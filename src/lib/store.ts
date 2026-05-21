@@ -1,6 +1,6 @@
 import { Redis } from '@upstash/redis';
 import { env } from './env';
-import type { ChatMessage, Transfer, UserRecord } from './types';
+import type { ChatMessage, Transfer } from './types';
 
 export interface RedisLike {
   get(key: string): Promise<string | null>;
@@ -45,23 +45,21 @@ export function createStore(redis: RedisLike) {
     },
     async saveTransfer(transfer: Transfer): Promise<void> {
       await redis.set(`transfer:${transfer.id}`, JSON.stringify(transfer));
-      const raw = await redis.get('transfers:index');
-      const index: string[] = raw ? (JSON.parse(raw) as string[]) : [];
-      if (!index.includes(transfer.id)) {
-        index.push(transfer.id);
-        await redis.set('transfers:index', JSON.stringify(index));
-      }
+      await redis.sadd('transfers:index', transfer.id);
     },
-    async getUser(phone: string): Promise<UserRecord> {
-      const raw = await redis.get(`user:${phone}`);
-      return raw ? (JSON.parse(raw) as UserRecord) : { transferCount: 0 };
+    async listTransfers(): Promise<Transfer[]> {
+      const ids = await redis.smembers('transfers:index');
+      const all = await Promise.all(ids.map((id) => this.getTransfer(id)));
+      return all
+        .filter((t): t is Transfer => t !== null)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    },
+    async getTransferCount(phone: string): Promise<number> {
+      const raw = await redis.get(`count:${phone}`);
+      return raw ? Number(raw) : 0;
     },
     async incrementTransferCount(phone: string): Promise<void> {
-      const user = await this.getUser(phone);
-      await redis.set(
-        `user:${phone}`,
-        JSON.stringify({ transferCount: user.transferCount + 1 }),
-      );
+      await redis.incr(`count:${phone}`);
     },
     async markMessageSeen(wamid: string): Promise<boolean> {
       const result = await redis.set(`msg:${wamid}`, '1', {
@@ -69,17 +67,6 @@ export function createStore(redis: RedisLike) {
         nx: true,
       });
       return result !== null;
-    },
-    async listTransfers(): Promise<Transfer[]> {
-      const raw = await redis.get('transfers:index');
-      const index: string[] = raw ? (JSON.parse(raw) as string[]) : [];
-      const results = await Promise.all(
-        index.map((id) => this.getTransfer(id)),
-      );
-      const transfers = results.filter((t): t is Transfer => t !== null);
-      return transfers.sort(
-        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
-      );
     },
   };
 }

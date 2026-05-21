@@ -150,13 +150,13 @@ async function getQuoteTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   try {
-    const user = await ctx.store.getUser(ctx.phone);
+    const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const fxRate = await getFxRate();
     const q = quote(
       Number(args.amount_usd),
       fxRate,
       args.funding_method as FundingMethod,
-      user.transferCount,
+      transferCount,
     );
     return {
       amount_usd: q.amountUsd,
@@ -185,11 +185,11 @@ async function createTransferTool(
       };
     }
 
-    const user = await ctx.store.getUser(ctx.phone);
+    const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const payoutMethod = args.payout_method as PayoutMethod;
     const fundingMethod = args.funding_method as FundingMethod;
     const fxRate = await getFxRate();
-    const q = quote(Number(args.amount_usd), fxRate, fundingMethod, user.transferCount);
+    const q = quote(Number(args.amount_usd), fxRate, fundingMethod, transferCount);
     const transfer: Transfer = {
       id: newTransferId(),
       phone: ctx.phone,

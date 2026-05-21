@@ -133,7 +133,7 @@ describe('executeTool', () => {
     expect(saved?.fundingMethod).toBe('debit_card');
     // recipientPhone should be normalized to digits only
     expect(saved?.recipientPhone).toBe('919876543210');
-    expect((await store.getUser(PHONE)).transferCount).toBe(1);
+    expect(await store.getTransferCount(PHONE)).toBe(1);
   });
 
   it('create_transfer returns an error and does NOT persist when recipient_phone is missing', async () => {

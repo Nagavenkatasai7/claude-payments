@@ -95,7 +95,7 @@ describe('end-to-end happy path', () => {
       k.startsWith('transfer:'),
     )!;
     const transferId = transferKey.replace('transfer:', '');
-    expect((await store.getUser(PHONE)).transferCount).toBe(1);
+    expect(await store.getTransferCount(PHONE)).toBe(1);
 
     // Completing payment: stage 1 marks paid, stage 2 delivers.
     const stage1 = await completePaymentStage1(store, transferId);
