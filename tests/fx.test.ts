@@ -73,6 +73,13 @@ describe('quote', () => {
     expect(() => quote(Infinity, RATE, 'bank_transfer', 0)).toThrow(QuoteError);
   });
 
+  it('rejects an unknown funding method on a repeat transfer', () => {
+    // simulates the LLM passing a value outside the schema enum
+    expect(() =>
+      quote(500, RATE, 'paypal' as unknown as never, 1),
+    ).toThrow(QuoteError);
+  });
+
   it('exports MIN_USD and MAX_USD', () => {
     expect(MIN_USD).toBe(10);
     expect(MAX_USD).toBe(2999);

@@ -63,25 +63,22 @@ describe('getFxRate', () => {
     expect(rate).toBe(FALLBACK_FX_RATE);
   });
 
-  it('returns last cached rate on subsequent fetch failure', async () => {
-    mockFetch(88.0);
-    await getFxRate();
-    resetRateCacheForTests(); // clear only the TTL marker — we use a fresh cache
-    // Actually we need to test the "has cached but fetch failed" scenario.
-    // Re-seed the cache with a success, then fail on re-fetch by manipulating time.
-    // The simpler approach: after a successful fetch, fail the next and confirm fallback/cache.
-    vi.restoreAllMocks();
-    mockFetch(88.0);
-    const first = await getFxRate(); // populates cache
-    expect(first).toBe(88.0);
-    // simulate TTL expiry so it tries to re-fetch
-    vi.restoreAllMocks();
-    mockFetchFailure();
-    // Without resetting cache we won't hit the network (TTL not expired).
-    // This test just confirms FALLBACK with empty cache.
-    resetRateCacheForTests();
-    const fallbackRate = await getFxRate();
-    expect(fallbackRate).toBe(FALLBACK_FX_RATE);
+  it('returns the last cached rate when a re-fetch fails after TTL expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      mockFetch(88.0);
+      expect(await getFxRate()).toBe(88.0); // populates the cache
+
+      // advance past the 1-hour TTL so the next call attempts a re-fetch
+      vi.advanceTimersByTime(3_600_001);
+      mockFetchFailure();
+
+      const stale = await getFxRate();
+      expect(stale).toBe(88.0); // serves the stale cache, not the fallback
+      expect(stale).not.toBe(FALLBACK_FX_RATE);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('FALLBACK_FX_RATE is 85', () => {

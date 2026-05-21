@@ -39,6 +39,12 @@ export function quote(
       case 'credit_card':
         feeUsd = Math.round((2.99 + 0.03 * amountUsd) * 100) / 100;
         break;
+      default:
+        // Guards against an unexpected funding method (e.g. the LLM
+        // passing a value outside the schema enum) producing NaN amounts.
+        throw new QuoteError(
+          'Please choose how to pay: credit card, debit card, or bank transfer.',
+        );
     }
   }
 
