@@ -1,0 +1,37 @@
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+export const env = {
+  get ollamaBaseUrl() {
+    return required('OLLAMA_BASE_URL');
+  },
+  get ollamaApiKey() {
+    return required('OLLAMA_API_KEY');
+  },
+  get ollamaModel() {
+    return required('OLLAMA_MODEL');
+  },
+  get whatsappToken() {
+    return required('WHATSAPP_TOKEN');
+  },
+  get whatsappPhoneNumberId() {
+    return required('WHATSAPP_PHONE_NUMBER_ID');
+  },
+  get whatsappVerifyToken() {
+    return required('WHATSAPP_VERIFY_TOKEN');
+  },
+  get appBaseUrl() {
+    return required('APP_BASE_URL');
+  },
+  get kvUrl() {
+    return required('KV_REST_API_URL');
+  },
+  get kvToken() {
+    return required('KV_REST_API_TOKEN');
+  },
+};
