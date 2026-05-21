@@ -231,3 +231,32 @@ button:disabled { opacity: 0.6; cursor: default; }
   font-size: 12px;
 }
 
+.dash-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.dash-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.who { color: #8696a0; font-size: 13px; }
+.login-form { display: flex; flex-direction: column; gap: 14px; }
+.login-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #8696a0; }
+.login-form input {
+  padding: 10px; background: #2a3942; border: 1px solid #2a3942;
+  border-radius: 8px; color: #e9edef; font-size: 15px;
+}
+.perm-form, .add-staff-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.add-staff-form input {
+  padding: 8px; background: #2a3942; border: 1px solid #2a3942;
+  border-radius: 8px; color: #e9edef; font-size: 14px;
+}
+.perm, .perm-row { font-size: 13px; color: #e9edef; display: inline-flex; gap: 6px; align-items: center; }
+.perm-row { gap: 16px; }
+
