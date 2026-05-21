@@ -1,0 +1,19 @@
+const ET = 'America/New_York';
+
+export function easternDate(epochMs: number): string {
+  return new Date(epochMs).toLocaleDateString('en-US', { timeZone: ET });
+}
+
+export function easternDayOfMonth(epochMs: number): number {
+  return Number(
+    new Date(epochMs).toLocaleString('en-US', { timeZone: ET, day: 'numeric' }),
+  );
+}
+
+export function easternDayOfWeek(epochMs: number): number {
+  const short = new Date(epochMs).toLocaleString('en-US', {
+    timeZone: ET,
+    weekday: 'short',
+  });
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(short);
+}

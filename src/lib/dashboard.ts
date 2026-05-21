@@ -1,3 +1,4 @@
+import { easternDate } from './dates';
 import type { Transfer } from './types';
 
 export const ABANDONED_THRESHOLD_MS = 30 * 60 * 1000;
@@ -7,12 +8,6 @@ export function isAbandoned(transfer: Transfer, now: number): boolean {
     transfer.status === 'awaiting_payment' &&
     now - Date.parse(transfer.createdAt) > ABANDONED_THRESHOLD_MS
   );
-}
-
-function easternDate(epochMs: number): string {
-  return new Date(epochMs).toLocaleDateString('en-US', {
-    timeZone: 'America/New_York',
-  });
 }
 
 export interface DashboardSummary {
