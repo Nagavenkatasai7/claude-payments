@@ -1,6 +1,7 @@
 import { env } from './env';
 
 export const RECIPIENT_TEMPLATE_NAME = 'transfer_delivered';
+export const SCHEDULED_TEMPLATE_NAME = 'scheduled_payment_ready';
 export const RECIPIENT_TEMPLATE_LANG = 'en_US';
 
 export interface IncomingMessage {
