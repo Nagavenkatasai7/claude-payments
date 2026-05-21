@@ -18,6 +18,19 @@ function Row({
   );
 }
 
+function formatFundingMethod(method: string): string {
+  switch (method) {
+    case 'credit_card':
+      return 'Credit card';
+    case 'debit_card':
+      return 'Debit card';
+    case 'bank_transfer':
+      return 'Bank transfer';
+    default:
+      return method;
+  }
+}
+
 export default async function PayPage({
   params,
 }: {
@@ -57,11 +70,15 @@ export default async function PayPage({
           value={`$${transfer.totalChargeUsd.toFixed(2)}`}
           bold
         />
+        <Row
+          label="Paying with"
+          value={formatFundingMethod(transfer.fundingMethod)}
+        />
       </div>
       {transfer.status === 'awaiting_payment' ? (
-        <PayForm transferId={transfer.id} />
+        <PayForm transferId={transfer.id} fundingMethod={transfer.fundingMethod} />
       ) : (
-        <p className="done">✅ Payment complete — money sent!</p>
+        <p className="done">&#x2705; Payment complete &mdash; money sent!</p>
       )}
     </main>
   );

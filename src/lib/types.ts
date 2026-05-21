@@ -1,5 +1,7 @@
 export type PayoutMethod = 'upi' | 'bank';
 
+export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer';
+
 export type TransferStatus = 'awaiting_payment' | 'paid' | 'delivered';
 
 export interface Quote {
@@ -22,6 +24,7 @@ export interface Transfer {
   recipientName: string;
   payoutMethod: PayoutMethod;
   payoutDestination: string;
+  fundingMethod: FundingMethod;
   status: TransferStatus;
   createdAt: string;
   paidAt?: string;

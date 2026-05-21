@@ -1,7 +1,8 @@
 import { quote, QuoteError } from './fx';
+import { getFxRate } from './rate';
 import { newTransferId } from './id';
 import { env } from './env';
-import type { ChatTool, PayoutMethod, Transfer } from './types';
+import type { ChatTool, FundingMethod, PayoutMethod, Transfer } from './types';
 import type { Store } from './store';
 
 export const toolSchemas: ChatTool[] = [
@@ -18,13 +19,14 @@ export const toolSchemas: ChatTool[] = [
             type: 'number',
             description: 'Amount to send, in US dollars.',
           },
-          payout_method: {
+          funding_method: {
             type: 'string',
-            enum: ['upi', 'bank'],
-            description: "How the recipient is paid: 'upi' or 'bank'.",
+            enum: ['credit_card', 'debit_card', 'bank_transfer'],
+            description:
+              "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. The fee depends on this choice.",
           },
         },
-        required: ['amount_usd', 'payout_method'],
+        required: ['amount_usd', 'funding_method'],
       },
     },
   },
@@ -45,12 +47,18 @@ export const toolSchemas: ChatTool[] = [
             description:
               'The UPI ID, or the bank account number with IFSC code.',
           },
+          funding_method: {
+            type: 'string',
+            enum: ['credit_card', 'debit_card', 'bank_transfer'],
+            description: "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'.",
+          },
         },
         required: [
           'amount_usd',
           'recipient_name',
           'payout_method',
           'payout_destination',
+          'funding_method',
         ],
       },
     },
@@ -60,7 +68,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'generate_payment_link',
       description:
-        'Generate the secure link where the user enters card details to pay.',
+        'Generate the secure link where the user enters payment details to pay.',
       parameters: {
         type: 'object',
         properties: { transfer_id: { type: 'string' } },
@@ -114,9 +122,11 @@ async function getQuoteTool(
 ): Promise<ToolResult> {
   try {
     const user = await ctx.store.getUser(ctx.phone);
+    const fxRate = await getFxRate();
     const q = quote(
       Number(args.amount_usd),
-      args.payout_method as PayoutMethod,
+      fxRate,
+      args.funding_method as FundingMethod,
       user.transferCount,
     );
     return {
@@ -140,7 +150,9 @@ async function createTransferTool(
   try {
     const user = await ctx.store.getUser(ctx.phone);
     const payoutMethod = args.payout_method as PayoutMethod;
-    const q = quote(Number(args.amount_usd), payoutMethod, user.transferCount);
+    const fundingMethod = args.funding_method as FundingMethod;
+    const fxRate = await getFxRate();
+    const q = quote(Number(args.amount_usd), fxRate, fundingMethod, user.transferCount);
     const transfer: Transfer = {
       id: newTransferId(),
       phone: ctx.phone,
@@ -152,6 +164,7 @@ async function createTransferTool(
       recipientName: String(args.recipient_name),
       payoutMethod,
       payoutDestination: String(args.payout_destination),
+      fundingMethod,
       status: 'awaiting_payment',
       createdAt: new Date().toISOString(),
     };

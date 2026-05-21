@@ -1,9 +1,30 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { executeTool, toolSchemas } from '@/lib/tools';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { resetRateCacheForTests } from '@/lib/rate';
 
 const PHONE = '15551234567';
+const MOCK_RATE = 85.0;
+
+function stubFetch(rate: number = MOCK_RATE) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ rates: { INR: rate } }),
+    }),
+  );
+}
+
+beforeEach(() => {
+  resetRateCacheForTests();
+  stubFetch();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('toolSchemas', () => {
   it('exposes all four tools', () => {
@@ -15,6 +36,20 @@ describe('toolSchemas', () => {
       'get_quote',
     ]);
   });
+
+  it('get_quote schema has amount_usd and funding_method (no payout_method)', () => {
+    const getQuote = toolSchemas.find((t) => t.function.name === 'get_quote')!;
+    const props = getQuote.function.parameters.properties as Record<string, unknown>;
+    expect(props).toHaveProperty('amount_usd');
+    expect(props).toHaveProperty('funding_method');
+    expect(props).not.toHaveProperty('payout_method');
+  });
+
+  it('create_transfer schema includes funding_method', () => {
+    const ct = toolSchemas.find((t) => t.function.name === 'create_transfer')!;
+    const props = ct.function.parameters.properties as Record<string, unknown>;
+    expect(props).toHaveProperty('funding_method');
+  });
 });
 
 describe('executeTool', () => {
@@ -22,21 +57,48 @@ describe('executeTool', () => {
     const store = createStore(fakeRedis());
     const result = await executeTool(
       'get_quote',
-      { amount_usd: 500, payout_method: 'upi' },
+      { amount_usd: 500, funding_method: 'bank_transfer' },
       { phone: PHONE, store },
     );
     expect(result.fee_usd).toBe(0);
-    expect(result.amount_inr).toBe(Math.round(500 * 85.2));
+    expect(result.amount_inr).toBe(Math.round(500 * MOCK_RATE));
   });
 
   it('get_quote surfaces a validation error as { error }', async () => {
     const store = createStore(fakeRedis());
     const result = await executeTool(
       'get_quote',
-      { amount_usd: 5, payout_method: 'upi' },
+      { amount_usd: 5, funding_method: 'bank_transfer' },
       { phone: PHONE, store },
     );
     expect(result.error).toMatch(/between/i);
+  });
+
+  it('get_quote uses credit_card surcharge for repeat transfers', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    // First transfer (free)
+    await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 100,
+        recipient_name: 'Mom',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'credit_card',
+      },
+      { phone: PHONE, store },
+    );
+    resetRateCacheForTests();
+    stubFetch();
+    // Second quote (repeat, credit_card)
+    const result = await executeTool(
+      'get_quote',
+      { amount_usd: 100, funding_method: 'credit_card' },
+      { phone: PHONE, store },
+    );
+    // fee = 2.99 + 3 = 5.99
+    expect(result.fee_usd).toBe(5.99);
   });
 
   it('create_transfer persists a transfer and increments the user count', async () => {
@@ -48,12 +110,14 @@ describe('executeTool', () => {
         recipient_name: 'Mom',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
+        funding_method: 'debit_card',
       },
       { phone: PHONE, store },
     );
     expect(result.status).toBe('awaiting_payment');
     const saved = await store.getTransfer(result.transfer_id as string);
     expect(saved?.recipientName).toBe('Mom');
+    expect(saved?.fundingMethod).toBe('debit_card');
     expect((await store.getUser(PHONE)).transferCount).toBe(1);
   });
 
@@ -66,6 +130,7 @@ describe('executeTool', () => {
         recipient_name: 'Mom',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
       },
       { phone: PHONE, store },
     );
@@ -88,6 +153,7 @@ describe('executeTool', () => {
         recipient_name: 'Mom',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
       },
       { phone: PHONE, store },
     );

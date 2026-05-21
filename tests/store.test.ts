@@ -15,6 +15,7 @@ function sampleTransfer(): Transfer {
     recipientName: 'Mom',
     payoutMethod: 'upi',
     payoutDestination: 'mom@upi',
+    fundingMethod: 'bank_transfer',
     status: 'awaiting_payment',
     createdAt: '2026-05-21T00:00:00.000Z',
   };

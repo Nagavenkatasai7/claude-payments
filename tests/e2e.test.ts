@@ -1,11 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { completePayment } from '@/lib/payment';
 import { fakeRedis } from './helpers';
+import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
 
 const PHONE = '15551234567';
+const MOCK_RATE = 85.2;
 
 function toolCall(id: string, name: string, args: object): ChatMessage {
   return {
@@ -21,6 +23,21 @@ function toolCall(id: string, name: string, args: object): ChatMessage {
   };
 }
 
+beforeEach(() => {
+  resetRateCacheForTests();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ rates: { INR: MOCK_RATE } }),
+    }),
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('end-to-end happy path', () => {
   it('quotes, creates a transfer, sends a link, and delivers', async () => {
     const redis = fakeRedis();
@@ -30,13 +47,14 @@ describe('end-to-end happy path', () => {
     const script: ChatMessage[] = [
       toolCall('c1', 'get_quote', {
         amount_usd: 500,
-        payout_method: 'upi',
+        funding_method: 'bank_transfer',
       }),
       toolCall('c2', 'create_transfer', {
         amount_usd: 500,
         recipient_name: 'Mom',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
       }),
       toolCall('c3', 'generate_payment_link', {
         transfer_id: 'PLACEHOLDER',

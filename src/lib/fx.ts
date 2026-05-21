@@ -1,7 +1,5 @@
-import type { PayoutMethod, Quote } from './types';
+import type { FundingMethod, Quote } from './types';
 
-export const FX_RATE = 85.2;
-export const REPEAT_FEE_USD = 2.99;
 export const MIN_USD = 10;
 export const MAX_USD = 2999;
 
@@ -14,7 +12,8 @@ export class QuoteError extends Error {
 
 export function quote(
   amountUsd: number,
-  payoutMethod: PayoutMethod,
+  fxRate: number,
+  fundingMethod: FundingMethod,
   transferCount: number,
 ): Quote {
   if (!Number.isFinite(amountUsd)) {
@@ -25,17 +24,34 @@ export function quote(
       `Transfers must be between $${MIN_USD} and $${MAX_USD}.`,
     );
   }
-  const feeUsd = transferCount === 0 ? 0 : REPEAT_FEE_USD;
-  const amountInr = Math.round(amountUsd * FX_RATE);
+
+  let feeUsd: number;
+  if (transferCount === 0) {
+    feeUsd = 0;
+  } else {
+    switch (fundingMethod) {
+      case 'bank_transfer':
+        feeUsd = 1.99;
+        break;
+      case 'debit_card':
+        feeUsd = 2.99;
+        break;
+      case 'credit_card':
+        feeUsd = Math.round((2.99 + 0.03 * amountUsd) * 100) / 100;
+        break;
+    }
+  }
+
+  feeUsd = Math.round(feeUsd * 100) / 100;
+  const amountInr = Math.round(amountUsd * fxRate);
   const totalChargeUsd = Math.round((amountUsd + feeUsd) * 100) / 100;
-  const deliveryEstimate =
-    payoutMethod === 'upi' ? 'within minutes' : 'within 2 hours';
+  const deliveryEstimate = 'within 10 minutes';
 
   return {
     amountUsd,
     feeUsd,
     totalChargeUsd,
-    fxRate: FX_RATE,
+    fxRate,
     amountInr,
     deliveryEstimate,
   };

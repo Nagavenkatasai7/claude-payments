@@ -1,10 +1,26 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
 
 const PHONE = '15551234567';
+
+beforeEach(() => {
+  resetRateCacheForTests();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ rates: { INR: 85.2 } }),
+    }),
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('createAgent', () => {
   it('returns a plain reply when the model uses no tools', async () => {
@@ -31,7 +47,7 @@ describe('createAgent', () => {
               name: 'get_quote',
               arguments: JSON.stringify({
                 amount_usd: 500,
-                payout_method: 'upi',
+                funding_method: 'bank_transfer',
               }),
             },
           },
