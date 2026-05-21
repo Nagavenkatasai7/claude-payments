@@ -67,6 +67,26 @@ export interface ChatTool {
   };
 }
 
+export type ScheduleFrequency = 'monthly' | 'weekly';
+export type ScheduleStatus = 'active' | 'cancelled';
+
+export interface Schedule {
+  id: string;
+  phone: string;
+  amountUsd: number;
+  recipientName: string;
+  recipientPhone: string;
+  payoutMethod: PayoutMethod;
+  payoutDestination: string;
+  fundingMethod: FundingMethod;
+  frequency: ScheduleFrequency;
+  dayOfMonth?: number;
+  dayOfWeek?: number;
+  status: ScheduleStatus;
+  createdAt: string;
+  lastRunAt?: string;
+}
+
 export type StaffRole = 'admin' | 'agent';
 
 export interface StaffPermissions {
