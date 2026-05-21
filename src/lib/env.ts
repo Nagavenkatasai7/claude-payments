@@ -34,4 +34,10 @@ export const env = {
   get kvToken() {
     return required('KV_REST_API_TOKEN');
   },
+  get seedAdminUsername() {
+    return required('SEED_ADMIN_USERNAME');
+  },
+  get seedAdminPassword() {
+    return required('SEED_ADMIN_PASSWORD');
+  },
 };

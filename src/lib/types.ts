@@ -61,3 +61,20 @@ export interface ChatTool {
     parameters: Record<string, unknown>;
   };
 }
+
+export type StaffRole = 'admin' | 'agent';
+
+export interface StaffPermissions {
+  canCancel: boolean;
+  canResend: boolean;
+  canAssign: boolean;
+}
+
+export interface Staff {
+  username: string;
+  name: string;
+  role: StaffRole;
+  permissions: StaffPermissions;
+  passwordHash: string;
+  createdAt: string;
+}

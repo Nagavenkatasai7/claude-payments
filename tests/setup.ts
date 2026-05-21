@@ -7,3 +7,5 @@ process.env.WHATSAPP_VERIFY_TOKEN ||= 'verify-test';
 process.env.APP_BASE_URL ||= 'https://sendhome.test';
 process.env.KV_REST_API_URL ||= 'https://kv.test';
 process.env.KV_REST_API_TOKEN ||= 'kv-token';
+process.env.SEED_ADMIN_USERNAME ||= 'admin';
+process.env.SEED_ADMIN_PASSWORD ||= 'admin-test-pw';
