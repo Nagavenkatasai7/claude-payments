@@ -40,7 +40,9 @@ export interface ToolCall {
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  // OpenAI-compatible APIs return null content when an assistant message
+  // carries tool_calls instead of text.
+  content: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
