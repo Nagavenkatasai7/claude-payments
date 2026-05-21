@@ -124,6 +124,8 @@ describe('createAgent', () => {
       payoutMethod: 'upi',
       payoutDestination: 'priya@upi',
       fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared',
+      complianceReasons: [],
       status: 'awaiting_payment',
       createdAt: new Date().toISOString(),
     });
@@ -177,6 +179,8 @@ describe('createAgent', () => {
       payoutMethod: 'upi',
       payoutDestination: 'priya@upi',
       fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared',
+      complianceReasons: [],
       status: 'awaiting_payment',
       createdAt: new Date().toISOString(),
     });

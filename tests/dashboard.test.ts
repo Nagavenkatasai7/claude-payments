@@ -20,6 +20,8 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
     payoutMethod: 'upi',
     payoutDestination: 'test@upi',
     fundingMethod: 'credit_card',
+    complianceStatus: 'cleared',
+    complianceReasons: [],
     status: 'awaiting_payment',
     createdAt: new Date(0).toISOString(),
     ...overrides,

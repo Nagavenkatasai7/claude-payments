@@ -3,6 +3,7 @@ import { getFxRate } from './rate';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
+import { createTransfer } from './transfer-create';
 import type { ChatTool, FundingMethod, PayoutMethod, Transfer } from './types';
 import type { Store } from './store';
 
@@ -176,41 +177,28 @@ async function createTransferTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  const recipientPhone = normalizePhone(args.recipient_phone);
+  if (!isValidPhone(recipientPhone)) {
+    return {
+      error:
+        'A valid recipient WhatsApp number with country code is required before creating the transfer. Ask the user for it (e.g. 919876543210).',
+    };
+  }
   try {
-    const recipientPhone = normalizePhone(args.recipient_phone);
-    if (!isValidPhone(recipientPhone)) {
-      return {
-        error:
-          'A valid recipient WhatsApp number with country code is required before creating the transfer. Ask the user for it (e.g. 919876543210).',
-      };
-    }
-
-    const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const payoutMethod = args.payout_method as PayoutMethod;
-    const fundingMethod = args.funding_method as FundingMethod;
-    const fxRate = await getFxRate();
-    const q = quote(Number(args.amount_usd), fxRate, fundingMethod, transferCount);
-    const transfer: Transfer = {
-      id: newTransferId(),
+    const transfer = await createTransfer(ctx.store, {
       phone: ctx.phone,
-      amountUsd: q.amountUsd,
-      feeUsd: q.feeUsd,
-      totalChargeUsd: q.totalChargeUsd,
-      fxRate: q.fxRate,
-      amountInr: q.amountInr,
+      amountUsd: Number(args.amount_usd),
       recipientName: String(args.recipient_name),
       recipientPhone,
-      payoutMethod,
+      payoutMethod: args.payout_method as PayoutMethod,
       payoutDestination: String(args.payout_destination),
-      fundingMethod,
-      status: 'awaiting_payment',
-      createdAt: new Date().toISOString(),
-    };
-    await ctx.store.saveTransfer(transfer);
-    await ctx.store.incrementTransferCount(ctx.phone);
+      fundingMethod: args.funding_method as FundingMethod,
+    });
     return {
       transfer_id: transfer.id,
       status: transfer.status,
+      compliance_status: transfer.complianceStatus,
+      compliance_reasons: transfer.complianceReasons,
       amount_inr: transfer.amountInr,
       total_charge_usd: transfer.totalChargeUsd,
       recipient_name: transfer.recipientName,
@@ -227,6 +215,11 @@ async function generatePaymentLinkTool(
 ): Promise<ToolResult> {
   const transfer = await ctx.store.getTransfer(String(args.transfer_id));
   if (!transfer) return { error: 'Transfer not found.' };
+  if (transfer.status === 'blocked') {
+    return {
+      error: 'This transfer did not pass compliance and cannot be paid.',
+    };
+  }
   return { url: `${env.appBaseUrl}/pay/${transfer.id}` };
 }
 

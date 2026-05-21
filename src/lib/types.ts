@@ -2,7 +2,14 @@ export type PayoutMethod = 'upi' | 'bank';
 
 export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer';
 
-export type TransferStatus = 'awaiting_payment' | 'paid' | 'delivered' | 'cancelled';
+export type TransferStatus =
+  | 'awaiting_payment'
+  | 'paid'
+  | 'delivered'
+  | 'cancelled'
+  | 'blocked';
+
+export type ComplianceStatus = 'cleared' | 'flagged' | 'blocked';
 
 export interface Quote {
   amountUsd: number;
@@ -26,6 +33,8 @@ export interface Transfer {
   payoutMethod: PayoutMethod;
   payoutDestination: string;
   fundingMethod: FundingMethod;
+  complianceStatus: ComplianceStatus;
+  complianceReasons: string[];
   status: TransferStatus;
   createdAt: string;
   paidAt?: string;

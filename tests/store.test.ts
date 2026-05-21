@@ -18,6 +18,8 @@ function sampleTransfer(id: string, createdAt: string): Transfer {
     payoutMethod: 'upi',
     payoutDestination: 'mom@upi',
     fundingMethod: 'bank_transfer',
+    complianceStatus: 'cleared',
+    complianceReasons: [],
     status: 'awaiting_payment',
     createdAt,
   };

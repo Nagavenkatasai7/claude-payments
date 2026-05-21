@@ -22,6 +22,8 @@ function awaitingTransfer(): Transfer {
     payoutMethod: 'upi',
     payoutDestination: 'mom@upi',
     fundingMethod: 'bank_transfer',
+    complianceStatus: 'cleared',
+    complianceReasons: [],
     status: 'awaiting_payment',
     createdAt: '2026-05-21T00:00:00.000Z',
   };

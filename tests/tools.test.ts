@@ -128,12 +128,40 @@ describe('executeTool', () => {
       { phone: PHONE, store },
     );
     expect(result.status).toBe('awaiting_payment');
+    expect(result.compliance_status).toBe('cleared');
     const saved = await store.getTransfer(result.transfer_id as string);
     expect(saved?.recipientName).toBe('Mom');
     expect(saved?.fundingMethod).toBe('debit_card');
     // recipientPhone should be normalized to digits only
     expect(saved?.recipientPhone).toBe('919876543210');
     expect(await store.getTransferCount(PHONE)).toBe(1);
+  });
+
+  it('create_transfer with watchlisted recipient returns blocked status', async () => {
+    const store = createStore(fakeRedis());
+    const result = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 200,
+        recipient_name: 'John Doe',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'john@upi',
+        funding_method: 'bank_transfer',
+      },
+      { phone: PHONE, store },
+    );
+    expect(result.compliance_status).toBe('blocked');
+    expect(result.status).toBe('blocked');
+
+    // generate_payment_link for a blocked transfer should return an error
+    const linkResult = await executeTool(
+      'generate_payment_link',
+      { transfer_id: result.transfer_id },
+      { phone: PHONE, store },
+    );
+    expect(linkResult.error).toBeDefined();
+    expect(linkResult.error).toMatch(/compliance/i);
   });
 
   it('create_transfer returns an error and does NOT persist when recipient_phone is missing', async () => {
