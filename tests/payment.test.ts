@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   completePaymentStage1,
   completePaymentStage2,
+  recipientTemplateParams,
 } from '@/lib/payment';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -27,7 +28,7 @@ function awaitingTransfer(): Transfer {
 }
 
 describe('completePaymentStage1', () => {
-  it('sets status to paid and paidAt, returns sender and recipient messages', async () => {
+  it('sets status to paid and paidAt, returns sender messages', async () => {
     const store = createStore(fakeRedis());
     await store.saveTransfer(awaitingTransfer());
 
@@ -41,20 +42,6 @@ describe('completePaymentStage1', () => {
     expect(result.senderMessages[0]).toContain('$500.00');
     expect(result.senderMessages[0]).toContain('42,600');
     expect(result.senderMessages[0]).toContain('Mom');
-
-    expect(result.recipientMessages).toHaveLength(1);
-    expect(result.recipientMessages[0]).toContain('42,600');
-    expect(result.recipientMessages[0]).toContain('Mom');
-    expect(result.recipientMessages[0]).toContain('UPI ID');
-  });
-
-  it('says bank account for bank payout method', async () => {
-    const store = createStore(fakeRedis());
-    const t = { ...awaitingTransfer(), payoutMethod: 'bank' as const };
-    await store.saveTransfer(t);
-
-    const result = await completePaymentStage1(store, 'pay12345');
-    expect(result.recipientMessages[0]).toContain('bank account');
   });
 
   it('is idempotent — if already paid, returns empty message arrays', async () => {
@@ -65,7 +52,6 @@ describe('completePaymentStage1', () => {
     const second = await completePaymentStage1(store, 'pay12345');
     expect(second.transfer.status).toBe('paid');
     expect(second.senderMessages).toHaveLength(0);
-    expect(second.recipientMessages).toHaveLength(0);
   });
 
   it('is idempotent — if already delivered, returns empty message arrays', async () => {
@@ -75,7 +61,6 @@ describe('completePaymentStage1', () => {
     const result = await completePaymentStage1(store, 'pay12345');
     expect(result.transfer.status).toBe('delivered');
     expect(result.senderMessages).toHaveLength(0);
-    expect(result.recipientMessages).toHaveLength(0);
   });
 
   it('throws for a missing transfer', async () => {
@@ -87,7 +72,7 @@ describe('completePaymentStage1', () => {
 });
 
 describe('completePaymentStage2', () => {
-  it('sets status to delivered and deliveredAt, returns sender and recipient messages', async () => {
+  it('sets status to delivered and deliveredAt, returns sender messages', async () => {
     const store = createStore(fakeRedis());
     // Pre-seed a paid transfer
     await store.saveTransfer({
@@ -105,9 +90,6 @@ describe('completePaymentStage2', () => {
     expect(result.senderMessages).toHaveLength(1);
     expect(result.senderMessages[0]).toContain('42,600');
     expect(result.senderMessages[0]).toContain('Mom');
-
-    expect(result.recipientMessages).toHaveLength(1);
-    expect(result.recipientMessages[0]).toContain('42,600');
   });
 
   it('is idempotent — if already delivered, returns empty message arrays', async () => {
@@ -122,7 +104,6 @@ describe('completePaymentStage2', () => {
     const result = await completePaymentStage2(store, 'pay12345');
     expect(result.transfer.status).toBe('delivered');
     expect(result.senderMessages).toHaveLength(0);
-    expect(result.recipientMessages).toHaveLength(0);
   });
 
   it('does NOT deliver a cancelled transfer — returns empty messages', async () => {
@@ -135,7 +116,6 @@ describe('completePaymentStage2', () => {
     const result = await completePaymentStage2(store, 'pay12345');
     expect(result.transfer.status).toBe('cancelled');
     expect(result.senderMessages).toHaveLength(0);
-    expect(result.recipientMessages).toHaveLength(0);
   });
 
   it('sets paidAt if somehow unset when delivering', async () => {
@@ -155,16 +135,32 @@ describe('completePaymentStage2', () => {
       /not found/i,
     );
   });
+});
 
-  it('recipient messages mention the rupee amount', async () => {
-    const store = createStore(fakeRedis());
-    await store.saveTransfer({
-      ...awaitingTransfer(),
-      status: 'paid',
-      paidAt: '2026-05-21T01:00:00.000Z',
-    });
+describe('recipientTemplateParams', () => {
+  it('returns 4 params in order for a UPI transfer', () => {
+    const transfer = awaitingTransfer();
+    const params = recipientTemplateParams(transfer);
 
-    const result = await completePaymentStage2(store, 'pay12345');
-    expect(result.recipientMessages[0]).toContain('42,600');
+    expect(params).toHaveLength(4);
+    expect(params[0]).toBe('Mom'); // recipient name
+    expect(params[1]).toBe('42,600'); // formatted rupee amount
+    expect(params[2]).toBe('+15551234567'); // sender phone with +
+    expect(params[3]).toBe('UPI ID'); // payout method label
+  });
+
+  it('returns "bank account" for bank payout method', () => {
+    const transfer = { ...awaitingTransfer(), payoutMethod: 'bank' as const };
+    const params = recipientTemplateParams(transfer);
+
+    expect(params).toHaveLength(4);
+    expect(params[3]).toBe('bank account');
+  });
+
+  it('formats the rupee amount using en-IN locale', () => {
+    const transfer = { ...awaitingTransfer(), amountInr: 100000 };
+    const params = recipientTemplateParams(transfer);
+    // en-IN formats 100000 as "1,00,000"
+    expect(params[1]).toBe('1,00,000');
   });
 });

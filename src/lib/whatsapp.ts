@@ -1,5 +1,8 @@
 import { env } from './env';
 
+export const RECIPIENT_TEMPLATE_NAME = 'transfer_delivered';
+export const RECIPIENT_TEMPLATE_LANG = 'en_US';
+
 export interface IncomingMessage {
   from: string;
   text: string;
@@ -58,5 +61,43 @@ export async function sendText(to: string, text: string): Promise<void> {
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`WhatsApp send failed (${res.status}): ${body}`);
+  }
+}
+
+export async function sendTemplate(
+  to: string,
+  templateName: string,
+  languageCode: string,
+  bodyParams: string[],
+): Promise<void> {
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.whatsappToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          components: [
+            {
+              type: 'body',
+              parameters: bodyParams.map((text) => ({ type: 'text', text })),
+            },
+          ],
+        },
+      }),
+    },
+  );
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`WhatsApp template send failed (${res.status}): ${body}`);
   }
 }

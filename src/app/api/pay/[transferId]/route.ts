@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { getStore } from '@/lib/store';
-import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
-import { sendText } from '@/lib/whatsapp';
+import {
+  completePaymentStage1,
+  completePaymentStage2,
+  recipientTemplateParams,
+} from '@/lib/payment';
+import {
+  sendText,
+  sendTemplate,
+  RECIPIENT_TEMPLATE_NAME,
+  RECIPIENT_TEMPLATE_LANG,
+} from '@/lib/whatsapp';
 
 export const maxDuration = 300;
 
@@ -14,17 +23,14 @@ export async function POST(
   const { transferId } = await params;
   try {
     const store = getStore();
-    const { transfer, senderMessages, recipientMessages } =
-      await completePaymentStage1(store, transferId);
+    const { transfer, senderMessages } = await completePaymentStage1(
+      store,
+      transferId,
+    );
 
-    // Send stage-1 messages to sender and recipient
+    // Send stage-1 messages to sender only
     for (const msg of senderMessages) {
       await sendText(transfer.phone, msg);
-    }
-    if (transfer.recipientPhone) {
-      for (const msg of recipientMessages) {
-        await sendText(transfer.recipientPhone, msg);
-      }
     }
 
     // Schedule stage-2 delivery after a delay
@@ -36,9 +42,12 @@ export async function POST(
           await sendText(stage2.transfer.phone, msg);
         }
         if (stage2.transfer.recipientPhone) {
-          for (const msg of stage2.recipientMessages) {
-            await sendText(stage2.transfer.recipientPhone, msg);
-          }
+          await sendTemplate(
+            stage2.transfer.recipientPhone,
+            RECIPIENT_TEMPLATE_NAME,
+            RECIPIENT_TEMPLATE_LANG,
+            recipientTemplateParams(stage2.transfer),
+          );
         }
       } catch (err) {
         console.error('Stage-2 delivery failed:', err);

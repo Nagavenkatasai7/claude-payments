@@ -4,7 +4,6 @@ import type { Transfer } from './types';
 export interface StageResult {
   transfer: Transfer;
   senderMessages: string[];
-  recipientMessages: string[];
 }
 
 function inr(amount: number): string {
@@ -22,7 +21,7 @@ export async function completePaymentStage1(
 
   // Idempotent: already past this stage
   if (transfer.status === 'paid' || transfer.status === 'delivered') {
-    return { transfer, senderMessages: [], recipientMessages: [] };
+    return { transfer, senderMessages: [] };
   }
 
   const now = new Date().toISOString();
@@ -37,13 +36,7 @@ export async function completePaymentStage1(
     `✅ Payment received — $${updated.totalChargeUsd.toFixed(2)} charged. Sending ₹${inr(updated.amountInr)} to ${updated.recipientName}…`,
   ];
 
-  const destination =
-    updated.payoutMethod === 'upi' ? 'UPI ID' : 'bank account';
-  const recipientMessages = [
-    `Hi ${updated.recipientName}! 💸 ₹${inr(updated.amountInr)} is on its way to you via SendHome — it will reach your ${destination} within 10 minutes.`,
-  ];
-
-  return { transfer: updated, senderMessages, recipientMessages };
+  return { transfer: updated, senderMessages };
 }
 
 export async function completePaymentStage2(
@@ -57,12 +50,12 @@ export async function completePaymentStage2(
 
   // Idempotent: already delivered
   if (transfer.status === 'delivered') {
-    return { transfer, senderMessages: [], recipientMessages: [] };
+    return { transfer, senderMessages: [] };
   }
 
   // Do not deliver a cancelled transfer
   if (transfer.status === 'cancelled') {
-    return { transfer, senderMessages: [], recipientMessages: [] };
+    return { transfer, senderMessages: [] };
   }
 
   const now = new Date().toISOString();
@@ -77,9 +70,13 @@ export async function completePaymentStage2(
   const senderMessages = [
     `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName}. Thanks for using SendHome!`,
   ];
-  const recipientMessages = [
-    `🎉 ₹${inr(updated.amountInr)} has landed in your account. All done!`,
-  ];
 
-  return { transfer: updated, senderMessages, recipientMessages };
+  return { transfer: updated, senderMessages };
+}
+
+export function recipientTemplateParams(transfer: Transfer): string[] {
+  const amountInr = transfer.amountInr.toLocaleString('en-IN');
+  const sender = `+${transfer.phone}`;
+  const destination = transfer.payoutMethod === 'upi' ? 'UPI ID' : 'bank account';
+  return [transfer.recipientName, amountInr, sender, destination];
 }
