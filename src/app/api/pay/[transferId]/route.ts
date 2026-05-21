@@ -13,8 +13,12 @@ export async function POST(
       getStore(),
       transferId,
     );
-    for (const message of messages) {
-      await sendText(transfer.phone, message);
+    // Send each confirmation with a short beat between them so the
+    // "payment received → converting → delivered" sequence reads as a
+    // live progression in the chat rather than a single burst.
+    for (let i = 0; i < messages.length; i++) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, 2000));
+      await sendText(transfer.phone, messages[i]);
     }
     return NextResponse.json({ ok: true, status: transfer.status });
   } catch (err) {
