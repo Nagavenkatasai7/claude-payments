@@ -41,6 +41,9 @@ export const env = {
   get kvToken() {
     return required('KV_REST_API_TOKEN');
   },
+  get cronSecret() {
+    return process.env.CRON_SECRET ?? '';
+  },
   get seedAdminUsername() {
     return required('SEED_ADMIN_USERNAME');
   },
