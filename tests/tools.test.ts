@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { executeTool, toolSchemas } from '@/lib/tools';
 import { createStore } from '@/lib/store';
+import { createScheduleStore } from '@/lib/schedule-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 
@@ -27,13 +28,16 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all five tools', () => {
+  it('exposes all eight tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
+      'cancel_schedule',
       'check_payment_status',
+      'create_schedule',
       'create_transfer',
       'generate_payment_link',
       'get_quote',
+      'list_schedules',
       'update_recipient_phone',
     ]);
   });
@@ -69,7 +73,7 @@ describe('executeTool', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 500, funding_method: 'bank_transfer' },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(result.fee_usd).toBe(0);
     expect(result.amount_inr).toBe(Math.round(500 * MOCK_RATE));
@@ -80,7 +84,7 @@ describe('executeTool', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 5, funding_method: 'bank_transfer' },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(result.error).toMatch(/between/i);
   });
@@ -99,7 +103,7 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'credit_card',
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     resetRateCacheForTests();
     stubFetch();
@@ -107,7 +111,7 @@ describe('executeTool', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 100, funding_method: 'credit_card' },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     // fee = 2.99 + 3 = 5.99
     expect(result.fee_usd).toBe(5.99);
@@ -125,7 +129,7 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'debit_card',
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(result.status).toBe('awaiting_payment');
     expect(result.compliance_status).toBe('cleared');
@@ -149,7 +153,7 @@ describe('executeTool', () => {
         payout_destination: 'john@upi',
         funding_method: 'bank_transfer',
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(result.compliance_status).toBe('blocked');
     expect(result.status).toBe('blocked');
@@ -158,7 +162,7 @@ describe('executeTool', () => {
     const linkResult = await executeTool(
       'generate_payment_link',
       { transfer_id: result.transfer_id },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(linkResult.error).toBeDefined();
     expect(linkResult.error).toMatch(/compliance/i);
@@ -177,7 +181,7 @@ describe('executeTool', () => {
         funding_method: 'debit_card',
         // recipient_phone intentionally omitted
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(result.error).toBeDefined();
     expect(typeof result.error).toBe('string');
@@ -199,7 +203,7 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'debit_card',
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(result.error).toBeDefined();
     expect(typeof result.error).toBe('string');
@@ -219,12 +223,12 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     const link = await executeTool(
       'generate_payment_link',
       { transfer_id: created.transfer_id },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(link.url).toBe(
       `https://sendhome.test/pay/${created.transfer_id}`,
@@ -243,19 +247,19 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
       },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     const status = await executeTool(
       'check_payment_status',
       { transfer_id: created.transfer_id },
-      { phone: PHONE, store },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
     );
     expect(status.status).toBe('awaiting_payment');
   });
 
   it('returns an error for an unknown tool', async () => {
     const store = createStore(fakeRedis());
-    const result = await executeTool('nope', {}, { phone: PHONE, store });
+    const result = await executeTool('nope', {}, { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) });
     expect(result.error).toMatch(/unknown tool/i);
   });
 
@@ -273,7 +277,7 @@ describe('executeTool', () => {
           payout_destination: 'dad@upi',
           funding_method: 'bank_transfer',
         },
-        { phone: PHONE, store },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
       );
       const transferId = created.transfer_id as string;
 
@@ -281,7 +285,7 @@ describe('executeTool', () => {
       const result = await executeTool(
         'update_recipient_phone',
         { transfer_id: transferId, recipient_phone: '+91 98765 11111' },
-        { phone: PHONE, store },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
       );
       expect(result.error).toBeUndefined();
       expect(result.recipient_phone).toBe('919876511111');
@@ -297,7 +301,7 @@ describe('executeTool', () => {
       const result = await executeTool(
         'update_recipient_phone',
         { transfer_id: 'nonexistent-id', recipient_phone: '919876543210' },
-        { phone: PHONE, store },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
       );
       expect(result.error).toBeDefined();
       expect(result.error).toMatch(/not found/i);
@@ -315,14 +319,14 @@ describe('executeTool', () => {
           payout_destination: 'dad@upi',
           funding_method: 'bank_transfer',
         },
-        { phone: PHONE, store },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
       );
       const transferId = created.transfer_id as string;
 
       const result = await executeTool(
         'update_recipient_phone',
         { transfer_id: transferId, recipient_phone: '123' },
-        { phone: PHONE, store },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
       );
       expect(result.error).toBeDefined();
       expect(result.error).toMatch(/valid/i);
@@ -331,5 +335,60 @@ describe('executeTool', () => {
       const saved = await store.getTransfer(transferId);
       expect(saved?.recipientPhone).toBe('919876543210');
     });
+  });
+});
+
+describe('schedule tools', () => {
+  function ctx() {
+    return {
+      phone: '15551234567',
+      store: createStore(fakeRedis()),
+      scheduleStore: createScheduleStore(fakeRedis()),
+    };
+  }
+
+  it('create_schedule saves a monthly schedule', async () => {
+    const c = ctx();
+    const r = await executeTool('create_schedule', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '+91 9133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 2,
+    }, c);
+    expect(r.schedule_id).toBeTruthy();
+    const saved = await c.scheduleStore.getSchedule(r.schedule_id as string);
+    expect(saved?.frequency).toBe('monthly');
+    expect(saved?.recipientPhone).toBe('919133001840');
+  });
+
+  it('create_schedule rejects an out-of-range day_of_month', async () => {
+    const r = await executeTool('create_schedule', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 31,
+    }, ctx());
+    expect(r.error).toMatch(/day of the month/i);
+  });
+
+  it('list_schedules returns only this customer active schedules', async () => {
+    const c = ctx();
+    await executeTool('create_schedule', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'weekly', day_of_week: 5,
+    }, c);
+    const r = await executeTool('list_schedules', {}, c);
+    expect((r.schedules as unknown[]).length).toBe(1);
+  });
+
+  it('cancel_schedule cancels an existing schedule', async () => {
+    const c = ctx();
+    const created = await executeTool('create_schedule', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 2,
+    }, c);
+    await executeTool('cancel_schedule', { schedule_id: created.schedule_id }, c);
+    const saved = await c.scheduleStore.getSchedule(created.schedule_id as string);
+    expect(saved?.status).toBe('cancelled');
   });
 });

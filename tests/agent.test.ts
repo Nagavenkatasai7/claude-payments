@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent, sanitizeReply } from '@/lib/agent';
 import { createStore } from '@/lib/store';
+import { createScheduleStore } from '@/lib/schedule-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
@@ -27,6 +28,7 @@ describe('createAgent', () => {
     const store = createStore(fakeRedis());
     const agent = createAgent({
       store,
+      scheduleStore: createScheduleStore(fakeRedis()),
       chat: async () => ({ role: 'assistant', content: 'Hi there!' }),
     });
     const reply = await agent.runAgentTurn(PHONE, 'hello');
@@ -58,6 +60,7 @@ describe('createAgent', () => {
     let call = 0;
     const agent = createAgent({
       store,
+      scheduleStore: createScheduleStore(fakeRedis()),
       chat: async () => responses[call++],
     });
 
@@ -72,6 +75,7 @@ describe('createAgent', () => {
     const store = createStore(fakeRedis());
     const agent = createAgent({
       store,
+      scheduleStore: createScheduleStore(fakeRedis()),
       chat: async () => ({ role: 'assistant', content: 'noted' }),
     });
     await agent.runAgentTurn(PHONE, 'remember this');
@@ -132,6 +136,7 @@ describe('createAgent', () => {
 
     const agent = createAgent({
       store,
+      scheduleStore: createScheduleStore(fakeRedis()),
       chat: async () => responses[call++],
     });
 
@@ -188,6 +193,7 @@ describe('createAgent', () => {
     let call = 0;
     const agent = createAgent({
       store,
+      scheduleStore: createScheduleStore(fakeRedis()),
       chat: async () => responses[call++],
     });
 
