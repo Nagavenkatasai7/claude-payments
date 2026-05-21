@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { getStore } from '@/lib/store';
+import { getAuthStore } from '@/lib/auth-store';
 import { sendText } from '@/lib/whatsapp';
 import {
   cancelTransfer,
@@ -33,6 +34,10 @@ export async function assignTransferAction(formData: FormData): Promise<void> {
   const id = formData.get('id') as string;
   const assignee = (formData.get('assignee') as string) ?? '';
   const note = (formData.get('note') as string) ?? '';
+  // Only allow assigning to a real staff account.
+  if (!(await getAuthStore().getStaff(assignee))) {
+    throw new Error('Cannot assign: unknown staff member.');
+  }
   await assignTransfer(getStore(), id, assignee, note);
   revalidatePath('/dashboard');
 }

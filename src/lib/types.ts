@@ -34,10 +34,6 @@ export interface Transfer {
   adminNote?: string;
 }
 
-export interface UserRecord {
-  transferCount: number;
-}
-
 export interface ToolCall {
   id: string;
   type: 'function';
