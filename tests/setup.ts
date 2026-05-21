@@ -1,0 +1,9 @@
+process.env.OLLAMA_BASE_URL ||= 'https://ollama.test/v1';
+process.env.OLLAMA_API_KEY ||= 'test-key';
+process.env.OLLAMA_MODEL ||= 'kimi-test';
+process.env.WHATSAPP_TOKEN ||= 'test-token';
+process.env.WHATSAPP_PHONE_NUMBER_ID ||= '123456';
+process.env.WHATSAPP_VERIFY_TOKEN ||= 'verify-test';
+process.env.APP_BASE_URL ||= 'https://sendhome.test';
+process.env.KV_REST_API_URL ||= 'https://kv.test';
+process.env.KV_REST_API_TOKEN ||= 'kv-token';
