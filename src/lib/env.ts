@@ -26,7 +26,14 @@ export const env = {
     return required('WHATSAPP_VERIFY_TOKEN');
   },
   get appBaseUrl() {
-    return required('APP_BASE_URL');
+    const explicit = process.env.APP_BASE_URL;
+    if (explicit && explicit.trim()) return explicit.trim().replace(/\/+$/, '');
+    // Vercel auto-injects the production domain (no protocol).
+    const vercelDomain = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+    if (vercelDomain && vercelDomain.trim()) {
+      return `https://${vercelDomain.trim()}`;
+    }
+    return 'https://claude-payments.vercel.app';
   },
   get kvUrl() {
     return required('KV_REST_API_URL');
