@@ -10,12 +10,19 @@ export function isAbandoned(transfer: Transfer, now: number): boolean {
   );
 }
 
+export function needsAttention(transfer: Transfer, now: number): boolean {
+  if (transfer.complianceStatus === 'flagged') return true;
+  if (transfer.complianceStatus === 'blocked') return true;
+  return isAbandoned(transfer, now);
+}
+
 export interface DashboardSummary {
   commissionToday: number;
   volumeToday: number;
   countToday: number;
   needsAttention: number;
   commissionAllTime: number;
+  flaggedToday: number;
 }
 
 export function summarize(transfers: Transfer[], now: number): DashboardSummary {
@@ -24,8 +31,9 @@ export function summarize(transfers: Transfer[], now: number): DashboardSummary 
   let commissionToday = 0;
   let volumeToday = 0;
   let countToday = 0;
-  let needsAttention = 0;
+  let needsAttentionCount = 0;
   let commissionAllTime = 0;
+  let flaggedToday = 0;
 
   for (const t of transfers) {
     const isToday = easternDate(Date.parse(t.createdAt)) === todayStr;
@@ -36,14 +44,17 @@ export function summarize(transfers: Transfer[], now: number): DashboardSummary 
       if (t.status === 'paid' || t.status === 'delivered') {
         commissionToday += t.feeUsd;
       }
+      if (t.complianceStatus === 'flagged' || t.complianceStatus === 'blocked') {
+        flaggedToday += 1;
+      }
     }
 
     if (t.status === 'paid' || t.status === 'delivered') {
       commissionAllTime += t.feeUsd;
     }
 
-    if (isAbandoned(t, now)) {
-      needsAttention += 1;
+    if (needsAttention(t, now)) {
+      needsAttentionCount += 1;
     }
   }
 
@@ -51,7 +62,8 @@ export function summarize(transfers: Transfer[], now: number): DashboardSummary 
     commissionToday: Math.round(commissionToday * 100) / 100,
     volumeToday: Math.round(volumeToday * 100) / 100,
     countToday,
-    needsAttention,
+    needsAttention: needsAttentionCount,
     commissionAllTime: Math.round(commissionAllTime * 100) / 100,
+    flaggedToday,
   };
 }

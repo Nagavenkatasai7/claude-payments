@@ -4,7 +4,7 @@ import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
 import { requireStaff } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
-import { summarize, isAbandoned } from '@/lib/dashboard';
+import { summarize, needsAttention } from '@/lib/dashboard';
 import { logout } from '../login/actions';
 import { LiveRefresh } from './live-refresh';
 import type { Staff, Transfer } from '@/lib/types';
@@ -107,7 +107,7 @@ export default async function DashboardPage() {
   const staff = await getAuthStore().listStaff();
   const now = Date.now();
   const summary = summarize(transfers, now);
-  const abandoned = transfers.filter((t) => isAbandoned(t, now));
+  const attentionTransfers = transfers.filter((t) => needsAttention(t, now));
   const staffByUsername = new Map(staff.map((s) => [s.username, s.name]));
 
   return (
@@ -153,15 +153,19 @@ export default async function DashboardPage() {
           <span className="metric-label">All-time commission</span>
           <span className="metric-value">{usd(summary.commissionAllTime)}</span>
         </div>
+        <div className="metric metric-small">
+          <span className="metric-label">Flagged today</span>
+          <span className="metric-value">{summary.flaggedToday}</span>
+        </div>
       </section>
 
       <section className="attention">
         <h2>Needs Attention</h2>
-        {abandoned.length === 0 ? (
+        {attentionTransfers.length === 0 ? (
           <p className="nothing-attention">Nothing needs attention right now.</p>
         ) : (
           <ul className="attention-list">
-            {abandoned.map((t) => (
+            {attentionTransfers.map((t) => (
               <li key={t.id} className="attention-item">
                 <span className="attention-id">{t.id}</span>
                 <span className="attention-name">{t.recipientName}</span>
@@ -191,6 +195,7 @@ export default async function DashboardPage() {
                   <th>Fee</th>
                   <th>Funding</th>
                   <th>Payout</th>
+                  <th>Compliance</th>
                   <th>US Payment</th>
                   <th>India Delivery</th>
                   <th>Status</th>
@@ -202,7 +207,7 @@ export default async function DashboardPage() {
                 {transfers.map((t) => (
                   <tr
                     key={t.id}
-                    className={isAbandoned(t, now) ? 'row-abandoned' : ''}
+                    className={needsAttention(t, now) ? 'row-abandoned' : ''}
                   >
                     <td>{new Date(t.createdAt).toLocaleString()}</td>
                     <td>{t.recipientName}</td>
@@ -211,6 +216,9 @@ export default async function DashboardPage() {
                     <td>{usd(t.feeUsd)}</td>
                     <td>{humanizeFunding(t.fundingMethod)}</td>
                     <td>{t.payoutMethod.toUpperCase()}</td>
+                    <td>
+                      <span className={`status-badge compliance-${t.complianceStatus}`}>{t.complianceStatus}</span>
+                    </td>
                     <td>
                       <Stage at={t.paidAt} fallback="pending" />
                     </td>

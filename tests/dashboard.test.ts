@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   isAbandoned,
   summarize,
+  needsAttention,
   ABANDONED_THRESHOLD_MS,
 } from '@/lib/dashboard';
 import type { Transfer } from '@/lib/types';
@@ -165,5 +166,45 @@ describe('summarize', () => {
     expect(summary.countToday).toBe(0);
     expect(summary.needsAttention).toBe(0);
     expect(summary.commissionAllTime).toBe(0);
+  });
+
+  it('returns a numeric flaggedToday field', () => {
+    const transfers = [
+      makeTransfer({ id: 'f1', createdAt: TODAY_ISO, complianceStatus: 'flagged' }),
+      makeTransfer({ id: 'f2', createdAt: TODAY_ISO, complianceStatus: 'blocked', status: 'blocked' }),
+      makeTransfer({ id: 'f3', createdAt: TODAY_ISO, complianceStatus: 'cleared' }),
+      makeTransfer({ id: 'f4', createdAt: YESTERDAY_ISO, complianceStatus: 'flagged' }),
+    ];
+    const summary = summarize(transfers, NOW);
+    expect(typeof summary.flaggedToday).toBe('number');
+    expect(summary.flaggedToday).toBe(2);
+  });
+});
+
+describe('needsAttention', () => {
+  const baseNow = Date.parse('2026-05-21T16:00:00.000Z');
+  function t(overrides: Partial<Transfer>): Transfer {
+    return {
+      id: 'x', phone: 'p', amountUsd: 100, feeUsd: 0, totalChargeUsd: 100,
+      fxRate: 85, amountInr: 8500, recipientName: 'R', recipientPhone: '91999',
+      payoutMethod: 'upi', payoutDestination: 'r@upi', fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared', complianceReasons: [],
+      status: 'awaiting_payment', createdAt: new Date(baseNow).toISOString(),
+      ...overrides,
+    };
+  }
+
+  it('is false for a fresh cleared transfer', () => {
+    expect(needsAttention(t({}), baseNow)).toBe(false);
+  });
+  it('is true for a flagged transfer', () => {
+    expect(needsAttention(t({ complianceStatus: 'flagged' }), baseNow)).toBe(true);
+  });
+  it('is true for a blocked transfer', () => {
+    expect(needsAttention(t({ complianceStatus: 'blocked', status: 'blocked' }), baseNow)).toBe(true);
+  });
+  it('is true for an abandoned (old awaiting_payment) transfer', () => {
+    const old = baseNow - 60 * 60 * 1000;
+    expect(needsAttention(t({ createdAt: new Date(old).toISOString() }), baseNow)).toBe(true);
   });
 });

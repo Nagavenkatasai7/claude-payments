@@ -259,4 +259,7 @@ button:disabled { opacity: 0.6; cursor: default; }
 }
 .perm, .perm-row { font-size: 13px; color: #e9edef; display: inline-flex; gap: 6px; align-items: center; }
 .perm-row { gap: 16px; }
+.compliance-cleared { background: #1f3a2a; color: #25d366; }
+.compliance-flagged { background: #4a3a1a; color: #f0c000; }
+.compliance-blocked { background: #4a1f1f; color: #f15c6d; }
 
