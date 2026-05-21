@@ -45,10 +45,12 @@ export function createStore(redis: RedisLike) {
     },
     async saveTransfer(transfer: Transfer): Promise<void> {
       await redis.set(`transfer:${transfer.id}`, JSON.stringify(transfer));
-      await redis.sadd('transfers:index', transfer.id);
+      // 'transfers:ids' (a Redis set) — distinct from the legacy
+      // 'transfers:index' string key used before the multi-user change.
+      await redis.sadd('transfers:ids', transfer.id);
     },
     async listTransfers(): Promise<Transfer[]> {
-      const ids = await redis.smembers('transfers:index');
+      const ids = await redis.smembers('transfers:ids');
       const all = await Promise.all(ids.map((id) => this.getTransfer(id)));
       return all
         .filter((t): t is Transfer => t !== null)
