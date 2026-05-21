@@ -2,6 +2,7 @@ import { quote, QuoteError } from './fx';
 import { getFxRate } from './rate';
 import { newTransferId } from './id';
 import { env } from './env';
+import { normalizePhone, isValidPhone } from './phone';
 import type { ChatTool, FundingMethod, PayoutMethod, Transfer } from './types';
 import type { Store } from './store';
 
@@ -94,6 +95,26 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'update_recipient_phone',
+      description:
+        "Add or correct the recipient's WhatsApp number on an existing transfer. Use this if a transfer was created without a valid recipient number.",
+      parameters: {
+        type: 'object',
+        properties: {
+          transfer_id: { type: 'string' },
+          recipient_phone: {
+            type: 'string',
+            description:
+              "Recipient's WhatsApp number with country code, e.g. 919876543210.",
+          },
+        },
+        required: ['transfer_id', 'recipient_phone'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -117,6 +138,8 @@ export async function executeTool(
       return generatePaymentLinkTool(args, ctx);
     case 'check_payment_status':
       return checkPaymentStatusTool(args, ctx);
+    case 'update_recipient_phone':
+      return updateRecipientPhoneTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -154,6 +177,14 @@ async function createTransferTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   try {
+    const recipientPhone = normalizePhone(args.recipient_phone);
+    if (!isValidPhone(recipientPhone)) {
+      return {
+        error:
+          'A valid recipient WhatsApp number with country code is required before creating the transfer. Ask the user for it (e.g. 919876543210).',
+      };
+    }
+
     const user = await ctx.store.getUser(ctx.phone);
     const payoutMethod = args.payout_method as PayoutMethod;
     const fundingMethod = args.funding_method as FundingMethod;
@@ -168,7 +199,7 @@ async function createTransferTool(
       fxRate: q.fxRate,
       amountInr: q.amountInr,
       recipientName: String(args.recipient_name),
-      recipientPhone: String(args.recipient_phone).replace(/\D/g, ''),
+      recipientPhone,
       payoutMethod,
       payoutDestination: String(args.payout_destination),
       fundingMethod,
@@ -206,4 +237,29 @@ async function checkPaymentStatusTool(
   const transfer = await ctx.store.getTransfer(String(args.transfer_id));
   if (!transfer) return { error: 'Transfer not found.' };
   return { transfer_id: transfer.id, status: transfer.status };
+}
+
+async function updateRecipientPhoneTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const transfer = await ctx.store.getTransfer(String(args.transfer_id));
+  if (!transfer) return { error: 'Transfer not found.' };
+
+  const recipientPhone = normalizePhone(args.recipient_phone);
+  if (!isValidPhone(recipientPhone)) {
+    return {
+      error:
+        'That does not look like a valid WhatsApp number. Please provide it with country code, e.g. 919876543210.',
+    };
+  }
+
+  transfer.recipientPhone = recipientPhone;
+  await ctx.store.saveTransfer(transfer);
+  return {
+    transfer_id: transfer.id,
+    recipient_phone: recipientPhone,
+    recipient_name: transfer.recipientName,
+    status: transfer.status,
+  };
 }

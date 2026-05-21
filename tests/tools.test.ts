@@ -27,13 +27,14 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all four tools', () => {
+  it('exposes all five tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'check_payment_status',
       'create_transfer',
       'generate_payment_link',
       'get_quote',
+      'update_recipient_phone',
     ]);
   });
 
@@ -50,6 +51,15 @@ describe('toolSchemas', () => {
     const props = ct.function.parameters.properties as Record<string, unknown>;
     expect(props).toHaveProperty('funding_method');
     expect(props).toHaveProperty('recipient_phone');
+  });
+
+  it('update_recipient_phone schema has transfer_id and recipient_phone', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'update_recipient_phone')!;
+    const props = tool.function.parameters.properties as Record<string, unknown>;
+    expect(props).toHaveProperty('transfer_id');
+    expect(props).toHaveProperty('recipient_phone');
+    expect(tool.function.parameters.required).toContain('transfer_id');
+    expect(tool.function.parameters.required).toContain('recipient_phone');
   });
 });
 
@@ -126,6 +136,49 @@ describe('executeTool', () => {
     expect((await store.getUser(PHONE)).transferCount).toBe(1);
   });
 
+  it('create_transfer returns an error and does NOT persist when recipient_phone is missing', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const result = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 500,
+        recipient_name: 'Mom',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'debit_card',
+        // recipient_phone intentionally omitted
+      },
+      { phone: PHONE, store },
+    );
+    expect(result.error).toBeDefined();
+    expect(typeof result.error).toBe('string');
+    // No transfer should have been persisted
+    const transferKeys = [...redis.dump.keys()].filter((k) => k.startsWith('transfer:'));
+    expect(transferKeys).toHaveLength(0);
+  });
+
+  it('create_transfer returns an error and does NOT persist when recipient_phone is invalid (too short)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const result = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 500,
+        recipient_name: 'Mom',
+        recipient_phone: '12345',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'debit_card',
+      },
+      { phone: PHONE, store },
+    );
+    expect(result.error).toBeDefined();
+    expect(typeof result.error).toBe('string');
+    const transferKeys = [...redis.dump.keys()].filter((k) => k.startsWith('transfer:'));
+    expect(transferKeys).toHaveLength(0);
+  });
+
   it('generate_payment_link builds a URL for an existing transfer', async () => {
     const store = createStore(fakeRedis());
     const created = await executeTool(
@@ -176,5 +229,79 @@ describe('executeTool', () => {
     const store = createStore(fakeRedis());
     const result = await executeTool('nope', {}, { phone: PHONE, store });
     expect(result.error).toMatch(/unknown tool/i);
+  });
+
+  describe('update_recipient_phone', () => {
+    it('sets the normalized recipientPhone on an existing transfer', async () => {
+      const store = createStore(fakeRedis());
+      // Create a transfer first (with valid phone for the create_transfer enforcement)
+      const created = await executeTool(
+        'create_transfer',
+        {
+          amount_usd: 200,
+          recipient_name: 'Dad',
+          recipient_phone: '919876543210',
+          payout_method: 'upi',
+          payout_destination: 'dad@upi',
+          funding_method: 'bank_transfer',
+        },
+        { phone: PHONE, store },
+      );
+      const transferId = created.transfer_id as string;
+
+      // Update with a formatted phone
+      const result = await executeTool(
+        'update_recipient_phone',
+        { transfer_id: transferId, recipient_phone: '+91 98765 11111' },
+        { phone: PHONE, store },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.recipient_phone).toBe('919876511111');
+      expect(result.transfer_id).toBe(transferId);
+
+      // Verify in the store
+      const saved = await store.getTransfer(transferId);
+      expect(saved?.recipientPhone).toBe('919876511111');
+    });
+
+    it('returns an error for an unknown transfer id', async () => {
+      const store = createStore(fakeRedis());
+      const result = await executeTool(
+        'update_recipient_phone',
+        { transfer_id: 'nonexistent-id', recipient_phone: '919876543210' },
+        { phone: PHONE, store },
+      );
+      expect(result.error).toBeDefined();
+      expect(result.error).toMatch(/not found/i);
+    });
+
+    it('returns an error for an invalid phone number', async () => {
+      const store = createStore(fakeRedis());
+      const created = await executeTool(
+        'create_transfer',
+        {
+          amount_usd: 200,
+          recipient_name: 'Dad',
+          recipient_phone: '919876543210',
+          payout_method: 'upi',
+          payout_destination: 'dad@upi',
+          funding_method: 'bank_transfer',
+        },
+        { phone: PHONE, store },
+      );
+      const transferId = created.transfer_id as string;
+
+      const result = await executeTool(
+        'update_recipient_phone',
+        { transfer_id: transferId, recipient_phone: '123' },
+        { phone: PHONE, store },
+      );
+      expect(result.error).toBeDefined();
+      expect(result.error).toMatch(/valid/i);
+
+      // Phone should remain unchanged
+      const saved = await store.getTransfer(transferId);
+      expect(saved?.recipientPhone).toBe('919876543210');
+    });
   });
 });

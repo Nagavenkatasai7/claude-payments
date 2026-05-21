@@ -21,8 +21,10 @@ export async function POST(
     for (const msg of senderMessages) {
       await sendText(transfer.phone, msg);
     }
-    for (const msg of recipientMessages) {
-      await sendText(transfer.recipientPhone, msg);
+    if (transfer.recipientPhone) {
+      for (const msg of recipientMessages) {
+        await sendText(transfer.recipientPhone, msg);
+      }
     }
 
     // Schedule stage-2 delivery after a delay
@@ -33,8 +35,10 @@ export async function POST(
         for (const msg of stage2.senderMessages) {
           await sendText(stage2.transfer.phone, msg);
         }
-        for (const msg of stage2.recipientMessages) {
-          await sendText(stage2.transfer.recipientPhone, msg);
+        if (stage2.transfer.recipientPhone) {
+          for (const msg of stage2.recipientMessages) {
+            await sendText(stage2.transfer.recipientPhone, msg);
+          }
         }
       } catch (err) {
         console.error('Stage-2 delivery failed:', err);
