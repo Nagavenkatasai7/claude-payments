@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import type { Transfer } from '@/lib/types';
+import { easternDate } from '@/lib/dates';
 
 function sampleTransfer(id: string, createdAt: string): Transfer {
   return {
@@ -54,6 +55,30 @@ describe('store transfer count', () => {
     await store.incrementTransferCount('p1');
     expect(await store.getTransferCount('p1')).toBe(1);
     expect(await store.getTransferCount('p2')).toBe(0);
+  });
+});
+
+describe('store velocity counter', () => {
+  it('defaults today count to 0 and increments', async () => {
+    const store = createStore(fakeRedis());
+    expect(await store.getTodayTransferCount('p')).toBe(0);
+    await store.incrementTodayTransferCount('p');
+    await store.incrementTodayTransferCount('p');
+    expect(await store.getTodayTransferCount('p')).toBe(2);
+  });
+
+  it('velocity is isolated per phone', async () => {
+    const store = createStore(fakeRedis());
+    await store.incrementTodayTransferCount('p1');
+    expect(await store.getTodayTransferCount('p1')).toBe(1);
+    expect(await store.getTodayTransferCount('p2')).toBe(0);
+  });
+
+  it('uses an eastern-date-keyed velocity key', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    await store.incrementTodayTransferCount('p');
+    expect(redis.dump.has(`velocity:p:${easternDate(Date.now())}`)).toBe(true);
   });
 });
 

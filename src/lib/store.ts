@@ -1,5 +1,6 @@
 import { Redis } from '@upstash/redis';
 import { env } from './env';
+import { easternDate } from './dates';
 import type { ChatMessage, Transfer } from './types';
 
 export interface RedisLike {
@@ -62,6 +63,13 @@ export function createStore(redis: RedisLike) {
     },
     async incrementTransferCount(phone: string): Promise<void> {
       await redis.incr(`count:${phone}`);
+    },
+    async incrementTodayTransferCount(phone: string): Promise<void> {
+      await redis.incr(`velocity:${phone}:${easternDate(Date.now())}`);
+    },
+    async getTodayTransferCount(phone: string): Promise<number> {
+      const raw = await redis.get(`velocity:${phone}:${easternDate(Date.now())}`);
+      return raw ? Number(raw) : 0;
     },
     async markMessageSeen(wamid: string): Promise<boolean> {
       const result = await redis.set(`msg:${wamid}`, '1', {
