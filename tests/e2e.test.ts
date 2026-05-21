@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent } from '@/lib/agent';
 import { createStore } from '@/lib/store';
-import { completePayment } from '@/lib/payment';
+import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
@@ -52,6 +52,7 @@ describe('end-to-end happy path', () => {
       toolCall('c2', 'create_transfer', {
         amount_usd: 500,
         recipient_name: 'Mom',
+        recipient_phone: '919876543210',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
@@ -96,12 +97,16 @@ describe('end-to-end happy path', () => {
     const transferId = transferKey.replace('transfer:', '');
     expect((await store.getUser(PHONE)).transferCount).toBe(1);
 
-    // Completing payment delivers the money.
-    const result = await completePayment(store, transferId);
-    expect(result.transfer.status).toBe('delivered');
-    expect(result.messages[1]).toContain('42,600');
+    // Completing payment: stage 1 marks paid, stage 2 delivers.
+    const stage1 = await completePaymentStage1(store, transferId);
+    expect(stage1.transfer.status).toBe('paid');
+    expect(stage1.senderMessages[0]).toContain('42,600');
+
+    const stage2 = await completePaymentStage2(store, transferId);
+    expect(stage2.transfer.status).toBe('delivered');
+    expect(stage2.senderMessages[0]).toContain('42,600');
 
     // First transfer was free.
-    expect(result.transfer.feeUsd).toBe(0);
+    expect(stage2.transfer.feeUsd).toBe(0);
   });
 });

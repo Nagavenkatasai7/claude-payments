@@ -13,8 +13,9 @@ WHAT TO COLLECT
    - "debit card" → debit_card (fee: $2.99; first transfer free)
    - "bank transfer" → bank_transfer (fee: $1.99; first transfer free)
 3. The recipient's name.
-4. The payout method: 'upi' (a UPI ID) or 'bank' (bank account number + IFSC code).
-5. The payout destination (the UPI ID, or the account number with IFSC code).
+4. The recipient's WhatsApp number in India, with country code (e.g. 919876543210). This is used to notify them when the money is on its way.
+5. The payout method: 'upi' (a UPI ID) or 'bank' (bank account number + IFSC code).
+6. The payout destination (the UPI ID, or the account number with IFSC code).
 
 FLOW
 - Once you know the amount and the sender's funding method, call get_quote and show the user the fee, the exchange rate, and the rupee amount the recipient will receive. Ask them to confirm.

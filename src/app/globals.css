@@ -211,3 +211,23 @@ button:disabled { opacity: 0.6; cursor: default; }
   margin-top: 0 !important;
 }
 
+/* Live refresh indicator */
+.live-dot {
+  font-size: 11px;
+  font-weight: 500;
+  color: #25d366;
+  opacity: 0.75;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+
+/* Two-stage delivery status */
+.stage-done {
+  color: #25d366;
+  font-size: 12px;
+}
+.stage-pending {
+  color: #8696a0;
+  font-size: 12px;
+}
+

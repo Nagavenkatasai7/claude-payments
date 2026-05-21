@@ -52,6 +52,11 @@ export const toolSchemas: ChatTool[] = [
             enum: ['credit_card', 'debit_card', 'bank_transfer'],
             description: "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'.",
           },
+          recipient_phone: {
+            type: 'string',
+            description:
+              "The recipient's WhatsApp number in India, with country code, e.g. 919876543210.",
+          },
         },
         required: [
           'amount_usd',
@@ -59,6 +64,7 @@ export const toolSchemas: ChatTool[] = [
           'payout_method',
           'payout_destination',
           'funding_method',
+          'recipient_phone',
         ],
       },
     },
@@ -162,6 +168,7 @@ async function createTransferTool(
       fxRate: q.fxRate,
       amountInr: q.amountInr,
       recipientName: String(args.recipient_name),
+      recipientPhone: String(args.recipient_phone).replace(/\D/g, ''),
       payoutMethod,
       payoutDestination: String(args.payout_destination),
       fundingMethod,

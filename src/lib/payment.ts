@@ -1,25 +1,68 @@
 import type { Store } from './store';
 import type { Transfer } from './types';
 
-export interface PaymentResult {
+export interface StageResult {
   transfer: Transfer;
-  messages: string[];
+  senderMessages: string[];
+  recipientMessages: string[];
 }
 
 function inr(amount: number): string {
   return amount.toLocaleString('en-IN');
 }
 
-export async function completePayment(
+export async function completePaymentStage1(
   store: Store,
   transferId: string,
-): Promise<PaymentResult> {
+): Promise<StageResult> {
   const transfer = await store.getTransfer(transferId);
   if (!transfer) {
     throw new Error(`Transfer not found: ${transferId}`);
   }
+
+  // Idempotent: already past this stage
+  if (transfer.status === 'paid' || transfer.status === 'delivered') {
+    return { transfer, senderMessages: [], recipientMessages: [] };
+  }
+
+  const now = new Date().toISOString();
+  const updated: Transfer = {
+    ...transfer,
+    status: 'paid',
+    paidAt: now,
+  };
+  await store.saveTransfer(updated);
+
+  const senderMessages = [
+    `✅ Payment received — $${updated.totalChargeUsd.toFixed(2)} charged. Sending ₹${inr(updated.amountInr)} to ${updated.recipientName}…`,
+  ];
+
+  const destination =
+    updated.payoutMethod === 'upi' ? 'UPI ID' : 'bank account';
+  const recipientMessages = [
+    `Hi ${updated.recipientName}! 💸 ₹${inr(updated.amountInr)} is on its way to you via SendHome — it will reach your ${destination} within 10 minutes.`,
+  ];
+
+  return { transfer: updated, senderMessages, recipientMessages };
+}
+
+export async function completePaymentStage2(
+  store: Store,
+  transferId: string,
+): Promise<StageResult> {
+  const transfer = await store.getTransfer(transferId);
+  if (!transfer) {
+    throw new Error(`Transfer not found: ${transferId}`);
+  }
+
+  // Idempotent: already delivered
   if (transfer.status === 'delivered') {
-    return { transfer, messages: [] };
+    return { transfer, senderMessages: [], recipientMessages: [] };
+  }
+
+  // Do not deliver a cancelled transfer
+  if (transfer.status === 'cancelled') {
+    return { transfer, senderMessages: [], recipientMessages: [] };
   }
 
   const now = new Date().toISOString();
@@ -31,14 +74,12 @@ export async function completePayment(
   };
   await store.saveTransfer(updated);
 
-  const method = updated.payoutMethod === 'upi' ? 'UPI' : 'bank transfer';
-  const messages = [
-    `✅ Payment received — $${updated.totalChargeUsd.toFixed(
-      2,
-    )} charged. Converting to rupees…`,
-    `🎉 ₹${inr(updated.amountInr)} delivered to ${
-      updated.recipientName
-    } via ${method}. Thanks for using SendHome!`,
+  const senderMessages = [
+    `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName}. Thanks for using SendHome!`,
   ];
-  return { transfer: updated, messages };
+  const recipientMessages = [
+    `🎉 ₹${inr(updated.amountInr)} has landed in your account. All done!`,
+  ];
+
+  return { transfer: updated, senderMessages, recipientMessages };
 }

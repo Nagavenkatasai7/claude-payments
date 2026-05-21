@@ -45,10 +45,11 @@ describe('toolSchemas', () => {
     expect(props).not.toHaveProperty('payout_method');
   });
 
-  it('create_transfer schema includes funding_method', () => {
+  it('create_transfer schema includes funding_method and recipient_phone', () => {
     const ct = toolSchemas.find((t) => t.function.name === 'create_transfer')!;
     const props = ct.function.parameters.properties as Record<string, unknown>;
     expect(props).toHaveProperty('funding_method');
+    expect(props).toHaveProperty('recipient_phone');
   });
 });
 
@@ -83,6 +84,7 @@ describe('executeTool', () => {
       {
         amount_usd: 100,
         recipient_name: 'Mom',
+        recipient_phone: '919876543210',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
         funding_method: 'credit_card',
@@ -108,6 +110,7 @@ describe('executeTool', () => {
       {
         amount_usd: 500,
         recipient_name: 'Mom',
+        recipient_phone: '+91 98765 43210',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
         funding_method: 'debit_card',
@@ -118,6 +121,8 @@ describe('executeTool', () => {
     const saved = await store.getTransfer(result.transfer_id as string);
     expect(saved?.recipientName).toBe('Mom');
     expect(saved?.fundingMethod).toBe('debit_card');
+    // recipientPhone should be normalized to digits only
+    expect(saved?.recipientPhone).toBe('919876543210');
     expect((await store.getUser(PHONE)).transferCount).toBe(1);
   });
 
@@ -128,6 +133,7 @@ describe('executeTool', () => {
       {
         amount_usd: 500,
         recipient_name: 'Mom',
+        recipient_phone: '919876543210',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
@@ -151,6 +157,7 @@ describe('executeTool', () => {
       {
         amount_usd: 500,
         recipient_name: 'Mom',
+        recipient_phone: '919876543210',
         payout_method: 'upi',
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',

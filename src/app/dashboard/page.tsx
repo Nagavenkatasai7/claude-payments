@@ -8,6 +8,7 @@ import {
   assignTransferAction,
   resendPaymentLinkAction,
 } from './actions';
+import { LiveRefresh } from './live-refresh';
 
 function usd(amount: number): string {
   return `$${amount.toFixed(2)}`;
@@ -90,7 +91,7 @@ export default async function DashboardPage() {
 
   return (
     <main className="dashboard">
-      <h1 className="dashboard-title">SendHome Admin</h1>
+      <h1 className="dashboard-title">SendHome Admin <LiveRefresh /></h1>
 
       {/* Summary Cards */}
       <section className="cards">
@@ -155,6 +156,8 @@ export default async function DashboardPage() {
                   <th>Funding</th>
                   <th>Payout</th>
                   <th>Status</th>
+                  <th>US Payment</th>
+                  <th>India Delivery</th>
                   <th>Assignee</th>
                   <th>Actions</th>
                 </tr>
@@ -170,6 +173,22 @@ export default async function DashboardPage() {
                     <td>{humanizeFunding(t.fundingMethod)}</td>
                     <td>{t.payoutMethod.toUpperCase()}</td>
                     <td><StatusBadge status={t.status} /></td>
+                    <td>
+                      {t.paidAt ? (
+                        <span className="stage-done">✓ {new Date(t.paidAt).toLocaleString()}</span>
+                      ) : (
+                        <span className="stage-pending">pending</span>
+                      )}
+                    </td>
+                    <td>
+                      {t.deliveredAt ? (
+                        <span className="stage-done">✓ {new Date(t.deliveredAt).toLocaleString()}</span>
+                      ) : t.status === 'paid' ? (
+                        <span className="stage-pending">in transit</span>
+                      ) : (
+                        <span className="stage-pending">—</span>
+                      )}
+                    </td>
                     <td>{t.assignedTo ?? '—'}</td>
                     <td><TransferActions transfer={t} /></td>
                   </tr>

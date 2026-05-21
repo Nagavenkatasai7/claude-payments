@@ -14,6 +14,7 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
     fxRate: 85,
     amountInr: 8500,
     recipientName: 'Test User',
+    recipientPhone: '919876543210',
     payoutMethod: 'upi',
     payoutDestination: 'test@upi',
     fundingMethod: 'credit_card',

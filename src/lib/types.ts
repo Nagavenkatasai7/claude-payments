@@ -22,6 +22,7 @@ export interface Transfer {
   fxRate: number;
   amountInr: number;
   recipientName: string;
+  recipientPhone: string;
   payoutMethod: PayoutMethod;
   payoutDestination: string;
   fundingMethod: FundingMethod;
