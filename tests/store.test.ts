@@ -3,6 +3,25 @@ import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import type { Transfer } from '@/lib/types';
 
+function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
+  return {
+    id: overrides.id,
+    phone: '15551234567',
+    amountUsd: 100,
+    feeUsd: 2.5,
+    totalChargeUsd: 102.5,
+    fxRate: 85,
+    amountInr: 8500,
+    recipientName: 'Test User',
+    payoutMethod: 'upi',
+    payoutDestination: 'test@upi',
+    fundingMethod: 'credit_card',
+    status: 'awaiting_payment',
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 function sampleTransfer(): Transfer {
   return {
     id: 'abc12345',
@@ -67,5 +86,33 @@ describe('store', () => {
     const conv = await store.getConversation('p');
     expect(conv).toHaveLength(40);
     expect(conv[conv.length - 1].content).toBe('m59');
+  });
+
+  it('listTransfers returns saved transfers newest first by createdAt', async () => {
+    const store = createStore(fakeRedis());
+    const oldest = makeTransfer({ id: 'old1', createdAt: '2026-01-01T00:00:00.000Z' });
+    const middle = makeTransfer({ id: 'mid1', createdAt: '2026-03-01T00:00:00.000Z' });
+    const newest = makeTransfer({ id: 'new1', createdAt: '2026-05-01T00:00:00.000Z' });
+    // Save in random order
+    await store.saveTransfer(middle);
+    await store.saveTransfer(oldest);
+    await store.saveTransfer(newest);
+    const list = await store.listTransfers();
+    expect(list).toHaveLength(3);
+    expect(list[0].id).toBe('new1');
+    expect(list[1].id).toBe('mid1');
+    expect(list[2].id).toBe('old1');
+  });
+
+  it('re-saving the same transfer does not duplicate it in the index', async () => {
+    const store = createStore(fakeRedis());
+    const t = makeTransfer({ id: 'dup1' });
+    await store.saveTransfer(t);
+    await store.saveTransfer({ ...t, status: 'paid' });
+    await store.saveTransfer({ ...t, status: 'delivered' });
+    const list = await store.listTransfers();
+    const matches = list.filter((x) => x.id === 'dup1');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].status).toBe('delivered');
   });
 });

@@ -2,7 +2,7 @@ export type PayoutMethod = 'upi' | 'bank';
 
 export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer';
 
-export type TransferStatus = 'awaiting_payment' | 'paid' | 'delivered';
+export type TransferStatus = 'awaiting_payment' | 'paid' | 'delivered' | 'cancelled';
 
 export interface Quote {
   amountUsd: number;
@@ -29,6 +29,8 @@ export interface Transfer {
   createdAt: string;
   paidAt?: string;
   deliveredAt?: string;
+  assignedTo?: string;
+  adminNote?: string;
 }
 
 export interface UserRecord {

@@ -40,6 +40,12 @@ export function createStore(redis: RedisLike) {
     },
     async saveTransfer(transfer: Transfer): Promise<void> {
       await redis.set(`transfer:${transfer.id}`, JSON.stringify(transfer));
+      const raw = await redis.get('transfers:index');
+      const index: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+      if (!index.includes(transfer.id)) {
+        index.push(transfer.id);
+        await redis.set('transfers:index', JSON.stringify(index));
+      }
     },
     async getUser(phone: string): Promise<UserRecord> {
       const raw = await redis.get(`user:${phone}`);
@@ -58,6 +64,17 @@ export function createStore(redis: RedisLike) {
         nx: true,
       });
       return result !== null;
+    },
+    async listTransfers(): Promise<Transfer[]> {
+      const raw = await redis.get('transfers:index');
+      const index: string[] = raw ? (JSON.parse(raw) as string[]) : [];
+      const results = await Promise.all(
+        index.map((id) => this.getTransfer(id)),
+      );
+      const transfers = results.filter((t): t is Transfer => t !== null);
+      return transfers.sort(
+        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
+      );
     },
   };
 }

@@ -36,3 +36,178 @@ button {
 button:disabled { opacity: 0.6; cursor: default; }
 .done { color: #25d366; font-weight: 600; text-align: center; }
 .err { color: #f15c6d; font-size: 13px; margin-top: 8px; }
+
+/* ─── Dashboard ─────────────────────────────────────────────────────────── */
+.dashboard {
+  max-width: 1100px;
+  width: 100%;
+  padding: 24px 16px;
+}
+.dashboard-title {
+  color: #25d366;
+  font-size: 22px;
+  font-weight: 800;
+  margin-bottom: 24px;
+}
+
+/* Summary cards */
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 28px;
+}
+.metric {
+  background: #111b21;
+  border-radius: 12px;
+  padding: 18px 22px;
+  flex: 1 1 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.metric-small {
+  flex-basis: 100%;
+}
+.metric-attention .metric-value {
+  color: #f15c6d;
+}
+.metric-label {
+  font-size: 12px;
+  color: #8696a0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.metric-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #25d366;
+}
+
+/* Needs attention panel */
+.attention {
+  background: #1a1010;
+  border: 1px solid #5c2020;
+  border-radius: 12px;
+  padding: 18px 22px;
+  margin-bottom: 28px;
+}
+.attention h2 {
+  font-size: 15px;
+  color: #f15c6d;
+  margin-bottom: 12px;
+}
+.nothing-attention {
+  color: #8696a0;
+  font-size: 14px;
+}
+.attention-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.attention-item {
+  background: #2a1212;
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  align-items: center;
+}
+.attention-id { color: #8696a0; font-family: monospace; }
+.attention-name { font-weight: 600; }
+.attention-amount { color: #25d366; }
+.attention-age { color: #8696a0; font-size: 12px; margin-left: auto; }
+
+/* Ledger table */
+.ledger-section h2 {
+  font-size: 15px;
+  color: #e9edef;
+  margin-bottom: 12px;
+}
+.empty-state {
+  color: #8696a0;
+  font-size: 14px;
+}
+.ledger-wrapper {
+  overflow-x: auto;
+}
+.ledger {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.ledger th {
+  text-align: left;
+  padding: 8px 10px;
+  background: #111b21;
+  color: #8696a0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid #202c33;
+  white-space: nowrap;
+}
+.ledger td {
+  padding: 10px 10px;
+  border-bottom: 1px solid #202c33;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.ledger tr:hover td {
+  background: #111b21;
+}
+.row-abandoned td {
+  background: #1a1010;
+}
+
+/* Status badges */
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.status-awaiting_payment { background: #2a2000; color: #f0b429; }
+.status-paid            { background: #002a0a; color: #25d366; }
+.status-delivered       { background: #001a2a; color: #5bc8fa; }
+.status-cancelled       { background: #2a0000; color: #f15c6d; }
+
+/* Row action buttons */
+.action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 180px;
+}
+.action-btn {
+  width: auto;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+}
+.resend-btn { background: #202c33; color: #25d366; }
+.cancel-btn { background: #2a1212; color: #f15c6d; }
+.assign-btn { background: #202c33; color: #e9edef; }
+
+.assign-form {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.small-input {
+  width: 80px !important;
+  padding: 4px 6px !important;
+  font-size: 12px !important;
+  border-radius: 6px !important;
+  margin-top: 0 !important;
+}
+
