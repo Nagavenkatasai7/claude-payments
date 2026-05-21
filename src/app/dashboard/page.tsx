@@ -5,6 +5,8 @@ import { getAuthStore } from '@/lib/auth-store';
 import { requireStaff } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { summarize, needsAttention } from '@/lib/dashboard';
+import { getScheduleStore } from '@/lib/schedule-store';
+import { easternDayOfMonth, easternDayOfWeek } from '@/lib/dates';
 import { logout } from '../login/actions';
 import { LiveRefresh } from './live-refresh';
 import type { Staff, Transfer } from '@/lib/types';
@@ -19,6 +21,13 @@ function humanizeFunding(method: Transfer['fundingMethod']): string {
   if (method === 'credit_card') return 'Credit card';
   if (method === 'debit_card') return 'Debit card';
   return 'Bank transfer';
+}
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+function scheduleWhen(s: import('@/lib/types').Schedule): string {
+  if (s.frequency === 'monthly') return `Monthly · day ${s.dayOfMonth}`;
+  return `Weekly · ${WEEKDAYS[s.dayOfWeek ?? 0]}`;
 }
 
 function StatusBadge({ status }: { status: Transfer['status'] }) {
@@ -109,6 +118,7 @@ export default async function DashboardPage() {
   const summary = summarize(transfers, now);
   const attentionTransfers = transfers.filter((t) => needsAttention(t, now));
   const staffByUsername = new Map(staff.map((s) => [s.username, s.name]));
+  const schedules = await getScheduleStore().listSchedules();
 
   return (
     <main className="dashboard">
@@ -242,6 +252,46 @@ export default async function DashboardPage() {
                         viewer={viewer}
                         staff={staff}
                       />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="ledger-section">
+        <h2>Recurring Schedules</h2>
+        {schedules.length === 0 ? (
+          <p className="empty-state">No recurring schedules yet.</p>
+        ) : (
+          <div className="ledger-wrapper">
+            <table className="ledger">
+              <thead>
+                <tr>
+                  <th>Recipient</th>
+                  <th>Amount</th>
+                  <th>When</th>
+                  <th>Last run</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schedules.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.recipientName}</td>
+                    <td>{usd(s.amountUsd)}</td>
+                    <td>{scheduleWhen(s)}</td>
+                    <td>
+                      {s.lastRunAt
+                        ? new Date(s.lastRunAt).toLocaleDateString()
+                        : '—'}
+                    </td>
+                    <td>
+                      <span className={`status-badge status-${s.status}`}>
+                        {s.status}
+                      </span>
                     </td>
                   </tr>
                 ))}
