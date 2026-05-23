@@ -201,36 +201,16 @@ export default async function DashboardPage() {
         <section id="transactions" className="sh-card">
           <TransactionsTabs
             transfers={transfers}
-            renderRow={(t) => (
-              <tr key={t.id}>
-                <td>
-                  <div className="sh-recipient">{t.recipientName}</div>
-                  <div className="sh-recipient-sub">
-                    {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
-                  </div>
-                </td>
-                <td>
-                  <div className="sh-amount">{usd(t.amountUsd)}</div>
-                  <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
-                </td>
-                <td>{humanizeFunding(t.fundingMethod)}</td>
-                <td><Stage at={t.paidAt} fallback="pending" /></td>
-                <td>
-                  <Stage
-                    at={t.deliveredAt}
-                    fallback={t.status === 'paid' ? 'in transit' : '—'}
-                  />
-                </td>
-                <td><ComplianceBadge status={t.complianceStatus} /></td>
-                <td><StatusPill status={t.status} /></td>
-                <td>
-                  {t.assignedTo
-                    ? staffByUsername.get(t.assignedTo) ?? t.assignedTo
-                    : <span className="sh-recipient-sub">—</span>}
-                </td>
-                <td><RowActions transfer={t} viewer={viewer} staff={staff} /></td>
-              </tr>
+            staff={staff}
+            staffByUsername={Object.fromEntries(
+              staff.map((s) => [s.username, s.name]),
             )}
+            canCancel={hasPermission(viewer, 'canCancel')}
+            canResend={hasPermission(viewer, 'canResend')}
+            canAssign={hasPermission(viewer, 'canAssign')}
+            cancelAction={cancelTransferAction}
+            assignAction={assignTransferAction}
+            resendAction={resendPaymentLinkAction}
           />
         </section>
 
