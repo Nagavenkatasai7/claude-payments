@@ -2,14 +2,17 @@ export const dynamic = 'force-dynamic';
 
 import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
+import { getScheduleStore } from '@/lib/schedule-store';
 import { requireStaff } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { summarize, needsAttention } from '@/lib/dashboard';
-import { getScheduleStore } from '@/lib/schedule-store';
-import { easternDayOfMonth, easternDayOfWeek } from '@/lib/dates';
-import { logout } from '../login/actions';
-import { LiveRefresh } from './live-refresh';
-import type { Staff, Transfer } from '@/lib/types';
+import type { Schedule, Staff, Transfer } from '@/lib/types';
+import { Sidebar } from './sidebar';
+import {
+  cancelTransferAction,
+  assignTransferAction,
+  resendPaymentLinkAction,
+} from './actions';
 
 function usd(amount: number): string {
   return `$${amount.toFixed(2)}`;
@@ -23,17 +26,38 @@ function humanizeFunding(method: Transfer['fundingMethod']): string {
   return 'Bank transfer';
 }
 
-const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const WEEKDAYS = [
+  'Sunday', 'Monday', 'Tuesday', 'Wednesday',
+  'Thursday', 'Friday', 'Saturday',
+];
 
-function scheduleWhen(s: import('@/lib/types').Schedule): string {
+function scheduleWhen(s: Schedule): string {
   if (s.frequency === 'monthly') return `Monthly · day ${s.dayOfMonth}`;
   return `Weekly · ${WEEKDAYS[s.dayOfWeek ?? 0]}`;
 }
 
-function StatusBadge({ status }: { status: Transfer['status'] }) {
+function StatusPill({ status }: { status: Transfer['status'] }) {
+  const klass =
+    status === 'delivered' ? 'sh-pill-success' :
+    status === 'paid' ? 'sh-pill-info' :
+    status === 'awaiting_payment' ? 'sh-pill-neutral' :
+    status === 'cancelled' ? 'sh-pill-warning' :
+    'sh-pill-danger';
   return (
-    <span className={`status-badge status-${status}`}>
-      {status.replace('_', ' ')}
+    <span className={`sh-pill ${klass}`}>
+      <span className="sh-pill-dot"></span>{status.replace('_', ' ')}
+    </span>
+  );
+}
+
+function ComplianceBadge({ status }: { status: Transfer['complianceStatus'] }) {
+  const klass =
+    status === 'cleared' ? 'sh-pill-success' :
+    status === 'flagged' ? 'sh-pill-warning' :
+    'sh-pill-danger';
+  return (
+    <span className={`sh-pill ${klass}`}>
+      <span className="sh-pill-dot"></span>{status}
     </span>
   );
 }
@@ -41,68 +65,51 @@ function StatusBadge({ status }: { status: Transfer['status'] }) {
 function Stage({ at, fallback }: { at?: string; fallback: string }) {
   if (at) {
     return (
-      <span className="stage-done">✓ {new Date(at).toLocaleString()}</span>
+      <span className="sh-stage">
+        <span className="sh-check">✓</span>
+        {new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      </span>
     );
   }
-  return <span className="stage-pending">{fallback}</span>;
+  return <span className="sh-stage-pending">{fallback}</span>;
 }
 
 function AssignForm({ id, staff }: { id: string; staff: Staff[] }) {
   return (
-    <form action={assignTransferAction} className="assign-form">
+    <form action={assignTransferAction} className="sh-inline-form">
       <input type="hidden" name="id" value={id} />
-      <select name="assignee" className="small-input" required>
-        <option value="">Assign to…</option>
+      <select name="assignee" className="sh-inline-select" required>
+        <option value="">Assign…</option>
         {staff.map((s) => (
-          <option key={s.username} value={s.username}>
-            {s.name}
-          </option>
+          <option key={s.username} value={s.username}>{s.name}</option>
         ))}
       </select>
-      <input type="text" name="note" placeholder="Note" className="small-input" />
-      <button type="submit" className="action-btn assign-btn">
-        Assign
-      </button>
+      <input type="text" name="note" placeholder="Note" className="sh-inline-input" />
+      <button type="submit" className="sh-mini-btn">Save</button>
     </form>
   );
 }
 
-import {
-  cancelTransferAction,
-  assignTransferAction,
-  resendPaymentLinkAction,
-} from './actions';
-
-function TransferActions({
-  transfer,
-  viewer,
-  staff,
-}: {
-  transfer: Transfer;
-  viewer: Staff;
-  staff: Staff[];
-}) {
+function RowActions({
+  transfer, viewer, staff,
+}: { transfer: Transfer; viewer: Staff; staff: Staff[] }) {
   const { status, id } = transfer;
   const canCancel = hasPermission(viewer, 'canCancel');
   const canResend = hasPermission(viewer, 'canResend');
   const canAssign = hasPermission(viewer, 'canAssign');
 
   return (
-    <div className="action-group">
+    <div className="sh-attention-actions">
       {status === 'awaiting_payment' && canResend && (
         <form action={resendPaymentLinkAction}>
           <input type="hidden" name="id" value={id} />
-          <button type="submit" className="action-btn resend-btn">
-            Resend link
-          </button>
+          <button type="submit" className="sh-mini-btn">Resend link</button>
         </form>
       )}
       {(status === 'awaiting_payment' || status === 'paid') && canCancel && (
         <form action={cancelTransferAction}>
           <input type="hidden" name="id" value={id} />
-          <button type="submit" className="action-btn cancel-btn">
-            Cancel/refund
-          </button>
+          <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Cancel</button>
         </form>
       )}
       {canAssign && <AssignForm id={id} staff={staff} />}
@@ -114,192 +121,193 @@ export default async function DashboardPage() {
   const viewer = await requireStaff();
   const transfers = await getStore().listTransfers();
   const staff = await getAuthStore().listStaff();
+  const schedules = await getScheduleStore().listSchedules();
   const now = Date.now();
   const summary = summarize(transfers, now);
-  const attentionTransfers = transfers.filter((t) => needsAttention(t, now));
+  const attention = transfers.filter((t) => needsAttention(t, now));
   const staffByUsername = new Map(staff.map((s) => [s.username, s.name]));
-  const schedules = await getScheduleStore().listSchedules();
+  const todayLabel = new Date(now).toLocaleDateString('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
 
   return (
-    <main className="dashboard">
-      <header className="dash-header">
-        <h1 className="dashboard-title">SendHome Admin</h1>
-        <div className="dash-header-right">
-          <LiveRefresh />
-          <span className="who">
-            {viewer.name} ({viewer.role})
-          </span>
-          {viewer.role === 'admin' && (
-            <a href="/dashboard/team" className="action-btn">
-              Team &amp; Permissions
-            </a>
+    <>
+      <Sidebar active="overview" />
+      <main className="sh-main">
+        <div className="sh-page-head">
+          <div>
+            <div className="sh-page-title">Overview</div>
+            <div className="sh-page-sub">{todayLabel}</div>
+          </div>
+        </div>
+
+        <section className="sh-metrics">
+          <div className="sh-metric sh-metric-primary">
+            <div className="sh-metric-label">Commission today</div>
+            <div className="sh-metric-value">{usd(summary.commissionToday)}</div>
+          </div>
+          <div className="sh-metric">
+            <div className="sh-metric-label">Volume today</div>
+            <div className="sh-metric-value">{usd(summary.volumeToday)}</div>
+          </div>
+          <div className="sh-metric">
+            <div className="sh-metric-label">Transactions today</div>
+            <div className="sh-metric-value">{summary.countToday}</div>
+          </div>
+          <div className="sh-metric sh-metric-alert">
+            <div className="sh-metric-label">Flagged today</div>
+            <div className="sh-metric-value">{summary.flaggedToday}</div>
+          </div>
+          <div className="sh-metric">
+            <div className="sh-metric-label">All-time commission</div>
+            <div className="sh-metric-value">{usd(summary.commissionAllTime)}</div>
+            <div className="sh-metric-sub">Across {transfers.length} transfers</div>
+          </div>
+        </section>
+
+        <section id="attention" className="sh-attention">
+          <div className="sh-attention-title">
+            ⚠ Needs Attention
+            <span className="sh-attention-count">{attention.length} items</span>
+          </div>
+          {attention.length === 0 ? (
+            <div className="sh-attention-meta">Nothing needs attention right now.</div>
+          ) : (
+            attention.map((t) => (
+              <div key={t.id} className="sh-attention-row">
+                <div className="sh-attention-info">
+                  <div className="sh-attention-recipient">
+                    {t.recipientName}
+                    {t.complianceStatus !== 'cleared' && ` — ${t.complianceStatus}`}
+                  </div>
+                  <div className="sh-attention-meta">
+                    {usd(t.amountUsd)} · {t.payoutMethod.toUpperCase()} ·{' '}
+                    {t.complianceReasons.length > 0
+                      ? t.complianceReasons.join(' · ')
+                      : `awaiting payment since ${new Date(t.createdAt).toLocaleString()}`}
+                  </div>
+                </div>
+                <RowActions transfer={t} viewer={viewer} staff={staff} />
+              </div>
+            ))
           )}
-          <form action={logout}>
-            <button type="submit" className="action-btn">
-              Log out
-            </button>
-          </form>
-        </div>
-      </header>
+        </section>
 
-      <section className="cards">
-        <div className="metric">
-          <span className="metric-label">Commission today</span>
-          <span className="metric-value">{usd(summary.commissionToday)}</span>
-        </div>
-        <div className="metric">
-          <span className="metric-label">Volume today</span>
-          <span className="metric-value">{usd(summary.volumeToday)}</span>
-        </div>
-        <div className="metric">
-          <span className="metric-label">Transactions today</span>
-          <span className="metric-value">{summary.countToday}</span>
-        </div>
-        <div className="metric metric-attention">
-          <span className="metric-label">Needs attention</span>
-          <span className="metric-value">{summary.needsAttention}</span>
-        </div>
-        <div className="metric metric-small">
-          <span className="metric-label">All-time commission</span>
-          <span className="metric-value">{usd(summary.commissionAllTime)}</span>
-        </div>
-        <div className="metric metric-small">
-          <span className="metric-label">Flagged today</span>
-          <span className="metric-value">{summary.flaggedToday}</span>
-        </div>
-      </section>
-
-      <section className="attention">
-        <h2>Needs Attention</h2>
-        {attentionTransfers.length === 0 ? (
-          <p className="nothing-attention">Nothing needs attention right now.</p>
-        ) : (
-          <ul className="attention-list">
-            {attentionTransfers.map((t) => (
-              <li key={t.id} className="attention-item">
-                <span className="attention-id">{t.id}</span>
-                <span className="attention-name">{t.recipientName}</span>
-                <span className="attention-amount">{usd(t.amountUsd)}</span>
-                <span className="attention-age">
-                  Created {new Date(t.createdAt).toLocaleString()}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="ledger-section">
-        <h2>All Transactions</h2>
-        {transfers.length === 0 ? (
-          <p className="empty-state">No transactions yet.</p>
-        ) : (
-          <div className="ledger-wrapper">
-            <table className="ledger">
-              <thead>
-                <tr>
-                  <th>Created</th>
-                  <th>Recipient</th>
-                  <th>Amount</th>
-                  <th>→ INR</th>
-                  <th>Fee</th>
-                  <th>Funding</th>
-                  <th>Payout</th>
-                  <th>Compliance</th>
-                  <th>US Payment</th>
-                  <th>India Delivery</th>
-                  <th>Status</th>
-                  <th>Assignee</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {transfers.map((t) => (
-                  <tr
-                    key={t.id}
-                    className={needsAttention(t, now) ? 'row-abandoned' : ''}
-                  >
-                    <td>{new Date(t.createdAt).toLocaleString()}</td>
-                    <td>{t.recipientName}</td>
-                    <td>{usd(t.amountUsd)}</td>
-                    <td>{inr(t.amountInr)}</td>
-                    <td>{usd(t.feeUsd)}</td>
-                    <td>{humanizeFunding(t.fundingMethod)}</td>
-                    <td>{t.payoutMethod.toUpperCase()}</td>
-                    <td>
-                      <span className={`status-badge compliance-${t.complianceStatus}`}>{t.complianceStatus}</span>
-                    </td>
-                    <td>
-                      <Stage at={t.paidAt} fallback="pending" />
-                    </td>
-                    <td>
-                      <Stage
-                        at={t.deliveredAt}
-                        fallback={t.status === 'paid' ? 'in transit' : '—'}
-                      />
-                    </td>
-                    <td>
-                      <StatusBadge status={t.status} />
-                    </td>
-                    <td>
-                      {t.assignedTo
-                        ? staffByUsername.get(t.assignedTo) ?? t.assignedTo
-                        : '—'}
-                    </td>
-                    <td>
-                      <TransferActions
-                        transfer={t}
-                        viewer={viewer}
-                        staff={staff}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <section id="transactions" className="sh-card">
+          <div className="sh-card-head">
+            <div>
+              <div className="sh-card-title">Transactions</div>
+              <div className="sh-card-sub">All transfers, newest first</div>
+            </div>
           </div>
-        )}
-      </section>
-
-      <section className="ledger-section">
-        <h2>Recurring Schedules</h2>
-        {schedules.length === 0 ? (
-          <p className="empty-state">No recurring schedules yet.</p>
-        ) : (
-          <div className="ledger-wrapper">
-            <table className="ledger">
-              <thead>
-                <tr>
-                  <th>Recipient</th>
-                  <th>Amount</th>
-                  <th>When</th>
-                  <th>Last run</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {schedules.map((s) => (
-                  <tr key={s.id}>
-                    <td>{s.recipientName}</td>
-                    <td>{usd(s.amountUsd)}</td>
-                    <td>{scheduleWhen(s)}</td>
-                    <td>
-                      {s.lastRunAt
-                        ? new Date(s.lastRunAt).toLocaleDateString()
-                        : '—'}
-                    </td>
-                    <td>
-                      <span className={`status-badge status-${s.status}`}>
-                        {s.status}
-                      </span>
-                    </td>
+          <div className="sh-ledger-wrap">
+            {transfers.length === 0 ? (
+              <div className="sh-empty">No transactions yet.</div>
+            ) : (
+              <table className="sh-table">
+                <thead>
+                  <tr>
+                    <th>Recipient</th>
+                    <th>Amount</th>
+                    <th>Funding</th>
+                    <th>US Payment</th>
+                    <th>India Delivery</th>
+                    <th>Compliance</th>
+                    <th>Status</th>
+                    <th>Assignee</th>
+                    <th>Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {transfers.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <div className="sh-recipient">{t.recipientName}</div>
+                        <div className="sh-recipient-sub">
+                          {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="sh-amount">{usd(t.amountUsd)}</div>
+                        <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+                      </td>
+                      <td>{humanizeFunding(t.fundingMethod)}</td>
+                      <td><Stage at={t.paidAt} fallback="pending" /></td>
+                      <td>
+                        <Stage
+                          at={t.deliveredAt}
+                          fallback={t.status === 'paid' ? 'in transit' : '—'}
+                        />
+                      </td>
+                      <td><ComplianceBadge status={t.complianceStatus} /></td>
+                      <td><StatusPill status={t.status} /></td>
+                      <td>
+                        {t.assignedTo
+                          ? staffByUsername.get(t.assignedTo) ?? t.assignedTo
+                          : <span className="sh-recipient-sub">—</span>}
+                      </td>
+                      <td><RowActions transfer={t} viewer={viewer} staff={staff} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
-        )}
-      </section>
-    </main>
+        </section>
+
+        <section id="schedules" className="sh-card">
+          <div className="sh-card-head">
+            <div>
+              <div className="sh-card-title">Recurring Schedules</div>
+              <div className="sh-card-sub">
+                {schedules.filter((s) => s.status === 'active').length} active
+              </div>
+            </div>
+          </div>
+          <div className="sh-ledger-wrap">
+            {schedules.length === 0 ? (
+              <div className="sh-empty">No recurring schedules yet.</div>
+            ) : (
+              <table className="sh-table">
+                <thead>
+                  <tr>
+                    <th>Recipient</th>
+                    <th>Amount</th>
+                    <th>When</th>
+                    <th>Last run</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schedules.map((s) => (
+                    <tr key={s.id}>
+                      <td><div className="sh-recipient">{s.recipientName}</div></td>
+                      <td className="sh-amount">{usd(s.amountUsd)}</td>
+                      <td>{scheduleWhen(s)}</td>
+                      <td>
+                        {s.lastRunAt
+                          ? new Date(s.lastRunAt).toLocaleDateString()
+                          : <span className="sh-recipient-sub">—</span>}
+                      </td>
+                      <td>
+                        <span className={`sh-pill ${
+                          s.status === 'active' ? 'sh-pill-info' : 'sh-pill-neutral'
+                        }`}>
+                          <span className="sh-pill-dot"></span>{s.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      </main>
+    </>
   );
 }
