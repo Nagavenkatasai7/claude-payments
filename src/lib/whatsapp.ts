@@ -2,7 +2,9 @@ import { env } from './env';
 
 export const RECIPIENT_TEMPLATE_NAME = 'transfer_delivered';
 export const SCHEDULED_TEMPLATE_NAME = 'scheduled_payment_ready';
-export const RECIPIENT_TEMPLATE_LANG = 'en_US';
+// Must exactly match the approved template's language in WhatsApp Manager.
+// The transfer_delivered template was created with "English" => language code 'en'.
+export const RECIPIENT_TEMPLATE_LANG = 'en';
 
 export interface IncomingMessage {
   from: string;

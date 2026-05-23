@@ -115,7 +115,7 @@ describe('sendTemplate', () => {
 
   it('uses the correct template name and language code constants', async () => {
     expect(RECIPIENT_TEMPLATE_NAME).toBe('transfer_delivered');
-    expect(RECIPIENT_TEMPLATE_LANG).toBe('en_US');
+    expect(RECIPIENT_TEMPLATE_LANG).toBe('en');
   });
 
   it('throws when the Graph API responds with an error', async () => {
