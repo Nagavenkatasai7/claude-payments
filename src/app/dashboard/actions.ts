@@ -26,7 +26,10 @@ export async function cancelTransferAction(formData: FormData): Promise<void> {
   await requirePermission('canCancel');
   const id = formData.get('id') as string;
   await cancelTransfer(getStore(), id);
-  revalidatePath('/dashboard');
+  // 'layout' revalidates every page under /dashboard (transactions, schedules,
+  // compliance, etc.), not just the root — so the change shows up wherever the
+  // viewer happens to be.
+  revalidatePath('/dashboard', 'layout');
 }
 
 export async function assignTransferAction(formData: FormData): Promise<void> {
@@ -39,7 +42,10 @@ export async function assignTransferAction(formData: FormData): Promise<void> {
     throw new Error('Cannot assign: unknown staff member.');
   }
   await assignTransfer(getStore(), id, assignee, note);
-  revalidatePath('/dashboard');
+  // 'layout' revalidates every page under /dashboard (transactions, schedules,
+  // compliance, etc.), not just the root — so the change shows up wherever the
+  // viewer happens to be.
+  revalidatePath('/dashboard', 'layout');
 }
 
 export async function resendPaymentLinkAction(
@@ -48,5 +54,8 @@ export async function resendPaymentLinkAction(
   await requirePermission('canResend');
   const id = formData.get('id') as string;
   await resendPaymentLink(getStore(), sendText, id);
-  revalidatePath('/dashboard');
+  // 'layout' revalidates every page under /dashboard (transactions, schedules,
+  // compliance, etc.), not just the root — so the change shows up wherever the
+  // viewer happens to be.
+  revalidatePath('/dashboard', 'layout');
 }

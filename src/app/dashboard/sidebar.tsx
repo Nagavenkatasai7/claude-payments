@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
 
 export type SidebarActive =
@@ -13,42 +14,42 @@ export async function Sidebar({ active }: { active: SidebarActive }) {
 
   return (
     <aside className="sh-sidebar">
-      <a
+      <Link
         href="/dashboard"
         className={`sh-nav-item ${active === 'overview' ? 'active' : ''}`}
       >
         <span className="sh-nav-icon">◾</span> Overview
-      </a>
-      <a
+      </Link>
+      <Link
         href="/dashboard/transactions"
         className={`sh-nav-item ${active === 'transactions' ? 'active' : ''}`}
       >
         <span className="sh-nav-icon">↔</span> Transactions
-      </a>
-      <a
+      </Link>
+      <Link
         href="/dashboard/schedules"
         className={`sh-nav-item ${active === 'schedules' ? 'active' : ''}`}
       >
         <span className="sh-nav-icon">↻</span> Schedules
-      </a>
-      <a
+      </Link>
+      <Link
         href="/dashboard/compliance"
         className={`sh-nav-item ${active === 'compliance' ? 'active' : ''}`}
       >
         <span className="sh-nav-icon">⚑</span> Compliance
-      </a>
+      </Link>
       {isAdmin && (
         <>
           <div className="sh-nav-label">Account</div>
-          <a
+          <Link
             href="/dashboard/team"
             className={`sh-nav-item ${active === 'team' ? 'active' : ''}`}
           >
             <span className="sh-nav-icon">◉</span> Team
-          </a>
-          <a href="/dashboard" className="sh-nav-item">
+          </Link>
+          <Link href="/dashboard" className="sh-nav-item">
             <span className="sh-nav-icon">⚙</span> Settings
-          </a>
+          </Link>
         </>
       )}
     </aside>
