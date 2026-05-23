@@ -3,15 +3,15 @@
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 
-export function LiveRefresh() {
+export function LiveRefresh({ intervalMs = 5000 }: { intervalMs?: number }) {
   const router = useRouter();
-
   useEffect(() => {
-    const id = setInterval(() => {
-      router.refresh();
-    }, 5000);
-    return () => clearInterval(id);
-  }, [router]);
-
-  return <span className="live-dot">● Live</span>;
+    const t = setInterval(() => router.refresh(), intervalMs);
+    return () => clearInterval(t);
+  }, [router, intervalMs]);
+  return (
+    <span className="sh-live">
+      <span className="sh-live-dot"></span>Live
+    </span>
+  );
 }
