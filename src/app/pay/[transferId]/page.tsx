@@ -41,45 +41,49 @@ export default async function PayPage({
 
   if (!transfer) {
     return (
-      <main className="card">
-        <div className="brand">SendHome</div>
-        <h1>Transfer not found</h1>
+      <main className="payapp">
+        <div className="card">
+          <div className="brand">SendHome</div>
+          <h1>Transfer not found</h1>
+        </div>
       </main>
     );
   }
 
   return (
-    <main className="card">
-      <div className="brand">SendHome</div>
-      <h1>Secure payment</h1>
-      <div className="summary">
-        <Row label="Recipient" value={transfer.recipientName} />
-        <Row
-          label="They receive"
-          value={`₹${transfer.amountInr.toLocaleString('en-IN')}`}
-        />
-        <Row label="Amount" value={`$${transfer.amountUsd.toFixed(2)}`} />
-        <Row
-          label="Fee"
-          value={
-            transfer.feeUsd === 0 ? 'FREE' : `$${transfer.feeUsd.toFixed(2)}`
-          }
-        />
-        <Row
-          label="Total charge"
-          value={`$${transfer.totalChargeUsd.toFixed(2)}`}
-          bold
-        />
-        <Row
-          label="Paying with"
-          value={formatFundingMethod(transfer.fundingMethod)}
-        />
+    <main className="payapp">
+      <div className="card">
+        <div className="brand">SendHome</div>
+        <h1>Secure payment</h1>
+        <div className="summary">
+          <Row label="Recipient" value={transfer.recipientName} />
+          <Row
+            label="They receive"
+            value={`₹${transfer.amountInr.toLocaleString('en-IN')}`}
+          />
+          <Row label="Amount" value={`$${transfer.amountUsd.toFixed(2)}`} />
+          <Row
+            label="Fee"
+            value={
+              transfer.feeUsd === 0 ? 'FREE' : `$${transfer.feeUsd.toFixed(2)}`
+            }
+          />
+          <Row
+            label="Total charge"
+            value={`$${transfer.totalChargeUsd.toFixed(2)}`}
+            bold
+          />
+          <Row
+            label="Paying with"
+            value={formatFundingMethod(transfer.fundingMethod)}
+          />
+        </div>
+        {transfer.status === 'awaiting_payment' ? (
+          <PayForm transferId={transfer.id} fundingMethod={transfer.fundingMethod} />
+        ) : (
+          <p className="done">&#x2705; Payment complete &mdash; money sent!</p>
+        )}
       </div>
-      {transfer.status === 'awaiting_payment' ? (
-        <PayForm transferId={transfer.id} fundingMethod={transfer.fundingMethod} />
-      ) : (
-        <p className="done">&#x2705; Payment complete &mdash; money sent!</p>
-      )}
     </main>
   );
 }
