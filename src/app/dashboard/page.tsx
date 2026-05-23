@@ -8,6 +8,7 @@ import { hasPermission } from '@/lib/permissions';
 import { summarize, needsAttention } from '@/lib/dashboard';
 import type { Schedule, Staff, Transfer } from '@/lib/types';
 import { Sidebar } from './sidebar';
+import { TransactionsTabs } from './transactions-tabs';
 import {
   cancelTransferAction,
   assignTransferAction,
@@ -198,65 +199,39 @@ export default async function DashboardPage() {
         </section>
 
         <section id="transactions" className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Transactions</div>
-              <div className="sh-card-sub">All transfers, newest first</div>
-            </div>
-          </div>
-          <div className="sh-ledger-wrap">
-            {transfers.length === 0 ? (
-              <div className="sh-empty">No transactions yet.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr>
-                    <th>Recipient</th>
-                    <th>Amount</th>
-                    <th>Funding</th>
-                    <th>US Payment</th>
-                    <th>India Delivery</th>
-                    <th>Compliance</th>
-                    <th>Status</th>
-                    <th>Assignee</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {transfers.map((t) => (
-                    <tr key={t.id}>
-                      <td>
-                        <div className="sh-recipient">{t.recipientName}</div>
-                        <div className="sh-recipient-sub">
-                          {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
-                        </div>
-                      </td>
-                      <td>
-                        <div className="sh-amount">{usd(t.amountUsd)}</div>
-                        <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
-                      </td>
-                      <td>{humanizeFunding(t.fundingMethod)}</td>
-                      <td><Stage at={t.paidAt} fallback="pending" /></td>
-                      <td>
-                        <Stage
-                          at={t.deliveredAt}
-                          fallback={t.status === 'paid' ? 'in transit' : '—'}
-                        />
-                      </td>
-                      <td><ComplianceBadge status={t.complianceStatus} /></td>
-                      <td><StatusPill status={t.status} /></td>
-                      <td>
-                        {t.assignedTo
-                          ? staffByUsername.get(t.assignedTo) ?? t.assignedTo
-                          : <span className="sh-recipient-sub">—</span>}
-                      </td>
-                      <td><RowActions transfer={t} viewer={viewer} staff={staff} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <TransactionsTabs
+            transfers={transfers}
+            renderRow={(t) => (
+              <tr key={t.id}>
+                <td>
+                  <div className="sh-recipient">{t.recipientName}</div>
+                  <div className="sh-recipient-sub">
+                    {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
+                  </div>
+                </td>
+                <td>
+                  <div className="sh-amount">{usd(t.amountUsd)}</div>
+                  <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+                </td>
+                <td>{humanizeFunding(t.fundingMethod)}</td>
+                <td><Stage at={t.paidAt} fallback="pending" /></td>
+                <td>
+                  <Stage
+                    at={t.deliveredAt}
+                    fallback={t.status === 'paid' ? 'in transit' : '—'}
+                  />
+                </td>
+                <td><ComplianceBadge status={t.complianceStatus} /></td>
+                <td><StatusPill status={t.status} /></td>
+                <td>
+                  {t.assignedTo
+                    ? staffByUsername.get(t.assignedTo) ?? t.assignedTo
+                    : <span className="sh-recipient-sub">—</span>}
+                </td>
+                <td><RowActions transfer={t} viewer={viewer} staff={staff} /></td>
+              </tr>
             )}
-          </div>
+          />
         </section>
 
         <section id="schedules" className="sh-card">
