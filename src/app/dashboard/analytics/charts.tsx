@@ -149,7 +149,7 @@ export function StatusDonut({
         </Pie>
         <Tooltip />
         <Legend
-          formatter={(value: string) => value.replace('_', ' ')}
+          formatter={(value: string) => value.replaceAll('_', ' ')}
           wrapperStyle={{ fontSize: 11 }}
         />
       </PieChart>
