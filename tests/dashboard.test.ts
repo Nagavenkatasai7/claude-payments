@@ -208,3 +208,134 @@ describe('needsAttention', () => {
     expect(needsAttention(t({ createdAt: new Date(old).toISOString() }), baseNow)).toBe(true);
   });
 });
+
+import {
+  nextDueAt,
+  schedulesDueInRange,
+  topVelocityToday,
+} from '@/lib/dashboard';
+import type { Schedule } from '@/lib/types';
+
+function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
+  return {
+    id: 's',
+    phone: 'p',
+    amountUsd: 100,
+    recipientName: 'R',
+    recipientPhone: '91999',
+    payoutMethod: 'upi',
+    payoutDestination: 'r@upi',
+    fundingMethod: 'bank_transfer',
+    frequency: 'monthly',
+    dayOfMonth: 5,
+    status: 'active',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+describe('nextDueAt', () => {
+  // Pick a fixed moment: Friday May 22, 2026 17:00 UTC (~ noon ET, weekday 5 = Fri)
+  const NOW = Date.parse('2026-05-22T17:00:00.000Z');
+
+  it('monthly: next due is this month if day is today or later', () => {
+    expect(nextDueAt(makeSchedule({ dayOfMonth: 28 }), NOW))
+      .toBe(new Date(2026, 4, 28).getTime());
+  });
+
+  it('monthly: jumps to next month if day already passed', () => {
+    expect(nextDueAt(makeSchedule({ dayOfMonth: 2 }), NOW))
+      .toBe(new Date(2026, 5, 2).getTime());
+  });
+
+  it('weekly: due today when dayOfWeek matches today', () => {
+    const s = makeSchedule({ frequency: 'weekly', dayOfMonth: undefined, dayOfWeek: 5 });
+    const start = new Date(NOW);
+    start.setHours(0, 0, 0, 0);
+    expect(nextDueAt(s, NOW)).toBe(start.getTime());
+  });
+
+  it('weekly: due next occurrence when later in week', () => {
+    const s = makeSchedule({ frequency: 'weekly', dayOfMonth: undefined, dayOfWeek: 1 });
+    // From Fri (5), next Mon (1) is 3 days away
+    const today = new Date(NOW); today.setHours(0, 0, 0, 0);
+    const expected = new Date(today); expected.setDate(today.getDate() + 3);
+    expect(nextDueAt(s, NOW)).toBe(expected.getTime());
+  });
+
+  it('weekly: pushes to next week when lastRunAt is today', () => {
+    const today = new Date(NOW); today.setHours(0, 0, 0, 0);
+    const s = makeSchedule({
+      frequency: 'weekly', dayOfMonth: undefined, dayOfWeek: 5,
+      lastRunAt: today.toISOString(),
+    });
+    expect(nextDueAt(s, NOW)).toBe(today.getTime() + 7 * 86400000);
+  });
+});
+
+describe('schedulesDueInRange', () => {
+  const NOW = Date.parse('2026-05-22T17:00:00.000Z');
+
+  it('returns only active schedules whose next due is within N days, sorted soonest first', () => {
+    const a = makeSchedule({ id: 'a', dayOfMonth: 23 }); // tomorrow
+    const b = makeSchedule({ id: 'b', dayOfMonth: 28 }); // 6 days
+    const c = makeSchedule({ id: 'c', dayOfMonth: 1 });  // next month → 10 days
+    const cancelled = makeSchedule({ id: 'd', dayOfMonth: 23, status: 'cancelled' });
+    const result = schedulesDueInRange([cancelled, c, b, a], NOW, 7).map((s) => s.id);
+    expect(result).toEqual(['a', 'b']); // c is out of range; cancelled excluded
+  });
+
+  it('returns empty when nothing is due in the window', () => {
+    const farOff = makeSchedule({ dayOfMonth: 1 }); // ~10 days
+    expect(schedulesDueInRange([farOff], NOW, 3)).toEqual([]);
+  });
+});
+
+describe('topVelocityToday', () => {
+  // Use the test-environment timezone; build createdAt from start-of-today.
+  const NOW = Date.now();
+  const todayIso = new Date(NOW).toISOString();
+  const yesterdayIso = new Date(NOW - 36 * 60 * 60 * 1000).toISOString();
+
+  function t(id: string, phone: string, createdAt: string): import('@/lib/types').Transfer {
+    return {
+      id, phone, amountUsd: 100, feeUsd: 0, totalChargeUsd: 100,
+      fxRate: 85, amountInr: 8500,
+      recipientName: 'r', recipientPhone: '91999',
+      payoutMethod: 'upi', payoutDestination: 'r@upi',
+      fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared', complianceReasons: [],
+      status: 'awaiting_payment', createdAt,
+    };
+  }
+
+  it('groups today transfers by phone and returns top N', () => {
+    const transfers = [
+      t('1', 'pA', todayIso),
+      t('2', 'pA', todayIso),
+      t('3', 'pA', todayIso),
+      t('4', 'pB', todayIso),
+      t('5', 'pB', todayIso),
+      t('6', 'pC', todayIso),
+      t('7', 'pD', yesterdayIso), // excluded — not today
+    ];
+    expect(topVelocityToday(transfers, NOW, 10)).toEqual([
+      { phone: 'pA', count: 3 },
+      { phone: 'pB', count: 2 },
+      { phone: 'pC', count: 1 },
+    ]);
+  });
+
+  it('respects the limit', () => {
+    const transfers = [
+      t('1', 'pA', todayIso),
+      t('2', 'pB', todayIso),
+      t('3', 'pC', todayIso),
+    ];
+    expect(topVelocityToday(transfers, NOW, 2)).toHaveLength(2);
+  });
+
+  it('returns empty array when no transfers today', () => {
+    expect(topVelocityToday([t('1', 'pA', yesterdayIso)], NOW, 5)).toEqual([]);
+  });
+});

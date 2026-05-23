@@ -1,5 +1,5 @@
 import { easternDate } from './dates';
-import type { Transfer } from './types';
+import type { Transfer, Schedule } from './types';
 
 export const ABANDONED_THRESHOLD_MS = 30 * 60 * 1000;
 
@@ -66,4 +66,78 @@ export function summarize(transfers: Transfer[], now: number): DashboardSummary 
     commissionAllTime: Math.round(commissionAllTime * 100) / 100,
     flaggedToday,
   };
+}
+
+function startOfDay(now: number): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function isSameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+export function nextDueAt(schedule: Schedule, now: number): number {
+  const ref = new Date(now);
+  const todayStart = startOfDay(now);
+
+  if (schedule.frequency === 'monthly') {
+    const dom = schedule.dayOfMonth ?? 1;
+    const d = new Date(ref.getFullYear(), ref.getMonth(), dom);
+    if (d.getTime() < todayStart) {
+      d.setMonth(d.getMonth() + 1);
+    }
+    return d.getTime();
+  }
+
+  // weekly
+  const today = new Date(todayStart);
+  const targetDow = schedule.dayOfWeek ?? 0;
+  let daysUntil = (targetDow - today.getDay() + 7) % 7;
+  if (daysUntil === 0 && schedule.lastRunAt) {
+    if (isSameDay(new Date(schedule.lastRunAt), today)) {
+      daysUntil = 7;
+    }
+  }
+  const next = new Date(today);
+  next.setDate(today.getDate() + daysUntil);
+  return next.getTime();
+}
+
+export function schedulesDueInRange(
+  schedules: Schedule[],
+  now: number,
+  days: number,
+): Schedule[] {
+  const cutoff = now + days * 86400000;
+  const todayStart = startOfDay(now);
+  return schedules
+    .filter((s) => s.status === 'active')
+    .map((s) => ({ s, due: nextDueAt(s, now) }))
+    .filter(({ due }) => due >= todayStart && due <= cutoff)
+    .sort((a, b) => a.due - b.due)
+    .map(({ s }) => s);
+}
+
+export function topVelocityToday(
+  transfers: Transfer[],
+  now: number,
+  limit: number,
+): { phone: string; count: number }[] {
+  const today = easternDate(now);
+  const counts = new Map<string, number>();
+  for (const t of transfers) {
+    if (easternDate(Date.parse(t.createdAt)) === today) {
+      counts.set(t.phone, (counts.get(t.phone) ?? 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([phone, count]) => ({ phone, count }))
+    .sort((a, b) => b.count - a.count || a.phone.localeCompare(b.phone))
+    .slice(0, limit);
 }
