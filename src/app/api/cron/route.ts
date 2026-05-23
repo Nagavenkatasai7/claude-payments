@@ -3,11 +3,7 @@ import { env } from '@/lib/env';
 import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
 import { runDueSchedules } from '@/lib/cron-run';
-import {
-  sendTemplate,
-  SCHEDULED_TEMPLATE_NAME,
-  RECIPIENT_TEMPLATE_LANG,
-} from '@/lib/whatsapp';
+import { sendText } from '@/lib/whatsapp';
 
 export const maxDuration = 300;
 
@@ -25,17 +21,17 @@ export async function GET(req: NextRequest) {
     scheduleStore: getScheduleStore(),
     now: Date.now(),
     sendScheduledLink: async (schedule, _transfer, url) => {
+      // TEMPORARY: the scheduled_payment_ready template is not yet approved
+      // by Meta. Until it is, fall back to a free-form WhatsApp text. This
+      // only delivers if the customer chatted with the bot within the last
+      // 24 hours; otherwise WhatsApp rejects it with a re-engagement error,
+      // which is logged and swallowed. Switch back to `sendTemplate` once
+      // the template is approved.
+      const text =
+        `Your scheduled SendHome transfer of $${schedule.amountUsd.toFixed(2)} ` +
+        `to ${schedule.recipientName} is ready. Tap to pay: ${url}`;
       try {
-        await sendTemplate(
-          schedule.phone,
-          SCHEDULED_TEMPLATE_NAME,
-          RECIPIENT_TEMPLATE_LANG,
-          [
-            `$${schedule.amountUsd.toFixed(2)}`,
-            schedule.recipientName,
-            url,
-          ],
-        );
+        await sendText(schedule.phone, text);
       } catch (err) {
         console.error('Scheduled-link send failed:', schedule.id, err);
       }
