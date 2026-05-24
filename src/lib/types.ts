@@ -103,3 +103,44 @@ export interface Staff {
   passwordHash: string;
   createdAt: string;
 }
+
+export interface Recipient {
+  name: string;
+  recipientPhone: string;
+  payoutMethod: PayoutMethod;
+  payoutDestination: string;
+  lastUsedAt: string; // ISO-8601
+}
+
+export interface Draft {
+  senderPhone: string;
+  recipient: {
+    name: string;
+    recipientPhone: string;
+    payoutMethod: PayoutMethod;
+    payoutDestination: string;
+  };
+  amountUsd: number;
+  fundingMethod: FundingMethod;
+  quote: {
+    feeUsd: number;
+    fxRate: number;
+    amountInr: number;
+  };
+  createdAt: string; // ISO-8601
+}
+
+export type ButtonTap =
+  | { kind: 'recipient'; recipientPhone: string }
+  | { kind: 'recipient_new' }
+  | { kind: 'approve'; draftId: string }
+  | { kind: 'cancel'; draftId: string };
+
+export interface TurnContext {
+  isNewConversation: boolean;
+  buttonTap?: ButtonTap;
+}
+
+export type IncomingMessage =
+  | { kind: 'text'; from: string; text: string; messageId: string }
+  | { kind: 'button'; from: string; buttonId: string; messageId: string };
