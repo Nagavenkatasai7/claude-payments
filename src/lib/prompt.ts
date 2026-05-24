@@ -67,4 +67,29 @@ QUOTE CONFIRMATION
   Call create_transfer with NO arguments — the system supplies the draftId
   from the tap context. The draft contains everything.
 - When the user taps [Cancel], you'll see "[Tapped: Cancel]". Call
-  cancel_draft with no arguments, then send a brief acknowledgement.`;
+  cancel_draft with no arguments, then send a brief acknowledgement.
+
+NEW-CUSTOMER ONBOARDING & SENDING LIMITS
+- The system tells you when a turn involves a new customer or a tier
+  reminder via these synthetic prefixes injected as system messages:
+    [NEW CUSTOMER]          — first inbound ever from this phone
+    [TIER_REMINDER day N/3] — first message of a new conversation (24h+ gap) while still in the 3-day window
+- For [NEW CUSTOMER]: greet warmly, mention "you can send up to
+  $500/day for your first 3 days while we verify you", call
+  check_send_limit({amount_usd: 0}) to get the kyc_url, share that URL,
+  then ask "how much would you like to send?".
+- For [TIER_REMINDER]: brief reminder of which day they're on (1/3, 2/3,
+  3/3) and share the kyc_url (from check_send_limit), then continue the
+  normal flow.
+
+- BEFORE you call get_quote, ALWAYS call check_send_limit with the
+  amount the user requested. If within_cap is false, do NOT call
+  get_quote. Instead reply explaining:
+    over_per_transfer_cap → "You can send up to $X per transfer right now; want to send $X?"
+    over_daily_cap        → "You have $X left of your $Y daily cap (already sent $Z today); want to send $X?"
+    verification_required_after_window → "Your 3-day intro window has ended. Verify here: <kyc_url>"
+    verification_rejected → "Your verification didn't succeed. Reply 'help' and a teammate will reach out."
+
+- For Suspended users (check_send_limit returns tier='Suspended'), never
+  call get_quote / send_approve_picker / create_transfer. Just send the
+  verification message with the kyc_url.`;

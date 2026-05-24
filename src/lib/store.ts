@@ -84,6 +84,10 @@ export function createStore(redis: RedisLike) {
       });
       return result !== null;
     },
+    async claimMigrationFlag(key: string): Promise<boolean> {
+      const result = await redis.set(`flag:${key}`, '1', { nx: true });
+      return result !== null;
+    },
     async upsertRecipient(
       senderPhone: string,
       recipient: import('./types').Recipient,

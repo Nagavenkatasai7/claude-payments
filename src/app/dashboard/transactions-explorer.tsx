@@ -1,13 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import type { Staff, Transfer } from '@/lib/types';
+import type { Staff, Tier, Transfer } from '@/lib/types';
 import { TransactionsTabs } from './transactions-tabs';
 
 export interface TransactionsExplorerProps {
   transfers: Transfer[];
   staff: Staff[];
   staffByUsername: Record<string, string>;
+  tierByPhone: Record<string, Tier>;
   canCancel: boolean;
   canResend: boolean;
   canAssign: boolean;
@@ -95,6 +96,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
         transfers={filtered}
         staff={props.staff}
         staffByUsername={props.staffByUsername}
+        tierByPhone={props.tierByPhone}
         canCancel={props.canCancel}
         canResend={props.canResend}
         canAssign={props.canAssign}

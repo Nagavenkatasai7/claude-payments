@@ -5,6 +5,7 @@ export type SidebarActive =
   | 'overview'
   | 'transactions'
   | 'schedules'
+  | 'customers'
   | 'compliance'
   | 'analytics'
   | 'team';
@@ -32,6 +33,12 @@ export async function Sidebar({ active }: { active: SidebarActive }) {
         className={`sh-nav-item ${active === 'schedules' ? 'active' : ''}`}
       >
         <span className="sh-nav-icon">↻</span> Schedules
+      </Link>
+      <Link
+        href="/dashboard/customers"
+        className={`sh-nav-item ${active === 'customers' ? 'active' : ''}`}
+      >
+        <span className="sh-nav-icon">◍</span> Customers
       </Link>
       <Link
         href="/dashboard/compliance"

@@ -139,8 +139,50 @@ export type ButtonTap =
 export interface TurnContext {
   isNewConversation: boolean;
   buttonTap?: ButtonTap;
+  isNewCustomer?: boolean;              // true only on the first inbound from a brand-new phone (never grandfathered)
+  tierReminderDayOfWindow?: 1 | 2 | 3;  // T0 + new conversation + not new-customer → which day of the 3-day window
 }
 
 export type IncomingMessage =
   | { kind: 'text'; from: string; text: string; messageId: string }
   | { kind: 'button'; from: string; buttonId: string; messageId: string };
+
+export type KycStatus =
+  | 'not_started'
+  | 'pending'
+  | 'verified'
+  | 'rejected'
+  | 'grandfathered';
+
+export interface Customer {
+  senderPhone: string;
+  firstSeenAt: string;       // ISO-8601, set on first inbound
+  kycStatus: KycStatus;
+  kycVerifiedAt?: string;
+  kycProviderRef?: string;
+  kycRejectedReason?: string;
+  fullName?: string;
+  dateOfBirth?: string;
+  country?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type Tier = 'T0' | 'T1' | 'Suspended';
+
+export type CapReason =
+  | 'verification_required_after_window'
+  | 'verification_rejected'
+  | 'over_per_transfer_cap'
+  | 'over_daily_cap';
+
+export interface CapEvaluation {
+  withinCap: boolean;
+  tier: Tier;
+  dailyCapCents: number;
+  perTransferCapCents: number;
+  todayUsedCents: number;
+  todayRemainingCents: number;
+  reason?: CapReason;
+  dayOfWindow?: number;   // 1, 2, or 3 — present only when tier === 'T0'
+}

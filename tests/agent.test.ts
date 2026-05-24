@@ -3,9 +3,19 @@ import { createAgent, sanitizeReply } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
+import { createCustomerStore } from '@/lib/customer-store';
+import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage, TurnContext } from '@/lib/types';
+
+function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
+  const customerStore = createCustomerStore(redis, store);
+  const dailyVolumeStore = createDailyVolumeStore(redis);
+  const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+  return { customerStore, dailyVolumeStore, kycProvider };
+}
 
 const PHONE = '15551234567';
 
@@ -26,11 +36,13 @@ afterEach(() => {
 
 describe('createAgent', () => {
   it('returns a plain reply when the model uses no tools', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
       chat: async () => ({ role: 'assistant', content: 'Hi there!' }),
     });
     const reply = await agent.runAgentTurn(PHONE, 'hello');
@@ -64,6 +76,7 @@ describe('createAgent', () => {
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
     });
 
@@ -75,11 +88,13 @@ describe('createAgent', () => {
   });
 
   it('saves the conversation history after a turn', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
       chat: async () => ({ role: 'assistant', content: 'noted' }),
     });
     await agent.runAgentTurn(PHONE, 'remember this');
@@ -142,6 +157,7 @@ describe('createAgent', () => {
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
     });
 
@@ -200,6 +216,7 @@ describe('createAgent', () => {
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
     });
 
@@ -267,12 +284,14 @@ describe('sanitizeReply', () => {
 
 describe('createAgent — TurnContext', () => {
   it('prepends a [NEW CONVERSATION] system note when turn.isNewConversation is true', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
       chat: async (messages) => {
         seen.push(messages);
         return { role: 'assistant', content: 'ok' };
@@ -285,12 +304,14 @@ describe('createAgent — TurnContext', () => {
   });
 
   it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
       draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
       chat: async (messages) => {
         seen.push(messages);
         return { role: 'assistant', content: 'ok' };
@@ -341,6 +362,7 @@ describe('createAgent — TurnContext', () => {
       store,
       scheduleStore: createScheduleStore(redis),
       draftStore,
+      ...extraDeps(redis, store),
       chat: async () => responses[i++],
     });
     const reply = await agent.runAgentTurn('15551234567', '[Tapped: Approve & pay]', {
@@ -394,6 +416,7 @@ describe('replay safety', () => {
       store,
       scheduleStore: createScheduleStore(redis),
       draftStore,
+      ...extraDeps(redis, store),
       chat: async () => responses[i++],
     });
 
@@ -407,5 +430,72 @@ describe('replay safety', () => {
     expect(await draftStore.getDraft(draftId)).not.toBeNull();
     // No transfer exists.
     expect([...redis.dump.keys()].some((k) => k.startsWith('transfer:'))).toBe(false);
+  });
+});
+
+describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
+  function build(redis = fakeRedis()) {
+    const store = createStore(redis);
+    const customerStore = createCustomerStore(redis, store);
+    const dailyVolumeStore = createDailyVolumeStore(redis);
+    const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+    return { redis, store, customerStore, dailyVolumeStore, kycProvider };
+  }
+
+  it('prepends [NEW CUSTOMER] when turn.isNewCustomer is true', async () => {
+    const b = build();
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: createScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      kycProvider: b.kycProvider,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: true, isNewCustomer: true });
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('first message ever from this phone'))).toBe(true);
+  });
+
+  it('prepends [TIER_REMINDER day 2/3] when turn.tierReminderDayOfWindow is 2', async () => {
+    const b = build();
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: createScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      kycProvider: b.kycProvider,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', {
+      isNewConversation: true,
+      tierReminderDayOfWindow: 2,
+    });
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('T0 customer in their observation window') && s.includes('day 2/3'))).toBe(true);
+  });
+
+  it('does NOT prepend either when neither flag is set', async () => {
+    const b = build();
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: createScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      kycProvider: b.kycProvider,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
+    expect(sys.some((s) => typeof s === 'string' && (
+      s.includes('first message ever from this phone') ||
+      s.includes('T0 customer in their observation window')
+    ))).toBe(false);
   });
 });
