@@ -15,6 +15,12 @@ export interface RedisLike {
   sadd(key: string, member: string): Promise<unknown>;
   srem(key: string, member: string): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
+  hset(key: string, fields: Record<string, string>): Promise<unknown>;
+  hget(key: string, field: string): Promise<string | null>;
+  hgetall(key: string): Promise<Record<string, string>>;
+  hdel(key: string, field: string): Promise<unknown>;
+  getdel(key: string): Promise<string | null>;
+  exists(key: string): Promise<number>;
 }
 
 const MAX_HISTORY = 40;
