@@ -281,7 +281,7 @@ describe('createAgent — TurnContext', () => {
     const turn: TurnContext = { isNewConversation: true };
     await agent.runAgentTurn('15551234567', 'hi', turn);
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
-    expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(true);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(true);
   });
 
   it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {
@@ -298,7 +298,7 @@ describe('createAgent — TurnContext', () => {
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
-    expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(false);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(false);
   });
 
   it('passes turn.buttonTap through to executeTool (approve path)', async () => {
