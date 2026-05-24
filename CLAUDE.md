@@ -6,7 +6,7 @@ Project context for any Claude session working in this repo. Keep concise; updat
 
 **SendHome** — a working prototype of a WhatsApp-based US→India remittance service, inspired by Felix Pago. Customers chat with an AI agent in WhatsApp to send money; staff manage everything through a Stripe-style admin dashboard. **All real money movement is mocked** — no actual Plaid, FedNow, or UPI integration. Every transfer is realistic on screen but doesn't move a cent.
 
-Live at **https://claude-payments.vercel.app** (admin: `forextransfer` / `forex@123`).
+Live at **https://claude-payments.vercel.app** (admin credentials live in Vercel env vars `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values).
 
 ## Stack
 
@@ -73,7 +73,7 @@ Env vars (see `.env.example`):
 - `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, `OLLAMA_MODEL` — Ollama Cloud / Kimi K2.6
 - `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN` — Meta Cloud API (see memory `sendhome-meta-state`)
 - `KV_REST_API_URL`, `KV_REST_API_TOKEN` — Upstash Redis (provisioned via Vercel Marketplace)
-- `SEED_ADMIN_USERNAME`, `SEED_ADMIN_PASSWORD` — first admin account (currently `forextransfer` / `forex@123`)
+- `SEED_ADMIN_USERNAME`, `SEED_ADMIN_PASSWORD` — first admin account; only seeds when the staff list is empty (rotation = delete `staff:<username>` in Upstash, change env var, redeploy)
 - `APP_BASE_URL` — currently empty in prod; the code self-derives from `VERCEL_PROJECT_PRODUCTION_URL` (auto-injected by Vercel)
 - `CRON_SECRET` (optional) — gates `/api/cron`
 
