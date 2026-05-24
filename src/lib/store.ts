@@ -15,6 +15,12 @@ export interface RedisLike {
   sadd(key: string, member: string): Promise<unknown>;
   srem(key: string, member: string): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
+  hset(key: string, fields: Record<string, string>): Promise<unknown>;
+  hget(key: string, field: string): Promise<string | null>;
+  hgetall(key: string): Promise<Record<string, string> | null>;
+  hdel(key: string, field: string): Promise<unknown>;
+  getdel(key: string): Promise<string | null>;
+  exists(key: string): Promise<number>;
 }
 
 const MAX_HISTORY = 40;
@@ -77,6 +83,40 @@ export function createStore(redis: RedisLike) {
         nx: true,
       });
       return result !== null;
+    },
+    async upsertRecipient(
+      senderPhone: string,
+      recipient: import('./types').Recipient,
+    ): Promise<void> {
+      await redis.hset(`recipients:${senderPhone}`, {
+        [recipient.recipientPhone]: JSON.stringify(recipient),
+      });
+    },
+    async listRecipients(
+      senderPhone: string,
+      limit: number,
+    ): Promise<import('./types').Recipient[]> {
+      const all = (await redis.hgetall(`recipients:${senderPhone}`)) ?? {};
+      const parsed: import('./types').Recipient[] = [];
+      for (const value of Object.values(all)) {
+        try {
+          parsed.push(JSON.parse(value) as import('./types').Recipient);
+        } catch {
+          // skip malformed entries; never throw
+        }
+      }
+      parsed.sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
+      return parsed.slice(0, limit);
+    },
+    async getLastInboundAt(senderPhone: string): Promise<string | null> {
+      return redis.get(`lastmsg:${senderPhone}`);
+    },
+    async recordInboundNow(senderPhone: string): Promise<void> {
+      await redis.set(
+        `lastmsg:${senderPhone}`,
+        new Date().toISOString(),
+        { ex: 86400 },
+      );
     },
   };
 }

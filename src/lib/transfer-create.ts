@@ -49,5 +49,21 @@ export async function createTransfer(
   await store.saveTransfer(transfer);
   await store.incrementTransferCount(input.phone);
   await store.incrementTodayTransferCount(input.phone);
+
+  // Best-effort: persist the recipient for future picker suggestions.
+  // Failure here must not surface to the sender — the transfer is the source
+  // of truth and is already saved at this point.
+  try {
+    await store.upsertRecipient(input.phone, {
+      name: input.recipientName,
+      recipientPhone: input.recipientPhone,
+      payoutMethod: input.payoutMethod,
+      payoutDestination: input.payoutDestination,
+      lastUsedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn('upsertRecipient failed (non-fatal):', err);
+  }
+
   return transfer;
 }

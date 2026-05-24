@@ -5,8 +5,18 @@ import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer } from './transfer-create';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, FundingMethod, PayoutMethod, Schedule } from './types';
+import type { ChatTool, FundingMethod, PayoutMethod, Schedule, TurnContext } from './types';
 import type { Store } from './store';
+import type { DraftStore } from './draft-store';
+import { sendInteractive, type InteractiveButton } from './whatsapp';
+import {
+  recipientButtonId,
+  someoneNewButtonId,
+  approveButtonId,
+  cancelButtonId,
+  disambiguateNames,
+  truncateLabel,
+} from './whatsapp-buttons';
 
 export const toolSchemas: ChatTool[] = [
   {
@@ -160,12 +170,85 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'list_saved_recipients',
+      description:
+        "List the sender's recently-used recipients (top 2 by most recent). Call this on the first message of a new conversation.",
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_recipient_picker',
+      description:
+        'Send the sender a WhatsApp interactive message with reply buttons for each recipient plus a "Someone new" button. Provide 1 or 2 recipient entries.',
+      parameters: {
+        type: 'object',
+        properties: {
+          recipients: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                recipient_phone: { type: 'string' },
+              },
+              required: ['name', 'recipient_phone'],
+            },
+            description: 'Up to 2 recipient entries. Anything beyond 2 is dropped.',
+          },
+        },
+        required: ['recipients'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_approve_picker',
+      description:
+        'Lock the quote and send the sender [Approve & pay] [Cancel] buttons. Call this when you have ALL transfer details: amount, funding method, recipient name, recipient phone, payout method, payout destination.',
+      parameters: {
+        type: 'object',
+        properties: {
+          amount_usd: { type: 'number' },
+          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
+          recipient_name: { type: 'string' },
+          recipient_phone: { type: 'string' },
+          payout_method: { type: 'string', enum: ['upi', 'bank'] },
+          payout_destination: { type: 'string' },
+        },
+        required: [
+          'amount_usd',
+          'funding_method',
+          'recipient_name',
+          'recipient_phone',
+          'payout_method',
+          'payout_destination',
+        ],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_draft',
+      description:
+        'Cancel the pending approval draft. Call this when the user taps [Cancel] or otherwise asks to cancel before paying. No arguments needed; the system supplies the draft id from the button-tap context.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ];
 
 export interface ToolContext {
   phone: string;
   store: Store;
   scheduleStore: ScheduleStore;
+  draftStore: DraftStore;
+  turn: TurnContext;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -192,6 +275,14 @@ export async function executeTool(
       return listSchedulesTool(args, ctx);
     case 'cancel_schedule':
       return cancelScheduleTool(args, ctx);
+    case 'list_saved_recipients':
+      return listSavedRecipientsTool(args, ctx);
+    case 'send_recipient_picker':
+      return sendRecipientPickerTool(args, ctx);
+    case 'send_approve_picker':
+      return sendApprovePickerTool(args, ctx);
+    case 'cancel_draft':
+      return cancelDraftTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -228,6 +319,46 @@ async function createTransferTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // Approve-tap path: the system supplies the draftId via context.
+  // The LLM cannot fabricate this; if no buttonTap.draftId is present, we
+  // fall back to the legacy explicit-args path (cron uses it).
+  const ctxDraftId =
+    ctx.turn.buttonTap?.kind === 'approve' ? ctx.turn.buttonTap.draftId : null;
+
+  if (ctxDraftId) {
+    const draft = await ctx.draftStore.consumeDraft(ctxDraftId);
+    if (!draft) {
+      return {
+        error:
+          'That quote was already approved or has expired. Please request a fresh quote.',
+      };
+    }
+    try {
+      const transfer = await createTransfer(ctx.store, {
+        phone: ctx.phone,
+        amountUsd: draft.amountUsd,
+        recipientName: draft.recipient.name,
+        recipientPhone: draft.recipient.recipientPhone,
+        payoutMethod: draft.recipient.payoutMethod,
+        payoutDestination: draft.recipient.payoutDestination,
+        fundingMethod: draft.fundingMethod,
+      });
+      return {
+        transfer_id: transfer.id,
+        status: transfer.status,
+        compliance_status: transfer.complianceStatus,
+        compliance_reasons: transfer.complianceReasons,
+        amount_inr: transfer.amountInr,
+        total_charge_usd: transfer.totalChargeUsd,
+        recipient_name: transfer.recipientName,
+      };
+    } catch (err) {
+      if (err instanceof QuoteError) return { error: err.message };
+      throw err;
+    }
+  }
+
+  // Legacy explicit-args path (cold-start without buttons, or cron).
   const recipientPhone = normalizePhone(args.recipient_phone);
   if (!isValidPhone(recipientPhone)) {
     return {
@@ -383,4 +514,118 @@ async function cancelScheduleTool(
   schedule.status = 'cancelled';
   await ctx.scheduleStore.saveSchedule(schedule);
   return { schedule_id: schedule.id, status: schedule.status };
+}
+
+async function listSavedRecipientsTool(
+  _args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  try {
+    const recipients = await ctx.store.listRecipients(ctx.phone, 2);
+    return {
+      recipients: recipients.map((r) => ({
+        name: r.name,
+        recipient_phone: r.recipientPhone,
+        payout_method: r.payoutMethod,
+        payout_destination: r.payoutDestination,
+        last_used_at: r.lastUsedAt,
+      })),
+    };
+  } catch (err) {
+    console.warn('listRecipients failed; returning []:', err);
+    return { recipients: [] };
+  }
+}
+
+async function sendRecipientPickerTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const rawList = Array.isArray(args.recipients)
+    ? (args.recipients as { name?: unknown; recipient_phone?: unknown }[])
+    : [];
+  if (rawList.length === 0) {
+    return { error: 'send_recipient_picker requires at least 1 recipient.' };
+  }
+  // Cap server-side at 2; ignore excess silently.
+  const capped = rawList.slice(0, 2).map((r) => ({
+    name: String(r.name ?? '').trim(),
+    recipientPhone: normalizePhone(r.recipient_phone),
+  }));
+  const labels = disambiguateNames(capped);
+  const buttons: InteractiveButton[] = capped.map((r, i) => ({
+    id: recipientButtonId(r.recipientPhone),
+    title: truncateLabel(labels[i]),
+  }));
+  buttons.push({
+    id: someoneNewButtonId(),
+    title: 'Someone new',
+  });
+
+  await sendInteractive(
+    ctx.phone,
+    'Welcome back 👋 Who are we sending to?',
+    buttons,
+  );
+  return { sent: true };
+}
+
+async function sendApprovePickerTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const recipientPhone = normalizePhone(args.recipient_phone);
+  if (!isValidPhone(recipientPhone)) {
+    return {
+      error:
+        "A valid recipient WhatsApp number with country code is required (e.g. 919876543210).",
+    };
+  }
+  const amountUsd = Number(args.amount_usd);
+  const fundingMethod = args.funding_method as FundingMethod;
+  try {
+    const transferCount = await ctx.store.getTransferCount(ctx.phone);
+    const fxRate = await getFxRate();
+    const q = quote(amountUsd, fxRate, fundingMethod, transferCount);
+    const draftId = await ctx.draftStore.createDraft({
+      senderPhone: ctx.phone,
+      recipient: {
+        name: String(args.recipient_name),
+        recipientPhone,
+        payoutMethod: args.payout_method as PayoutMethod,
+        payoutDestination: String(args.payout_destination),
+      },
+      amountUsd: q.amountUsd,
+      fundingMethod,
+      quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
+    });
+    const summary =
+      `Sending $${q.amountUsd.toFixed(2)} to ${args.recipient_name}.\n` +
+      `Fee $${q.feeUsd.toFixed(2)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
+    await sendInteractive(ctx.phone, summary, [
+      { id: approveButtonId(draftId), title: 'Approve & pay' },
+      { id: cancelButtonId(draftId), title: 'Cancel' },
+    ]);
+    return { sent: true, draft_id: draftId };
+  } catch (err) {
+    if (err instanceof QuoteError) return { error: err.message };
+    throw err;
+  }
+}
+
+async function cancelDraftTool(
+  _args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const draftId = ctx.turn.buttonTap?.kind === 'cancel'
+    ? ctx.turn.buttonTap.draftId
+    : null;
+  if (!draftId) {
+    return { error: 'No active draft to cancel.' };
+  }
+  const draft = await ctx.draftStore.consumeDraft(draftId);
+  if (!draft) {
+    return { cancelled: false, reason: 'draft_not_found_or_expired' };
+  }
+  return { cancelled: true };
 }

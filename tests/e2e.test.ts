@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
+import { createDraftStore } from '@/lib/draft-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -44,6 +45,7 @@ describe('end-to-end happy path', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const scheduleStore = createScheduleStore(redis);
+    const draftStore = createDraftStore(redis);
 
     // Scripted Kimi: quote -> create -> link -> final reply.
     const script: ChatMessage[] = [
@@ -71,6 +73,7 @@ describe('end-to-end happy path', () => {
     const agent = createAgent({
       store,
       scheduleStore,
+      draftStore,
       async chat() {
         const msg = script[turn++];
         // Patch the real transfer id into the link tool call.
@@ -111,5 +114,140 @@ describe('end-to-end happy path', () => {
 
     // First transfer was free.
     expect(stage2.transfer.feeUsd).toBe(0);
+  });
+});
+
+describe('end-to-end returning customer', () => {
+  it('seeded recipient → picker → tap Mom → amount → quote → tap Approve → delivered', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const draftStore = createDraftStore(redis);
+    const scheduleStore = createScheduleStore(redis);
+
+    // Pre-seed: Mom is a saved recipient from a previous (mock) transfer.
+    await store.upsertRecipient(PHONE, {
+      name: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      lastUsedAt: '2026-05-01T00:00:00Z',
+    });
+
+    // Turn 1: "[NEW CONVERSATION] hi" — bot calls list + send_recipient_picker.
+    const turn1Script: ChatMessage[] = [
+      toolCall('c1', 'list_saved_recipients', {}),
+      toolCall('c2', 'send_recipient_picker', {
+        recipients: [{ name: 'Mom', recipient_phone: '919876543210' }],
+      }),
+      { role: 'assistant', content: 'Welcome back 👋 Who are we sending to?' },
+    ];
+    // Turn 2: user taps Mom → bot asks "how much".
+    const turn2Script: ChatMessage[] = [
+      { role: 'assistant', content: 'How much do you want to send to Mom?' },
+    ];
+    // Turn 3: user says "$300" → bot calls send_approve_picker → asks for funding? In
+    // this scripted run we assume the bot already knows enough; in reality the
+    // prompt would have it ask for the funding method too. For test simplicity we
+    // collapse that into a single tool call.
+    const turn3Script: ChatMessage[] = [
+      toolCall('c3', 'send_approve_picker', {
+        amount_usd: 300,
+        funding_method: 'bank_transfer',
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+      }),
+      { role: 'assistant', content: 'Quote ready — tap Approve to send.' },
+    ];
+    // Turn 4: user taps Approve → bot calls create_transfer (no args) → generate_payment_link.
+    const turn4Script: ChatMessage[] = [
+      toolCall('c4', 'create_transfer', {}),
+      toolCall('c5', 'generate_payment_link', { transfer_id: 'PLACEHOLDER' }),
+      { role: 'assistant', content: 'Tap to pay securely.' },
+    ];
+
+    const allScripts = [turn1Script, turn2Script, turn3Script, turn4Script];
+    let activeScript: ChatMessage[] = [];
+    let scriptIdx = 0;
+
+    // Stub fetch for both FX and WhatsApp Cloud API (no-op success).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ rates: { INR: 85.2 } }),
+        text: async () => '',
+      }),
+    );
+
+    const agent = createAgent({
+      store,
+      scheduleStore,
+      draftStore,
+      async chat() {
+        const msg = activeScript.shift()!;
+        if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
+          const key = [...redis.dump.keys()].find((k) =>
+            k.startsWith('transfer:'),
+          )!;
+          msg.tool_calls[0].function.arguments = JSON.stringify({
+            transfer_id: key.replace('transfer:', ''),
+          });
+        }
+        return msg;
+      },
+    });
+
+    // --- Turn 1: new conversation, picker should send.
+    activeScript = [...allScripts[scriptIdx++]];
+    await agent.runAgentTurn(PHONE, 'hi', { isNewConversation: true });
+
+    // --- Turn 2: user taps Mom.
+    activeScript = [...allScripts[scriptIdx++]];
+    await agent.runAgentTurn(
+      PHONE,
+      `[Tapped: Send to recipient 919876543210]`,
+      {
+        isNewConversation: false,
+        buttonTap: { kind: 'recipient', recipientPhone: '919876543210' },
+      },
+    );
+
+    // --- Turn 3: user types "$300" — bot sends approve picker, creates draft.
+    activeScript = [...allScripts[scriptIdx++]];
+    await agent.runAgentTurn(PHONE, '$300', { isNewConversation: false });
+
+    // A draft must now exist.
+    const draftKey = [...redis.dump.keys()].find((k) =>
+      k.startsWith('recipient_draft:'),
+    );
+    expect(draftKey).toBeDefined();
+    const draftId = draftKey!.replace('recipient_draft:', '');
+
+    // --- Turn 4: user taps Approve.
+    activeScript = [...allScripts[scriptIdx++]];
+    await agent.runAgentTurn(
+      PHONE,
+      '[Tapped: Approve & pay]',
+      {
+        isNewConversation: false,
+        buttonTap: { kind: 'approve', draftId },
+      },
+    );
+
+    // A transfer must have been created.
+    const transferKey = [...redis.dump.keys()].find((k) =>
+      k.startsWith('transfer:'),
+    );
+    expect(transferKey).toBeDefined();
+
+    // The draft must have been consumed.
+    expect(await draftStore.getDraft(draftId)).toBeNull();
+
+    // The recipient's lastUsedAt must have advanced past the seed.
+    const recipients = await store.listRecipients(PHONE, 3);
+    expect(recipients).toHaveLength(1);
+    expect(recipients[0].lastUsedAt > '2026-05-01T00:00:00Z').toBe(true);
   });
 });

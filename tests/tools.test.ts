@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { executeTool, toolSchemas } from '@/lib/tools';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
+import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
+
+const TURN = { isNewConversation: false } as const;
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
@@ -28,16 +31,20 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all eight tools', () => {
+  it('exposes all twelve tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
+      'cancel_draft',
       'cancel_schedule',
       'check_payment_status',
       'create_schedule',
       'create_transfer',
       'generate_payment_link',
       'get_quote',
+      'list_saved_recipients',
       'list_schedules',
+      'send_approve_picker',
+      'send_recipient_picker',
       'update_recipient_phone',
     ]);
   });
@@ -73,7 +80,7 @@ describe('executeTool', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 500, funding_method: 'bank_transfer' },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(result.fee_usd).toBe(0);
     expect(result.amount_inr).toBe(Math.round(500 * MOCK_RATE));
@@ -84,7 +91,7 @@ describe('executeTool', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 5, funding_method: 'bank_transfer' },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(result.error).toMatch(/between/i);
   });
@@ -103,7 +110,7 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'credit_card',
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     resetRateCacheForTests();
     stubFetch();
@@ -111,7 +118,7 @@ describe('executeTool', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 100, funding_method: 'credit_card' },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     // fee = 2.99 + 3 = 5.99
     expect(result.fee_usd).toBe(5.99);
@@ -129,7 +136,7 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'debit_card',
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(result.status).toBe('awaiting_payment');
     expect(result.compliance_status).toBe('cleared');
@@ -153,7 +160,7 @@ describe('executeTool', () => {
         payout_destination: 'john@upi',
         funding_method: 'bank_transfer',
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(result.compliance_status).toBe('blocked');
     expect(result.status).toBe('blocked');
@@ -162,7 +169,7 @@ describe('executeTool', () => {
     const linkResult = await executeTool(
       'generate_payment_link',
       { transfer_id: result.transfer_id },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(linkResult.error).toBeDefined();
     expect(linkResult.error).toMatch(/compliance/i);
@@ -181,7 +188,7 @@ describe('executeTool', () => {
         funding_method: 'debit_card',
         // recipient_phone intentionally omitted
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(result.error).toBeDefined();
     expect(typeof result.error).toBe('string');
@@ -203,7 +210,7 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'debit_card',
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(result.error).toBeDefined();
     expect(typeof result.error).toBe('string');
@@ -223,12 +230,12 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     const link = await executeTool(
       'generate_payment_link',
       { transfer_id: created.transfer_id },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(link.url).toBe(
       `https://sendhome.test/pay/${created.transfer_id}`,
@@ -247,19 +254,19 @@ describe('executeTool', () => {
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
       },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     const status = await executeTool(
       'check_payment_status',
       { transfer_id: created.transfer_id },
-      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+      { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
     );
     expect(status.status).toBe('awaiting_payment');
   });
 
   it('returns an error for an unknown tool', async () => {
     const store = createStore(fakeRedis());
-    const result = await executeTool('nope', {}, { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) });
+    const result = await executeTool('nope', {}, { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN });
     expect(result.error).toMatch(/unknown tool/i);
   });
 
@@ -277,7 +284,7 @@ describe('executeTool', () => {
           payout_destination: 'dad@upi',
           funding_method: 'bank_transfer',
         },
-        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
       );
       const transferId = created.transfer_id as string;
 
@@ -285,7 +292,7 @@ describe('executeTool', () => {
       const result = await executeTool(
         'update_recipient_phone',
         { transfer_id: transferId, recipient_phone: '+91 98765 11111' },
-        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
       );
       expect(result.error).toBeUndefined();
       expect(result.recipient_phone).toBe('919876511111');
@@ -301,7 +308,7 @@ describe('executeTool', () => {
       const result = await executeTool(
         'update_recipient_phone',
         { transfer_id: 'nonexistent-id', recipient_phone: '919876543210' },
-        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
       );
       expect(result.error).toBeDefined();
       expect(result.error).toMatch(/not found/i);
@@ -319,14 +326,14 @@ describe('executeTool', () => {
           payout_destination: 'dad@upi',
           funding_method: 'bank_transfer',
         },
-        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
       );
       const transferId = created.transfer_id as string;
 
       const result = await executeTool(
         'update_recipient_phone',
         { transfer_id: transferId, recipient_phone: '123' },
-        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()) },
+        { phone: PHONE, store, scheduleStore: createScheduleStore(fakeRedis()), draftStore: createDraftStore(fakeRedis()), turn: TURN },
       );
       expect(result.error).toBeDefined();
       expect(result.error).toMatch(/valid/i);
@@ -340,10 +347,13 @@ describe('executeTool', () => {
 
 describe('schedule tools', () => {
   function ctx() {
+    const redis = fakeRedis();
     return {
       phone: '15551234567',
-      store: createStore(fakeRedis()),
-      scheduleStore: createScheduleStore(fakeRedis()),
+      store: createStore(redis),
+      scheduleStore: createScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      turn: TURN,
     };
   }
 
