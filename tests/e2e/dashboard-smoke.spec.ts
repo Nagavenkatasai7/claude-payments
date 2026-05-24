@@ -1,7 +1,9 @@
 import { test, expect } from '@playwright/test';
 
-const USERNAME = process.env.E2E_USERNAME ?? 'forextransfer';
-const PASSWORD = process.env.E2E_PASSWORD ?? 'forex@123';
+// `||` not `??`: GitHub Actions sets env vars to empty string when the
+// referenced secret doesn't exist, and `??` only falls back on undefined.
+const USERNAME = process.env.E2E_USERNAME || 'forextransfer';
+const PASSWORD = process.env.E2E_PASSWORD || 'forex@123';
 
 test('staff can log in and reach dashboard pages', async ({ page }) => {
   await page.goto('/login');
