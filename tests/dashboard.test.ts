@@ -9,7 +9,6 @@ import type { Transfer } from '@/lib/types';
 
 function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   return {
-    id: overrides.id,
     phone: '15551234567',
     amountUsd: 100,
     feeUsd: 2.5,

@@ -66,9 +66,9 @@ describe('sendText', () => {
 
     await sendText('15551234567', 'hi');
 
-    const [url, init] = fetchMock.mock.calls[0];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toContain('/123456/messages');
-    const body = JSON.parse(init.body);
+    const body = JSON.parse(init.body as string);
     expect(body.to).toBe('15551234567');
     expect(body.text.body).toBe('hi');
   });
@@ -98,9 +98,9 @@ describe('sendTemplate', () => {
       ['Mom', '42,600', '+15551234567', 'UPI ID'],
     );
 
-    const [url, init] = fetchMock.mock.calls[0];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toContain('/123456/messages');
-    const body = JSON.parse(init.body);
+    const body = JSON.parse(init.body as string);
     expect(body.type).toBe('template');
     expect(body.to).toBe('919876543210');
     expect(body.template.name).toBe(RECIPIENT_TEMPLATE_NAME);
