@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent } from '@/lib/agent';
 import { createStore } from '@/lib/store';
+import { createScheduleStore } from '@/lib/schedule-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -42,6 +43,7 @@ describe('end-to-end happy path', () => {
   it('quotes, creates a transfer, sends a link, and delivers', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
+    const scheduleStore = createScheduleStore(redis);
 
     // Scripted Kimi: quote -> create -> link -> final reply.
     const script: ChatMessage[] = [
@@ -68,6 +70,7 @@ describe('end-to-end happy path', () => {
     let turn = 0;
     const agent = createAgent({
       store,
+      scheduleStore,
       async chat() {
         const msg = script[turn++];
         // Patch the real transfer id into the link tool call.

@@ -22,9 +22,9 @@ describe('chat', () => {
     );
 
     expect(result.content).toBe('Hello!');
-    const [url, init] = fetchMock.mock.calls[0];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('https://ollama.test/v1/chat/completions');
-    expect(JSON.parse(init.body).model).toBe('kimi-test');
+    expect(JSON.parse(init.body as string).model).toBe('kimi-test');
   });
 
   it('throws when the response is not ok', async () => {
