@@ -7,6 +7,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
+import { evaluateCap } from '@/lib/tier-rules';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
@@ -264,5 +265,127 @@ describe('end-to-end returning customer', () => {
     const recipients = await store.listRecipients(PHONE, 3);
     expect(recipients).toHaveLength(1);
     expect(recipients[0].lastUsedAt > '2026-05-01T00:00:00Z').toBe(true);
+  });
+});
+
+describe('end-to-end new customer with cap', () => {
+  it('greeted → over-cap → under-cap → approve creates transfer + increments daily volume', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const customerStore = createCustomerStore(redis, store);
+    const dailyVolumeStore = createDailyVolumeStore(redis);
+    const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+    const scheduleStore = createScheduleStore(redis);
+    const draftStore = createDraftStore(redis);
+
+    // Turn 1: [NEW CUSTOMER] greeting — bot calls check_send_limit({amount_usd: 0})
+    const turn1: ChatMessage[] = [
+      toolCall('c1', 'check_send_limit', { amount_usd: 0 }),
+      { role: 'assistant', content: 'Welcome! $500/day cap for 3 days. Verify: <url>. How much?' },
+    ];
+    // Turn 2: user asks $700 → bot calls check_send_limit({700}) → over_per_transfer_cap → bot replies
+    const turn2: ChatMessage[] = [
+      toolCall('c2', 'check_send_limit', { amount_usd: 700 }),
+      { role: 'assistant', content: 'You can send up to $500 per transfer right now. Want $500?' },
+    ];
+    // Turn 3: user agrees to $400 → check_send_limit OK → send_approve_picker → bot waits
+    const turn3: ChatMessage[] = [
+      toolCall('c3', 'check_send_limit', { amount_usd: 400 }),
+      toolCall('c4', 'send_approve_picker', {
+        amount_usd: 400, funding_method: 'bank_transfer',
+        recipient_name: 'Mom', recipient_phone: '919876543210',
+        payout_method: 'upi', payout_destination: 'mom@upi',
+      }),
+      { role: 'assistant', content: 'Tap Approve to send.' },
+    ];
+    // Turn 4: user taps Approve → bot calls create_transfer (no args, from ctx) → generate_payment_link
+    const turn4: ChatMessage[] = [
+      toolCall('c5', 'create_transfer', {}),
+      toolCall('c6', 'generate_payment_link', { transfer_id: 'PLACEHOLDER' }),
+      { role: 'assistant', content: 'Tap to pay.' },
+    ];
+
+    const scripts = [turn1, turn2, turn3, turn4];
+    let active: ChatMessage[] = [];
+    let idx = 0;
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
+    }));
+
+    const agent = createAgent({
+      store, scheduleStore, draftStore, customerStore, dailyVolumeStore, kycProvider,
+      async chat() {
+        const msg = active.shift()!;
+        if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
+          const key = [...redis.dump.keys()].find((k) => k.startsWith('transfer:'))!;
+          msg.tool_calls[0].function.arguments = JSON.stringify({
+            transfer_id: key.replace('transfer:', ''),
+          });
+        }
+        return msg;
+      },
+    });
+
+    // Turn 1: NEW CUSTOMER
+    active = [...scripts[idx++]];
+    await agent.runAgentTurn(PHONE, 'hi', { isNewConversation: true, isNewCustomer: true });
+    const customerAfterT1 = await customerStore.getCustomer(PHONE);
+    expect(customerAfterT1?.kycStatus).toBe('not_started');
+
+    // Turn 2: over-cap
+    active = [...scripts[idx++]];
+    await agent.runAgentTurn(PHONE, 'send 700', { isNewConversation: false });
+
+    // Turn 3: under-cap
+    active = [...scripts[idx++]];
+    await agent.runAgentTurn(PHONE, 'send 400 to mom upi mom@upi 919876543210 via bank', { isNewConversation: false });
+
+    // A draft should now exist
+    const draftKey = [...redis.dump.keys()].find((k) => k.startsWith('recipient_draft:'));
+    expect(draftKey).toBeDefined();
+    const draftId = draftKey!.replace('recipient_draft:', '');
+
+    // Turn 4: approve tap
+    active = [...scripts[idx++]];
+    await agent.runAgentTurn(PHONE, '[Tapped: Approve & pay]', {
+      isNewConversation: false,
+      buttonTap: { kind: 'approve', draftId },
+    });
+
+    // Transfer must exist
+    const transferKey = [...redis.dump.keys()].find((k) => k.startsWith('transfer:'));
+    expect(transferKey).toBeDefined();
+    // Daily volume must be 40000 cents
+    expect(await dailyVolumeStore.getTodayCents(PHONE)).toBe(40_000);
+
+    // Now mark verified mid-window — cap stays $500/day (observation invariant)
+    await customerStore.saveCustomer({
+      ...(await customerStore.getCustomer(PHONE))!,
+      kycStatus: 'verified',
+      kycVerifiedAt: new Date().toISOString(),
+    });
+
+    // $400 used today + $200 requested = $600 > $500 cap → over_daily_cap
+    // (Verifies the observation invariant: KYC verified mid-window does NOT
+    //  lift the cap. If verification lifted, $200 would fit in T1's $2,999.)
+    const ev = evaluateCap(
+      (await customerStore.getCustomer(PHONE))!,
+      new Date(),
+      await dailyVolumeStore.getTodayCents(PHONE),
+      20_000,
+    );
+    expect(ev.tier).toBe('T0'); // still in window despite verification
+    expect(ev.withinCap).toBe(false);
+    expect(ev.reason).toBe('over_daily_cap');
+
+    // Asking for $100 (which fits the $100 remaining of the $500 cap) → within
+    const within = evaluateCap(
+      (await customerStore.getCustomer(PHONE))!,
+      new Date(),
+      await dailyVolumeStore.getTodayCents(PHONE),
+      10_000,
+    );
+    expect(within.withinCap).toBe(true);
   });
 });
