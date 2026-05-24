@@ -3,6 +3,9 @@ import { createAgent } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
+import { createCustomerStore } from '@/lib/customer-store';
+import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -70,10 +73,16 @@ describe('end-to-end happy path', () => {
       },
     ];
     let turn = 0;
+    const customerStore = createCustomerStore(redis, store);
+    const dailyVolumeStore = createDailyVolumeStore(redis);
+    const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const agent = createAgent({
       store,
       scheduleStore,
       draftStore,
+      customerStore,
+      dailyVolumeStore,
+      kycProvider,
       async chat() {
         const msg = script[turn++];
         // Patch the real transfer id into the link tool call.
@@ -181,10 +190,16 @@ describe('end-to-end returning customer', () => {
       }),
     );
 
+    const customerStore = createCustomerStore(redis, store);
+    const dailyVolumeStore = createDailyVolumeStore(redis);
+    const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const agent = createAgent({
       store,
       scheduleStore,
       draftStore,
+      customerStore,
+      dailyVolumeStore,
+      kycProvider,
       async chat() {
         const msg = activeScript.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {

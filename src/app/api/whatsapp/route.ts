@@ -7,6 +7,9 @@ import { createAgent } from '@/lib/agent';
 import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
 import { getDraftStore } from '@/lib/draft-store';
+import { getCustomerStore } from '@/lib/customer-store';
+import { getDailyVolumeStore } from '@/lib/daily-volume-store';
+import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import type { ButtonTap, TurnContext } from '@/lib/types';
 
 export async function GET(req: NextRequest) {
@@ -68,11 +71,17 @@ export async function POST(req: NextRequest) {
 
   after(async () => {
     try {
+      const customerStore = getCustomerStore(store);
+      const dailyVolumeStore = getDailyVolumeStore();
+      const kycProvider = new MockKycProvider(customerStore, env.appBaseUrl);
       const agent = createAgent({
         chat,
         store,
         scheduleStore: getScheduleStore(),
         draftStore: getDraftStore(),
+        customerStore,
+        dailyVolumeStore,
+        kycProvider,
       });
       const reply = await agent.runAgentTurn(incoming.from, messageText, turn);
       await sendText(incoming.from, reply);

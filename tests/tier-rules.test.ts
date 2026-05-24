@@ -11,7 +11,6 @@ import type { Customer } from '@/lib/types';
 function customer(overrides: Partial<Customer> & { firstSeenAt: string }): Customer {
   return {
     senderPhone: '15551234567',
-    firstSeenAt: overrides.firstSeenAt,
     kycStatus: 'not_started',
     createdAt: overrides.firstSeenAt,
     updatedAt: overrides.firstSeenAt,
