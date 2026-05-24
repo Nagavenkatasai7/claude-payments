@@ -4,10 +4,14 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer } from './transfer-create';
+import { evaluateCap } from './tier-rules';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, FundingMethod, PayoutMethod, Schedule, TurnContext } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
+import type { CustomerStore } from './customer-store';
+import type { DailyVolumeStore } from './daily-volume-store';
+import type { KycProvider } from './providers/kyc-provider';
 import { sendInteractive, type InteractiveButton } from './whatsapp';
 import {
   recipientButtonId,
@@ -241,6 +245,24 @@ export const toolSchemas: ChatTool[] = [
       parameters: { type: 'object', properties: {} },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'check_send_limit',
+      description:
+        "Check whether the sender is allowed to send `amount_usd` right now. Pass 0 to fetch their current cap status without proposing an amount. Returns { within_cap, tier, daily_cap_usd, per_transfer_cap_usd, today_used_usd, today_remaining_usd, reason?, day_of_window?, kyc_url? }. Always call this BEFORE get_quote.",
+      parameters: {
+        type: 'object',
+        properties: {
+          amount_usd: {
+            type: 'number',
+            description: 'Amount the sender wants to send in USD. Pass 0 for status-only.',
+          },
+        },
+        required: ['amount_usd'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -249,6 +271,9 @@ export interface ToolContext {
   scheduleStore: ScheduleStore;
   draftStore: DraftStore;
   turn: TurnContext;
+  customerStore: CustomerStore;
+  dailyVolumeStore: DailyVolumeStore;
+  kycProvider: KycProvider;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -283,6 +308,8 @@ export async function executeTool(
       return sendApprovePickerTool(args, ctx);
     case 'cancel_draft':
       return cancelDraftTool(args, ctx);
+    case 'check_send_limit':
+      return checkSendLimitTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -333,6 +360,20 @@ async function createTransferTool(
           'That quote was already approved or has expired. Please request a fresh quote.',
       };
     }
+    // Re-check cap at the moment of approval (cap state may have changed since picker)
+    {
+      const customer = (await ctx.customerStore.getCustomer(ctx.phone))
+        ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+      const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+      const requestedCents = Math.round(draft.amountUsd * 100);
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+      if (!ev.withinCap) {
+        return {
+          error: 'That quote would exceed your current sending cap. Please request a fresh quote.',
+          cap_eval: { tier: ev.tier, reason: ev.reason, today_remaining_usd: ev.todayRemainingCents / 100 },
+        };
+      }
+    }
     try {
       const transfer = await createTransfer(ctx.store, {
         phone: ctx.phone,
@@ -343,6 +384,7 @@ async function createTransferTool(
         payoutDestination: draft.recipient.payoutDestination,
         fundingMethod: draft.fundingMethod,
       });
+      await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       return {
         transfer_id: transfer.id,
         status: transfer.status,
@@ -366,6 +408,21 @@ async function createTransferTool(
         'A valid recipient WhatsApp number with country code is required before creating the transfer. Ask the user for it (e.g. 919876543210).',
     };
   }
+  // Cap check on the legacy path (cron-fired or no-button cold-start)
+  {
+    const amtUsd = Number(args.amount_usd);
+    const customer = (await ctx.customerStore.getCustomer(ctx.phone))
+      ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+    const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+    const requestedCents = Math.round(amtUsd * 100);
+    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+    if (!ev.withinCap) {
+      return {
+        error: 'Cap exceeded for this transfer.',
+        cap_eval: { tier: ev.tier, reason: ev.reason, today_remaining_usd: ev.todayRemainingCents / 100 },
+      };
+    }
+  }
   try {
     const transfer = await createTransfer(ctx.store, {
       phone: ctx.phone,
@@ -376,6 +433,7 @@ async function createTransferTool(
       payoutDestination: String(args.payout_destination),
       fundingMethod: args.funding_method as FundingMethod,
     });
+    await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
     return {
       transfer_id: transfer.id,
       status: transfer.status,
@@ -583,6 +641,26 @@ async function sendApprovePickerTool(
   }
   const amountUsd = Number(args.amount_usd);
   const fundingMethod = args.funding_method as FundingMethod;
+  // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
+  {
+    const customer = (await ctx.customerStore.getCustomer(ctx.phone))
+      ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+    const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+    const requestedCents = Math.round(amountUsd * 100);
+    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+    if (!ev.withinCap) {
+      return {
+        error: 'Cap exceeded for this transfer.',
+        cap_eval: {
+          tier: ev.tier,
+          reason: ev.reason,
+          today_used_usd: ev.todayUsedCents / 100,
+          today_remaining_usd: ev.todayRemainingCents / 100,
+          daily_cap_usd: ev.dailyCapCents / 100,
+        },
+      };
+    }
+  }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const fxRate = await getFxRate();
@@ -628,4 +706,38 @@ async function cancelDraftTool(
     return { cancelled: false, reason: 'draft_not_found_or_expired' };
   }
   return { cancelled: true };
+}
+
+async function checkSendLimitTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const amountUsd = Number(args.amount_usd ?? 0);
+  const requestedCents = Math.round(amountUsd * 100);
+  const customer = (await ctx.customerStore.getCustomer(ctx.phone))
+    ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+  const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+
+  // Surface a KYC URL for T0 or Suspended (the agent uses this in the message).
+  let kycUrl: string | undefined;
+  if (evalResult.tier === 'T0' || evalResult.tier === 'Suspended') {
+    const start = await ctx.kycProvider.startVerification({
+      customerId: ctx.phone,
+      senderPhone: ctx.phone,
+    });
+    kycUrl = start.url;
+  }
+
+  return {
+    within_cap: evalResult.withinCap,
+    tier: evalResult.tier,
+    daily_cap_usd: evalResult.dailyCapCents / 100,
+    per_transfer_cap_usd: evalResult.perTransferCapCents / 100,
+    today_used_usd: evalResult.todayUsedCents / 100,
+    today_remaining_usd: evalResult.todayRemainingCents / 100,
+    reason: evalResult.reason,
+    day_of_window: evalResult.dayOfWindow,
+    kyc_url: kycUrl,
+  };
 }
