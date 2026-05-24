@@ -76,9 +76,25 @@ Copy `.env.example` to `.env.local` for local development.
 ```bash
 npm run dev          # Local Next.js dev server
 npm run build        # Production build
+npm run typecheck    # tsc --noEmit
+npm run lint         # ESLint (next/core-web-vitals)
 npm test             # Vitest run (29 files / ~209 tests)
 npm run test:watch   # Vitest watch mode
+npm run e2e          # Playwright smoke test (BASE_URL defaults to prod)
 ```
+
+## Contributing / CI
+
+The deploy pipeline is GitHub-driven:
+
+1. Branch from `main` (`git checkout -b feat/your-thing`).
+2. Push. Open a PR. CI runs typecheck + lint + test + build; Vercel
+   posts a preview URL.
+3. Once `ci / ci` is green, merge (squash). `main` is protected — direct
+   pushes are rejected.
+4. The merge auto-deploys to `claude-payments.vercel.app`. A Playwright
+   smoke test then logs into the live dashboard; failure shows up on the
+   commit's status check.
 
 ## Project layout
 

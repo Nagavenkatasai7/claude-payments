@@ -63,8 +63,8 @@ docs/
 - **Pure helpers** (`fx.ts`, `compliance.ts`, `dashboard.ts`, `analytics.ts`, `transfer-create.ts`, etc.) are TDD'd; UI pages are not unit-tested.
 - **Live updates** on every dashboard page via `<LiveRefresh>` in the layout's TopBar; pages are `export const dynamic = 'force-dynamic'`; sidebar uses `next/link` for soft navigation so the polling timer stays continuous.
 - **CSS** lives entirely in `src/app/globals.css` with two scopes: the `sh-*` Stripe-style theme (login + dashboard) and a legacy `.payapp`-scoped WhatsApp-dark theme (preserved for the pay page).
-- **Deploys** are currently manual via `vercel --prod`. The CI/CD batch in `docs/superpowers/plans/2026-05-23-cicd.md` swaps this for GitHub Actions + Vercel auto-deploy.
-- **Branches:** `master` (initial state) and `feat/sendhome-prototype` (all the work). CI/CD plan migrates to a `main` branch as the deploy target.
+- **Deploys** are GitHub-driven: merge a PR into `main` → Vercel auto-deploys → Playwright smoke test runs against prod. No more manual `vercel --prod`. CI workflow in `.github/workflows/ci.yml`; smoke workflow in `.github/workflows/smoke.yml`. Branch protection on `main` requires the `ci / ci` status check; direct pushes are rejected.
+- **Branches:** `main` is the deploy target on GitHub (`Nagavenkatasai7/claude-payments`); old `master` is preserved on the remote as `archive/initial-scaffold`.
 
 ## Key external configuration
 
@@ -84,5 +84,5 @@ See `docs/ROADMAP.md` for the realistic feature inventory (what's built, what's 
 ## Workflow rules
 
 - **Plan first, get approval, then build.** Use `superpowers:brainstorming` → `superpowers:writing-plans` → `superpowers:subagent-driven-development` for any meaningful change.
-- **The literal word "deploy" is required from the user before `vercel --prod`** — the Vercel auto-mode classifier blocks otherwise.
+- **No direct pushes to `main`.** Open a PR; the `ci / ci` status check must pass. Vercel auto-deploys on merge. The old "type 'deploy'" rule is moot for code changes; it still applies if anyone reaches for `vercel --prod` directly.
 - This is also captured in the `sendhome-user-workflow` memory.
