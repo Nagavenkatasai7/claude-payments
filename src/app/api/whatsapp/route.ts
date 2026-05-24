@@ -22,6 +22,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   const incoming = parseIncoming(body);
   if (!incoming) return NextResponse.json({ ok: true });
+  if (incoming.kind !== 'text') return NextResponse.json({ ok: true });
 
   const store = getStore();
   const isNew = await store.markMessageSeen(incoming.messageId);
