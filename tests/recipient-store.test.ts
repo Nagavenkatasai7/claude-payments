@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { createTransfer } from '@/lib/transfer-create';
+import { resetRateCacheForTests } from '@/lib/rate';
 
 const SENDER = '15551234567';
 const OTHER = '15559999999';
@@ -86,5 +88,60 @@ describe('last-inbound tracking', () => {
     const store = createStore(fakeRedis());
     await store.recordInboundNow(SENDER);
     expect(await store.getLastInboundAt(SENDER)).not.toBeNull();
+  });
+});
+
+describe('createTransfer side-effects', () => {
+  beforeEach(() => {
+    resetRateCacheForTests();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ rates: { INR: 85.2 } }),
+      }),
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('upserts the recipient after a successful transfer', async () => {
+    const store = createStore(fakeRedis());
+    await createTransfer(store, {
+      phone: '15551234567',
+      amountUsd: 100,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+    });
+    const saved = await store.listRecipients('15551234567', 3);
+    expect(saved).toHaveLength(1);
+    expect(saved[0].name).toBe('Mom');
+    expect(saved[0].recipientPhone).toBe('919876543210');
+    expect(saved[0].payoutDestination).toBe('mom@upi');
+  });
+
+  it('idempotently bumps lastUsedAt on a repeat transfer to the same recipient', async () => {
+    const store = createStore(fakeRedis());
+    const input = {
+      phone: '15551234567',
+      amountUsd: 100,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi' as const,
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer' as const,
+    };
+    await createTransfer(store, input);
+    const firstList = await store.listRecipients('15551234567', 3);
+    const firstAt = firstList[0].lastUsedAt;
+
+    await new Promise((r) => setTimeout(r, 10));
+    await createTransfer(store, input);
+    const secondList = await store.listRecipients('15551234567', 3);
+
+    expect(secondList).toHaveLength(1);
+    expect(secondList[0].lastUsedAt > firstAt).toBe(true);
   });
 });
