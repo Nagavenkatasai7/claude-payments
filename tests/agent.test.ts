@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent, sanitizeReply } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
+import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
-import type { ChatMessage } from '@/lib/types';
+import type { ChatMessage, TurnContext } from '@/lib/types';
 
 const PHONE = '15551234567';
 
@@ -29,6 +30,7 @@ describe('createAgent', () => {
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
       chat: async () => ({ role: 'assistant', content: 'Hi there!' }),
     });
     const reply = await agent.runAgentTurn(PHONE, 'hello');
@@ -61,6 +63,7 @@ describe('createAgent', () => {
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
       chat: async () => responses[call++],
     });
 
@@ -76,6 +79,7 @@ describe('createAgent', () => {
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
       chat: async () => ({ role: 'assistant', content: 'noted' }),
     });
     await agent.runAgentTurn(PHONE, 'remember this');
@@ -137,6 +141,7 @@ describe('createAgent', () => {
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
       chat: async () => responses[call++],
     });
 
@@ -194,6 +199,7 @@ describe('createAgent', () => {
     const agent = createAgent({
       store,
       scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
       chat: async () => responses[call++],
     });
 
@@ -256,5 +262,93 @@ describe('sanitizeReply', () => {
     const last = 'https://claude-payments.vercel.app/pay/last';
     const result = sanitizeReply('Done.', [first, last]);
     expect(result).toContain(last);
+  });
+});
+
+describe('createAgent — TurnContext', () => {
+  it('prepends a [NEW CONVERSATION] system note when turn.isNewConversation is true', async () => {
+    const store = createStore(fakeRedis());
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
+      chat: async (messages) => {
+        seen.push(messages);
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    const turn: TurnContext = { isNewConversation: true };
+    await agent.runAgentTurn('15551234567', 'hi', turn);
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(true);
+  });
+
+  it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {
+    const store = createStore(fakeRedis());
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: createScheduleStore(fakeRedis()),
+      draftStore: createDraftStore(fakeRedis()),
+      chat: async (messages) => {
+        seen.push(messages);
+        return { role: 'assistant', content: 'ok' };
+      },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(false);
+  });
+
+  it('passes turn.buttonTap through to executeTool (approve path)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const draftStore = createDraftStore(redis);
+    // Seed a draft as if send_approve_picker had been called earlier.
+    const draftId = await draftStore.createDraft({
+      senderPhone: '15551234567',
+      recipient: {
+        name: 'Mom',
+        recipientPhone: '919876543210',
+        payoutMethod: 'upi',
+        payoutDestination: 'mom@upi',
+      },
+      amountUsd: 300,
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
+    });
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'c1',
+            type: 'function',
+            function: {
+              // LLM passes a wrong/missing draft id; context should win.
+              name: 'create_transfer',
+              arguments: JSON.stringify({}),
+            },
+          },
+        ],
+      },
+      { role: 'assistant', content: 'Transfer created!' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: createScheduleStore(redis),
+      draftStore,
+      chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn('15551234567', '[Tapped: Approve & pay]', {
+      isNewConversation: false,
+      buttonTap: { kind: 'approve', draftId },
+    });
+    expect(reply).toContain('Transfer created');
+    // Draft must have been consumed.
+    expect(await draftStore.getDraft(draftId)).toBeNull();
   });
 });

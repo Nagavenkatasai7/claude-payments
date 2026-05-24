@@ -5,6 +5,7 @@ import { chat } from '@/lib/ollama';
 import { createAgent } from '@/lib/agent';
 import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
+import { getDraftStore } from '@/lib/draft-store';
 
 export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
@@ -30,7 +31,12 @@ export async function POST(req: NextRequest) {
 
   after(async () => {
     try {
-      const agent = createAgent({ chat, store, scheduleStore: getScheduleStore() });
+      const agent = createAgent({
+        chat,
+        store,
+        scheduleStore: getScheduleStore(),
+        draftStore: getDraftStore(),
+      });
       const reply = await agent.runAgentTurn(incoming.from, incoming.text);
       await sendText(incoming.from, reply);
     } catch (err) {
