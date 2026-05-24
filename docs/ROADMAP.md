@@ -8,9 +8,9 @@ Of ~26 sub-features in the original specification (the WhatsApp-as-remittance-pi
 
 | | Count |
 |---|---|
-| ✅ Fully built | 7 |
+| ✅ Fully built | 8 |
 | ⚠️ Mocked or partial | 8 |
-| ❌ Not built | 11 |
+| ❌ Not built | 10 |
 
 We have a **convincing prototype of the conversation, dashboard, and notification layers**. We do **not** move real money, do real KYC, or integrate with real banking rails. That matches the original prototype scope; turning it into a live service requires partnerships + regulatory work, not just code.
 
@@ -77,7 +77,7 @@ We have a **convincing prototype of the conversation, dashboard, and notificatio
 | Multi-channel WhatsApp monitoring | ❌ not built | Single phone-number-id hardcoded. |
 | Scalable as users grow | ⚠️ prototype-scale | Fine at hundreds of transfers. In-memory aggregation would not survive ten-thousands without pre-aggregated counters or a real DB. |
 | Modifiable / extensible | ✅ structural | Modular `src/lib/*`; agent + tools pattern. Easy to add features. |
-| **CI/CD pipeline** | ❌ not built | Manual `vercel --prod`. No GitHub Actions, no PR checks, no preview deploys, no staging. **This is the next batch.** |
+| **CI/CD pipeline** | ✅ built | GitHub repo at `Nagavenkatasai7/claude-payments`; GitHub Actions runs typecheck + lint + test + build on every PR and push to `main`; Vercel auto-deploys on merge with per-PR preview URLs; branch protection requires the `ci / ci` check; Playwright smoke test runs against prod after each production deploy. Shipped 2026-05-23. |
 
 ---
 
@@ -85,7 +85,7 @@ We have a **convincing prototype of the conversation, dashboard, and notificatio
 
 ### Lane A — Cheap wins (no external partnerships, days of work)
 
-1. **CI/CD pipeline** (THIS IS THE NEXT BATCH). GitHub repo + GitHub Actions for PR checks + Vercel auto-deploy + branch protection + a Playwright smoke test for the dashboard. Half a day to a day. *Plan: `docs/superpowers/plans/2026-05-23-cicd.md`*
+1. ~~**CI/CD pipeline.** GitHub repo + GitHub Actions for PR checks + Vercel auto-deploy + branch protection + a Playwright smoke test for the dashboard.~~ ✅ **shipped 2026-05-23** — `Nagavenkatasai7/claude-payments`, workflows in `.github/workflows/`. *Plan: `docs/superpowers/plans/2026-05-23-cicd.md`*
 2. **Provider abstraction layer** — `interface PaymentRail`, `interface KycProvider`, `interface SanctionsProvider`. Today's mocks implement these. Production swaps in real providers behind the same interfaces without rewriting the agent. ~1–2 days.
 3. **AI recipient suggestions + WhatsApp interactive buttons** — biggest customer-facing chat wins. Save recipients per phone; bot greets returning customers with "Send $200 to Mom again?" + Approve/Cancel buttons. ~2 days.
 4. **Digital receipt page + AI scheduling suggestion** — `/receipt/[id]` public URL sent in confirmation messages; bot detects repeat patterns and offers to schedule them. ~1 day.
