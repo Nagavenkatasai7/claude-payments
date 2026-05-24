@@ -24,4 +24,10 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
   await expect(
     page.getByRole('table').or(page.getByText(/no transfers/i)),
   ).toBeVisible();
+
+  await page.getByRole('link', { name: /customers/i }).click();
+  await expect(page).toHaveURL(/\/dashboard\/customers/);
+  await expect(
+    page.getByRole('table').or(page.getByText(/no customers yet/i)),
+  ).toBeVisible();
 });
