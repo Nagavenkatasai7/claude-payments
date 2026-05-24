@@ -344,3 +344,22 @@ input, select, textarea { font: inherit; color: inherit; }
 .payapp button:disabled { opacity: 0.6; cursor: default; }
 .payapp .done { color: #25d366; font-weight: 600; text-align: center; }
 .payapp .err { color: #f15c6d; font-size: 13px; margin-top: 8px; }
+
+/* === Tier tags === */
+.sh-tag {
+  display: inline-flex; align-items: center;
+  padding: 3px 9px; border-radius: var(--sh-radius-pill);
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.sh-tag-tier-t0 {
+  background: #fef3c7;
+  color: #92400e;
+}
+.sh-tag-tier-t1 {
+  background: #dcfce7;
+  color: #166534;
+}
+.sh-tag-tier-suspended {
+  background: #fee2e2;
+  color: #991b1b;
+}

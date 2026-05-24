@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { Staff, Transfer } from '@/lib/types';
+import type { Staff, Tier, Transfer } from '@/lib/types';
 
 const TABS = [
   { key: 'all', label: 'All' },
@@ -70,6 +70,7 @@ export interface TransactionsTabsProps {
   transfers: Transfer[];
   staff: Staff[];
   staffByUsername: Record<string, string>;
+  tierByPhone: Record<string, Tier>;
   canCancel: boolean;
   canResend: boolean;
   canAssign: boolean;
@@ -78,10 +79,17 @@ export interface TransactionsTabsProps {
   resendAction: (formData: FormData) => void | Promise<void>;
 }
 
+function tierBadgeClass(tier: Tier): string {
+  if (tier === 'T0') return 'sh-tag sh-tag-tier-t0';
+  if (tier === 'T1') return 'sh-tag sh-tag-tier-t1';
+  return 'sh-tag sh-tag-tier-suspended';
+}
+
 export function TransactionsTabs({
   transfers,
   staff,
   staffByUsername,
+  tierByPhone,
   canCancel,
   canResend,
   canAssign,
@@ -123,6 +131,7 @@ export function TransactionsTabs({
             <thead>
               <tr>
                 <th>Recipient</th>
+                <th>Tier</th>
                 <th>Amount</th>
                 <th>Funding</th>
                 <th>US Payment</th>
@@ -141,6 +150,15 @@ export function TransactionsTabs({
                     <div className="sh-recipient-sub">
                       {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
                     </div>
+                  </td>
+                  <td>
+                    {tierByPhone[t.phone] ? (
+                      <span className={tierBadgeClass(tierByPhone[t.phone])}>
+                        {tierByPhone[t.phone]}
+                      </span>
+                    ) : (
+                      <span className="sh-recipient-sub">—</span>
+                    )}
                   </td>
                   <td>
                     <div className="sh-amount">{usd(t.amountUsd)}</div>
