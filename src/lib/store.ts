@@ -17,7 +17,7 @@ export interface RedisLike {
   smembers(key: string): Promise<string[]>;
   hset(key: string, fields: Record<string, string>): Promise<unknown>;
   hget(key: string, field: string): Promise<string | null>;
-  hgetall(key: string): Promise<Record<string, string>>;
+  hgetall(key: string): Promise<Record<string, string> | null>;
   hdel(key: string, field: string): Promise<unknown>;
   getdel(key: string): Promise<string | null>;
   exists(key: string): Promise<number>;

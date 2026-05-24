@@ -53,8 +53,8 @@ describe('fakeRedis hashes', () => {
     expect(all).toEqual({ '919876543210': 'a', '919999999999': 'b' });
   });
 
-  it('hgetall returns {} for a missing key', async () => {
-    expect(await fakeRedis().hgetall('recipients:nobody')).toEqual({});
+  it('hgetall returns null for a missing key', async () => {
+    expect(await fakeRedis().hgetall('recipients:nobody')).toBeNull();
   });
 
   it('hdel removes a field', async () => {
@@ -62,6 +62,12 @@ describe('fakeRedis hashes', () => {
     await r.hset('h', { a: '1', b: '2' });
     await r.hdel('h', 'a');
     expect(await r.hgetall('h')).toEqual({ b: '2' });
+  });
+
+  it('exists returns 1 for a hash-only key', async () => {
+    const r = fakeRedis();
+    await r.hset('h', { a: '1' });
+    expect(await r.exists('h')).toBe(1);
   });
 });
 

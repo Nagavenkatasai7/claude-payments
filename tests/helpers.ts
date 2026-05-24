@@ -63,7 +63,7 @@ export function fakeRedis(): FakeRedis {
     },
     async hgetall(key: string) {
       const h = hashes.get(key);
-      if (!h) return {};
+      if (!h) return null;
       return Object.fromEntries(h);
     },
     async hdel(key: string, field: string) {
