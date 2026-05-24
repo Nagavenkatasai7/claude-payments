@@ -306,6 +306,19 @@ input, select, textarea { font: inherit; color: inherit; }
 .sh-perm-row { display: flex; flex-wrap: wrap; gap: 16px; padding: 0 18px 16px; }
 .sh-add-staff-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 16px 20px; }
 
+/* === Customer detail page === */
+.sh-card-body { padding: 16px 20px 20px; }
+.sh-dl {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 8px 16px;
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+.sh-dl dt { color: var(--sh-text-secondary); font-weight: 500; }
+.sh-dl dd { margin: 0; color: var(--sh-text); }
+.sh-card-body .sh-inline-form { margin-top: 12px; }
+
 /* === Legacy /pay (WhatsApp dark theme), scoped === */
 .payapp {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
