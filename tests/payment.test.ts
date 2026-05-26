@@ -26,6 +26,10 @@ function awaitingTransfer(): Transfer {
     complianceReasons: [],
     status: 'awaiting_payment',
     createdAt: '2026-05-21T00:00:00.000Z',
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'IN',
+    destinationCurrency: 'INR',
   };
 }
 

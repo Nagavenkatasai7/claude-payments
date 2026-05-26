@@ -4,6 +4,12 @@ import { screenTransfer } from './compliance';
 import { newTransferId } from './id';
 import type { Store } from './store';
 import type { FundingMethod, PayoutMethod, Transfer } from './types';
+import {
+  DEFAULT_SOURCE_COUNTRY,
+  DEFAULT_SOURCE_CURRENCY,
+  DEFAULT_DESTINATION_COUNTRY,
+  DEFAULT_DESTINATION_CURRENCY,
+} from './defaults';
 
 export interface CreateTransferInput {
   phone: string;
@@ -45,6 +51,11 @@ export async function createTransfer(
     complianceReasons: compliance.reasons,
     status: compliance.status === 'blocked' ? 'blocked' : 'awaiting_payment',
     createdAt: new Date().toISOString(),
+    // NEW (P1) — defaults until P4 unlocks bot-collected values
+    sourceCountry: DEFAULT_SOURCE_COUNTRY,
+    sourceCurrency: DEFAULT_SOURCE_CURRENCY,
+    destinationCountry: DEFAULT_DESTINATION_COUNTRY,
+    destinationCurrency: DEFAULT_DESTINATION_CURRENCY,
   };
   await store.saveTransfer(transfer);
   await store.incrementTransferCount(input.phone);

@@ -2,6 +2,12 @@ import { Redis } from '@upstash/redis';
 import { env } from './env';
 import { easternDate } from './dates';
 import type { ChatMessage, Transfer } from './types';
+import {
+  DEFAULT_SOURCE_COUNTRY,
+  DEFAULT_SOURCE_CURRENCY,
+  DEFAULT_DESTINATION_COUNTRY,
+  DEFAULT_DESTINATION_CURRENCY,
+} from './defaults';
 
 export interface RedisLike {
   get(key: string): Promise<string | null>;
@@ -48,7 +54,17 @@ export function createStore(redis: RedisLike) {
     },
     async getTransfer(id: string): Promise<Transfer | null> {
       const raw = await redis.get(`transfer:${id}`);
-      return raw ? (JSON.parse(raw) as Transfer) : null;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as Transfer;
+      // Lazy fill for pre-P1 records missing the 4 new fields (in-memory only;
+      // the cron pass is the only writer for backfilled records)
+      if (!parsed.sourceCountry) {
+        parsed.sourceCountry = DEFAULT_SOURCE_COUNTRY;
+        parsed.sourceCurrency = DEFAULT_SOURCE_CURRENCY;
+        parsed.destinationCountry = DEFAULT_DESTINATION_COUNTRY;
+        parsed.destinationCurrency = DEFAULT_DESTINATION_CURRENCY;
+      }
+      return parsed;
     },
     async saveTransfer(transfer: Transfer): Promise<void> {
       await redis.set(`transfer:${transfer.id}`, JSON.stringify(transfer));

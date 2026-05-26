@@ -21,6 +21,10 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
     complianceReasons: [],
     status: 'awaiting_payment',
     createdAt: new Date().toISOString(),
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'IN',
+    destinationCurrency: 'INR',
     ...overrides,
   };
 }

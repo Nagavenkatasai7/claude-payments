@@ -24,6 +24,10 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
     complianceReasons: [],
     status: 'awaiting_payment',
     createdAt: new Date(0).toISOString(),
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'IN',
+    destinationCurrency: 'INR',
     ...overrides,
   };
 }
@@ -189,6 +193,8 @@ describe('needsAttention', () => {
       payoutMethod: 'upi', payoutDestination: 'r@upi', fundingMethod: 'bank_transfer',
       complianceStatus: 'cleared', complianceReasons: [],
       status: 'awaiting_payment', createdAt: new Date(baseNow).toISOString(),
+      sourceCountry: 'US', sourceCurrency: 'USD',
+      destinationCountry: 'IN', destinationCurrency: 'INR',
       ...overrides,
     };
   }
@@ -305,6 +311,8 @@ describe('topVelocityToday', () => {
       fundingMethod: 'bank_transfer',
       complianceStatus: 'cleared', complianceReasons: [],
       status: 'awaiting_payment', createdAt,
+      sourceCountry: 'US', sourceCurrency: 'USD',
+      destinationCountry: 'IN', destinationCurrency: 'INR',
     };
   }
 

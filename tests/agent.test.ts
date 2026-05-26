@@ -151,6 +151,10 @@ describe('createAgent', () => {
       complianceReasons: [],
       status: 'awaiting_payment',
       createdAt: new Date().toISOString(),
+      sourceCountry: 'US',
+      sourceCurrency: 'USD',
+      destinationCountry: 'IN',
+      destinationCurrency: 'INR',
     });
 
     const agent = createAgent({
@@ -209,6 +213,10 @@ describe('createAgent', () => {
       complianceReasons: [],
       status: 'awaiting_payment',
       createdAt: new Date().toISOString(),
+      sourceCountry: 'US',
+      sourceCurrency: 'USD',
+      destinationCountry: 'IN',
+      destinationCurrency: 'INR',
     });
 
     let call = 0;
