@@ -464,6 +464,7 @@ describe('create_transfer — daily volume increment', () => {
       firstSeenAt: '2026-01-01T00:00:00Z',
       kycStatus: 'grandfathered',
       kycVerifiedAt: '2026-01-01T00:00:00Z',
+      senderCountry: 'US',
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
     });

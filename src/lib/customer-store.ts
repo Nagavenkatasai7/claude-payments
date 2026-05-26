@@ -2,6 +2,7 @@ import { Redis } from '@upstash/redis';
 import { env } from './env';
 import type { RedisLike, Store } from './store';
 import type { Customer } from './types';
+import { DEFAULT_SENDER_COUNTRY } from './defaults';
 
 export function createCustomerStore(redis: RedisLike, store: Store) {
   return {
@@ -9,7 +10,13 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
       const raw = await redis.get(`customer:${senderPhone}`);
       if (!raw) return null;
       try {
-        return JSON.parse(raw) as Customer;
+        const parsed = JSON.parse(raw) as Customer;
+        // Lazy fill for pre-P1 records missing senderCountry (in-memory only;
+        // the cron pass is the only writer for backfilled records)
+        if (!parsed.senderCountry) {
+          parsed.senderCountry = DEFAULT_SENDER_COUNTRY;
+        }
+        return parsed;
       } catch {
         return null;
       }
@@ -40,6 +47,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             firstSeenAt: minAt,
             kycStatus: 'grandfathered',
             kycVerifiedAt: nowIso,
+            senderCountry: DEFAULT_SENDER_COUNTRY,  // NEW (P1)
             createdAt: minAt,
             updatedAt: nowIso,
           }
@@ -47,6 +55,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             senderPhone,
             firstSeenAt: nowIso,
             kycStatus: 'not_started',
+            senderCountry: DEFAULT_SENDER_COUNTRY,  // NEW (P1)
             createdAt: nowIso,
             updatedAt: nowIso,
           };
