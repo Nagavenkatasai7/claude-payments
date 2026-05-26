@@ -23,6 +23,7 @@ describe('customer store', () => {
       senderPhone: PHONE,
       firstSeenAt: '2026-05-24T12:00:00Z',
       kycStatus: 'not_started' as const,
+      senderCountry: 'US' as const,
       createdAt: '2026-05-24T12:00:00Z',
       updatedAt: '2026-05-24T12:00:00Z',
     };
@@ -94,5 +95,56 @@ describe('customer store', () => {
     await redis.set(`customer:${PHONE}`, 'not-json');
     const cs = createCustomerStore(redis, store);
     expect(await cs.getCustomer(PHONE)).toBeNull();
+  });
+});
+
+describe('customer-store P1: senderCountry', () => {
+  it('upsertOnFirstInbound writes senderCountry: US on a brand-new customer', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer } = await cs.upsertOnFirstInbound('15550009999');
+    expect(customer.senderCountry).toBe('US');
+  });
+
+  it('upsertOnFirstInbound writes senderCountry: US on a grandfathered customer', async () => {
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ rates: { INR: 85.2 } }),
+    }));
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    await createTransfer(store, {
+      phone: '15550008888',
+      amountUsd: 50,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+    });
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer } = await cs.upsertOnFirstInbound('15550008888');
+    expect(customer.senderCountry).toBe('US');
+    expect(customer.kycStatus).toBe('grandfathered');
+  });
+
+  it('getCustomer fills missing senderCountry in-memory without persisting', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    // Manually write a customer record missing senderCountry (simulating pre-P1 data)
+    await redis.set('customer:15550007777', JSON.stringify({
+      senderPhone: '15550007777',
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      kycVerifiedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }));
+    const cs = createCustomerStore(redis, store);
+    const c1 = await cs.getCustomer('15550007777');
+    expect(c1?.senderCountry).toBe('US');
+    // Verify NO persist happened — raw value in Redis still missing the field
+    const raw = await redis.get('customer:15550007777');
+    expect(JSON.parse(raw!).senderCountry).toBeUndefined();
   });
 });

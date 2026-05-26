@@ -30,4 +30,6 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
   await expect(
     page.getByRole('table').or(page.getByText(/no customers yet/i)),
   ).toBeVisible();
+  // P1: assert the new Country column header exists
+  await expect(page.getByRole('columnheader', { name: /country/i })).toBeVisible();
 });

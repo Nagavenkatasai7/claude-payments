@@ -41,6 +41,11 @@ export interface Transfer {
   deliveredAt?: string;
   assignedTo?: string;
   adminNote?: string;
+  // NEW (P1) — required after migration
+  sourceCountry: CountryCode;
+  sourceCurrency: CurrencyCode;
+  destinationCountry: CountryCode;
+  destinationCurrency: CurrencyCode;
 }
 
 export interface ToolCall {
@@ -156,14 +161,15 @@ export type KycStatus =
 
 export interface Customer {
   senderPhone: string;
-  firstSeenAt: string;       // ISO-8601, set on first inbound
+  firstSeenAt: string;
   kycStatus: KycStatus;
   kycVerifiedAt?: string;
   kycProviderRef?: string;
   kycRejectedReason?: string;
   fullName?: string;
   dateOfBirth?: string;
-  country?: string;
+  country?: string;             // legacy KYC-provider free-text — DO NOT use for routing
+  senderCountry: CountryCode;   // NEW (P1) — required; the routing field
   createdAt: string;
   updatedAt: string;
 }
@@ -186,3 +192,33 @@ export interface CapEvaluation {
   reason?: CapReason;
   dayOfWindow?: number;   // 1, 2, or 3 — present only when tier === 'T0'
 }
+
+// ── Phase 1 country + currency types (P1) ─────────────────────────────
+//
+// `country?: string` on Customer (B1) is reserved for free-text KYC-provider
+// values (Persona may return "United States" as text). The NEW strictly-typed
+// `senderCountry: CountryCode` below is our routing field. Two different
+// concerns, two different fields. Routing code never reads `country`.
+
+// ISO 3166-1 alpha-2. Note: UAE = 'AE' (not 'UAE').
+export type CountryCode =
+  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ'  // send-side (Phase 1)
+  | 'IN';                                              // payout-side (v1 only)
+
+// ISO 4217 currency codes corresponding to the supported countries.
+export type CurrencyCode =
+  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD'  // send-side
+  | 'INR';                                                    // payout-side
+
+// Single source of truth for "what's the home currency of country X?"
+// Consumed by the migration + bot defaults.
+export const DEFAULT_CURRENCY_FOR_COUNTRY: Record<CountryCode, CurrencyCode> = {
+  US: 'USD',
+  CA: 'CAD',
+  GB: 'GBP',
+  AE: 'AED',
+  SG: 'SGD',
+  AU: 'AUD',
+  NZ: 'NZD',
+  IN: 'INR',
+};

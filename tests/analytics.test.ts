@@ -33,6 +33,10 @@ function makeTransfer(overrides: Partial<Transfer>): Transfer {
     complianceReasons: [],
     status: 'delivered',
     createdAt: new Date(NOW).toISOString(),
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'IN',
+    destinationCurrency: 'INR',
     ...overrides,
   };
 }

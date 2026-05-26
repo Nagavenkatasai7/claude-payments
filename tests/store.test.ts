@@ -22,6 +22,10 @@ function sampleTransfer(id: string, createdAt: string): Transfer {
     complianceReasons: [],
     status: 'awaiting_payment',
     createdAt,
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'IN',
+    destinationCurrency: 'INR',
   };
 }
 

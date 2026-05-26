@@ -53,3 +53,22 @@ describe('createTransfer', () => {
     expect(await store.getTodayTransferCount(base.phone)).toBe(1);
   });
 });
+
+describe('createTransfer P1: country + currency fields', () => {
+  it('populates all 4 new fields with defaults', async () => {
+    const store = createStore(fakeRedis());
+    const t = await createTransfer(store, {
+      phone: '15551112222',
+      amountUsd: 100,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+    });
+    expect(t.sourceCountry).toBe('US');
+    expect(t.sourceCurrency).toBe('USD');
+    expect(t.destinationCountry).toBe('IN');
+    expect(t.destinationCurrency).toBe('INR');
+  });
+});
