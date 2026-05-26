@@ -4,7 +4,7 @@ import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { runDueSchedules } from '@/lib/cron-run';
-import { backfillCustomersOnce } from '@/lib/migration';
+import { backfillCustomersOnce, backfillCountryCurrencyOnce } from '@/lib/migration';
 import { sendText } from '@/lib/whatsapp';
 
 export const maxDuration = 300;
@@ -21,8 +21,9 @@ export async function GET(req: NextRequest) {
   const store = getStore();
   const customerStore = getCustomerStore(store);
 
-  // Idempotent backfill — runs once, sentinel-guarded.
+  // Idempotent backfills — sentinel-guarded.
   const backfill = await backfillCustomersOnce(store, customerStore);
+  const countryCurrencyBackfill = await backfillCountryCurrencyOnce(store, customerStore);
 
   const result = await runDueSchedules({
     store,
@@ -46,5 +47,10 @@ export async function GET(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({ ok: true, fired: result.fired, backfill });
+  return NextResponse.json({
+    ok: true,
+    fired: result.fired,
+    backfill,
+    countryCurrencyBackfill,
+  });
 }
