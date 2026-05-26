@@ -131,6 +131,7 @@ export function TransactionsTabs({
             <thead>
               <tr>
                 <th>Recipient</th>
+                <th>Country</th>
                 <th>Tier</th>
                 <th>Amount</th>
                 <th>Funding</th>
@@ -151,6 +152,7 @@ export function TransactionsTabs({
                       {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
                     </div>
                   </td>
+                  <td>{t.sourceCountry}</td>
                   <td>
                     {tierByPhone[t.phone] ? (
                       <span className={tierBadgeClass(tierByPhone[t.phone])}>

@@ -58,10 +58,10 @@ export default async function CustomerDetailPage({
             <dl className="sh-dl">
               <dt>Status</dt><dd>{customer.kycStatus}</dd>
               <dt>Verified at</dt><dd>{customer.kycVerifiedAt ?? '—'}</dd>
+              <dt>Country</dt><dd>{customer.senderCountry}</dd>
               <dt>Provider ref</dt><dd>{customer.kycProviderRef ?? '—'}</dd>
               <dt>Full name</dt><dd>{customer.fullName ?? '—'}</dd>
               <dt>DOB</dt><dd>{customer.dateOfBirth ?? '—'}</dd>
-              <dt>Country</dt><dd>{customer.country ?? '—'}</dd>
               {customer.kycRejectedReason && (
                 <>
                   <dt>Rejected reason</dt>

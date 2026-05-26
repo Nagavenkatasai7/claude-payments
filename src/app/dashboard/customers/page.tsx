@@ -75,6 +75,7 @@ export default async function CustomersPage() {
                 <thead>
                   <tr>
                     <th>Phone</th>
+                    <th>Country</th>
                     <th>First seen</th>
                     <th>Tier</th>
                     <th>KYC</th>
@@ -92,6 +93,7 @@ export default async function CustomersPage() {
                             +{c.senderPhone}
                           </Link>
                         </td>
+                        <td>{c.senderCountry}</td>
                         <td>{new Date(c.firstSeenAt).toLocaleDateString()}</td>
                         <td>
                           <span className={tierBadge(tier)}>
