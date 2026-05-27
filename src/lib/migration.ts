@@ -1,9 +1,11 @@
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
-import { DEFAULT_SENDER_COUNTRY } from './defaults';
+import type { PartnerStore } from './partner-store';
+import { DEFAULT_SENDER_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 
 const SENTINEL_KEY = 'customer-backfill-v1';
 const COUNTRY_CURRENCY_SENTINEL_KEY = 'country-currency-backfill-v1';
+const PARTNER_SENTINEL_KEY = 'partner-backfill-v1';
 
 export async function backfillCustomersOnce(
   store: Store,
@@ -30,6 +32,7 @@ export async function backfillCustomersOnce(
       kycStatus: 'grandfathered',
       kycVerifiedAt: new Date().toISOString(),
       senderCountry: DEFAULT_SENDER_COUNTRY,
+      partnerId: DEFAULT_PARTNER_ID,                 // NEW (P2)
       createdAt: firstSeenAt,
       updatedAt: new Date().toISOString(),
     });
@@ -75,4 +78,57 @@ export async function backfillCountryCurrencyOnce(
   }
 
   return { customersBackfilled, transfersBackfilled, skippedSentinel: false };
+}
+
+export async function backfillPartnersOnce(
+  store: Store,
+  customerStore: CustomerStore,
+  partnerStore: PartnerStore,
+): Promise<{
+  defaultPartnerCreated: boolean;
+  customersBackfilled: number;
+  transfersBackfilled: number;
+  skippedSentinel: boolean;
+}> {
+  const claimed = await store.claimMigrationFlag(PARTNER_SENTINEL_KEY);
+  if (!claimed) {
+    return {
+      defaultPartnerCreated: false,
+      customersBackfilled: 0,
+      transfersBackfilled: 0,
+      skippedSentinel: true,
+    };
+  }
+
+  // Step 1: seed Default Partner if missing
+  const existing = await partnerStore.getPartner('default');
+  const defaultPartnerCreated = existing === null;
+  if (defaultPartnerCreated) {
+    const now = new Date().toISOString();
+    await partnerStore.savePartner({
+      id: 'default',
+      name: 'SendHome Default',
+      countries: ['US'],
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  // Step 2: backfill customers — lazy fill populated partnerId; re-save persists
+  let customersBackfilled = 0;
+  for (const c of await customerStore.listCustomers()) {
+    await customerStore.saveCustomer({ ...c, updatedAt: new Date().toISOString() });
+    customersBackfilled++;
+  }
+
+  // Step 3: backfill transfers
+  let transfersBackfilled = 0;
+  for (const t of await store.listTransfers()) {
+    await store.saveTransfer({ ...t });
+    transfersBackfilled++;
+  }
+
+  // Staff records NOT backfilled — partnerId stays optional (= global access).
+  return { defaultPartnerCreated, customersBackfilled, transfersBackfilled, skippedSentinel: false };
 }
