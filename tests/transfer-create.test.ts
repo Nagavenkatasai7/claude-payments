@@ -72,3 +72,19 @@ describe('createTransfer P1: country + currency fields', () => {
     expect(t.destinationCurrency).toBe('INR');
   });
 });
+
+describe('createTransfer P2: partnerId', () => {
+  it('populates partnerId: default on new transfers', async () => {
+    const store = createStore(fakeRedis());
+    const t = await createTransfer(store, {
+      phone: '15551112222',
+      amountUsd: 100,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+    });
+    expect(t.partnerId).toBe('default');
+  });
+});

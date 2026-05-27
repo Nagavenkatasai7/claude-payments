@@ -9,6 +9,7 @@ import {
   DEFAULT_SOURCE_CURRENCY,
   DEFAULT_DESTINATION_COUNTRY,
   DEFAULT_DESTINATION_CURRENCY,
+  DEFAULT_PARTNER_ID,
 } from './defaults';
 
 export interface CreateTransferInput {
@@ -56,6 +57,7 @@ export async function createTransfer(
     sourceCurrency: DEFAULT_SOURCE_CURRENCY,
     destinationCountry: DEFAULT_DESTINATION_COUNTRY,
     destinationCurrency: DEFAULT_DESTINATION_CURRENCY,
+    partnerId: DEFAULT_PARTNER_ID,
   };
   await store.saveTransfer(transfer);
   await store.incrementTransferCount(input.phone);
