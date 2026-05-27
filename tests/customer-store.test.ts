@@ -149,3 +149,57 @@ describe('customer-store P1: senderCountry', () => {
     expect(JSON.parse(raw!).senderCountry).toBeUndefined();
   });
 });
+
+describe('customer-store P2: partnerId', () => {
+  it('upsertOnFirstInbound writes partnerId: default on a brand-new customer', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer } = await cs.upsertOnFirstInbound('15550009999');
+    expect(customer.partnerId).toBe('default');
+  });
+
+  it('upsertOnFirstInbound writes partnerId: default on a grandfathered customer', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    // Pre-seed an old transfer for this phone (simulating pre-P2 data) without
+    // depending on createTransfer (Task 5 hasn't shipped yet).
+    await redis.set('transfer:OLDGRAND', JSON.stringify({
+      id: 'OLDGRAND', phone: '15550008888', amountUsd: 50, feeUsd: 1.99,
+      totalChargeUsd: 51.99, fxRate: 85.2, amountInr: 4260,
+      recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
+      complianceReasons: [], status: 'delivered',
+      createdAt: '2026-04-01T00:00:00Z',
+      sourceCountry: 'US', sourceCurrency: 'USD',
+      destinationCountry: 'IN', destinationCurrency: 'INR',
+      // Note: NO partnerId — simulates pre-P2 record
+    }));
+    await redis.sadd('transfers:ids', 'OLDGRAND');
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer } = await cs.upsertOnFirstInbound('15550008888');
+    expect(customer.partnerId).toBe('default');
+    expect(customer.kycStatus).toBe('grandfathered');
+  });
+
+  it('getCustomer fills missing partnerId in-memory without persisting', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    // Manually write a customer record missing partnerId (simulating pre-P2 data)
+    await redis.set('customer:15550007777', JSON.stringify({
+      senderPhone: '15550007777',
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      kycVerifiedAt: '2026-01-01T00:00:00Z',
+      senderCountry: 'US',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }));
+    const cs = createCustomerStore(redis, store);
+    const c = await cs.getCustomer('15550007777');
+    expect(c?.partnerId).toBe('default');
+    // Verify NO persist happened
+    const raw = await redis.get('customer:15550007777');
+    expect(JSON.parse(raw!).partnerId).toBeUndefined();
+  });
+});
