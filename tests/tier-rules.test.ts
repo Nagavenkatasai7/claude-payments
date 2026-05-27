@@ -13,6 +13,7 @@ function customer(overrides: Partial<Customer> & { firstSeenAt: string }): Custo
     senderPhone: '15551234567',
     kycStatus: 'not_started',
     senderCountry: 'US',
+    partnerId: 'default',
     createdAt: overrides.firstSeenAt,
     updatedAt: overrides.firstSeenAt,
     ...overrides,

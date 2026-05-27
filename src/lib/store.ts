@@ -7,6 +7,7 @@ import {
   DEFAULT_SOURCE_CURRENCY,
   DEFAULT_DESTINATION_COUNTRY,
   DEFAULT_DESTINATION_CURRENCY,
+  DEFAULT_PARTNER_ID,
 } from './defaults';
 
 export interface RedisLike {
@@ -56,13 +57,15 @@ export function createStore(redis: RedisLike) {
       const raw = await redis.get(`transfer:${id}`);
       if (!raw) return null;
       const parsed = JSON.parse(raw) as Transfer;
-      // Lazy fill for pre-P1 records missing the 4 new fields (in-memory only;
-      // the cron pass is the only writer for backfilled records)
+      // Lazy fill for pre-P1/P2 records (in-memory only; cron pass is the only writer)
       if (!parsed.sourceCountry) {
         parsed.sourceCountry = DEFAULT_SOURCE_COUNTRY;
         parsed.sourceCurrency = DEFAULT_SOURCE_CURRENCY;
         parsed.destinationCountry = DEFAULT_DESTINATION_COUNTRY;
         parsed.destinationCurrency = DEFAULT_DESTINATION_CURRENCY;
+      }
+      if (!parsed.partnerId) {
+        parsed.partnerId = DEFAULT_PARTNER_ID;
       }
       return parsed;
     },

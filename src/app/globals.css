@@ -376,3 +376,11 @@ input, select, textarea { font: inherit; color: inherit; }
   background: #fee2e2;
   color: #991b1b;
 }
+.sh-tag-partner-active {
+  background: #dcfce7;
+  color: #166534;
+}
+.sh-tag-partner-suspended {
+  background: #fee2e2;
+  color: #991b1b;
+}

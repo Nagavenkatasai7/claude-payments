@@ -5,6 +5,7 @@ import { requireStaff } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
+import { getPartnerStore } from '@/lib/partner-store';
 import { evaluateCap } from '@/lib/tier-rules';
 import { Sidebar } from '../../sidebar';
 import { markCustomerVerifiedAction, markCustomerRejectedAction } from '../actions';
@@ -24,9 +25,11 @@ export default async function CustomerDetailPage({
   const customer = await customerStore.getCustomer(phone);
   if (!customer) notFound();
 
-  const [transfers, todayUsedCents] = await Promise.all([
+  const partnerStore = getPartnerStore();
+  const [transfers, todayUsedCents, partner] = await Promise.all([
     store.listTransfers(),
     dailyVolumeStore.getTodayCents(phone),
+    partnerStore.getPartner(customer.partnerId),
   ]);
   const mine = transfers
     .filter((t) => t.phone === phone)
@@ -59,6 +62,7 @@ export default async function CustomerDetailPage({
               <dt>Status</dt><dd>{customer.kycStatus}</dd>
               <dt>Verified at</dt><dd>{customer.kycVerifiedAt ?? '—'}</dd>
               <dt>Country</dt><dd>{customer.senderCountry}</dd>
+              <dt>Partner</dt><dd>{partner ? partner.name : customer.partnerId}</dd>
               <dt>Provider ref</dt><dd>{customer.kycProviderRef ?? '—'}</dd>
               <dt>Full name</dt><dd>{customer.fullName ?? '—'}</dd>
               <dt>DOB</dt><dd>{customer.dateOfBirth ?? '—'}</dd>

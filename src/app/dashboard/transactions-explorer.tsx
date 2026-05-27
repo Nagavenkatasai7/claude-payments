@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { Staff, Tier, Transfer } from '@/lib/types';
+import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { TransactionsTabs } from './transactions-tabs';
 
 export interface TransactionsExplorerProps {
@@ -9,6 +9,8 @@ export interface TransactionsExplorerProps {
   staff: Staff[];
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
+  partnerById: Record<string, Partner>;
+  currentPartner: string;
   canCancel: boolean;
   canResend: boolean;
   canAssign: boolean;
@@ -37,6 +39,15 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
     return true;
   });
 
+  const partnerOptions = Object.values(props.partnerById);
+
+  function onPartnerChange(value: string) {
+    const url = new URL(window.location.href);
+    if (value) url.searchParams.set('partner', value);
+    else url.searchParams.delete('partner');
+    window.location.href = url.toString();
+  }
+
   return (
     <>
       <div
@@ -49,6 +60,29 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
           alignItems: 'center',
         }}
       >
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            fontSize: 12,
+            color: 'var(--sh-text-secondary)',
+          }}
+        >
+          Partner
+          <select
+            value={props.currentPartner ?? ''}
+            onChange={(e) => onPartnerChange(e.target.value)}
+            className="sh-input"
+          >
+            <option value="">All partners</option>
+            {partnerOptions.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <input
           type="text"
           placeholder="Search recipient, destination, or sender phone…"
@@ -97,6 +131,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
         staff={props.staff}
         staffByUsername={props.staffByUsername}
         tierByPhone={props.tierByPhone}
+        partnerById={props.partnerById}
         canCancel={props.canCancel}
         canResend={props.canResend}
         canAssign={props.canAssign}

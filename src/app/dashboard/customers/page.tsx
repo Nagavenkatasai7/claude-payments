@@ -4,9 +4,10 @@ import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
+import { getPartnerStore } from '@/lib/partner-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
-import type { Customer, Tier } from '@/lib/types';
+import type { Customer, Partner, Tier } from '@/lib/types';
 
 function tierBadge(tier: Tier): string {
   if (tier === 'T0') return 'sh-tag sh-tag-tier-t0';
@@ -23,15 +24,30 @@ function tierLabel(tier: Tier, c: Customer, now: Date): string {
   return tier;
 }
 
-export default async function CustomersPage() {
+export default async function CustomersPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ partner?: string }>;
+}) {
   await requireStaff();
   const store = getStore();
   const customerStore = getCustomerStore(store);
-  const [customers, transfers] = await Promise.all([
+  const partnerStore = getPartnerStore();
+  const [customers, transfers, partners] = await Promise.all([
     customerStore.listCustomers(),
     store.listTransfers(),
+    partnerStore.listPartners(),
   ]);
   const now = new Date();
+
+  const partnerById: Record<string, Partner> = {};
+  for (const p of partners) partnerById[p.id] = p;
+
+  const params = await searchParams;
+  const partnerFilter = String(params.partner ?? '');
+  const filteredCustomers = partnerFilter
+    ? customers.filter((c) => c.partnerId === partnerFilter)
+    : customers;
 
   // Lifetime sent per phone
   const lifetimeByPhone = new Map<string, { count: number; cents: number; lastAt?: string }>();
@@ -44,7 +60,7 @@ export default async function CustomersPage() {
   }
 
   // Sort: most-recently-active first
-  const rows = customers
+  const rows = filteredCustomers
     .map((c) => ({ c, life: lifetimeByPhone.get(c.senderPhone) ?? { count: 0, cents: 0 } }))
     .sort((a, b) => {
       const aAt = a.life.lastAt ?? a.c.createdAt;
@@ -67,6 +83,38 @@ export default async function CustomersPage() {
           </div>
         </div>
         <section className="sh-card">
+          <form
+            method="get"
+            style={{
+              display: 'flex',
+              gap: 10,
+              padding: '16px 20px',
+              borderBottom: '1px solid var(--sh-border)',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+            }}
+          >
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                fontSize: 12,
+                color: 'var(--sh-text-secondary)',
+              }}
+            >
+              Partner
+              <select name="partner" defaultValue={partnerFilter} className="sh-input">
+                <option value="">All partners</option>
+                {Object.values(partnerById).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="submit" className="sh-btn-secondary">Apply</button>
+          </form>
           <div className="sh-ledger-wrap">
             {rows.length === 0 ? (
               <div className="sh-empty">No customers yet.</div>
@@ -75,6 +123,7 @@ export default async function CustomersPage() {
                 <thead>
                   <tr>
                     <th>Phone</th>
+                    <th>Partner</th>
                     <th>Country</th>
                     <th>First seen</th>
                     <th>Tier</th>
@@ -93,6 +142,7 @@ export default async function CustomersPage() {
                             +{c.senderPhone}
                           </Link>
                         </td>
+                        <td>{partnerById[c.partnerId]?.name ?? c.partnerId}</td>
                         <td>{c.senderCountry}</td>
                         <td>{new Date(c.firstSeenAt).toLocaleDateString()}</td>
                         <td>

@@ -3,8 +3,9 @@ import { env } from '@/lib/env';
 import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
 import { getCustomerStore } from '@/lib/customer-store';
+import { getPartnerStore } from '@/lib/partner-store';
 import { runDueSchedules } from '@/lib/cron-run';
-import { backfillCustomersOnce, backfillCountryCurrencyOnce } from '@/lib/migration';
+import { backfillCustomersOnce, backfillCountryCurrencyOnce, backfillPartnersOnce } from '@/lib/migration';
 import { sendText } from '@/lib/whatsapp';
 
 export const maxDuration = 300;
@@ -20,10 +21,12 @@ export async function GET(req: NextRequest) {
 
   const store = getStore();
   const customerStore = getCustomerStore(store);
+  const partnerStore = getPartnerStore();
 
   // Idempotent backfills — sentinel-guarded.
   const backfill = await backfillCustomersOnce(store, customerStore);
   const countryCurrencyBackfill = await backfillCountryCurrencyOnce(store, customerStore);
+  const partnerBackfill = await backfillPartnersOnce(store, customerStore, partnerStore);
 
   const result = await runDueSchedules({
     store,
@@ -52,5 +55,6 @@ export async function GET(req: NextRequest) {
     fired: result.fired,
     backfill,
     countryCurrencyBackfill,
+    partnerBackfill,          // NEW (P2)
   });
 }

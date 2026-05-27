@@ -46,6 +46,7 @@ export interface Transfer {
   sourceCurrency: CurrencyCode;
   destinationCountry: CountryCode;
   destinationCurrency: CurrencyCode;
+  partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
 }
 
 export interface ToolCall {
@@ -107,6 +108,7 @@ export interface Staff {
   permissions: StaffPermissions;
   passwordHash: string;
   createdAt: string;
+  partnerId?: PartnerId;        // NEW (P2) — OPTIONAL: undefined = global admin; set = scoped (P3 enforces)
 }
 
 export interface Recipient {
@@ -169,7 +171,8 @@ export interface Customer {
   fullName?: string;
   dateOfBirth?: string;
   country?: string;             // legacy KYC-provider free-text — DO NOT use for routing
-  senderCountry: CountryCode;   // NEW (P1) — required; the routing field
+  senderCountry: CountryCode;   // (P1) the routing field
+  partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
   createdAt: string;
   updatedAt: string;
 }
@@ -222,3 +225,28 @@ export const DEFAULT_CURRENCY_FOR_COUNTRY: Record<CountryCode, CurrencyCode> = {
   NZ: 'NZD',
   IN: 'INR',
 };
+
+// ── Partner entity (P2) ───────────────────────────────────────────────
+//
+// `partnerId` introduces the multi-tenant boundary. Every Customer and
+// Transfer belongs to a Partner. Staff `partnerId` is optional — undefined
+// means global admin (sees all partners' data). P3 will enforce sub-admin
+// auth scoping; P2 just establishes the data field.
+
+export type PartnerId = string;  // 'default' or newTransferId() output
+
+export type PartnerStatus = 'active' | 'suspended';
+
+export interface Partner {
+  id: PartnerId;
+  name: string;                       // staff-facing display name
+  countries: CountryCode[];           // which Phase-1 countries this partner operates in
+  status: PartnerStatus;
+  // Whitelabel placeholders — optional until a real partner needs them.
+  brandName?: string;                 // end-customer-facing brand (NOT used in P2; future whitelabel)
+  primaryColor?: string;              // hex string e.g. '#1a73e8'
+  logoUrl?: string;                   // CDN URL
+  adminNote?: string;                 // internal staff annotation
+  createdAt: string;
+  updatedAt: string;
+}

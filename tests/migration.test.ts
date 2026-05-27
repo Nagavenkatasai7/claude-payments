@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { backfillCustomersOnce, backfillCountryCurrencyOnce } from '@/lib/migration';
+import { backfillCustomersOnce, backfillCountryCurrencyOnce, backfillPartnersOnce } from '@/lib/migration';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
+import { createPartnerStore } from '@/lib/partner-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
@@ -64,6 +65,7 @@ describe('backfillCustomersOnce', () => {
       senderCountry: 'US' as const,
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-02T00:00:00Z',
+      partnerId: 'default' as const,
     });
     await backfillCustomersOnce(store, cs);
     const c = await cs.getCustomer('15551111111');
@@ -186,5 +188,110 @@ describe('backfillCountryCurrencyOnce', () => {
     await backfillCountryCurrencyOnce(store, cs);
     const raw = JSON.parse((await redis.get('customer:15554444444'))!);
     expect(raw.senderCountry).toBe('CA'); // unchanged
+  });
+});
+
+describe('backfillPartnersOnce', () => {
+  it('seeds the Default Partner when no partner exists', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ps = createPartnerStore(redis);
+    const result = await backfillPartnersOnce(store, cs, ps);
+    expect(result.defaultPartnerCreated).toBe(true);
+    expect(result.skippedSentinel).toBe(false);
+    const p = await ps.getPartner('default');
+    expect(p?.name).toBe('SendHome Default');
+    expect(p?.countries).toEqual(['US']);
+    expect(p?.status).toBe('active');
+  });
+
+  it('does NOT recreate Default Partner if it already exists (preserves edits)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ps = createPartnerStore(redis);
+    // Pre-existing default with a custom name
+    await ps.savePartner({
+      id: 'default',
+      name: 'Custom Renamed Default',
+      countries: ['US', 'CA'],
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const result = await backfillPartnersOnce(store, cs, ps);
+    expect(result.defaultPartnerCreated).toBe(false);
+    const p = await ps.getPartner('default');
+    expect(p?.name).toBe('Custom Renamed Default');  // unchanged
+  });
+
+  it('backfills partnerId on existing customers + transfers', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ rates: { INR: 85.2 } }),
+    }));
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ps = createPartnerStore(redis);
+
+    // Pre-P2 customer (missing partnerId)
+    await redis.set('customer:15551111111', JSON.stringify({
+      senderPhone: '15551111111',
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }));
+    await redis.sadd('customers:phones', '15551111111');
+
+    // Pre-P2 transfer
+    await redis.set('transfer:OLDPART1', JSON.stringify({
+      id: 'OLDPART1',
+      phone: '15551111111',
+      amountUsd: 100,
+      feeUsd: 1.99,
+      totalChargeUsd: 101.99,
+      fxRate: 85.2,
+      amountInr: 8520,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared',
+      complianceReasons: [],
+      status: 'delivered',
+      createdAt: '2026-04-01T00:00:00Z',
+      sourceCountry: 'US',
+      sourceCurrency: 'USD',
+      destinationCountry: 'IN',
+      destinationCurrency: 'INR',
+    }));
+    await redis.sadd('transfers:ids', 'OLDPART1');
+
+    const result = await backfillPartnersOnce(store, cs, ps);
+    expect(result.customersBackfilled).toBe(1);
+    expect(result.transfersBackfilled).toBe(1);
+
+    const rawC = JSON.parse((await redis.get('customer:15551111111'))!);
+    expect(rawC.partnerId).toBe('default');
+    const rawT = JSON.parse((await redis.get('transfer:OLDPART1'))!);
+    expect(rawT.partnerId).toBe('default');
+  });
+
+  it('is idempotent — second call returns skippedSentinel: true and changes nothing', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ps = createPartnerStore(redis);
+    const first = await backfillPartnersOnce(store, cs, ps);
+    const second = await backfillPartnersOnce(store, cs, ps);
+    expect(first.skippedSentinel).toBe(false);
+    expect(second.skippedSentinel).toBe(true);
+    expect(second.defaultPartnerCreated).toBe(false);
+    expect(second.customersBackfilled).toBe(0);
+    expect(second.transfersBackfilled).toBe(0);
   });
 });

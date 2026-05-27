@@ -97,3 +97,64 @@ describe('store.getTransfer P1: lazy fill', () => {
     expect(t?.sourceCurrency).toBe('CAD');
   });
 });
+
+describe('store.getTransfer P2: partnerId lazy fill', () => {
+  it('returns partnerId: default for old records missing it', async () => {
+    const redis = fakeRedis();
+    await redis.set('transfer:OLDP2A', JSON.stringify({
+      id: 'OLDP2A',
+      phone: '15551234567',
+      amountUsd: 100,
+      feeUsd: 1.99,
+      totalChargeUsd: 101.99,
+      fxRate: 85.2,
+      amountInr: 8520,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared',
+      complianceReasons: [],
+      status: 'delivered',
+      createdAt: '2026-04-01T00:00:00Z',
+      sourceCountry: 'US',
+      sourceCurrency: 'USD',
+      destinationCountry: 'IN',
+      destinationCurrency: 'INR',
+    }));
+    const store = createStore(redis);
+    const t = await store.getTransfer('OLDP2A');
+    expect(t?.partnerId).toBe('default');
+  });
+
+  it('does NOT persist the partnerId lazy fill', async () => {
+    const redis = fakeRedis();
+    await redis.set('transfer:OLDP2B', JSON.stringify({
+      id: 'OLDP2B',
+      phone: '15551234567',
+      amountUsd: 100,
+      feeUsd: 1.99,
+      totalChargeUsd: 101.99,
+      fxRate: 85.2,
+      amountInr: 8520,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared',
+      complianceReasons: [],
+      status: 'delivered',
+      createdAt: '2026-04-01T00:00:00Z',
+      sourceCountry: 'US',
+      sourceCurrency: 'USD',
+      destinationCountry: 'IN',
+      destinationCurrency: 'INR',
+    }));
+    const store = createStore(redis);
+    await store.getTransfer('OLDP2B');
+    const raw = await redis.get('transfer:OLDP2B');
+    expect(JSON.parse(raw!).partnerId).toBeUndefined();
+  });
+});

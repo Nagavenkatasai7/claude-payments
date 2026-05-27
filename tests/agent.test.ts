@@ -155,6 +155,7 @@ describe('createAgent', () => {
       sourceCurrency: 'USD',
       destinationCountry: 'IN',
       destinationCurrency: 'INR',
+      partnerId: 'default',
     });
 
     const agent = createAgent({
@@ -217,6 +218,7 @@ describe('createAgent', () => {
       sourceCurrency: 'USD',
       destinationCountry: 'IN',
       destinationCurrency: 'INR',
+      partnerId: 'default',
     });
 
     let call = 0;
