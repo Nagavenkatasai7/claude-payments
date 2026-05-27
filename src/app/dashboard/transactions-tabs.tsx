@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { Staff, Tier, Transfer } from '@/lib/types';
+import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 
 const TABS = [
   { key: 'all', label: 'All' },
@@ -71,6 +71,7 @@ export interface TransactionsTabsProps {
   staff: Staff[];
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
+  partnerById: Record<string, Partner>;
   canCancel: boolean;
   canResend: boolean;
   canAssign: boolean;
@@ -90,6 +91,7 @@ export function TransactionsTabs({
   staff,
   staffByUsername,
   tierByPhone,
+  partnerById,
   canCancel,
   canResend,
   canAssign,
@@ -132,6 +134,7 @@ export function TransactionsTabs({
               <tr>
                 <th>Recipient</th>
                 <th>Country</th>
+                <th>Partner</th>
                 <th>Tier</th>
                 <th>Amount</th>
                 <th>Funding</th>
@@ -153,6 +156,7 @@ export function TransactionsTabs({
                     </div>
                   </td>
                   <td>{t.sourceCountry}</td>
+                  <td>{partnerById[t.partnerId]?.name ?? t.partnerId}</td>
                   <td>
                     {tierByPhone[t.phone] ? (
                       <span className={tierBadgeClass(tierByPhone[t.phone])}>
