@@ -102,7 +102,9 @@ export function complianceDistribution(
   }
   return Array.from(counts.entries())
     .map(([status, count]) => ({ status, count }))
-    .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status));
+    // `?? ''` defends against legacy transfers whose complianceStatus was never
+    // set, which become an undefined map key and then an undefined sort field.
+    .sort((a, b) => b.count - a.count || (a.status ?? '').localeCompare(b.status ?? ''));
 }
 
 export function fundingMethodMix(
@@ -114,7 +116,9 @@ export function fundingMethodMix(
   }
   return Array.from(counts.entries())
     .map(([method, count]) => ({ method, count }))
-    .sort((a, b) => b.count - a.count || a.method.localeCompare(b.method));
+    // Same defensive coercion as statusDistribution — legacy transfers may
+    // be missing fundingMethod, which would throw under sort.
+    .sort((a, b) => b.count - a.count || (a.method ?? '').localeCompare(b.method ?? ''));
 }
 
 export function topRecipientsByCount(
@@ -127,6 +131,9 @@ export function topRecipientsByCount(
   }
   return Array.from(counts.entries())
     .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    // `?? ''` mirrors the defensive coercion in store.listTransfers — legacy
+    // transfers may carry an undefined `recipientName`, which becomes the map
+    // key here and then the sort `name`. See store-listTransfers-legacy.test.
+    .sort((a, b) => b.count - a.count || (a.name ?? '').localeCompare(b.name ?? ''))
     .slice(0, limit);
 }

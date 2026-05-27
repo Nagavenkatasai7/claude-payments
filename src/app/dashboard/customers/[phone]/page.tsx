@@ -33,7 +33,9 @@ export default async function CustomerDetailPage({
   ]);
   const mine = transfers
     .filter((t) => t.phone === phone)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // `?? ''` defends against legacy transfers missing createdAt — see
+    // store.listTransfers for the canonical pattern.
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
   const now = new Date();
   const capEval = evaluateCap(customer, now, todayUsedCents, 0);
 
