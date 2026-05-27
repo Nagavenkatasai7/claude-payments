@@ -33,7 +33,9 @@ export default async function PartnerDetailPage({
   const transfers = await store.listTransfers();
   const mine = transfers
     .filter((t) => t.partnerId === id)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // `?? ''` defends against legacy transfers missing createdAt — see
+    // store.listTransfers for the canonical pattern.
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
   const lifetimeCents = mine.reduce(
     (sum, t) => sum + Math.round(t.amountUsd * 100),
     0,

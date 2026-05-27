@@ -63,8 +63,10 @@ export default async function CustomersPage({
   const rows = filteredCustomers
     .map((c) => ({ c, life: lifetimeByPhone.get(c.senderPhone) ?? { count: 0, cents: 0 } }))
     .sort((a, b) => {
-      const aAt = a.life.lastAt ?? a.c.createdAt;
-      const bAt = b.life.lastAt ?? b.c.createdAt;
+      // `?? ''` final fallback so a customer with neither a transfer nor a
+      // populated createdAt sorts to the bottom rather than crashing the page.
+      const aAt = a.life.lastAt ?? a.c.createdAt ?? '';
+      const bAt = b.life.lastAt ?? b.c.createdAt ?? '';
       return bAt.localeCompare(aAt);
     });
 

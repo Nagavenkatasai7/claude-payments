@@ -80,7 +80,11 @@ export function createStore(redis: RedisLike) {
       const all = await Promise.all(ids.map((id) => this.getTransfer(id)));
       return all
         .filter((t): t is Transfer => t !== null)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        // `?? ''` defends against legacy records whose `createdAt` was never
+        // populated (a real prod artifact that crashed the analytics page on
+        // 2026-05-27). Treating them as the earliest record is the right
+        // ordering — they sort to the bottom of the newest-first list.
+        .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
     },
     async getTransferCount(phone: string): Promise<number> {
       const raw = await redis.get(`count:${phone}`);
@@ -128,7 +132,9 @@ export function createStore(redis: RedisLike) {
           // skip malformed entries; never throw
         }
       }
-      parsed.sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt));
+      // `?? ''` defends against legacy recipients whose lastUsedAt was never
+      // populated — mirrors the same guard on listTransfers.
+      parsed.sort((a, b) => (b.lastUsedAt ?? '').localeCompare(a.lastUsedAt ?? ''));
       return parsed.slice(0, limit);
     },
     async getLastInboundAt(senderPhone: string): Promise<string | null> {
