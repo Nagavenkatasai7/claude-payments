@@ -26,6 +26,7 @@ describe('customer store', () => {
       senderCountry: 'US' as const,
       createdAt: '2026-05-24T12:00:00Z',
       updatedAt: '2026-05-24T12:00:00Z',
+      partnerId: 'default' as const,
     };
     await cs.saveCustomer(c);
     expect(await cs.getCustomer(PHONE)).toEqual(c);

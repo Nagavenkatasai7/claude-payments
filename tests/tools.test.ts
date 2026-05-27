@@ -467,6 +467,7 @@ describe('create_transfer — daily volume increment', () => {
       senderCountry: 'US',
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
+      partnerId: 'default',
     });
     await executeTool('create_transfer', {
       amount_usd: 100,

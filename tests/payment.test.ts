@@ -30,6 +30,7 @@ function awaitingTransfer(): Transfer {
     sourceCurrency: 'USD',
     destinationCountry: 'IN',
     destinationCurrency: 'INR',
+    partnerId: 'default',
   };
 }
 
