@@ -520,6 +520,9 @@ async function createScheduleTool(
       return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
     }
   }
+  // Look up the owner's partnerId — required on every new schedule (P3).
+  const owner = await ctx.customerStore.getCustomer(ctx.phone);
+  const partnerId = owner?.partnerId ?? DEFAULT_PARTNER_ID;
   const schedule: Schedule = {
     id: newTransferId(),
     phone: ctx.phone,
@@ -534,7 +537,7 @@ async function createScheduleTool(
     dayOfWeek,
     status: 'active',
     createdAt: new Date().toISOString(),
-    partnerId: DEFAULT_PARTNER_ID,   // P3 task 4 will derive this from the owning customer
+    partnerId,
   };
   await ctx.scheduleStore.saveSchedule(schedule);
   return {
