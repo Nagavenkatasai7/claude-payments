@@ -35,11 +35,32 @@ describe('getFxRates', () => {
     await getFxRates('GBP');
     await getFxRates('GBP');
     expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1); // GBP cached
+    await getFxRates('CAD'); // a distinct currency must trigger its own fetch
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(2);
   });
 
   it('falls back to the per-currency table on fetch failure with no cache', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
     const r = await getFxRates('AED');
     expect(r).toEqual(FALLBACK_FX_RATES.AED);
+  });
+
+  it('falls back (no NaN cached) when a 200 response omits INR', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.27 } }) }));
+    const r = await getFxRates('GBP');
+    expect(r).toEqual(FALLBACK_FX_RATES.GBP);
+  });
+
+  it('serves stale cached rates when a non-USD re-fetch fails after TTL', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.27, INR: 108 } }) }));
+      expect(await getFxRates('GBP')).toEqual({ toInr: 108, toUsd: 1.27 });
+      vi.advanceTimersByTime(3_600_001);
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+      expect(await getFxRates('GBP')).toEqual({ toInr: 108, toUsd: 1.27 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

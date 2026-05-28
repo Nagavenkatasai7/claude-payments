@@ -17,7 +17,7 @@ export const FALLBACK_FX_RATES: Record<CurrencyCode, FxRates> = {
   SGD: { toInr: 63, toUsd: 0.74 },
   AUD: { toInr: 56, toUsd: 0.66 },
   NZD: { toInr: 51, toUsd: 0.6 },
-  INR: { toInr: 1, toUsd: 0.0118 }, // never a source currency; present for type completeness
+  INR: { toInr: 1, toUsd: 0.0118 }, // ≈ 1/85, consistent with FALLBACK_FX_RATE; never a source currency, present for type completeness
 };
 
 const CACHE_TTL_MS = 3_600_000; // 1 hour
@@ -42,11 +42,22 @@ export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
     const to = source === 'USD' ? 'INR' : 'USD,INR';
     const res = await fetch(`https://api.frankfurter.app/latest?from=${source}&to=${to}`);
     if (!res.ok) return cached ? cached.rates : FALLBACK_FX_RATES[source];
-    const data = (await res.json()) as { rates: { USD?: number; INR: number } };
-    const rates: FxRates = {
-      toInr: data.rates.INR,
-      toUsd: source === 'USD' ? 1 : data.rates.USD ?? FALLBACK_FX_RATES[source].toUsd,
-    };
+    const data = (await res.json()) as { rates: { USD?: number; INR?: number } };
+    const inr = data.rates.INR;
+    if (typeof inr !== 'number' || !Number.isFinite(inr)) {
+      // Malformed 200 (missing INR) — treat as a failure; never cache NaN.
+      return cached ? cached.rates : FALLBACK_FX_RATES[source];
+    }
+    let toUsd: number;
+    if (source === 'USD') {
+      toUsd = 1;
+    } else if (typeof data.rates.USD === 'number' && Number.isFinite(data.rates.USD)) {
+      toUsd = data.rates.USD;
+    } else {
+      console.warn(`getFxRates(${source}): USD rate missing in response; using fallback toUsd`);
+      toUsd = FALLBACK_FX_RATES[source].toUsd;
+    }
+    const rates: FxRates = { toInr: inr, toUsd };
     cache.set(source, { rates, fetchedAt: now });
     return rates;
   } catch {
