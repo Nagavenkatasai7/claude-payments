@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic';
 
-import { getStore } from '@/lib/store';
-import { requireStaff } from '@/lib/auth';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import { topVelocityToday } from '@/lib/dashboard';
 import { WATCHLIST } from '@/lib/compliance';
 import { Sidebar } from '../sidebar';
@@ -35,8 +35,9 @@ function TransferRow({ t }: { t: Transfer }) {
 }
 
 export default async function CompliancePage() {
-  await requireStaff();
-  const transfers = await getStore().listTransfers();
+  const { staff } = await requireScope();
+  const scoped = createScopedStore(staff);
+  const transfers = await scoped.listTransfers();
   const flagged = transfers.filter((t) => t.complianceStatus === 'flagged');
   const blocked = transfers.filter((t) => t.complianceStatus === 'blocked');
   const topVel = topVelocityToday(transfers, Date.now(), 10);

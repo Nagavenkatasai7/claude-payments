@@ -1,9 +1,8 @@
 export const dynamic = 'force-dynamic';
 
 import { notFound } from 'next/navigation';
-import { requireStaff } from '@/lib/auth';
-import { getStore } from '@/lib/store';
-import { getPartnerStore } from '@/lib/partner-store';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { Sidebar } from '../../sidebar';
 import {
@@ -27,16 +26,15 @@ export default async function PartnerDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const staff = await requireStaff();
+  const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
   const { id } = await params;
 
-  const store = getStore();
-  const partnerStore = getPartnerStore();
-  const partner = await partnerStore.getPartner(id);
+  const scoped = createScopedStore(staff);
+  const partner = await scoped.getPartner(id);
   if (!partner) notFound();
 
-  const transfers = await store.listTransfers();
+  const transfers = await scoped.listTransfers();
   const mine = transfers
     .filter((t) => t.partnerId === id)
     // `?? ''` defends against legacy transfers missing createdAt — see

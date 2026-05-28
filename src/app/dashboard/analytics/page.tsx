@@ -1,8 +1,8 @@
 export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
-import { getStore } from '@/lib/store';
-import { requireStaff } from '@/lib/auth';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import {
   WINDOW_DAYS,
   type WindowDays,
@@ -40,12 +40,13 @@ export default async function AnalyticsPage({
 }: {
   searchParams: Promise<{ window?: string }>;
 }) {
-  await requireStaff();
+  const { staff } = await requireScope();
+  const scoped = createScopedStore(staff);
   const params = await searchParams;
   const windowDays = coerceWindow(params.window);
   const now = Date.now();
 
-  const allTransfers = await getStore().listTransfers();
+  const allTransfers = await scoped.listTransfers();
   const inWindow = transfersInWindow(allTransfers, now, windowDays);
 
   const counts = dailyCounts(allTransfers, now, windowDays);

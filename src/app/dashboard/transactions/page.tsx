@@ -1,10 +1,8 @@
 export const dynamic = 'force-dynamic';
 
-import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
-import { getCustomerStore } from '@/lib/customer-store';
-import { getPartnerStore } from '@/lib/partner-store';
-import { requireStaff } from '@/lib/auth';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import { hasPermission } from '@/lib/permissions';
 import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
@@ -21,15 +19,13 @@ export default async function TransactionsPage({
 }: {
   searchParams: Promise<{ phone?: string; partner?: string }>;
 }) {
-  const viewer = await requireStaff();
-  const store = getStore();
-  const customerStore = getCustomerStore(store);
-  const partnerStore = getPartnerStore();
-  const [transfers, staff, customers, partners] = await Promise.all([
-    store.listTransfers(),
+  const { staff: viewer } = await requireScope();
+  const scoped = createScopedStore(viewer);
+  const [transfers, allStaff, customers, partners] = await Promise.all([
+    scoped.listTransfers(),
     getAuthStore().listStaff(),
-    customerStore.listCustomers(),
-    partnerStore.listPartners(),
+    scoped.listCustomers(),
+    scoped.listPartners(),
   ]);
   const now = new Date();
   const tierByPhone: Record<string, Tier> = {};
@@ -58,9 +54,9 @@ export default async function TransactionsPage({
         <section className="sh-card">
           <TransactionsExplorer
             transfers={filteredTransfers}
-            staff={staff}
+            staff={allStaff}
             staffByUsername={Object.fromEntries(
-              staff.map((s) => [s.username, s.name]),
+              allStaff.map((s) => [s.username, s.name]),
             )}
             tierByPhone={tierByPhone}
             partnerById={partnerById}
