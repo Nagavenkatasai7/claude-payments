@@ -60,6 +60,7 @@ docs/
 ## Working conventions
 
 - **Server actions** in `src/app/dashboard/actions.ts` etc. are imported by client components — server actions can cross the server→client boundary, **plain functions cannot** (we've been bitten by this; design accordingly).
+- **Server-action security checklist (mandatory).** Every server action is a public POST endpoint; page-level gating does NOT protect it (a partner-admin can `curl` it directly). P3 caught three holes of this exact shape at review. Each server action MUST: (1) call its own `require*` auth gate (`requirePlatformAdmin` / `requireScope`), never trusting the calling page; (2) verify the target entity exists and is in scope before mutating; (3) check for collisions before any create (`saveX` is an unconditional SET — guard against silent overwrite/hijack); (4) treat URL/path params as authoritative over form fields for ownership (`partnerId` from the route, not the body).
 - **Pure helpers** (`fx.ts`, `compliance.ts`, `dashboard.ts`, `analytics.ts`, `transfer-create.ts`, etc.) are TDD'd; UI pages are not unit-tested.
 - **Live updates** on every dashboard page via `<LiveRefresh>` in the layout's TopBar; pages are `export const dynamic = 'force-dynamic'`; sidebar uses `next/link` for soft navigation so the polling timer stays continuous.
 - **CSS** lives entirely in `src/app/globals.css` with two scopes: the `sh-*` Stripe-style theme (login + dashboard) and a legacy `.payapp`-scoped WhatsApp-dark theme (preserved for the pay page).

@@ -46,10 +46,16 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
 });
 
 test('partner-scoped staff is restricted to their partner', async ({ page }) => {
-  test.skip(
-    !PARTNER_USERNAME || !PARTNER_PASSWORD || !PARTNER_ID,
-    'partner-seed env vars not configured',
-  );
+  const partnerEnvMissing = !PARTNER_USERNAME || !PARTNER_PASSWORD || !PARTNER_ID;
+  // Fail loud in CI: a missing partner-seed secret is a misconfiguration, not a
+  // reason to silently pass the most security-sensitive smoke check. Skip only
+  // for local runs where the operator hasn't wired up a partner account.
+  if (partnerEnvMissing && process.env.CI) {
+    throw new Error(
+      'E2E_PARTNER_USERNAME/_PASSWORD/_ID must be set in CI — partner-isolation smoke cannot be skipped.',
+    );
+  }
+  test.skip(partnerEnvMissing, 'partner-seed env vars not configured (local run)');
 
   await page.goto('/login');
   await page.getByLabel(/username/i).fill(PARTNER_USERNAME);

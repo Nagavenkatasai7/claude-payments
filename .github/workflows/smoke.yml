@@ -29,9 +29,13 @@ jobs:
         # land on an SSO page instead of /login. The alias is the unprotected
         # public URL we actually want to verify.
         env:
+          CI: 'true'
           BASE_URL: https://claude-payments.vercel.app
           E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          E2E_PARTNER_USERNAME: ${{ secrets.E2E_PARTNER_USERNAME }}
+          E2E_PARTNER_PASSWORD: ${{ secrets.E2E_PARTNER_PASSWORD }}
+          E2E_PARTNER_ID: ${{ secrets.E2E_PARTNER_ID }}
         run: npm run e2e
 
       - name: Upload trace on failure
