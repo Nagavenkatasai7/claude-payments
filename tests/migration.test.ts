@@ -1,8 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { backfillCustomersOnce, backfillCountryCurrencyOnce, backfillPartnersOnce } from '@/lib/migration';
+import {
+  backfillCustomersOnce,
+  backfillCountryCurrencyOnce,
+  backfillPartnersOnce,
+  backfillSchedulesOnce,
+} from '@/lib/migration';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createScheduleStore } from '@/lib/schedule-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
@@ -293,5 +299,122 @@ describe('backfillPartnersOnce', () => {
     expect(second.defaultPartnerCreated).toBe(false);
     expect(second.customersBackfilled).toBe(0);
     expect(second.transfersBackfilled).toBe(0);
+  });
+});
+
+describe('backfillSchedulesOnce', () => {
+  it('writes partnerId to every legacy schedule (from owning customer)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ss = createScheduleStore(redis, cs);
+
+    // Owning customer with partnerId: 'acme'
+    await cs.saveCustomer({
+      senderPhone: '15551112222',
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'acme',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+    // Legacy schedule, no partnerId on disk
+    await redis.set('schedule:OLDSCH1', JSON.stringify({
+      id: 'OLDSCH1',
+      phone: '15551112222',
+      amountUsd: 100,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+      frequency: 'monthly',
+      dayOfMonth: 2,
+      status: 'active',
+      createdAt: '2026-04-01T00:00:00Z',
+    }));
+    await redis.sadd('schedules:ids', 'OLDSCH1');
+
+    const result = await backfillSchedulesOnce(store, cs, ss);
+    expect(result.schedulesBackfilled).toBe(1);
+    expect(result.skippedSentinel).toBe(false);
+
+    const raw = JSON.parse((await redis.get('schedule:OLDSCH1'))!);
+    expect(raw.partnerId).toBe('acme');
+  });
+
+  it('falls back to default when owning customer is missing (defensive)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ss = createScheduleStore(redis, cs);
+    await redis.set('schedule:OLDSCH2', JSON.stringify({
+      id: 'OLDSCH2',
+      phone: '15559999999',                // orphan phone — no Customer record
+      amountUsd: 100,
+      recipientName: 'X',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'x@upi',
+      fundingMethod: 'bank_transfer',
+      frequency: 'monthly',
+      dayOfMonth: 2,
+      status: 'active',
+      createdAt: '2026-04-01T00:00:00Z',
+    }));
+    await redis.sadd('schedules:ids', 'OLDSCH2');
+
+    await backfillSchedulesOnce(store, cs, ss);
+    const raw = JSON.parse((await redis.get('schedule:OLDSCH2'))!);
+    expect(raw.partnerId).toBe('default');
+  });
+
+  it('is idempotent — second call returns skippedSentinel: true and changes nothing', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ss = createScheduleStore(redis, cs);
+    const first = await backfillSchedulesOnce(store, cs, ss);
+    const second = await backfillSchedulesOnce(store, cs, ss);
+    expect(first.skippedSentinel).toBe(false);
+    expect(second.skippedSentinel).toBe(true);
+    expect(second.schedulesBackfilled).toBe(0);
+  });
+
+  it('does NOT overwrite an existing partnerId on a schedule', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const ss = createScheduleStore(redis, cs);
+    await cs.saveCustomer({
+      senderPhone: '15551112222',
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'acme',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await redis.set('schedule:KEEPME', JSON.stringify({
+      id: 'KEEPME',
+      phone: '15551112222',
+      amountUsd: 100,
+      recipientName: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer',
+      frequency: 'monthly',
+      dayOfMonth: 2,
+      status: 'active',
+      createdAt: '2026-04-01T00:00:00Z',
+      partnerId: 'beta',               // already explicit — must be preserved
+    }));
+    await redis.sadd('schedules:ids', 'KEEPME');
+
+    await backfillSchedulesOnce(store, cs, ss);
+    const raw = JSON.parse((await redis.get('schedule:KEEPME'))!);
+    expect(raw.partnerId).toBe('beta');
   });
 });

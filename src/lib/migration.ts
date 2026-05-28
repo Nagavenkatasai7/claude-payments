@@ -1,11 +1,13 @@
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
 import type { PartnerStore } from './partner-store';
+import type { ScheduleStore } from './schedule-store';
 import { DEFAULT_SENDER_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 
 const SENTINEL_KEY = 'customer-backfill-v1';
 const COUNTRY_CURRENCY_SENTINEL_KEY = 'country-currency-backfill-v1';
 const PARTNER_SENTINEL_KEY = 'partner-backfill-v1';
+const SCHEDULE_PARTNER_SENTINEL_KEY = 'schedule-partner-backfill-v1';
 
 export async function backfillCustomersOnce(
   store: Store,
@@ -131,4 +133,23 @@ export async function backfillPartnersOnce(
 
   // Staff records NOT backfilled — partnerId stays optional (= global access).
   return { defaultPartnerCreated, customersBackfilled, transfersBackfilled, skippedSentinel: false };
+}
+
+export async function backfillSchedulesOnce(
+  store: Store,
+  customerStore: CustomerStore,
+  scheduleStore: ScheduleStore,
+): Promise<{ schedulesBackfilled: number; skippedSentinel: boolean }> {
+  const claimed = await store.claimMigrationFlag(SCHEDULE_PARTNER_SENTINEL_KEY);
+  if (!claimed) return { schedulesBackfilled: 0, skippedSentinel: true };
+
+  // listSchedules lazy-fills partnerId; re-saving persists.
+  // A schedule with an already-explicit partnerId stays unchanged because the
+  // spread preserves it (lazy-fill only runs when partnerId is falsy).
+  let schedulesBackfilled = 0;
+  for (const s of await scheduleStore.listSchedules()) {
+    await scheduleStore.saveSchedule({ ...s });
+    schedulesBackfilled++;
+  }
+  return { schedulesBackfilled, skippedSentinel: false };
 }
