@@ -18,6 +18,10 @@ export interface Quote {
   fxRate: number;
   amountInr: number;
   deliveryEstimate: string;
+  sourceCurrency: CurrencyCode;   // NEW (P4)
+  amountSource: number;           // NEW (P4)
+  feeSource: number;              // NEW (P4)
+  totalChargeSource: number;      // NEW (P4)
 }
 
 export interface Transfer {

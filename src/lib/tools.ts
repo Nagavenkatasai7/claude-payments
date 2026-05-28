@@ -1,5 +1,5 @@
 import { quote, QuoteError } from './fx';
-import { getFxRate } from './rate';
+import { getFxRates } from './rate';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -322,10 +322,11 @@ async function getQuoteTool(
 ): Promise<ToolResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const fxRate = await getFxRate();
+    const rates = await getFxRates('USD');
     const q = quote(
       Number(args.amount_usd),
-      fxRate,
+      'USD',
+      rates,
       args.funding_method as FundingMethod,
       transferCount,
     );
@@ -668,8 +669,8 @@ async function sendApprovePickerTool(
   }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const fxRate = await getFxRate();
-    const q = quote(amountUsd, fxRate, fundingMethod, transferCount);
+    const rates = await getFxRates('USD');
+    const q = quote(amountUsd, 'USD', rates, fundingMethod, transferCount);
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       recipient: {

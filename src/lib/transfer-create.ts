@@ -1,5 +1,5 @@
 import { quote } from './fx';
-import { getFxRate } from './rate';
+import { getFxRates } from './rate';
 import { screenTransfer } from './compliance';
 import { newTransferId } from './id';
 import type { Store } from './store';
@@ -27,8 +27,8 @@ export async function createTransfer(
   input: CreateTransferInput,
 ): Promise<Transfer> {
   const transferCount = await store.getTransferCount(input.phone);
-  const fxRate = await getFxRate();
-  const q = quote(input.amountUsd, fxRate, input.fundingMethod, transferCount);
+  const rates = await getFxRates('USD');
+  const q = quote(input.amountUsd, 'USD', rates, input.fundingMethod, transferCount);
   const transfersToday = await store.getTodayTransferCount(input.phone);
   const compliance = screenTransfer({
     amountUsd: input.amountUsd,
