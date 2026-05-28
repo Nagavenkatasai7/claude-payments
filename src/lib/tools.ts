@@ -379,7 +379,9 @@ async function createTransferTool(
     try {
       const transfer = await createTransfer(ctx.store, {
         phone: ctx.phone,
-        amountUsd: draft.amountUsd,
+        amountSource: draft.amountUsd,
+        sourceCurrency: 'USD',
+        partnerId: (await ctx.customerStore.getCustomer(ctx.phone))?.partnerId ?? DEFAULT_PARTNER_ID,
         recipientName: draft.recipient.name,
         recipientPhone: draft.recipient.recipientPhone,
         payoutMethod: draft.recipient.payoutMethod,
@@ -428,7 +430,9 @@ async function createTransferTool(
   try {
     const transfer = await createTransfer(ctx.store, {
       phone: ctx.phone,
-      amountUsd: Number(args.amount_usd),
+      amountSource: Number(args.amount_usd),
+      sourceCurrency: 'USD',
+      partnerId: (await ctx.customerStore.getCustomer(ctx.phone))?.partnerId ?? DEFAULT_PARTNER_ID,
       recipientName: String(args.recipient_name),
       recipientPhone,
       payoutMethod: args.payout_method as PayoutMethod,

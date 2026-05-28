@@ -26,7 +26,9 @@ export async function runDueSchedules(
     try {
       const transfer = await createTransfer(deps.store, {
         phone: schedule.phone,
-        amountUsd: schedule.amountUsd,
+        amountSource: schedule.amountUsd,
+        sourceCurrency: 'USD',
+        partnerId: schedule.partnerId,
         recipientName: schedule.recipientName,
         recipientPhone: schedule.recipientPhone,
         payoutMethod: schedule.payoutMethod,

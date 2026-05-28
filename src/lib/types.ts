@@ -51,6 +51,9 @@ export interface Transfer {
   destinationCountry: CountryCode;
   destinationCurrency: CurrencyCode;
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
+  amountSource: number;         // NEW (P4)
+  feeSource: number;            // NEW (P4)
+  totalChargeSource: number;    // NEW (P4)
 }
 
 export interface ToolCall {

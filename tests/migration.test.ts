@@ -28,7 +28,8 @@ describe('backfillCustomersOnce', () => {
     const cs = createCustomerStore(redis, store);
     for (const phone of ['15551111111', '15552222222']) {
       await createTransfer(store, {
-        phone, amountUsd: 100, recipientName: 'Mom', recipientPhone: '919876543210',
+        phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
+        recipientName: 'Mom', recipientPhone: '919876543210',
         payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
       });
     }
@@ -44,7 +45,8 @@ describe('backfillCustomersOnce', () => {
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
     await createTransfer(store, {
-      phone: '15551111111', amountUsd: 100, recipientName: 'Mom', recipientPhone: '919876543210',
+      phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
     });
     const first = await backfillCustomersOnce(store, cs);
@@ -59,7 +61,8 @@ describe('backfillCustomersOnce', () => {
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
     await createTransfer(store, {
-      phone: '15551111111', amountUsd: 100, recipientName: 'Mom', recipientPhone: '919876543210',
+      phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
     });
     // Pre-existing customer record (e.g. lazy backfill from webhook ran first)

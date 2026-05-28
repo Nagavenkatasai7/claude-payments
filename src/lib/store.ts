@@ -67,6 +67,12 @@ export function createStore(redis: RedisLike) {
       if (!parsed.partnerId) {
         parsed.partnerId = DEFAULT_PARTNER_ID;
       }
+      if (parsed.amountSource === undefined) {
+        // Pre-P4 records: source presentation equals the USD-equivalent.
+        parsed.amountSource = parsed.amountUsd;
+        parsed.feeSource = parsed.feeUsd;
+        parsed.totalChargeSource = parsed.totalChargeUsd;
+      }
       return parsed;
     },
     async saveTransfer(transfer: Transfer): Promise<void> {

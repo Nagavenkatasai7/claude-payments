@@ -38,6 +38,9 @@ function makeTransfer(overrides: Partial<Transfer>): Transfer {
     destinationCountry: 'IN',
     destinationCurrency: 'INR',
     partnerId: 'default',
+    amountSource: 100,
+    feeSource: 5,
+    totalChargeSource: 105,
     ...overrides,
   };
 }

@@ -162,6 +162,9 @@ describe('createAgent', () => {
       destinationCountry: 'IN',
       destinationCurrency: 'INR',
       partnerId: 'default',
+      amountSource: 100,
+      feeSource: 1.99,
+      totalChargeSource: 101.99,
     });
 
     const agent = createAgent({
@@ -225,6 +228,9 @@ describe('createAgent', () => {
       destinationCountry: 'IN',
       destinationCurrency: 'INR',
       partnerId: 'default',
+      amountSource: 100,
+      feeSource: 1.99,
+      totalChargeSource: 101.99,
     });
 
     let call = 0;

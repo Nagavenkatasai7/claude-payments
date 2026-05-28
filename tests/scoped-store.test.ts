@@ -56,8 +56,8 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
     await createTransfer(store, {
-      phone, amountUsd: 100, recipientName: 'Mom',
-      recipientPhone: '919876543210',
+      phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
     });
