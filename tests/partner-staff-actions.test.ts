@@ -14,13 +14,25 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+vi.mock('@/lib/partner-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
+  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+});
 vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
 import { createPartnerStaffAction, removePartnerStaffAction } from '@/app/dashboard/partners/actions';
 import { createAuthStore } from '@/lib/auth-store';
+import { createPartnerStore } from '@/lib/partner-store';
 
-beforeEach(() => redis.dump.clear());
+beforeEach(async () => {
+  redis.dump.clear();
+  // Seed the 'acme' partner that every createPartnerStaffAction test references.
+  await createPartnerStore(redis).savePartner({
+    id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+  });
+});
 afterEach(() => vi.clearAllMocks());
 
 function form(values: Record<string, string>): FormData {
@@ -60,6 +72,28 @@ describe('createPartnerStaffAction', () => {
     await expect(createPartnerStaffAction('acme', form({
       username: '', name: 'x', password: 'x', role: 'agent',
     }))).rejects.toThrow();
+  });
+
+  it('throws when the partner does not exist', async () => {
+    await expect(createPartnerStaffAction('ghost', form({
+      username: 'p1', name: 'P', password: 'pw', role: 'agent',
+    }))).rejects.toThrow(/partner not found/i);
+  });
+
+  it('refuses to clobber an existing staff record (silent overwrite would let a platform admin hijack any account)', async () => {
+    // Seed a pre-existing platform admin
+    await createAuthStore(redis).saveStaff({
+      username: 'admin', name: 'Admin', role: 'admin',
+      permissions: { canCancel: true, canResend: true, canAssign: true },
+      passwordHash: 'pre:existing', createdAt: '2026-01-01T00:00:00Z',
+    });
+    await expect(createPartnerStaffAction('acme', form({
+      username: 'admin', name: 'New', password: 'pw', role: 'agent',
+    }))).rejects.toThrow(/already exists/i);
+    // Verify the original record is intact (no silent rebind)
+    const orig = await createAuthStore(redis).getStaff('admin');
+    expect(orig?.partnerId).toBeUndefined();
+    expect(orig?.passwordHash).toBe('pre:existing');
   });
 });
 

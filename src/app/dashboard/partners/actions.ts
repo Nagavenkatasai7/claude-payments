@@ -94,7 +94,22 @@ export async function createPartnerStaffAction(
   if (role !== 'admin' && role !== 'agent') throw new Error('Invalid role.');
   if (!username || !name || !password) throw new Error('username, name, and password are required.');
 
-  await getAuthStore().saveStaff({
+  // Validate partner exists — server actions are POST endpoints callable with
+  // any bound partnerId, so the JSX `bind(null, partner.id)` is not a
+  // sufficient guard against direct invocation.
+  const partner = await getPartnerStore().getPartner(partnerId);
+  if (!partner) throw new Error('Partner not found.');
+
+  // Reject username collision. saveStaff would silently overwrite — and the
+  // existing reverse-index of sessions for the clobbered username would then
+  // resolve to a record now bound to a different partner. addStaffAction in
+  // /dashboard/team/actions.ts has the same guard for the same reason.
+  const authStore = getAuthStore();
+  if (await authStore.getStaff(username)) {
+    throw new Error('That username already exists.');
+  }
+
+  await authStore.saveStaff({
     username,
     name,
     role,
