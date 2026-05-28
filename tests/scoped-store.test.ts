@@ -71,8 +71,8 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       partnerId,
     });
   }
-  // Backfill transfers to carry the correct partnerId (createTransfer always
-  // writes DEFAULT_PARTNER_ID; rewrite them in-place for this test).
+  // Pass partnerId explicitly, then re-save with the partner-specific id to
+  // simulate records assigned to a non-default partner.
   for (const t of await store.listTransfers()) {
     const c = await customerStore.getCustomer(t.phone);
     await store.saveTransfer({ ...t, partnerId: c?.partnerId ?? 'default' });

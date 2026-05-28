@@ -113,6 +113,7 @@ describe('createTransfer P4: source-currency fields', () => {
     expect(t.sourceCurrency).toBe('USD');
     expect(t.amountSource).toBe(t.amountUsd); // USD: source == USD-equiv
     expect(t.feeSource).toBe(t.feeUsd);
+    expect(t.totalChargeSource).toBe(t.totalChargeUsd); // USD: source == USD-equiv
     expect(t.partnerId).toBe('default');
   });
 });

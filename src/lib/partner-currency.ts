@@ -7,7 +7,9 @@ const CURRENCY_TO_COUNTRY = Object.fromEntries(
 ) as Record<CurrencyCode, CountryCode>;
 
 export function countryForCurrency(c: CurrencyCode): CountryCode {
-  return CURRENCY_TO_COUNTRY[c];
+  const country = CURRENCY_TO_COUNTRY[c];
+  if (!country) throw new QuoteError(`Unsupported currency: ${c}.`);
+  return country;
 }
 
 // Send currencies = the partner's operating countries minus payout-side IN,
