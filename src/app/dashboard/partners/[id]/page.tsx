@@ -4,8 +4,14 @@ import { notFound } from 'next/navigation';
 import { requireStaff } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { getPartnerStore } from '@/lib/partner-store';
+import { getAuthStore } from '@/lib/auth-store';
 import { Sidebar } from '../../sidebar';
-import { updatePartnerAction, setPartnerStatusAction } from '../actions';
+import {
+  setPartnerStatusAction,
+  updatePartnerAction,
+  createPartnerStaffAction,
+  removePartnerStaffAction,
+} from '../actions';
 import type { CountryCode, Partner } from '@/lib/types';
 
 const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
@@ -40,6 +46,9 @@ export default async function PartnerDetailPage({
     (sum, t) => sum + Math.round(t.amountUsd * 100),
     0,
   );
+
+  const allStaff = await getAuthStore().listStaff();
+  const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
 
   return (
     <>
@@ -223,6 +232,66 @@ export default async function PartnerDetailPage({
               </tbody>
             </table>
           </div>
+        </section>
+
+        <section className="sh-card">
+          <div className="sh-card-head">
+            <div>
+              <div className="sh-card-title">Staff for this partner</div>
+              <div className="sh-card-sub">
+                {partnerStaff.length} {partnerStaff.length === 1 ? 'member' : 'members'}
+              </div>
+            </div>
+          </div>
+          <div className="sh-ledger-wrap">
+            <table className="sh-table">
+              <thead>
+                <tr><th>Name</th><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr>
+              </thead>
+              <tbody>
+                {partnerStaff.length === 0 && (
+                  <tr><td colSpan={5} className="sh-empty">No staff yet.</td></tr>
+                )}
+                {partnerStaff.map((s) => (
+                  <tr key={s.username}>
+                    <td>{s.name}</td>
+                    <td>{s.username}</td>
+                    <td>
+                      <span className={`sh-pill ${s.role === 'admin' ? 'sh-pill-info' : 'sh-pill-neutral'}`}>
+                        <span className="sh-pill-dot"></span>{s.role}
+                      </span>
+                    </td>
+                    <td>{new Date(s.createdAt).toLocaleDateString()}</td>
+                    <td>
+                      {isAdmin && (
+                        <form action={removePartnerStaffAction}>
+                          <input type="hidden" name="username" value={s.username} />
+                          <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {isAdmin && (
+            <form
+              action={createPartnerStaffAction.bind(null, partner.id)}
+              className="sh-inline-form"
+              style={{ flexDirection: 'column', alignItems: 'stretch', padding: 20, gap: 8 }}
+            >
+              <input className="sh-input" name="username" placeholder="Username" required />
+              <input className="sh-input" name="name" placeholder="Full name" required />
+              <input className="sh-input" name="password" type="password" placeholder="Password" required />
+              <select className="sh-input" name="role" defaultValue="agent">
+                <option value="agent">Agent</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button type="submit" className="sh-btn-primary">Invite staff</button>
+            </form>
+          )}
         </section>
       </main>
     </>

@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { requireStaff } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -16,6 +17,9 @@ function statusBadge(p: Partner): string {
 
 export default async function PartnersPage() {
   const staff = await requireStaff();
+  if (staff.partnerId) {
+    redirect(`/dashboard/partners/${staff.partnerId}`);
+  }
   const isAdmin = staff.role === 'admin';
 
   const store = getStore();
