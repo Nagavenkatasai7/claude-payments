@@ -22,6 +22,10 @@ describe('scopeOf', () => {
   it('returns partner scope when staff has a partnerId', () => {
     expect(scopeOf(staff('acme'))).toEqual({ kind: 'partner', partnerId: 'acme' });
   });
+
+  it('throws on empty-string partnerId rather than silently escalating to platform', () => {
+    expect(() => scopeOf(staff(''))).toThrow(/non-empty/i);
+  });
 });
 
 describe('canSee', () => {
