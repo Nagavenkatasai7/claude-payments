@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
+import type { Staff } from '@/lib/types';
 
 export type SidebarActive =
   | 'overview'
@@ -9,69 +10,77 @@ export type SidebarActive =
   | 'partners'
   | 'compliance'
   | 'analytics'
-  | 'team';
+  | 'team'
+  | 'my-partner';
+
+export type NavItem = SidebarActive;
+
+export function visibleNavItems(staff: Staff): NavItem[] {
+  const base: NavItem[] = [
+    'overview', 'transactions', 'schedules',
+    'customers', 'compliance', 'analytics',
+  ];
+  if (!staff.partnerId) {
+    // Platform: base + Partners list + (Team only if admin)
+    return [...base, 'partners', ...(staff.role === 'admin' ? (['team'] as NavItem[]) : [])];
+  }
+  // Partner-scoped: base + direct link to their own partner detail
+  return [...base, 'my-partner'];
+}
+
+interface NavMeta {
+  label: string;
+  icon: string;
+  hrefFor: (staff: Staff) => string;
+}
+const NAV_META: Record<NavItem, NavMeta> = {
+  overview:     { label: 'Overview',     icon: '◾', hrefFor: () => '/dashboard' },
+  transactions: { label: 'Transactions', icon: '↔', hrefFor: () => '/dashboard/transactions' },
+  schedules:    { label: 'Schedules',    icon: '↻', hrefFor: () => '/dashboard/schedules' },
+  customers:    { label: 'Customers',    icon: '◍', hrefFor: () => '/dashboard/customers' },
+  partners:     { label: 'Partners',     icon: '◆', hrefFor: () => '/dashboard/partners' },
+  compliance:   { label: 'Compliance',   icon: '⚑', hrefFor: () => '/dashboard/compliance' },
+  analytics:    { label: 'Analytics',    icon: '▦', hrefFor: () => '/dashboard/analytics' },
+  team:         { label: 'Team',         icon: '◉', hrefFor: () => '/dashboard/team' },
+  'my-partner': { label: 'My partner',   icon: '◆', hrefFor: (s) => `/dashboard/partners/${s.partnerId}` },
+};
 
 export async function Sidebar({ active }: { active: SidebarActive }) {
   const staff = await requireStaff();
-  const isAdmin = staff.role === 'admin';
+  const items = visibleNavItems(staff);
+  const showAccountLabel = !staff.partnerId && staff.role === 'admin';
 
   return (
     <aside className="sh-sidebar">
-      <Link
-        href="/dashboard"
-        className={`sh-nav-item ${active === 'overview' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">◾</span> Overview
-      </Link>
-      <Link
-        href="/dashboard/transactions"
-        className={`sh-nav-item ${active === 'transactions' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">↔</span> Transactions
-      </Link>
-      <Link
-        href="/dashboard/schedules"
-        className={`sh-nav-item ${active === 'schedules' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">↻</span> Schedules
-      </Link>
-      <Link
-        href="/dashboard/customers"
-        className={`sh-nav-item ${active === 'customers' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">◍</span> Customers
-      </Link>
-      <Link
-        href="/dashboard/partners"
-        className={`sh-nav-item ${active === 'partners' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">◆</span> Partners
-      </Link>
-      <Link
-        href="/dashboard/compliance"
-        className={`sh-nav-item ${active === 'compliance' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">⚑</span> Compliance
-      </Link>
-      <Link
-        href="/dashboard/analytics"
-        className={`sh-nav-item ${active === 'analytics' ? 'active' : ''}`}
-      >
-        <span className="sh-nav-icon">▦</span> Analytics
-      </Link>
-      {isAdmin && (
-        <>
-          <div className="sh-nav-label">Account</div>
+      {items.map((key) => {
+        if (key === 'team' && showAccountLabel) {
+          return (
+            <span key={`${key}-label`}>
+              <div className="sh-nav-label">Account</div>
+              <Link
+                key={key}
+                href={NAV_META[key].hrefFor(staff)}
+                className={`sh-nav-item ${active === key ? 'active' : ''}`}
+              >
+                <span className="sh-nav-icon">{NAV_META[key].icon}</span> {NAV_META[key].label}
+              </Link>
+            </span>
+          );
+        }
+        return (
           <Link
-            href="/dashboard/team"
-            className={`sh-nav-item ${active === 'team' ? 'active' : ''}`}
+            key={key}
+            href={NAV_META[key].hrefFor(staff)}
+            className={`sh-nav-item ${active === key ? 'active' : ''}`}
           >
-            <span className="sh-nav-icon">◉</span> Team
+            <span className="sh-nav-icon">{NAV_META[key].icon}</span> {NAV_META[key].label}
           </Link>
-          <Link href="/dashboard" className="sh-nav-item">
-            <span className="sh-nav-icon">⚙</span> Settings
-          </Link>
-        </>
+        );
+      })}
+      {showAccountLabel && (
+        <Link href="/dashboard" className="sh-nav-item">
+          <span className="sh-nav-icon">⚙</span> Settings
+        </Link>
       )}
     </aside>
   );
