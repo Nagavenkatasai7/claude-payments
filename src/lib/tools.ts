@@ -543,6 +543,8 @@ async function createScheduleTool(
     status: 'active',
     createdAt: new Date().toISOString(),
     partnerId,
+    sourceCurrency: 'USD',
+    amountSource: Number(args.amount_usd),
   };
   await ctx.scheduleStore.saveSchedule(schedule);
   return {

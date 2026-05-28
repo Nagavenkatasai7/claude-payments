@@ -69,6 +69,8 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       frequency: 'monthly', dayOfMonth: 2, status: 'active',
       createdAt: '2026-05-01T00:00:00Z',
       partnerId,
+      sourceCurrency: 'USD',
+      amountSource: 50,
     });
   }
   // Pass partnerId explicitly, then re-save with the partner-specific id to

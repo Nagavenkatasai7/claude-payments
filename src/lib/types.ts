@@ -99,6 +99,8 @@ export interface Schedule {
   createdAt: string;
   lastRunAt?: string;
   partnerId: PartnerId;   // NEW (P3) — required; multi-tenant boundary
+  sourceCurrency: CurrencyCode;   // NEW (P4)
+  amountSource: number;           // NEW (P4)
 }
 
 export type StaffRole = 'admin' | 'agent';
