@@ -135,7 +135,9 @@ export interface Draft {
     payoutMethod: PayoutMethod;
     payoutDestination: string;
   };
-  amountUsd: number;
+  amountUsd: number;              // USD-equivalent (for cap re-check)
+  amountSource: number;           // NEW (P4)
+  sourceCurrency: CurrencyCode;   // NEW (P4)
   fundingMethod: FundingMethod;
   quote: {
     feeUsd: number;

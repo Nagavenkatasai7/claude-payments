@@ -358,6 +358,8 @@ describe('createAgent — TurnContext', () => {
         payoutDestination: 'mom@upi',
       },
       amountUsd: 300,
+      amountSource: 300,
+      sourceCurrency: 'USD',
       fundingMethod: 'bank_transfer',
       quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
     });
@@ -412,6 +414,8 @@ describe('replay safety', () => {
         payoutDestination: 'mom@upi',
       },
       amountUsd: 300,
+      amountSource: 300,
+      sourceCurrency: 'USD',
       fundingMethod: 'bank_transfer',
       quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
     });

@@ -379,8 +379,8 @@ async function createTransferTool(
     try {
       const transfer = await createTransfer(ctx.store, {
         phone: ctx.phone,
-        amountSource: draft.amountUsd,
-        sourceCurrency: 'USD',
+        amountSource: draft.amountSource,
+        sourceCurrency: draft.sourceCurrency,
         partnerId: (await ctx.customerStore.getCustomer(ctx.phone))?.partnerId ?? DEFAULT_PARTNER_ID,
         recipientName: draft.recipient.name,
         recipientPhone: draft.recipient.recipientPhone,
@@ -684,12 +684,16 @@ async function sendApprovePickerTool(
         payoutDestination: String(args.payout_destination),
       },
       amountUsd: q.amountUsd,
+      amountSource: q.amountSource,
+      sourceCurrency: q.sourceCurrency,
       fundingMethod,
       quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
     });
+    const fmt = (n: number) =>
+      new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
     const summary =
-      `Sending $${q.amountUsd.toFixed(2)} to ${args.recipient_name}.\n` +
-      `Fee $${q.feeUsd.toFixed(2)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
+      `Sending ${fmt(q.amountSource)} to ${args.recipient_name}.\n` +
+      `Fee ${fmt(q.feeSource)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
     await sendInteractive(ctx.phone, summary, [
       { id: approveButtonId(draftId), title: 'Approve & pay' },
       { id: cancelButtonId(draftId), title: 'Cancel' },
