@@ -23,7 +23,11 @@ export function quote(
   if (!Number.isFinite(amountSource)) {
     throw new QuoteError('Please give a valid amount.');
   }
+  amountSource = round2(amountSource);
   const amountUsd = round2(amountSource * rates.toUsd);
+  if (!Number.isFinite(amountUsd)) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
   if (amountUsd < MIN_USD || amountUsd > MAX_USD) {
     throw new QuoteError(`Transfers must be between $${MIN_USD} and $${MAX_USD}.`);
   }
@@ -43,13 +47,14 @@ export function quote(
         feeUsd = round2(2.99 + 0.03 * amountUsd);
         break;
       default:
+        // Guards against an unexpected funding method (e.g. the LLM passing a
+        // value outside the schema enum) producing NaN amounts.
         throw new QuoteError(
           'Please choose how to pay: credit card, debit card, or bank transfer.',
         );
     }
   }
 
-  feeUsd = round2(feeUsd);
   const feeSource = round2(feeUsd / rates.toUsd);
   const amountInr = Math.round(amountSource * rates.toInr);
 

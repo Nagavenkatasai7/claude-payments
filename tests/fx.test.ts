@@ -42,3 +42,33 @@ describe('quote (non-USD source)', () => {
     expect(MAX_USD).toBe(2999);
   });
 });
+
+describe('quote (input guards)', () => {
+  it('rejects non-finite source amounts', () => {
+    expect(() => quote(NaN, 'USD', USD, 'bank_transfer', 0)).toThrow(QuoteError);
+    expect(() => quote(Infinity, 'USD', USD, 'bank_transfer', 0)).toThrow(QuoteError);
+  });
+  it('rejects an unknown funding method on a repeat transfer', () => {
+    expect(() => quote(500, 'USD', USD, 'paypal' as never, 1)).toThrow(QuoteError);
+  });
+  it('rejects a NaN exchange rate (corrupt FxRates)', () => {
+    expect(() => quote(100, 'GBP', { toInr: 108, toUsd: NaN }, 'bank_transfer', 0)).toThrow(QuoteError);
+  });
+});
+
+describe('quote (non-USD coverage)', () => {
+  it('non-USD first transfer is free', () => {
+    const q = quote(200, 'GBP', GBP, 'bank_transfer', 0);
+    expect(q.feeSource).toBe(0);
+    expect(q.totalChargeSource).toBe(200);
+  });
+  it('non-USD credit-card fee converts to source currency', () => {
+    const q = quote(100, 'GBP', GBP, 'credit_card', 1);
+    expect(q.amountUsd).toBe(127);       // 100 × 1.27
+    expect(q.feeUsd).toBe(6.8);          // 2.99 + 0.03×127
+    expect(q.feeSource).toBe(5.35);      // 6.8 / 1.27
+  });
+  it('enforces MAX_USD on the USD-equivalent for a non-USD source', () => {
+    expect(() => quote(2362, 'GBP', GBP, 'bank_transfer', 0)).toThrow(QuoteError); // 2362×1.27=2999.74 > 2999
+  });
+});
