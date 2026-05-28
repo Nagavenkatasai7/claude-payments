@@ -12,6 +12,7 @@ function sched(overrides: Partial<Schedule>): Schedule {
     payoutMethod: 'upi', payoutDestination: 'r@upi', fundingMethod: 'bank_transfer',
     frequency: 'monthly', dayOfMonth: 21, status: 'active',
     createdAt: '2026-01-01T00:00:00.000Z',
+    partnerId: 'default',
     ...overrides,
   };
 }

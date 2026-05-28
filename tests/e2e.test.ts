@@ -48,7 +48,8 @@ describe('end-to-end happy path', () => {
   it('quotes, creates a transfer, sends a link, and delivers', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const scheduleStore = createScheduleStore(redis);
+    const customerStore = createCustomerStore(redis, store);
+    const scheduleStore = createScheduleStore(redis, customerStore);
     const draftStore = createDraftStore(redis);
 
     // Scripted Kimi: quote -> create -> link -> final reply.
@@ -74,7 +75,6 @@ describe('end-to-end happy path', () => {
       },
     ];
     let turn = 0;
-    const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const agent = createAgent({
@@ -132,7 +132,8 @@ describe('end-to-end returning customer', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const draftStore = createDraftStore(redis);
-    const scheduleStore = createScheduleStore(redis);
+    const customerStore = createCustomerStore(redis, store);
+    const scheduleStore = createScheduleStore(redis, customerStore);
 
     // Pre-seed: Mom is a saved recipient from a previous (mock) transfer.
     await store.upsertRecipient(PHONE, {
@@ -191,7 +192,6 @@ describe('end-to-end returning customer', () => {
       }),
     );
 
-    const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const agent = createAgent({
@@ -275,7 +275,7 @@ describe('end-to-end new customer with cap', () => {
     const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
-    const scheduleStore = createScheduleStore(redis);
+    const scheduleStore = createScheduleStore(redis, customerStore);
     const draftStore = createDraftStore(redis);
 
     // Turn 1: [NEW CUSTOMER] greeting — bot calls check_send_limit({amount_usd: 0})

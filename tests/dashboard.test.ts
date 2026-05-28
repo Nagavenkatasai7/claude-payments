@@ -237,6 +237,7 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     dayOfMonth: 5,
     status: 'active',
     createdAt: '2026-01-01T00:00:00.000Z',
+    partnerId: 'default',
     ...overrides,
   };
 }

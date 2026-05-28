@@ -20,7 +20,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
   return {
     phone,
     store,
-    scheduleStore: createScheduleStore(redis),
+    scheduleStore: createScheduleStore(redis, customerStore),
     draftStore: createDraftStore(redis),
     turn: { isNewConversation: false } as const,
     customerStore,

@@ -5,6 +5,7 @@ import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer } from './transfer-create';
 import { evaluateCap } from './tier-rules';
+import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, FundingMethod, PayoutMethod, Schedule, TurnContext } from './types';
 import type { Store } from './store';
@@ -533,6 +534,7 @@ async function createScheduleTool(
     dayOfWeek,
     status: 'active',
     createdAt: new Date().toISOString(),
+    partnerId: DEFAULT_PARTNER_ID,   // P3 task 4 will derive this from the owning customer
   };
   await ctx.scheduleStore.saveSchedule(schedule);
   return {
