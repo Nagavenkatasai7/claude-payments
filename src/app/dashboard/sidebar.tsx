@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
 import type { Staff } from '@/lib/types';
@@ -55,16 +56,15 @@ export async function Sidebar({ active }: { active: SidebarActive }) {
       {items.map((key) => {
         if (key === 'team' && showAccountLabel) {
           return (
-            <span key={`${key}-label`}>
+            <Fragment key={key}>
               <div className="sh-nav-label">Account</div>
               <Link
-                key={key}
                 href={NAV_META[key].hrefFor(staff)}
                 className={`sh-nav-item ${active === key ? 'active' : ''}`}
               >
                 <span className="sh-nav-icon">{NAV_META[key].icon}</span> {NAV_META[key].label}
               </Link>
-            </span>
+            </Fragment>
           );
         }
         return (
