@@ -137,7 +137,6 @@ export async function backfillPartnersOnce(
 
 export async function backfillSchedulesOnce(
   store: Store,
-  customerStore: CustomerStore,
   scheduleStore: ScheduleStore,
 ): Promise<{ schedulesBackfilled: number; skippedSentinel: boolean }> {
   const claimed = await store.claimMigrationFlag(SCHEDULE_PARTNER_SENTINEL_KEY);

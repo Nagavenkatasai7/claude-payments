@@ -336,7 +336,7 @@ describe('backfillSchedulesOnce', () => {
     }));
     await redis.sadd('schedules:ids', 'OLDSCH1');
 
-    const result = await backfillSchedulesOnce(store, cs, ss);
+    const result = await backfillSchedulesOnce(store, ss);
     expect(result.schedulesBackfilled).toBe(1);
     expect(result.skippedSentinel).toBe(false);
 
@@ -365,7 +365,7 @@ describe('backfillSchedulesOnce', () => {
     }));
     await redis.sadd('schedules:ids', 'OLDSCH2');
 
-    await backfillSchedulesOnce(store, cs, ss);
+    await backfillSchedulesOnce(store, ss);
     const raw = JSON.parse((await redis.get('schedule:OLDSCH2'))!);
     expect(raw.partnerId).toBe('default');
   });
@@ -375,8 +375,8 @@ describe('backfillSchedulesOnce', () => {
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
     const ss = createScheduleStore(redis, cs);
-    const first = await backfillSchedulesOnce(store, cs, ss);
-    const second = await backfillSchedulesOnce(store, cs, ss);
+    const first = await backfillSchedulesOnce(store, ss);
+    const second = await backfillSchedulesOnce(store, ss);
     expect(first.skippedSentinel).toBe(false);
     expect(second.skippedSentinel).toBe(true);
     expect(second.schedulesBackfilled).toBe(0);
@@ -413,7 +413,7 @@ describe('backfillSchedulesOnce', () => {
     }));
     await redis.sadd('schedules:ids', 'KEEPME');
 
-    await backfillSchedulesOnce(store, cs, ss);
+    await backfillSchedulesOnce(store, ss);
     const raw = JSON.parse((await redis.get('schedule:KEEPME'))!);
     expect(raw.partnerId).toBe('beta');
   });

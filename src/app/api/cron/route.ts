@@ -33,7 +33,7 @@ export async function GET(req: NextRequest) {
   const backfill = await backfillCustomersOnce(store, customerStore);
   const countryCurrencyBackfill = await backfillCountryCurrencyOnce(store, customerStore);
   const partnerBackfill = await backfillPartnersOnce(store, customerStore, partnerStore);
-  const schedulePartnerBackfill = await backfillSchedulesOnce(store, customerStore, scheduleStore);
+  const schedulePartnerBackfill = await backfillSchedulesOnce(store, scheduleStore);
 
   const result = await runDueSchedules({
     store,
