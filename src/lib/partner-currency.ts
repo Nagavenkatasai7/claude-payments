@@ -2,9 +2,9 @@ import type { CountryCode, CurrencyCode, Partner } from './types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { QuoteError } from './fx';
 
-const CURRENCY_TO_COUNTRY: Record<CurrencyCode, CountryCode> = {
-  USD: 'US', CAD: 'CA', GBP: 'GB', AED: 'AE', SGD: 'SG', AUD: 'AU', NZD: 'NZ', INR: 'IN',
-};
+const CURRENCY_TO_COUNTRY = Object.fromEntries(
+  Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY).map(([country, cur]) => [cur, country]),
+) as Record<CurrencyCode, CountryCode>;
 
 export function countryForCurrency(c: CurrencyCode): CountryCode {
   return CURRENCY_TO_COUNTRY[c];
@@ -32,7 +32,7 @@ export function allowedSendCurrencies(partner: Partner): CurrencyCode[] {
 export function resolveSendCurrency(partner: Partner, requested?: string): CurrencyCode {
   const allowed = allowedSendCurrencies(partner);
   if (allowed.length === 1) return allowed[0];
-  const req = (requested ?? '').toUpperCase();
+  const req = (requested ?? '').trim().toUpperCase();
   const match = allowed.find((c) => c === req);
   if (!match) {
     throw new QuoteError(

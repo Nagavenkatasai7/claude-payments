@@ -24,6 +24,9 @@ describe('allowedSendCurrencies', () => {
   it('falls back to USD when no send countries', () => {
     expect(allowedSendCurrencies(partner(['IN']))).toEqual(['USD']);
   });
+  it('handles 3 send countries in stable order', () => {
+    expect(allowedSendCurrencies(partner(['US', 'GB', 'CA']))).toEqual(['USD', 'GBP', 'CAD']);
+  });
 });
 
 describe('resolveSendCurrency', () => {
@@ -37,11 +40,20 @@ describe('resolveSendCurrency', () => {
     expect(() => resolveSendCurrency(partner(['US', 'GB']), undefined)).toThrow(QuoteError);
     expect(() => resolveSendCurrency(partner(['US', 'GB']), 'EUR')).toThrow(/which currency/i);
   });
+  it('single allowed + no request → returns the single currency (not throw)', () => {
+    expect(resolveSendCurrency(partner(['US']), undefined)).toBe('USD');
+  });
+  it('trims whitespace around the requested currency', () => {
+    expect(resolveSendCurrency(partner(['US', 'GB']), ' gbp ')).toBe('GBP');
+  });
 });
 
 describe('countryForCurrency', () => {
   it('reverse-maps currency to ISO country', () => {
     expect(countryForCurrency('USD')).toBe('US');
     expect(countryForCurrency('GBP')).toBe('GB');
+  });
+  it('reverse-maps INR to IN', () => {
+    expect(countryForCurrency('INR')).toBe('IN');
   });
 });
