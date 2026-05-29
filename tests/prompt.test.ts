@@ -12,4 +12,16 @@ describe('SYSTEM_PROMPT', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('card');
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('never');
   });
+
+  it('includes the conditional ENHANCED VERIFICATION block gated on edd_required', () => {
+    expect(SYSTEM_PROMPT).toContain('ENHANCED VERIFICATION');
+    expect(SYSTEM_PROMPT).toContain('edd_required');
+    expect(SYSTEM_PROMPT).toContain('source_of_funds');
+    expect(SYSTEM_PROMPT).toContain('occupation');
+  });
+
+  it('instructs the bot to ask NOTHING extra when edd_required is false (dormancy)', () => {
+    expect(SYSTEM_PROMPT).toMatch(/edd_required is false/i);
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never ask');
+  });
 });
