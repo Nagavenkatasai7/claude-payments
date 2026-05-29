@@ -5,6 +5,9 @@ import {
   T0_DAILY_CAP_CENTS,
   T1_DAILY_CAP_CENTS,
   OBSERVATION_WINDOW_MS,
+  EDD_THRESHOLD_CENTS,
+  evaluateEdd,
+  evaluateEddForTransfer,
 } from '@/lib/tier-rules';
 import type { Customer } from '@/lib/types';
 
@@ -132,5 +135,62 @@ describe('evaluateCap', () => {
     expect(evaluateCap(verified, DAY_4, 0, 0).dayOfWindow).toBeUndefined();
     const suspended = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'rejected' });
     expect(evaluateCap(suspended, DAY_2, 0, 0).dayOfWindow).toBeUndefined();
+  });
+});
+
+describe('evaluateEdd (cumulative $3k trigger)', () => {
+  it('exports EDD_THRESHOLD_CENTS = 300_000 ($3,000)', () => {
+    expect(EDD_THRESHOLD_CENTS).toBe(300_000);
+  });
+  it('below threshold → not required (dormant)', () => {
+    expect(evaluateEdd(0, 20_000).eddRequired).toBe(false);        // single $200 send
+    expect(evaluateEdd(250_000, 49_000).eddRequired).toBe(false);  // 2,500 + 490 = 2,990
+  });
+  it('exactly at $3,000 → required (>= inclusive)', () => {
+    expect(evaluateEdd(0, 300_000).eddRequired).toBe(true);
+    expect(evaluateEdd(240_000, 60_000).eddRequired).toBe(true);   // 2,400 + 600 = 3,000
+  });
+  it('cumulative crossing catches structuring (250k month + 60k send)', () => {
+    expect(evaluateEdd(250_000, 60_000).eddRequired).toBe(true);   // 3,100
+  });
+  it('surfaces month/requested/threshold for messaging', () => {
+    const e = evaluateEdd(250_000, 60_000);
+    expect(e).toEqual({
+      eddRequired: true, monthUsedCents: 250_000,
+      requestedCents: 60_000, thresholdCents: 300_000,
+    });
+  });
+});
+
+describe('evaluateEddForTransfer (flag-only, never block)', () => {
+  it('flags when required AND fields absent', () => {
+    expect(evaluateEddForTransfer({ monthUsedCents: 250_000, requestedCents: 60_000, eddFieldsPresent: false }))
+      .toEqual({ eddRequired: true, flagReason: 'edd_required' });
+  });
+  it('no flag when required but fields present (sticky profile satisfies it)', () => {
+    expect(evaluateEddForTransfer({ monthUsedCents: 250_000, requestedCents: 60_000, eddFieldsPresent: true }))
+      .toEqual({ eddRequired: true });
+  });
+  it('no flag on the dormant path (not required)', () => {
+    expect(evaluateEddForTransfer({ monthUsedCents: 0, requestedCents: 20_000, eddFieldsPresent: false }))
+      .toEqual({ eddRequired: false });
+  });
+  it('never returns a block reason', () => {
+    const r = evaluateEddForTransfer({ monthUsedCents: 500_000, requestedCents: 100_000, eddFieldsPresent: false });
+    expect(r.flagReason).toBe('edd_required');
+    expect(JSON.stringify(r)).not.toContain('block');
+  });
+});
+
+describe('evaluateCap regression (EDD is orthogonal — cap math unchanged)', () => {
+  it('a T1 verified customer still computes today\'s cap regardless of EDD', () => {
+    const c = {
+      senderPhone: '1', firstSeenAt: '2026-01-01T00:00:00Z', kycStatus: 'verified' as const,
+      senderCountry: 'US' as const, partnerId: 'default', createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    const ev = evaluateCap(c, new Date('2026-05-29T00:00:00Z'), 0, 100_000);
+    expect(ev.tier).toBe('T1');
+    expect(ev.dailyCapCents).toBe(299_900); // unchanged T1_DAILY_CAP_CENTS
   });
 });

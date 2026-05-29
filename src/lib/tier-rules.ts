@@ -56,3 +56,36 @@ export function evaluateCap(
   }
   return { ...base, withinCap: true };
 }
+
+export const EDD_THRESHOLD_CENTS = 300_000;   // $3,000 USD-equivalent
+
+export interface EddEvaluation {
+  eddRequired: boolean;          // cumulative-month + requested >= $3,000
+  monthUsedCents: number;
+  requestedCents: number;
+  thresholdCents: number;        // EDD_THRESHOLD_CENTS (surfaced for messaging)
+}
+
+// Cumulative trigger: does this send push the rolling-month total to/over $3k?
+// `>=` so a send landing exactly on $3,000 trips EDD (regulatory threshold is inclusive).
+export function evaluateEdd(
+  monthUsedCents: number,
+  requestedCents: number,
+): EddEvaluation {
+  const month = Number(monthUsedCents) || 0;      // defensive (untrusted/coerced)
+  const requested = Number(requestedCents) || 0;
+  const eddRequired = month + requested >= EDD_THRESHOLD_CENTS;
+  return { eddRequired, monthUsedCents: month, requestedCents: requested, thresholdCents: EDD_THRESHOLD_CENTS };
+}
+
+// At create time: if EDD is required AND the EDD profile fields are absent,
+// the transfer is FLAGGED (never blocked). Returns the reason to merge.
+export function evaluateEddForTransfer(input: {
+  monthUsedCents: number;
+  requestedCents: number;
+  eddFieldsPresent: boolean;     // sourceOfFunds && occupation both set
+}): { eddRequired: boolean; flagReason?: 'edd_required' } {
+  const { eddRequired } = evaluateEdd(input.monthUsedCents, input.requestedCents);
+  if (eddRequired && !input.eddFieldsPresent) return { eddRequired, flagReason: 'edd_required' };
+  return { eddRequired };
+}
