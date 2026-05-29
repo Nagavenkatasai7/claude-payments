@@ -1,5 +1,11 @@
 import type { CountryCode, Partner } from './types';
-import { WATCHLIST, LARGE_AMOUNT_USD, VELOCITY_LIMIT } from './compliance';
+
+// Canonical screening constants — single source of truth.
+// compliance.ts re-exports these for backward compatibility.
+// Mock sanctions/watchlist — clearly fake names for the prototype.
+export const WATCHLIST = ['john doe', 'jane roe', 'test blocked'];
+export const LARGE_AMOUNT_USD = 1000;
+export const VELOCITY_LIMIT = 3;
 
 export interface ResolvedCorridorRules {
   baseWatchlist: string[];     // the screener's base list (today's WATCHLIST)
@@ -11,7 +17,7 @@ export interface ResolvedCorridorRules {
 
 // Today's globals, named so the dormant path is PROVABLY equal to current
 // behavior. baseWatchlist/largeAmountUsd/velocityLimit ARE the literal
-// compliance.ts constants — do not fork their values here.
+// screening constants above — do not fork their values here.
 export const GLOBAL_DEFAULTS: ResolvedCorridorRules = {
   baseWatchlist: WATCHLIST,
   watchlistExtra: [],

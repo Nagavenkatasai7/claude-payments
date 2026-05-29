@@ -1,14 +1,16 @@
 import type { ComplianceStatus, CountryCode } from './types';
-import type { ResolvedCorridorRules } from './compliance-config';
+import {
+  type ResolvedCorridorRules,
+  GLOBAL_DEFAULTS,
+} from './compliance-config';
 import {
   type SanctionsScreener,
   getSanctionsScreener,
 } from './providers/sanctions-provider';
 
-// Mock sanctions/watchlist — clearly fake names for the prototype.
-export const WATCHLIST = ['john doe', 'jane roe', 'test blocked'];
-export const LARGE_AMOUNT_USD = 1000;
-export const VELOCITY_LIMIT = 3;
+// Re-export the canonical screening constants so existing importers keep working
+// without changing their import paths (compliance-config is now the source of truth).
+export { WATCHLIST, LARGE_AMOUNT_USD, VELOCITY_LIMIT } from './compliance-config';
 
 export interface ComplianceResult {
   status: ComplianceStatus;
@@ -23,12 +25,6 @@ export async function screenTransfer(input: {
   rules?: ResolvedCorridorRules;     // NEW (P5) — defaults to GLOBAL_DEFAULTS (today's values)
   screener?: SanctionsScreener;      // NEW (P5) — defaults to a mock over rules' base ∪ extra
 }): Promise<ComplianceResult> {
-  // Lazy import to break the compliance <-> compliance-config module cycle:
-  // a static value import here would force compliance-config to evaluate
-  // GLOBAL_DEFAULTS before this module's WATCHLIST consts are initialized
-  // (capturing them as undefined). Resolved at call time, the config is
-  // fully initialized, so the default path equals today's behavior exactly.
-  const { GLOBAL_DEFAULTS } = await import('./compliance-config');
   const rules = input.rules ?? GLOBAL_DEFAULTS;
   const screener =
     input.screener ??
