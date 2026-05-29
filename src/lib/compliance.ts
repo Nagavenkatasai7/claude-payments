@@ -21,20 +21,22 @@ export async function screenTransfer(input: {
   amountUsd: number;                 // USD-equivalent (unchanged; fed by quote.amountUsd)
   recipientName: string;
   transfersToday: number;
-  sourceCountry?: CountryCode;       // NEW (P5) — passed to the screener for jurisdiction scoping
-  rules?: ResolvedCorridorRules;     // NEW (P5) — defaults to GLOBAL_DEFAULTS (today's values)
-  screener?: SanctionsScreener;      // NEW (P5) — defaults to a mock over rules' base ∪ extra
+  sourceCountry?: CountryCode;       // P5 — jurisdiction scoping
+  rules?: ResolvedCorridorRules;     // P5 — defaults to GLOBAL_DEFAULTS
+  screener?: SanctionsScreener;      // P5 — defaults to a mock over rules' base ∪ extra
+  senderName?: string;               // NEW (KYC) — sender legal name, screened via the SAME seam
 }): Promise<ComplianceResult> {
   const rules = input.rules ?? GLOBAL_DEFAULTS;
   const screener =
     input.screener ??
     getSanctionsScreener([...rules.baseWatchlist, ...rules.watchlistExtra]);
+  const sourceCountry = input.sourceCountry ?? 'US';
 
-  const hit = await screener.screen({
-    name: input.recipientName ?? '',
-    sourceCountry: input.sourceCountry ?? 'US',
-  });
-  if (hit.matched) {
+  const recipientHit = await screener.screen({ name: input.recipientName ?? '', sourceCountry });
+  const senderHit = input.senderName
+    ? await screener.screen({ name: input.senderName ?? '', sourceCountry })   // NEW (KYC)
+    : { matched: false };
+  if (recipientHit.matched || senderHit.matched) {
     return {
       status: 'blocked',
       reasons: ['Recipient is on the compliance watchlist.'],

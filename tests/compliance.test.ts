@@ -57,3 +57,40 @@ describe('screenTransfer — corridor overrides', () => {
     expect(r.status).toBe('blocked');
   });
 });
+
+describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)', () => {
+  it('dormant: no senderName reproduces today\'s recipient-only cleared result', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' });
+    expect(r.status).toBe('cleared');
+    expect(r.reasons).toEqual([]);
+  });
+  it('a watchlisted SENDER name blocks (screened via the seam)', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US',
+      senderName: 'John Doe',     // on the default WATCHLIST
+    });
+    expect(r.status).toBe('blocked');
+  });
+  it('clean sender + watchlisted recipient still blocks (recipient path unchanged)', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200, recipientName: 'John Doe', transfersToday: 0, sourceCountry: 'US',
+      senderName: 'Clean Person',
+    });
+    expect(r.status).toBe('blocked');
+  });
+  it('clean sender + clean recipient clears (no false positive)', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US',
+      senderName: 'Clean Person',
+    });
+    expect(r.status).toBe('cleared');
+  });
+  it('an injected screener is used for the sender too', async () => {
+    const screener = new MockSanctionsScreener(['only this sender']);
+    const r = await screenTransfer({
+      amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'GB',
+      senderName: 'Only This Sender', screener,
+    });
+    expect(r.status).toBe('blocked');
+  });
+});
