@@ -5,6 +5,7 @@ import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
@@ -17,6 +18,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
   const store = createStore(redis);
   const customerStore = createCustomerStore(redis, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
   return {
     phone,
@@ -26,6 +28,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
     turn: { isNewConversation: false } as const,
     customerStore,
     dailyVolumeStore,
+    monthlyVolumeStore,
     kycProvider,
     partnerStore: createPartnerStore(redis), // NEW (P4)
   };
@@ -470,6 +473,37 @@ describe('check_send_limit', () => {
     expect(r.within_cap).toBe(true);
     expect(r.kyc_url).toBeDefined();
   });
+
+  it('check_send_limit: dormant path returns edd_required:false with all today\'s fields intact', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550001111');
+    const res = await executeTool('check_send_limit', { amount_usd: 200 }, ctx);
+    // Today's fields unchanged (regression):
+    expect(res).toHaveProperty('within_cap');
+    expect(res).toHaveProperty('tier');
+    expect(res).toHaveProperty('daily_cap_usd');
+    expect(res).toHaveProperty('today_remaining_usd');
+    // Additive KYC fields:
+    expect(res.edd_required).toBe(false);
+    expect(res.edd_threshold_usd).toBe(3000);
+  });
+
+  it('check_send_limit: edd_required:true when cumulative-month + requested >= $3k and SoF/occupation absent', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550001111');
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000); // $2,500 this month
+    const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx); // → $3,100
+    expect(res.edd_required).toBe(true);
+  });
+
+  it('check_send_limit: edd_required:false when the customer already has EDD fields on file (sticky)', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550001111');
+    await ctx.customerStore.saveCustomer({
+      ...(await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer,
+      sourceOfFunds: 'employment', occupation: 'salaried', eddCapturedAt: '2026-05-01T00:00:00Z',
+    });
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000);
+    const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx);
+    expect(res.edd_required).toBe(false); // sticky profile satisfies it
+  });
 });
 
 describe('create_transfer — daily volume increment', () => {
@@ -500,6 +534,95 @@ describe('create_transfer — daily volume increment', () => {
       funding_method: 'bank_transfer',
     }, ctx);
     expect(await ctx.dailyVolumeStore.getTodayCents('15551234567')).toBe(10_000);
+  });
+});
+
+describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
+  async function grandfathered(ctx: ReturnType<typeof buildCtx>) {
+    await ctx.customerStore.saveCustomer({
+      senderPhone: ctx.phone,
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'grandfathered',
+      kycVerifiedAt: '2026-01-01T00:00:00Z',
+      senderCountry: 'US',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      partnerId: 'default',
+    });
+  }
+
+  it('EDD enum args persist onto the Customer (sticky)', async () => {
+    const ctx = buildCtx(fakeRedis(), '15551234567');
+    await grandfathered(ctx);
+    await executeTool('create_transfer', {
+      amount_usd: 100,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+      funding_method: 'bank_transfer',
+      source_of_funds: 'employment',
+      occupation: 'salaried',
+    }, ctx);
+    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    expect(customer?.sourceOfFunds).toBe('employment');
+    expect(customer?.occupation).toBe('salaried');
+    expect(customer?.eddCapturedAt).toBeTruthy();
+  });
+
+  it('invalid enum value is treated as unsupplied (eddFieldsPresent stays false)', async () => {
+    const ctx = buildCtx(fakeRedis(), '15551234567');
+    await grandfathered(ctx);
+    // $2,500 already this month + $600 → crosses $3k; an invalid SoF must NOT
+    // satisfy the EDD requirement, so the transfer must be flagged edd_required.
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000);
+    const r = await executeTool('create_transfer', {
+      amount_usd: 600,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+      funding_method: 'bank_transfer',
+      source_of_funds: 'lottery_winnings', // not in the closed set → unsupplied
+      occupation: 'salaried',
+    }, ctx);
+    expect(r.compliance_status).toBe('flagged');
+    expect(r.compliance_reasons).toContain('edd_required');
+    // And nothing invalid leaked onto the Customer.
+    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    expect(customer?.sourceOfFunds).toBeUndefined();
+    expect(customer?.occupation).toBeUndefined();
+  });
+
+  it('Travel-Rule fields flow from the draft into the Transfer', async () => {
+    const redis = fakeRedis();
+    const base = buildCtx(redis, '15551234567');
+    await grandfathered(base);
+    // Seed a draft as if send_approve_picker had been called with Travel-Rule data.
+    const draftId = await base.draftStore.createDraft({
+      senderPhone: base.phone,
+      recipient: {
+        name: 'Mom',
+        recipientPhone: '919876543210',
+        payoutMethod: 'upi',
+        payoutDestination: 'mom@upi',
+      },
+      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      fundingMethod: 'bank_transfer',
+      recipientLegalName: 'Mother Legal Name',
+      relationship: 'parent',
+      purpose: 'family_support',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8500 },
+    });
+    // Approve-tap path: context supplies the draftId.
+    const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
+    const r = await executeTool('create_transfer', {}, ctx);
+    const transfer = await ctx.store.getTransfer(r.transfer_id as string);
+    expect(transfer?.recipientLegalName).toBe('Mother Legal Name');
+    expect(transfer?.relationship).toBe('parent');
+    expect(transfer?.purpose).toBe('family_support');
   });
 });
 

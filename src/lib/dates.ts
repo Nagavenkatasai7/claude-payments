@@ -4,6 +4,13 @@ export function easternDate(epochMs: number): string {
   return new Date(epochMs).toLocaleDateString('en-US', { timeZone: ET });
 }
 
+export function easternMonth(epochMs: number): string {
+  const d = new Date(epochMs);
+  const year = d.toLocaleString('en-US', { timeZone: ET, year: 'numeric' });
+  const month = d.toLocaleString('en-US', { timeZone: ET, month: '2-digit' });
+  return `${year}-${month}`;
+}
+
 export function easternDayOfMonth(epochMs: number): number {
   return Number(
     new Date(epochMs).toLocaleString('en-US', { timeZone: ET, day: 'numeric' }),

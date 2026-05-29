@@ -62,3 +62,27 @@ describe('P5 corridor guards: bot never surfaces corridor/compliance config', ()
     }
   });
 });
+
+describe('KYC guards: bot never leaks PII values or EDD internals to chat content', () => {
+  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts'];
+  // Stored-PII / internal terms that must never appear inside a chat content literal.
+  const forbidden = ['govidnumber', 'gov_id', 'residentialaddress', 'pepdeclared', 'eddcapturedat'];
+
+  for (const rel of filesToScan) {
+    it(`${rel} has no chat content leaking a PII value or EDD internal`, () => {
+      const contents = readFileSync(resolve(process.cwd(), rel), 'utf-8');
+      const matches = [...contents.matchAll(/content:\s*['"`]([^'"`]*?)['"`]/g)];
+      for (const m of matches) {
+        const text = m[1].toLowerCase();
+        for (const term of forbidden) expect(text).not.toContain(term);
+      }
+    });
+  }
+
+  it('the prompt mentions source of funds / occupation only as a question, not a stored field name', () => {
+    const prompt = readFileSync(resolve(process.cwd(), 'src/lib/prompt.ts'), 'utf-8');
+    // The instruction must be present (Task 10) but must not echo a stored value back.
+    expect(prompt).toContain('source of funds');
+    expect(prompt.toLowerCase()).not.toContain('your source of funds is');
+  });
+});

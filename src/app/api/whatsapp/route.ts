@@ -9,6 +9,7 @@ import { getScheduleStore } from '@/lib/schedule-store';
 import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
+import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { getPartnerStore } from '@/lib/partner-store';
 import { deriveTier } from '@/lib/tier-rules';
@@ -47,6 +48,7 @@ export async function POST(req: NextRequest) {
   // Build TurnContext deterministically server-side
   const customerStore = getCustomerStore(store);
   const dailyVolumeStore = getDailyVolumeStore();
+  const monthlyVolumeStore = getMonthlyVolumeStore();
   const lastInboundAt = await store.getLastInboundAt(incoming.from);
   const isNewConversation = lastInboundAt === null;
   await store.recordInboundNow(incoming.from);
@@ -95,6 +97,7 @@ export async function POST(req: NextRequest) {
         draftStore: getDraftStore(),
         customerStore,
         dailyVolumeStore,
+        monthlyVolumeStore,   // NEW (KYC)
         kycProvider,
         partnerStore: getPartnerStore(), // NEW (P4)
       });

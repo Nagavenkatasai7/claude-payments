@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createTransfer } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 
@@ -31,7 +32,8 @@ describe('createTransfer', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    const t = await createTransfer(store, partnerStore, base);
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, base);
     expect(t.status).toBe('awaiting_payment');
     expect(t.complianceStatus).toBe('cleared');
     expect(await store.getTransfer(t.id)).not.toBeNull();
@@ -41,7 +43,8 @@ describe('createTransfer', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    const t = await createTransfer(store, partnerStore, { ...base, recipientName: 'John Doe' });
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'John Doe' });
     expect(t.complianceStatus).toBe('blocked');
     expect(t.status).toBe('blocked');
   });
@@ -50,7 +53,8 @@ describe('createTransfer', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    const t = await createTransfer(store, partnerStore, { ...base, amountSource: 1500 });
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, amountSource: 1500 });
     expect(t.complianceStatus).toBe('flagged');
     expect(t.status).toBe('awaiting_payment');
   });
@@ -59,7 +63,8 @@ describe('createTransfer', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    await createTransfer(store, partnerStore, base);
+    const mvs = createMonthlyVolumeStore(redis);
+    await createTransfer(store, partnerStore, mvs, base);
     expect(await store.getTransferCount(base.phone)).toBe(1);
     expect(await store.getTodayTransferCount(base.phone)).toBe(1);
   });
@@ -70,7 +75,8 @@ describe('createTransfer P1: country + currency fields', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    const t = await createTransfer(store, partnerStore, {
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551112222',
       amountSource: 100,
       sourceCurrency: 'USD',
@@ -93,7 +99,8 @@ describe('createTransfer P2: partnerId', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    const t = await createTransfer(store, partnerStore, {
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551112222',
       amountSource: 100,
       sourceCurrency: 'USD',
@@ -113,7 +120,8 @@ describe('createTransfer P4: source-currency fields', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    const t = await createTransfer(store, partnerStore, {
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230000',
       amountSource: 100,
       sourceCurrency: 'USD',
@@ -138,8 +146,9 @@ describe('createTransfer P5: corridor-aware compliance', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner(); // countries: ['US'], no corridorCompliance
-    const t = await createTransfer(store, partnerStore, {
+    const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230000',
       amountSource: 1500, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
@@ -153,6 +162,7 @@ describe('createTransfer P5: corridor-aware compliance', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.savePartner({
       id: 'gb-co', name: 'GB Co', countries: ['US', 'GB'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
@@ -163,7 +173,7 @@ describe('createTransfer P5: corridor-aware compliance', () => {
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.27, INR: 108 } }) }),
     );
-    const t = await createTransfer(store, partnerStore, {
+    const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551239999',
       amountSource: 1200, sourceCurrency: 'GBP', partnerId: 'gb-co',
       recipientName: 'Mom', recipientPhone: '919876543210',
@@ -171,5 +181,105 @@ describe('createTransfer P5: corridor-aware compliance', () => {
     });
     // 1200 GBP → USD-equivalent (~1524) is below the 5000 override → not flagged for amount.
     expect(t.complianceReasons).not.toContain('Large transfer amount.');
+  });
+});
+
+describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => {
+  it('KYC dormant: a sub-$3k send produces today\'s compliance result exactly (regression)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await partnerStore.ensureDefaultPartner();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      phone: '15551230000', amountSource: 200, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+    });
+    expect(t.complianceStatus).toBe('cleared');
+    expect(t.complianceReasons).toEqual([]);
+    expect(t.eddRequired).toBeFalsy();
+  });
+
+  it('KYC: a $3k-cumulative send with missing EDD fields → flagged + edd_required (NOT blocked)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await partnerStore.ensureDefaultPartner();
+    await mvs.addCents('15551230001', 250_000);  // $2,500 already this month
+    const t = await createTransfer(store, partnerStore, mvs, {
+      phone: '15551230001', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+    });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toContain('edd_required');
+    expect(t.eddRequired).toBe(true);
+    expect(t.status).not.toBe('blocked'); // EDD never hard-blocks; customer not suspended
+  });
+
+  it('KYC: $3k send WITH EDD fields present → no EDD flag', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await partnerStore.ensureDefaultPartner();
+    await mvs.addCents('15551230002', 250_000);
+    const t = await createTransfer(store, partnerStore, mvs, {
+      phone: '15551230002', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      sourceOfFunds: 'employment', occupation: 'salaried',
+    });
+    expect(t.complianceReasons).not.toContain('edd_required');
+  });
+
+  it('KYC precedence: a watchlist hit still BLOCKS even when EDD would flag', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await partnerStore.ensureDefaultPartner();
+    await mvs.addCents('15551230003', 250_000);
+    const t = await createTransfer(store, partnerStore, mvs, {
+      phone: '15551230003', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'John Doe',  // on WATCHLIST
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+    });
+    expect(t.complianceStatus).toBe('blocked');
+    expect(t.complianceReasons).not.toContain('edd_required');
+  });
+
+  it('KYC: monthlyVolumeStore.addCents called with USD-equivalent cents after save', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await partnerStore.ensureDefaultPartner();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      phone: '15551230004', amountSource: 200, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+    });
+    expect(await mvs.getMonthCents('15551230004')).toBe(Math.round(t.amountUsd * 100));
+  });
+
+  it('KYC: Travel-Rule fields are written onto the Transfer when supplied', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await partnerStore.ensureDefaultPartner();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      phone: '15551230005', amountSource: 200, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      recipientLegalName: 'Mother Legal Name', relationship: 'parent', purpose: 'family_support',
+    });
+    expect(t.recipientLegalName).toBe('Mother Legal Name');
+    expect(t.relationship).toBe('parent');
+    expect(t.purpose).toBe('family_support');
   });
 });

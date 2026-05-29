@@ -5,14 +5,15 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer } from './transfer-create';
-import { evaluateCap } from './tier-rules';
+import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, Customer, CurrencyCode, FundingMethod, Partner, PayoutMethod, Schedule, TurnContext } from './types';
+import type { ChatTool, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PayoutMethod, Schedule, SourceOfFunds, TurnContext } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
+import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { sendInteractive, type InteractiveButton } from './whatsapp';
@@ -24,6 +25,16 @@ import {
   disambiguateNames,
   truncateLabel,
 } from './whatsapp-buttons';
+
+// ── KYC closed-set validators: an unknown value is treated as UNSUPPLIED
+// (fail-safe to flag, never silent-pass). Mirrors the type unions in types.ts. ──
+const SOURCE_OF_FUNDS = ['employment','business','investment','gift','savings','other'] as const;
+const OCCUPATIONS = ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] as const;
+const RELATIONSHIPS = ['self','spouse','parent','child','sibling','other_family','friend','business','other'] as const;
+const PURPOSES = ['family_support','gift','education','medical','savings','bills','business','other'] as const;
+function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | undefined {
+  return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
+}
 
 export const toolSchemas: ChatTool[] = [
   {
@@ -82,6 +93,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The recipient's WhatsApp number in India, with country code, e.g. 919876543210.",
           },
+          recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
+          relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
+          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
+          occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: [
           'amount_usd',
@@ -162,6 +178,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
+          relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
+          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
+          occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: ['amount_usd', 'recipient_name', 'recipient_phone', 'payout_method', 'payout_destination', 'funding_method', 'frequency'],
       },
@@ -242,6 +263,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
+          relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
+          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
+          occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: [
           'amount_usd',
@@ -268,7 +294,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'check_send_limit',
       description:
-        "Check whether the sender is allowed to send `amount_usd` right now. Pass 0 to fetch their current cap status without proposing an amount. Returns { within_cap, tier, daily_cap_usd, per_transfer_cap_usd, today_used_usd, today_remaining_usd, reason?, day_of_window?, kyc_url? }. Always call this BEFORE get_quote.",
+        "Check whether the sender is allowed to send `amount_usd` right now. Pass 0 to fetch their current cap status without proposing an amount. Returns { within_cap, tier, daily_cap_usd, per_transfer_cap_usd, today_used_usd, today_remaining_usd, reason?, day_of_window?, kyc_url?, edd_required, edd_threshold_usd }. Always call this BEFORE get_quote.",
       parameters: {
         type: 'object',
         properties: {
@@ -296,6 +322,7 @@ export interface ToolContext {
   turn: TurnContext;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
+  monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
 }
@@ -427,7 +454,7 @@ async function createTransferTool(
       }
     }
     try {
-      const transfer = await createTransfer(ctx.store, ctx.partnerStore, {
+      const transfer = await createTransfer(ctx.store, ctx.partnerStore, ctx.monthlyVolumeStore, {
         phone: ctx.phone,
         amountSource: draft.amountSource,
         sourceCurrency: draft.sourceCurrency,
@@ -437,8 +464,16 @@ async function createTransferTool(
         payoutMethod: draft.recipient.payoutMethod,
         payoutDestination: draft.recipient.payoutDestination,
         fundingMethod: draft.fundingMethod,
+        // ── KYC Travel-Rule / EDD: from the consumed draft + sender legal name ──
+        recipientLegalName: draft.recipientLegalName,
+        relationship: draft.relationship,
+        purpose: draft.purpose,
+        sourceOfFunds: draft.sourceOfFunds,
+        occupation: draft.occupation,
+        senderName: customer.fullName,
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
+      await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
       return {
         transfer_id: transfer.id,
         status: transfer.status,
@@ -481,8 +516,10 @@ async function createTransferTool(
       };
     }
   }
+  const legacySof = asEnum(SOURCE_OF_FUNDS, args.source_of_funds);
+  const legacyOcc = asEnum(OCCUPATIONS, args.occupation);
   try {
-    const transfer = await createTransfer(ctx.store, ctx.partnerStore, {
+    const transfer = await createTransfer(ctx.store, ctx.partnerStore, ctx.monthlyVolumeStore, {
       phone: ctx.phone,
       amountSource,
       sourceCurrency,
@@ -492,8 +529,16 @@ async function createTransferTool(
       payoutMethod: args.payout_method as PayoutMethod,
       payoutDestination: String(args.payout_destination),
       fundingMethod: args.funding_method as FundingMethod,
+      // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
+      recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
+      relationship: asEnum(RELATIONSHIPS, args.relationship),
+      purpose: asEnum(PURPOSES, args.purpose),
+      sourceOfFunds: legacySof,
+      occupation: legacyOcc,
+      senderName: legacyCustomer.fullName,
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
+    await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
     return {
       transfer_id: transfer.id,
       status: transfer.status,
@@ -506,6 +551,23 @@ async function createTransferTool(
   } catch (err) {
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
+  }
+}
+
+// Sticky EDD profile: when both SoF + occupation are supplied (validated) and
+// differ from what's stored, persist them onto the Customer so future sends
+// satisfy the EDD requirement without re-asking.
+async function persistEddProfile(
+  ctx: ToolContext,
+  customer: Customer,
+  sof: SourceOfFunds | undefined,
+  occ: Occupation | undefined,
+): Promise<void> {
+  if (sof && occ && (customer.sourceOfFunds !== sof || customer.occupation !== occ)) {
+    await ctx.customerStore.saveCustomer({
+      ...customer, sourceOfFunds: sof, occupation: occ, eddCapturedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
   }
 }
 
@@ -744,6 +806,12 @@ async function sendApprovePickerTool(
       amountSource: q.amountSource,
       sourceCurrency: q.sourceCurrency,
       fundingMethod,
+      // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
+      recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
+      relationship: asEnum(RELATIONSHIPS, args.relationship),
+      purpose: asEnum(PURPOSES, args.purpose),
+      sourceOfFunds: asEnum(SOURCE_OF_FUNDS, args.source_of_funds),
+      occupation: asEnum(OCCUPATIONS, args.occupation),
       quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
     });
     const fmt = (n: number) =>
@@ -792,6 +860,10 @@ async function checkSendLimitTool(
   const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
   const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
 
+  const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.phone);   // NEW (KYC)
+  const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)
+  const eddFieldsPresent = Boolean(customer.sourceOfFunds && customer.occupation); // NEW (KYC)
+
   // Surface a KYC URL for T0 or Suspended (the agent uses this in the message).
   let kycUrl: string | undefined;
   if (evalResult.tier === 'T0' || evalResult.tier === 'Suspended') {
@@ -812,5 +884,7 @@ async function checkSendLimitTool(
     reason: evalResult.reason,
     day_of_window: evalResult.dayOfWindow,
     kyc_url: kycUrl,
+    edd_required: edd.eddRequired && !eddFieldsPresent,   // false on the dormant path
+    edd_threshold_usd: edd.thresholdCents / 100,          // 3000 (for messaging)
   };
 }

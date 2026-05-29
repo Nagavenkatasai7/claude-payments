@@ -5,6 +5,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { evaluateCap } from '@/lib/tier-rules';
+import { maskLast4 } from '@/lib/mask';
 import { Sidebar } from '../../sidebar';
 import { markCustomerVerifiedAction, markCustomerRejectedAction } from '../actions';
 
@@ -64,6 +65,12 @@ export default async function CustomerDetailPage({
               <dt>Provider ref</dt><dd>{customer.kycProviderRef ?? '—'}</dd>
               <dt>Full name</dt><dd>{customer.fullName ?? '—'}</dd>
               <dt>DOB</dt><dd>{customer.dateOfBirth ?? '—'}</dd>
+              <dt>Nationality</dt><dd>{customer.nationality ?? '—'}</dd>
+              <dt>Address</dt><dd>{customer.residentialAddress ?? '—'}</dd>
+              <dt>Gov ID</dt><dd>{customer.govIdType ? `${customer.govIdType} ••••${maskLast4(customer.govIdNumber)}` : '—'}</dd>
+              <dt>PEP</dt><dd>{customer.pepDeclared ? 'Self-declared' : 'No'}</dd>
+              <dt>Source of funds</dt><dd>{customer.sourceOfFunds ?? '—'}</dd>
+              <dt>Occupation</dt><dd>{customer.occupation ?? '—'}</dd>
               {customer.kycRejectedReason && (
                 <>
                   <dt>Rejected reason</dt>

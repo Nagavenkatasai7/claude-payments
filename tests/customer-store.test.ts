@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -61,8 +62,9 @@ describe('customer store', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const ps = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
     // Pre-existing transfer (e.g. from before this batch shipped)
-    await createTransfer(store, ps, {
+    await createTransfer(store, ps, mvs, {
       phone: PHONE,
       amountSource: 100,
       sourceCurrency: 'USD',
@@ -119,7 +121,8 @@ describe('customer-store P1: senderCountry', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const ps = createPartnerStore(redis);
-    await createTransfer(store, ps, {
+    const mvs = createMonthlyVolumeStore(redis);
+    await createTransfer(store, ps, mvs, {
       phone: '15550008888',
       amountSource: 50,
       sourceCurrency: 'USD',

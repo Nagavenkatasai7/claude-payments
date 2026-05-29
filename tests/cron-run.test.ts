@@ -4,6 +4,7 @@ import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Schedule } from '@/lib/types';
@@ -44,13 +45,14 @@ describe('runDueSchedules', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     await scheduleStore.saveSchedule(sched('due', 21));
     await scheduleStore.saveSchedule(sched('notdue', 5));
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, scheduleStore, now: NOW,
+      store, partnerStore, monthlyVolumeStore, scheduleStore, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -66,6 +68,7 @@ describe('runDueSchedules', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const blocked = sched('b', 21);
     blocked.recipientName = 'John Doe'; // on the watchlist
@@ -73,7 +76,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, scheduleStore, now: NOW,
+      store, partnerStore, monthlyVolumeStore, scheduleStore, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 

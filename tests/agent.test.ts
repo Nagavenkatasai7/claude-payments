@@ -5,6 +5,7 @@ import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
@@ -14,9 +15,10 @@ import type { ChatMessage, TurnContext } from '@/lib/types';
 function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
   const customerStore = createCustomerStore(redis, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
   const partnerStore = createPartnerStore(redis);
-  return { customerStore, dailyVolumeStore, kycProvider, partnerStore };
+  return { customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
 }
 
 function freshScheduleStore(redis = fakeRedis()) {
@@ -466,9 +468,10 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
     const store = createStore(redis);
     const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const partnerStore = createPartnerStore(redis);
-    return { redis, store, customerStore, dailyVolumeStore, kycProvider, partnerStore };
+    return { redis, store, customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
   }
 
   it('injects [SEND CURRENCIES: USD, GBP] note when partner has countries [US, GB]', async () => {
@@ -505,6 +508,7 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
       kycProvider: b.kycProvider,
       partnerStore: b.partnerStore,
       chat: async (messages) => {
@@ -536,6 +540,7 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
       kycProvider: b.kycProvider,
       partnerStore: b.partnerStore,
       chat: async (messages) => {
@@ -560,9 +565,10 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     const store = createStore(redis);
     const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const partnerStore = createPartnerStore(redis);
-    return { redis, store, customerStore, dailyVolumeStore, kycProvider, partnerStore };
+    return { redis, store, customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
   }
 
   it('prepends [NEW CUSTOMER] when turn.isNewCustomer is true', async () => {
@@ -574,6 +580,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
       kycProvider: b.kycProvider,
       partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
@@ -592,6 +599,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
       kycProvider: b.kycProvider,
       partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
@@ -613,6 +621,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
       kycProvider: b.kycProvider,
       partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },

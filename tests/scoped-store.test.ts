@@ -4,6 +4,7 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -37,6 +38,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
   const store = createStore(redis);
   const customerStore = createCustomerStore(redis, store);
   const partnerStore = createPartnerStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const scheduleStore = createScheduleStore(redis, customerStore);
 
   for (const id of ['acme', 'beta']) {
@@ -55,7 +57,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       kycStatus: 'verified', senderCountry: 'US', partnerId,
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
-    await createTransfer(store, partnerStore, {
+    await createTransfer(store, partnerStore, monthlyVolumeStore, {
       phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'mom@upi',
