@@ -6,6 +6,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage, TurnContext } from '@/lib/types';
@@ -14,7 +15,8 @@ function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
   const customerStore = createCustomerStore(redis, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
-  return { customerStore, dailyVolumeStore, kycProvider };
+  const partnerStore = createPartnerStore(redis);
+  return { customerStore, dailyVolumeStore, kycProvider, partnerStore };
 }
 
 function freshScheduleStore(redis = fakeRedis()) {
@@ -465,7 +467,8 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
-    return { redis, store, customerStore, dailyVolumeStore, kycProvider };
+    const partnerStore = createPartnerStore(redis);
+    return { redis, store, customerStore, dailyVolumeStore, kycProvider, partnerStore };
   }
 
   it('prepends [NEW CUSTOMER] when turn.isNewCustomer is true', async () => {
@@ -478,6 +481,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
       kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: true, isNewCustomer: true });
@@ -495,6 +499,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
       kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
     });
     await agent.runAgentTurn('15551234567', 'hi', {
@@ -515,6 +520,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
       kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });

@@ -13,6 +13,7 @@ import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
+import type { PartnerStore } from './partner-store';
 import { sendInteractive, type InteractiveButton } from './whatsapp';
 import {
   recipientButtonId,
@@ -275,6 +276,7 @@ export interface ToolContext {
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   kycProvider: KycProvider;
+  partnerStore: PartnerStore; // NEW (P4)
 }
 
 type ToolResult = Record<string, unknown>;

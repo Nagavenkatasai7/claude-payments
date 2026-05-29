@@ -10,6 +10,7 @@ import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import { getPartnerStore } from '@/lib/partner-store';
 import { deriveTier } from '@/lib/tier-rules';
 import type { ButtonTap, TurnContext } from '@/lib/types';
 
@@ -95,6 +96,7 @@ export async function POST(req: NextRequest) {
         customerStore,
         dailyVolumeStore,
         kycProvider,
+        partnerStore: getPartnerStore(), // NEW (P4)
       });
       const reply = await agent.runAgentTurn(incoming.from, messageText, turn);
       await sendText(incoming.from, reply);
