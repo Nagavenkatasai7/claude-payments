@@ -13,6 +13,8 @@ function sampleDraft(): Omit<Draft, 'createdAt'> {
       payoutDestination: 'mom@upi',
     },
     amountUsd: 300,
+    amountSource: 300,
+    sourceCurrency: 'USD',
     fundingMethod: 'bank_transfer',
     quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
   };
@@ -53,5 +55,21 @@ describe('draft store', () => {
     const a = await ds.createDraft(sampleDraft());
     const b = await ds.createDraft(sampleDraft());
     expect(a).not.toBe(b);
+  });
+
+  it('P4: round-trips source-currency fields on a draft', async () => {
+    const store = createDraftStore(fakeRedis());
+    const id = await store.createDraft({
+      senderPhone: '15551230000',
+      recipient: { name: 'Asha', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'asha@upi' },
+      amountUsd: 254,
+      amountSource: 200,
+      sourceCurrency: 'GBP',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21600 },
+    });
+    const got = await store.consumeDraft(id);
+    expect(got?.amountSource).toBe(200);
+    expect(got?.sourceCurrency).toBe('GBP');
   });
 });

@@ -10,6 +10,7 @@ import {
   backfillCountryCurrencyOnce,
   backfillPartnersOnce,
   backfillSchedulesOnce,
+  backfillSourceAmountsOnce,
 } from '@/lib/migration';
 import { sendText } from '@/lib/whatsapp';
 
@@ -34,6 +35,7 @@ export async function GET(req: NextRequest) {
   const countryCurrencyBackfill = await backfillCountryCurrencyOnce(store, customerStore);
   const partnerBackfill = await backfillPartnersOnce(store, customerStore, partnerStore);
   const schedulePartnerBackfill = await backfillSchedulesOnce(store, scheduleStore);
+  const sourceAmountBackfill = await backfillSourceAmountsOnce(store, scheduleStore); // NEW (P4)
 
   const result = await runDueSchedules({
     store,
@@ -64,5 +66,6 @@ export async function GET(req: NextRequest) {
     countryCurrencyBackfill,
     partnerBackfill,          // NEW (P2)
     schedulePartnerBackfill,  // NEW (P3)
+    sourceAmountBackfill,     // NEW (P4)
   });
 }

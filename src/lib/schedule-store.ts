@@ -22,6 +22,8 @@ export function createScheduleStore(
         const c = await customerStore.getCustomer(parsed.phone);
         parsed.partnerId = c?.partnerId ?? DEFAULT_PARTNER_ID;
       }
+      if (!parsed.sourceCurrency) parsed.sourceCurrency = 'USD';
+      if (parsed.amountSource === undefined) parsed.amountSource = parsed.amountUsd;
       return parsed;
     },
     async saveSchedule(schedule: Schedule): Promise<void> {

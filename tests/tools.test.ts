@@ -6,6 +6,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 
@@ -26,6 +27,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
     customerStore,
     dailyVolumeStore,
     kycProvider,
+    partnerStore: createPartnerStore(redis), // NEW (P4)
   };
 }
 
@@ -501,11 +503,82 @@ describe('create_transfer — daily volume increment', () => {
   });
 });
 
+describe('multi-currency dormancy invariant', () => {
+  it('get_quote for a multi-currency partner returns source_currency GBP and correct amounts', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15559991111');
+
+    // Seed a multi-currency partner (US + GB)
+    const now = new Date().toISOString();
+    await ctx.partnerStore.savePartner({
+      id: 'multi-test',
+      name: 'Multi Partner',
+      countries: ['US', 'GB'],
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Seed customer linked to multi-currency partner
+    await ctx.customerStore.saveCustomer({
+      senderPhone: '15559991111',
+      firstSeenAt: now,
+      kycStatus: 'not_started',
+      senderCountry: 'US',
+      partnerId: 'multi-test',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Mock getFxRates to return GBP rates for this test
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('from=GBP')) {
+        return { ok: true, json: async () => ({ rates: { INR: 108, USD: 1.27 } }) };
+      }
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+
+    const result = await executeTool(
+      'get_quote',
+      { amount_usd: 200, funding_method: 'bank_transfer', source_currency: 'GBP' },
+      ctx,
+    );
+
+    expect(result.source_currency).toBe('GBP');
+    expect(result.amount_inr).toBe(21600);  // Math.round(200 * 108)
+    expect(result.amount_usd).toBe(254);    // round2(200 * 1.27)
+    expect(result.error).toBeUndefined();
+  });
+
+  it('get_quote for a US-only partner ignores source_currency GBP request (dormant)', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15559992222');
+
+    // Use the default partner (US only — ensureDefaultPartner gives countries: ['US'])
+    // No need to seed a partner; resolveCurrencyAndRates will call ensureDefaultPartner
+
+    // Even though we pass source_currency: 'GBP', it should be ignored for a ['US'] partner
+    const result = await executeTool(
+      'get_quote',
+      { amount_usd: 200, funding_method: 'bank_transfer', source_currency: 'GBP' },
+      ctx,
+    );
+
+    // Dormant: USD path, MOCK_RATE=85 (set in beforeEach stubFetch)
+    expect(result.source_currency).toBe('USD');
+    expect(result.amount_inr).toBe(Math.round(200 * MOCK_RATE));
+    expect(result.error).toBeUndefined();
+  });
+});
+
 describe('send_approve_picker — cap enforcement', () => {
   it('refuses to send buttons and returns error when over cap', async () => {
     const redis = fakeRedis();
     const ctx = buildCtx(redis, '15550002222');
     await ctx.customerStore.upsertOnFirstInbound('15550002222');
+    // Prime the rate cache with the standard stub BEFORE replacing fetch, so
+    // resolveCurrencyAndRates doesn't hit the WhatsApp-detection stub.
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
     let interactiveSent = false;
     vi.stubGlobal('fetch', vi.fn(async () => {
       interactiveSent = true;

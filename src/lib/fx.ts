@@ -1,4 +1,5 @@
-import type { FundingMethod, Quote } from './types';
+import type { CurrencyCode, FundingMethod, Quote } from './types';
+import type { FxRates } from './rate';
 
 export const MIN_USD = 10;
 export const MAX_USD = 2999;
@@ -10,19 +11,25 @@ export class QuoteError extends Error {
   }
 }
 
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
 export function quote(
-  amountUsd: number,
-  fxRate: number,
+  amountSource: number,
+  sourceCurrency: CurrencyCode,
+  rates: FxRates,
   fundingMethod: FundingMethod,
   transferCount: number,
 ): Quote {
+  if (!Number.isFinite(amountSource)) {
+    throw new QuoteError('Please give a valid amount.');
+  }
+  amountSource = round2(amountSource);
+  const amountUsd = round2(amountSource * rates.toUsd);
   if (!Number.isFinite(amountUsd)) {
-    throw new QuoteError('Please give a valid amount in US dollars.');
+    throw new QuoteError('Invalid exchange rate; please try again.');
   }
   if (amountUsd < MIN_USD || amountUsd > MAX_USD) {
-    throw new QuoteError(
-      `Transfers must be between $${MIN_USD} and $${MAX_USD}.`,
-    );
+    throw new QuoteError(`Transfers must be between $${MIN_USD} and $${MAX_USD}.`);
   }
 
   let feeUsd: number;
@@ -37,28 +44,30 @@ export function quote(
         feeUsd = 2.99;
         break;
       case 'credit_card':
-        feeUsd = Math.round((2.99 + 0.03 * amountUsd) * 100) / 100;
+        feeUsd = round2(2.99 + 0.03 * amountUsd);
         break;
       default:
-        // Guards against an unexpected funding method (e.g. the LLM
-        // passing a value outside the schema enum) producing NaN amounts.
+        // Guards against an unexpected funding method (e.g. the LLM passing a
+        // value outside the schema enum) producing NaN amounts.
         throw new QuoteError(
           'Please choose how to pay: credit card, debit card, or bank transfer.',
         );
     }
   }
 
-  feeUsd = Math.round(feeUsd * 100) / 100;
-  const amountInr = Math.round(amountUsd * fxRate);
-  const totalChargeUsd = Math.round((amountUsd + feeUsd) * 100) / 100;
-  const deliveryEstimate = 'within 10 minutes';
+  const feeSource = round2(feeUsd / rates.toUsd);
+  const amountInr = Math.round(amountSource * rates.toInr);
 
   return {
     amountUsd,
     feeUsd,
-    totalChargeUsd,
-    fxRate,
+    totalChargeUsd: round2(amountUsd + feeUsd),
+    fxRate: rates.toInr,
     amountInr,
-    deliveryEstimate,
+    deliveryEstimate: 'within 10 minutes',
+    sourceCurrency,
+    amountSource,
+    feeSource,
+    totalChargeSource: round2(amountSource + feeSource),
   };
 }

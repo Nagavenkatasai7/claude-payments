@@ -18,6 +18,10 @@ export interface Quote {
   fxRate: number;
   amountInr: number;
   deliveryEstimate: string;
+  sourceCurrency: CurrencyCode;   // NEW (P4)
+  amountSource: number;           // NEW (P4)
+  feeSource: number;              // NEW (P4)
+  totalChargeSource: number;      // NEW (P4)
 }
 
 export interface Transfer {
@@ -47,6 +51,9 @@ export interface Transfer {
   destinationCountry: CountryCode;
   destinationCurrency: CurrencyCode;
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
+  amountSource: number;         // NEW (P4)
+  feeSource: number;            // NEW (P4)
+  totalChargeSource: number;    // NEW (P4)
 }
 
 export interface ToolCall {
@@ -92,6 +99,8 @@ export interface Schedule {
   createdAt: string;
   lastRunAt?: string;
   partnerId: PartnerId;   // NEW (P3) — required; multi-tenant boundary
+  sourceCurrency: CurrencyCode;   // NEW (P4)
+  amountSource: number;           // NEW (P4)
 }
 
 export type StaffRole = 'admin' | 'agent';
@@ -128,7 +137,9 @@ export interface Draft {
     payoutMethod: PayoutMethod;
     payoutDestination: string;
   };
-  amountUsd: number;
+  amountUsd: number;              // USD-equivalent (for cap re-check)
+  amountSource: number;           // NEW (P4)
+  sourceCurrency: CurrencyCode;   // NEW (P4)
   fundingMethod: FundingMethod;
   quote: {
     feeUsd: number;

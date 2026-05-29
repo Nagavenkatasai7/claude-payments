@@ -6,6 +6,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage, TurnContext } from '@/lib/types';
@@ -14,7 +15,8 @@ function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
   const customerStore = createCustomerStore(redis, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
-  return { customerStore, dailyVolumeStore, kycProvider };
+  const partnerStore = createPartnerStore(redis);
+  return { customerStore, dailyVolumeStore, kycProvider, partnerStore };
 }
 
 function freshScheduleStore(redis = fakeRedis()) {
@@ -162,6 +164,9 @@ describe('createAgent', () => {
       destinationCountry: 'IN',
       destinationCurrency: 'INR',
       partnerId: 'default',
+      amountSource: 100,
+      feeSource: 1.99,
+      totalChargeSource: 101.99,
     });
 
     const agent = createAgent({
@@ -225,6 +230,9 @@ describe('createAgent', () => {
       destinationCountry: 'IN',
       destinationCurrency: 'INR',
       partnerId: 'default',
+      amountSource: 100,
+      feeSource: 1.99,
+      totalChargeSource: 101.99,
     });
 
     let call = 0;
@@ -352,6 +360,8 @@ describe('createAgent — TurnContext', () => {
         payoutDestination: 'mom@upi',
       },
       amountUsd: 300,
+      amountSource: 300,
+      sourceCurrency: 'USD',
       fundingMethod: 'bank_transfer',
       quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
     });
@@ -406,6 +416,8 @@ describe('replay safety', () => {
         payoutDestination: 'mom@upi',
       },
       amountUsd: 300,
+      amountSource: 300,
+      sourceCurrency: 'USD',
       fundingMethod: 'bank_transfer',
       quote: { feeUsd: 1.99, fxRate: 84, amountInr: 25200 },
     });
@@ -449,13 +461,108 @@ describe('replay safety', () => {
   });
 });
 
+describe('createAgent — P4 [SEND CURRENCIES] note', () => {
+  function buildWithRedis(redis = fakeRedis()) {
+    const store = createStore(redis);
+    const customerStore = createCustomerStore(redis, store);
+    const dailyVolumeStore = createDailyVolumeStore(redis);
+    const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+    const partnerStore = createPartnerStore(redis);
+    return { redis, store, customerStore, dailyVolumeStore, kycProvider, partnerStore };
+  }
+
+  it('injects [SEND CURRENCIES: USD, GBP] note when partner has countries [US, GB]', async () => {
+    const b = buildWithRedis();
+    const now = new Date().toISOString();
+
+    // Seed a multi-currency partner (US + GB → USD + GBP).
+    const multiPartner = {
+      id: 'multi-test' as import('@/lib/types').PartnerId,
+      name: 'Multi Test Partner',
+      countries: ['US', 'GB'] as import('@/lib/types').CountryCode[],
+      status: 'active' as const,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await b.partnerStore.savePartner(multiPartner);
+
+    // Seed a customer assigned to this partner.
+    await b.customerStore.saveCustomer({
+      senderPhone: PHONE,
+      firstSeenAt: now,
+      kycStatus: 'verified',
+      kycVerifiedAt: now,
+      senderCountry: 'US',
+      partnerId: 'multi-test',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: freshScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
+      chat: async (messages) => {
+        seen.push(messages);
+        return { role: 'assistant', content: 'hi' };
+      },
+    });
+
+    await agent.runAgentTurn(PHONE, 'hello', { isNewConversation: false });
+
+    // Exclude the SYSTEM_PROMPT (first message); only check ephemeral system notes.
+    const ephemeralSys = seen[0]
+      .filter((m) => m.role === 'system')
+      .slice(1) // skip the base SYSTEM_PROMPT
+      .map((m) => m.content);
+    expect(ephemeralSys.some((s) => typeof s === 'string' && /\[SEND CURRENCIES: USD, GBP/.test(s))).toBe(true);
+  });
+
+  it('does NOT inject [SEND CURRENCIES] note when partner has only country [US] (dormant)', async () => {
+    const b = buildWithRedis();
+    const seen: ChatMessage[][] = [];
+
+    // Default partner (countries: ['US']) — single currency, note must NOT appear.
+    await b.partnerStore.ensureDefaultPartner();
+
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: freshScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
+      chat: async (messages) => {
+        seen.push(messages);
+        return { role: 'assistant', content: 'hi' };
+      },
+    });
+
+    await agent.runAgentTurn(PHONE, 'hello', { isNewConversation: false });
+
+    // Exclude the SYSTEM_PROMPT (first message); only check ephemeral system notes.
+    const ephemeralSys = seen[0]
+      .filter((m) => m.role === 'system')
+      .slice(1) // skip the base SYSTEM_PROMPT
+      .map((m) => m.content);
+    expect(ephemeralSys.some((s) => typeof s === 'string' && s.includes('[SEND CURRENCIES'))).toBe(false);
+  });
+});
+
 describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
   function build(redis = fakeRedis()) {
     const store = createStore(redis);
     const customerStore = createCustomerStore(redis, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
-    return { redis, store, customerStore, dailyVolumeStore, kycProvider };
+    const partnerStore = createPartnerStore(redis);
+    return { redis, store, customerStore, dailyVolumeStore, kycProvider, partnerStore };
   }
 
   it('prepends [NEW CUSTOMER] when turn.isNewCustomer is true', async () => {
@@ -468,6 +575,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
       kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: true, isNewCustomer: true });
@@ -485,6 +593,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
       kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
     });
     await agent.runAgentTurn('15551234567', 'hi', {
@@ -505,6 +614,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
       kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: false });

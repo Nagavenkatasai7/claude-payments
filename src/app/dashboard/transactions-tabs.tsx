@@ -14,8 +14,8 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]['key'];
 
-function usd(amount: number): string {
-  return `$${amount.toFixed(2)}`;
+function money(amount: number, currency: Transfer['sourceCurrency']): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
 }
 function inr(amount: number): string {
   return `₹${amount.toLocaleString('en-IN')}`;
@@ -167,7 +167,10 @@ export function TransactionsTabs({
                     )}
                   </td>
                   <td>
-                    <div className="sh-amount">{usd(t.amountUsd)}</div>
+                    <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                    {t.sourceCurrency !== 'USD' && (
+                      <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                    )}
                     <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
                   </td>
                   <td>{humanizeFunding(t.fundingMethod)}</td>
