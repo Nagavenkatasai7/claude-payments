@@ -11,6 +11,7 @@ describe('P2 hard rule: bot never mentions partner in any chat content', () => {
     'src/lib/prompt.ts',
     'src/lib/agent.ts',
     'src/lib/tools.ts',
+    'src/lib/recent-transfers.ts',
     'tests/agent.test.ts',
     'tests/e2e.test.ts',
   ];
@@ -39,7 +40,7 @@ describe('P4 currency note guards', () => {
 });
 
 describe('P5 corridor guards: bot never surfaces corridor/compliance config', () => {
-  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts'];
+  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts', 'src/lib/recent-transfers.ts'];
   const forbidden = ['corridor', 'watchlist', 'corridorcompliance', 'sanctions'];
 
   for (const rel of filesToScan) {
@@ -64,7 +65,7 @@ describe('P5 corridor guards: bot never surfaces corridor/compliance config', ()
 });
 
 describe('KYC guards: bot never leaks PII values or EDD internals to chat content', () => {
-  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts'];
+  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts', 'src/lib/recent-transfers.ts'];
   // Stored-PII / internal terms that must never appear inside a chat content literal.
   const forbidden = ['govidnumber', 'gov_id', 'residentialaddress', 'pepdeclared', 'eddcapturedat'];
 
@@ -84,5 +85,40 @@ describe('KYC guards: bot never leaks PII values or EDD internals to chat conten
     // The instruction must be present (Task 10) but must not echo a stored value back.
     expect(prompt).toContain('source of funds');
     expect(prompt.toLowerCase()).not.toContain('your source of funds is');
+  });
+});
+
+describe('transfer-memory: recent-transfers module + rendered note stay partner-/compliance-blind', () => {
+  it('the module source contains none of the forbidden tenant/compliance terms', () => {
+    const src = readFileSync(resolve(process.cwd(), 'src/lib/recent-transfers.ts'), 'utf-8').toLowerCase();
+    for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'compliance'])
+      expect(src).not.toContain(term);
+    // 'blocked' MUST appear once — as the STATUS_LABEL KEY mapping to 'on hold' —
+    // but never as a value the customer sees. Assert the mapping is to 'on hold'.
+    expect(src).toContain("blocked: 'on hold'");
+  });
+
+  it('a rendered note (incl. a blocked transfer) leaks no tenant/compliance internals', async () => {
+    const { createStore } = await import('@/lib/store');
+    const { fakeRedis } = await import('./helpers');
+    const { getRecentTransfersNote } = await import('@/lib/recent-transfers');
+    const store = createStore(fakeRedis());
+    const base = {
+      id: 'g1', phone: '+1555', amountUsd: 500, feeUsd: 5, totalChargeUsd: 505, fxRate: 83,
+      amountInr: 41500, recipientName: 'Mom', recipientPhone: '919', payoutMethod: 'upi',
+      payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
+      complianceReasons: [], status: 'delivered', createdAt: '2026-05-28T12:00:00Z',
+      partnerId: 'default', sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN',
+      destinationCurrency: 'INR', amountSource: 500, feeSource: 5, totalChargeSource: 505,
+    };
+    await store.saveTransfer(base as never);
+    await store.saveTransfer({ ...base, id: 'g2', recipientName: 'Ravi', status: 'blocked',
+      createdAt: '2026-05-27T12:00:00Z' } as never);
+
+    const note = (await getRecentTransfersNote('+1555', store)).toLowerCase();
+    for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'blocked', 'compliance', 'partnerid'])
+      expect(note).not.toContain(term);
+    expect(note).toContain('mom');     // customer-owned data IS present
+    expect(note).toContain('on hold'); // blocked surfaced as the soft label
   });
 });

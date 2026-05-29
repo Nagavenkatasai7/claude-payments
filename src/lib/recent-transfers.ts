@@ -5,7 +5,7 @@ import { easternDate } from './dates';
 const MAX_RECENT = 5; // last 5 of the already-newest-first list (fixed token cost)
 
 // Customer-facing status labels. NEVER the raw internal token for `blocked` —
-// the customer must never see compliance wording. bot-content-guard backstops this.
+// the customer must never see internal screening wording. bot-content-guard backstops this.
 const STATUS_LABEL: Record<TransferStatus, string> = {
   awaiting_payment: 'awaiting payment',
   paid: 'paid',
@@ -40,7 +40,7 @@ function formatLine(transfer: Transfer): string {
  * Returns '' (inject nothing) when the customer has no transfer history.
  *
  * Read-only: calls store.listTransfers() and nothing else — no Redis writes,
- * no schema change, no new key. Partner-blind by construction: surfaces only
+ * no schema change, no new key. Tenant-blind by construction: surfaces only
  * recipientName + source-currency amount + status label + date (fields the
  * customer already owns). Strict own-phone filter; a legacy record with a
  * missing phone matches nothing and is dropped (fail-closed).
