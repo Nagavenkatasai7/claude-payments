@@ -4,6 +4,7 @@ import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
+import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
 import {
   backfillCustomersOnce,
@@ -29,6 +30,7 @@ export async function GET(req: NextRequest) {
   const store = getStore();
   const customerStore = getCustomerStore(store);
   const partnerStore = getPartnerStore();
+  const monthlyVolumeStore = getMonthlyVolumeStore();
   const scheduleStore = getScheduleStore();
 
   // Idempotent backfills — sentinel-guarded.
@@ -42,6 +44,7 @@ export async function GET(req: NextRequest) {
   const result = await runDueSchedules({
     store,
     partnerStore,                 // NEW (P5): corridor-aware compliance
+    monthlyVolumeStore,           // NEW (KYC): cumulative-month EDD trigger at run time
     scheduleStore,
     now: Date.now(),
     sendScheduledLink: async (schedule, _transfer, url) => {
