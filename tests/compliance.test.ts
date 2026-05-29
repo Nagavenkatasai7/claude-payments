@@ -1,39 +1,59 @@
 import { describe, it, expect } from 'vitest';
 import { screenTransfer } from '@/lib/compliance';
+import { GLOBAL_DEFAULTS } from '@/lib/compliance-config';
+import { MockSanctionsScreener } from '@/lib/providers/sanctions-provider';
 
-describe('screenTransfer', () => {
-  it('clears an ordinary transfer', () => {
-    const r = screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0 });
+describe('screenTransfer — dormant (no rules/screener) reproduces today', () => {
+  it('clears an ordinary transfer', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' });
     expect(r.status).toBe('cleared');
     expect(r.reasons).toEqual([]);
   });
-
-  it('blocks a recipient on the watchlist (case-insensitive)', () => {
-    const r = screenTransfer({ amountUsd: 200, recipientName: '  John Doe ', transfersToday: 0 });
+  it('blocks a recipient on the watchlist (case-insensitive)', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: '  John Doe ', transfersToday: 0, sourceCountry: 'US' });
     expect(r.status).toBe('blocked');
     expect(r.reasons[0]).toMatch(/watchlist/i);
   });
-
-  it('flags a large amount', () => {
-    const r = screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 0 });
+  it('flags a large amount', async () => {
+    const r = await screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' });
     expect(r.status).toBe('flagged');
     expect(r.reasons.some((x) => /amount/i.test(x))).toBe(true);
   });
-
-  it('flags high velocity', () => {
-    const r = screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 3 });
+  it('flags high velocity', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 3, sourceCountry: 'US' });
     expect(r.status).toBe('flagged');
     expect(r.reasons.some((x) => /velocity/i.test(x))).toBe(true);
   });
-
-  it('records both reasons when amount and velocity both trip', () => {
-    const r = screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 4 });
+  it('records both reasons when amount and velocity both trip', async () => {
+    const r = await screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 4, sourceCountry: 'US' });
     expect(r.status).toBe('flagged');
     expect(r.reasons).toHaveLength(2);
   });
+  it('blocked takes precedence over flagged', async () => {
+    const r = await screenTransfer({ amountUsd: 2000, recipientName: 'John Doe', transfersToday: 9, sourceCountry: 'US' });
+    expect(r.status).toBe('blocked');
+  });
+});
 
-  it('blocked takes precedence over flagged', () => {
-    const r = screenTransfer({ amountUsd: 2000, recipientName: 'John Doe', transfersToday: 9 });
+describe('screenTransfer — corridor overrides', () => {
+  it('a raised largeAmountUsd clears a transfer that is flagged-today', async () => {
+    const rules = { ...GLOBAL_DEFAULTS, largeAmountUsd: 5000 };
+    const r = await screenTransfer({ amountUsd: 1200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'GB', rules });
+    expect(r.status).toBe('cleared'); // 1200 < 5000
+  });
+  it('watchlistExtra blocks a name absent from the global list', async () => {
+    const rules = { ...GLOBAL_DEFAULTS, watchlistExtra: ['corridor villain'] };
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Corridor Villain', transfersToday: 0, sourceCountry: 'GB', rules });
+    expect(r.status).toBe('blocked');
+  });
+  it('a lowered velocityLimit moves the flag boundary', async () => {
+    const rules = { ...GLOBAL_DEFAULTS, velocityLimit: 1 };
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 1, sourceCountry: 'GB', rules });
+    expect(r.status).toBe('flagged');
+  });
+  it('an injected screener is used in place of the default', async () => {
+    const screener = new MockSanctionsScreener(['only this name']);
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'only this name', transfersToday: 0, sourceCountry: 'GB', screener });
     expect(r.status).toBe('blocked');
   });
 });

@@ -9,6 +9,7 @@ const COUNTRY_CURRENCY_SENTINEL_KEY = 'country-currency-backfill-v1';
 const PARTNER_SENTINEL_KEY = 'partner-backfill-v1';
 const SCHEDULE_PARTNER_SENTINEL_KEY = 'schedule-partner-backfill-v1';
 const SOURCE_AMOUNT_SENTINEL_KEY = 'transfer-source-amount-backfill-v1';
+const CORRIDOR_COMPLIANCE_SENTINEL_KEY = 'corridor-compliance-backfill-v1';
 
 export async function backfillCustomersOnce(
   store: Store,
@@ -152,6 +153,26 @@ export async function backfillSchedulesOnce(
     schedulesBackfilled++;
   }
   return { schedulesBackfilled, skippedSentinel: false };
+}
+
+export async function backfillCorridorComplianceOnce(
+  store: Store,
+  partnerStore: PartnerStore,
+): Promise<{ partnersTouched: number; skippedSentinel: boolean }> {
+  const claimed = await store.claimMigrationFlag(CORRIDOR_COMPLIANCE_SENTINEL_KEY);
+  if (!claimed) return { partnersTouched: 0, skippedSentinel: true };
+
+  // corridorCompliance is OPTIONAL — the dormant path has nothing to fill.
+  // Skip the write for partners with no corridor data so 'default' stays
+  // byte-for-byte (spec open question 2). Partners that already carry an
+  // override are re-saved via the spread, preserving the field exactly.
+  let partnersTouched = 0;
+  for (const p of await partnerStore.listPartners()) {
+    if (p.corridorCompliance === undefined) continue; // skip → default untouched
+    await partnerStore.savePartner({ ...p });
+    partnersTouched++;
+  }
+  return { partnersTouched, skippedSentinel: false };
 }
 
 export async function backfillSourceAmountsOnce(

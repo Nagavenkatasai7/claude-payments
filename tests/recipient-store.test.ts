@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createStore } from '@/lib/store';
+import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -105,8 +106,10 @@ describe('createTransfer side-effects', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('upserts the recipient after a successful transfer', async () => {
-    const store = createStore(fakeRedis());
-    await createTransfer(store, {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    await createTransfer(store, partnerStore, {
       phone: '15551234567',
       amountSource: 100,
       sourceCurrency: 'USD',
@@ -125,7 +128,9 @@ describe('createTransfer side-effects', () => {
   });
 
   it('idempotently bumps lastUsedAt on a repeat transfer to the same recipient', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
     const input = {
       phone: '15551234567',
       amountSource: 100,
@@ -137,12 +142,12 @@ describe('createTransfer side-effects', () => {
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer' as const,
     };
-    await createTransfer(store, input);
+    await createTransfer(store, partnerStore, input);
     const firstList = await store.listRecipients('15551234567', 3);
     const firstAt = firstList[0].lastUsedAt;
 
     await new Promise((r) => setTimeout(r, 10));
-    await createTransfer(store, input);
+    await createTransfer(store, partnerStore, input);
     const secondList = await store.listRecipients('15551234567', 3);
 
     expect(secondList).toHaveLength(1);

@@ -259,6 +259,21 @@ export interface Partner {
   primaryColor?: string;              // hex string e.g. '#1a73e8'
   logoUrl?: string;                   // CDN URL
   adminNote?: string;                 // internal staff annotation
+  corridorCompliance?: Partial<Record<CountryCode, CorridorComplianceRule>>;  // NEW (P5) — optional override map (default partner never gets it)
   createdAt: string;
   updatedAt: string;
+}
+
+// ── Per-corridor compliance (P5) ──────────────────────────────────────
+//
+// A corridor is a (source-country → IN) pair; destination is always IN in v1,
+// so a corridor is identified by its SOURCE CountryCode (the map key). All
+// fields optional so an override can tweak a single dimension. This data is
+// untrusted at rest (set manually / via a future API) — readers must treat
+// its strings/lists defensively (?? '' / ?? [], lowercase/trim before compare).
+export interface CorridorComplianceRule {
+  watchlistExtra?: string[];   // names appended to the screener's base list (lowercased on read)
+  largeAmountUsd?: number;     // USD-equivalent flag threshold; overrides LARGE_AMOUNT_USD
+  velocityLimit?: number;      // transfers/day before 'High transfer velocity.'; overrides VELOCITY_LIMIT
+  kycCapHintUsd?: number;      // ADVISORY ONLY — hook for the NEXT (KYC) batch; NOT read by screenTransfer in P5
 }

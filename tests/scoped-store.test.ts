@@ -55,7 +55,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       kycStatus: 'verified', senderCountry: 'US', partnerId,
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
-    await createTransfer(store, {
+    await createTransfer(store, partnerStore, {
       phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'mom@upi',
