@@ -1,8 +1,7 @@
 export const dynamic = 'force-dynamic';
 
-import { getStore } from '@/lib/store';
-import { getScheduleStore } from '@/lib/schedule-store';
-import { requireStaff } from '@/lib/auth';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import {
   summarize,
   needsAttention,
@@ -43,9 +42,10 @@ function statusPillClass(status: Transfer['status']): string {
 }
 
 export default async function DashboardPage() {
-  await requireStaff();
-  const transfers = await getStore().listTransfers();
-  const schedules = await getScheduleStore().listSchedules();
+  const { staff } = await requireScope();
+  const scoped = createScopedStore(staff);
+  const transfers = await scoped.listTransfers();
+  const schedules = await scoped.listSchedules();
   const now = Date.now();
   const summary = summarize(transfers, now);
   const attentionCount = transfers.filter((t) => needsAttention(t, now)).length;

@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic';
 
-import { getScheduleStore } from '@/lib/schedule-store';
-import { requireStaff } from '@/lib/auth';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import { schedulesDueInRange } from '@/lib/dashboard';
 import { Sidebar } from '../sidebar';
 import type { Schedule } from '@/lib/types';
@@ -25,10 +25,11 @@ export default async function SchedulesPage({
 }: {
   searchParams: Promise<{ show?: string }>;
 }) {
-  await requireStaff();
+  const { staff } = await requireScope();
+  const scoped = createScopedStore(staff);
   const params = await searchParams;
   const showAll = params.show === 'all';
-  const all = await getScheduleStore().listSchedules();
+  const all = await scoped.listSchedules();
   const visible = showAll ? all : all.filter((s) => s.status === 'active');
   const now = Date.now();
   const dueIn7 = schedulesDueInRange(

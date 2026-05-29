@@ -5,6 +5,7 @@ import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer } from './transfer-create';
 import { evaluateCap } from './tier-rules';
+import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, FundingMethod, PayoutMethod, Schedule, TurnContext } from './types';
 import type { Store } from './store';
@@ -519,6 +520,9 @@ async function createScheduleTool(
       return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
     }
   }
+  // Look up the owner's partnerId — required on every new schedule (P3).
+  const owner = await ctx.customerStore.getCustomer(ctx.phone);
+  const partnerId = owner?.partnerId ?? DEFAULT_PARTNER_ID;
   const schedule: Schedule = {
     id: newTransferId(),
     phone: ctx.phone,
@@ -533,6 +537,7 @@ async function createScheduleTool(
     dayOfWeek,
     status: 'active',
     createdAt: new Date().toISOString(),
+    partnerId,
   };
   await ctx.scheduleStore.saveSchedule(schedule);
   return {

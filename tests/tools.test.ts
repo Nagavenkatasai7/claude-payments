@@ -20,7 +20,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
   return {
     phone,
     store,
-    scheduleStore: createScheduleStore(redis),
+    scheduleStore: createScheduleStore(redis, customerStore),
     draftStore: createDraftStore(redis),
     turn: { isNewConversation: false } as const,
     customerStore,
@@ -408,6 +408,26 @@ describe('schedule tools', () => {
     await executeTool('cancel_schedule', { schedule_id: created.schedule_id }, c);
     const saved = await c.scheduleStore.getSchedule(created.schedule_id as string);
     expect(saved?.status).toBe('cancelled');
+  });
+
+  it('create_schedule writes partnerId from the owning customer', async () => {
+    const c = buildCtx(fakeRedis());
+    await c.customerStore.saveCustomer({
+      senderPhone: PHONE,
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'acme',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const created = await executeTool('create_schedule', {
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 2,
+    }, c);
+    const saved = await c.scheduleStore.getSchedule(created.schedule_id as string);
+    expect(saved?.partnerId).toBe('acme');
   });
 });
 

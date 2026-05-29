@@ -5,7 +5,12 @@ import { getScheduleStore } from '@/lib/schedule-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { runDueSchedules } from '@/lib/cron-run';
-import { backfillCustomersOnce, backfillCountryCurrencyOnce, backfillPartnersOnce } from '@/lib/migration';
+import {
+  backfillCustomersOnce,
+  backfillCountryCurrencyOnce,
+  backfillPartnersOnce,
+  backfillSchedulesOnce,
+} from '@/lib/migration';
 import { sendText } from '@/lib/whatsapp';
 
 export const maxDuration = 300;
@@ -22,15 +27,17 @@ export async function GET(req: NextRequest) {
   const store = getStore();
   const customerStore = getCustomerStore(store);
   const partnerStore = getPartnerStore();
+  const scheduleStore = getScheduleStore();
 
   // Idempotent backfills — sentinel-guarded.
   const backfill = await backfillCustomersOnce(store, customerStore);
   const countryCurrencyBackfill = await backfillCountryCurrencyOnce(store, customerStore);
   const partnerBackfill = await backfillPartnersOnce(store, customerStore, partnerStore);
+  const schedulePartnerBackfill = await backfillSchedulesOnce(store, scheduleStore);
 
   const result = await runDueSchedules({
     store,
-    scheduleStore: getScheduleStore(),
+    scheduleStore,
     now: Date.now(),
     sendScheduledLink: async (schedule, _transfer, url) => {
       // TEMPORARY: the scheduled_payment_ready template is not yet approved
@@ -56,5 +63,6 @@ export async function GET(req: NextRequest) {
     backfill,
     countryCurrencyBackfill,
     partnerBackfill,          // NEW (P2)
+    schedulePartnerBackfill,  // NEW (P3)
   });
 }

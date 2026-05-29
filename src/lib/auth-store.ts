@@ -23,7 +23,7 @@ export function createAuthStore(redis: RedisLike) {
       );
       return all
         .filter((s): s is Staff => s !== null)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
     },
     async deleteStaff(username: string): Promise<void> {
       await redis.del(`staff:${username}`);
@@ -34,13 +34,21 @@ export function createAuthStore(redis: RedisLike) {
       await redis.set(`session:${token}`, username, {
         ex: SESSION_TTL_SECONDS,
       });
+      await redis.sadd(`staff_sessions:${username}`, token);
       return token;
     },
     async getSessionUser(token: string): Promise<string | null> {
       return redis.get(`session:${token}`);
     },
     async deleteSession(token: string): Promise<void> {
+      const username = await redis.get(`session:${token}`);
       await redis.del(`session:${token}`);
+      if (username) await redis.srem(`staff_sessions:${username}`, token);
+    },
+    async deleteAllSessionsFor(username: string): Promise<void> {
+      const tokens = await redis.smembers(`staff_sessions:${username}`);
+      for (const t of tokens) await redis.del(`session:${t}`);
+      await redis.del(`staff_sessions:${username}`);
     },
   };
 }

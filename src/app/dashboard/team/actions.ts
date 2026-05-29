@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { getAuthStore } from '@/lib/auth-store';
-import { requireAdmin } from '@/lib/auth';
+import { requirePlatformAdmin } from '@/lib/auth';
 import { hashPassword } from '@/lib/password';
 import type { Staff } from '@/lib/types';
 
@@ -15,7 +15,7 @@ function readPermissions(formData: FormData) {
 }
 
 export async function addStaffAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const name = String(formData.get('name') ?? '').trim();
   const password = String(formData.get('password') ?? '');
@@ -41,7 +41,7 @@ export async function addStaffAction(formData: FormData): Promise<void> {
 export async function updatePermissionsAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '');
   const store = getAuthStore();
   const staff = await store.getStaff(username);
@@ -53,7 +53,7 @@ export async function updatePermissionsAction(
 }
 
 export async function removeStaffAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '');
   const store = getAuthStore();
   const staff = await store.getStaff(username);

@@ -61,3 +61,32 @@ describe('auth-store sessions', () => {
     expect(await s.getSessionUser(token)).toBeNull();
   });
 });
+
+describe('auth-store session reverse-index', () => {
+  it('tracks tokens per user and lets deleteAllSessionsFor revoke them', async () => {
+    const s = createAuthStore(fakeRedis());
+    const t1 = await s.createSession('priya');
+    const t2 = await s.createSession('priya');
+    const tOther = await s.createSession('admin');
+
+    await s.deleteAllSessionsFor('priya');
+
+    expect(await s.getSessionUser(t1)).toBeNull();
+    expect(await s.getSessionUser(t2)).toBeNull();
+    expect(await s.getSessionUser(tOther)).toBe('admin');
+  });
+
+  it('deleteSession also removes the token from the reverse-index set', async () => {
+    const s = createAuthStore(fakeRedis());
+    const t = await s.createSession('priya');
+    await s.deleteSession(t);
+    // Subsequent deleteAllSessionsFor must be a no-op (no orphan keys).
+    await s.deleteAllSessionsFor('priya');
+    expect(await s.getSessionUser(t)).toBeNull();
+  });
+
+  it('deleteAllSessionsFor on an unknown user is a no-op', async () => {
+    const s = createAuthStore(fakeRedis());
+    await expect(s.deleteAllSessionsFor('nobody')).resolves.not.toThrow();
+  });
+});

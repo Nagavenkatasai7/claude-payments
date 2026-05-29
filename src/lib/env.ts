@@ -50,4 +50,14 @@ export const env = {
   get seedAdminPassword() {
     return required('SEED_ADMIN_PASSWORD');
   },
+  // P3: optional partner-staff seed (set when E2E needs a partner login)
+  get seedPartnerUsername() {
+    return process.env.SEED_PARTNER_USERNAME ?? '';
+  },
+  get seedPartnerPassword() {
+    return process.env.SEED_PARTNER_PASSWORD ?? '';
+  },
+  get seedPartnerId() {
+    return process.env.SEED_PARTNER_ID ?? '';
+  },
 };

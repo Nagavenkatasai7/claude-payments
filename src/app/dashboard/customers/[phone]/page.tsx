@@ -1,11 +1,9 @@
 export const dynamic = 'force-dynamic';
 
 import { notFound } from 'next/navigation';
-import { requireStaff } from '@/lib/auth';
-import { getStore } from '@/lib/store';
-import { getCustomerStore } from '@/lib/customer-store';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
-import { getPartnerStore } from '@/lib/partner-store';
 import { evaluateCap } from '@/lib/tier-rules';
 import { Sidebar } from '../../sidebar';
 import { markCustomerVerifiedAction, markCustomerRejectedAction } from '../actions';
@@ -15,21 +13,19 @@ export default async function CustomerDetailPage({
 }: {
   params: Promise<{ phone: string }>;
 }) {
-  const staff = await requireStaff();
+  const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
   const { phone } = await params;
 
-  const store = getStore();
-  const customerStore = getCustomerStore(store);
+  const scoped = createScopedStore(staff);
   const dailyVolumeStore = getDailyVolumeStore();
-  const customer = await customerStore.getCustomer(phone);
+  const customer = await scoped.getCustomer(phone);
   if (!customer) notFound();
 
-  const partnerStore = getPartnerStore();
   const [transfers, todayUsedCents, partner] = await Promise.all([
-    store.listTransfers(),
+    scoped.listTransfers(),
     dailyVolumeStore.getTodayCents(phone),
-    partnerStore.getPartner(customer.partnerId),
+    scoped.getPartner(customer.partnerId),
   ]);
   const mine = transfers
     .filter((t) => t.phone === phone)
