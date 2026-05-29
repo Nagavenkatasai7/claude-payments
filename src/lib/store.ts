@@ -1,7 +1,7 @@
 import { Redis } from '@upstash/redis';
 import { env } from './env';
 import { easternDate } from './dates';
-import type { ChatMessage, Transfer } from './types';
+import type { ChatMessage, Transfer, TransferStatus } from './types';
 import {
   DEFAULT_SOURCE_COUNTRY,
   DEFAULT_SOURCE_CURRENCY,
@@ -31,6 +31,11 @@ export interface RedisLike {
 }
 
 const MAX_HISTORY = 40;
+
+// Forward-only rank; higher = further along. Side/terminal states are never regressed.
+const STATUS_RANK: Record<TransferStatus, number> = {
+  blocked: -1, cancelled: -1, awaiting_payment: 0, paid: 1, delivered: 2,
+};
 
 function trimHistory(messages: ChatMessage[]): ChatMessage[] {
   if (messages.length <= MAX_HISTORY) return messages;
@@ -80,6 +85,25 @@ export function createStore(redis: RedisLike) {
       // 'transfers:ids' (a Redis set) — distinct from the legacy
       // 'transfers:index' string key used before the multi-user change.
       await redis.sadd('transfers:ids', transfer.id);
+    },
+    async updateTransferFromWebhook(
+      transferId: string,
+      status: TransferStatus,          // already mapped to our domain by handleWebhook
+    ): Promise<Transfer | null> {
+      const transfer = await this.getTransfer(transferId);
+      if (!transfer) return null;                                   // unknown id → no-op (untrusted)
+      if (transfer.status === 'cancelled' || transfer.status === 'blocked') return null; // terminal
+      // Never regress: ignore anything not strictly forward of the current status.
+      if (STATUS_RANK[status] <= STATUS_RANK[transfer.status]) return null; // dup / out-of-order / back
+      const now = new Date().toISOString();
+      const updated: Transfer = {
+        ...transfer,
+        status,
+        paidAt: status === 'paid' || status === 'delivered' ? (transfer.paidAt ?? now) : transfer.paidAt,
+        deliveredAt: status === 'delivered' ? now : transfer.deliveredAt,
+      };
+      await this.saveTransfer(updated);
+      return updated;                                               // non-null ⇒ a real transition
     },
     async listTransfers(): Promise<Transfer[]> {
       const ids = await redis.smembers('transfers:ids');
