@@ -28,7 +28,13 @@ function TransferRow({ t }: { t: Transfer }) {
         <div className="sh-amount">{usd(t.amountUsd)}</div>
         <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
       </td>
-      <td>{t.complianceReasons.join(', ') || '—'}</td>
+      <td>
+        {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
+          r === 'edd_required'
+            ? <span key={r} className="sh-pill sh-pill-warning"><span className="sh-pill-dot"></span>EDD required</span>
+            : <span key={r} style={{ marginRight: 6 }}>{r}</span>,
+        )}
+      </td>
       <td>{new Date(t.createdAt).toLocaleString()}</td>
       <td><span className="sh-recipient-sub">{t.phone}</span></td>
     </tr>
