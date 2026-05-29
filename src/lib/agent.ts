@@ -10,6 +10,7 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies } from './partner-currency';
+import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
 
 const MAX_TOOL_ROUNDS = 6;
 const FALLBACK_REPLY =
@@ -65,6 +66,11 @@ export function createAgent(deps: AgentDeps) {
       : await deps.partnerStore.ensureDefaultPartner();
     const sendCurrencies = allowedSendCurrencies(notePartner);
 
+    // Recent-transfer memory: the customer's OWN recent sends, surfaced once at
+    // round 0 so the model can reference "you sent Mom $500 yesterday". '' when
+    // the customer has no history ⇒ nothing is injected (behavior unchanged).
+    const recentNote = await getRecentTransfersNote(phone, deps.store);
+
     let reply = '';
     const paymentLinks: string[] = [];
 
@@ -104,6 +110,9 @@ export function createAgent(deps: AgentDeps) {
             `[SEND CURRENCIES: ${sendCurrencies.join(', ')} — ask the user which currency they are sending, ` +
             `pass it as source_currency to get_quote/check_send_limit/send_approve_picker, and state the amount in that currency.]`,
         });
+      }
+      if (round === 0 && recentNote) {
+        messages.push({ role: 'system', content: recentNote });
       }
       messages.push(...history);
 

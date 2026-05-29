@@ -560,6 +560,102 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
   });
 });
 
+describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
+  function makeAgent(redis = fakeRedis()) {
+    const store = createStore(redis);
+    const customerStore = createCustomerStore(redis, store);
+    const dailyVolumeStore = createDailyVolumeStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+    const partnerStore = createPartnerStore(redis);
+    const chat = vi.fn<(messages: ChatMessage[], tools: import('@/lib/types').ChatTool[]) => Promise<ChatMessage>>();
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      customerStore,
+      dailyVolumeStore,
+      monthlyVolumeStore,
+      kycProvider,
+      partnerStore,
+      chat,
+    });
+    return { agent, store, chat };
+  }
+
+  const mkTransfer = (phone: string, recipientName: string): import('@/lib/types').Transfer => ({
+    id: `tx-${Math.random().toString(36).slice(2)}`,
+    phone,
+    amountUsd: 200,
+    feeUsd: 1.99,
+    totalChargeUsd: 201.99,
+    fxRate: 85.2,
+    amountInr: 17040,
+    recipientName,
+    recipientPhone: '919876543210',
+    payoutMethod: 'upi',
+    payoutDestination: `${recipientName.toLowerCase()}@upi`,
+    fundingMethod: 'bank_transfer',
+    complianceStatus: 'cleared',
+    complianceReasons: [],
+    status: 'delivered',
+    createdAt: new Date().toISOString(),
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'IN',
+    destinationCurrency: 'INR',
+    partnerId: 'default',
+    amountSource: 200,
+    feeSource: 1.99,
+    totalChargeSource: 201.99,
+  });
+
+  it('a returning customer WITH history gets a [RECENT TRANSFERS] system message at round 0', async () => {
+    const { agent, store, chat } = makeAgent();
+    await store.saveTransfer(mkTransfer('+15551230000', 'Mom'));
+    chat.mockResolvedValueOnce({ role: 'assistant', content: 'hi' });
+
+    await agent.runAgentTurn('+15551230000', 'did my payment go through?');
+
+    const sent = chat.mock.calls[0][0] as Array<{ role: string; content: string | null }>;
+    const note = sent.find((m) => m.role === 'system' && (m.content ?? '').includes('[RECENT TRANSFERS]'));
+    expect(note).toBeDefined();
+    expect(note!.content).toContain('Mom');
+  });
+
+  it('a customer with NO history gets NO such message (messages identical to baseline)', async () => {
+    const { agent, chat } = makeAgent();
+    // no transfers saved for this phone
+    chat.mockResolvedValueOnce({ role: 'assistant', content: 'hi' });
+
+    await agent.runAgentTurn('+15551230000', 'hello');
+
+    const sent = chat.mock.calls[0][0] as Array<{ role: string; content: string | null }>;
+    expect(sent.some((m) => (m.content ?? '').includes('[RECENT TRANSFERS]'))).toBe(false);
+  });
+
+  it('the note is NOT persisted to history (absent from a subsequent turn transcript)', async () => {
+    const { agent, store, chat } = makeAgent();
+    await store.saveTransfer(mkTransfer('+15551230000', 'Dad'));
+    chat.mockResolvedValue({ role: 'assistant', content: 'ok' });
+
+    await agent.runAgentTurn('+15551230000', 'turn one');
+    const persisted = await store.getConversation('+15551230000');
+    expect(persisted.some((m) => (m.content ?? '').includes('[RECENT TRANSFERS]'))).toBe(false);
+  });
+
+  it('the note carries no partnerId / compliance term', async () => {
+    const { agent, store, chat } = makeAgent();
+    await store.saveTransfer(mkTransfer('+15551230000', 'Sister'));
+    chat.mockResolvedValueOnce({ role: 'assistant', content: 'ok' });
+
+    await agent.runAgentTurn('+15551230000', 'status?');
+    const sent = chat.mock.calls[0][0] as Array<{ content: string | null }>;
+    const note = (sent.find((m) => (m.content ?? '').includes('[RECENT TRANSFERS]'))!.content ?? '').toLowerCase();
+    for (const term of ['partner', 'compliance', 'blocked']) expect(note).not.toContain(term);
+  });
+});
+
 describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
   function build(redis = fakeRedis()) {
     const store = createStore(redis);
