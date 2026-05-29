@@ -71,3 +71,21 @@ export function quote(
     totalChargeSource: round2(amountSource + feeSource),
   };
 }
+
+/**
+ * Back-solve the send amount (in the sender's source currency) from a target
+ * rupee amount the recipient should receive — the exact inverse of the forward
+ * line `amountInr = Math.round(amountSource * rates.toInr)` in quote(). The
+ * caller feeds the result straight into quote(), which enforces MIN_USD/MAX_USD
+ * on the USD-equivalent and adds the fee on TOP (the recipient still gets the
+ * exact target INR). Receive-first quoting (Win A) is the only caller.
+ */
+export function sourceForInr(amountInr: number, rates: FxRates): number {
+  if (!Number.isFinite(amountInr) || amountInr <= 0) {
+    throw new QuoteError('Please give a valid rupee amount.');
+  }
+  if (!Number.isFinite(rates.toInr) || rates.toInr <= 0) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
+  return round2(amountInr / rates.toInr);
+}
