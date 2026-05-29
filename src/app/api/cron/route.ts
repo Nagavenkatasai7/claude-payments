@@ -39,6 +39,7 @@ export async function GET(req: NextRequest) {
 
   const result = await runDueSchedules({
     store,
+    partnerStore,                 // NEW (P5): corridor-aware compliance
     scheduleStore,
     now: Date.now(),
     sendScheduledLink: async (schedule, _transfer, url) => {

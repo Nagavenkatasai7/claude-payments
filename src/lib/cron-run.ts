@@ -2,11 +2,13 @@ import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
 import { env } from './env';
 import type { Store } from './store';
+import type { PartnerStore } from './partner-store';
 import type { ScheduleStore } from './schedule-store';
 import type { Schedule, Transfer } from './types';
 
 export interface CronDeps {
   store: Store;
+  partnerStore: PartnerStore;           // NEW (P5): for corridor-aware compliance
   scheduleStore: ScheduleStore;
   now: number;
   sendScheduledLink: (
@@ -24,7 +26,7 @@ export async function runDueSchedules(
   for (const schedule of schedules) {
     if (!isScheduleDueToday(schedule, deps.now)) continue;
     try {
-      const transfer = await createTransfer(deps.store, {
+      const transfer = await createTransfer(deps.store, deps.partnerStore, {
         phone: schedule.phone,
         amountSource: schedule.amountSource,
         sourceCurrency: schedule.sourceCurrency,

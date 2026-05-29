@@ -3,6 +3,7 @@ import { runDueSchedules } from '@/lib/cron-run';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createCustomerStore } from '@/lib/customer-store';
+import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Schedule } from '@/lib/types';
@@ -40,14 +41,16 @@ function makeScheduleStore() {
 
 describe('runDueSchedules', () => {
   it('fires a due schedule: creates a transfer, notifies, records lastRunAt', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
     const scheduleStore = makeScheduleStore();
     await scheduleStore.saveSchedule(sched('due', 21));
     await scheduleStore.saveSchedule(sched('notdue', 5));
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, scheduleStore, now: NOW,
+      store, partnerStore, scheduleStore, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -60,7 +63,9 @@ describe('runDueSchedules', () => {
   });
 
   it('does not notify when the created transfer is compliance-blocked', async () => {
-    const store = createStore(fakeRedis());
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
     const scheduleStore = makeScheduleStore();
     const blocked = sched('b', 21);
     blocked.recipientName = 'John Doe'; // on the watchlist
@@ -68,7 +73,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, scheduleStore, now: NOW,
+      store, partnerStore, scheduleStore, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 

@@ -27,8 +27,9 @@ describe('backfillCustomersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
+    const ps = createPartnerStore(redis);
     for (const phone of ['15551111111', '15552222222']) {
-      await createTransfer(store, {
+      await createTransfer(store, ps, {
         phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
         recipientName: 'Mom', recipientPhone: '919876543210',
         payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
@@ -45,7 +46,8 @@ describe('backfillCustomersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    await createTransfer(store, {
+    const ps = createPartnerStore(redis);
+    await createTransfer(store, ps, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
@@ -61,7 +63,8 @@ describe('backfillCustomersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    await createTransfer(store, {
+    const ps = createPartnerStore(redis);
+    await createTransfer(store, ps, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',

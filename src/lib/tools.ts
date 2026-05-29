@@ -427,7 +427,7 @@ async function createTransferTool(
       }
     }
     try {
-      const transfer = await createTransfer(ctx.store, {
+      const transfer = await createTransfer(ctx.store, ctx.partnerStore, {
         phone: ctx.phone,
         amountSource: draft.amountSource,
         sourceCurrency: draft.sourceCurrency,
@@ -482,7 +482,7 @@ async function createTransferTool(
     }
   }
   try {
-    const transfer = await createTransfer(ctx.store, {
+    const transfer = await createTransfer(ctx.store, ctx.partnerStore, {
       phone: ctx.phone,
       amountSource,
       sourceCurrency,

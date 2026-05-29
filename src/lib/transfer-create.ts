@@ -1,9 +1,11 @@
 import { quote } from './fx';
 import { getFxRates } from './rate';
 import { screenTransfer } from './compliance';
+import { resolveCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { countryForCurrency } from './partner-currency';
 import type { Store } from './store';
+import type { PartnerStore } from './partner-store';
 import type { CurrencyCode, FundingMethod, PartnerId, PayoutMethod, Transfer } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
@@ -21,16 +23,23 @@ export interface CreateTransferInput {
 
 export async function createTransfer(
   store: Store,
+  partnerStore: PartnerStore,           // NEW (P5): to resolve corridor rules
   input: CreateTransferInput,
 ): Promise<Transfer> {
   const transferCount = await store.getTransferCount(input.phone);
   const rates = await getFxRates(input.sourceCurrency);
   const q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount);
   const transfersToday = await store.getTodayTransferCount(input.phone);
-  const compliance = await screenTransfer({
-    amountUsd: q.amountUsd, // USD-equivalent
+
+  const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
+  const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
+  const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
+  const compliance = await screenTransfer({                         // P5: corridor-aware
+    amountUsd: q.amountUsd,            // USD-equivalent — UNCHANGED
     recipientName: input.recipientName,
     transfersToday,
+    sourceCountry,                     // NEW (P5)
+    rules,                             // NEW (P5)
   });
   const transfer: Transfer = {
     id: newTransferId(),
@@ -49,7 +58,7 @@ export async function createTransfer(
     complianceReasons: compliance.reasons,
     status: compliance.status === 'blocked' ? 'blocked' : 'awaiting_payment',
     createdAt: new Date().toISOString(),
-    sourceCountry: countryForCurrency(input.sourceCurrency),
+    sourceCountry,
     sourceCurrency: input.sourceCurrency,
     destinationCountry: DEFAULT_DESTINATION_COUNTRY,
     destinationCurrency: DEFAULT_DESTINATION_CURRENCY,
