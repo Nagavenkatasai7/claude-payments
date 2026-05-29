@@ -4,6 +4,7 @@ import { fakeRedis } from './helpers';
 vi.mock('@/lib/auth', () => ({
   requireAdmin: async () => ({ username: 'admin', role: 'admin' }),
   requireStaff: async () => ({ username: 'admin', role: 'admin' }),
+  requirePlatformAdmin: async () => ({ username: 'admin', role: 'admin' }),
 }));
 
 const sharedRedis = fakeRedis();
@@ -13,6 +14,11 @@ vi.mock('@/lib/partner-store', async () => {
     ...actual,
     getPartnerStore: () => actual.createPartnerStore(sharedRedis),
   };
+});
+
+vi.mock('@/lib/auth-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
+  return { ...actual, getAuthStore: () => actual.createAuthStore(sharedRedis) };
 });
 
 vi.mock('next/navigation', () => ({
@@ -116,5 +122,30 @@ describe('setPartnerStatusAction', () => {
     fd.set('status', 'active');
     await setPartnerStatusAction(fd);
     expect((await ps.getPartner('p1'))?.status).toBe('active');
+  });
+});
+
+describe('setPartnerStatusAction session revocation', () => {
+  it('deletes sessions for all staff of a suspended partner', async () => {
+    const { getAuthStore } = await import('@/lib/auth-store');
+    const authStore = getAuthStore();
+    await ps.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await authStore.saveStaff({
+      username: 'p', name: 'P', role: 'admin',
+      permissions: { canCancel: false, canResend: false, canAssign: false },
+      passwordHash: 'salt:hash', createdAt: '2026-05-27T00:00:00Z',
+      partnerId: 'acme',
+    });
+    const token = await authStore.createSession('p');
+
+    const fd = new FormData();
+    fd.set('id', 'acme');
+    fd.set('status', 'suspended');
+    await setPartnerStatusAction(fd);
+
+    expect(await authStore.getSessionUser(token)).toBeNull();
   });
 });

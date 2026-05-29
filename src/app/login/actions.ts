@@ -3,6 +3,7 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getAuthStore } from '@/lib/auth-store';
+import { getPartnerStore } from '@/lib/partner-store';
 import { ensureSeedAdmin } from '@/lib/seed';
 import { verifyPassword } from '@/lib/password';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
@@ -17,6 +18,14 @@ export async function login(
   const staff = await getAuthStore().getStaff(username);
   if (!staff || !verifyPassword(password, staff.passwordHash)) {
     return 'Invalid username or password.';
+  }
+  // P3: block login if the staff's partner is suspended or missing.
+  // Generic error so credential validity isn't leaked.
+  if (staff.partnerId) {
+    const partner = await getPartnerStore().getPartner(staff.partnerId);
+    if (!partner || partner.status !== 'active') {
+      return 'Account unavailable. Contact SendHome support.';
+    }
   }
   const token = await getAuthStore().createSession(username);
   (await cookies()).set(SESSION_COOKIE, token, {

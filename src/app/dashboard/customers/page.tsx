@@ -1,10 +1,8 @@
 export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
-import { requireStaff } from '@/lib/auth';
-import { getStore } from '@/lib/store';
-import { getCustomerStore } from '@/lib/customer-store';
-import { getPartnerStore } from '@/lib/partner-store';
+import { requireScope } from '@/lib/auth';
+import { createScopedStore } from '@/lib/scoped-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
 import type { Customer, Partner, Tier } from '@/lib/types';
@@ -29,14 +27,12 @@ export default async function CustomersPage({
 }: {
   searchParams: Promise<{ partner?: string }>;
 }) {
-  await requireStaff();
-  const store = getStore();
-  const customerStore = getCustomerStore(store);
-  const partnerStore = getPartnerStore();
+  const { staff } = await requireScope();
+  const scoped = createScopedStore(staff);
   const [customers, transfers, partners] = await Promise.all([
-    customerStore.listCustomers(),
-    store.listTransfers(),
-    partnerStore.listPartners(),
+    scoped.listCustomers(),
+    scoped.listTransfers(),
+    scoped.listPartners(),
   ]);
   const now = new Date();
 
@@ -85,38 +81,40 @@ export default async function CustomersPage({
           </div>
         </div>
         <section className="sh-card">
-          <form
-            method="get"
-            style={{
-              display: 'flex',
-              gap: 10,
-              padding: '16px 20px',
-              borderBottom: '1px solid var(--sh-border)',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-            }}
-          >
-            <label
+          {scoped.scope.kind === 'platform' && (
+            <form
+              method="get"
               style={{
                 display: 'flex',
+                gap: 10,
+                padding: '16px 20px',
+                borderBottom: '1px solid var(--sh-border)',
+                flexWrap: 'wrap',
                 alignItems: 'center',
-                gap: 8,
-                fontSize: 12,
-                color: 'var(--sh-text-secondary)',
               }}
             >
-              Partner
-              <select name="partner" defaultValue={partnerFilter} className="sh-input">
-                <option value="">All partners</option>
-                {Object.values(partnerById).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="submit" className="sh-btn-secondary">Apply</button>
-          </form>
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 12,
+                  color: 'var(--sh-text-secondary)',
+                }}
+              >
+                Partner
+                <select name="partner" defaultValue={partnerFilter} className="sh-input">
+                  <option value="">All partners</option>
+                  {Object.values(partnerById).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button type="submit" className="sh-btn-secondary">Apply</button>
+            </form>
+          )}
           <div className="sh-ledger-wrap">
             {rows.length === 0 ? (
               <div className="sh-empty">No customers yet.</div>
@@ -125,7 +123,7 @@ export default async function CustomersPage({
                 <thead>
                   <tr>
                     <th>Phone</th>
-                    <th>Partner</th>
+                    {scoped.scope.kind === 'platform' && <th>Partner</th>}
                     <th>Country</th>
                     <th>First seen</th>
                     <th>Tier</th>
@@ -144,7 +142,9 @@ export default async function CustomersPage({
                             +{c.senderPhone}
                           </Link>
                         </td>
-                        <td>{partnerById[c.partnerId]?.name ?? c.partnerId}</td>
+                        {scoped.scope.kind === 'platform' && (
+                          <td>{partnerById[c.partnerId]?.name ?? c.partnerId}</td>
+                        )}
                         <td>{c.senderCountry}</td>
                         <td>{new Date(c.firstSeenAt).toLocaleDateString()}</td>
                         <td>

@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic';
 
 import { getAuthStore } from '@/lib/auth-store';
-import { requireAdmin } from '@/lib/auth';
+import { requirePlatformAdmin } from '@/lib/auth';
 import {
   addStaffAction,
   updatePermissionsAction,
@@ -72,8 +72,9 @@ function StaffRow({ staff }: { staff: Staff }) {
 }
 
 export default async function TeamPage() {
-  await requireAdmin();
-  const staff = await getAuthStore().listStaff();
+  await requirePlatformAdmin();
+  const allStaff = await getAuthStore().listStaff();
+  const staff = allStaff.filter((s) => !s.partnerId);
 
   return (
     <>

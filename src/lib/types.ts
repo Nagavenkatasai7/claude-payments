@@ -91,6 +91,7 @@ export interface Schedule {
   status: ScheduleStatus;
   createdAt: string;
   lastRunAt?: string;
+  partnerId: PartnerId;   // NEW (P3) — required; multi-tenant boundary
 }
 
 export type StaffRole = 'admin' | 'agent';

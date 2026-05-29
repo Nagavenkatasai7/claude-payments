@@ -17,6 +17,12 @@ function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
   return { customerStore, dailyVolumeStore, kycProvider };
 }
 
+function freshScheduleStore(redis = fakeRedis()) {
+  const store = createStore(redis);
+  const customerStore = createCustomerStore(redis, store);
+  return createScheduleStore(redis, customerStore);
+}
+
 const PHONE = '15551234567';
 
 beforeEach(() => {
@@ -40,7 +46,7 @@ describe('createAgent', () => {
     const store = createStore(redis);
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(redis, store),
       chat: async () => ({ role: 'assistant', content: 'Hi there!' }),
@@ -74,7 +80,7 @@ describe('createAgent', () => {
     let call = 0;
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
@@ -92,7 +98,7 @@ describe('createAgent', () => {
     const store = createStore(redis);
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(redis, store),
       chat: async () => ({ role: 'assistant', content: 'noted' }),
@@ -160,7 +166,7 @@ describe('createAgent', () => {
 
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
@@ -224,7 +230,7 @@ describe('createAgent', () => {
     let call = 0;
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
@@ -299,7 +305,7 @@ describe('createAgent — TurnContext', () => {
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(redis, store),
       chat: async (messages) => {
@@ -319,7 +325,7 @@ describe('createAgent — TurnContext', () => {
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(fakeRedis()),
+      scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(redis, store),
       chat: async (messages) => {
@@ -370,7 +376,7 @@ describe('createAgent — TurnContext', () => {
     let i = 0;
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(redis),
+      scheduleStore: freshScheduleStore(redis),
       draftStore,
       ...extraDeps(redis, store),
       chat: async () => responses[i++],
@@ -424,7 +430,7 @@ describe('replay safety', () => {
     let i = 0;
     const agent = createAgent({
       store,
-      scheduleStore: createScheduleStore(redis),
+      scheduleStore: freshScheduleStore(redis),
       draftStore,
       ...extraDeps(redis, store),
       chat: async () => responses[i++],
@@ -457,7 +463,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store: b.store,
-      scheduleStore: createScheduleStore(b.redis),
+      scheduleStore: freshScheduleStore(b.redis),
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
@@ -474,7 +480,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store: b.store,
-      scheduleStore: createScheduleStore(b.redis),
+      scheduleStore: freshScheduleStore(b.redis),
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
@@ -494,7 +500,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store: b.store,
-      scheduleStore: createScheduleStore(b.redis),
+      scheduleStore: freshScheduleStore(b.redis),
       draftStore: createDraftStore(b.redis),
       customerStore: b.customerStore,
       dailyVolumeStore: b.dailyVolumeStore,
