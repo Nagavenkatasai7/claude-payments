@@ -4,6 +4,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { topVelocityToday } from '@/lib/dashboard';
 import { WATCHLIST } from '@/lib/compliance';
+import { resolveCorridorRules } from '@/lib/compliance-config';
 import { Sidebar } from '../sidebar';
 import type { Transfer } from '@/lib/types';
 
@@ -41,6 +42,24 @@ export default async function CompliancePage() {
   const flagged = transfers.filter((t) => t.complianceStatus === 'flagged');
   const blocked = transfers.filter((t) => t.complianceStatus === 'blocked');
   const topVel = topVelocityToday(transfers, Date.now(), 10);
+
+  const partners = await scoped.listPartners();
+  const corridorRows = partners.flatMap((p) =>
+    (p.countries ?? [])
+      .filter((c) => c !== 'IN')
+      .map((country) => {
+        const rules = resolveCorridorRules(p, country);
+        return {
+          partnerName: p.name ?? '',
+          corridor: `${country} → IN`,
+          largeAmountUsd: rules.largeAmountUsd,
+          velocityLimit: rules.velocityLimit,
+          watchlistSize: rules.baseWatchlist.length + rules.watchlistExtra.length,
+          watchlistExtra: rules.watchlistExtra,
+        };
+      }),
+  );
+  corridorRows.sort((a, b) => (a.partnerName + a.corridor).localeCompare(b.partnerName + b.corridor));
 
   return (
     <>
@@ -129,6 +148,51 @@ export default async function CompliancePage() {
                 <span className="sh-pill-dot"></span>{name}
               </span>
             ))}
+          </div>
+        </section>
+
+        <section className="sh-card">
+          <div className="sh-card-head">
+            <div>
+              <div className="sh-card-title">Corridor rules</div>
+              <div className="sh-card-sub">
+                Resolved compliance rules per corridor (read-only). Full rule-creation UI is deferred.
+              </div>
+            </div>
+          </div>
+          <div className="sh-ledger-wrap">
+            {corridorRows.length === 0 ? (
+              <div className="sh-empty">No corridors configured.</div>
+            ) : (
+              <table className="sh-table">
+                <thead><tr>
+                  <th>Partner</th><th>Corridor</th><th>Large-amount (USD)</th>
+                  <th>Velocity / day</th><th>Watchlist</th>
+                </tr></thead>
+                <tbody>
+                  {corridorRows.map((r) => (
+                    <tr key={r.partnerName + r.corridor}>
+                      <td>{r.partnerName}</td>
+                      <td>{r.corridor}</td>
+                      <td className="sh-amount">{usd(r.largeAmountUsd)}</td>
+                      <td className="sh-amount">{r.velocityLimit}</td>
+                      <td>
+                        {r.watchlistSize}
+                        {r.watchlistExtra.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                            {r.watchlistExtra.map((name) => (
+                              <span key={name} className="sh-pill sh-pill-danger">
+                                <span className="sh-pill-dot"></span>{name}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </section>
 
