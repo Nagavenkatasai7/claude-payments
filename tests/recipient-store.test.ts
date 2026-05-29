@@ -108,7 +108,9 @@ describe('createTransfer side-effects', () => {
     const store = createStore(fakeRedis());
     await createTransfer(store, {
       phone: '15551234567',
-      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
       recipientName: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',
@@ -126,7 +128,9 @@ describe('createTransfer side-effects', () => {
     const store = createStore(fakeRedis());
     const input = {
       phone: '15551234567',
-      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD' as const,
+      partnerId: 'default',
       recipientName: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi' as const,

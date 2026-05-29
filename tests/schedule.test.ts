@@ -13,6 +13,8 @@ function sched(overrides: Partial<Schedule>): Schedule {
     frequency: 'monthly', dayOfMonth: 21, status: 'active',
     createdAt: '2026-01-01T00:00:00.000Z',
     partnerId: 'default',
+    sourceCurrency: 'USD',
+    amountSource: 100,
     ...overrides,
   };
 }

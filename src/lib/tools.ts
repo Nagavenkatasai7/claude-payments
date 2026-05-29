@@ -1,5 +1,6 @@
 import { quote, QuoteError } from './fx';
-import { getFxRate } from './rate';
+import { getFxRates, type FxRates } from './rate';
+import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -7,12 +8,13 @@ import { createTransfer } from './transfer-create';
 import { evaluateCap } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, FundingMethod, PayoutMethod, Schedule, TurnContext } from './types';
+import type { ChatTool, Customer, CurrencyCode, FundingMethod, Partner, PayoutMethod, Schedule, TurnContext } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
+import type { PartnerStore } from './partner-store';
 import { sendInteractive, type InteractiveButton } from './whatsapp';
 import {
   recipientButtonId,
@@ -35,13 +37,18 @@ export const toolSchemas: ChatTool[] = [
         properties: {
           amount_usd: {
             type: 'number',
-            description: 'Amount to send, in US dollars.',
+            description: "Amount to send, in the sender's send currency (US dollars unless told otherwise).",
           },
           funding_method: {
             type: 'string',
             enum: ['credit_card', 'debit_card', 'bank_transfer'],
             description:
               "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. The fee depends on this choice.",
+          },
+          source_currency: {
+            type: 'string',
+            description:
+              "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
         },
         required: ['amount_usd', 'funding_method'],
@@ -57,7 +64,7 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          amount_usd: { type: 'number' },
+          amount_usd: { type: 'number', description: "Amount to send, in the sender's send currency (US dollars unless told otherwise)." },
           recipient_name: { type: 'string' },
           payout_method: { type: 'string', enum: ['upi', 'bank'] },
           payout_destination: {
@@ -141,7 +148,7 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          amount_usd: { type: 'number' },
+          amount_usd: { type: 'number', description: "Amount to send, in the sender's send currency (US dollars unless told otherwise)." },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string', description: "Recipient's WhatsApp number with country code." },
           payout_method: { type: 'string', enum: ['upi', 'bank'] },
@@ -150,6 +157,11 @@ export const toolSchemas: ChatTool[] = [
           frequency: { type: 'string', enum: ['monthly', 'weekly'] },
           day_of_month: { type: 'number', description: 'Day 1-28, required when frequency is monthly.' },
           day_of_week: { type: 'number', description: 'Day 0 (Sunday) to 6 (Saturday), required when frequency is weekly.' },
+          source_currency: {
+            type: 'string',
+            description:
+              "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
+          },
         },
         required: ['amount_usd', 'recipient_name', 'recipient_phone', 'payout_method', 'payout_destination', 'funding_method', 'frequency'],
       },
@@ -219,12 +231,17 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          amount_usd: { type: 'number' },
+          amount_usd: { type: 'number', description: "Amount to send, in the sender's send currency (US dollars unless told otherwise)." },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string' },
           payout_method: { type: 'string', enum: ['upi', 'bank'] },
           payout_destination: { type: 'string' },
+          source_currency: {
+            type: 'string',
+            description:
+              "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
+          },
         },
         required: [
           'amount_usd',
@@ -257,7 +274,12 @@ export const toolSchemas: ChatTool[] = [
         properties: {
           amount_usd: {
             type: 'number',
-            description: 'Amount the sender wants to send in USD. Pass 0 for status-only.',
+            description: 'Amount the sender wants to send, in their send currency (USD unless told otherwise). Pass 0 for status-only.',
+          },
+          source_currency: {
+            type: 'string',
+            description:
+              "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
         },
         required: ['amount_usd'],
@@ -275,9 +297,31 @@ export interface ToolContext {
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   kycProvider: KycProvider;
+  partnerStore: PartnerStore; // NEW (P4)
 }
 
 type ToolResult = Record<string, unknown>;
+
+// Resolves the customer (upsert on first contact), their partner, the send
+// currency for that partner, and fresh FX rates — all in one place so callers
+// can reuse the customer and avoid duplicate Redis fetches.
+async function resolveCurrencyAndRates(
+  ctx: ToolContext,
+  requested: unknown,
+): Promise<{ customer: Customer; partner: Partner; sourceCurrency: CurrencyCode; rates: FxRates }> {
+  const customer =
+    (await ctx.customerStore.getCustomer(ctx.phone)) ??
+    (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+  const partner =
+    (await ctx.partnerStore.getPartner(customer.partnerId)) ??
+    (await ctx.partnerStore.ensureDefaultPartner());
+  const sourceCurrency = resolveSendCurrency(
+    partner,
+    typeof requested === 'string' ? requested : undefined,
+  );
+  const rates = await getFxRates(sourceCurrency);
+  return { customer, partner, sourceCurrency, rates };
+}
 
 export async function executeTool(
   name: string,
@@ -322,14 +366,19 @@ async function getQuoteTool(
 ): Promise<ToolResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const fxRate = await getFxRate();
+    const { sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
     const q = quote(
       Number(args.amount_usd),
-      fxRate,
+      sourceCurrency,
+      rates,
       args.funding_method as FundingMethod,
       transferCount,
     );
     return {
+      source_currency: q.sourceCurrency,
+      amount_source: q.amountSource,
+      fee_source: q.feeSource,
+      total_charge_source: q.totalChargeSource,
       amount_usd: q.amountUsd,
       fee_usd: q.feeUsd,
       total_charge_usd: q.totalChargeUsd,
@@ -361,10 +410,12 @@ async function createTransferTool(
           'That quote was already approved or has expired. Please request a fresh quote.',
       };
     }
-    // Re-check cap at the moment of approval (cap state may have changed since picker)
+    // Re-check cap at the moment of approval (cap state may have changed since picker).
+    // Fetch customer ONCE — reuse for both the cap check and partnerId.
+    const customer =
+      (await ctx.customerStore.getCustomer(ctx.phone)) ??
+      (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
     {
-      const customer = (await ctx.customerStore.getCustomer(ctx.phone))
-        ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
       const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
@@ -378,7 +429,9 @@ async function createTransferTool(
     try {
       const transfer = await createTransfer(ctx.store, {
         phone: ctx.phone,
-        amountUsd: draft.amountUsd,
+        amountSource: draft.amountSource,
+        sourceCurrency: draft.sourceCurrency,
+        partnerId: customer.partnerId ?? DEFAULT_PARTNER_ID,
         recipientName: draft.recipient.name,
         recipientPhone: draft.recipient.recipientPhone,
         payoutMethod: draft.recipient.payoutMethod,
@@ -409,14 +462,18 @@ async function createTransferTool(
         'A valid recipient WhatsApp number with country code is required before creating the transfer. Ask the user for it (e.g. 919876543210).',
     };
   }
+  // Resolve currency + rates and reuse customer for cap check + partnerId.
+  const { customer: legacyCustomer, sourceCurrency, rates } = await resolveCurrencyAndRates(
+    ctx,
+    args.source_currency,
+  );
+  const amountSource = Number(args.amount_usd);
+  const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap check on the legacy path (cron-fired or no-button cold-start)
   {
-    const amtUsd = Number(args.amount_usd);
-    const customer = (await ctx.customerStore.getCustomer(ctx.phone))
-      ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
-    const requestedCents = Math.round(amtUsd * 100);
-    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+    const requestedCents = Math.round(amountUsd * 100);
+    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents);
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -427,7 +484,9 @@ async function createTransferTool(
   try {
     const transfer = await createTransfer(ctx.store, {
       phone: ctx.phone,
-      amountUsd: Number(args.amount_usd),
+      amountSource,
+      sourceCurrency,
+      partnerId: legacyCustomer.partnerId ?? DEFAULT_PARTNER_ID,
       recipientName: String(args.recipient_name),
       recipientPhone,
       payoutMethod: args.payout_method as PayoutMethod,
@@ -520,13 +579,14 @@ async function createScheduleTool(
       return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
     }
   }
-  // Look up the owner's partnerId — required on every new schedule (P3).
-  const owner = await ctx.customerStore.getCustomer(ctx.phone);
-  const partnerId = owner?.partnerId ?? DEFAULT_PARTNER_ID;
+  // Resolve currency and reuse customer for partnerId (P4 wiring).
+  const { customer: owner, sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  const partnerId = owner.partnerId ?? DEFAULT_PARTNER_ID;
+  const amountSource = Number(args.amount_usd);
   const schedule: Schedule = {
     id: newTransferId(),
     phone: ctx.phone,
-    amountUsd: Number(args.amount_usd),
+    amountUsd: amountSource, // kept as source amount (USD-equivalent when USD; else raw source)
     recipientName: String(args.recipient_name),
     recipientPhone,
     payoutMethod: args.payout_method as Schedule['payoutMethod'],
@@ -538,6 +598,8 @@ async function createScheduleTool(
     status: 'active',
     createdAt: new Date().toISOString(),
     partnerId,
+    sourceCurrency,
+    amountSource,
   };
   await ctx.scheduleStore.saveSchedule(schedule);
   return {
@@ -644,12 +706,13 @@ async function sendApprovePickerTool(
         "A valid recipient WhatsApp number with country code is required (e.g. 919876543210).",
     };
   }
-  const amountUsd = Number(args.amount_usd);
   const fundingMethod = args.funding_method as FundingMethod;
+  // Resolve currency+rates ONCE; reuse `customer` for the cap check (no second getCustomer).
+  const { customer, sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  const amountSource = Number(args.amount_usd);
+  const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
   {
-    const customer = (await ctx.customerStore.getCustomer(ctx.phone))
-      ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
     const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
@@ -668,8 +731,7 @@ async function sendApprovePickerTool(
   }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const fxRate = await getFxRate();
-    const q = quote(amountUsd, fxRate, fundingMethod, transferCount);
+    const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount);
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       recipient: {
@@ -679,12 +741,16 @@ async function sendApprovePickerTool(
         payoutDestination: String(args.payout_destination),
       },
       amountUsd: q.amountUsd,
+      amountSource: q.amountSource,
+      sourceCurrency: q.sourceCurrency,
       fundingMethod,
       quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
     });
+    const fmt = (n: number) =>
+      new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
     const summary =
-      `Sending $${q.amountUsd.toFixed(2)} to ${args.recipient_name}.\n` +
-      `Fee $${q.feeUsd.toFixed(2)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
+      `Sending ${fmt(q.amountSource)} to ${args.recipient_name}.\n` +
+      `Fee ${fmt(q.feeSource)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
     await sendInteractive(ctx.phone, summary, [
       { id: approveButtonId(draftId), title: 'Approve & pay' },
       { id: cancelButtonId(draftId), title: 'Cancel' },
@@ -717,10 +783,12 @@ async function checkSendLimitTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const amountUsd = Number(args.amount_usd ?? 0);
+  // Resolve currency+rates and reuse `customer` — no second getCustomer.
+  const { customer, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  const amountSource = Number(args.amount_usd ?? 0);
+  // Convert to USD-equivalent for the cap evaluation (for USD partners toUsd===1).
+  const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   const requestedCents = Math.round(amountUsd * 100);
-  const customer = (await ctx.customerStore.getCustomer(ctx.phone))
-    ?? (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
   const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
   const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
 

@@ -8,6 +8,7 @@ const SENTINEL_KEY = 'customer-backfill-v1';
 const COUNTRY_CURRENCY_SENTINEL_KEY = 'country-currency-backfill-v1';
 const PARTNER_SENTINEL_KEY = 'partner-backfill-v1';
 const SCHEDULE_PARTNER_SENTINEL_KEY = 'schedule-partner-backfill-v1';
+const SOURCE_AMOUNT_SENTINEL_KEY = 'transfer-source-amount-backfill-v1';
 
 export async function backfillCustomersOnce(
   store: Store,
@@ -151,4 +152,25 @@ export async function backfillSchedulesOnce(
     schedulesBackfilled++;
   }
   return { schedulesBackfilled, skippedSentinel: false };
+}
+
+export async function backfillSourceAmountsOnce(
+  store: Store,
+  scheduleStore: ScheduleStore,
+): Promise<{ transfersBackfilled: number; schedulesBackfilled: number; skippedSentinel: boolean }> {
+  const claimed = await store.claimMigrationFlag(SOURCE_AMOUNT_SENTINEL_KEY);
+  if (!claimed) return { transfersBackfilled: 0, schedulesBackfilled: 0, skippedSentinel: true };
+
+  // listTransfers / listSchedules return lazy-filled records; re-saving persists.
+  let transfersBackfilled = 0;
+  for (const t of await store.listTransfers()) {
+    await store.saveTransfer({ ...t });
+    transfersBackfilled++;
+  }
+  let schedulesBackfilled = 0;
+  for (const s of await scheduleStore.listSchedules()) {
+    await scheduleStore.saveSchedule({ ...s });
+    schedulesBackfilled++;
+  }
+  return { transfersBackfilled, schedulesBackfilled, skippedSentinel: false };
 }

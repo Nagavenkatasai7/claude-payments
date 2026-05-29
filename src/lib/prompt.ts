@@ -92,4 +92,12 @@ NEW-CUSTOMER ONBOARDING & SENDING LIMITS
 
 - For Suspended users (check_send_limit returns tier='Suspended'), never
   call get_quote / send_approve_picker / create_transfer. Just send the
-  verification message with the kyc_url.`;
+  verification message with the kyc_url.
+
+CURRENCY
+- By default you send in US dollars. If — and only if — the system injects a
+  "[SEND CURRENCIES: ...]" note this turn, ask the user which listed currency
+  they are sending, then pass it as source_currency to get_quote,
+  check_send_limit, and send_approve_picker. The amount the user gives is in
+  that currency. Never invent or convert currencies yourself; the tools do the
+  FX. If no such note is present, send in USD and do not mention currency.`;

@@ -29,6 +29,9 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
     destinationCountry: 'IN',
     destinationCurrency: 'INR',
     partnerId: 'default',
+    amountSource: 100,
+    feeSource: 2.5,
+    totalChargeSource: 102.5,
     ...overrides,
   };
 }
@@ -197,6 +200,7 @@ describe('needsAttention', () => {
       sourceCountry: 'US', sourceCurrency: 'USD',
       destinationCountry: 'IN', destinationCurrency: 'INR',
       partnerId: 'default',
+      amountSource: 100, feeSource: 0, totalChargeSource: 100,
       ...overrides,
     };
   }
@@ -238,6 +242,8 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     status: 'active',
     createdAt: '2026-01-01T00:00:00.000Z',
     partnerId: 'default',
+    sourceCurrency: 'USD',
+    amountSource: 100,
     ...overrides,
   };
 }
@@ -317,6 +323,7 @@ describe('topVelocityToday', () => {
       sourceCountry: 'US', sourceCurrency: 'USD',
       destinationCountry: 'IN', destinationCurrency: 'INR',
       partnerId: 'default',
+      amountSource: 100, feeSource: 0, totalChargeSource: 100,
     };
   }
 

@@ -1,25 +1,22 @@
 import { quote } from './fx';
-import { getFxRate } from './rate';
+import { getFxRates } from './rate';
 import { screenTransfer } from './compliance';
 import { newTransferId } from './id';
+import { countryForCurrency } from './partner-currency';
 import type { Store } from './store';
-import type { FundingMethod, PayoutMethod, Transfer } from './types';
-import {
-  DEFAULT_SOURCE_COUNTRY,
-  DEFAULT_SOURCE_CURRENCY,
-  DEFAULT_DESTINATION_COUNTRY,
-  DEFAULT_DESTINATION_CURRENCY,
-  DEFAULT_PARTNER_ID,
-} from './defaults';
+import type { CurrencyCode, FundingMethod, PartnerId, PayoutMethod, Transfer } from './types';
+import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
 export interface CreateTransferInput {
   phone: string;
-  amountUsd: number;
   recipientName: string;
   recipientPhone: string;
   payoutMethod: PayoutMethod;
   payoutDestination: string;
   fundingMethod: FundingMethod;
+  amountSource: number;          // CHANGED (P4): was amountUsd
+  sourceCurrency: CurrencyCode;  // NEW (P4)
+  partnerId: PartnerId;          // NEW (P4): from the owning customer
 }
 
 export async function createTransfer(
@@ -27,11 +24,11 @@ export async function createTransfer(
   input: CreateTransferInput,
 ): Promise<Transfer> {
   const transferCount = await store.getTransferCount(input.phone);
-  const fxRate = await getFxRate();
-  const q = quote(input.amountUsd, fxRate, input.fundingMethod, transferCount);
+  const rates = await getFxRates(input.sourceCurrency);
+  const q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount);
   const transfersToday = await store.getTodayTransferCount(input.phone);
   const compliance = screenTransfer({
-    amountUsd: input.amountUsd,
+    amountUsd: q.amountUsd, // USD-equivalent
     recipientName: input.recipientName,
     transfersToday,
   });
@@ -52,20 +49,19 @@ export async function createTransfer(
     complianceReasons: compliance.reasons,
     status: compliance.status === 'blocked' ? 'blocked' : 'awaiting_payment',
     createdAt: new Date().toISOString(),
-    // NEW (P1) — defaults until P4 unlocks bot-collected values
-    sourceCountry: DEFAULT_SOURCE_COUNTRY,
-    sourceCurrency: DEFAULT_SOURCE_CURRENCY,
+    sourceCountry: countryForCurrency(input.sourceCurrency),
+    sourceCurrency: input.sourceCurrency,
     destinationCountry: DEFAULT_DESTINATION_COUNTRY,
     destinationCurrency: DEFAULT_DESTINATION_CURRENCY,
-    partnerId: DEFAULT_PARTNER_ID,
+    partnerId: input.partnerId,
+    amountSource: q.amountSource,
+    feeSource: q.feeSource,
+    totalChargeSource: q.totalChargeSource,
   };
   await store.saveTransfer(transfer);
   await store.incrementTransferCount(input.phone);
   await store.incrementTodayTransferCount(input.phone);
 
-  // Best-effort: persist the recipient for future picker suggestions.
-  // Failure here must not surface to the sender — the transfer is the source
-  // of truth and is already saved at this point.
   try {
     await store.upsertRecipient(input.phone, {
       name: input.recipientName,

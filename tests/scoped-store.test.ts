@@ -56,8 +56,8 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
     await createTransfer(store, {
-      phone, amountUsd: 100, recipientName: 'Mom',
-      recipientPhone: '919876543210',
+      phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
+      recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
     });
@@ -69,10 +69,12 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       frequency: 'monthly', dayOfMonth: 2, status: 'active',
       createdAt: '2026-05-01T00:00:00Z',
       partnerId,
+      sourceCurrency: 'USD',
+      amountSource: 50,
     });
   }
-  // Backfill transfers to carry the correct partnerId (createTransfer always
-  // writes DEFAULT_PARTNER_ID; rewrite them in-place for this test).
+  // Pass partnerId explicitly, then re-save with the partner-specific id to
+  // simulate records assigned to a non-default partner.
   for (const t of await store.listTransfers()) {
     const c = await customerStore.getCustomer(t.phone);
     await store.saveTransfer({ ...t, partnerId: c?.partnerId ?? 'default' });

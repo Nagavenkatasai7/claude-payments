@@ -62,7 +62,9 @@ describe('customer store', () => {
     // Pre-existing transfer (e.g. from before this batch shipped)
     await createTransfer(store, {
       phone: PHONE,
-      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
       recipientName: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',
@@ -116,7 +118,9 @@ describe('customer-store P1: senderCountry', () => {
     const store = createStore(redis);
     await createTransfer(store, {
       phone: '15550008888',
-      amountUsd: 50,
+      amountSource: 50,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
       recipientName: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',

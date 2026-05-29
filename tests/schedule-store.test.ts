@@ -13,6 +13,8 @@ function schedule(id: string, status: Schedule['status'] = 'active'): Schedule {
     frequency: 'monthly', dayOfMonth: 2, status,
     createdAt: '2026-05-21T00:00:00.000Z',
     partnerId: 'default',
+    sourceCurrency: 'USD',
+    amountSource: 200,
   };
 }
 
@@ -54,5 +56,22 @@ describe('schedule-store', () => {
     await s.saveSchedule(schedule('a'));
     await s.saveSchedule(schedule('a'));
     expect(await s.listSchedules()).toHaveLength(1);
+  });
+});
+
+describe('schedule-store P4 lazy-fills', () => {
+  it('P4: lazy-fills sourceCurrency/amountSource for pre-P4 schedules', async () => {
+    const redis = fakeRedis();
+    await redis.set('schedule:s1', JSON.stringify({
+      id: 's1', phone: '15551230000', amountUsd: 100, recipientName: 'Asha',
+      recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'asha@upi',
+      fundingMethod: 'bank_transfer', frequency: 'monthly', dayOfMonth: 1,
+      status: 'active', createdAt: '2026-01-01T00:00:00Z', partnerId: 'default',
+    }));
+    await redis.sadd('schedules:ids', 's1');
+    const store = createScheduleStore(redis, createCustomerStore(redis, createStore(redis)));
+    const s = await store.getSchedule('s1');
+    expect(s?.sourceCurrency).toBe('USD');
+    expect(s?.amountSource).toBe(100);
   });
 });

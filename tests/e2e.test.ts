@@ -6,6 +6,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { evaluateCap } from '@/lib/tier-rules';
 import { fakeRedis } from './helpers';
@@ -84,6 +85,7 @@ describe('end-to-end happy path', () => {
       customerStore,
       dailyVolumeStore,
       kycProvider,
+      partnerStore: createPartnerStore(redis), // NEW (P4)
       async chat() {
         const msg = script[turn++];
         // Patch the real transfer id into the link tool call.
@@ -201,6 +203,7 @@ describe('end-to-end returning customer', () => {
       customerStore,
       dailyVolumeStore,
       kycProvider,
+      partnerStore: createPartnerStore(redis), // NEW (P4)
       async chat() {
         const msg = activeScript.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
@@ -315,6 +318,7 @@ describe('end-to-end new customer with cap', () => {
 
     const agent = createAgent({
       store, scheduleStore, draftStore, customerStore, dailyVolumeStore, kycProvider,
+      partnerStore: createPartnerStore(redis), // NEW (P4)
       async chat() {
         const msg = active.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {

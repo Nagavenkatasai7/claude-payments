@@ -27,6 +27,9 @@ function sampleTransfer(id: string, createdAt: string): Transfer {
     destinationCountry: 'IN',
     destinationCurrency: 'INR',
     partnerId: 'default',
+    amountSource: 500,
+    feeSource: 0,
+    totalChargeSource: 500,
   };
 }
 

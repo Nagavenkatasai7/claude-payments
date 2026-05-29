@@ -15,7 +15,9 @@ afterEach(() => vi.restoreAllMocks());
 
 const base = {
   phone: '15551234567',
-  amountUsd: 200,
+  amountSource: 200,
+  sourceCurrency: 'USD' as const,
+  partnerId: 'default',
   recipientName: 'Mom',
   recipientPhone: '919133001840',
   payoutMethod: 'upi' as const,
@@ -41,7 +43,7 @@ describe('createTransfer', () => {
 
   it('flags a large amount but stays awaiting_payment', async () => {
     const store = createStore(fakeRedis());
-    const t = await createTransfer(store, { ...base, amountUsd: 1500 });
+    const t = await createTransfer(store, { ...base, amountSource: 1500 });
     expect(t.complianceStatus).toBe('flagged');
     expect(t.status).toBe('awaiting_payment');
   });
@@ -59,7 +61,9 @@ describe('createTransfer P1: country + currency fields', () => {
     const store = createStore(fakeRedis());
     const t = await createTransfer(store, {
       phone: '15551112222',
-      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
       recipientName: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',
@@ -78,13 +82,38 @@ describe('createTransfer P2: partnerId', () => {
     const store = createStore(fakeRedis());
     const t = await createTransfer(store, {
       phone: '15551112222',
-      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
       recipientName: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
     });
+    expect(t.partnerId).toBe('default');
+  });
+});
+
+describe('createTransfer P4: source-currency fields', () => {
+  it('P4: populates source-currency fields (USD scaffold) from the quote', async () => {
+    const store = createStore(fakeRedis());
+    const t = await createTransfer(store, {
+      phone: '15551230000',
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
+      recipientName: 'Asha',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'asha@upi',
+      fundingMethod: 'bank_transfer',
+    });
+    expect(t.amountSource).toBe(100);
+    expect(t.sourceCurrency).toBe('USD');
+    expect(t.amountSource).toBe(t.amountUsd); // USD: source == USD-equiv
+    expect(t.feeSource).toBe(t.feeUsd);
+    expect(t.totalChargeSource).toBe(t.totalChargeUsd); // USD: source == USD-equiv
     expect(t.partnerId).toBe('default');
   });
 });

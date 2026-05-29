@@ -26,6 +26,9 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
     destinationCountry: 'IN',
     destinationCurrency: 'INR',
     partnerId: 'default',
+    amountSource: 100,
+    feeSource: 2.5,
+    totalChargeSource: 102.5,
     ...overrides,
   };
 }
