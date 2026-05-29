@@ -54,6 +54,8 @@ export interface Transfer {
   amountSource: number;         // NEW (P4)
   feeSource: number;            // NEW (P4)
   totalChargeSource: number;    // NEW (P4)
+  // ── Payment-provider seam (pay-seam) — optional (dormant) ──
+  paymentProviderRef?: string;   // partner's settlement id; the mock sets `mock-<transfer.id>`
   // ── KYC Tier 2 Travel-Rule (per-send) — all optional (dormant) ──
   recipientLegalName?: string;            // legal name distinct from display recipientName
   relationship?: SenderRecipientRelationship;
