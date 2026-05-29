@@ -1,20 +1,8 @@
-import { NextRequest, NextResponse, after } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
-import {
-  completePaymentStage1,
-  completePaymentStage2,
-  recipientTemplateParams,
-} from '@/lib/payment';
-import {
-  sendText,
-  sendTemplate,
-  RECIPIENT_TEMPLATE_NAME,
-  RECIPIENT_TEMPLATE_LANG,
-} from '@/lib/whatsapp';
+import { getPaymentProvider } from '@/lib/providers/payment-provider';
 
-export const maxDuration = 300;
-
-const DELIVERY_DELAY_MS = 120000; // 2 minutes
+export const maxDuration = 300; // unchanged — the mock still sleeps 120s inside after()
 
 export async function POST(
   _req: NextRequest,
@@ -23,43 +11,25 @@ export async function POST(
   const { transferId } = await params;
   try {
     const store = getStore();
-    const { transfer, senderMessages } = await completePaymentStage1(
-      store,
-      transferId,
-    );
-
-    // Send stage-1 messages to sender only
-    for (const msg of senderMessages) {
-      await sendText(transfer.phone, msg);
+    const transfer = await store.getTransfer(transferId);
+    if (!transfer) {
+      return NextResponse.json({ ok: false, error: 'Not found' }, { status: 404 });
     }
 
-    // Schedule stage-2 delivery after a delay
-    after(async () => {
-      try {
-        await new Promise((resolve) => setTimeout(resolve, DELIVERY_DELAY_MS));
-        const stage2 = await completePaymentStage2(store, transferId);
-        for (const msg of stage2.senderMessages) {
-          await sendText(stage2.transfer.phone, msg);
-        }
-        if (stage2.transfer.recipientPhone) {
-          await sendTemplate(
-            stage2.transfer.recipientPhone,
-            RECIPIENT_TEMPLATE_NAME,
-            RECIPIENT_TEMPLATE_LANG,
-            recipientTemplateParams(stage2.transfer),
-          );
-        }
-      } catch (err) {
-        console.error('Stage-2 delivery failed:', err);
-      }
-    });
+    const provider = getPaymentProvider(store);
+    // Stage 1 + (mock) self-advancing stage 2 — payment.ts stages are unchanged.
+    const { providerRef } = await provider.initiateTransfer(transfer);
+
+    // Persist the settlement ref WITHOUT clobbering the 'paid' write initiateTransfer
+    // just made: re-read, write the ref only when not already set, spread-merge.
+    const settled = await store.getTransfer(transferId);
+    if (settled && !settled.paymentProviderRef) {
+      await store.saveTransfer({ ...settled, paymentProviderRef: providerRef });
+    }
 
     return NextResponse.json({ ok: true, status: 'paid' });
   } catch (err) {
     console.error('Payment processing failed:', err);
-    return NextResponse.json(
-      { ok: false, error: 'Payment failed' },
-      { status: 400 },
-    );
+    return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
   }
 }

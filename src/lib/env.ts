@@ -1,3 +1,5 @@
+export type PaymentProviderMode = 'mock'; // v1: mock only; real modes added when a partner lands
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -59,5 +61,14 @@ export const env = {
   },
   get seedPartnerId() {
     return process.env.SEED_PARTNER_ID ?? '';
+  },
+  get paymentProviderMode(): PaymentProviderMode {
+    // Default + only supported value in v1 — a forward hook, not a live switch.
+    return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';
+  },
+  paymentWebhookSecret(provider: string): string {
+    // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
+    // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).
+    return process.env[`PAYMENT_WEBHOOK_SECRET_${provider.toUpperCase()}`] ?? '';
   },
 };

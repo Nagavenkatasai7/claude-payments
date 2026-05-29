@@ -4,6 +4,18 @@ import { fakeRedis } from './helpers';
 import type { Transfer } from '@/lib/types';
 import { easternDate } from '@/lib/dates';
 
+function seedTransfer(status: Transfer['status'] = 'awaiting_payment'): Transfer {
+  return {
+    id: 'wh_1', phone: '15551230000', amountUsd: 200, feeUsd: 5, totalChargeUsd: 205,
+    fxRate: 83, amountInr: 16600, recipientName: 'Mom', recipientPhone: '919876543210',
+    payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+    status, complianceStatus: 'cleared', complianceReasons: [],
+    createdAt: '2026-05-29T00:00:00Z', partnerId: 'default',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    amountSource: 200, feeSource: 5, totalChargeSource: 205,
+  } as Transfer;
+}
+
 function sampleTransfer(id: string, createdAt: string): Transfer {
   return {
     id,
@@ -89,6 +101,63 @@ describe('store velocity counter', () => {
     const store = createStore(redis);
     await store.incrementTodayTransferCount('p');
     expect(redis.dump.has(`velocity:p:${easternDate(Date.now())}`)).toBe(true);
+  });
+});
+
+describe('updateTransferFromWebhook (idempotent, forward-only)', () => {
+  it('advances awaiting_payment → paid and sets paidAt', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer());
+    const r = await store.updateTransferFromWebhook('wh_1', 'paid');
+    expect(r).not.toBeNull();
+    expect(r!.status).toBe('paid');
+    expect(r!.paidAt).toBeTruthy();
+  });
+
+  it('advances paid → delivered and sets deliveredAt (keeps paidAt)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer('paid'));
+    const r = await store.updateTransferFromWebhook('wh_1', 'delivered');
+    expect(r!.status).toBe('delivered');
+    expect(r!.deliveredAt).toBeTruthy();
+  });
+
+  it('is IDEMPOTENT: a duplicate paid_out (delivered) callback returns null, no re-save', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer('delivered'));
+    expect(await store.updateTransferFromWebhook('wh_1', 'delivered')).toBeNull();
+  });
+
+  it('is FORWARD-ONLY: a backward funded (paid) after delivered is ignored', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer('delivered'));
+    expect(await store.updateTransferFromWebhook('wh_1', 'paid')).toBeNull();
+    expect((await store.getTransfer('wh_1'))!.status).toBe('delivered'); // never regressed
+  });
+
+  it('no-ops on an unknown transferId (untrusted body)', async () => {
+    const store = createStore(fakeRedis());
+    expect(await store.updateTransferFromWebhook('nope', 'paid')).toBeNull();
+  });
+
+  it('refuses to advance a cancelled transfer (terminal-protected)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer('cancelled'));
+    expect(await store.updateTransferFromWebhook('wh_1', 'delivered')).toBeNull();
+    expect((await store.getTransfer('wh_1'))!.status).toBe('cancelled');
+  });
+
+  it('refuses to advance a blocked transfer (terminal-protected)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer('blocked'));
+    expect(await store.updateTransferFromWebhook('wh_1', 'paid')).toBeNull();
+  });
+
+  it('returns the updated Transfer only on a real transition', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(seedTransfer());
+    expect((await store.updateTransferFromWebhook('wh_1', 'paid'))!.id).toBe('wh_1'); // real
+    expect(await store.updateTransferFromWebhook('wh_1', 'paid')).toBeNull();          // dup → null
   });
 });
 
