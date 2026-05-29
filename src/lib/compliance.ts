@@ -1,4 +1,9 @@
-import type { ComplianceStatus } from './types';
+import type { ComplianceStatus, CountryCode } from './types';
+import type { ResolvedCorridorRules } from './compliance-config';
+import {
+  type SanctionsScreener,
+  getSanctionsScreener,
+} from './providers/sanctions-provider';
 
 // Mock sanctions/watchlist — clearly fake names for the prototype.
 export const WATCHLIST = ['john doe', 'jane roe', 'test blocked'];
@@ -10,23 +15,41 @@ export interface ComplianceResult {
   reasons: string[];
 }
 
-export function screenTransfer(input: {
-  amountUsd: number;
+export async function screenTransfer(input: {
+  amountUsd: number;                 // USD-equivalent (unchanged; fed by quote.amountUsd)
   recipientName: string;
   transfersToday: number;
-}): ComplianceResult {
-  const name = input.recipientName.trim().toLowerCase();
-  if (WATCHLIST.includes(name)) {
+  sourceCountry?: CountryCode;       // NEW (P5) — passed to the screener for jurisdiction scoping
+  rules?: ResolvedCorridorRules;     // NEW (P5) — defaults to GLOBAL_DEFAULTS (today's values)
+  screener?: SanctionsScreener;      // NEW (P5) — defaults to a mock over rules' base ∪ extra
+}): Promise<ComplianceResult> {
+  // Lazy import to break the compliance <-> compliance-config module cycle:
+  // a static value import here would force compliance-config to evaluate
+  // GLOBAL_DEFAULTS before this module's WATCHLIST consts are initialized
+  // (capturing them as undefined). Resolved at call time, the config is
+  // fully initialized, so the default path equals today's behavior exactly.
+  const { GLOBAL_DEFAULTS } = await import('./compliance-config');
+  const rules = input.rules ?? GLOBAL_DEFAULTS;
+  const screener =
+    input.screener ??
+    getSanctionsScreener([...rules.baseWatchlist, ...rules.watchlistExtra]);
+
+  const hit = await screener.screen({
+    name: input.recipientName ?? '',
+    sourceCountry: input.sourceCountry ?? 'US',
+  });
+  if (hit.matched) {
     return {
       status: 'blocked',
       reasons: ['Recipient is on the compliance watchlist.'],
     };
   }
+
   const reasons: string[] = [];
-  if (input.amountUsd >= LARGE_AMOUNT_USD) {
+  if (input.amountUsd >= rules.largeAmountUsd) {
     reasons.push('Large transfer amount.');
   }
-  if (input.transfersToday >= VELOCITY_LIMIT) {
+  if (input.transfersToday >= rules.velocityLimit) {
     reasons.push('High transfer velocity.');
   }
   if (reasons.length > 0) return { status: 'flagged', reasons };

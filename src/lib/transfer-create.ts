@@ -27,7 +27,7 @@ export async function createTransfer(
   const rates = await getFxRates(input.sourceCurrency);
   const q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount);
   const transfersToday = await store.getTodayTransferCount(input.phone);
-  const compliance = screenTransfer({
+  const compliance = await screenTransfer({
     amountUsd: q.amountUsd, // USD-equivalent
     recipientName: input.recipientName,
     transfersToday,
