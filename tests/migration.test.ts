@@ -4,6 +4,7 @@ import {
   backfillCountryCurrencyOnce,
   backfillPartnersOnce,
   backfillSchedulesOnce,
+  backfillSourceAmountsOnce,
 } from '@/lib/migration';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
@@ -419,5 +420,33 @@ describe('backfillSchedulesOnce', () => {
     await backfillSchedulesOnce(store, ss);
     const raw = JSON.parse((await redis.get('schedule:KEEPME'))!);
     expect(raw.partnerId).toBe('beta');
+  });
+});
+
+describe('backfillSourceAmountsOnce', () => {
+  it('P4: persists source fields on transfers and is sentinel-guarded', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const ss = createScheduleStore(redis, createCustomerStore(redis, store));
+    // Pre-P4 transfer (no source fields), persisted raw
+    await redis.set('transfer:t1', JSON.stringify({
+      id: 't1', phone: '1', amountUsd: 100, feeUsd: 1.99, totalChargeUsd: 101.99,
+      fxRate: 85, amountInr: 8500, recipientName: 'A', recipientPhone: '919999999999',
+      payoutMethod: 'upi', payoutDestination: 'a@upi', fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared', complianceReasons: [], status: 'paid',
+      createdAt: '2026-01-01T00:00:00Z', sourceCountry: 'US', sourceCurrency: 'USD',
+      destinationCountry: 'IN', destinationCurrency: 'INR', partnerId: 'default',
+    }));
+    await redis.sadd('transfers:ids', 't1');
+
+    const first = await backfillSourceAmountsOnce(store, ss);
+    expect(first.skippedSentinel).toBe(false);
+    expect(first.transfersBackfilled).toBe(1);
+
+    const raw = JSON.parse((await redis.get('transfer:t1'))!);
+    expect(raw.amountSource).toBe(100); // PERSISTED, not just lazy-filled in memory
+
+    const second = await backfillSourceAmountsOnce(store, ss);
+    expect(second.skippedSentinel).toBe(true);
   });
 });
