@@ -54,7 +54,22 @@ export interface Transfer {
   amountSource: number;         // NEW (P4)
   feeSource: number;            // NEW (P4)
   totalChargeSource: number;    // NEW (P4)
+  // ── KYC Tier 2 Travel-Rule (per-send) — all optional (dormant) ──
+  recipientLegalName?: string;            // legal name distinct from display recipientName
+  relationship?: SenderRecipientRelationship;
+  purpose?: TransferPurpose;
+  // ── KYC Tier 4 EDD snapshot at send time ──
+  eddRequired?: boolean;                  // true when this send crossed the $3k cumulative trigger
 }
+
+// ── KYC Travel-Rule (Tier 2) enums — per-send counterparty data ──
+export type SenderRecipientRelationship =
+  | 'self' | 'spouse' | 'parent' | 'child' | 'sibling'
+  | 'other_family' | 'friend' | 'business' | 'other';
+
+export type TransferPurpose =
+  | 'family_support' | 'gift' | 'education' | 'medical'
+  | 'savings' | 'bills' | 'business' | 'other';
 
 export interface ToolCall {
   id: string;
@@ -141,6 +156,12 @@ export interface Draft {
   amountSource: number;           // NEW (P4)
   sourceCurrency: CurrencyCode;   // NEW (P4)
   fundingMethod: FundingMethod;
+  // ── KYC Travel-Rule / EDD (optional; populated only on the EDD path) ──
+  recipientLegalName?: string;
+  relationship?: SenderRecipientRelationship;
+  purpose?: TransferPurpose;
+  sourceOfFunds?: SourceOfFunds;
+  occupation?: Occupation;
   quote: {
     feeUsd: number;
     fxRate: number;
@@ -173,6 +194,16 @@ export type KycStatus =
   | 'rejected'
   | 'grandfathered';
 
+// ── KYC tiered capture: closed-list enums (screenable, friction-free) ──
+export type GovIdType = 'passport' | 'drivers_license' | 'national_id' | 'state_id';
+
+export type SourceOfFunds =
+  | 'employment' | 'business' | 'investment' | 'gift' | 'savings' | 'other';
+
+export type Occupation =
+  | 'salaried' | 'self_employed' | 'business_owner' | 'student'
+  | 'homemaker' | 'retired' | 'unemployed' | 'other';
+
 export interface Customer {
   senderPhone: string;
   firstSeenAt: string;
@@ -182,6 +213,17 @@ export interface Customer {
   kycRejectedReason?: string;
   fullName?: string;
   dateOfBirth?: string;
+  // ── KYC Tier 1 Core-ID (CIP) — all optional (dormant) ──
+  residentialAddress?: string;   // single-line residential address (captured, not validated)
+  govIdType?: GovIdType;
+  govIdNumber?: string;          // PII — dashboard masks to last 4
+  nationality?: CountryCode;     // ISO 3166-1 alpha-2 (typed, unlike legacy `country`)
+  // ── KYC Tier 3 Risk ──
+  pepDeclared?: boolean;         // self-declared Politically Exposed Person flag
+  // ── KYC Tier 4 EDD profile (sticky once captured) ──
+  sourceOfFunds?: SourceOfFunds;
+  occupation?: Occupation;
+  eddCapturedAt?: string;        // ISO — when EDD enums were last supplied
   country?: string;             // legacy KYC-provider free-text — DO NOT use for routing
   senderCountry: CountryCode;   // (P1) the routing field
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
