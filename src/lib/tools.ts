@@ -1,4 +1,4 @@
-import { quote, QuoteError } from './fx';
+import { quote, QuoteError, sourceForInr } from './fx';
 import { getFxRates, type FxRates } from './rate';
 import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
@@ -49,6 +49,11 @@ export const toolSchemas: ChatTool[] = [
           amount_usd: {
             type: 'number',
             description: "Amount to send, in the sender's send currency (US dollars unless told otherwise).",
+          },
+          amount_inr: {
+            type: 'number',
+            description:
+              "Optional. The exact rupee amount the RECIPIENT should receive. Provide this INSTEAD of amount_usd when the customer asks in rupees ('I want mom to get ₹40000'). We back-solve the send amount and add the fee on top. If both are given, amount_inr wins.",
           },
           funding_method: {
             type: 'string',
@@ -394,8 +399,19 @@ async function getQuoteTool(
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const { sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+
+    // Receive-first (Win A): when a finite, positive target rupee amount is
+    // given, back-solve the send amount; the recipient gets exactly that INR
+    // and the fee is added on top (today's model). amount_inr wins over
+    // amount_usd. Otherwise this is byte-for-byte today's send-first path.
+    const targetInr = Number(args.amount_inr);
+    const amountSource =
+      Number.isFinite(targetInr) && targetInr > 0
+        ? sourceForInr(targetInr, rates)
+        : Number(args.amount_usd);
+
     const q = quote(
-      Number(args.amount_usd),
+      amountSource,
       sourceCurrency,
       rates,
       args.funding_method as FundingMethod,

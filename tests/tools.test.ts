@@ -694,6 +694,87 @@ describe('multi-currency dormancy invariant', () => {
   });
 });
 
+describe('get_quote: receive-first (amount_inr) branch', () => {
+  it('amount_inr back-solves the send amount; recipient gets ~the target INR', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const res = await executeTool('get_quote',
+      { amount_inr: 42500, funding_method: 'bank_transfer' }, ctx);
+    expect('error' in res).toBe(false);
+    expect(res.amount_inr).toBeCloseTo(42500, -1); // recipient gets the requested rupees
+    expect(res.amount_source).toBeCloseTo(500, 2); // back-solved 42500/85
+    // result-key set is unchanged from the send-first path:
+    for (const k of ['source_currency', 'amount_source', 'fee_source', 'total_charge_source',
+      'amount_usd', 'fee_usd', 'total_charge_usd', 'fx_rate', 'amount_inr', 'delivery_estimate'])
+      expect(k in res).toBe(true);
+  });
+
+  it('amount_inr WINS when both amount_inr and amount_usd are given', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const res = await executeTool('get_quote',
+      { amount_inr: 42500, amount_usd: 9999, funding_method: 'bank_transfer' }, ctx);
+    expect(res.amount_source).toBeCloseTo(500, 2); // from 42500/85, NOT 9999
+  });
+
+  it('send-first path is UNCHANGED when amount_inr is absent', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const res = await executeTool('get_quote',
+      { amount_usd: 500, funding_method: 'bank_transfer' }, ctx);
+    expect(res.amount_source).toBe(500);
+    expect(res.amount_inr).toBe(Math.round(500 * 85));
+  });
+
+  it('a non-finite / non-positive amount_inr is ignored, falling back to amount_usd', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const res = await executeTool('get_quote',
+      { amount_inr: 'abc', amount_usd: 500, funding_method: 'bank_transfer' }, ctx);
+    expect(res.amount_source).toBe(500); // junk amount_inr did not hijack the quote
+  });
+
+  it('the back-solved amount still hits the MIN/MAX guard (QuoteError → error result)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    // 85 INR → ~$1; below MIN_USD=10 ⇒ quote() throws QuoteError, surfaced as { error }
+    const res = await executeTool('get_quote',
+      { amount_inr: 85, funding_method: 'bank_transfer' }, ctx);
+    expect('error' in res).toBe(true);
+  });
+
+  it('receive-first respects source_currency (GBP rates)', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15559991111');
+    const now = new Date().toISOString();
+    // Seed a multi-currency partner (US + GB)
+    await ctx.partnerStore.savePartner({
+      id: 'multi-gbp-test',
+      name: 'Multi Partner GBP',
+      countries: ['US', 'GB'],
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    });
+    // Seed customer linked to multi-currency partner
+    await ctx.customerStore.saveCustomer({
+      senderPhone: '15559991111',
+      firstSeenAt: now,
+      kycStatus: 'not_started',
+      senderCountry: 'US',
+      partnerId: 'multi-gbp-test',
+      createdAt: now,
+      updatedAt: now,
+    });
+    // Mock GBP rates: 1 GBP = 108 INR, 1 GBP = 1.27 USD
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('from=GBP')) {
+        return { ok: true, json: async () => ({ rates: { INR: 108, USD: 1.27 } }) };
+      }
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+    const res = await executeTool('get_quote',
+      { amount_inr: 21600, funding_method: 'bank_transfer', source_currency: 'GBP' }, ctx);
+    expect(res.source_currency).toBe('GBP');
+    expect(res.amount_source).toBeCloseTo(200, 2); // 21600 / 108
+  });
+});
+
 describe('send_approve_picker — cap enforcement', () => {
   it('refuses to send buttons and returns error when over cap', async () => {
     const redis = fakeRedis();
