@@ -8,6 +8,7 @@ import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
+import { allowedSendCurrencies } from './partner-currency';
 
 const MAX_TOOL_ROUNDS = 6;
 const FALLBACK_REPLY =
@@ -53,6 +54,15 @@ export function createAgent(deps: AgentDeps) {
     const history = await deps.store.getConversation(phone);
     history.push({ role: 'user', content: incomingText });
 
+    // Resolve the partner's allowed send currencies ONCE before the round loop.
+    // Use distinct names (noteCustomer / notePartner) to avoid shadowing any
+    // variables introduced by tool calls later in the same scope.
+    const noteCustomer = await deps.customerStore.getCustomer(phone);
+    const notePartner = noteCustomer
+      ? (await deps.partnerStore.getPartner(noteCustomer.partnerId)) ?? (await deps.partnerStore.ensureDefaultPartner())
+      : await deps.partnerStore.ensureDefaultPartner();
+    const sendCurrencies = allowedSendCurrencies(notePartner);
+
     let reply = '';
     const paymentLinks: string[] = [];
 
@@ -84,6 +94,14 @@ export function createAgent(deps: AgentDeps) {
               `[TIER_REMINDER day ${turn.tierReminderDayOfWindow}/3] T0 customer in their observation window. Briefly remind them which day they're on and share the kyc_url (from check_send_limit({amount_usd: 0})) before continuing the normal flow.`,
           });
         }
+      }
+      if (round === 0 && sendCurrencies.length > 1) {
+        messages.push({
+          role: 'system',
+          content:
+            `[SEND CURRENCIES: ${sendCurrencies.join(', ')} — ask the user which currency they are sending, ` +
+            `pass it as source_currency to get_quote/check_send_limit/send_approve_picker, and state the amount in that currency.]`,
+        });
       }
       messages.push(...history);
 

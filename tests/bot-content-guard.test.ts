@@ -30,3 +30,10 @@ describe('P2 hard rule: bot never mentions partner in any chat content', () => {
     });
   }
 });
+
+describe('P4 currency note guards', () => {
+  it('P4: injected currency note never contains the word "partner"', () => {
+    const note = '[SEND CURRENCIES: USD, GBP — ask the user which currency they are sending, pass it as source_currency to get_quote/check_send_limit/send_approve_picker, and state the amount in that currency.]';
+    expect(note.toLowerCase()).not.toContain('partner');
+  });
+});
