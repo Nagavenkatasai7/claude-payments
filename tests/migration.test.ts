@@ -5,6 +5,7 @@ import {
   backfillPartnersOnce,
   backfillSchedulesOnce,
   backfillSourceAmountsOnce,
+  backfillCorridorComplianceOnce,
 } from '@/lib/migration';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
@@ -423,6 +424,44 @@ describe('backfillSchedulesOnce', () => {
     await backfillSchedulesOnce(store, ss);
     const raw = JSON.parse((await redis.get('schedule:KEEPME'))!);
     expect(raw.partnerId).toBe('beta');
+  });
+});
+
+describe('backfillCorridorComplianceOnce', () => {
+  it('P5: backfillCorridorComplianceOnce is sentinel-guarded and leaves default untouched', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const def = await partnerStore.ensureDefaultPartner();
+    const before = JSON.stringify(await redis.get('partner:default'));
+
+    const first = await backfillCorridorComplianceOnce(store, partnerStore);
+    expect(first.skippedSentinel).toBe(false);
+
+    // default has no corridorCompliance → not re-saved → byte-for-byte identical
+    const after = JSON.stringify(await redis.get('partner:default'));
+    expect(after).toBe(before);
+    const reloaded = await partnerStore.getPartner('default');
+    expect(reloaded).toEqual(def);
+    expect(reloaded?.corridorCompliance).toBeUndefined();
+
+    // second pass is a no-op (sentinel already claimed)
+    const second = await backfillCorridorComplianceOnce(store, partnerStore);
+    expect(second.skippedSentinel).toBe(true);
+  });
+
+  it('P5: a partner WITH corridorCompliance is preserved by the re-save (spread)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    await partnerStore.savePartner({
+      id: 'gb-co', name: 'GB Co', countries: ['US', 'GB'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+      corridorCompliance: { GB: { velocityLimit: 9 } },
+    });
+    await backfillCorridorComplianceOnce(store, partnerStore);
+    const reloaded = await partnerStore.getPartner('gb-co');
+    expect(reloaded?.corridorCompliance?.GB?.velocityLimit).toBe(9);
   });
 });
 
