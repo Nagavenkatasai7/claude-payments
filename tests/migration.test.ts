@@ -10,6 +10,7 @@ import {
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -29,8 +30,9 @@ describe('backfillCustomersOnce', () => {
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
     const ps = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
     for (const phone of ['15551111111', '15552222222']) {
-      await createTransfer(store, ps, {
+      await createTransfer(store, ps, mvs, {
         phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
         recipientName: 'Mom', recipientPhone: '919876543210',
         payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
@@ -48,7 +50,8 @@ describe('backfillCustomersOnce', () => {
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
     const ps = createPartnerStore(redis);
-    await createTransfer(store, ps, {
+    const mvs = createMonthlyVolumeStore(redis);
+    await createTransfer(store, ps, mvs, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
@@ -65,7 +68,8 @@ describe('backfillCustomersOnce', () => {
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
     const ps = createPartnerStore(redis);
-    await createTransfer(store, ps, {
+    const mvs = createMonthlyVolumeStore(redis);
+    await createTransfer(store, ps, mvs, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',

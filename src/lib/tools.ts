@@ -8,7 +8,7 @@ import { createTransfer } from './transfer-create';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, Customer, CurrencyCode, FundingMethod, Partner, PayoutMethod, Schedule, TurnContext } from './types';
+import type { ChatTool, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PayoutMethod, Schedule, SourceOfFunds, TurnContext } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
@@ -25,6 +25,16 @@ import {
   disambiguateNames,
   truncateLabel,
 } from './whatsapp-buttons';
+
+// ── KYC closed-set validators: an unknown value is treated as UNSUPPLIED
+// (fail-safe to flag, never silent-pass). Mirrors the type unions in types.ts. ──
+const SOURCE_OF_FUNDS = ['employment','business','investment','gift','savings','other'] as const;
+const OCCUPATIONS = ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] as const;
+const RELATIONSHIPS = ['self','spouse','parent','child','sibling','other_family','friend','business','other'] as const;
+const PURPOSES = ['family_support','gift','education','medical','savings','bills','business','other'] as const;
+function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | undefined {
+  return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
+}
 
 export const toolSchemas: ChatTool[] = [
   {
@@ -83,6 +93,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The recipient's WhatsApp number in India, with country code, e.g. 919876543210.",
           },
+          recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
+          relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
+          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
+          occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: [
           'amount_usd',
@@ -163,6 +178,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
+          relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
+          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
+          occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: ['amount_usd', 'recipient_name', 'recipient_phone', 'payout_method', 'payout_destination', 'funding_method', 'frequency'],
       },
@@ -243,6 +263,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
+          relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
+          purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
+          source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
+          occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: [
           'amount_usd',
@@ -429,7 +454,7 @@ async function createTransferTool(
       }
     }
     try {
-      const transfer = await createTransfer(ctx.store, ctx.partnerStore, {
+      const transfer = await createTransfer(ctx.store, ctx.partnerStore, ctx.monthlyVolumeStore, {
         phone: ctx.phone,
         amountSource: draft.amountSource,
         sourceCurrency: draft.sourceCurrency,
@@ -439,8 +464,16 @@ async function createTransferTool(
         payoutMethod: draft.recipient.payoutMethod,
         payoutDestination: draft.recipient.payoutDestination,
         fundingMethod: draft.fundingMethod,
+        // ── KYC Travel-Rule / EDD: from the consumed draft + sender legal name ──
+        recipientLegalName: draft.recipientLegalName,
+        relationship: draft.relationship,
+        purpose: draft.purpose,
+        sourceOfFunds: draft.sourceOfFunds,
+        occupation: draft.occupation,
+        senderName: customer.fullName,
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
+      await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
       return {
         transfer_id: transfer.id,
         status: transfer.status,
@@ -483,8 +516,10 @@ async function createTransferTool(
       };
     }
   }
+  const legacySof = asEnum(SOURCE_OF_FUNDS, args.source_of_funds);
+  const legacyOcc = asEnum(OCCUPATIONS, args.occupation);
   try {
-    const transfer = await createTransfer(ctx.store, ctx.partnerStore, {
+    const transfer = await createTransfer(ctx.store, ctx.partnerStore, ctx.monthlyVolumeStore, {
       phone: ctx.phone,
       amountSource,
       sourceCurrency,
@@ -494,8 +529,16 @@ async function createTransferTool(
       payoutMethod: args.payout_method as PayoutMethod,
       payoutDestination: String(args.payout_destination),
       fundingMethod: args.funding_method as FundingMethod,
+      // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
+      recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
+      relationship: asEnum(RELATIONSHIPS, args.relationship),
+      purpose: asEnum(PURPOSES, args.purpose),
+      sourceOfFunds: legacySof,
+      occupation: legacyOcc,
+      senderName: legacyCustomer.fullName,
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
+    await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
     return {
       transfer_id: transfer.id,
       status: transfer.status,
@@ -508,6 +551,23 @@ async function createTransferTool(
   } catch (err) {
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
+  }
+}
+
+// Sticky EDD profile: when both SoF + occupation are supplied (validated) and
+// differ from what's stored, persist them onto the Customer so future sends
+// satisfy the EDD requirement without re-asking.
+async function persistEddProfile(
+  ctx: ToolContext,
+  customer: Customer,
+  sof: SourceOfFunds | undefined,
+  occ: Occupation | undefined,
+): Promise<void> {
+  if (sof && occ && (customer.sourceOfFunds !== sof || customer.occupation !== occ)) {
+    await ctx.customerStore.saveCustomer({
+      ...customer, sourceOfFunds: sof, occupation: occ, eddCapturedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
   }
 }
 
@@ -746,6 +806,12 @@ async function sendApprovePickerTool(
       amountSource: q.amountSource,
       sourceCurrency: q.sourceCurrency,
       fundingMethod,
+      // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
+      recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
+      relationship: asEnum(RELATIONSHIPS, args.relationship),
+      purpose: asEnum(PURPOSES, args.purpose),
+      sourceOfFunds: asEnum(SOURCE_OF_FUNDS, args.source_of_funds),
+      occupation: asEnum(OCCUPATIONS, args.occupation),
       quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
     });
     const fmt = (n: number) =>

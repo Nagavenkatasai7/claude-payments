@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -109,7 +110,8 @@ describe('createTransfer side-effects', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
-    await createTransfer(store, partnerStore, {
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    await createTransfer(store, partnerStore, monthlyVolumeStore, {
       phone: '15551234567',
       amountSource: 100,
       sourceCurrency: 'USD',
@@ -131,6 +133,7 @@ describe('createTransfer side-effects', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const input = {
       phone: '15551234567',
       amountSource: 100,
@@ -142,12 +145,12 @@ describe('createTransfer side-effects', () => {
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer' as const,
     };
-    await createTransfer(store, partnerStore, input);
+    await createTransfer(store, partnerStore, monthlyVolumeStore, input);
     const firstList = await store.listRecipients('15551234567', 3);
     const firstAt = firstList[0].lastUsedAt;
 
     await new Promise((r) => setTimeout(r, 10));
-    await createTransfer(store, partnerStore, input);
+    await createTransfer(store, partnerStore, monthlyVolumeStore, input);
     const secondList = await store.listRecipients('15551234567', 3);
 
     expect(secondList).toHaveLength(1);

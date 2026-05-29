@@ -537,6 +537,95 @@ describe('create_transfer — daily volume increment', () => {
   });
 });
 
+describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
+  async function grandfathered(ctx: ReturnType<typeof buildCtx>) {
+    await ctx.customerStore.saveCustomer({
+      senderPhone: ctx.phone,
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'grandfathered',
+      kycVerifiedAt: '2026-01-01T00:00:00Z',
+      senderCountry: 'US',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+      partnerId: 'default',
+    });
+  }
+
+  it('EDD enum args persist onto the Customer (sticky)', async () => {
+    const ctx = buildCtx(fakeRedis(), '15551234567');
+    await grandfathered(ctx);
+    await executeTool('create_transfer', {
+      amount_usd: 100,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+      funding_method: 'bank_transfer',
+      source_of_funds: 'employment',
+      occupation: 'salaried',
+    }, ctx);
+    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    expect(customer?.sourceOfFunds).toBe('employment');
+    expect(customer?.occupation).toBe('salaried');
+    expect(customer?.eddCapturedAt).toBeTruthy();
+  });
+
+  it('invalid enum value is treated as unsupplied (eddFieldsPresent stays false)', async () => {
+    const ctx = buildCtx(fakeRedis(), '15551234567');
+    await grandfathered(ctx);
+    // $2,500 already this month + $600 → crosses $3k; an invalid SoF must NOT
+    // satisfy the EDD requirement, so the transfer must be flagged edd_required.
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000);
+    const r = await executeTool('create_transfer', {
+      amount_usd: 600,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+      funding_method: 'bank_transfer',
+      source_of_funds: 'lottery_winnings', // not in the closed set → unsupplied
+      occupation: 'salaried',
+    }, ctx);
+    expect(r.compliance_status).toBe('flagged');
+    expect(r.compliance_reasons).toContain('edd_required');
+    // And nothing invalid leaked onto the Customer.
+    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    expect(customer?.sourceOfFunds).toBeUndefined();
+    expect(customer?.occupation).toBeUndefined();
+  });
+
+  it('Travel-Rule fields flow from the draft into the Transfer', async () => {
+    const redis = fakeRedis();
+    const base = buildCtx(redis, '15551234567');
+    await grandfathered(base);
+    // Seed a draft as if send_approve_picker had been called with Travel-Rule data.
+    const draftId = await base.draftStore.createDraft({
+      senderPhone: base.phone,
+      recipient: {
+        name: 'Mom',
+        recipientPhone: '919876543210',
+        payoutMethod: 'upi',
+        payoutDestination: 'mom@upi',
+      },
+      amountUsd: 100,
+      amountSource: 100,
+      sourceCurrency: 'USD',
+      fundingMethod: 'bank_transfer',
+      recipientLegalName: 'Mother Legal Name',
+      relationship: 'parent',
+      purpose: 'family_support',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8500 },
+    });
+    // Approve-tap path: context supplies the draftId.
+    const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
+    const r = await executeTool('create_transfer', {}, ctx);
+    const transfer = await ctx.store.getTransfer(r.transfer_id as string);
+    expect(transfer?.recipientLegalName).toBe('Mother Legal Name');
+    expect(transfer?.relationship).toBe('parent');
+    expect(transfer?.purpose).toBe('family_support');
+  });
+});
+
 describe('multi-currency dormancy invariant', () => {
   it('get_quote for a multi-currency partner returns source_currency GBP and correct amounts', async () => {
     const redis = fakeRedis();
