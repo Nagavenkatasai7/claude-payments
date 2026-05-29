@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { quote, QuoteError, MIN_USD, MAX_USD } from '@/lib/fx';
+import { sourceForInr, quote, QuoteError, MIN_USD, MAX_USD } from '@/lib/fx';
 import type { FxRates } from '@/lib/rate';
 
 const USD: FxRates = { toInr: 85, toUsd: 1 };
@@ -53,6 +53,34 @@ describe('quote (input guards)', () => {
   });
   it('rejects a NaN exchange rate (corrupt FxRates)', () => {
     expect(() => quote(100, 'GBP', { toInr: 108, toUsd: NaN }, 'bank_transfer', 0)).toThrow(QuoteError);
+  });
+});
+
+describe('sourceForInr — back-solve send amount from a target rupee amount', () => {
+  it('is the inverse of the forward amountInr line for USD', () => {
+    // forward: 500 * 85 = 42500; inverse of 42500 must round-trip to ~500
+    expect(sourceForInr(42500, USD)).toBe(500);
+  });
+  it('back-solves a non-USD source currency (GBP)', () => {
+    // 108 INR per GBP; 21600 / 108 = 200
+    expect(sourceForInr(21600, GBP)).toBe(200);
+  });
+  it('rounds the source amount to 2 dp (cents), like round2', () => {
+    // 40000 / 85 = 470.588... → 470.59
+    expect(sourceForInr(40000, USD)).toBe(470.59);
+  });
+  it('round-trips through quote(): the recipient gets ~the requested INR', () => {
+    const src = sourceForInr(40000, USD);            // 470.59
+    const q = quote(src, 'USD', USD, 'bank_transfer', 1);
+    expect(q.amountInr).toBe(Math.round(470.59 * 85)); // 40000 (±1 from cent rounding)
+  });
+  it('throws QuoteError on a non-finite target', () => {
+    expect(() => sourceForInr(Number.NaN, USD)).toThrow(QuoteError);
+    expect(() => sourceForInr(Number.POSITIVE_INFINITY, USD)).toThrow(QuoteError);
+  });
+  it('throws QuoteError on a non-positive target', () => {
+    expect(() => sourceForInr(0, USD)).toThrow(QuoteError);
+    expect(() => sourceForInr(-100, USD)).toThrow(QuoteError);
   });
 });
 

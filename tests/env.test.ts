@@ -81,4 +81,34 @@ describe('env', () => {
       expect(env.paymentWebhookSecret('uniteller')).toBe('s3cret');
     });
   });
+
+  describe('whatsappFlowsEnabled — strict-true, default-false', () => {
+    afterEach(() => {
+      delete process.env.WHATSAPP_FLOWS_ENABLED;
+    });
+    it('is false when unset', () => {
+      delete process.env.WHATSAPP_FLOWS_ENABLED;
+      expect(env.whatsappFlowsEnabled).toBe(false);
+    });
+    it("is false when set to ''", () => {
+      process.env.WHATSAPP_FLOWS_ENABLED = '';
+      expect(env.whatsappFlowsEnabled).toBe(false);
+    });
+    it("is true only on the literal \"true\"", () => {
+      process.env.WHATSAPP_FLOWS_ENABLED = 'true';
+      expect(env.whatsappFlowsEnabled).toBe(true);
+    });
+    it('is false on "1"', () => {
+      process.env.WHATSAPP_FLOWS_ENABLED = '1';
+      expect(env.whatsappFlowsEnabled).toBe(false);
+    });
+    it('is false on "yes"', () => {
+      process.env.WHATSAPP_FLOWS_ENABLED = 'yes';
+      expect(env.whatsappFlowsEnabled).toBe(false);
+    });
+    it('is false on "TRUE" (case-sensitive)', () => {
+      process.env.WHATSAPP_FLOWS_ENABLED = 'TRUE';
+      expect(env.whatsappFlowsEnabled).toBe(false);
+    });
+  });
 });

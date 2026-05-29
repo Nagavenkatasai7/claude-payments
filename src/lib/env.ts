@@ -66,6 +66,12 @@ export const env = {
     // Default + only supported value in v1 — a forward hook, not a live switch.
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';
   },
+  get whatsappFlowsEnabled(): boolean {
+    // Strict 'true' literal (mirrors paymentProviderMode). Default-false: the
+    // test WABA is not Meta-Business-verified, so a live list/flow send may
+    // fail — the send_recipient_picker call site falls back to buttons.
+    return process.env.WHATSAPP_FLOWS_ENABLED === 'true';
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).

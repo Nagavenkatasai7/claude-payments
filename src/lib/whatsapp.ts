@@ -21,6 +21,7 @@ interface WebhookShape {
           interactive?: {
             type?: string;
             button_reply?: { id?: string; title?: string };
+            list_reply?: { id?: string; title?: string };
           };
         }[];
       };
@@ -51,6 +52,18 @@ export function parseIncoming(body: unknown): IncomingMessage | null {
         kind: 'button',
         from: message.from,
         buttonId: message.interactive.button_reply.id,
+        messageId: message.id,
+      };
+    }
+    if (
+      message.type === 'interactive' &&
+      message.interactive?.type === 'list_reply' &&
+      message.interactive.list_reply?.id
+    ) {
+      return {
+        kind: 'button', // collapse to the existing button shape — route + parseButtonId reused unchanged
+        from: message.from,
+        buttonId: message.interactive.list_reply.id,
         messageId: message.id,
       };
     }
@@ -186,4 +199,65 @@ export async function sendInteractive(
 
   const body = await res.text();
   throw new Error(`WhatsApp interactive send failed (${res.status}): ${body}`);
+}
+
+export interface ListRow {
+  id: string;
+  title: string;
+}
+
+/**
+ * Send an interactive LIST message (WhatsApp Flows scaffolding). Same Graph API
+ * envelope as sendInteractive; same HTTP-470 → sendText fallback. On any other
+ * non-OK status it THROWS so the caller can fall back to buttons. Row ids carry
+ * the existing recipient:<phone> / recipient:new grammar, so parseIncoming's
+ * list_reply branch and parseButtonId need no changes. Gated behind
+ * env.whatsappFlowsEnabled at the call site — flag off ⇒ this is never reached.
+ */
+export async function sendList(
+  to: string,
+  bodyText: string,
+  buttonText: string,
+  rows: ListRow[],
+): Promise<void> {
+  if (rows.length === 0 || rows.length > 10) {
+    throw new Error(`sendList: WhatsApp accepts 1-10 list rows (got ${rows.length}).`);
+  }
+  const numbered = rows.map((r, i) => `${i + 1}. ${r.title}`).join('\n');
+  const fullBody = `${bodyText}\n\n${numbered}`;
+
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.whatsappToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'list',
+          body: { text: bodyText },
+          action: {
+            button: buttonText,
+            sections: [{ rows: rows.map((r) => ({ id: r.id, title: r.title })) }],
+          },
+        },
+      }),
+    },
+  );
+
+  if (res.ok) return;
+
+  if (res.status === 470) {
+    console.warn('sendList hit 24h-window error; falling back to sendText');
+    await sendText(to, fullBody);
+    return;
+  }
+
+  const body = await res.text();
+  throw new Error(`WhatsApp list send failed (${res.status}): ${body}`);
 }

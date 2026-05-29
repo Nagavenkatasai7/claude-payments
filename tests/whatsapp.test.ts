@@ -4,6 +4,7 @@ import {
   sendText,
   sendTemplate,
   sendInteractive,
+  sendList,
   RECIPIENT_TEMPLATE_NAME,
   RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
@@ -236,5 +237,80 @@ describe('sendInteractive', () => {
     await expect(
       sendInteractive('1', 'pick', [{ id: 'recipient:new', title: 'New' }]),
     ).rejects.toThrow(/400/);
+  });
+});
+
+describe('sendList — richer interactive list, sendInteractive-shaped envelope', () => {
+  it('POSTs the Graph v21.0 messages endpoint with an interactive list body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    await sendList('15551230000', 'Who are we sending to?', 'Choose', [
+      { id: 'recipient:919876543210', title: 'Mom' },
+      { id: 'recipient:new', title: 'Someone new' },
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('/v21.0/');
+    expect(url).toContain('/messages');
+    const sent = JSON.parse((init as RequestInit).body as string);
+    expect(sent.messaging_product).toBe('whatsapp');
+    expect(sent.type).toBe('interactive');
+    expect(sent.interactive.type).toBe('list');
+    // row ids carry the SAME grammar parseButtonId already understands
+    const rowIds = sent.interactive.action.sections
+      .flatMap((s: { rows: { id: string }[] }) => s.rows).map((r: { id: string }) => r.id);
+    expect(rowIds).toContain('recipient:919876543210');
+    expect(rowIds).toContain('recipient:new');
+  });
+
+  it('falls back to sendText on HTTP 470 (24h window), like sendInteractive', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 470, text: async () => 'window' })
+      .mockResolvedValueOnce({ ok: true, status: 200 }); // the sendText retry
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendList('15551230000', 'Body', 'Choose', [
+      { id: 'recipient:new', title: 'Someone new' },
+    ])).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const second = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+    expect(second.type).toBe('text'); // fell back to plain text with the options listed
+  });
+
+  it('throws on a non-OK, non-470 status (so the caller can fall back to buttons)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 400, text: async () => 'bad' });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendList('15551230000', 'Body', 'Choose', [
+      { id: 'recipient:new', title: 'Someone new' },
+    ])).rejects.toThrow();
+  });
+});
+
+describe('parseIncoming — list_reply collapses to the existing button shape', () => {
+  it('a list_reply yields { kind: "button", buttonId } (same shape as button_reply)', () => {
+    const msg = parseIncoming({
+      entry: [{ changes: [{ value: { messages: [{
+        type: 'interactive', from: '15551230000', id: 'wamid.1',
+        interactive: { type: 'list_reply', list_reply: { id: 'recipient:919876543210', title: 'Mom' } },
+      }] } }] }],
+    });
+    expect(msg).toEqual({ kind: 'button', from: '15551230000',
+      buttonId: 'recipient:919876543210', messageId: 'wamid.1' });
+  });
+  it('returns null for a list_reply missing its id (defensive)', () => {
+    const msg = parseIncoming({
+      entry: [{ changes: [{ value: { messages: [{
+        type: 'interactive', from: '15551230000', id: 'wamid.2',
+        interactive: { type: 'list_reply', list_reply: {} },
+      }] } }] }],
+    });
+    expect(msg).toBeNull();
+  });
+  it('still parses a button_reply exactly as before (regression)', () => {
+    const msg = parseIncoming({
+      entry: [{ changes: [{ value: { messages: [{
+        type: 'interactive', from: '15551230000', id: 'wamid.3',
+        interactive: { type: 'button_reply', button_reply: { id: 'recipient:new', title: 'Someone new' } },
+      }] } }] }],
+    });
+    expect(msg).toEqual({ kind: 'button', from: '15551230000', buttonId: 'recipient:new', messageId: 'wamid.3' });
   });
 });
