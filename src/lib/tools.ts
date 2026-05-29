@@ -5,7 +5,7 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer } from './transfer-create';
-import { evaluateCap } from './tier-rules';
+import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, Customer, CurrencyCode, FundingMethod, Partner, PayoutMethod, Schedule, TurnContext } from './types';
@@ -13,6 +13,7 @@ import type { Store } from './store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
+import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { sendInteractive, type InteractiveButton } from './whatsapp';
@@ -268,7 +269,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'check_send_limit',
       description:
-        "Check whether the sender is allowed to send `amount_usd` right now. Pass 0 to fetch their current cap status without proposing an amount. Returns { within_cap, tier, daily_cap_usd, per_transfer_cap_usd, today_used_usd, today_remaining_usd, reason?, day_of_window?, kyc_url? }. Always call this BEFORE get_quote.",
+        "Check whether the sender is allowed to send `amount_usd` right now. Pass 0 to fetch their current cap status without proposing an amount. Returns { within_cap, tier, daily_cap_usd, per_transfer_cap_usd, today_used_usd, today_remaining_usd, reason?, day_of_window?, kyc_url?, edd_required, edd_threshold_usd }. Always call this BEFORE get_quote.",
       parameters: {
         type: 'object',
         properties: {
@@ -296,6 +297,7 @@ export interface ToolContext {
   turn: TurnContext;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
+  monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
 }
@@ -792,6 +794,10 @@ async function checkSendLimitTool(
   const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
   const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
 
+  const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.phone);   // NEW (KYC)
+  const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)
+  const eddFieldsPresent = Boolean(customer.sourceOfFunds && customer.occupation); // NEW (KYC)
+
   // Surface a KYC URL for T0 or Suspended (the agent uses this in the message).
   let kycUrl: string | undefined;
   if (evalResult.tier === 'T0' || evalResult.tier === 'Suspended') {
@@ -812,5 +818,7 @@ async function checkSendLimitTool(
     reason: evalResult.reason,
     day_of_window: evalResult.dayOfWindow,
     kyc_url: kycUrl,
+    edd_required: edd.eddRequired && !eddFieldsPresent,   // false on the dormant path
+    edd_threshold_usd: edd.thresholdCents / 100,          // 3000 (for messaging)
   };
 }

@@ -5,6 +5,7 @@ import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
@@ -17,6 +18,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
   const store = createStore(redis);
   const customerStore = createCustomerStore(redis, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
   return {
     phone,
@@ -26,6 +28,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
     turn: { isNewConversation: false } as const,
     customerStore,
     dailyVolumeStore,
+    monthlyVolumeStore,
     kycProvider,
     partnerStore: createPartnerStore(redis), // NEW (P4)
   };
@@ -469,6 +472,37 @@ describe('check_send_limit', () => {
     const r = await executeTool('check_send_limit', { amount_usd: 0 }, ctx);
     expect(r.within_cap).toBe(true);
     expect(r.kyc_url).toBeDefined();
+  });
+
+  it('check_send_limit: dormant path returns edd_required:false with all today\'s fields intact', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550001111');
+    const res = await executeTool('check_send_limit', { amount_usd: 200 }, ctx);
+    // Today's fields unchanged (regression):
+    expect(res).toHaveProperty('within_cap');
+    expect(res).toHaveProperty('tier');
+    expect(res).toHaveProperty('daily_cap_usd');
+    expect(res).toHaveProperty('today_remaining_usd');
+    // Additive KYC fields:
+    expect(res.edd_required).toBe(false);
+    expect(res.edd_threshold_usd).toBe(3000);
+  });
+
+  it('check_send_limit: edd_required:true when cumulative-month + requested >= $3k and SoF/occupation absent', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550001111');
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000); // $2,500 this month
+    const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx); // → $3,100
+    expect(res.edd_required).toBe(true);
+  });
+
+  it('check_send_limit: edd_required:false when the customer already has EDD fields on file (sticky)', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550001111');
+    await ctx.customerStore.saveCustomer({
+      ...(await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer,
+      sourceOfFunds: 'employment', occupation: 'salaried', eddCapturedAt: '2026-05-01T00:00:00Z',
+    });
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000);
+    const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx);
+    expect(res.edd_required).toBe(false); // sticky profile satisfies it
   });
 });
 

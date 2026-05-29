@@ -6,6 +6,7 @@ import type { ScheduleStore } from './schedule-store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
+import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies } from './partner-currency';
@@ -21,6 +22,7 @@ export interface AgentDeps {
   draftStore: DraftStore;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
+  monthlyVolumeStore: MonthlyVolumeStore;  // NEW (KYC)
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
 }
@@ -123,6 +125,7 @@ export function createAgent(deps: AgentDeps) {
             draftStore: deps.draftStore,
             customerStore: deps.customerStore,
             dailyVolumeStore: deps.dailyVolumeStore,
+            monthlyVolumeStore: deps.monthlyVolumeStore,  // NEW (KYC)
             kycProvider: deps.kycProvider,
             partnerStore: deps.partnerStore, // NEW (P4)
             turn,
