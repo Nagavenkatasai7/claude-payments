@@ -59,4 +59,26 @@ describe('env', () => {
       expect(env.appBaseUrl).toBe('https://sendhome.test');
     });
   });
+
+  describe('paymentProviderMode', () => {
+    it("defaults to 'mock' when unset", () => {
+      delete process.env.PAYMENT_PROVIDER_MODE;
+      expect(env.paymentProviderMode).toBe('mock');
+    });
+    it("stays 'mock' even when an unknown value is set (v1 only supports mock)", () => {
+      process.env.PAYMENT_PROVIDER_MODE = 'uniteller';
+      expect(env.paymentProviderMode).toBe('mock');
+    });
+  });
+
+  describe('paymentWebhookSecret(provider)', () => {
+    it("returns '' when the per-provider secret is unset (fail-closed)", () => {
+      delete process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER;
+      expect(env.paymentWebhookSecret('uniteller')).toBe('');
+    });
+    it('returns the configured secret keyed by upper-cased provider name', () => {
+      process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER = 's3cret';
+      expect(env.paymentWebhookSecret('uniteller')).toBe('s3cret');
+    });
+  });
 });
