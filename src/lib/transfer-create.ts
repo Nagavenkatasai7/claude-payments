@@ -127,3 +127,69 @@ export async function createTransfer(
 
   return transfer;
 }
+
+export interface BlockedAttemptInput {
+  phone: string;
+  recipientName: string;
+  recipientPhone: string;
+  payoutMethod: PayoutMethod;
+  payoutDestination: string;
+  fundingMethod: FundingMethod;
+  amountUsd: number;
+  amountSource: number;
+  sourceCurrency: CurrencyCode;
+  feeUsd: number;
+  feeSource: number;
+  fxRate: number;
+  amountInr: number;                  // destination-currency amount
+  totalChargeUsd: number;
+  totalChargeSource: number;
+  destinationCountry: CountryCode;
+  destinationCurrency: CurrencyCode;
+  partnerId: PartnerId;
+  reasons: string[];
+}
+
+/**
+ * Persist a watchlist-blocked attempt as an auditable, never-charged transfer
+ * row (status='blocked'), so blocked attempts are visible in the ledger and
+ * compliance views instead of vanishing silently.
+ *
+ * Unlike createTransfer's blocked branch, this writes ONLY the row: it does NOT
+ * increment the all-time / today velocity counters, does NOT accrue monthly
+ * volume, and does NOT upsert the (watchlisted) recipient. A blocked attempt
+ * must never advance the customer's caps, EDD volume, or saved-recipient list.
+ */
+export async function recordBlockedAttempt(
+  store: Store,
+  input: BlockedAttemptInput,
+): Promise<Transfer> {
+  const transfer: Transfer = {
+    id: newTransferId(),
+    phone: input.phone,
+    amountUsd: input.amountUsd,
+    feeUsd: input.feeUsd,
+    totalChargeUsd: input.totalChargeUsd,
+    fxRate: input.fxRate,
+    amountInr: input.amountInr,
+    recipientName: input.recipientName,
+    recipientPhone: input.recipientPhone,
+    payoutMethod: input.payoutMethod,
+    payoutDestination: input.payoutDestination,
+    fundingMethod: input.fundingMethod,
+    complianceStatus: 'blocked',
+    complianceReasons: input.reasons,
+    status: 'blocked',
+    createdAt: new Date().toISOString(),
+    sourceCountry: countryForCurrency(input.sourceCurrency),
+    sourceCurrency: input.sourceCurrency,
+    destinationCountry: input.destinationCountry,
+    destinationCurrency: input.destinationCurrency,
+    partnerId: input.partnerId,
+    amountSource: input.amountSource,
+    feeSource: input.feeSource,
+    totalChargeSource: input.totalChargeSource,
+  };
+  await store.saveTransfer(transfer);
+  return transfer;
+}

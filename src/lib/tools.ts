@@ -4,7 +4,7 @@ import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { createTransfer } from './transfer-create';
+import { createTransfer, recordBlockedAttempt } from './transfer-create';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
@@ -1128,21 +1128,54 @@ async function sendApprovePickerTool(
       };
     }
   }
-  // Screen at card-show (read-only) BEFORE creating the draft
+  // Screen at card-show (read-only) BEFORE creating the draft. Quote first so a
+  // blocked attempt is recorded with real figures.
   const transfersToday = await ctx.store.getTodayTransferCount(ctx.phone);
-  const screen = await screenTransfer({
-    amountUsd,
-    recipientName: String(args.recipient_name),
-    transfersToday,
-    sourceCountry: customer.senderCountry,
-    senderName: customer.fullName,
-  });
-  if (screen.status === 'blocked') {
-    return { error: "I'm sorry — I can't set up this transfer right now. If you think this is a mistake, reply 'help' and a teammate will follow up." };
-  }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
+
+    const screen = await screenTransfer({
+      amountUsd,
+      recipientName: String(args.recipient_name),
+      transfersToday,
+      sourceCountry: customer.senderCountry,
+      senderName: customer.fullName,
+    });
+    if (screen.status === 'blocked') {
+      // Record an auditable, never-charged blocked row (no velocity/volume bump).
+      try {
+        await recordBlockedAttempt(ctx.store, {
+          phone: ctx.phone,
+          recipientName: String(args.recipient_name),
+          recipientPhone,
+          payoutMethod: args.payout_method as PayoutMethod,
+          payoutDestination: String(args.payout_destination),
+          fundingMethod,
+          amountUsd: q.amountUsd,
+          amountSource: q.amountSource,
+          sourceCurrency: q.sourceCurrency,
+          feeUsd: q.feeUsd,
+          feeSource: q.feeSource,
+          fxRate: q.fxRate,
+          amountInr: q.amountInr,
+          totalChargeUsd: q.totalChargeUsd,
+          totalChargeSource: q.totalChargeSource,
+          destinationCountry,
+          destinationCurrency,
+          partnerId: customer.partnerId,
+          reasons: screen.reasons,
+        });
+      } catch (err) {
+        console.warn('recordBlockedAttempt failed (non-fatal):', err);
+      }
+      return {
+        blocked: true,
+        reply_to_customer:
+          "This transfer can't be completed, and our team has been notified. If you have any questions, reply 'help' and we'll follow up.",
+      };
+    }
+
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       recipient: {

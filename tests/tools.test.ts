@@ -943,7 +943,7 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     expect(typeof draft!.quote.totalChargeUsd).toBe('number');
   });
 
-  it('BLOCKED recipient (John Doe) → { error }, no draft, no CTA fetch', async () => {
+  it('BLOCKED recipient (John Doe) → { blocked }, no draft/CTA, persists an audit row', async () => {
     const ctx = await buildClearedCtx();
     let ctaFetched = false;
     vi.stubGlobal('fetch', vi.fn(async () => {
@@ -958,10 +958,18 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
       payout_method: 'upi',
       payout_destination: 'john@upi',
     }, ctx);
-    expect(r.error).toBeDefined();
+    // New contract: a compliance block returns { blocked, reply_to_customer },
+    // never an { error } the model would paraphrase as a technical glitch.
+    expect(r.blocked).toBe(true);
+    expect(typeof r.reply_to_customer).toBe('string');
+    expect(String(r.reply_to_customer).toLowerCase()).not.toContain('went wrong');
     expect(r.sent).toBeUndefined();
     expect(r.draft_id).toBeUndefined();
     expect(ctaFetched).toBe(false);
+    // The blocked attempt is now persisted as an auditable ledger row.
+    const blocked = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].recipientName).toBe('John Doe');
   });
 });
 
