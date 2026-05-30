@@ -154,8 +154,9 @@ export default async function CustomersPage({
                         </td>
                         <td>{c.kycStatus}</td>
                         <td>
+                          {/* Lifetime sent is a USD-equivalent aggregate across all transfers — always USD */}
                           <div className="sh-amount">
-                            ${(life.cents / 100).toFixed(2)}
+                            ${(life.cents / 100).toFixed(2)} USD
                           </div>
                           <div className="sh-recipient-sub">
                             {life.count} {life.count === 1 ? 'transfer' : 'transfers'}

@@ -6,11 +6,9 @@ import { topVelocityToday } from '@/lib/dashboard';
 import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { Sidebar } from '../sidebar';
+import { money } from '../format';
 import type { Transfer } from '@/lib/types';
 
-function usd(n: number): string {
-  return `$${n.toFixed(2)}`;
-}
 function inr(n: number): string {
   return `₹${n.toLocaleString('en-IN')}`;
 }
@@ -25,7 +23,10 @@ function TransferRow({ t }: { t: Transfer }) {
         </div>
       </td>
       <td>
-        <div className="sh-amount">{usd(t.amountUsd)}</div>
+        <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+        {t.sourceCurrency !== 'USD' && (
+          <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+        )}
         <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
       </td>
       <td>
@@ -180,7 +181,8 @@ export default async function CompliancePage() {
                     <tr key={r.partnerName + r.corridor}>
                       <td>{r.partnerName}</td>
                       <td>{r.corridor}</td>
-                      <td className="sh-amount">{usd(r.largeAmountUsd)}</td>
+                      {/* largeAmountUsd is a USD-equivalent threshold, not a source amount — always USD */}
+                      <td className="sh-amount">{money(r.largeAmountUsd, 'USD')}</td>
                       <td className="sh-amount">{r.velocityLimit}</td>
                       <td>
                         {r.watchlistSize}
