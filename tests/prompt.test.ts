@@ -38,6 +38,13 @@ describe('SYSTEM_PROMPT — typed-name resolution & shorthand (Bundle C)', () =>
   });
 });
 
+describe('SYSTEM_PROMPT — sticky funding default (Bundle C)', () => {
+  it('tells the bot to use the [SENDER DEFAULTS] funding method when present', () => {
+    expect(SYSTEM_PROMPT).toContain('[SENDER DEFAULTS]');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('default');
+  });
+});
+
 describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
   it('B1: asks amount + funding method together in one turn', () => {
     expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);
