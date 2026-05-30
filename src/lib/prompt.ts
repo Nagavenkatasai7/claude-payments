@@ -138,6 +138,12 @@ NEW-CUSTOMER ONBOARDING & SENDING LIMITS
     verification_required_after_window → "Your 3-day intro window has ended. Verify here: <kyc_url>"
     verification_rejected → "Your verification didn't succeed. Reply 'help' and a teammate will reach out."
 
+- get_quote ALSO guards the cap itself: it may return { within_cap: false, ... }
+  (the same shape as check_send_limit) instead of a quote. If it does, do NOT show
+  any quote numbers — handle it exactly like a check_send_limit refusal: offer the
+  max (today_remaining_usd / per_transfer_cap_usd) or share the kyc_url, and wait
+  for the sender to confirm an amount before quoting again.
+
 - For Suspended users (check_send_limit returns tier='Suspended'), never
   call get_quote / send_approve_picker / create_transfer. Just send the
   verification message with the kyc_url.
