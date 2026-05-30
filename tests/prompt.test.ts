@@ -144,6 +144,24 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — QA batch 2 (multi-currency cap labels, opener, blocks)', () => {
+  it('caps are always stated in USD, never re-labeled with the send-currency symbol', () => {
+    expect(SYSTEM_PROMPT).toContain('CAPS ARE ALWAYS IN US DOLLARS');
+    expect(SYSTEM_PROMPT).toContain('NEVER convert a cap into the send currency');
+  });
+
+  it('unsupported-destination opener ban: never lead with "Got it"/"noted your interest"', () => {
+    expect(SYSTEM_PROMPT).toContain('Do NOT open with "Got it"');
+    expect(SYSTEM_PROMPT).toContain('VERY FIRST sentence must say we don\'t deliver there yet');
+  });
+
+  it('compliance blocks are relayed verbatim, never framed as a technical error', () => {
+    expect(SYSTEM_PROMPT).toContain('COMPLIANCE BLOCKS');
+    expect(SYSTEM_PROMPT).toContain('reply_to_customer');
+    expect(SYSTEM_PROMPT).toContain('something went wrong on our end');
+  });
+});
+
 describe('SYSTEM_PROMPT — recurring schedule guardrails (QA #7)', () => {
   it('tells the bot schedules run until cancelled or until an optional end date', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('until they cancel');
