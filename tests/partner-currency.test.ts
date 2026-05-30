@@ -4,6 +4,7 @@ import {
   resolveSendCurrency,
   countryForCurrency,
   currencyForPhone,
+  countryForPhone,
 } from '@/lib/partner-currency';
 import { QuoteError } from '@/lib/fx';
 import type { Partner } from '@/lib/types';
@@ -56,6 +57,27 @@ describe('countryForCurrency', () => {
   });
   it('reverse-maps INR to IN', () => {
     expect(countryForCurrency('INR')).toBe('IN');
+  });
+});
+
+describe('countryForPhone', () => {
+  it('US number → US', () => {
+    expect(countryForPhone('15551234567')).toBe('US');
+  });
+  it('AE number (971 prefix) → AE', () => {
+    expect(countryForPhone('971501234567')).toBe('AE');
+  });
+  it('GB number → GB', () => {
+    expect(countryForPhone('447911123456')).toBe('GB');
+  });
+  it('IN number → IN', () => {
+    expect(countryForPhone('919876543210')).toBe('IN');
+  });
+  it('empty string → undefined', () => {
+    expect(countryForPhone('')).toBeUndefined();
+  });
+  it('unknown calling code → undefined', () => {
+    expect(countryForPhone('886123')).toBeUndefined();
   });
 });
 

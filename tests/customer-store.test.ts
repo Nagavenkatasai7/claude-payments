@@ -160,6 +160,62 @@ describe('customer-store P1: senderCountry', () => {
   });
 });
 
+describe('customer-store multicountry: senderCountry inferred from phone', () => {
+  it('AE phone (971...) → senderCountry AE', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const { customer } = await cs.upsertOnFirstInbound('971501234567');
+    expect(customer.senderCountry).toBe('AE');
+  });
+
+  it('GB phone (44...) → senderCountry GB', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const { customer } = await cs.upsertOnFirstInbound('447911123456');
+    expect(customer.senderCountry).toBe('GB');
+  });
+
+  it('US phone (1...) → senderCountry US', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const { customer } = await cs.upsertOnFirstInbound('15551234567');
+    expect(customer.senderCountry).toBe('US');
+  });
+
+  it('unknown calling code (886...) → senderCountry falls back to DEFAULT_SENDER_COUNTRY (US)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    const { customer } = await cs.upsertOnFirstInbound('886123456');
+    expect(customer.senderCountry).toBe('US');
+  });
+
+  it('AE phone on grandfathered path → senderCountry AE', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    // Seed a raw transfer record for this phone (no createTransfer dependency)
+    await redis.set('transfer:AETRANSFER', JSON.stringify({
+      id: 'AETRANSFER', phone: '971509999999', amountUsd: 200, feeUsd: 2,
+      totalChargeUsd: 202, fxRate: 85, amountInr: 17000,
+      recipientName: 'Cousin', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'cousin@upi',
+      fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
+      complianceReasons: [], status: 'delivered',
+      createdAt: '2026-04-01T00:00:00Z',
+      sourceCountry: 'AE', sourceCurrency: 'AED',
+      destinationCountry: 'IN', destinationCurrency: 'INR',
+    }));
+    await redis.sadd('transfers:ids', 'AETRANSFER');
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer } = await cs.upsertOnFirstInbound('971509999999');
+    expect(customer.senderCountry).toBe('AE');
+    expect(customer.kycStatus).toBe('grandfathered');
+  });
+});
+
 describe('recordFundingMethod (Bundle C sticky funding)', () => {
   it('persists lastFundingMethod + lastFundingMethodAt on an existing customer', async () => {
     const redis = fakeRedis();

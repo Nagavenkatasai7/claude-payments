@@ -3,6 +3,7 @@ import { env } from './env';
 import type { RedisLike, Store } from './store';
 import type { Customer, FundingMethod } from './types';
 import { DEFAULT_SENDER_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
+import { countryForPhone } from './partner-currency';
 
 export function createCustomerStore(redis: RedisLike, store: Store) {
   return {
@@ -36,6 +37,8 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
       const existing = await this.getCustomer(senderPhone);
       if (existing) return { customer: existing, wasCreated: false };
 
+      const inferredCountry = countryForPhone(senderPhone) ?? DEFAULT_SENDER_COUNTRY;
+
       // Lazy grandfather: peek at existing transfers
       const transfers = await store.listTransfers();
       const minAt = transfers
@@ -50,7 +53,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             firstSeenAt: minAt,
             kycStatus: 'grandfathered',
             kycVerifiedAt: nowIso,
-            senderCountry: DEFAULT_SENDER_COUNTRY,  // NEW (P1)
+            senderCountry: inferredCountry,          // NEW (P1)
             partnerId: DEFAULT_PARTNER_ID,          // NEW (P2)
             createdAt: minAt,
             updatedAt: nowIso,
@@ -59,7 +62,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             senderPhone,
             firstSeenAt: nowIso,
             kycStatus: 'not_started',
-            senderCountry: DEFAULT_SENDER_COUNTRY,  // NEW (P1)
+            senderCountry: inferredCountry,          // NEW (P1)
             partnerId: DEFAULT_PARTNER_ID,          // NEW (P2)
             createdAt: nowIso,
             updatedAt: nowIso,
