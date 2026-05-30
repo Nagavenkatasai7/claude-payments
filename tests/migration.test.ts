@@ -6,6 +6,7 @@ import {
   backfillSchedulesOnce,
   backfillSourceAmountsOnce,
   backfillCorridorComplianceOnce,
+  backfillExpandCountriesOnce,
 } from '@/lib/migration';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
@@ -494,5 +495,81 @@ describe('backfillSourceAmountsOnce', () => {
 
     const second = await backfillSourceAmountsOnce(store, ss);
     expect(second.skippedSentinel).toBe(true);
+  });
+});
+
+describe('backfillExpandCountriesOnce', () => {
+  it('unions AE+GB into a partner with countries: [US] and reports partnersTouched >= 1', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    // Seed default partner with only US
+    await partnerStore.savePartner({
+      id: 'default',
+      name: 'SendHome Default',
+      countries: ['US'],
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+
+    const result = await backfillExpandCountriesOnce(store, partnerStore);
+    expect(result.skippedSentinel).toBe(false);
+    expect(result.partnersTouched).toBeGreaterThanOrEqual(1);
+
+    const p = await partnerStore.getPartner('default');
+    expect(p?.countries).toContain('US');
+    expect(p?.countries).toContain('AE');
+    expect(p?.countries).toContain('GB');
+  });
+
+  it('is idempotent — second run returns { partnersTouched: 0, skippedSentinel: true }', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    await partnerStore.savePartner({
+      id: 'default',
+      name: 'SendHome Default',
+      countries: ['US'],
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+
+    const first = await backfillExpandCountriesOnce(store, partnerStore);
+    expect(first.skippedSentinel).toBe(false);
+
+    const second = await backfillExpandCountriesOnce(store, partnerStore);
+    expect(second.partnersTouched).toBe(0);
+    expect(second.skippedSentinel).toBe(true);
+
+    // Countries remain unchanged after second run
+    const p = await partnerStore.getPartner('default');
+    expect(p?.countries).toContain('US');
+    expect(p?.countries).toContain('AE');
+    expect(p?.countries).toContain('GB');
+  });
+
+  it('preserves existing countries — [US, CA] partner ends up with [US, CA, AE, GB]', async () => {
+    // Fresh redis so the sentinel is not already claimed from the tests above
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    await partnerStore.savePartner({
+      id: 'partner-ca',
+      name: 'CA Partner',
+      countries: ['US', 'CA'],
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+
+    await backfillExpandCountriesOnce(store, partnerStore);
+
+    const p = await partnerStore.getPartner('partner-ca');
+    expect(p?.countries).toContain('US');
+    expect(p?.countries).toContain('CA');
+    expect(p?.countries).toContain('AE');
+    expect(p?.countries).toContain('GB');
   });
 });
