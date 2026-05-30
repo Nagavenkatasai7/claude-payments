@@ -15,13 +15,14 @@ export interface Quote {
   amountUsd: number;
   feeUsd: number;
   totalChargeUsd: number;
-  fxRate: number;
-  amountInr: number;
+  fxRate: number;                 // source -> destination cross-rate
+  amountInr: number;              // amount in the DESTINATION currency (name kept for back-compat; = INR for India sends)
   deliveryEstimate: string;
   sourceCurrency: CurrencyCode;   // NEW (P4)
   amountSource: number;           // NEW (P4)
   feeSource: number;              // NEW (P4)
   totalChargeSource: number;      // NEW (P4)
+  destinationCurrency?: CurrencyCode;  // NEW (any-to-any) — currency amountInr/fxRate are in (absent ⇒ INR)
 }
 
 export interface Transfer {
