@@ -1,4 +1,4 @@
-import { quote, QuoteError, sourceForInr } from './fx';
+import { quote, QuoteError, sourceForInr, wouldBeFeeUsd } from './fx';
 import { getFxRates, type FxRates } from './rate';
 import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
@@ -25,6 +25,52 @@ import {
   disambiguateNames,
   truncateLabel,
 } from './whatsapp-buttons';
+
+// ── Approve message helpers ──────────────────────────────────────────────────
+
+function maskDestination(method: PayoutMethod, dest: string): string {
+  if (method === 'upi') return `UPI ${dest}`;
+  // bank: "<acct> <ifsc>" or "<acct>, <ifsc>" → mask all but last 4 of the account
+  const [acct, ...rest] = dest.split(/[,\s]+/).filter(Boolean);
+  const last4 = (acct ?? '').slice(-4);
+  const ifsc = rest.join(' ');
+  return `bank a/c ****${last4}${ifsc ? `, IFSC ${ifsc}` : ''}`;
+}
+
+/**
+ * Builds the enriched single-message body for the approve/cancel interactive.
+ * Pure function; no I/O. Exported for unit-testing.
+ */
+export function buildApproveSummary(
+  q: import('./types').Quote,
+  recipientName: string,
+  payoutMethod: PayoutMethod,
+  payoutDestination: string,
+  fundingMethod: FundingMethod,
+): string {
+  const fmt = (n: number) =>
+    new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
+  const inr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+
+  let feeLine: string;
+  if (q.feeUsd === 0) {
+    // A2: first-transfer-free framing — show what the user saves vs a repeat send
+    const ratio = q.amountUsd > 0 ? q.amountSource / q.amountUsd : 1; // USD→source scalar
+    const wouldBeSource = Math.round(wouldBeFeeUsd(q.amountUsd, fundingMethod) * ratio * 100) / 100;
+    feeLine = `first transfer free — you save ${fmt(wouldBeSource)}`;
+  } else {
+    feeLine = `Fee ${fmt(q.feeSource)}`;
+  }
+
+  return [
+    `Sending ${fmt(q.amountSource)} to ${recipientName}.`,
+    feeLine,
+    `Rate: 1 ${q.sourceCurrency} = ${inr(q.fxRate)}`,
+    `They get ${inr(q.amountInr)} ${q.deliveryEstimate}.`,
+    `To: ${maskDestination(payoutMethod, payoutDestination)}`,
+    `Rate locked ~10 min.`,
+  ].join('\n');
+}
 
 // ── KYC closed-set validators: an unknown value is treated as UNSUPPLIED
 // (fail-safe to flag, never silent-pass). Mirrors the type unions in types.ts. ──
@@ -850,11 +896,13 @@ async function sendApprovePickerTool(
       occupation: asEnum(OCCUPATIONS, args.occupation),
       quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
     });
-    const fmt = (n: number) =>
-      new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
-    const summary =
-      `Sending ${fmt(q.amountSource)} to ${args.recipient_name}.\n` +
-      `Fee ${fmt(q.feeSource)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
+    const summary = buildApproveSummary(
+      q,
+      String(args.recipient_name),
+      args.payout_method as PayoutMethod,
+      String(args.payout_destination),
+      fundingMethod,
+    );
     await sendInteractive(ctx.phone, summary, [
       { id: approveButtonId(draftId), title: 'Approve & pay' },
       { id: cancelButtonId(draftId), title: 'Cancel' },
