@@ -4,8 +4,11 @@ import type { CountryCode, Partner } from './types';
 // compliance.ts re-exports these for backward compatibility.
 // Mock sanctions/watchlist — clearly fake names for the prototype.
 export const WATCHLIST = ['john doe', 'jane roe', 'test blocked'];
+// Compliance review thresholds — tunable here without touching screening logic.
+// LARGE_AMOUNT_USD: flag transfers >= $1000 USD-equivalent.
+// VELOCITY_LIMIT: flag when sender has already sent >= this many times today.
 export const LARGE_AMOUNT_USD = 1000;
-export const VELOCITY_LIMIT = 3;
+export const VELOCITY_LIMIT = 5; // raised from 3: 1-4 sends/day are normal behaviour
 
 export interface ResolvedCorridorRules {
   baseWatchlist: string[];     // the screener's base list (today's WATCHLIST)

@@ -20,12 +20,17 @@ describe('screenTransfer — dormant (no rules/screener) reproduces today', () =
     expect(r.reasons.some((x) => /amount/i.test(x))).toBe(true);
   });
   it('flags high velocity', async () => {
-    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 3, sourceCountry: 'US' });
+    // VELOCITY_LIMIT is now 5; 5+ same-day sends trigger a flag
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 5, sourceCountry: 'US' });
     expect(r.status).toBe('flagged');
     expect(r.reasons.some((x) => /velocity/i.test(x))).toBe(true);
   });
+  it('clears at 4 same-day sends (below the new VELOCITY_LIMIT of 5)', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 4, sourceCountry: 'US' });
+    expect(r.status).toBe('cleared');
+  });
   it('records both reasons when amount and velocity both trip', async () => {
-    const r = await screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 4, sourceCountry: 'US' });
+    const r = await screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 5, sourceCountry: 'US' });
     expect(r.status).toBe('flagged');
     expect(r.reasons).toHaveLength(2);
   });
