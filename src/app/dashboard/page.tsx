@@ -14,10 +14,6 @@ import { Sidebar } from './sidebar';
 function usd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
-function inr(n: number): string {
-  return `₹${n.toLocaleString('en-IN')}`;
-}
-
 function humanizeFunding(method: Transfer['fundingMethod']): string {
   if (method === 'credit_card') return 'Credit card';
   if (method === 'debit_card') return 'Debit card';
@@ -150,7 +146,9 @@ export default async function DashboardPage() {
                         {t.sourceCurrency !== 'USD' && (
                           <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
                         )}
-                        <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+                        <div className="sh-recipient-sub">
+                          → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
+                        </div>
                       </td>
                       <td>{humanizeFunding(t.fundingMethod)}</td>
                       <td>

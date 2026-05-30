@@ -37,8 +37,37 @@ function awaitingTransfer(): Transfer {
   };
 }
 
+function awaitingAedTransfer(): Transfer {
+  return {
+    id: 'pay99999',
+    phone: '15557654321',
+    amountUsd: 300,
+    feeUsd: 5,
+    totalChargeUsd: 305,
+    fxRate: 3.67,
+    amountInr: 1101,  // amountInr = destination amount (AED)
+    recipientName: 'Ali',
+    recipientPhone: '971501234567',
+    payoutMethod: 'bank',
+    payoutDestination: 'AE12345678901234567890',
+    fundingMethod: 'bank_transfer',
+    complianceStatus: 'cleared',
+    complianceReasons: [],
+    status: 'awaiting_payment',
+    createdAt: '2026-05-21T00:00:00.000Z',
+    sourceCountry: 'US',
+    sourceCurrency: 'USD',
+    destinationCountry: 'AE',
+    destinationCurrency: 'AED',
+    partnerId: 'default',
+    amountSource: 300,
+    feeSource: 5,
+    totalChargeSource: 305,
+  };
+}
+
 describe('completePaymentStage1', () => {
-  it('sets status to paid and paidAt, returns sender messages', async () => {
+  it('sets status to paid and paidAt, returns sender messages (INR → ₹)', async () => {
     const store = createStore(fakeRedis());
     await store.saveTransfer(awaitingTransfer());
 
@@ -49,11 +78,31 @@ describe('completePaymentStage1', () => {
     expect(result.transfer.deliveredAt).toBeUndefined();
 
     expect(result.senderMessages).toHaveLength(1);
+    // Source charge in USD
     expect(result.senderMessages[0]).toContain('$500.00');
+    // Destination amount in INR — Intl formats as ₹42,600
+    expect(result.senderMessages[0]).toContain('₹');
     expect(result.senderMessages[0]).toContain('42,600');
     expect(result.senderMessages[0]).toContain('Mom');
     expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
     expect(result.senderMessages[0]).not.toContain('…'); // no trailing ellipsis
+    expect(result.senderMessages[0]).toContain('within ~10 minutes');
+  });
+
+  it('formats non-INR destination currency correctly (AED)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(awaitingAedTransfer());
+
+    const result = await completePaymentStage1(store, 'pay99999');
+
+    expect(result.senderMessages).toHaveLength(1);
+    // Source charge in USD
+    expect(result.senderMessages[0]).toContain('$305.00');
+    // Destination amount in AED — Intl renders "AED" prefix
+    expect(result.senderMessages[0]).toContain('AED');
+    expect(result.senderMessages[0]).toContain('1,101');
+    expect(result.senderMessages[0]).toContain('Ali');
+    expect(result.senderMessages[0]).toContain('Transfer ID: pay99999');
     expect(result.senderMessages[0]).toContain('within ~10 minutes');
   });
 
@@ -85,7 +134,7 @@ describe('completePaymentStage1', () => {
 });
 
 describe('completePaymentStage2', () => {
-  it('sets status to delivered and deliveredAt, returns sender messages', async () => {
+  it('sets status to delivered and deliveredAt, returns sender messages (INR → ₹)', async () => {
     const store = createStore(fakeRedis());
     // Pre-seed a paid transfer
     await store.saveTransfer({
@@ -101,13 +150,16 @@ describe('completePaymentStage2', () => {
     expect(result.transfer.paidAt).toBeTruthy();
 
     expect(result.senderMessages).toHaveLength(1);
+    // Destination amount in INR — Intl formats as ₹42,600
+    expect(result.senderMessages[0]).toContain('₹');
     expect(result.senderMessages[0]).toContain('42,600');
     expect(result.senderMessages[0]).toContain('Mom');
-    expect(result.senderMessages[0]).toContain('via UPI');       // default fixture payoutMethod 'upi'
+    // Always "via bank transfer" regardless of payoutMethod
+    expect(result.senderMessages[0]).toContain('via bank transfer');
     expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
   });
 
-  it('uses "via bank" label for bank payout method', async () => {
+  it('always uses "via bank transfer" label (payout method is irrelevant for message)', async () => {
     const store = createStore(fakeRedis());
     await store.saveTransfer({
       ...awaitingTransfer(),
@@ -117,7 +169,27 @@ describe('completePaymentStage2', () => {
     });
 
     const result = await completePaymentStage2(store, 'pay12345');
-    expect(result.senderMessages[0]).toContain('via bank');
+    expect(result.senderMessages[0]).toContain('via bank transfer');
+    // Must not mention UPI
+    expect(result.senderMessages[0]).not.toContain('UPI');
+  });
+
+  it('formats non-INR destination currency correctly (AED) in stage-2 message', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer({
+      ...awaitingAedTransfer(),
+      status: 'paid',
+      paidAt: '2026-05-21T01:00:00.000Z',
+    });
+
+    const result = await completePaymentStage2(store, 'pay99999');
+
+    expect(result.senderMessages).toHaveLength(1);
+    expect(result.senderMessages[0]).toContain('AED');
+    expect(result.senderMessages[0]).toContain('1,101');
+    expect(result.senderMessages[0]).toContain('Ali');
+    expect(result.senderMessages[0]).toContain('via bank transfer');
+    expect(result.senderMessages[0]).toContain('Transfer ID: pay99999');
   });
 
   it('is idempotent — if already delivered, returns empty message arrays', async () => {
@@ -166,29 +238,47 @@ describe('completePaymentStage2', () => {
 });
 
 describe('recipientTemplateParams', () => {
-  it('returns 4 params in order for a UPI transfer', () => {
+  it('returns 4 params in order for an INR transfer (₹ via Intl)', () => {
     const transfer = awaitingTransfer();
     const params = recipientTemplateParams(transfer);
 
     expect(params).toHaveLength(4);
     expect(params[0]).toBe('Mom'); // recipient name
-    expect(params[1]).toBe('42,600'); // formatted rupee amount
+    // Intl formats INR with ₹ symbol
+    expect(params[1]).toContain('₹');
+    expect(params[1]).toContain('42,600');
     expect(params[2]).toBe('+15551234567'); // sender phone with +
-    expect(params[3]).toBe('UPI ID'); // payout method label
+    expect(params[3]).toBe('bank account'); // always "bank account"
   });
 
-  it('returns "bank account" for bank payout method', () => {
-    const transfer = { ...awaitingTransfer(), payoutMethod: 'bank' as const };
+  it('always returns "bank account" regardless of payoutMethod', () => {
+    const transfer = { ...awaitingTransfer(), payoutMethod: 'upi' as const };
     const params = recipientTemplateParams(transfer);
 
     expect(params).toHaveLength(4);
     expect(params[3]).toBe('bank account');
   });
 
-  it('formats the rupee amount using en-IN locale', () => {
-    const transfer = { ...awaitingTransfer(), amountInr: 100000 };
+  it('formats AED destination amount using Intl', () => {
+    const transfer = awaitingAedTransfer();
     const params = recipientTemplateParams(transfer);
-    // en-IN formats 100000 as "1,00,000"
-    expect(params[1]).toBe('1,00,000');
+
+    expect(params).toHaveLength(4);
+    expect(params[0]).toBe('Ali');
+    expect(params[1]).toContain('AED');
+    expect(params[1]).toContain('1,101');
+    expect(params[2]).toBe('+15557654321');
+    expect(params[3]).toBe('bank account');
+  });
+
+  it('defaults to INR when destinationCurrency is absent (legacy record)', () => {
+    const transfer = {
+      ...awaitingTransfer(),
+      destinationCurrency: undefined as unknown as import('@/lib/types').CurrencyCode,
+      amountInr: 100000,
+    };
+    const params = recipientTemplateParams(transfer);
+    // Should still render ₹ (INR default)
+    expect(params[1]).toContain('₹');
   });
 });
