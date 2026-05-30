@@ -5,6 +5,7 @@ export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer';
 export type TransferStatus =
   | 'awaiting_payment'
   | 'paid'
+  | 'in_review'
   | 'delivered'
   | 'cancelled'
   | 'blocked';
@@ -116,6 +117,7 @@ export interface Schedule {
   status: ScheduleStatus;
   createdAt: string;
   lastRunAt?: string;
+  endDate?: string;               // NEW (QA #7) — ISO-8601 date; absent ⇒ runs until cancelled
   partnerId: PartnerId;   // NEW (P3) — required; multi-tenant boundary
   sourceCurrency: CurrencyCode;   // NEW (P4)
   amountSource: number;           // NEW (P4)

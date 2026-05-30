@@ -98,6 +98,68 @@ describe('SYSTEM_PROMPT — non-supported destination lead capture', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
+  it('Fix #1: never-echo-full-account rule is present', () => {
+    expect(SYSTEM_PROMPT.toUpperCase()).toContain('NEVER REPEAT A CUSTOMER');
+    expect(SYSTEM_PROMPT).toContain('****6789');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('approval card already masks it');
+  });
+
+  it('Fix #2: over_daily_cap message does NOT volunteer the amount already spent', () => {
+    // Old wording "(already sent $Z today)" must be gone
+    expect(SYSTEM_PROMPT).not.toContain('already sent $Z today');
+    // New wording uses today_remaining_usd
+    expect(SYSTEM_PROMPT).toContain('today_remaining_usd');
+    expect(SYSTEM_PROMPT).toContain('do NOT volunteer the exact amount already spent');
+  });
+
+  it('Fix #3: send-amount lock rule is present', () => {
+    expect(SYSTEM_PROMPT).toContain('amount_usd for all later get_quote calls');
+    expect(SYSTEM_PROMPT).toContain('confirm with the user first');
+    // Must not silently switch to receive-first
+    expect(SYSTEM_PROMPT).toContain('must NOT silently change the send amount');
+  });
+
+  it('Fix #4: unsupported-country section leads with limitation, not with an affirmative opener', () => {
+    // The first instruction in the list says to lead with the limitation
+    expect(SYSTEM_PROMPT).toContain("Lead with the limitation");
+    // Country list appears in the example message
+    expect(SYSTEM_PROMPT).toContain("We don't deliver to <country> yet");
+    // The 8 countries are named in the unsupported-destination example
+    expect(SYSTEM_PROMPT).toContain('US, Canada, UK, UAE, Singapore, Australia, New Zealand, and India');
+    // The bot must NOT start with an affirmative opener that implies the country is supported
+    expect(SYSTEM_PROMPT).toContain('Do NOT start with "That sounds great!"');
+  });
+
+  it('Fix #5: payee-name echo rule is present', () => {
+    expect(SYSTEM_PROMPT).toContain('Got it — sending to Bobby');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('catch a wrong name');
+  });
+
+  it('Fix #6: phone-country vs destination mismatch warning is present', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('country code matches the destination country');
+    expect(SYSTEM_PROMPT).toContain('+91');
+    // Must not block, just confirm
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain("don't block it, just confirm");
+  });
+});
+
+describe('SYSTEM_PROMPT — recurring schedule guardrails (QA #7)', () => {
+  it('tells the bot schedules run until cancelled or until an optional end date', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('until they cancel');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('optional end date');
+  });
+
+  it('tells the bot each run uses the daily sending cap that day', () => {
+    expect(SYSTEM_PROMPT.toUpperCase()).toContain('EACH RUN USES THEIR DAILY SENDING CAP');
+  });
+
+  it('tells the bot to offer an end date and confirm schedule details including end date', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('offer to set an end date');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('confirm the schedule details including the end date');
+  });
+});
+
 describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
   it('a2a: does NOT ask credit/debit card and asks for the amount (no funding-method question)', () => {
     // The old combined "amount + funding method" question is gone

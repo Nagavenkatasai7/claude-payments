@@ -44,6 +44,7 @@ function formatSourceCharge(amount: number, currency: CurrencyCode | string): st
 export async function completePaymentStage1(
   store: Store,
   transferId: string,
+  opts?: { held?: boolean },
 ): Promise<StageResult> {
   const transfer = await store.getTransfer(transferId);
   if (!transfer) {
@@ -70,9 +71,13 @@ export async function completePaymentStage1(
     updated.sourceCurrency ?? 'USD',
   );
 
-  const senderMessages = [
-    `✅ Payment received — ${sourceCharge} charged. ${updated.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${updated.id}`,
-  ];
+  const senderMessages = opts?.held
+    ? [
+        `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${updated.id}`,
+      ]
+    : [
+        `✅ Payment received — ${sourceCharge} charged. ${updated.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${updated.id}`,
+      ];
 
   return { transfer: updated, senderMessages };
 }

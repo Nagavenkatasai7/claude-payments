@@ -28,6 +28,27 @@ import { screenTransfer } from './compliance';
 
 // ── Approve message helpers ──────────────────────────────────────────────────
 
+/**
+ * Masks a payout_destination string the same way maskDestination does:
+ * - UPI: returns the ID unchanged (no sensitive digits to hide).
+ * - Bank: replaces the longest all-digit run with "****<last4>" so the full
+ *   account number is never surfaced to the LLM (list_saved_recipients /
+ *   resolve_recipient return this masked form).
+ */
+export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: string): string {
+  if (payoutMethod === 'upi') return payoutDestination;
+  // Re-use the masking logic from maskDestination but return just the masked
+  // token string (without the "bank a/c" prefix), so tool responses still carry
+  // the full picture (IFSC + masked acct) and the LLM can confirm naturally.
+  const tokens = payoutDestination.split(/[,\s]+/).filter(Boolean);
+  const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
+  const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
+  const last4 = acct.slice(-4);
+  return tokens
+    .map((t) => (t === acct ? `****${last4}` : t))
+    .join(' ');
+}
+
 function maskDestination(method: PayoutMethod, dest: string): string {
   if (method === 'upi') return `UPI ${dest}`;
   // bank: tokens are "<acct> <routing/sort/ifsc/iban>" in either order, possibly
@@ -257,6 +278,10 @@ export const toolSchemas: ChatTool[] = [
             type: 'string',
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
+          },
+          end_date: {
+            type: 'string',
+            description: 'Optional ISO date (YYYY-MM-DD) after which the schedule stops. Omit for no end date.',
           },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
@@ -898,6 +923,14 @@ async function createScheduleTool(
   const { customer: owner, sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
   const partnerId = owner.partnerId ?? DEFAULT_PARTNER_ID;
   const amountSource = Number(args.amount_usd);
+  // Validate optional end_date: must be a parseable ISO date string; ignore if not.
+  let endDate: string | undefined;
+  if (typeof args.end_date === 'string' && args.end_date.trim() !== '') {
+    const parsed = Date.parse(args.end_date.trim());
+    if (!isNaN(parsed)) {
+      endDate = args.end_date.trim();
+    }
+  }
   const schedule: Schedule = {
     id: newTransferId(),
     phone: ctx.phone,
@@ -912,6 +945,7 @@ async function createScheduleTool(
     dayOfWeek,
     status: 'active',
     createdAt: new Date().toISOString(),
+    endDate,
     partnerId,
     sourceCurrency,
     amountSource,
@@ -922,6 +956,7 @@ async function createScheduleTool(
     frequency: schedule.frequency,
     day_of_month: schedule.dayOfMonth ?? null,
     day_of_week: schedule.dayOfWeek ?? null,
+    end_date: schedule.endDate ?? null,
   };
 }
 
@@ -967,7 +1002,7 @@ async function listSavedRecipientsTool(
         name: r.name,
         recipient_phone: r.recipientPhone,
         payout_method: r.payoutMethod,
-        payout_destination: r.payoutDestination,
+        payout_destination: maskAccount(r.payoutMethod, r.payoutDestination),
         last_used_at: r.lastUsedAt,
       })),
     };
@@ -993,11 +1028,12 @@ async function resolveRecipientTool(
   }
 
   // Customer-owned fields only — never partner/compliance/PII.
+  // payout_destination is masked so the LLM never sees a raw account number.
   const shape = (r: import('./types').Recipient) => ({
     name: r.name,
     recipient_phone: r.recipientPhone,
     payout_method: r.payoutMethod,
-    payout_destination: r.payoutDestination,
+    payout_destination: maskAccount(r.payoutMethod, r.payoutDestination),
   });
   const norm = (s: string) => (s ?? '').trim().toLowerCase();
 

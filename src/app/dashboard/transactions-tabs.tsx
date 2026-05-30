@@ -8,6 +8,7 @@ const TABS = [
   { key: 'all', label: 'All' },
   { key: 'awaiting_payment', label: 'Awaiting' },
   { key: 'paid', label: 'Paid' },
+  { key: 'in_review', label: 'In review' },
   { key: 'delivered', label: 'Delivered' },
   { key: 'cancelled', label: 'Cancelled' },
   { key: 'blocked', label: 'Blocked' },
@@ -25,13 +26,14 @@ function StatusPill({ status }: { status: Transfer['status'] }) {
   const klass =
     status === 'delivered' ? 'sh-pill-success'
     : status === 'paid' ? 'sh-pill-info'
+    : status === 'in_review' ? 'sh-pill-warning'
     : status === 'awaiting_payment' ? 'sh-pill-neutral'
     : status === 'cancelled' ? 'sh-pill-warning'
     : 'sh-pill-danger';
   return (
     <span className={`sh-pill ${klass}`}>
       <span className="sh-pill-dot"></span>
-      {status.replace('_', ' ')}
+      {status === 'in_review' ? 'In review' : status.replace('_', ' ')}
     </span>
   );
 }

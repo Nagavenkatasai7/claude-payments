@@ -8,8 +8,10 @@ import {
   cancelTransfer,
   assignTransfer,
   resendPaymentLink,
+  releaseTransfer,
+  rejectTransfer,
 } from '@/lib/dashboard-ops';
-import { requireStaff } from '@/lib/auth';
+import { requireStaff, requireAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import type { StaffPermissions } from '@/lib/types';
 
@@ -57,5 +59,37 @@ export async function resendPaymentLinkAction(
   // 'layout' revalidates every page under /dashboard (transactions, schedules,
   // compliance, etc.), not just the root — so the change shows up wherever the
   // viewer happens to be.
+  revalidatePath('/dashboard', 'layout');
+}
+
+/**
+ * Release a held (in_review) transfer — triggers stage-2 delivery.
+ * Requires admin role (high-stakes compliance decision).
+ * Security checklist:
+ *   (a) calls requireAdmin — only staff with role:'admin' can proceed
+ *   (b) releaseTransfer loads the transfer from the trusted store and verifies status === 'in_review'
+ *   (c) id comes from the trusted FormData arg, not ambient state
+ */
+export async function releaseTransferAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const id = formData.get('id') as string;
+  if (!id) throw new Error('Missing transfer id');
+  await releaseTransfer(getStore(), id);
+  revalidatePath('/dashboard', 'layout');
+}
+
+/**
+ * Reject a held (in_review) transfer — cancels it (mock refund, adminNote set).
+ * Requires admin role (high-stakes compliance decision).
+ * Security checklist:
+ *   (a) calls requireAdmin — only staff with role:'admin' can proceed
+ *   (b) rejectTransfer loads the transfer from the trusted store and verifies status === 'in_review'
+ *   (c) id comes from the trusted FormData arg, not ambient state
+ */
+export async function rejectTransferAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const id = formData.get('id') as string;
+  if (!id) throw new Error('Missing transfer id');
+  await rejectTransfer(getStore(), id);
   revalidatePath('/dashboard', 'layout');
 }

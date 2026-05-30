@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { executeTool, toolSchemas, buildApproveSummary } from '@/lib/tools';
+import { executeTool, toolSchemas, buildApproveSummary, maskAccount } from '@/lib/tools';
 import type { Quote } from '@/lib/types';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
@@ -417,6 +417,42 @@ describe('executeTool', () => {
       const saved = await ctx.store.getTransfer(transferId);
       expect(saved?.recipientPhone).toBe('919876543210');
     });
+  });
+});
+
+describe('create_schedule — end_date guardrail (QA #7)', () => {
+  it('stores a valid end_date on the schedule', async () => {
+    const c = buildCtx(fakeRedis());
+    const r = await executeTool('create_schedule', {
+      amount_usd: 150, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 10,
+      end_date: '2027-12-31',
+    }, c);
+    expect(r.schedule_id).toBeTruthy();
+    expect(r.end_date).toBe('2027-12-31');
+    const saved = await c.scheduleStore.getSchedule(r.schedule_id as string);
+    expect(saved?.endDate).toBe('2027-12-31');
+  });
+
+  it('ignores an invalid end_date (non-parseable string) and stores no endDate', async () => {
+    const c = buildCtx(fakeRedis());
+    const r = await executeTool('create_schedule', {
+      amount_usd: 150, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 10,
+      end_date: 'not-a-date',
+    }, c);
+    expect(r.schedule_id).toBeTruthy();
+    const saved = await c.scheduleStore.getSchedule(r.schedule_id as string);
+    expect(saved?.endDate).toBeUndefined();
+  });
+
+  it('create_schedule schema includes an end_date property', () => {
+    const cs = toolSchemas.find((t) => t.function.name === 'create_schedule')!;
+    const props = cs.function.parameters.properties as Record<string, unknown>;
+    expect(props).toHaveProperty('end_date');
+    expect((props.end_date as Record<string, unknown>).type).toBe('string');
   });
 });
 
@@ -1086,6 +1122,114 @@ describe('resolve_recipient — typed-name lookup of saved recipients', () => {
     await seedRecipient(otherCtx, { name: 'Mom', recipientPhone: '919876543210' });
     const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
     expect(r.match).toBe('none'); // the other sender's recipient is invisible
+  });
+});
+
+describe('maskAccount — exported helper', () => {
+  it('UPI: returns the address unchanged', () => {
+    expect(maskAccount('upi', 'mom@okhdfc')).toBe('mom@okhdfc');
+  });
+
+  it('bank: masks the longest digit run to ****<last4>', () => {
+    // Account number (longer) wins over routing/IFSC
+    expect(maskAccount('bank', '123456789 HDFC0001234')).toBe('****6789 HDFC0001234');
+  });
+
+  it('bank: masks correctly when IFSC comes first (reversed order)', () => {
+    expect(maskAccount('bank', 'HDFC0001234 123456789')).toBe('HDFC0001234 ****6789');
+  });
+
+  it('bank: does not include the raw account number in output', () => {
+    const result = maskAccount('bank', '999123456789 HDFC0001234');
+    expect(result).not.toContain('999123456789');
+    expect(result).toContain('****6789');
+  });
+});
+
+describe('list_saved_recipients — payout_destination masking (Fix #1)', () => {
+  it('bank recipient: full account number does NOT appear; last 4 do', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'bank',
+      payoutDestination: '123456789 HDFC0001234',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('list_saved_recipients', {}, ctx);
+    const rec = (r.recipients as Record<string, unknown>[])[0];
+    expect(String(rec.payout_destination)).not.toContain('123456789');
+    expect(String(rec.payout_destination)).toContain('6789');
+  });
+
+  it('UPI recipient: payout_destination returned unchanged', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: 'Dad',
+      recipientPhone: '919811111111',
+      payoutMethod: 'upi',
+      payoutDestination: 'dad@okaxis',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('list_saved_recipients', {}, ctx);
+    const rec = (r.recipients as Record<string, unknown>[])[0];
+    expect(rec.payout_destination).toBe('dad@okaxis');
+  });
+});
+
+describe('resolve_recipient — payout_destination masking (Fix #1)', () => {
+  it('bank recipient: full account does NOT appear in exact match result', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: 'Priya',
+      recipientPhone: '919876543210',
+      payoutMethod: 'bank',
+      payoutDestination: '987654321 SBIN0001234',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('resolve_recipient', { name: 'Priya' }, ctx);
+    expect(r.match).toBe('exact');
+    const dest = String((r.recipient as Record<string, unknown>).payout_destination);
+    expect(dest).not.toContain('987654321');
+    expect(dest).toContain('4321');
+  });
+
+  it('bank recipient: full account does NOT appear in ambiguous candidates', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: 'Mom',
+      recipientPhone: '919876543210',
+      payoutMethod: 'bank',
+      payoutDestination: '111222333444 HDFC0001234',
+      lastUsedAt: new Date().toISOString(),
+    });
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: 'Mom',
+      recipientPhone: '919800000000',
+      payoutMethod: 'bank',
+      payoutDestination: '555666777888 ICIC0001234',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('ambiguous');
+    for (const c of r.candidates as Record<string, unknown>[]) {
+      expect(String(c.payout_destination)).not.toContain('111222333444');
+      expect(String(c.payout_destination)).not.toContain('555666777888');
+    }
+  });
+
+  it('UPI exact match: payout_destination stays unmasked', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: 'Ravi',
+      recipientPhone: '919876543210',
+      payoutMethod: 'upi',
+      payoutDestination: 'ravi@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('resolve_recipient', { name: 'Ravi' }, ctx);
+    expect(r.match).toBe('exact');
+    expect((r.recipient as Record<string, unknown>).payout_destination).toBe('ravi@okhdfc');
   });
 });
 
