@@ -26,6 +26,18 @@ describe('SYSTEM_PROMPT', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — typed-name resolution & shorthand (Bundle C)', () => {
+  it('tells the bot to resolve a typed recipient name via resolve_recipient', () => {
+    expect(SYSTEM_PROMPT).toContain('resolve_recipient');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('exact');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('ambiguous');
+  });
+  it('keeps check_send_limit before get_quote on the shorthand path', () => {
+    // shorthand must not bypass the cap gate
+    expect(SYSTEM_PROMPT).toContain('check_send_limit');
+  });
+});
+
 describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
   it('B1: asks amount + funding method together in one turn', () => {
     expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);
