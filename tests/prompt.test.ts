@@ -144,6 +144,22 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — recurring schedule guardrails (QA #7)', () => {
+  it('tells the bot schedules run until cancelled or until an optional end date', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('until they cancel');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('optional end date');
+  });
+
+  it('tells the bot each run uses the daily sending cap that day', () => {
+    expect(SYSTEM_PROMPT.toUpperCase()).toContain('EACH RUN USES THEIR DAILY SENDING CAP');
+  });
+
+  it('tells the bot to offer an end date and confirm schedule details including end date', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('offer to set an end date');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('confirm the schedule details including the end date');
+  });
+});
+
 describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
   it('a2a: does NOT ask credit/debit card and asks for the amount (no funding-method question)', () => {
     // The old combined "amount + funding method" question is gone

@@ -420,6 +420,42 @@ describe('executeTool', () => {
   });
 });
 
+describe('create_schedule — end_date guardrail (QA #7)', () => {
+  it('stores a valid end_date on the schedule', async () => {
+    const c = buildCtx(fakeRedis());
+    const r = await executeTool('create_schedule', {
+      amount_usd: 150, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 10,
+      end_date: '2027-12-31',
+    }, c);
+    expect(r.schedule_id).toBeTruthy();
+    expect(r.end_date).toBe('2027-12-31');
+    const saved = await c.scheduleStore.getSchedule(r.schedule_id as string);
+    expect(saved?.endDate).toBe('2027-12-31');
+  });
+
+  it('ignores an invalid end_date (non-parseable string) and stores no endDate', async () => {
+    const c = buildCtx(fakeRedis());
+    const r = await executeTool('create_schedule', {
+      amount_usd: 150, recipient_name: 'Mom', recipient_phone: '919133001840',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 10,
+      end_date: 'not-a-date',
+    }, c);
+    expect(r.schedule_id).toBeTruthy();
+    const saved = await c.scheduleStore.getSchedule(r.schedule_id as string);
+    expect(saved?.endDate).toBeUndefined();
+  });
+
+  it('create_schedule schema includes an end_date property', () => {
+    const cs = toolSchemas.find((t) => t.function.name === 'create_schedule')!;
+    const props = cs.function.parameters.properties as Record<string, unknown>;
+    expect(props).toHaveProperty('end_date');
+    expect((props.end_date as Record<string, unknown>).type).toBe('string');
+  });
+});
+
 describe('schedule tools', () => {
   it('create_schedule saves a monthly schedule', async () => {
     const c = buildCtx(fakeRedis());

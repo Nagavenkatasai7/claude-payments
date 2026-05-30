@@ -26,6 +26,16 @@ export async function runDueSchedules(
   const schedules = await deps.scheduleStore.listActiveSchedules();
   let fired = 0;
   for (const schedule of schedules) {
+    // QA #7: if the schedule has an endDate and the current run time is AFTER it,
+    // mark it cancelled and skip firing — it will no longer appear in active schedules.
+    if (schedule.endDate) {
+      const endTs = Date.parse(schedule.endDate);
+      if (!isNaN(endTs) && deps.now > endTs) {
+        schedule.status = 'cancelled';
+        await deps.scheduleStore.saveSchedule(schedule);
+        continue;
+      }
+    }
     if (!isScheduleDueToday(schedule, deps.now)) continue;
     try {
       const transfer = await createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {

@@ -279,6 +279,10 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          end_date: {
+            type: 'string',
+            description: 'Optional ISO date (YYYY-MM-DD) after which the schedule stops. Omit for no end date.',
+          },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
           purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
@@ -919,6 +923,14 @@ async function createScheduleTool(
   const { customer: owner, sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
   const partnerId = owner.partnerId ?? DEFAULT_PARTNER_ID;
   const amountSource = Number(args.amount_usd);
+  // Validate optional end_date: must be a parseable ISO date string; ignore if not.
+  let endDate: string | undefined;
+  if (typeof args.end_date === 'string' && args.end_date.trim() !== '') {
+    const parsed = Date.parse(args.end_date.trim());
+    if (!isNaN(parsed)) {
+      endDate = args.end_date.trim();
+    }
+  }
   const schedule: Schedule = {
     id: newTransferId(),
     phone: ctx.phone,
@@ -933,6 +945,7 @@ async function createScheduleTool(
     dayOfWeek,
     status: 'active',
     createdAt: new Date().toISOString(),
+    endDate,
     partnerId,
     sourceCurrency,
     amountSource,
@@ -943,6 +956,7 @@ async function createScheduleTool(
     frequency: schedule.frequency,
     day_of_month: schedule.dayOfMonth ?? null,
     day_of_week: schedule.dayOfWeek ?? null,
+    end_date: schedule.endDate ?? null,
   };
 }
 
