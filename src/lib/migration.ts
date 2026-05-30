@@ -218,3 +218,28 @@ export async function backfillExpandCountriesOnce(
   }
   return { partnersTouched, skippedSentinel: false };
 }
+
+const ALL_CORRIDORS_SENTINEL_KEY = 'all-corridors-v1';
+const ALL_PHASE1_COUNTRIES = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'] as const;
+
+/**
+ * Any-to-any demo: union ALL 8 Phase-1 countries into every partner's `countries`
+ * so every supported currency (incl. INR) is a valid SOURCE — a sender in any of
+ * the 8 can send out. Idempotent, additive (never removes manual entries).
+ */
+export async function backfillAllCorridorsOnce(
+  store: Store,
+  partnerStore: PartnerStore,
+): Promise<{ partnersTouched: number; skippedSentinel: boolean }> {
+  const claimed = await store.claimMigrationFlag(ALL_CORRIDORS_SENTINEL_KEY);
+  if (!claimed) return { partnersTouched: 0, skippedSentinel: true };
+  let partnersTouched = 0;
+  for (const p of await partnerStore.listPartners()) {
+    const merged = Array.from(new Set([...p.countries, ...ALL_PHASE1_COUNTRIES]));
+    if (merged.length !== p.countries.length) {
+      await partnerStore.savePartner({ ...p, countries: merged as typeof p.countries, updatedAt: new Date().toISOString() });
+      partnersTouched++;
+    }
+  }
+  return { partnersTouched, skippedSentinel: false };
+}

@@ -14,6 +14,7 @@ import {
   backfillSourceAmountsOnce,
   backfillCorridorComplianceOnce,
   backfillExpandCountriesOnce,
+  backfillAllCorridorsOnce,
 } from '@/lib/migration';
 import { sendText } from '@/lib/whatsapp';
 
@@ -42,6 +43,7 @@ export async function GET(req: NextRequest) {
   const sourceAmountBackfill = await backfillSourceAmountsOnce(store, scheduleStore); // NEW (P4)
   const corridorComplianceBackfill = await backfillCorridorComplianceOnce(store, partnerStore); // NEW (P5)
   const expandCountriesBackfill = await backfillExpandCountriesOnce(store, partnerStore); // NEW (multicountry)
+  const allCorridorsBackfill = await backfillAllCorridorsOnce(store, partnerStore); // NEW (any-to-any)
 
   const result = await runDueSchedules({
     store,
@@ -77,5 +79,6 @@ export async function GET(req: NextRequest) {
     sourceAmountBackfill,     // NEW (P4)
     corridorComplianceBackfill,  // NEW (P5)
     expandCountriesBackfill,     // NEW (multicountry)
+    allCorridorsBackfill,        // NEW (any-to-any)
   });
 }
