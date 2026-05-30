@@ -55,6 +55,16 @@ describe('SYSTEM_PROMPT — reactive repeat (Bundle C)', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — get_quote cap refusal (Bundle D)', () => {
+  it('tells the bot get_quote may itself return a cap refusal to handle like check_send_limit', () => {
+    expect(SYSTEM_PROMPT).toContain('get_quote');
+    // assert the actual Bundle-D note (not just the word within_cap, which the
+    // check_send_limit section already contains) so this is a real regression guard
+    expect(SYSTEM_PROMPT).toContain('get_quote ALSO guards the cap itself');
+    expect(SYSTEM_PROMPT).toContain('do NOT show');
+  });
+});
+
 describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
   it('B1: asks amount + funding method together in one turn', () => {
     expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);
