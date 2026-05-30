@@ -74,8 +74,8 @@ describe('SYSTEM_PROMPT — get_quote cap refusal (Bundle D)', () => {
   });
 });
 
-describe('SYSTEM_PROMPT — non-India destination lead capture', () => {
-  it('references capture_corridor_request for non-India destinations', () => {
+describe('SYSTEM_PROMPT — non-supported destination lead capture', () => {
+  it('references capture_corridor_request for unsupported destinations', () => {
     expect(SYSTEM_PROMPT).toContain('capture_corridor_request');
   });
 
@@ -84,8 +84,11 @@ describe('SYSTEM_PROMPT — non-India destination lead capture', () => {
     expect(SYSTEM_PROMPT).not.toContain('do NOT offer other destinations');
   });
 
-  it('steers back to India after capturing the lead', () => {
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain('in the meantime i can send to india');
+  it('steers back to supported countries after capturing a lead for an unsupported destination', () => {
+    // The old India-only steer-back is gone; now generic
+    expect(SYSTEM_PROMPT.toLowerCase()).not.toContain('in the meantime i can send to india');
+    // Instead it should steer back to supported countries in general
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('which of our current countries');
   });
 
   it('instructs the bot NOT to say "corridor" to the customer', () => {
@@ -95,28 +98,67 @@ describe('SYSTEM_PROMPT — non-India destination lead capture', () => {
   });
 });
 
-describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
-  it('B1: asks amount + funding method together in one turn', () => {
-    expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain('together'); // the combined-ask instruction
+describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
+  it('a2a: does NOT ask credit/debit card and asks for the amount (no funding-method question)', () => {
+    // The old combined "amount + funding method" question is gone
+    expect(SYSTEM_PROMPT).not.toMatch(/how do you want to pay/i);
+    // Funding question is gone — no "credit card, debit card, or bank transfer" choice
+    expect(SYSTEM_PROMPT).not.toMatch(/credit card.*debit card.*bank transfer/i);
+    // The first question is just the amount
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('how much would you like to send');
+    // Bank transfer is always the method — it should say so
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('always bank transfer');
   });
+
   it('B2/B3: two-ask recipient + immediate validate_phone call', () => {
     expect(SYSTEM_PROMPT).toContain('validate_phone');
     expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/name and (their )?whatsapp number/);
   });
+
   it('A5: surfaces FX rate + ETA + payout destination in confirmations', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('delivery time');
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('payout destination');
   });
+
   it('multi-country: currency is auto-detected, the bot does not ask by default', () => {
     expect(SYSTEM_PROMPT.toUpperCase()).toContain('AUTO-DETECTED');
     expect(SYSTEM_PROMPT).toContain('NOT need to ask which currency');
     expect(SYSTEM_PROMPT).toContain('source_currency');
   });
-  it('A5: distinguishes pay-out from send-from (no blanket send-block)', () => {
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain('pays out only in india');
+
+  it('a2a: supports all 8 countries (no India-only restriction)', () => {
+    // The old "pays out only in India" restriction is gone
+    expect(SYSTEM_PROMPT.toLowerCase()).not.toContain('pays out only in india');
+    // All 8 countries are listed
     expect(SYSTEM_PROMPT).toContain('[SEND CURRENCIES');
-    // the old blanket "sending money to India" send-blocking promise is gone
+    // The old blanket "sending money to India" promise is gone
     expect(SYSTEM_PROMPT).not.toContain('Do not promise anything beyond sending money to India');
+    // Now sends between 8 countries in any direction
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('8 countries');
+    expect(SYSTEM_PROMPT).toContain('bank-to-bank');
+  });
+
+  it('a2a: prompt references destination_country parameter', () => {
+    expect(SYSTEM_PROMPT).toContain('destination_country');
+  });
+
+  it('a2a: prompt asks for destination country when not given', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('which country are you sending to');
+  });
+
+  it('a2a: prompt includes per-country bank-detail guidance', () => {
+    // All major formats must appear
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('iban');           // AE
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('routing number'); // US
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('sort code');      // GB
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('ifsc');           // IN
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('bsb');            // AU
+  });
+
+  it('a2a: payout is always bank account, no UPI offered', () => {
+    // UPI must not be offered as a payout option to customers
+    expect(SYSTEM_PROMPT.toLowerCase()).not.toMatch(/how should they receive.*upi/i);
+    // Payout is always bank
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain("payout is always a bank account");
   });
 });
