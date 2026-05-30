@@ -45,6 +45,16 @@ describe('SYSTEM_PROMPT — sticky funding default (Bundle C)', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — reactive repeat (Bundle C)', () => {
+  it('tells the bot to use repeat_transfer reactively, never proactively', () => {
+    expect(SYSTEM_PROMPT).toContain('repeat_transfer');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('do not offer this proactively');
+  });
+  it('handles the needs_edd follow-up', () => {
+    expect(SYSTEM_PROMPT).toContain('needs_edd');
+  });
+});
+
 describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
   it('B1: asks amount + funding method together in one turn', () => {
     expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);

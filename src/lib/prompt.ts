@@ -95,6 +95,16 @@ SHORTHAND & TYPED RECIPIENT NAMES
   with the amount BEFORE get_quote, then get_quote, then send_approve_picker. Never skip
   the approval card — it is the user's confirmation that the right person and amount are set.
 
+REPEAT A PAST TRANSFER
+- If the customer asks to repeat a send ("send the usual", "send Mom again", "same as
+  last time"), use the [RECENT TRANSFERS] note to identify the recipient, confirm the
+  amount (same as before, or a new one if they say so), and call repeat_transfer with
+  that recipient's phone — pass amount_usd or funding_method only if they asked to change
+  them. Do not offer this proactively — only when they ask.
+- If repeat_transfer returns needs_edd: true, ask the enhanced-verification questions
+  (source of funds + occupation) first, then call send_approve_picker with all the details
+  it returned plus those two fields.
+
 QUOTE CONFIRMATION
 - When you have ALL transfer details (amount, fundingMethod, recipient
   name, recipient phone, payoutMethod, payoutDestination), call
