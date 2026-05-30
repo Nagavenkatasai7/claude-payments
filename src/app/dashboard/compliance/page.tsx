@@ -13,8 +13,11 @@ import {
 } from '../actions';
 import type { Transfer } from '@/lib/types';
 
-function inr(n: number): string {
-  return `₹${n.toLocaleString('en-IN')}`;
+// "Recipient gets" is denominated in the transfer's DESTINATION currency
+// (amountInr holds the destination amount post-multi-currency). Fall back to
+// INR for legacy rows written before destinationCurrency existed.
+function recipientGets(t: Transfer): string {
+  return money(t.amountInr, t.destinationCurrency ?? 'INR');
 }
 
 function TransferRow({ t }: { t: Transfer }) {
@@ -31,7 +34,7 @@ function TransferRow({ t }: { t: Transfer }) {
         {t.sourceCurrency !== 'USD' && (
           <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
         )}
-        <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+        <div className="sh-recipient-sub">{recipientGets(t)}</div>
       </td>
       <td>
         {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
@@ -118,7 +121,7 @@ export default async function CompliancePage() {
                         {t.sourceCurrency !== 'USD' && (
                           <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
                         )}
-                        <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+                        <div className="sh-recipient-sub">{recipientGets(t)}</div>
                       </td>
                       <td>
                         {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>

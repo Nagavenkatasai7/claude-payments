@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createTransfer } from '@/lib/transfer-create';
+import { createTransfer, recordBlockedAttempt } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -335,5 +335,59 @@ describe('createTransfer any-to-any corridors', () => {
     const t = await createTransfer(store, partnerStore, mvs, base);
     expect(t.complianceStatus).toBe('cleared');
     expect(t.destinationCurrency).toBe('INR');
+  });
+});
+
+describe('recordBlockedAttempt', () => {
+  const blockedInput = {
+    phone: '15551234567',
+    recipientName: 'John Doe',
+    recipientPhone: '919133001840',
+    payoutMethod: 'bank' as const,
+    payoutDestination: '123456789 HDFC0001234',
+    fundingMethod: 'bank_transfer' as const,
+    amountUsd: 100,
+    amountSource: 100,
+    sourceCurrency: 'USD' as const,
+    feeUsd: 1.99,
+    feeSource: 1.99,
+    fxRate: 85,
+    amountInr: 8500,
+    totalChargeUsd: 101.99,
+    totalChargeSource: 101.99,
+    destinationCountry: 'IN' as const,
+    destinationCurrency: 'INR' as const,
+    partnerId: 'default',
+    reasons: ['Recipient is on the compliance watchlist.'],
+  };
+
+  it('persists an auditable blocked row (status + complianceStatus blocked)', async () => {
+    const store = createStore(fakeRedis());
+    const t = await recordBlockedAttempt(store, blockedInput);
+    expect(t.status).toBe('blocked');
+    expect(t.complianceStatus).toBe('blocked');
+    expect(t.complianceReasons).toEqual(['Recipient is on the compliance watchlist.']);
+    const fetched = await store.getTransfer(t.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched?.status).toBe('blocked');
+    expect(fetched?.recipientName).toBe('John Doe');
+    expect(fetched?.destinationCurrency).toBe('INR');
+  });
+
+  it('does NOT advance velocity or volume counters (a blocked attempt is never charged)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    await recordBlockedAttempt(store, blockedInput);
+    expect(await store.getTransferCount(blockedInput.phone)).toBe(0);
+    expect(await store.getTodayTransferCount(blockedInput.phone)).toBe(0);
+    expect(await mvs.getMonthCents(blockedInput.phone)).toBe(0);
+  });
+
+  it('does NOT add the watchlisted recipient to the saved list', async () => {
+    const store = createStore(fakeRedis());
+    await recordBlockedAttempt(store, blockedInput);
+    const recipients = await store.listRecipients(blockedInput.phone, 25);
+    expect(recipients).toHaveLength(0);
   });
 });

@@ -4,7 +4,7 @@ import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { createTransfer } from './transfer-create';
+import { createTransfer, recordBlockedAttempt } from './transfer-create';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
@@ -29,40 +29,44 @@ import { screenTransfer } from './compliance';
 // ── Approve message helpers ──────────────────────────────────────────────────
 
 /**
- * Masks a payout_destination string the same way maskDestination does:
- * - UPI: returns the ID unchanged (no sensitive digits to hide).
- * - Bank: replaces the longest all-digit run with "****<last4>" so the full
- *   account number is never surfaced to the LLM (list_saved_recipients /
- *   resolve_recipient return this masked form).
+ * Returns the last 4 digits of the account number in a payout string, or '' if
+ * it contains no digits. The account number is taken as the LONGEST run of
+ * digits — a rule that holds across every supported format (US routing+acct,
+ * UK sort+acct, IN acct+IFSC, AE IBAN, hyphenated NZ acct, …) because
+ * routing/sort/IFSC/SWIFT codes are either shorter than the account or contain
+ * letters. We never keep any other part of the string, so nothing but these 4
+ * digits can ever surface — leak-proof regardless of field order or format.
+ */
+function accountLast4(dest: string): string {
+  const runs = dest.match(/\d+/g);
+  if (!runs || runs.length === 0) return '';
+  const longest = runs.reduce((a, b) => (b.length > a.length ? b : a));
+  return longest.slice(-4);
+}
+
+/**
+ * Masks a payout_destination for tool responses fed back to the LLM
+ * (list_saved_recipients / resolve_recipient): UPI IDs pass through unchanged
+ * (no account digits to hide); bank destinations collapse to "****<last4>" so a
+ * full account number — or an IBAN, which embeds the account — can never be
+ * echoed by the model.
  */
 export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: string): string {
   if (payoutMethod === 'upi') return payoutDestination;
-  // Re-use the masking logic from maskDestination but return just the masked
-  // token string (without the "bank a/c" prefix), so tool responses still carry
-  // the full picture (IFSC + masked acct) and the LLM can confirm naturally.
-  const tokens = payoutDestination.split(/[,\s]+/).filter(Boolean);
-  const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
-  const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
-  const last4 = acct.slice(-4);
-  return tokens
-    .map((t) => (t === acct ? `****${last4}` : t))
-    .join(' ');
+  const last4 = accountLast4(payoutDestination);
+  return last4 ? `****${last4}` : 'account on file';
 }
 
+/**
+ * Masks a payout_destination for the customer-facing approval card. Shows ONLY
+ * the account's last 4 digits — no routing/sort/IFSC code and no IBAN body — so
+ * the card is leak-proof regardless of field order or country format. The
+ * "****<last4>" form matches the last-4 convention banks use on receipts.
+ */
 function maskDestination(method: PayoutMethod, dest: string): string {
   if (method === 'upi') return `UPI ${dest}`;
-  // bank: tokens are "<acct> <routing/sort/ifsc/iban>" in either order, possibly
-  // comma-separated or wrapped in prose. The account is the longest all-digit run
-  // (routing codes / IBANs always contain letters); mask all but its last 4 REGARDLESS
-  // of field order so a full account number can never surface if the model passes
-  // the fields reversed. Generic: show remaining tokens without the word "IFSC" so
-  // the same function works for US routing+acct, UK sort code+acct, AE IBAN, etc.
-  const tokens = dest.split(/[,\s]+/).filter(Boolean);
-  const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
-  const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
-  const last4 = acct.slice(-4);
-  const rest = tokens.filter((t) => t !== acct && t.toUpperCase() !== 'IFSC').join(' ');
-  return `bank a/c ****${last4}${rest ? `, ${rest}` : ''}`;
+  const last4 = accountLast4(dest);
+  return last4 ? `bank a/c ****${last4}` : 'bank a/c on file';
 }
 
 /**
@@ -1124,21 +1128,54 @@ async function sendApprovePickerTool(
       };
     }
   }
-  // Screen at card-show (read-only) BEFORE creating the draft
+  // Screen at card-show (read-only) BEFORE creating the draft. Quote first so a
+  // blocked attempt is recorded with real figures.
   const transfersToday = await ctx.store.getTodayTransferCount(ctx.phone);
-  const screen = await screenTransfer({
-    amountUsd,
-    recipientName: String(args.recipient_name),
-    transfersToday,
-    sourceCountry: customer.senderCountry,
-    senderName: customer.fullName,
-  });
-  if (screen.status === 'blocked') {
-    return { error: "I'm sorry — I can't set up this transfer right now. If you think this is a mistake, reply 'help' and a teammate will follow up." };
-  }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
+
+    const screen = await screenTransfer({
+      amountUsd,
+      recipientName: String(args.recipient_name),
+      transfersToday,
+      sourceCountry: customer.senderCountry,
+      senderName: customer.fullName,
+    });
+    if (screen.status === 'blocked') {
+      // Record an auditable, never-charged blocked row (no velocity/volume bump).
+      try {
+        await recordBlockedAttempt(ctx.store, {
+          phone: ctx.phone,
+          recipientName: String(args.recipient_name),
+          recipientPhone,
+          payoutMethod: args.payout_method as PayoutMethod,
+          payoutDestination: String(args.payout_destination),
+          fundingMethod,
+          amountUsd: q.amountUsd,
+          amountSource: q.amountSource,
+          sourceCurrency: q.sourceCurrency,
+          feeUsd: q.feeUsd,
+          feeSource: q.feeSource,
+          fxRate: q.fxRate,
+          amountInr: q.amountInr,
+          totalChargeUsd: q.totalChargeUsd,
+          totalChargeSource: q.totalChargeSource,
+          destinationCountry,
+          destinationCurrency,
+          partnerId: customer.partnerId,
+          reasons: screen.reasons,
+        });
+      } catch (err) {
+        console.warn('recordBlockedAttempt failed (non-fatal):', err);
+      }
+      return {
+        blocked: true,
+        reply_to_customer:
+          "This transfer can't be completed, and our team has been notified. If you have any questions, reply 'help' and we'll follow up.",
+      };
+    }
+
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       recipient: {
