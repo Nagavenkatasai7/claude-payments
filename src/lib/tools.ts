@@ -1116,11 +1116,15 @@ async function cancelDraftTool(
   _args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const draftId = ctx.turn.buttonTap?.kind === 'cancel'
-    ? ctx.turn.buttonTap.draftId
-    : null;
+  // Prefer the legacy Cancel-button tap context; otherwise fall back to the
+  // per-phone active-draft pointer. The one-tap CTA pay flow has no Cancel
+  // button, so a typed/spoken "cancel" routes here with no buttonTap.
+  const draftId =
+    ctx.turn.buttonTap?.kind === 'cancel'
+      ? ctx.turn.buttonTap.draftId
+      : await ctx.draftStore.getActiveDraftId(ctx.phone);
   if (!draftId) {
-    return { error: 'No active draft to cancel.' };
+    return { cancelled: false, reason: 'no_active_draft' };
   }
   const draft = await ctx.draftStore.consumeDraft(draftId);
   if (!draft) {

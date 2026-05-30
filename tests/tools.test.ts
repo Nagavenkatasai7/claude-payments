@@ -882,6 +882,33 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
   });
 });
 
+describe('cancel_draft — typed cancel via active-draft pointer (Batch 1)', () => {
+  it('cancels the active draft when there is no Cancel-button tap', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15550004444');
+    await ctx.customerStore.upsertOnFirstInbound('15550004444');
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx); // prime rates
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    const picker = await executeTool('send_approve_picker', {
+      amount_usd: 150, funding_method: 'bank_transfer', recipient_name: 'Mom',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi',
+    }, ctx);
+    expect(picker.sent).toBe(true);
+    // typed 'cancel' → no buttonTap; cancelDraftTool falls back to the active-draft pointer
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.cancelled).toBe(true);
+    const again = await executeTool('cancel_draft', {}, ctx); // pointer cleared on consume
+    expect(again.cancelled).toBe(false);
+  });
+
+  it('returns cancelled:false / no_active_draft when nothing is pending', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550005555');
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.cancelled).toBe(false);
+    expect(r.reason).toBe('no_active_draft');
+  });
+});
+
 const baseQuote = (over: Partial<Quote> = {}): Quote => ({
   amountUsd: 500, feeUsd: 1.99, totalChargeUsd: 501.99, fxRate: 83, amountInr: 41500,
   deliveryEstimate: 'within 10 minutes', sourceCurrency: 'USD', amountSource: 500,
