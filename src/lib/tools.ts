@@ -8,7 +8,8 @@ import { createTransfer } from './transfer-create';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PayoutMethod, Schedule, SourceOfFunds, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PayoutMethod, Schedule, SourceOfFunds, TurnContext } from './types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
@@ -29,21 +30,26 @@ import { screenTransfer } from './compliance';
 
 function maskDestination(method: PayoutMethod, dest: string): string {
   if (method === 'upi') return `UPI ${dest}`;
-  // bank: tokens are "<acct> <ifsc>" in either order, possibly comma-separated or
-  // wrapped in prose. The account is the longest all-digit run (an IFSC always
-  // contains letters); mask all but its last 4 REGARDLESS of field order so a full
-  // account number can never surface if the model passes the fields reversed.
+  // bank: tokens are "<acct> <routing/sort/ifsc/iban>" in either order, possibly
+  // comma-separated or wrapped in prose. The account is the longest all-digit run
+  // (routing codes / IBANs always contain letters); mask all but its last 4 REGARDLESS
+  // of field order so a full account number can never surface if the model passes
+  // the fields reversed. Generic: show remaining tokens without the word "IFSC" so
+  // the same function works for US routing+acct, UK sort code+acct, AE IBAN, etc.
   const tokens = dest.split(/[,\s]+/).filter(Boolean);
   const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
   const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
   const last4 = acct.slice(-4);
-  const ifsc = tokens.filter((t) => t !== acct).join(' ');
-  return `bank a/c ****${last4}${ifsc ? `, IFSC ${ifsc}` : ''}`;
+  const rest = tokens.filter((t) => t !== acct && t.toUpperCase() !== 'IFSC').join(' ');
+  return `bank a/c ****${last4}${rest ? `, ${rest}` : ''}`;
 }
 
 /**
  * Builds the enriched single-message body for the approve/cancel interactive.
  * Pure function; no I/O. Exported for unit-testing.
+ *
+ * destinationCurrency defaults to 'INR' for full back-compat — INR quotes render
+ * identically to before (Intl en-US INR → "₹83", "₹41,500").
  */
 export function buildApproveSummary(
   q: import('./types').Quote,
@@ -51,10 +57,20 @@ export function buildApproveSummary(
   payoutMethod: PayoutMethod,
   payoutDestination: string,
   fundingMethod: FundingMethod,
+  destinationCurrency: CurrencyCode = 'INR',
 ): string {
   const fmt = (n: number) =>
     new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
-  const inr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+  // Generic destination-currency formatter (works for AED, GBP, INR, …).
+  // For INR with en-US locale: Intl renders "₹83" / "₹41,500" — identical to the
+  // previous `₹${n.toLocaleString('en-IN')}` for the integers we use here.
+  const fmtDest = (n: number) =>
+    new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: destinationCurrency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(n);
 
   let feeLine: string;
   if (q.feeUsd === 0) {
@@ -69,8 +85,8 @@ export function buildApproveSummary(
   return [
     `Sending ${fmt(q.amountSource)} to ${recipientName}.`,
     feeLine,
-    `Rate: 1 ${q.sourceCurrency} = ${inr(q.fxRate)}`,
-    `They get ${inr(q.amountInr)} ${q.deliveryEstimate}.`,
+    `Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`,
+    `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
     `Rate locked ~10 min.`,
   ].join('\n');
@@ -116,6 +132,11 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          destination_country: {
+            type: 'string',
+            description:
+              "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+          },
         },
         required: ['amount_usd', 'funding_method'],
       },
@@ -153,6 +174,10 @@ export const toolSchemas: ChatTool[] = [
           purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
+          destination_country: {
+            type: 'string',
+            description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+          },
         },
         required: [
           'amount_usd',
@@ -318,6 +343,10 @@ export const toolSchemas: ChatTool[] = [
             description:
               "The currency the sender is sending in, e.g. 'USD' or 'GBP'. Only provide when you have been told more than one is available; otherwise omit it.",
           },
+          destination_country: {
+            type: 'string',
+            description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+          },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
           purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
@@ -460,13 +489,28 @@ export interface ToolContext {
 
 type ToolResult = Record<string, unknown>;
 
+// Valid CountryCode set for runtime validation (must match the union in types.ts).
+const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
+  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
+]);
+
 // Resolves the customer (upsert on first contact), their partner, the send
-// currency for that partner, and fresh FX rates — all in one place so callers
-// can reuse the customer and avoid duplicate Redis fetches.
+// currency for that partner, fresh FX rates, AND the destination country/currency.
+// destinationCountryArg is validated against the CountryCode union; unknown values
+// fall back to 'IN' (India) so the default US→India path is unchanged.
 async function resolveCurrencyAndRates(
   ctx: ToolContext,
   requested: unknown,
-): Promise<{ customer: Customer; partner: Partner; sourceCurrency: CurrencyCode; rates: FxRates }> {
+  destinationCountryArg?: unknown,
+): Promise<{
+  customer: Customer;
+  partner: Partner;
+  sourceCurrency: CurrencyCode;
+  rates: FxRates;
+  destinationCountry: CountryCode;
+  destinationCurrency: CurrencyCode;
+  destToUsd: number;
+}> {
   const customer =
     (await ctx.customerStore.getCustomer(ctx.phone)) ??
     (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
@@ -479,7 +523,17 @@ async function resolveCurrencyAndRates(
     ctx.phone,
   );
   const rates = await getFxRates(sourceCurrency);
-  return { customer, partner, sourceCurrency, rates };
+
+  // Destination resolution — validated; unknown country code → 'IN' (back-compat).
+  const destinationCountry: CountryCode =
+    typeof destinationCountryArg === 'string' &&
+    VALID_COUNTRY_CODES.has(destinationCountryArg.toUpperCase())
+      ? (destinationCountryArg.toUpperCase() as CountryCode)
+      : 'IN';
+  const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
+  const destRates = await getFxRates(destinationCurrency);
+
+  return { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd: destRates.toUsd };
 }
 
 export async function executeTool(
@@ -533,7 +587,8 @@ async function getQuoteTool(
 ): Promise<ToolResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const { customer, sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+    const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
+      await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
 
     // Receive-first (Win A): when a finite, positive target rupee amount is
     // given, back-solve the send amount; the recipient gets exactly that INR
@@ -577,12 +632,17 @@ async function getQuoteTool(
       }
     }
 
+    // G: default funding_method to bank_transfer when absent
+    const fundingMethod = (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer';
+
     const q = quote(
       amountSource,
       sourceCurrency,
       rates,
-      args.funding_method as FundingMethod,
+      fundingMethod,
       transferCount,
+      destinationCurrency,
+      destToUsd,
     );
     return {
       source_currency: q.sourceCurrency,
@@ -593,7 +653,10 @@ async function getQuoteTool(
       fee_usd: q.feeUsd,
       total_charge_usd: q.totalChargeUsd,
       fx_rate: q.fxRate,
-      amount_inr: q.amountInr,
+      amount_inr: q.amountInr,           // back-compat field (= amount in destination currency)
+      amount_dest: q.amountInr,          // clear alias for non-India destinations
+      destination_currency: q.destinationCurrency,
+      destination_country: destinationCountry,
       delivery_estimate: q.deliveryEstimate,
     };
   } catch (err) {
@@ -641,6 +704,8 @@ async function createTransferTool(
         phone: ctx.phone,
         amountSource: draft.amountSource,
         sourceCurrency: draft.sourceCurrency,
+        destinationCountry: draft.destinationCountry,
+        destinationCurrency: draft.destinationCurrency,
         partnerId: customer.partnerId ?? DEFAULT_PARTNER_ID,
         recipientName: draft.recipient.name,
         recipientPhone: draft.recipient.recipientPhone,
@@ -682,9 +747,10 @@ async function createTransferTool(
     };
   }
   // Resolve currency + rates and reuse customer for cap check + partnerId.
-  const { customer: legacyCustomer, sourceCurrency, rates } = await resolveCurrencyAndRates(
+  const { customer: legacyCustomer, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = await resolveCurrencyAndRates(
     ctx,
     args.source_currency,
+    args.destination_country,
   );
   const amountSource = Number(args.amount_usd);
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
@@ -707,12 +773,14 @@ async function createTransferTool(
       phone: ctx.phone,
       amountSource,
       sourceCurrency,
+      destinationCountry: legacyDestCountry,
+      destinationCurrency: legacyDestCurrency,
       partnerId: legacyCustomer.partnerId ?? DEFAULT_PARTNER_ID,
       recipientName: String(args.recipient_name),
       recipientPhone,
       payoutMethod: args.payout_method as PayoutMethod,
       payoutDestination: String(args.payout_destination),
-      fundingMethod: args.funding_method as FundingMethod,
+      fundingMethod: (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer',
       // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
       recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
       relationship: asEnum(RELATIONSHIPS, args.relationship),
@@ -995,9 +1063,11 @@ async function sendApprovePickerTool(
         "A valid recipient WhatsApp number with country code is required (e.g. 919876543210).",
     };
   }
-  const fundingMethod = args.funding_method as FundingMethod;
-  // Resolve currency+rates ONCE; reuse `customer` for the cap check (no second getCustomer).
-  const { customer, sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  // G: default funding_method to bank_transfer when absent
+  const fundingMethod = (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer';
+  // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
+  const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
+    await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
   const amountSource = Number(args.amount_usd);
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
@@ -1032,7 +1102,7 @@ async function sendApprovePickerTool(
   }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount);
+    const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
       recipient: {
@@ -1044,6 +1114,8 @@ async function sendApprovePickerTool(
       amountUsd: q.amountUsd,
       amountSource: q.amountSource,
       sourceCurrency: q.sourceCurrency,
+      destinationCountry,
+      destinationCurrency,
       fundingMethod,
       // ── KYC Travel-Rule / EDD enums (validated; unknown ⇒ unsupplied) ──
       recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
@@ -1051,7 +1123,15 @@ async function sendApprovePickerTool(
       purpose: asEnum(PURPOSES, args.purpose),
       sourceOfFunds: asEnum(SOURCE_OF_FUNDS, args.source_of_funds),
       occupation: asEnum(OCCUPATIONS, args.occupation),
-      quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr, feeSource: q.feeSource, totalChargeSource: q.totalChargeSource, totalChargeUsd: q.totalChargeUsd },
+      quote: {
+        feeUsd: q.feeUsd,
+        fxRate: q.fxRate,
+        amountInr: q.amountInr,
+        feeSource: q.feeSource,
+        totalChargeSource: q.totalChargeSource,
+        totalChargeUsd: q.totalChargeUsd,
+        destinationCurrency: q.destinationCurrency,
+      },
     });
     const summary = buildApproveSummary(
       q,
@@ -1059,6 +1139,7 @@ async function sendApprovePickerTool(
       args.payout_method as PayoutMethod,
       String(args.payout_destination),
       fundingMethod,
+      q.destinationCurrency ?? 'INR',
     );
     const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
     await sendCtaUrl(ctx.phone, `${summary}\n\nTap to pay securely, or reply cancel to stop.`, { displayText: 'Approve & Pay', url: payUrl });

@@ -60,6 +60,8 @@ export async function finalizeDraftPayment(
     fundingMethod: draft.fundingMethod,
     amountSource: draft.amountSource,
     sourceCurrency: draft.sourceCurrency,
+    destinationCountry: draft.destinationCountry,
+    destinationCurrency: draft.destinationCurrency,
     partnerId: customer.partnerId ?? DEFAULT_PARTNER_ID,
     recipientLegalName: draft.recipientLegalName,
     relationship: draft.relationship,

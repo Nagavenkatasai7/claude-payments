@@ -158,6 +158,8 @@ export interface Draft {
   amountUsd: number;              // USD-equivalent (for cap re-check)
   amountSource: number;           // NEW (P4)
   sourceCurrency: CurrencyCode;   // NEW (P4)
+  destinationCountry?: CountryCode;   // NEW (any-to-any) — absent ⇒ IN
+  destinationCurrency?: CurrencyCode; // NEW (any-to-any) — absent ⇒ INR
   fundingMethod: FundingMethod;
   // ── KYC Travel-Rule / EDD (optional; populated only on the EDD path) ──
   recipientLegalName?: string;
@@ -172,6 +174,7 @@ export interface Draft {
     feeSource?: number;
     totalChargeSource?: number;
     totalChargeUsd?: number;
+    destinationCurrency?: CurrencyCode; // NEW (any-to-any)
   };
   createdAt: string; // ISO-8601
 }
