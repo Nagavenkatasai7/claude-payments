@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sourceForInr, quote, QuoteError, MIN_USD, MAX_USD } from '@/lib/fx';
+import { sourceForInr, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd } from '@/lib/fx';
 import type { FxRates } from '@/lib/rate';
 
 const USD: FxRates = { toInr: 85, toUsd: 1 };
@@ -81,6 +81,17 @@ describe('sourceForInr — back-solve send amount from a target rupee amount', (
   it('throws QuoteError on a non-positive target', () => {
     expect(() => sourceForInr(0, USD)).toThrow(QuoteError);
     expect(() => sourceForInr(-100, USD)).toThrow(QuoteError);
+  });
+});
+
+describe('wouldBeFeeUsd — the repeat-send fee (for first-transfer-free framing)', () => {
+  it('bank_transfer → 1.99, debit_card → 2.99', () => {
+    expect(wouldBeFeeUsd(500, 'bank_transfer')).toBe(1.99);
+    expect(wouldBeFeeUsd(500, 'debit_card')).toBe(2.99);
+  });
+  it('credit_card → 2.99 + 3% of the amount (matches quote()\'s schedule)', () => {
+    expect(wouldBeFeeUsd(500, 'credit_card')).toBe(17.99); // round2(2.99 + 0.03*500)
+    expect(wouldBeFeeUsd(100, 'credit_card')).toBe(5.99);
   });
 });
 

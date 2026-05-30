@@ -73,6 +73,24 @@ export function quote(
 }
 
 /**
+ * The fee the sender WOULD pay on a repeat send with this funding method, in USD.
+ * Single-sources the same fee schedule quote() uses (bank 1.99 / debit 2.99 /
+ * credit 2.99 + 3%), so the "first transfer free — you save $X" framing can show
+ * an honest figure without quote() (which returns 0 on a first transfer) supplying
+ * it. quote()'s body is unchanged; this is a pure sibling for presentation only.
+ */
+export function wouldBeFeeUsd(amountUsd: number, fundingMethod: FundingMethod): number {
+  switch (fundingMethod) {
+    case 'bank_transfer':
+      return 1.99;
+    case 'debit_card':
+      return 2.99;
+    case 'credit_card':
+      return round2(2.99 + 0.03 * amountUsd);
+  }
+}
+
+/**
  * Back-solve the send amount (in the sender's source currency) from a target
  * rupee amount the recipient should receive — the exact inverse of the forward
  * line `amountInr = Math.round(amountSource * rates.toInr)` in quote(). The
