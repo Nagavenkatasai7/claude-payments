@@ -417,6 +417,32 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'capture_corridor_request',
+      description:
+        "Capture a lead when a user wants to send to a country we don't deliver to yet (anything other than India). Saves their destination + rough amount for the team. Call this, then steer the user to India.",
+      parameters: {
+        type: 'object',
+        properties: {
+          destination_country: {
+            type: 'string',
+            description: 'The destination country the user mentioned (e.g. "UAE", "Pakistan").',
+          },
+          approx_amount: {
+            type: 'number',
+            description: 'Optional. Approximately how much the user wants to send.',
+          },
+          approx_currency: {
+            type: 'string',
+            description: 'Optional. The currency for the approximate amount (e.g. "USD", "AED").',
+          },
+        },
+        required: ['destination_country'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -494,6 +520,8 @@ export async function executeTool(
       return resolveRecipientTool(args, ctx);
     case 'repeat_transfer':
       return repeatTransferTool(args, ctx);
+    case 'capture_corridor_request':
+      return captureCorridorRequestTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -1145,6 +1173,25 @@ function validatePhoneTool(args: Record<string, unknown>): ToolResult {
     };
   }
   return { valid: true, normalized };
+}
+
+async function captureCorridorRequestTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const destinationCountry = String(args.destination_country ?? '').trim();
+  if (!destinationCountry) return { error: 'destination_country is required.' };
+  const amt = Number(args.approx_amount);
+  const req: import('./types').CorridorRequest = {
+    id: newTransferId(),
+    senderPhone: ctx.phone,
+    destinationCountry,
+    approxAmount: Number.isFinite(amt) && amt > 0 ? amt : undefined,
+    approxCurrency: typeof args.approx_currency === 'string' ? args.approx_currency.toUpperCase() : undefined,
+    capturedAt: new Date().toISOString(),
+  };
+  await ctx.store.saveCorridorRequest(req);
+  return { saved: true, request_id: req.id };
 }
 
 async function checkSendLimitTool(

@@ -327,3 +327,17 @@ export interface CorridorComplianceRule {
   velocityLimit?: number;      // transfers/day before 'High transfer velocity.'; overrides VELOCITY_LIMIT
   kycCapHintUsd?: number;      // ADVISORY ONLY — hook for the NEXT (KYC) batch; NOT read by screenTransfer in P5
 }
+
+// ── Destination-interest lead (non-India payout requests) ─────────────────────
+//
+// When a user asks to send to a country we don't yet deliver to, the bot
+// captures a lightweight lead record so the team can track demand. The word
+// "corridor" is INTERNAL and must never appear in any customer-facing chat text.
+export interface CorridorRequest {
+  id: string;
+  senderPhone: string;
+  destinationCountry: string;   // free text as the user named it ("UAE", "Pakistan")
+  approxAmount?: number;
+  approxCurrency?: string;
+  capturedAt: string;           // ISO-8601
+}

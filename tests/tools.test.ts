@@ -55,11 +55,12 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all sixteen tools', () => {
+  it('exposes all seventeen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
       'cancel_schedule',
+      'capture_corridor_request',
       'check_payment_status',
       'check_send_limit',
       'create_schedule',
@@ -99,6 +100,52 @@ describe('toolSchemas', () => {
     expect(props).toHaveProperty('recipient_phone');
     expect(tool.function.parameters.required).toContain('transfer_id');
     expect(tool.function.parameters.required).toContain('recipient_phone');
+  });
+});
+
+describe('capture_corridor_request', () => {
+  it('saves a lead and returns { saved: true, request_id }', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const result = await executeTool('capture_corridor_request', {
+      destination_country: 'UAE',
+      approx_amount: 500,
+      approx_currency: 'usd',
+    }, ctx);
+    expect(result.saved).toBe(true);
+    expect(typeof result.request_id).toBe('string');
+    // Verify it was persisted
+    const leads = await ctx.store.listCorridorRequests();
+    expect(leads).toHaveLength(1);
+    expect(leads[0].destinationCountry).toBe('UAE');
+    expect(leads[0].approxAmount).toBe(500);
+    expect(leads[0].approxCurrency).toBe('USD'); // uppercased
+    expect(leads[0].senderPhone).toBe(PHONE);
+  });
+
+  it('returns { error } when destination_country is missing', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const result = await executeTool('capture_corridor_request', {}, ctx);
+    expect(result.error).toBeDefined();
+    expect(result.saved).toBeUndefined();
+  });
+
+  it('saves a lead without optional fields', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const result = await executeTool('capture_corridor_request', {
+      destination_country: 'Pakistan',
+    }, ctx);
+    expect(result.saved).toBe(true);
+    const leads = await ctx.store.listCorridorRequests();
+    expect(leads[0].approxAmount).toBeUndefined();
+    expect(leads[0].approxCurrency).toBeUndefined();
+  });
+
+  it('does NOT return sent: true (agent still sends a text reply)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const result = await executeTool('capture_corridor_request', {
+      destination_country: 'UAE',
+    }, ctx);
+    expect(result.sent).toBeUndefined();
   });
 });
 
