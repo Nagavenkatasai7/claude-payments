@@ -133,6 +133,36 @@ describe('completePaymentStage1', () => {
   });
 });
 
+describe('completePaymentStage1 — held=true (flagged transfer)', () => {
+  it('sends a held message (no delivery ETA) when held=true', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(awaitingTransfer());
+
+    const result = await completePaymentStage1(store, 'pay12345', { held: true });
+
+    expect(result.transfer.status).toBe('paid');
+    expect(result.senderMessages).toHaveLength(1);
+    // Must contain the charge amount
+    expect(result.senderMessages[0]).toContain('$500.00');
+    // Must NOT promise delivery time
+    expect(result.senderMessages[0]).not.toContain('within ~10 minutes');
+    expect(result.senderMessages[0]).not.toContain('will get');
+    // Must contain the review/hold message
+    expect(result.senderMessages[0]).toContain('quick review');
+    expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
+  });
+
+  it('held=false (default) still sends the normal message', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(awaitingTransfer());
+
+    const result = await completePaymentStage1(store, 'pay12345');
+
+    expect(result.senderMessages[0]).toContain('within ~10 minutes');
+    expect(result.senderMessages[0]).not.toContain('quick review');
+  });
+});
+
 describe('completePaymentStage2', () => {
   it('sets status to delivered and deliveredAt, returns sender messages (INR → ₹)', async () => {
     const store = createStore(fakeRedis());
