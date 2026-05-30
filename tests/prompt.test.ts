@@ -25,3 +25,24 @@ describe('SYSTEM_PROMPT', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('never ask');
   });
 });
+
+describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
+  it('B1: asks amount + funding method together in one turn', () => {
+    expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('together'); // the combined-ask instruction
+  });
+  it('B2/B3: two-ask recipient + immediate validate_phone call', () => {
+    expect(SYSTEM_PROMPT).toContain('validate_phone');
+    expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/name and (their )?whatsapp number/);
+  });
+  it('A5: surfaces FX rate + ETA + payout destination in confirmations', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('delivery time');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('payout destination');
+  });
+  it('A5: distinguishes pay-out from send-from (no blanket send-block)', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('pays out only in india');
+    expect(SYSTEM_PROMPT).toContain('[SEND CURRENCIES');
+    // the old blanket "sending money to India" send-blocking promise is gone
+    expect(SYSTEM_PROMPT).not.toContain('Do not promise anything beyond sending money to India');
+  });
+});

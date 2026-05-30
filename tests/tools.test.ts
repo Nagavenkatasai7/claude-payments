@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { executeTool, toolSchemas } from '@/lib/tools';
+import { executeTool, toolSchemas, buildApproveSummary } from '@/lib/tools';
+import type { Quote } from '@/lib/types';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -54,7 +55,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all thirteen tools', () => {
+  it('exposes all fourteen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -70,6 +71,7 @@ describe('toolSchemas', () => {
       'send_approve_picker',
       'send_recipient_picker',
       'update_recipient_phone',
+      'validate_phone',
     ]);
   });
 
@@ -798,5 +800,72 @@ describe('send_approve_picker — cap enforcement', () => {
     }, ctx);
     expect(r.error).toBeDefined();
     expect(interactiveSent).toBe(false); // never reached sendInteractive
+  });
+});
+
+const baseQuote = (over: Partial<Quote> = {}): Quote => ({
+  amountUsd: 500, feeUsd: 1.99, totalChargeUsd: 501.99, fxRate: 83, amountInr: 41500,
+  deliveryEstimate: 'within 10 minutes', sourceCurrency: 'USD', amountSource: 500,
+  feeSource: 1.99, totalChargeSource: 501.99, ...over,
+});
+
+describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
+  it('renders FX rate, ETA, masked bank destination, and the rate-lock line', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '123456789 HDFC0001234', 'bank_transfer');
+    expect(s).toContain('1 USD = ₹83');
+    expect(s).toContain('₹41,500');
+    expect(s).toContain('within 10 minutes');
+    expect(s).toContain('bank a/c ****6789');
+    expect(s).toContain('IFSC HDFC0001234');
+    expect(s).toContain('Rate locked ~10 min');
+  });
+  it('masks the account even when fields arrive reversed (ifsc before acct) — never leaks the full number', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
+    expect(s).toContain('bank a/c ****6789');
+    expect(s).toContain('IFSC HDFC0001234');
+    expect(s).not.toContain('123456789'); // the full account number must not appear
+  });
+  it('shows a UPI destination in full', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
+    expect(s).toContain('UPI mom@okhdfc');
+  });
+  it('first transfer (feeUsd 0) → "first transfer free" framing, NEVER "Fee $0.00"', () => {
+    const s = buildApproveSummary(baseQuote({ feeUsd: 0, feeSource: 0 }), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
+    expect(s.toLowerCase()).toContain('first transfer free');
+    expect(s).not.toContain('Fee $0.00');
+  });
+  it('a repeat transfer renders a concrete Fee line', () => {
+    const s = buildApproveSummary(baseQuote({ feeUsd: 1.99, feeSource: 1.99 }), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
+    expect(s).toContain('Fee $1.99');
+  });
+  it('a GBP-source quote renders "1 GBP = ₹"', () => {
+    const s = buildApproveSummary(baseQuote({ sourceCurrency: 'GBP', amountSource: 400, feeSource: 1.6 }), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
+    expect(s).toContain('1 GBP = ₹');
+    expect(s).toContain('£');
+  });
+});
+
+describe('validate_phone — read-only phone early-catch', () => {
+  const call = (phone: unknown) =>
+    executeTool('validate_phone', { phone }, {} as never); // ctx is never touched
+
+  it('a clean 919876543210 → { valid: true, normalized }', async () => {
+    expect(await call('919876543210')).toEqual({ valid: true, normalized: '919876543210' });
+  });
+  it('a formatted "+91 98765 43210" → valid, normalized digits-only', async () => {
+    expect(await call('+91 98765 43210')).toEqual({ valid: true, normalized: '919876543210' });
+  });
+  it('too-short "12345" → valid:false with a re-ask error', async () => {
+    const r = await call('12345') as { valid: boolean; error: string };
+    expect(r.valid).toBe(false);
+    expect(r.error).toMatch(/valid/i);
+  });
+  it('junk/empty → valid:false', async () => {
+    expect((await call('') as { valid: boolean }).valid).toBe(false);
+    expect((await call('abc') as { valid: boolean }).valid).toBe(false);
+  });
+  it('performs no Redis I/O — runs with a bare ctx and still returns', async () => {
+    // {} as never proves the handler reads nothing off ctx
+    expect((await call('919876543210') as { valid: boolean }).valid).toBe(true);
   });
 });

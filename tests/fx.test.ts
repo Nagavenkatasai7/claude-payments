@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sourceForInr, quote, QuoteError, MIN_USD, MAX_USD } from '@/lib/fx';
+import { sourceForInr, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd } from '@/lib/fx';
 import type { FxRates } from '@/lib/rate';
 
 const USD: FxRates = { toInr: 85, toUsd: 1 };
@@ -81,6 +81,30 @@ describe('sourceForInr — back-solve send amount from a target rupee amount', (
   it('throws QuoteError on a non-positive target', () => {
     expect(() => sourceForInr(0, USD)).toThrow(QuoteError);
     expect(() => sourceForInr(-100, USD)).toThrow(QuoteError);
+  });
+});
+
+describe('wouldBeFeeUsd — the repeat-send fee (for first-transfer-free framing)', () => {
+  it('bank_transfer → 1.99, debit_card → 2.99', () => {
+    expect(wouldBeFeeUsd(500, 'bank_transfer')).toBe(1.99);
+    expect(wouldBeFeeUsd(500, 'debit_card')).toBe(2.99);
+  });
+  it('credit_card → 2.99 + 3% of the amount (matches quote()\'s schedule)', () => {
+    expect(wouldBeFeeUsd(500, 'credit_card')).toBe(17.99); // round2(2.99 + 0.03*500)
+    expect(wouldBeFeeUsd(100, 'credit_card')).toBe(5.99);
+  });
+  // Lock the duplicated fee schedule to quote()'s own: wouldBeFeeUsd re-states the
+  // bank/debit/credit constants for the first-transfer-free framing, so assert it
+  // equals quote()'s repeat-send feeUsd across every funding method and a few
+  // amounts. If quote()'s schedule ever changes, this fails until both agree —
+  // the constants can't silently drift apart.
+  it('equals quote()\'s repeat-send feeUsd for every funding method (no drift)', () => {
+    const methods = ['bank_transfer', 'debit_card', 'credit_card'] as const;
+    for (const amt of [100, 500, 2999]) {
+      for (const m of methods) {
+        expect(wouldBeFeeUsd(amt, m)).toBe(quote(amt, 'USD', USD, m, 1).feeUsd);
+      }
+    }
   });
 });
 

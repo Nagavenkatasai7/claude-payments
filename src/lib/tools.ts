@@ -1,4 +1,4 @@
-import { quote, QuoteError, sourceForInr } from './fx';
+import { quote, QuoteError, sourceForInr, wouldBeFeeUsd } from './fx';
 import { getFxRates, type FxRates } from './rate';
 import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
@@ -25,6 +25,57 @@ import {
   disambiguateNames,
   truncateLabel,
 } from './whatsapp-buttons';
+
+// ── Approve message helpers ──────────────────────────────────────────────────
+
+function maskDestination(method: PayoutMethod, dest: string): string {
+  if (method === 'upi') return `UPI ${dest}`;
+  // bank: tokens are "<acct> <ifsc>" in either order, possibly comma-separated or
+  // wrapped in prose. The account is the longest all-digit run (an IFSC always
+  // contains letters); mask all but its last 4 REGARDLESS of field order so a full
+  // account number can never surface if the model passes the fields reversed.
+  const tokens = dest.split(/[,\s]+/).filter(Boolean);
+  const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
+  const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
+  const last4 = acct.slice(-4);
+  const ifsc = tokens.filter((t) => t !== acct).join(' ');
+  return `bank a/c ****${last4}${ifsc ? `, IFSC ${ifsc}` : ''}`;
+}
+
+/**
+ * Builds the enriched single-message body for the approve/cancel interactive.
+ * Pure function; no I/O. Exported for unit-testing.
+ */
+export function buildApproveSummary(
+  q: import('./types').Quote,
+  recipientName: string,
+  payoutMethod: PayoutMethod,
+  payoutDestination: string,
+  fundingMethod: FundingMethod,
+): string {
+  const fmt = (n: number) =>
+    new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
+  const inr = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+
+  let feeLine: string;
+  if (q.feeUsd === 0) {
+    // A2: first-transfer-free framing — show what the user saves vs a repeat send
+    const ratio = q.amountUsd > 0 ? q.amountSource / q.amountUsd : 1; // USD→source scalar
+    const wouldBeSource = Math.round(wouldBeFeeUsd(q.amountUsd, fundingMethod) * ratio * 100) / 100;
+    feeLine = `first transfer free — you save ${fmt(wouldBeSource)}`;
+  } else {
+    feeLine = `Fee ${fmt(q.feeSource)}`;
+  }
+
+  return [
+    `Sending ${fmt(q.amountSource)} to ${recipientName}.`,
+    feeLine,
+    `Rate: 1 ${q.sourceCurrency} = ${inr(q.fxRate)}`,
+    `They get ${inr(q.amountInr)} ${q.deliveryEstimate}.`,
+    `To: ${maskDestination(payoutMethod, payoutDestination)}`,
+    `Rate locked ~10 min.`,
+  ].join('\n');
+}
 
 // ── KYC closed-set validators: an unknown value is treated as UNSUPPLIED
 // (fail-safe to flag, never silent-pass). Mirrors the type unions in types.ts. ──
@@ -317,6 +368,24 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'validate_phone',
+      description:
+        "Check that a recipient WhatsApp number is well-formed (digits only, with country code, 10–15 digits). Call this immediately after the user gives the recipient's number, BEFORE asking about payout. Returns { valid, normalized, error? }.",
+      parameters: {
+        type: 'object',
+        properties: {
+          phone: {
+            type: 'string',
+            description: "The recipient's WhatsApp number as the user typed it, e.g. '+91 98765 43210'.",
+          },
+        },
+        required: ['phone'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -387,6 +456,8 @@ export async function executeTool(
       return cancelDraftTool(args, ctx);
     case 'check_send_limit':
       return checkSendLimitTool(args, ctx);
+    case 'validate_phone':
+      return validatePhoneTool(args); // pure — no ctx
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -830,11 +901,13 @@ async function sendApprovePickerTool(
       occupation: asEnum(OCCUPATIONS, args.occupation),
       quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
     });
-    const fmt = (n: number) =>
-      new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
-    const summary =
-      `Sending ${fmt(q.amountSource)} to ${args.recipient_name}.\n` +
-      `Fee ${fmt(q.feeSource)} → ₹${q.amountInr.toLocaleString('en-IN')}.`;
+    const summary = buildApproveSummary(
+      q,
+      String(args.recipient_name),
+      args.payout_method as PayoutMethod,
+      String(args.payout_destination),
+      fundingMethod,
+    );
     await sendInteractive(ctx.phone, summary, [
       { id: approveButtonId(draftId), title: 'Approve & pay' },
       { id: cancelButtonId(draftId), title: 'Cancel' },
@@ -861,6 +934,19 @@ async function cancelDraftTool(
     return { cancelled: false, reason: 'draft_not_found_or_expired' };
   }
   return { cancelled: true };
+}
+
+function validatePhoneTool(args: Record<string, unknown>): ToolResult {
+  const normalized = normalizePhone(args.phone ?? '');
+  if (!isValidPhone(normalized)) {
+    return {
+      valid: false,
+      normalized,
+      error:
+        "That doesn't look like a valid WhatsApp number — please send it with country code, e.g. 919876543210.",
+    };
+  }
+  return { valid: true, normalized };
 }
 
 async function checkSendLimitTool(

@@ -33,7 +33,7 @@ export async function completePaymentStage1(
   await store.saveTransfer(updated);
 
   const senderMessages = [
-    `✅ Payment received — $${updated.totalChargeUsd.toFixed(2)} charged. Sending ₹${inr(updated.amountInr)} to ${updated.recipientName}…`,
+    `✅ Payment received — $${updated.totalChargeUsd.toFixed(2)} charged. ${updated.recipientName} will get ₹${inr(updated.amountInr)} within ~10 minutes. Transfer ID: ${updated.id}`,
   ];
 
   return { transfer: updated, senderMessages };
@@ -67,8 +67,9 @@ export async function completePaymentStage2(
   };
   await store.saveTransfer(updated);
 
+  const via = updated.payoutMethod === 'upi' ? 'UPI' : 'bank';
   const senderMessages = [
-    `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName}. Thanks for using SendHome!`,
+    `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName} via ${via}. Transfer ID: ${updated.id}. Thanks for using SendHome!`,
   ];
 
   return { transfer: updated, senderMessages };
