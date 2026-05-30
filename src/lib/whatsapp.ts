@@ -261,3 +261,64 @@ export async function sendList(
   const body = await res.text();
   throw new Error(`WhatsApp list send failed (${res.status}): ${body}`);
 }
+
+export interface CtaButton {
+  displayText: string;
+  url: string;
+}
+
+/**
+ * Interactive CTA-URL button. Opens the URL on tap (NO webhook callback).
+ * Same HTTP-470 → sendText fallback and non-OK throw pattern as sendInteractive/sendList.
+ */
+export async function sendCtaUrl(
+  to: string,
+  bodyText: string,
+  button: CtaButton,
+  headerText?: string,
+  footerText?: string,
+): Promise<void> {
+  if (!button.url.startsWith('https://')) throw new Error('sendCtaUrl: URL must be https://');
+  if (button.displayText.length > 20) throw new Error('sendCtaUrl: displayText must be <= 20 chars');
+  const fallbackText = `${bodyText}\n\n${button.displayText}\n${button.url}`;
+
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.whatsappToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'interactive',
+        interactive: {
+          type: 'cta_url',
+          ...(headerText && { header: { type: 'text', text: headerText } }),
+          body: { text: bodyText },
+          ...(footerText && { footer: { text: footerText } }),
+          action: {
+            name: 'cta_url',
+            parameters: {
+              display_text: button.displayText,
+              url: button.url,
+            },
+          },
+        },
+      }),
+    },
+  );
+
+  if (res.ok) return;
+
+  if (res.status === 470) {
+    console.warn('sendCtaUrl hit 24h-window error; falling back to sendText');
+    await sendText(to, fallbackText);
+    return;
+  }
+
+  const body = await res.text();
+  throw new Error(`WhatsApp CTA-URL send failed (${res.status}): ${body}`);
+}

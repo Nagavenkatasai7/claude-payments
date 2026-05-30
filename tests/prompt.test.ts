@@ -4,8 +4,17 @@ import { SYSTEM_PROMPT } from '@/lib/prompt';
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
     expect(SYSTEM_PROMPT).toContain('get_quote');
-    expect(SYSTEM_PROMPT).toContain('create_transfer');
-    expect(SYSTEM_PROMPT).toContain('generate_payment_link');
+    expect(SYSTEM_PROMPT).toContain('send_approve_picker');
+    expect(SYSTEM_PROMPT).toContain('check_payment_status');
+  });
+
+  it('describes the one-tap Approve & Pay flow (no separate link, cancel by text)', () => {
+    expect(SYSTEM_PROMPT).toContain('Approve & Pay');
+    // the bot must NOT call generate_payment_link in the happy path any more
+    expect(SYSTEM_PROMPT).toContain('do NOT call generate_payment_link');
+    // cancel is the typed word now (no Cancel button)
+    expect(SYSTEM_PROMPT).toContain('cancel_draft');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('reply "cancel"');
   });
 
   it('forbids asking for card details in chat', () => {

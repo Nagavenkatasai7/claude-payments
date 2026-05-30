@@ -805,6 +805,110 @@ describe('send_approve_picker — cap enforcement', () => {
   });
 });
 
+describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
+  // Helper: build a context with a cleared recipient + primed rate cache
+  async function buildClearedCtx() {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15550003333');
+    await ctx.customerStore.upsertOnFirstInbound('15550003333');
+    // Prime rate cache before we replace fetch
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    return ctx;
+  }
+
+  it('CLEARED recipient → { sent:true, draft_id }; POST body has cta_url type and https pay URL', async () => {
+    const ctx = await buildClearedCtx();
+    const calls: { url: string; body: unknown }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: init?.body ? JSON.parse(init.body as string) : null });
+      return { ok: true, text: async () => '' };
+    }));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200,
+      funding_method: 'bank_transfer',
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+    }, ctx);
+    expect(r.sent).toBe(true);
+    expect(typeof r.draft_id).toBe('string');
+    // Find the WhatsApp API call (cta_url)
+    const waCall = calls.find((c) => (c.body as Record<string, unknown>)?.interactive);
+    expect(waCall).toBeDefined();
+    const interactive = (waCall!.body as Record<string, unknown>).interactive as Record<string, unknown>;
+    expect(interactive.type).toBe('cta_url');
+    const params = (interactive.action as Record<string, unknown>).parameters as Record<string, unknown>;
+    expect(params.url).toMatch(/\/pay\/.+$/);
+    expect(String(params.url)).toMatch(/^https:\/\//);
+  });
+
+  it('the draft is persisted with the enriched quote (totalChargeUsd is a number)', async () => {
+    const ctx = await buildClearedCtx();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200,
+      funding_method: 'bank_transfer',
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+    }, ctx);
+    expect(typeof r.draft_id).toBe('string');
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft).not.toBeNull();
+    expect(typeof draft!.quote.totalChargeUsd).toBe('number');
+  });
+
+  it('BLOCKED recipient (John Doe) → { error }, no draft, no CTA fetch', async () => {
+    const ctx = await buildClearedCtx();
+    let ctaFetched = false;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      ctaFetched = true;
+      return { ok: true, text: async () => '' };
+    }));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200,
+      funding_method: 'bank_transfer',
+      recipient_name: 'John Doe', // on the test watchlist → blocked
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'john@upi',
+    }, ctx);
+    expect(r.error).toBeDefined();
+    expect(r.sent).toBeUndefined();
+    expect(r.draft_id).toBeUndefined();
+    expect(ctaFetched).toBe(false);
+  });
+});
+
+describe('cancel_draft — typed cancel via active-draft pointer (Batch 1)', () => {
+  it('cancels the active draft when there is no Cancel-button tap', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15550004444');
+    await ctx.customerStore.upsertOnFirstInbound('15550004444');
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx); // prime rates
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    const picker = await executeTool('send_approve_picker', {
+      amount_usd: 150, funding_method: 'bank_transfer', recipient_name: 'Mom',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi',
+    }, ctx);
+    expect(picker.sent).toBe(true);
+    // typed 'cancel' → no buttonTap; cancelDraftTool falls back to the active-draft pointer
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.cancelled).toBe(true);
+    const again = await executeTool('cancel_draft', {}, ctx); // pointer cleared on consume
+    expect(again.cancelled).toBe(false);
+  });
+
+  it('returns cancelled:false / no_active_draft when nothing is pending', async () => {
+    const ctx = buildCtx(fakeRedis(), '15550005555');
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.cancelled).toBe(false);
+    expect(r.reason).toBe('no_active_draft');
+  });
+});
+
 const baseQuote = (over: Partial<Quote> = {}): Quote => ({
   amountUsd: 500, feeUsd: 1.99, totalChargeUsd: 501.99, fxRate: 83, amountInr: 41500,
   deliveryEstimate: 'within 10 minutes', sourceCurrency: 'USD', amountSource: 500,
