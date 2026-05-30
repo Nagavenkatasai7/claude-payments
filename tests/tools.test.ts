@@ -55,7 +55,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all fourteen tools', () => {
+  it('exposes all fifteen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -68,6 +68,7 @@ describe('toolSchemas', () => {
       'get_quote',
       'list_saved_recipients',
       'list_schedules',
+      'resolve_recipient',
       'send_approve_picker',
       'send_recipient_picker',
       'update_recipient_phone',
@@ -867,5 +868,66 @@ describe('validate_phone — read-only phone early-catch', () => {
   it('performs no Redis I/O — runs with a bare ctx and still returns', async () => {
     // {} as never proves the handler reads nothing off ctx
     expect((await call('919876543210') as { valid: boolean }).valid).toBe(true);
+  });
+});
+
+describe('resolve_recipient — typed-name lookup of saved recipients', () => {
+  const seedRecipient = async (
+    ctx: ReturnType<typeof buildCtx>,
+    over: Partial<{ name: string; recipientPhone: string; payoutMethod: 'upi' | 'bank'; payoutDestination: string }> = {},
+  ) => {
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: over.name ?? 'Mom',
+      recipientPhone: over.recipientPhone ?? '919876543210',
+      payoutMethod: over.payoutMethod ?? 'upi',
+      payoutDestination: over.payoutDestination ?? 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+  };
+
+  it('returns match:exact for a single case-insensitive, trimmed name match with payout details', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Mom', recipientPhone: '919876543210', payoutDestination: 'mom@okhdfc' });
+    await seedRecipient(ctx, { name: 'Dad', recipientPhone: '919811111111', payoutDestination: 'dad@okaxis' });
+    const r = await executeTool('resolve_recipient', { name: '  mOm ' }, ctx);
+    expect(r.match).toBe('exact');
+    expect((r.recipient as Record<string, unknown>).recipient_phone).toBe('919876543210');
+    expect((r.recipient as Record<string, unknown>).payout_destination).toBe('mom@okhdfc');
+    // field hygiene: no internal fields leak
+    expect(r.recipient).not.toHaveProperty('partnerId');
+    expect(r.recipient).not.toHaveProperty('complianceStatus');
+  });
+
+  it('returns match:ambiguous when two saved recipients share the name', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Mom', recipientPhone: '919876543210' });
+    await seedRecipient(ctx, { name: 'Mom', recipientPhone: '919800000000' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('ambiguous');
+    expect((r.candidates as unknown[]).length).toBe(2);
+  });
+
+  it('returns match:ambiguous for a partial/substring match (never auto-proceeds)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Mom (work)', recipientPhone: '919876543210' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('ambiguous');
+    expect((r.candidates as unknown[]).length).toBe(1);
+  });
+
+  it('returns match:none when nothing matches (cold-start path)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Dad', recipientPhone: '919811111111' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('none');
+  });
+
+  it('only searches the calling sender\'s own recipients', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15551234567');
+    const otherCtx = buildCtx(redis, '15559999999');
+    await seedRecipient(otherCtx, { name: 'Mom', recipientPhone: '919876543210' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('none'); // the other sender's recipient is invisible
   });
 });

@@ -386,6 +386,21 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'resolve_recipient',
+      description:
+        "Look up the sender's saved recipients by a name they typed (e.g. 'Mom'). Returns { match: 'exact', recipient } when exactly one saved recipient matches — use its payout_method, payout_destination, and recipient_phone directly (do not re-ask). Returns { match: 'ambiguous', candidates } when more than one could match — call send_recipient_picker with the candidates. Returns { match: 'none' } when nothing matches — ask for the recipient's number and payout details.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: "The recipient name the user typed, e.g. 'Mom'." },
+        },
+        required: ['name'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -458,6 +473,8 @@ export async function executeTool(
       return checkSendLimitTool(args, ctx);
     case 'validate_phone':
       return validatePhoneTool(args); // pure — no ctx
+    case 'resolve_recipient':
+      return resolveRecipientTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -809,6 +826,48 @@ async function listSavedRecipientsTool(
     console.warn('listRecipients failed; returning []:', err);
     return { recipients: [] };
   }
+}
+
+async function resolveRecipientTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const query = String(args.name ?? '').trim().toLowerCase();
+  if (!query) return { match: 'none' };
+
+  let all: import('./types').Recipient[];
+  try {
+    all = await ctx.store.listRecipients(ctx.phone, 25); // generous cap; own-phone only
+  } catch (err) {
+    console.warn('resolve_recipient listRecipients failed:', err);
+    return { match: 'none' };
+  }
+
+  // Customer-owned fields only — never partner/compliance/PII.
+  const shape = (r: import('./types').Recipient) => ({
+    name: r.name,
+    recipient_phone: r.recipientPhone,
+    payout_method: r.payoutMethod,
+    payout_destination: r.payoutDestination,
+  });
+  const norm = (s: string) => (s ?? '').trim().toLowerCase();
+
+  const exact = all.filter((r) => norm(r.name) === query);
+  if (exact.length === 1) return { match: 'exact', recipient: shape(exact[0]) };
+
+  // Ambiguous: >1 exact match, or only partial (either-direction substring) matches.
+  // A partial match alone NEVER auto-proceeds — exact-1 is the only fast path.
+  const candidates = (
+    exact.length > 1
+      ? exact
+      : all.filter((r) => {
+          const n = norm(r.name);
+          return n.includes(query) || query.includes(n);
+        })
+  ).slice(0, 3); // WhatsApp reply-button cap
+
+  if (candidates.length === 0) return { match: 'none' };
+  return { match: 'ambiguous', candidates: candidates.map(shape) };
 }
 
 async function sendRecipientPickerTool(
