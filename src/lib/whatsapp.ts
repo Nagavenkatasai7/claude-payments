@@ -313,12 +313,10 @@ export async function sendCtaUrl(
 
   if (res.ok) return;
 
-  if (res.status === 470) {
-    console.warn('sendCtaUrl hit 24h-window error; falling back to sendText');
-    await sendText(to, fallbackText);
-    return;
-  }
-
-  const body = await res.text();
-  throw new Error(`WhatsApp CTA-URL send failed (${res.status}): ${body}`);
+  // CTA-URL is a newer interactive type; if Meta rejects it for ANY reason (24h
+  // window 470, unsupported type, etc.), degrade gracefully to a plain text with
+  // the link inline rather than throwing — the customer still gets a tappable link.
+  const body = await res.text().catch(() => '');
+  console.warn(`sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`);
+  await sendText(to, fallbackText);
 }

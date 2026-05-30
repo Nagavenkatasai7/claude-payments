@@ -359,6 +359,22 @@ describe('sendCtaUrl', () => {
 
     expect(calls).toEqual(['interactive', 'text']);
   });
+
+  it('on ANY non-OK error (e.g. 400 unsupported type), falls back to sendText instead of throwing', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        calls.push(JSON.parse(init.body as string).type);
+        if (calls.length === 1) return { ok: false, status: 400, text: async () => 'unsupported message type' };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+
+    // Must NOT throw — degrade gracefully to a text message with the link.
+    await sendCtaUrl('15551234567', 'Tap below to pay', { displayText: 'Pay now', url: 'https://example.com/pay/abc' });
+    expect(calls).toEqual(['interactive', 'text']);
+  });
 });
 
 describe('parseIncoming — list_reply collapses to the existing button shape', () => {

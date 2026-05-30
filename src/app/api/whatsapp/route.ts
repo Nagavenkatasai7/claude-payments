@@ -102,7 +102,9 @@ export async function POST(req: NextRequest) {
         partnerStore: getPartnerStore(), // NEW (P4)
       });
       const reply = await agent.runAgentTurn(incoming.from, messageText, turn);
-      await sendText(incoming.from, reply);
+      // An empty reply means a tool already sent an interactive card this turn —
+      // sending an empty text would be a stray/blank message, so skip it.
+      if (reply.trim()) await sendText(incoming.from, reply);
     } catch (err) {
       console.error('Failed to process WhatsApp message:', err);
       try {
