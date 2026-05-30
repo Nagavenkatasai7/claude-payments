@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createStore } from '@/lib/store';
-import { cancelTransfer, assignTransfer, resendPaymentLink } from '@/lib/dashboard-ops';
+import { cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer } from '@/lib/dashboard-ops';
 import { fakeRedis } from './helpers';
 import type { Transfer } from '@/lib/types';
 
@@ -107,5 +107,61 @@ describe('resendPaymentLink', () => {
     const store = createStore(fakeRedis());
     const sendText = vi.fn().mockResolvedValue(undefined);
     await expect(resendPaymentLink(store, sendText, 'missing')).rejects.toThrow('Transfer not found');
+  });
+});
+
+describe('releaseTransfer', () => {
+  it('delivers an in_review transfer (sets status delivered, deliveredAt)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(makeTransfer({ id: 'rel1', status: 'in_review', paidAt: '2026-05-30T00:00:00Z' }));
+    await releaseTransfer(store, 'rel1');
+    const loaded = await store.getTransfer('rel1');
+    expect(loaded?.status).toBe('delivered');
+    expect(loaded?.deliveredAt).toBeTruthy();
+  });
+
+  it('throws when transfer is not found', async () => {
+    const store = createStore(fakeRedis());
+    await expect(releaseTransfer(store, 'missing')).rejects.toThrow(/not found/i);
+  });
+
+  it('throws when transfer is not in_review (e.g. already delivered)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(makeTransfer({ id: 'rel2', status: 'delivered' }));
+    await expect(releaseTransfer(store, 'rel2')).rejects.toThrow(/not in_review/i);
+  });
+
+  it('throws when transfer is awaiting_payment (not yet charged)', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(makeTransfer({ id: 'rel3', status: 'awaiting_payment' }));
+    await expect(releaseTransfer(store, 'rel3')).rejects.toThrow(/not in_review/i);
+  });
+});
+
+describe('rejectTransfer', () => {
+  it('cancels an in_review transfer with an adminNote', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(makeTransfer({ id: 'rej1', status: 'in_review' }));
+    await rejectTransfer(store, 'rej1');
+    const loaded = await store.getTransfer('rej1');
+    expect(loaded?.status).toBe('cancelled');
+    expect(loaded?.adminNote).toContain('rejected in review');
+  });
+
+  it('throws when transfer is not found', async () => {
+    const store = createStore(fakeRedis());
+    await expect(rejectTransfer(store, 'missing')).rejects.toThrow(/not found/i);
+  });
+
+  it('throws when transfer is not in_review', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(makeTransfer({ id: 'rej2', status: 'awaiting_payment' }));
+    await expect(rejectTransfer(store, 'rej2')).rejects.toThrow(/not in_review/i);
+  });
+
+  it('throws when transfer is already cancelled', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(makeTransfer({ id: 'rej3', status: 'cancelled' }));
+    await expect(rejectTransfer(store, 'rej3')).rejects.toThrow(/not in_review/i);
   });
 });
