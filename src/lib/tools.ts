@@ -16,15 +16,14 @@ import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
-import { sendInteractive, type InteractiveButton } from './whatsapp';
+import { sendInteractive, sendCtaUrl, type InteractiveButton } from './whatsapp';
 import {
   recipientButtonId,
   someoneNewButtonId,
-  approveButtonId,
-  cancelButtonId,
   disambiguateNames,
   truncateLabel,
 } from './whatsapp-buttons';
+import { screenTransfer } from './compliance';
 
 // ── Approve message helpers ──────────────────────────────────────────────────
 
@@ -990,6 +989,18 @@ async function sendApprovePickerTool(
       };
     }
   }
+  // Screen at card-show (read-only) BEFORE creating the draft
+  const transfersToday = await ctx.store.getTodayTransferCount(ctx.phone);
+  const screen = await screenTransfer({
+    amountUsd,
+    recipientName: String(args.recipient_name),
+    transfersToday,
+    sourceCountry: customer.senderCountry,
+    senderName: customer.fullName,
+  });
+  if (screen.status === 'blocked') {
+    return { error: "I'm sorry — I can't set up this transfer right now. If you think this is a mistake, reply 'help' and a teammate will follow up." };
+  }
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
     const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount);
@@ -1011,7 +1022,7 @@ async function sendApprovePickerTool(
       purpose: asEnum(PURPOSES, args.purpose),
       sourceOfFunds: asEnum(SOURCE_OF_FUNDS, args.source_of_funds),
       occupation: asEnum(OCCUPATIONS, args.occupation),
-      quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr },
+      quote: { feeUsd: q.feeUsd, fxRate: q.fxRate, amountInr: q.amountInr, feeSource: q.feeSource, totalChargeSource: q.totalChargeSource, totalChargeUsd: q.totalChargeUsd },
     });
     const summary = buildApproveSummary(
       q,
@@ -1020,10 +1031,8 @@ async function sendApprovePickerTool(
       String(args.payout_destination),
       fundingMethod,
     );
-    await sendInteractive(ctx.phone, summary, [
-      { id: approveButtonId(draftId), title: 'Approve & pay' },
-      { id: cancelButtonId(draftId), title: 'Cancel' },
-    ]);
+    const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
+    await sendCtaUrl(ctx.phone, `${summary}\n\nTap to pay securely, or reply cancel to stop.`, { displayText: 'Approve & Pay', url: payUrl });
     return { sent: true, draft_id: draftId };
   } catch (err) {
     if (err instanceof QuoteError) return { error: err.message };
