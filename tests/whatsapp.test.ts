@@ -5,6 +5,7 @@ import {
   sendTemplate,
   sendInteractive,
   sendList,
+  sendCtaUrl,
   RECIPIENT_TEMPLATE_NAME,
   RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
@@ -281,6 +282,82 @@ describe('sendList — richer interactive list, sendInteractive-shaped envelope'
     await expect(sendList('15551230000', 'Body', 'Choose', [
       { id: 'recipient:new', title: 'Someone new' },
     ])).rejects.toThrow();
+  });
+});
+
+describe('sendCtaUrl', () => {
+  it('POSTs interactive.type "cta_url" with action.name "cta_url" + parameters.display_text + parameters.url', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendCtaUrl(
+      '15551234567',
+      'Tap below to pay',
+      { displayText: 'Pay now', url: 'https://example.com/pay/abc' },
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain('/v21.0/');
+    expect(url).toContain('/messages');
+    const body = JSON.parse(init.body as string);
+    expect(body.messaging_product).toBe('whatsapp');
+    expect(body.to).toBe('15551234567');
+    expect(body.type).toBe('interactive');
+    expect(body.interactive.type).toBe('cta_url');
+    expect(body.interactive.body.text).toBe('Tap below to pay');
+    expect(body.interactive.action.name).toBe('cta_url');
+    expect(body.interactive.action.parameters.display_text).toBe('Pay now');
+    expect(body.interactive.action.parameters.url).toBe('https://example.com/pay/abc');
+  });
+
+  it('includes optional header and footer when passed', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendCtaUrl(
+      '15551234567',
+      'Body text',
+      { displayText: 'Open link', url: 'https://example.com/link' },
+      'Header text',
+      'Footer text',
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.interactive.header).toEqual({ type: 'text', text: 'Header text' });
+    expect(body.interactive.footer).toEqual({ text: 'Footer text' });
+  });
+
+  it('throws when url is not https://', async () => {
+    await expect(
+      sendCtaUrl('15551234567', 'Body', { displayText: 'Go', url: 'http://example.com' }),
+    ).rejects.toThrow('sendCtaUrl: URL must be https://');
+  });
+
+  it('throws when displayText is longer than 20 chars', async () => {
+    await expect(
+      sendCtaUrl('15551234567', 'Body', { displayText: 'This is way too long!', url: 'https://example.com' }),
+    ).rejects.toThrow('sendCtaUrl: displayText must be <= 20 chars');
+  });
+
+  it('on HTTP 470, falls back to sendText (second fetch posts type "text")', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        calls.push(JSON.parse(init.body as string).type);
+        if (calls.length === 1) return { ok: false, status: 470, text: async () => 'engagement' };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+
+    await sendCtaUrl(
+      '15551234567',
+      'Tap below to pay',
+      { displayText: 'Pay now', url: 'https://example.com/pay/abc' },
+    );
+
+    expect(calls).toEqual(['interactive', 'text']);
   });
 });
 
