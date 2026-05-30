@@ -450,6 +450,7 @@ async function resolveCurrencyAndRates(
   const sourceCurrency = resolveSendCurrency(
     partner,
     typeof requested === 'string' ? requested : undefined,
+    ctx.phone,
   );
   const rates = await getFxRates(sourceCurrency);
   return { customer, partner, sourceCurrency, rates };

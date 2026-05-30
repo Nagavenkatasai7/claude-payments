@@ -3,6 +3,8 @@ import {
   allowedSendCurrencies,
   resolveSendCurrency,
   countryForCurrency,
+  currencyForPhone,
+  countryForPhone,
 } from '@/lib/partner-currency';
 import { QuoteError } from '@/lib/fx';
 import type { Partner } from '@/lib/types';
@@ -55,5 +57,77 @@ describe('countryForCurrency', () => {
   });
   it('reverse-maps INR to IN', () => {
     expect(countryForCurrency('INR')).toBe('IN');
+  });
+});
+
+describe('countryForPhone', () => {
+  it('US number → US', () => {
+    expect(countryForPhone('15551234567')).toBe('US');
+  });
+  it('AE number (971 prefix) → AE', () => {
+    expect(countryForPhone('971501234567')).toBe('AE');
+  });
+  it('GB number → GB', () => {
+    expect(countryForPhone('447911123456')).toBe('GB');
+  });
+  it('IN number → IN', () => {
+    expect(countryForPhone('919876543210')).toBe('IN');
+  });
+  it('empty string → undefined', () => {
+    expect(countryForPhone('')).toBeUndefined();
+  });
+  it('unknown calling code → undefined', () => {
+    expect(countryForPhone('886123')).toBeUndefined();
+  });
+});
+
+describe('currencyForPhone', () => {
+  it('US number → USD', () => {
+    expect(currencyForPhone('15551234567')).toBe('USD');
+  });
+  it('AE number (971 prefix) → AED', () => {
+    expect(currencyForPhone('971501234567')).toBe('AED');
+  });
+  it('GB number → GBP', () => {
+    expect(currencyForPhone('447911123456')).toBe('GBP');
+  });
+  it('IN number → INR', () => {
+    expect(currencyForPhone('919876543210')).toBe('INR');
+  });
+  it('empty string → undefined', () => {
+    expect(currencyForPhone('')).toBeUndefined();
+  });
+  it('non-digit string → undefined', () => {
+    expect(currencyForPhone('abc')).toBeUndefined();
+  });
+  it('unknown calling code → undefined', () => {
+    expect(currencyForPhone('886123')).toBeUndefined();
+  });
+  it('greedy match: 971... → AED (not fallthrough to 9)', () => {
+    // 9 is not in the map, 97 is not in the map, 971 → AE → AED
+    expect(currencyForPhone('971501234567')).toBe('AED');
+  });
+});
+
+describe('resolveSendCurrency with senderPhone', () => {
+  const multiPartner = partner(['US', 'AE', 'GB']);
+
+  it('multi-currency + senderPhone AE, no request → returns AED', () => {
+    expect(resolveSendCurrency(multiPartner, undefined, '971501234567')).toBe('AED');
+  });
+  it('multi-currency + senderPhone US, no request → returns USD', () => {
+    expect(resolveSendCurrency(multiPartner, undefined, '15551234567')).toBe('USD');
+  });
+  it('explicit requested GBP overrides AE phone default', () => {
+    expect(resolveSendCurrency(multiPartner, 'GBP', '971501234567')).toBe('GBP');
+  });
+  it('phone currency not in allowed + no request → throws QuoteError', () => {
+    // partner only has US and AE; GB phone → GBP not in allowed → should throw
+    const usAePartner = partner(['US', 'AE']);
+    expect(() => resolveSendCurrency(usAePartner, undefined, '447911123456')).toThrow(QuoteError);
+  });
+  it('single-currency partner ignores senderPhone (regression: phone never overrides)', () => {
+    // partner(['US']) → USD always; GB phone must not change this
+    expect(resolveSendCurrency(partner(['US']), undefined, '447911123456')).toBe('USD');
   });
 });

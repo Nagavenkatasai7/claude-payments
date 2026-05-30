@@ -10,6 +10,7 @@ const PARTNER_SENTINEL_KEY = 'partner-backfill-v1';
 const SCHEDULE_PARTNER_SENTINEL_KEY = 'schedule-partner-backfill-v1';
 const SOURCE_AMOUNT_SENTINEL_KEY = 'transfer-source-amount-backfill-v1';
 const CORRIDOR_COMPLIANCE_SENTINEL_KEY = 'corridor-compliance-backfill-v1';
+const EXPAND_COUNTRIES_SENTINEL_KEY = 'expand-countries-ae-gb-v1';
 
 export async function backfillCustomersOnce(
   store: Store,
@@ -194,4 +195,26 @@ export async function backfillSourceAmountsOnce(
     schedulesBackfilled++;
   }
   return { transfersBackfilled, schedulesBackfilled, skippedSentinel: false };
+}
+
+/**
+ * Additive, idempotent expansion of every partner's send countries to include
+ * AE + GB (enables USD/AED/GBP). Union-based: never removes or clobbers a manual
+ * country list; only re-saves a partner whose set actually changed.
+ */
+export async function backfillExpandCountriesOnce(
+  store: Store,
+  partnerStore: PartnerStore,
+): Promise<{ partnersTouched: number; skippedSentinel: boolean }> {
+  const claimed = await store.claimMigrationFlag(EXPAND_COUNTRIES_SENTINEL_KEY);
+  if (!claimed) return { partnersTouched: 0, skippedSentinel: true };
+  let partnersTouched = 0;
+  for (const p of await partnerStore.listPartners()) {
+    const merged = Array.from(new Set([...p.countries, 'AE', 'GB']));
+    if (merged.length !== p.countries.length) {
+      await partnerStore.savePartner({ ...p, countries: merged as typeof p.countries, updatedAt: new Date().toISOString() });
+      partnersTouched++;
+    }
+  }
+  return { partnersTouched, skippedSentinel: false };
 }
