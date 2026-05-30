@@ -9,6 +9,7 @@ const MAX_RECENT = 5; // last 5 of the already-newest-first list (fixed token co
 const STATUS_LABEL: Record<TransferStatus, string> = {
   awaiting_payment: 'awaiting payment',
   paid: 'paid',
+  in_review: 'under review',
   delivered: 'delivered',
   cancelled: 'cancelled',
   blocked: 'on hold',

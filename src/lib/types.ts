@@ -5,6 +5,7 @@ export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer';
 export type TransferStatus =
   | 'awaiting_payment'
   | 'paid'
+  | 'in_review'
   | 'delivered'
   | 'cancelled'
   | 'blocked';

@@ -34,7 +34,7 @@ const MAX_HISTORY = 40;
 
 // Forward-only rank; higher = further along. Side/terminal states are never regressed.
 const STATUS_RANK: Record<TransferStatus, number> = {
-  blocked: -1, cancelled: -1, awaiting_payment: 0, paid: 1, delivered: 2,
+  blocked: -1, cancelled: -1, awaiting_payment: 0, paid: 1, in_review: 1, delivered: 2,
 };
 
 function trimHistory(messages: ChatMessage[]): ChatMessage[] {
@@ -92,7 +92,7 @@ export function createStore(redis: RedisLike) {
     ): Promise<Transfer | null> {
       const transfer = await this.getTransfer(transferId);
       if (!transfer) return null;                                   // unknown id → no-op (untrusted)
-      if (transfer.status === 'cancelled' || transfer.status === 'blocked') return null; // terminal
+      if (transfer.status === 'cancelled' || transfer.status === 'blocked' || transfer.status === 'in_review') return null; // terminal
       // Never regress: ignore anything not strictly forward of the current status.
       if (STATUS_RANK[status] <= STATUS_RANK[transfer.status]) return null; // dup / out-of-order / back
       const now = new Date().toISOString();
