@@ -7,17 +7,22 @@ const CALLING_CODE_TO_COUNTRY: Record<string, CountryCode> = {
   '1': 'US', '44': 'GB', '971': 'AE', '61': 'AU', '64': 'NZ', '65': 'SG', '91': 'IN',
 };
 
+/** Best-effort CountryCode from a normalized (digits-only) sender phone. undefined if unknown. */
+export function countryForPhone(normalizedPhone: string): CountryCode | undefined {
+  if (!normalizedPhone || !/^\d+$/.test(normalizedPhone)) return undefined;
+  for (let len = 3; len >= 1; len--) {
+    const country = CALLING_CODE_TO_COUNTRY[normalizedPhone.slice(0, len)];
+    if (country) return country;
+  }
+  return undefined;
+}
+
 /** Best-effort send currency from a normalized (digits-only) sender phone.
  *  e.g. '15551234567'→USD, '971501234567'→AED, '447911123456'→GBP. undefined if unknown.
  *  '+1' is heuristically US (NANP ambiguity accepted). */
 export function currencyForPhone(normalizedPhone: string): CurrencyCode | undefined {
-  if (!normalizedPhone || !/^\d+$/.test(normalizedPhone)) return undefined;
-  for (let len = 3; len >= 1; len--) {
-    const prefix = normalizedPhone.slice(0, len);
-    const country = CALLING_CODE_TO_COUNTRY[prefix];
-    if (country) return DEFAULT_CURRENCY_FOR_COUNTRY[country];
-  }
-  return undefined;
+  const country = countryForPhone(normalizedPhone);
+  return country ? DEFAULT_CURRENCY_FOR_COUNTRY[country] : undefined;
 }
 
 const CURRENCY_TO_COUNTRY = Object.fromEntries(
