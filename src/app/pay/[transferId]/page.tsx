@@ -1,5 +1,6 @@
 import { getStore } from '@/lib/store';
 import { getDraftStore } from '@/lib/draft-store';
+import type { CurrencyCode } from '@/lib/types';
 import { PayForm } from './pay-form';
 
 function Row({
@@ -19,16 +20,21 @@ function Row({
   );
 }
 
-function formatFundingMethod(method: string): string {
-  switch (method) {
-    case 'credit_card':
-      return 'Credit card';
-    case 'debit_card':
-      return 'Debit card';
-    case 'bank_transfer':
-      return 'Bank transfer';
-    default:
-      return method;
+/**
+ * Format any amount in any ISO-4217 currency using Intl.NumberFormat.
+ * Gives ₹ for INR, £ for GBP, AED for AED, $ for USD, etc.
+ * Falls back to a plain numeric string for unrecognised codes.
+ */
+function formatMoney(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch {
+    return `${amount} ${currency}`;
   }
 }
 
@@ -45,10 +51,14 @@ export default async function PayPage({
   type View = {
     id: string;
     recipientName: string;
-    amountInr: number;
-    amountUsd: number;
-    feeUsd: number;
-    totalChargeUsd: number;
+    // Destination (recipient) side
+    destAmount: number;
+    destCurrency: string;
+    // Source (sender) side
+    sourceAmount: number;
+    sourceFee: number;
+    sourceTotalCharge: number;
+    sourceCurrency: string;
     fundingMethod: string;
     awaitingPayment: boolean;
   };
@@ -56,13 +66,17 @@ export default async function PayPage({
   let view: View | null = null;
 
   if (transfer) {
+    const destCurrency: string = transfer.destinationCurrency ?? 'INR';
+    const sourceCurrency: string = transfer.sourceCurrency ?? 'USD';
     view = {
       id: transfer.id,
       recipientName: transfer.recipientName,
-      amountInr: transfer.amountInr,
-      amountUsd: transfer.amountUsd,
-      feeUsd: transfer.feeUsd,
-      totalChargeUsd: transfer.totalChargeUsd,
+      destAmount: transfer.amountInr,
+      destCurrency,
+      sourceAmount: transfer.amountSource ?? transfer.amountUsd,
+      sourceFee: transfer.feeSource ?? transfer.feeUsd,
+      sourceTotalCharge: transfer.totalChargeSource ?? transfer.totalChargeUsd,
+      sourceCurrency,
       fundingMethod: transfer.fundingMethod,
       awaitingPayment: transfer.status === 'awaiting_payment',
     };
@@ -70,14 +84,22 @@ export default async function PayPage({
     // Dual-lookup: treat the segment as a draftId
     const draft = await getDraftStore().getDraft(transferId);
     if (draft) {
+      const destCurrency: string = draft.quote.destinationCurrency ?? draft.destinationCurrency ?? 'INR';
+      const sourceCurrency: string = draft.sourceCurrency ?? 'USD';
+      const feeSource = draft.quote.feeSource ?? draft.quote.feeUsd;
+      const totalChargeSource =
+        draft.quote.totalChargeSource ??
+        draft.quote.totalChargeUsd ??
+        draft.amountSource + feeSource;
       view = {
         id: transferId,
         recipientName: draft.recipient.name,
-        amountInr: draft.quote.amountInr,
-        amountUsd: draft.amountUsd,
-        feeUsd: draft.quote.feeUsd,
-        totalChargeUsd:
-          draft.quote.totalChargeUsd ?? draft.amountUsd + draft.quote.feeUsd,
+        destAmount: draft.quote.amountInr,
+        destCurrency,
+        sourceAmount: draft.amountSource,
+        sourceFee: feeSource,
+        sourceTotalCharge: totalChargeSource,
+        sourceCurrency,
         fundingMethod: draft.fundingMethod,
         awaitingPayment: true, // a draft is always awaiting payment
       };
@@ -95,6 +117,11 @@ export default async function PayPage({
     );
   }
 
+  const feeLabel =
+    view.sourceFee === 0
+      ? 'FREE'
+      : formatMoney(view.sourceFee, view.sourceCurrency);
+
   return (
     <main className="payapp">
       <div className="card">
@@ -104,22 +131,19 @@ export default async function PayPage({
           <Row label="Recipient" value={view.recipientName} />
           <Row
             label="They receive"
-            value={`₹${view.amountInr.toLocaleString('en-IN')}`}
+            value={formatMoney(view.destAmount, view.destCurrency)}
           />
-          <Row label="Amount" value={`$${view.amountUsd.toFixed(2)}`} />
           <Row
-            label="Fee"
-            value={view.feeUsd === 0 ? 'FREE' : `$${view.feeUsd.toFixed(2)}`}
+            label="Amount"
+            value={formatMoney(view.sourceAmount, view.sourceCurrency)}
           />
+          <Row label="Fee" value={feeLabel} />
           <Row
             label="Total charge"
-            value={`$${view.totalChargeUsd.toFixed(2)}`}
+            value={formatMoney(view.sourceTotalCharge, view.sourceCurrency)}
             bold
           />
-          <Row
-            label="Paying with"
-            value={formatFundingMethod(view.fundingMethod)}
-          />
+          <Row label="Paying with" value="Bank transfer" />
         </div>
         {view.awaitingPayment ? (
           <PayForm transferId={view.id} fundingMethod={view.fundingMethod as import('@/lib/types').FundingMethod} />

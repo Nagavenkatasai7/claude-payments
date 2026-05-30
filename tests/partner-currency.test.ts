@@ -20,11 +20,14 @@ describe('allowedSendCurrencies', () => {
   it("['US'] → ['USD']", () => {
     expect(allowedSendCurrencies(partner(['US']))).toEqual(['USD']);
   });
-  it('maps multiple countries, drops payout-side IN, dedupes', () => {
-    expect(allowedSendCurrencies(partner(['US', 'GB', 'IN']))).toEqual(['USD', 'GBP']);
+  it('maps countries to currencies incl. INR (India is a valid source now), dedupes', () => {
+    expect(allowedSendCurrencies(partner(['US', 'GB', 'IN']))).toEqual(['USD', 'GBP', 'INR']);
   });
-  it('falls back to USD when no send countries', () => {
-    expect(allowedSendCurrencies(partner(['IN']))).toEqual(['USD']);
+  it('an India-only partner sends in INR', () => {
+    expect(allowedSendCurrencies(partner(['IN']))).toEqual(['INR']);
+  });
+  it('falls back to USD when the partner has no countries at all', () => {
+    expect(allowedSendCurrencies(partner([]))).toEqual(['USD']);
   });
   it('handles 3 send countries in stable order', () => {
     expect(allowedSendCurrencies(partner(['US', 'GB', 'CA']))).toEqual(['USD', 'GBP', 'CAD']);

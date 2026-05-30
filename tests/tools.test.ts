@@ -969,13 +969,18 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     expect(s).toContain('₹41,500');
     expect(s).toContain('within 10 minutes');
     expect(s).toContain('bank a/c ****6789');
-    expect(s).toContain('IFSC HDFC0001234');
+    // maskDestination now drops the literal word "IFSC" so the same function works
+    // for routing numbers, sort codes, IBANs, etc. The IFSC value is still present.
+    expect(s).toContain('HDFC0001234');
+    expect(s).not.toContain('IFSC HDFC0001234'); // "IFSC" keyword no longer prepended
     expect(s).toContain('Rate locked ~10 min');
   });
   it('masks the account even when fields arrive reversed (ifsc before acct) — never leaks the full number', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('bank a/c ****6789');
-    expect(s).toContain('IFSC HDFC0001234');
+    // maskDestination drops the literal "IFSC" keyword; the routing value is still present.
+    expect(s).toContain('HDFC0001234');
+    expect(s).not.toContain('IFSC HDFC0001234'); // "IFSC" keyword no longer prepended
     expect(s).not.toContain('123456789'); // the full account number must not appear
   });
   it('shows a UPI destination in full', () => {
@@ -1201,5 +1206,108 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
     expect(r.needs_edd).toBe(true);
     expect(r.sent).toBeUndefined();
     expect(r.payout_destination).toBe('mom@okhdfc'); // hydrated details returned for the follow-up
+  });
+});
+
+describe('any-to-any corridors — destination_country threading', () => {
+  // AED fallback rate: 1 USD = 1/0.27 ≈ 3.703 AED (from FALLBACK_FX_RATES.AED.toUsd = 0.27).
+  // USD→AED cross rate = USD.toUsd / AED.toUsd = 1 / 0.27 ≈ 3.703.
+  // For $500 USD: amountInr (= AED dest) = Math.round(500 * (1/0.27)) = Math.round(500 * 3.7037) = 1852.
+  // Note: getFxRates('AED') for INR destination will return FALLBACK; for source USD it's already cached.
+
+  function stubAedFetch() {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=AED')) {
+        // AED rates: toInr=23.1, toUsd=0.27
+        return { ok: true, json: async () => ({ rates: { INR: 23.1, USD: 0.27 } }) };
+      }
+      // USD rates: toInr=85 (standard mock)
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+  }
+
+  it('get_quote with destination_country AE returns destination_currency AED and amount_dest in AED (≠ INR amount)', async () => {
+    resetRateCacheForTests();
+    stubAedFetch();
+    const ctx = buildCtx(fakeRedis());
+    // Prime USD rates first (avoids AED mock intercepting a USD call)
+    const r = await executeTool('get_quote', {
+      amount_usd: 500,
+      funding_method: 'bank_transfer',
+      destination_country: 'AE',
+    }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.destination_currency).toBe('AED');
+    expect(r.destination_country).toBe('AE');
+    // amount_dest == amount_inr (same value, clearer alias for non-India)
+    expect(r.amount_dest).toBe(r.amount_inr);
+    // AED amount should NOT equal the INR amount for the same $500 send
+    // INR: Math.round(500 * 85) = 42500; AED: Math.round(500 / 0.27) ≈ 1852
+    expect(r.amount_inr).toBeLessThan(10000); // AED is much smaller than INR
+    expect(r.amount_inr).toBeGreaterThan(0);
+    // The rate is the cross-rate USD→AED ≈ 3.7
+    expect((r.fx_rate as number)).toBeCloseTo(1 / 0.27, 1);
+  });
+
+  it('get_quote with NO destination_country defaults to India (INR, back-compat)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', {
+      amount_usd: 500,
+      funding_method: 'bank_transfer',
+    }, ctx);
+    expect(r.destination_currency).toBe('INR');
+    expect(r.destination_country).toBe('IN');
+    expect(r.amount_inr).toBe(Math.round(500 * MOCK_RATE));
+  });
+
+  it('send_approve_picker to AE creates a draft with destinationCurrency AED in the quote', async () => {
+    resetRateCacheForTests();
+    stubAedFetch();
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15550099999');
+    await ctx.customerStore.upsertOnFirstInbound('15550099999');
+    // Prime the rate cache for USD first
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=AED')) {
+        return { ok: true, json: async () => ({ rates: { INR: 23.1, USD: 0.27 } }) };
+      }
+      // WhatsApp API or USD
+      if (u.includes('graph.facebook.com') || u.includes('whatsapp')) {
+        return { ok: true, text: async () => '' };
+      }
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200,
+      funding_method: 'bank_transfer',
+      recipient_name: 'Ali',
+      recipient_phone: '971501234567',
+      payout_method: 'bank',
+      payout_destination: 'AE12 0000 0000 0000 1234 567',
+      destination_country: 'AE',
+    }, ctx);
+    expect(r.sent).toBe(true);
+    expect(typeof r.draft_id).toBe('string');
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft).not.toBeNull();
+    expect(draft!.destinationCurrency).toBe('AED');
+    expect(draft!.destinationCountry).toBe('AE');
+    expect(draft!.quote.destinationCurrency).toBe('AED');
+  });
+
+  it('buildApproveSummary with AED destination formats rate and dest amount in AED (not ₹)', () => {
+    const q = baseQuote({
+      fxRate: 3.7,      // USD→AED cross rate
+      amountInr: 1850,  // AED dest amount (field name kept for back-compat)
+      destinationCurrency: 'AED',
+    });
+    const s = buildApproveSummary(q, 'Ali', 'bank', 'AE12 0000 0000 0000 1234 567', 'bank_transfer', 'AED');
+    // Should show AED, not INR (₹)
+    expect(s).toContain('AED');
+    expect(s).not.toContain('₹');
+    expect(s).toContain('1 USD = AED');
   });
 });

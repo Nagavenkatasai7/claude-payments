@@ -15,13 +15,14 @@ export interface Quote {
   amountUsd: number;
   feeUsd: number;
   totalChargeUsd: number;
-  fxRate: number;
-  amountInr: number;
+  fxRate: number;                 // source -> destination cross-rate
+  amountInr: number;              // amount in the DESTINATION currency (name kept for back-compat; = INR for India sends)
   deliveryEstimate: string;
   sourceCurrency: CurrencyCode;   // NEW (P4)
   amountSource: number;           // NEW (P4)
   feeSource: number;              // NEW (P4)
   totalChargeSource: number;      // NEW (P4)
+  destinationCurrency?: CurrencyCode;  // NEW (any-to-any) — currency amountInr/fxRate are in (absent ⇒ INR)
 }
 
 export interface Transfer {
@@ -157,6 +158,8 @@ export interface Draft {
   amountUsd: number;              // USD-equivalent (for cap re-check)
   amountSource: number;           // NEW (P4)
   sourceCurrency: CurrencyCode;   // NEW (P4)
+  destinationCountry?: CountryCode;   // NEW (any-to-any) — absent ⇒ IN
+  destinationCurrency?: CurrencyCode; // NEW (any-to-any) — absent ⇒ INR
   fundingMethod: FundingMethod;
   // ── KYC Travel-Rule / EDD (optional; populated only on the EDD path) ──
   recipientLegalName?: string;
@@ -171,6 +174,7 @@ export interface Draft {
     feeSource?: number;
     totalChargeSource?: number;
     totalChargeUsd?: number;
+    destinationCurrency?: CurrencyCode; // NEW (any-to-any)
   };
   createdAt: string; // ISO-8601
 }

@@ -124,3 +124,33 @@ describe('quote (non-USD coverage)', () => {
     expect(() => quote(2362, 'GBP', GBP, 'bank_transfer', 0)).toThrow(QuoteError); // 2362×1.27=2999.74 > 2999
   });
 });
+
+describe('quote — any-to-any cross-currency destination', () => {
+  const USD2 = { toInr: 85, toUsd: 1 };
+  it('USD→INR is byte-for-byte the legacy result (5-arg call defaults to INR)', () => {
+    const q = quote(500, 'USD', USD2, 'bank_transfer', 1);
+    expect(q.amountInr).toBe(42500);
+    expect(q.fxRate).toBe(85);
+    expect(q.destinationCurrency).toBe('INR');
+    expect(q.amountUsd).toBe(500);
+  });
+  it('USD→AED uses the USD-pivot cross-rate', () => {
+    const q = quote(500, 'USD', USD2, 'bank_transfer', 1, 'AED', 0.27); // AED.toUsd
+    expect(q.destinationCurrency).toBe('AED');
+    expect(q.fxRate).toBeCloseTo(1 / 0.27, 3);     // ≈3.70
+    expect(q.amountInr).toBe(Math.round(500 * (1 / 0.27))); // dest amount in AED ≈1852
+    expect(q.amountUsd).toBe(500);                  // caps still USD-equiv
+  });
+  it('INR→AED (sender in India) cross-converts via USD pivot', () => {
+    const INR = { toInr: 1, toUsd: 0.0118 };
+    const q = quote(10000, 'INR', INR, 'bank_transfer', 1, 'AED', 0.27);
+    expect(q.destinationCurrency).toBe('AED');
+    expect(q.amountUsd).toBe(118);                  // 10000×0.0118, within MIN/MAX
+    expect(q.amountInr).toBe(Math.round(10000 * (0.0118 / 0.27))); // ≈437 AED
+  });
+  it('explicit INR destination matches the default path', () => {
+    const q = quote(500, 'USD', USD2, 'bank_transfer', 1, 'INR', 0.0118);
+    expect(q.amountInr).toBe(42500); // INR branch uses rates.toInr, ignores destToUsd
+    expect(q.fxRate).toBe(85);
+  });
+});

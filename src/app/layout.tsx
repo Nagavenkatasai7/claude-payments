@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 
 export const metadata = {
   title: 'SendHome',
-  description: 'Send money to family in India via WhatsApp',
+  description: 'Send money across borders via WhatsApp',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

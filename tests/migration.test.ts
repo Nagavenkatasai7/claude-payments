@@ -7,6 +7,7 @@ import {
   backfillSourceAmountsOnce,
   backfillCorridorComplianceOnce,
   backfillExpandCountriesOnce,
+  backfillAllCorridorsOnce,
 } from '@/lib/migration';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
@@ -571,5 +572,36 @@ describe('backfillExpandCountriesOnce', () => {
     expect(p?.countries).toContain('CA');
     expect(p?.countries).toContain('AE');
     expect(p?.countries).toContain('GB');
+  });
+});
+
+describe('backfillAllCorridorsOnce (any-to-any)', () => {
+  it('unions all 8 Phase-1 countries into every partner', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    await partnerStore.savePartner({
+      id: 'default', name: 'SendHome Default', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const result = await backfillAllCorridorsOnce(store, partnerStore);
+    expect(result.skippedSentinel).toBe(false);
+    expect(result.partnersTouched).toBeGreaterThanOrEqual(1);
+    const p = await partnerStore.getPartner('default');
+    for (const c of ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']) {
+      expect(p?.countries).toContain(c);
+    }
+  });
+  it('is idempotent (second run touches 0, sentinel claimed)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    await partnerStore.savePartner({
+      id: 'default', name: 'D', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await backfillAllCorridorsOnce(store, partnerStore);
+    const second = await backfillAllCorridorsOnce(store, partnerStore);
+    expect(second).toEqual({ partnersTouched: 0, skippedSentinel: true });
   });
 });

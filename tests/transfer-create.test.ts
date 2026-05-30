@@ -283,3 +283,57 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     expect(t.purpose).toBe('family_support');
   });
 });
+
+describe('createTransfer any-to-any corridors', () => {
+  it('a transfer with destinationCountry AE has destinationCurrency AED and amountInr in AED', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    // Mock: USD rates return {INR:85}; AED rates return {INR:23.1, USD:0.27}
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=AED')) {
+        return { ok: true, json: async () => ({ rates: { INR: 23.1, USD: 0.27 } }) };
+      }
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      destinationCountry: 'AE',
+      destinationCurrency: 'AED',
+    });
+    expect(t.destinationCountry).toBe('AE');
+    expect(t.destinationCurrency).toBe('AED');
+    // Cross-rate USD→AED: 1 / 0.27 ≈ 3.703; 200 USD → ~741 AED
+    expect(t.amountInr).toBeGreaterThan(500);   // AED amount, much less than 200 * 85 = 17000 INR
+    expect(t.amountInr).toBeLessThan(5000);      // but reasonable for ~740 AED
+    expect(t.amountUsd).toBeCloseTo(200, 0);     // USD-equiv unchanged
+  });
+
+  it('a transfer with NO destinationCountry defaults to IN/INR (back-compat invariant)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    // Standard mock: USD→INR=85
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ rates: { INR: 85 } }),
+    })));
+    const t = await createTransfer(store, partnerStore, mvs, base);
+    expect(t.destinationCountry).toBe('IN');
+    expect(t.destinationCurrency).toBe('INR');
+    expect(t.amountInr).toBe(Math.round(200 * 85)); // 17000 INR — identical to old behavior
+  });
+
+  it('existing India tests are unchanged — US→IN transfer complianceStatus cleared at $200', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const partnerStore = createPartnerStore(redis);
+    const mvs = createMonthlyVolumeStore(redis);
+    const t = await createTransfer(store, partnerStore, mvs, base);
+    expect(t.complianceStatus).toBe('cleared');
+    expect(t.destinationCurrency).toBe('INR');
+  });
+});

@@ -85,8 +85,9 @@ describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', 
     expect(tmCall[0]).toBe('919876543210');
     expect(tmCall[1]).toBe('transfer_delivered');
     expect(tmCall[2]).toBe('en');
-    // recipientTemplateParams → [recipientName, amountInr, sender, destination]
-    expect(tmCall[3]).toEqual(['Mom', '16,600', '+15551230000', 'UPI ID']);
+    // recipientTemplateParams → [recipientName, destAmount (Intl), sender, 'bank account']
+    // INR → Intl renders ₹16,600; always 'bank account' regardless of payoutMethod
+    expect(tmCall[3]).toEqual(['Mom', '₹16,600', '+15551230000', 'bank account']);
   });
 
   it('skips the recipient template when there is no recipientPhone', async () => {

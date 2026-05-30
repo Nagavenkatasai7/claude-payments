@@ -35,20 +35,20 @@ export function countryForCurrency(c: CurrencyCode): CountryCode {
   return country;
 }
 
-// Send currencies = the partner's operating countries minus payout-side IN,
-// mapped to home currency, de-duplicated, stable order. ['US'] → ['USD'].
+// Send currencies = the partner's operating countries mapped to home currency,
+// de-duplicated, stable order. ['US'] → ['USD']. Any-to-any: India (INR) is now a
+// valid SOURCE too (a sender in India can send out), so it is NO LONGER excluded.
 export function allowedSendCurrencies(partner: Partner): CurrencyCode[] {
   const seen = new Set<CurrencyCode>();
   const out: CurrencyCode[] = [];
   for (const country of partner.countries) {
-    if (country === 'IN') continue; // payout-side only in v1
     const cur = DEFAULT_CURRENCY_FOR_COUNTRY[country];
     if (!seen.has(cur)) {
       seen.add(cur);
       out.push(cur);
     }
   }
-  if (out.length === 0) out.push('USD'); // safety net for a partner with no send countries
+  if (out.length === 0) out.push('USD'); // safety net for a partner with no countries
   return out;
 }
 

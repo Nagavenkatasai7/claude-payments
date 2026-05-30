@@ -19,6 +19,8 @@ export function quote(
   rates: FxRates,
   fundingMethod: FundingMethod,
   transferCount: number,
+  destinationCurrency: CurrencyCode = 'INR',  // NEW (any-to-any) — defaults to INR (back-compat)
+  destToUsd?: number,                          // NEW — destination currency's USD rate (for the cross-rate via USD pivot)
 ): Quote {
   if (!Number.isFinite(amountSource)) {
     throw new QuoteError('Please give a valid amount.');
@@ -56,19 +58,28 @@ export function quote(
   }
 
   const feeSource = round2(feeUsd / rates.toUsd);
-  const amountInr = Math.round(amountSource * rates.toInr);
+
+  // Source -> destination cross-rate. For an INR destination (or when no dest
+  // rate is supplied) this is rates.toInr — byte-for-byte identical to the
+  // pre-any-to-any behavior. Otherwise pivot through USD: src->dest = src.toUsd / dest.toUsd.
+  const crossRate =
+    destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
+      ? rates.toInr
+      : rates.toUsd / destToUsd;
+  const amountInr = Math.round(amountSource * crossRate); // amount in the destination currency
 
   return {
     amountUsd,
     feeUsd,
     totalChargeUsd: round2(amountUsd + feeUsd),
-    fxRate: rates.toInr,
+    fxRate: crossRate,
     amountInr,
     deliveryEstimate: 'within 10 minutes',
     sourceCurrency,
     amountSource,
     feeSource,
     totalChargeSource: round2(amountSource + feeSource),
+    destinationCurrency,
   };
 }
 

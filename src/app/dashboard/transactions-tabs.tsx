@@ -15,9 +15,6 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]['key'];
 
-function inr(amount: number): string {
-  return `₹${amount.toLocaleString('en-IN')}`;
-}
 function humanizeFunding(method: Transfer['fundingMethod']): string {
   if (method === 'credit_card') return 'Credit card';
   if (method === 'debit_card') return 'Debit card';
@@ -136,8 +133,8 @@ export function TransactionsTabs({
                 <th>Tier</th>
                 <th>Amount</th>
                 <th>Funding</th>
-                <th>US Payment</th>
-                <th>India Delivery</th>
+                <th>Payment received</th>
+                <th>Recipient gets</th>
                 <th>Compliance</th>
                 <th>Status</th>
                 <th>Assignee</th>
@@ -153,7 +150,7 @@ export function TransactionsTabs({
                       {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
                     </div>
                   </td>
-                  <td>{t.sourceCountry}</td>
+                  <td>{t.sourceCountry} → {t.destinationCountry}</td>
                   <td>{partnerById[t.partnerId]?.name ?? t.partnerId}</td>
                   <td>
                     {tierByPhone[t.phone] ? (
@@ -169,7 +166,9 @@ export function TransactionsTabs({
                     {t.sourceCurrency !== 'USD' && (
                       <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
                     )}
-                    <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+                    <div className="sh-recipient-sub">
+                      → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
+                    </div>
                   </td>
                   <td>{humanizeFunding(t.fundingMethod)}</td>
                   <td><Stage at={t.paidAt} fallback="pending" /></td>

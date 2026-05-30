@@ -9,7 +9,7 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type {
-  CurrencyCode, FundingMethod, PartnerId, PayoutMethod, Transfer,
+  CountryCode, CurrencyCode, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
@@ -23,6 +23,8 @@ export interface CreateTransferInput {
   fundingMethod: FundingMethod;
   amountSource: number;          // CHANGED (P4): was amountUsd
   sourceCurrency: CurrencyCode;  // NEW (P4)
+  destinationCountry?: CountryCode;  // NEW (any-to-any) — absent ⇒ DEFAULT_DESTINATION_COUNTRY ('IN')
+  destinationCurrency?: CurrencyCode; // NEW (any-to-any) — absent ⇒ DEFAULT_DESTINATION_CURRENCY ('INR')
   partnerId: PartnerId;          // NEW (P4): from the owning customer
   // ── KYC Travel-Rule (Tier 2) + EDD (Tier 4) — all optional (dormant) ──
   recipientLegalName?: string;
@@ -41,7 +43,13 @@ export async function createTransfer(
 ): Promise<Transfer> {
   const transferCount = await store.getTransferCount(input.phone);
   const rates = await getFxRates(input.sourceCurrency);
-  const q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount);
+  // Resolve destination — default to IN/INR for full back-compat (all existing tests unchanged).
+  const destinationCountry = input.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY;
+  const destinationCurrency = input.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY;
+  // Fetch dest rates for the cross-rate. For INR this returns {toInr:1,toUsd:0.0118}
+  // and quote() takes the INR branch (rates.toInr) — identical to the pre-any-to-any behavior.
+  const destRates = await getFxRates(destinationCurrency);
+  const q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates.toUsd);
   const transfersToday = await store.getTodayTransferCount(input.phone);
 
   const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
@@ -89,8 +97,8 @@ export async function createTransfer(
     createdAt: new Date().toISOString(),
     sourceCountry,
     sourceCurrency: input.sourceCurrency,
-    destinationCountry: DEFAULT_DESTINATION_COUNTRY,
-    destinationCurrency: DEFAULT_DESTINATION_CURRENCY,
+    destinationCountry,
+    destinationCurrency,
     partnerId: input.partnerId,
     amountSource: q.amountSource,
     feeSource: q.feeSource,
