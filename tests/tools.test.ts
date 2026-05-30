@@ -933,6 +933,45 @@ describe('resolve_recipient — typed-name lookup of saved recipients', () => {
   });
 });
 
+describe('get_quote cap guard (Bundle D)', () => {
+  it('refuses an over-per-transfer amount with a cap result (no quote)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 700, funding_method: 'bank_transfer' }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.reason).toBe('over_per_transfer_cap');
+    expect(r.fee_usd).toBeUndefined();        // NO quote presented
+    expect(r.amount_inr).toBeUndefined();
+    expect(typeof r.kyc_url).toBe('string');  // T0 → kyc_url surfaced
+    expect(r.per_transfer_cap_usd).toBe(500);
+  });
+
+  it('refuses an over-daily amount and reports the remaining', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await ctx.dailyVolumeStore.addCents(PHONE, 40_000); // $400 already used today
+    const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.reason).toBe('over_daily_cap');
+    expect(r.today_remaining_usd).toBe(100); // $500 cap − $400 used
+    expect(r.fee_usd).toBeUndefined();
+  });
+
+  it('guards the receive-first (amount_inr) path too', async () => {
+    const ctx = buildCtx(fakeRedis());
+    // 70000 INR / 85 ≈ $823 USD-equiv → over the $500 per-transfer cap
+    const r = await executeTool('get_quote', { amount_inr: 70000, funding_method: 'bank_transfer' }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.fee_usd).toBeUndefined();
+  });
+
+  it('still returns a normal quote when within cap (no within_cap field)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const r = await executeTool('get_quote', { amount_usd: 300, funding_method: 'bank_transfer' }, ctx);
+    expect(r.within_cap).toBeUndefined();     // success path unchanged
+    expect(r.fee_usd).toBe(0);                // first transfer free
+    expect(r.amount_inr).toBe(Math.round(300 * MOCK_RATE));
+  });
+});
+
 describe('create_transfer records the sender\'s funding method (Bundle C)', () => {
   it('writes lastFundingMethod onto the customer after a successful create', async () => {
     const ctx = buildCtx(fakeRedis());

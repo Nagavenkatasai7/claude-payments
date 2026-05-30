@@ -505,7 +505,7 @@ async function getQuoteTool(
 ): Promise<ToolResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const { sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+    const { customer, sourceCurrency, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
 
     // Receive-first (Win A): when a finite, positive target rupee amount is
     // given, back-solve the send amount; the recipient gets exactly that INR
@@ -516,6 +516,38 @@ async function getQuoteTool(
       Number.isFinite(targetInr) && targetInr > 0
         ? sourceForInr(targetInr, rates)
         : Number(args.amount_usd);
+
+    // Cap/tier guard (Bundle D) — refuse BEFORE quoting so the bot never presents
+    // an unfulfillable quote. Mirrors check_send_limit's cap result (caps-only; EDD
+    // is unchanged and stays on check_send_limit). Runs on the resolved amountSource,
+    // so it covers the amount_inr (receive-first) path too. Only when the amount is
+    // finite — a missing/NaN amount falls through to quote()'s "valid amount" error.
+    const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
+    if (Number.isFinite(amountUsd)) {
+      const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100));
+      if (!ev.withinCap) {
+        let kycUrl: string | undefined;
+        if (ev.tier === 'T0' || ev.tier === 'Suspended') {
+          const start = await ctx.kycProvider.startVerification({
+            customerId: ctx.phone,
+            senderPhone: ctx.phone,
+          });
+          kycUrl = start.url;
+        }
+        return {
+          within_cap: false,
+          tier: ev.tier,
+          reason: ev.reason,
+          daily_cap_usd: ev.dailyCapCents / 100,
+          per_transfer_cap_usd: ev.perTransferCapCents / 100,
+          today_used_usd: ev.todayUsedCents / 100,
+          today_remaining_usd: ev.todayRemainingCents / 100,
+          day_of_window: ev.dayOfWindow,
+          kyc_url: kycUrl,
+        };
+      }
+    }
 
     const q = quote(
       amountSource,
