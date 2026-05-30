@@ -1005,19 +1005,34 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     expect(s).toContain('₹41,500');
     expect(s).toContain('within 10 minutes');
     expect(s).toContain('bank a/c ****6789');
-    // maskDestination now drops the literal word "IFSC" so the same function works
-    // for routing numbers, sort codes, IBANs, etc. The IFSC value is still present.
-    expect(s).toContain('HDFC0001234');
-    expect(s).not.toContain('IFSC HDFC0001234'); // "IFSC" keyword no longer prepended
+    // The card now shows ONLY the last 4 — no IFSC/routing code, no IBAN body —
+    // so it is leak-proof in every country format.
+    expect(s).not.toContain('HDFC0001234');
     expect(s).toContain('Rate locked ~10 min');
   });
   it('masks the account even when fields arrive reversed (ifsc before acct) — never leaks the full number', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('bank a/c ****6789');
-    // maskDestination drops the literal "IFSC" keyword; the routing value is still present.
-    expect(s).toContain('HDFC0001234');
-    expect(s).not.toContain('IFSC HDFC0001234'); // "IFSC" keyword no longer prepended
-    expect(s).not.toContain('123456789'); // the full account number must not appear
+    expect(s).not.toContain('HDFC0001234');     // bank code is dropped entirely
+    expect(s).not.toContain('123456789');       // the full account number must not appear
+  });
+  it('never leaks an AE IBAN (the previous heuristic showed it whole)', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'AE070331234567890123456', 'bank_transfer');
+    expect(s).toContain('bank a/c ****3456');
+    expect(s).not.toContain('AE070331234567890123456');
+    expect(s).not.toContain('33123456789'); // no run of the IBAN body survives
+  });
+  it('never leaks a US account when routing and account are similar lengths', () => {
+    // routing first, account second — both 9 digits; the account must not leak
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '021000021 123456789', 'bank_transfer');
+    expect(s).toMatch(/bank a\/c \*\*\*\*\d{4}/);
+    expect(s).not.toContain('123456789'); // full account never shown
+    expect(s).not.toContain('021000021'); // full routing never shown either
+  });
+  it('never leaks a hyphenated NZ account number', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '01-0123-0123456-00', 'bank_transfer');
+    expect(s).toContain('bank a/c ****3456'); // longest digit run is 0123456
+    expect(s).not.toContain('0123456');        // the account body must not appear
   });
   it('shows a UPI destination in full', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
@@ -1130,19 +1145,19 @@ describe('maskAccount — exported helper', () => {
     expect(maskAccount('upi', 'mom@okhdfc')).toBe('mom@okhdfc');
   });
 
-  it('bank: masks the longest digit run to ****<last4>', () => {
-    // Account number (longer) wins over routing/IFSC
-    expect(maskAccount('bank', '123456789 HDFC0001234')).toBe('****6789 HDFC0001234');
+  it('bank: collapses to ****<last4> of the longest digit run (account)', () => {
+    // Account number (longer) wins over routing/IFSC; nothing else is shown
+    expect(maskAccount('bank', '123456789 HDFC0001234')).toBe('****6789');
   });
 
-  it('bank: masks correctly when IFSC comes first (reversed order)', () => {
-    expect(maskAccount('bank', 'HDFC0001234 123456789')).toBe('HDFC0001234 ****6789');
+  it('bank: same result when IFSC comes first (field order is irrelevant)', () => {
+    expect(maskAccount('bank', 'HDFC0001234 123456789')).toBe('****6789');
   });
 
-  it('bank: does not include the raw account number in output', () => {
-    const result = maskAccount('bank', '999123456789 HDFC0001234');
-    expect(result).not.toContain('999123456789');
-    expect(result).toContain('****6789');
+  it('bank: never includes the raw account number, even with no spaces (IBAN)', () => {
+    const result = maskAccount('bank', 'AE070331234567890123456');
+    expect(result).not.toContain('AE070331234567890123456');
+    expect(result).toBe('****3456');
   });
 });
 
