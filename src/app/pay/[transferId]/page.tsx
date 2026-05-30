@@ -1,4 +1,5 @@
 import { getStore } from '@/lib/store';
+import { getDraftStore } from '@/lib/draft-store';
 import { PayForm } from './pay-form';
 
 function Row({
@@ -39,12 +40,56 @@ export default async function PayPage({
   const { transferId } = await params;
   const transfer = await getStore().getTransfer(transferId);
 
-  if (!transfer) {
+  // ── Build a unified view object so JSX is shared between both paths ──
+
+  type View = {
+    id: string;
+    recipientName: string;
+    amountInr: number;
+    amountUsd: number;
+    feeUsd: number;
+    totalChargeUsd: number;
+    fundingMethod: string;
+    awaitingPayment: boolean;
+  };
+
+  let view: View | null = null;
+
+  if (transfer) {
+    view = {
+      id: transfer.id,
+      recipientName: transfer.recipientName,
+      amountInr: transfer.amountInr,
+      amountUsd: transfer.amountUsd,
+      feeUsd: transfer.feeUsd,
+      totalChargeUsd: transfer.totalChargeUsd,
+      fundingMethod: transfer.fundingMethod,
+      awaitingPayment: transfer.status === 'awaiting_payment',
+    };
+  } else {
+    // Dual-lookup: treat the segment as a draftId
+    const draft = await getDraftStore().getDraft(transferId);
+    if (draft) {
+      view = {
+        id: transferId,
+        recipientName: draft.recipient.name,
+        amountInr: draft.quote.amountInr,
+        amountUsd: draft.amountUsd,
+        feeUsd: draft.quote.feeUsd,
+        totalChargeUsd:
+          draft.quote.totalChargeUsd ?? draft.amountUsd + draft.quote.feeUsd,
+        fundingMethod: draft.fundingMethod,
+        awaitingPayment: true, // a draft is always awaiting payment
+      };
+    }
+  }
+
+  if (!view) {
     return (
       <main className="payapp">
         <div className="card">
           <div className="brand">SendHome</div>
-          <h1>Transfer not found</h1>
+          <h1>This link is no longer active</h1>
         </div>
       </main>
     );
@@ -56,30 +101,28 @@ export default async function PayPage({
         <div className="brand">SendHome</div>
         <h1>Secure payment</h1>
         <div className="summary">
-          <Row label="Recipient" value={transfer.recipientName} />
+          <Row label="Recipient" value={view.recipientName} />
           <Row
             label="They receive"
-            value={`₹${transfer.amountInr.toLocaleString('en-IN')}`}
+            value={`₹${view.amountInr.toLocaleString('en-IN')}`}
           />
-          <Row label="Amount" value={`$${transfer.amountUsd.toFixed(2)}`} />
+          <Row label="Amount" value={`$${view.amountUsd.toFixed(2)}`} />
           <Row
             label="Fee"
-            value={
-              transfer.feeUsd === 0 ? 'FREE' : `$${transfer.feeUsd.toFixed(2)}`
-            }
+            value={view.feeUsd === 0 ? 'FREE' : `$${view.feeUsd.toFixed(2)}`}
           />
           <Row
             label="Total charge"
-            value={`$${transfer.totalChargeUsd.toFixed(2)}`}
+            value={`$${view.totalChargeUsd.toFixed(2)}`}
             bold
           />
           <Row
             label="Paying with"
-            value={formatFundingMethod(transfer.fundingMethod)}
+            value={formatFundingMethod(view.fundingMethod)}
           />
         </div>
-        {transfer.status === 'awaiting_payment' ? (
-          <PayForm transferId={transfer.id} fundingMethod={transfer.fundingMethod} />
+        {view.awaitingPayment ? (
+          <PayForm transferId={view.id} fundingMethod={view.fundingMethod as import('@/lib/types').FundingMethod} />
         ) : (
           <p className="done">&#x2705; Payment complete &mdash; money sent!</p>
         )}
