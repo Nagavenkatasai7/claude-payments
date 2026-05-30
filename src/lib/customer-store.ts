@@ -1,7 +1,7 @@
 import { Redis } from '@upstash/redis';
 import { env } from './env';
 import type { RedisLike, Store } from './store';
-import type { Customer } from './types';
+import type { Customer, FundingMethod } from './types';
 import { DEFAULT_SENDER_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 
 export function createCustomerStore(redis: RedisLike, store: Store) {
@@ -67,6 +67,18 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
 
       await this.saveCustomer(customer);
       return { customer, wasCreated: !minAt };
+    },
+
+    async recordFundingMethod(senderPhone: string, method: FundingMethod): Promise<void> {
+      const customer = await this.getCustomer(senderPhone);
+      if (!customer) return; // nothing to stick to yet (no-op for brand-new senders)
+      const nowIso = new Date().toISOString();
+      await this.saveCustomer({
+        ...customer,
+        lastFundingMethod: method,
+        lastFundingMethodAt: nowIso,
+        updatedAt: nowIso,
+      });
     },
 
     async listCustomers(): Promise<Customer[]> {

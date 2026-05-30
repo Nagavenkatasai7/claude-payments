@@ -122,3 +122,28 @@ describe('transfer-memory: recent-transfers module + rendered note stay partner-
     expect(note).toContain('on hold'); // blocked surfaced as the soft label
   });
 });
+
+describe('Bundle C: [SENDER DEFAULTS] note + new tool modules stay partner-/compliance-/PII-blind', () => {
+  it('the rendered sender-defaults note leaks no internal term', async () => {
+    const { getSenderDefaultsNote } = await import('@/lib/sender-defaults');
+    const note = getSenderDefaultsNote({
+      senderPhone: '15551234567',
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'default',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      lastFundingMethod: 'bank_transfer',
+      lastFundingMethodAt: new Date().toISOString(),
+    }).toLowerCase();
+    for (const term of ['partner', 'corridor', 'compliance', 'watchlist', 'sanctions', 'provider', 'govid', 'residentialaddress'])
+      expect(note).not.toContain(term);
+  });
+
+  it('sender-defaults.ts source contains no forbidden internal term', () => {
+    const src = readFileSync(resolve(process.cwd(), 'src/lib/sender-defaults.ts'), 'utf-8').toLowerCase();
+    for (const term of ['partner', 'corridor', 'watchlist', 'sanctions'])
+      expect(src).not.toContain(term);
+  });
+});

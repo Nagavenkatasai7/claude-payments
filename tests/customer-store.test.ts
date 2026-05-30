@@ -160,6 +160,25 @@ describe('customer-store P1: senderCountry', () => {
   });
 });
 
+describe('recordFundingMethod (Bundle C sticky funding)', () => {
+  it('persists lastFundingMethod + lastFundingMethodAt on an existing customer', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    await cs.upsertOnFirstInbound(PHONE); // creates the customer record
+    await cs.recordFundingMethod(PHONE, 'credit_card');
+    const c = await cs.getCustomer(PHONE);
+    expect(c?.lastFundingMethod).toBe('credit_card');
+    expect(typeof c?.lastFundingMethodAt).toBe('string');
+  });
+  it('is a no-op when there is no customer record yet', async () => {
+    const redis = fakeRedis();
+    const cs = createCustomerStore(redis, createStore(redis));
+    await cs.recordFundingMethod(PHONE, 'bank_transfer'); // must not throw
+    expect(await cs.getCustomer(PHONE)).toBeNull();
+  });
+});
+
 describe('customer-store P2: partnerId', () => {
   it('upsertOnFirstInbound writes partnerId: default on a brand-new customer', async () => {
     const store = createStore(fakeRedis());

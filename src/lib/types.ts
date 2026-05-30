@@ -226,6 +226,9 @@ export interface Customer {
   sourceOfFunds?: SourceOfFunds;
   occupation?: Occupation;
   eddCapturedAt?: string;        // ISO — when EDD enums were last supplied
+  // ── Sticky funding (Bundle C) — the sender's last-used funding method ──
+  lastFundingMethod?: FundingMethod;
+  lastFundingMethodAt?: string;   // ISO-8601; powers the 90-day staleness check
   country?: string;             // legacy KYC-provider free-text — DO NOT use for routing
   senderCountry: CountryCode;   // (P1) the routing field
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary

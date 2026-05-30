@@ -11,6 +11,7 @@ import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies } from './partner-currency';
 import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
+import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 
 const MAX_TOOL_ROUNDS = 6;
 const FALLBACK_REPLY =
@@ -71,6 +72,11 @@ export function createAgent(deps: AgentDeps) {
     // the customer has no history ⇒ nothing is injected (behavior unchanged).
     const recentNote = await getRecentTransfersNote(phone, deps.store);
 
+    // Sticky funding default (Bundle C): surfaced once at round 0 so the bot can
+    // default the funding method instead of re-asking. '' (no injection) for new /
+    // history-less customers and stale defaults — behavior unchanged.
+    const senderDefaultsNote = getSenderDefaultsNote(noteCustomer);
+
     let reply = '';
     const paymentLinks: string[] = [];
 
@@ -113,6 +119,9 @@ export function createAgent(deps: AgentDeps) {
       }
       if (round === 0 && recentNote) {
         messages.push({ role: 'system', content: recentNote });
+      }
+      if (round === 0 && senderDefaultsNote) {
+        messages.push({ role: 'system', content: senderDefaultsNote });
       }
       messages.push(...history);
 

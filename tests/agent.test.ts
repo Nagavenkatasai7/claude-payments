@@ -618,7 +618,10 @@ describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
     await agent.runAgentTurn('+15551230000', 'did my payment go through?');
 
     const sent = chat.mock.calls[0][0] as Array<{ role: string; content: string | null }>;
-    const note = sent.find((m) => m.role === 'system' && (m.content ?? '').includes('[RECENT TRANSFERS]'));
+    // Match the injected NOTE by its unique body text ('most recent sends'); the
+    // bare '[RECENT TRANSFERS]' tag is now also referenced in SYSTEM_PROMPT (the
+    // repeat-flow guidance points the model at this note by name).
+    const note = sent.find((m) => m.role === 'system' && (m.content ?? '').includes('most recent sends'));
     expect(note).toBeDefined();
     expect(note!.content).toContain('Mom');
   });
@@ -631,7 +634,9 @@ describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
     await agent.runAgentTurn('+15551230000', 'hello');
 
     const sent = chat.mock.calls[0][0] as Array<{ role: string; content: string | null }>;
-    expect(sent.some((m) => (m.content ?? '').includes('[RECENT TRANSFERS]'))).toBe(false);
+    // The injected recent-transfers note (identified by its body text) must be
+    // absent — SYSTEM_PROMPT may mention the tag, but no NOTE should be injected.
+    expect(sent.some((m) => (m.content ?? '').includes('most recent sends'))).toBe(false);
   });
 
   it('the note is NOT persisted to history (absent from a subsequent turn transcript)', async () => {

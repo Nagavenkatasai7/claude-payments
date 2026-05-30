@@ -26,6 +26,35 @@ describe('SYSTEM_PROMPT', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — typed-name resolution & shorthand (Bundle C)', () => {
+  it('tells the bot to resolve a typed recipient name via resolve_recipient', () => {
+    expect(SYSTEM_PROMPT).toContain('resolve_recipient');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('exact');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('ambiguous');
+  });
+  it('keeps check_send_limit before get_quote on the shorthand path', () => {
+    // shorthand must not bypass the cap gate
+    expect(SYSTEM_PROMPT).toContain('check_send_limit');
+  });
+});
+
+describe('SYSTEM_PROMPT — sticky funding default (Bundle C)', () => {
+  it('tells the bot to use the [SENDER DEFAULTS] funding method when present', () => {
+    expect(SYSTEM_PROMPT).toContain('[SENDER DEFAULTS]');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('default');
+  });
+});
+
+describe('SYSTEM_PROMPT — reactive repeat (Bundle C)', () => {
+  it('tells the bot to use repeat_transfer reactively, never proactively', () => {
+    expect(SYSTEM_PROMPT).toContain('repeat_transfer');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('do not offer this proactively');
+  });
+  it('handles the needs_edd follow-up', () => {
+    expect(SYSTEM_PROMPT).toContain('needs_edd');
+  });
+});
+
 describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
   it('B1: asks amount + funding method together in one turn', () => {
     expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);

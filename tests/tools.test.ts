@@ -55,7 +55,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all fourteen tools', () => {
+  it('exposes all sixteen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -68,6 +68,8 @@ describe('toolSchemas', () => {
       'get_quote',
       'list_saved_recipients',
       'list_schedules',
+      'repeat_transfer',
+      'resolve_recipient',
       'send_approve_picker',
       'send_recipient_picker',
       'update_recipient_phone',
@@ -867,5 +869,147 @@ describe('validate_phone — read-only phone early-catch', () => {
   it('performs no Redis I/O — runs with a bare ctx and still returns', async () => {
     // {} as never proves the handler reads nothing off ctx
     expect((await call('919876543210') as { valid: boolean }).valid).toBe(true);
+  });
+});
+
+describe('resolve_recipient — typed-name lookup of saved recipients', () => {
+  const seedRecipient = async (
+    ctx: ReturnType<typeof buildCtx>,
+    over: Partial<{ name: string; recipientPhone: string; payoutMethod: 'upi' | 'bank'; payoutDestination: string }> = {},
+  ) => {
+    await ctx.store.upsertRecipient(ctx.phone, {
+      name: over.name ?? 'Mom',
+      recipientPhone: over.recipientPhone ?? '919876543210',
+      payoutMethod: over.payoutMethod ?? 'upi',
+      payoutDestination: over.payoutDestination ?? 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+  };
+
+  it('returns match:exact for a single case-insensitive, trimmed name match with payout details', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Mom', recipientPhone: '919876543210', payoutDestination: 'mom@okhdfc' });
+    await seedRecipient(ctx, { name: 'Dad', recipientPhone: '919811111111', payoutDestination: 'dad@okaxis' });
+    const r = await executeTool('resolve_recipient', { name: '  mOm ' }, ctx);
+    expect(r.match).toBe('exact');
+    expect((r.recipient as Record<string, unknown>).recipient_phone).toBe('919876543210');
+    expect((r.recipient as Record<string, unknown>).payout_destination).toBe('mom@okhdfc');
+    // field hygiene: no internal fields leak
+    expect(r.recipient).not.toHaveProperty('partnerId');
+    expect(r.recipient).not.toHaveProperty('complianceStatus');
+  });
+
+  it('returns match:ambiguous when two saved recipients share the name', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Mom', recipientPhone: '919876543210' });
+    await seedRecipient(ctx, { name: 'Mom', recipientPhone: '919800000000' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('ambiguous');
+    expect((r.candidates as unknown[]).length).toBe(2);
+  });
+
+  it('returns match:ambiguous for a partial/substring match (never auto-proceeds)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Mom (work)', recipientPhone: '919876543210' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('ambiguous');
+    expect((r.candidates as unknown[]).length).toBe(1);
+  });
+
+  it('returns match:none when nothing matches (cold-start path)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedRecipient(ctx, { name: 'Dad', recipientPhone: '919811111111' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('none');
+  });
+
+  it('only searches the calling sender\'s own recipients', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, '15551234567');
+    const otherCtx = buildCtx(redis, '15559999999');
+    await seedRecipient(otherCtx, { name: 'Mom', recipientPhone: '919876543210' });
+    const r = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    expect(r.match).toBe('none'); // the other sender's recipient is invisible
+  });
+});
+
+describe('create_transfer records the sender\'s funding method (Bundle C)', () => {
+  it('writes lastFundingMethod onto the customer after a successful create', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await executeTool('create_transfer', {
+      amount_usd: 200,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+      funding_method: 'credit_card',
+    }, ctx);
+    const c = await ctx.customerStore.getCustomer(ctx.phone);
+    expect(c?.lastFundingMethod).toBe('credit_card');
+  });
+});
+
+describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', () => {
+  const seedPastTransfer = async (ctx: ReturnType<typeof buildCtx>) => {
+    // A real create so the recipient + a past transfer exist with full details.
+    // $200 (not $500) so a repeat stays within the T0 $500/day cap and exercises
+    // the REAL cap gate inside repeat_transfer rather than tripping it.
+    await executeTool('create_transfer', {
+      amount_usd: 200,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@okhdfc',
+      funding_method: 'bank_transfer',
+    }, ctx);
+  };
+
+  it('hydrates the last transfer and sends an approve card (a draft, NOT a new transfer)', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedPastTransfer(ctx);
+    const countBefore = await ctx.store.getTransferCount(ctx.phone);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect(r.sent).toBe(true);
+    expect(typeof r.draft_id).toBe('string');
+    // routed through the draft path — no new transfer created yet
+    expect(await ctx.store.getTransferCount(ctx.phone)).toBe(countBefore);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.recipient.payoutDestination).toBe('mom@okhdfc');
+    expect(draft?.amountSource).toBe(200); // reused last amount
+  });
+
+  it('honors an amount_usd override', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedPastTransfer(ctx);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 250 }, ctx);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.amountSource).toBe(250);
+  });
+
+  it('falls back to the sender\'s remembered funding method when none is given', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedPastTransfer(ctx); // last transfer used bank_transfer + records it as the default
+    await ctx.customerStore.recordFundingMethod(ctx.phone, 'credit_card'); // newer default
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.fundingMethod).toBe('credit_card');
+  });
+
+  it('errors when there is no past transfer to that number', async () => {
+    const ctx = buildCtx(fakeRedis());
+    const r = await executeTool('repeat_transfer', { recipient_phone: '910000000000' }, ctx);
+    expect(r.error).toBeDefined();
+    expect(r.sent).toBeUndefined();
+  });
+
+  it('returns needs_edd (and does NOT send a card) when the month is over the EDD threshold', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await seedPastTransfer(ctx);
+    // push cumulative monthly volume over $3,000 so evaluateEdd trips; customer has no SoF/occupation
+    await ctx.monthlyVolumeStore.addCents(ctx.phone, 300000);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100 }, ctx);
+    expect(r.needs_edd).toBe(true);
+    expect(r.sent).toBeUndefined();
+    expect(r.payout_destination).toBe('mom@okhdfc'); // hydrated details returned for the follow-up
   });
 });

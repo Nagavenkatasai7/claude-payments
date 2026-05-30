@@ -386,6 +386,38 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'resolve_recipient',
+      description:
+        "Look up the sender's saved recipients by a name they typed (e.g. 'Mom'). Returns { match: 'exact', recipient } when exactly one saved recipient matches — use its payout_method, payout_destination, and recipient_phone directly (do not re-ask). Returns { match: 'ambiguous', candidates } when more than one could match — call send_recipient_picker with the candidates. Returns { match: 'none' } when nothing matches — ask for the recipient's number and payout details.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: "The recipient name the user typed, e.g. 'Mom'." },
+        },
+        required: ['name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'repeat_transfer',
+      description:
+        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount; funding_method overrides the remembered method. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with all the details it returned plus those two fields.",
+      parameters: {
+        type: 'object',
+        properties: {
+          recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210)." },
+          amount_usd: { type: 'number', description: 'Optional. New amount in the send currency; if omitted, reuse the last amount sent to this recipient.' },
+          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'], description: "Optional. Defaults to the sender's remembered method, then the last transfer's method." },
+        },
+        required: ['recipient_phone'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -458,6 +490,10 @@ export async function executeTool(
       return checkSendLimitTool(args, ctx);
     case 'validate_phone':
       return validatePhoneTool(args); // pure — no ctx
+    case 'resolve_recipient':
+      return resolveRecipientTool(args, ctx);
+    case 'repeat_transfer':
+      return repeatTransferTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -561,6 +597,7 @@ async function createTransferTool(
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
+      await ctx.customerStore.recordFundingMethod(ctx.phone, draft.fundingMethod);
       return {
         transfer_id: transfer.id,
         status: transfer.status,
@@ -626,6 +663,7 @@ async function createTransferTool(
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
+    await ctx.customerStore.recordFundingMethod(ctx.phone, args.funding_method as FundingMethod);
     return {
       transfer_id: transfer.id,
       status: transfer.status,
@@ -811,6 +849,48 @@ async function listSavedRecipientsTool(
   }
 }
 
+async function resolveRecipientTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const query = String(args.name ?? '').trim().toLowerCase();
+  if (!query) return { match: 'none' };
+
+  let all: import('./types').Recipient[];
+  try {
+    all = await ctx.store.listRecipients(ctx.phone, 25); // generous cap; own-phone only
+  } catch (err) {
+    console.warn('resolve_recipient listRecipients failed:', err);
+    return { match: 'none' };
+  }
+
+  // Customer-owned fields only — never partner/compliance/PII.
+  const shape = (r: import('./types').Recipient) => ({
+    name: r.name,
+    recipient_phone: r.recipientPhone,
+    payout_method: r.payoutMethod,
+    payout_destination: r.payoutDestination,
+  });
+  const norm = (s: string) => (s ?? '').trim().toLowerCase();
+
+  const exact = all.filter((r) => norm(r.name) === query);
+  if (exact.length === 1) return { match: 'exact', recipient: shape(exact[0]) };
+
+  // Ambiguous: >1 exact match, or only partial (either-direction substring) matches.
+  // A partial match alone NEVER auto-proceeds — exact-1 is the only fast path.
+  const candidates = (
+    exact.length > 1
+      ? exact
+      : all.filter((r) => {
+          const n = norm(r.name);
+          return n.includes(query) || query.includes(n);
+        })
+  ).slice(0, 3); // WhatsApp reply-button cap
+
+  if (candidates.length === 0) return { match: 'none' };
+  return { match: 'ambiguous', candidates: candidates.map(shape) };
+}
+
 async function sendRecipientPickerTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
@@ -917,6 +997,78 @@ async function sendApprovePickerTool(
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
+}
+
+async function repeatTransferTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const recipientPhone = normalizePhone(args.recipient_phone);
+  if (!isValidPhone(recipientPhone)) {
+    return { error: "I need the recipient's WhatsApp number to repeat a transfer." };
+  }
+
+  // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
+  const mine = (await ctx.store.listTransfers()).filter(
+    (t) => (t.phone ?? '') === ctx.phone && t.recipientPhone === recipientPhone,
+  );
+  const last = mine[0];
+  if (!last) {
+    return { error: "I don't see a past transfer to that number — who would you like to send to?" };
+  }
+
+  // Amount + funding fallback chain.
+  const overrideAmount = Number(args.amount_usd);
+  const amountSource =
+    Number.isFinite(overrideAmount) && overrideAmount > 0
+      ? overrideAmount
+      : last.amountSource ?? last.amountUsd;
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const fundingMethod =
+    (args.funding_method as FundingMethod | undefined) ??
+    customer?.lastFundingMethod ??
+    last.fundingMethod;
+
+  // Defense-in-depth cap + EDD re-check on the REAL amount — the same gate the
+  // normal flow runs before quoting. EDD must be collected BEFORE the approval
+  // card, so on edd_required we return the hydrated details and let the model ask,
+  // rather than sending the card.
+  const limit = await checkSendLimitTool(
+    { amount_usd: amountSource, source_currency: last.sourceCurrency },
+    ctx,
+  );
+  if (limit.within_cap === false) {
+    return { error: 'That repeat would exceed your current sending cap.', cap_eval: limit };
+  }
+  if (limit.edd_required === true) {
+    return {
+      needs_edd: true,
+      edd_threshold_usd: limit.edd_threshold_usd,
+      amount_usd: amountSource,
+      source_currency: last.sourceCurrency,
+      funding_method: fundingMethod,
+      recipient_name: last.recipientName,
+      recipient_phone: recipientPhone,
+      payout_method: last.payoutMethod,
+      payout_destination: last.payoutDestination,
+    };
+  }
+
+  // Route through the EXISTING approve-card path (cap re-check, quote, draft,
+  // [Approve & pay] card). Never calls create_transfer directly — compliance
+  // re-screens at approval exactly like any other send.
+  return sendApprovePickerTool(
+    {
+      amount_usd: amountSource,
+      funding_method: fundingMethod,
+      recipient_name: last.recipientName,
+      recipient_phone: recipientPhone,
+      payout_method: last.payoutMethod,
+      payout_destination: last.payoutDestination,
+      source_currency: last.sourceCurrency,
+    },
+    ctx,
+  );
 }
 
 async function cancelDraftTool(
