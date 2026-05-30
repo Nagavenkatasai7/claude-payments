@@ -931,3 +931,19 @@ describe('resolve_recipient — typed-name lookup of saved recipients', () => {
     expect(r.match).toBe('none'); // the other sender's recipient is invisible
   });
 });
+
+describe('create_transfer records the sender\'s funding method (Bundle C)', () => {
+  it('writes lastFundingMethod onto the customer after a successful create', async () => {
+    const ctx = buildCtx(fakeRedis());
+    await executeTool('create_transfer', {
+      amount_usd: 200,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      payout_method: 'upi',
+      payout_destination: 'mom@upi',
+      funding_method: 'credit_card',
+    }, ctx);
+    const c = await ctx.customerStore.getCustomer(ctx.phone);
+    expect(c?.lastFundingMethod).toBe('credit_card');
+  });
+});

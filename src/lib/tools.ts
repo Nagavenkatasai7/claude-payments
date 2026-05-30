@@ -578,6 +578,7 @@ async function createTransferTool(
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
+      await ctx.customerStore.recordFundingMethod(ctx.phone, draft.fundingMethod);
       return {
         transfer_id: transfer.id,
         status: transfer.status,
@@ -643,6 +644,7 @@ async function createTransferTool(
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
+    await ctx.customerStore.recordFundingMethod(ctx.phone, args.funding_method as FundingMethod);
     return {
       transfer_id: transfer.id,
       status: transfer.status,
