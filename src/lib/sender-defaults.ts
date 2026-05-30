@@ -15,7 +15,8 @@ const FUNDING_LABEL: Record<FundingMethod, string> = {
  * history-less customers and for stale (>90-day) defaults.
  *
  * Pure + read-only: takes the already-fetched Customer (no extra Redis read).
- * Surfaces ONLY the funding-method enum label — no PII, no partner, no amounts.
+ * Tenant-blind: surfaces ONLY the funding-method enum label — no PII, no tenant
+ * data, no amounts.
  */
 export function getSenderDefaultsNote(customer: Customer | null): string {
   const method = customer?.lastFundingMethod;
