@@ -168,6 +168,9 @@ export interface Draft {
     feeUsd: number;
     fxRate: number;
     amountInr: number;
+    feeSource?: number;
+    totalChargeSource?: number;
+    totalChargeUsd?: number;
   };
   createdAt: string; // ISO-8601
 }
