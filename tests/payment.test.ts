@@ -52,6 +52,9 @@ describe('completePaymentStage1', () => {
     expect(result.senderMessages[0]).toContain('$500.00');
     expect(result.senderMessages[0]).toContain('42,600');
     expect(result.senderMessages[0]).toContain('Mom');
+    expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
+    expect(result.senderMessages[0]).not.toContain('…'); // no trailing ellipsis
+    expect(result.senderMessages[0]).toContain('within ~10 minutes');
   });
 
   it('is idempotent — if already paid, returns empty message arrays', async () => {
@@ -100,6 +103,21 @@ describe('completePaymentStage2', () => {
     expect(result.senderMessages).toHaveLength(1);
     expect(result.senderMessages[0]).toContain('42,600');
     expect(result.senderMessages[0]).toContain('Mom');
+    expect(result.senderMessages[0]).toContain('via UPI');       // default fixture payoutMethod 'upi'
+    expect(result.senderMessages[0]).toContain('Transfer ID: pay12345');
+  });
+
+  it('uses "via bank" label for bank payout method', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveTransfer({
+      ...awaitingTransfer(),
+      payoutMethod: 'bank',
+      status: 'paid',
+      paidAt: '2026-05-21T01:00:00.000Z',
+    });
+
+    const result = await completePaymentStage2(store, 'pay12345');
+    expect(result.senderMessages[0]).toContain('via bank');
   });
 
   it('is idempotent — if already delivered, returns empty message arrays', async () => {
