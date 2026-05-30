@@ -7,6 +7,10 @@ import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
+import {
+  releaseTransferAction,
+  rejectTransferAction,
+} from '../actions';
 import type { Transfer } from '@/lib/types';
 
 function inr(n: number): string {
@@ -46,6 +50,7 @@ export default async function CompliancePage() {
   const { staff } = await requireScope();
   const scoped = createScopedStore(staff);
   const transfers = await scoped.listTransfers();
+  const inReview = transfers.filter((t) => t.status === 'in_review');
   const flagged = transfers.filter((t) => t.complianceStatus === 'flagged');
   const blocked = transfers.filter((t) => t.complianceStatus === 'blocked');
   const topVel = topVelocityToday(transfers, Date.now(), 10);
@@ -80,6 +85,69 @@ export default async function CompliancePage() {
             </div>
           </div>
         </div>
+
+        <section className="sh-card">
+          <div className="sh-card-head">
+            <div>
+              <div className="sh-card-title">Needs review</div>
+              <div className="sh-card-sub">
+                {inReview.length} {inReview.length === 1 ? 'transfer' : 'transfers'} — payment captured, pending staff decision
+              </div>
+            </div>
+          </div>
+          <div className="sh-ledger-wrap">
+            {inReview.length === 0 ? (
+              <div className="sh-empty">No transfers awaiting review.</div>
+            ) : (
+              <table className="sh-table">
+                <thead><tr>
+                  <th>Recipient</th><th>Amount</th><th>Reasons</th>
+                  <th>Created</th><th>Sender</th><th>Actions</th>
+                </tr></thead>
+                <tbody>
+                  {inReview.map((t) => (
+                    <tr key={t.id}>
+                      <td>
+                        <div className="sh-recipient">{t.recipientName}</div>
+                        <div className="sh-recipient-sub">
+                          {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                        {t.sourceCurrency !== 'USD' && (
+                          <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                        )}
+                        <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
+                      </td>
+                      <td>
+                        {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
+                          r === 'edd_required'
+                            ? <span key={r} className="sh-pill sh-pill-warning"><span className="sh-pill-dot"></span>EDD required</span>
+                            : <span key={r} style={{ marginRight: 6 }}>{r}</span>,
+                        )}
+                      </td>
+                      <td>{new Date(t.createdAt).toLocaleString()}</td>
+                      <td><span className="sh-recipient-sub">{t.phone}</span></td>
+                      <td>
+                        <div className="sh-attention-actions">
+                          <form action={releaseTransferAction}>
+                            <input type="hidden" name="id" value={t.id} />
+                            <button type="submit" className="sh-mini-btn">Release</button>
+                          </form>
+                          <form action={rejectTransferAction}>
+                            <input type="hidden" name="id" value={t.id} />
+                            <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Reject</button>
+                          </form>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
 
         <section className="sh-card">
           <div className="sh-card-head">
