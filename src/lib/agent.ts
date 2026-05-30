@@ -9,7 +9,7 @@ import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
-import { allowedSendCurrencies } from './partner-currency';
+import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 
@@ -110,11 +110,13 @@ export function createAgent(deps: AgentDeps) {
         }
       }
       if (round === 0 && sendCurrencies.length > 1) {
+        const detected = currencyForPhone(phone) ?? sendCurrencies[0];
         messages.push({
           role: 'system',
           content:
-            `[SEND CURRENCIES: ${sendCurrencies.join(', ')} — ask the user which currency they are sending, ` +
-            `pass it as source_currency to get_quote/check_send_limit/send_approve_picker, and state the amount in that currency.]`,
+            `[SEND CURRENCIES: ${sendCurrencies.join(', ')}. The sender sends in ${detected} ` +
+            `(auto-detected from their number) — do NOT ask which currency; the tools default to it. ` +
+            `Pass source_currency ONLY if the sender explicitly asks for a different listed currency.]`,
         });
       }
       if (round === 0 && recentNote) {

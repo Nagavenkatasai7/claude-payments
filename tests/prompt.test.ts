@@ -87,6 +87,11 @@ describe('whatsapp-ux: faster first send + clearer confirmation + destination re
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('delivery time');
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('payout destination');
   });
+  it('multi-country: currency is auto-detected, the bot does not ask by default', () => {
+    expect(SYSTEM_PROMPT.toUpperCase()).toContain('AUTO-DETECTED');
+    expect(SYSTEM_PROMPT).toContain('NOT need to ask which currency');
+    expect(SYSTEM_PROMPT).toContain('source_currency');
+  });
   it('A5: distinguishes pay-out from send-from (no blanket send-block)', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('pays out only in india');
     expect(SYSTEM_PROMPT).toContain('[SEND CURRENCIES');
