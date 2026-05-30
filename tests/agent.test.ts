@@ -656,7 +656,10 @@ describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
 
     await agent.runAgentTurn('+15551230000', 'status?');
     const sent = chat.mock.calls[0][0] as Array<{ content: string | null }>;
-    const note = (sent.find((m) => (m.content ?? '').includes('[RECENT TRANSFERS]'))!.content ?? '').toLowerCase();
+    // Locate the INJECTED note by its body text ('most recent sends'), not by the
+    // '[RECENT TRANSFERS]' tag — SYSTEM_PROMPT also references that tag (and now
+    // legitimately contains 'compliance'/'blocked' in unrelated rules).
+    const note = (sent.find((m) => (m.content ?? '').includes('most recent sends'))!.content ?? '').toLowerCase();
     for (const term of ['partner', 'compliance', 'blocked']) expect(note).not.toContain(term);
   });
 });
