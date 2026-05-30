@@ -317,6 +317,24 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'validate_phone',
+      description:
+        "Check that a recipient WhatsApp number is well-formed (digits only, with country code, 10–15 digits). Call this immediately after the user gives the recipient's number, BEFORE asking about payout. Returns { valid, normalized, error? }.",
+      parameters: {
+        type: 'object',
+        properties: {
+          phone: {
+            type: 'string',
+            description: "The recipient's WhatsApp number as the user typed it, e.g. '+91 98765 43210'.",
+          },
+        },
+        required: ['phone'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -387,6 +405,8 @@ export async function executeTool(
       return cancelDraftTool(args, ctx);
     case 'check_send_limit':
       return checkSendLimitTool(args, ctx);
+    case 'validate_phone':
+      return validatePhoneTool(args); // pure — no ctx
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -861,6 +881,19 @@ async function cancelDraftTool(
     return { cancelled: false, reason: 'draft_not_found_or_expired' };
   }
   return { cancelled: true };
+}
+
+function validatePhoneTool(args: Record<string, unknown>): ToolResult {
+  const normalized = normalizePhone(args.phone ?? '');
+  if (!isValidPhone(normalized)) {
+    return {
+      valid: false,
+      normalized,
+      error:
+        "That doesn't look like a valid WhatsApp number — please send it with country code, e.g. 919876543210.",
+    };
+  }
+  return { valid: true, normalized };
 }
 
 async function checkSendLimitTool(

@@ -54,7 +54,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all thirteen tools', () => {
+  it('exposes all fourteen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -70,6 +70,7 @@ describe('toolSchemas', () => {
       'send_approve_picker',
       'send_recipient_picker',
       'update_recipient_phone',
+      'validate_phone',
     ]);
   });
 
@@ -798,5 +799,30 @@ describe('send_approve_picker — cap enforcement', () => {
     }, ctx);
     expect(r.error).toBeDefined();
     expect(interactiveSent).toBe(false); // never reached sendInteractive
+  });
+});
+
+describe('validate_phone — read-only phone early-catch', () => {
+  const call = (phone: unknown) =>
+    executeTool('validate_phone', { phone }, {} as never); // ctx is never touched
+
+  it('a clean 919876543210 → { valid: true, normalized }', async () => {
+    expect(await call('919876543210')).toEqual({ valid: true, normalized: '919876543210' });
+  });
+  it('a formatted "+91 98765 43210" → valid, normalized digits-only', async () => {
+    expect(await call('+91 98765 43210')).toEqual({ valid: true, normalized: '919876543210' });
+  });
+  it('too-short "12345" → valid:false with a re-ask error', async () => {
+    const r = await call('12345') as { valid: boolean; error: string };
+    expect(r.valid).toBe(false);
+    expect(r.error).toMatch(/valid/i);
+  });
+  it('junk/empty → valid:false', async () => {
+    expect((await call('') as { valid: boolean }).valid).toBe(false);
+    expect((await call('abc') as { valid: boolean }).valid).toBe(false);
+  });
+  it('performs no Redis I/O — runs with a bare ctx and still returns', async () => {
+    // {} as never proves the handler reads nothing off ctx
+    expect((await call('919876543210') as { valid: boolean }).valid).toBe(true);
   });
 });
