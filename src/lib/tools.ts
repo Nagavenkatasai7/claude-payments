@@ -401,6 +401,23 @@ export const toolSchemas: ChatTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'repeat_transfer',
+      description:
+        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount; funding_method overrides the remembered method. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with all the details it returned plus those two fields.",
+      parameters: {
+        type: 'object',
+        properties: {
+          recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210)." },
+          amount_usd: { type: 'number', description: 'Optional. New amount in the send currency; if omitted, reuse the last amount sent to this recipient.' },
+          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'], description: "Optional. Defaults to the sender's remembered method, then the last transfer's method." },
+        },
+        required: ['recipient_phone'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -475,6 +492,8 @@ export async function executeTool(
       return validatePhoneTool(args); // pure — no ctx
     case 'resolve_recipient':
       return resolveRecipientTool(args, ctx);
+    case 'repeat_transfer':
+      return repeatTransferTool(args, ctx);
     default:
       return { error: `Unknown tool: ${name}` };
   }
@@ -978,6 +997,78 @@ async function sendApprovePickerTool(
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
+}
+
+async function repeatTransferTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const recipientPhone = normalizePhone(args.recipient_phone);
+  if (!isValidPhone(recipientPhone)) {
+    return { error: "I need the recipient's WhatsApp number to repeat a transfer." };
+  }
+
+  // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
+  const mine = (await ctx.store.listTransfers()).filter(
+    (t) => (t.phone ?? '') === ctx.phone && t.recipientPhone === recipientPhone,
+  );
+  const last = mine[0];
+  if (!last) {
+    return { error: "I don't see a past transfer to that number — who would you like to send to?" };
+  }
+
+  // Amount + funding fallback chain.
+  const overrideAmount = Number(args.amount_usd);
+  const amountSource =
+    Number.isFinite(overrideAmount) && overrideAmount > 0
+      ? overrideAmount
+      : last.amountSource ?? last.amountUsd;
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const fundingMethod =
+    (args.funding_method as FundingMethod | undefined) ??
+    customer?.lastFundingMethod ??
+    last.fundingMethod;
+
+  // Defense-in-depth cap + EDD re-check on the REAL amount — the same gate the
+  // normal flow runs before quoting. EDD must be collected BEFORE the approval
+  // card, so on edd_required we return the hydrated details and let the model ask,
+  // rather than sending the card.
+  const limit = await checkSendLimitTool(
+    { amount_usd: amountSource, source_currency: last.sourceCurrency },
+    ctx,
+  );
+  if (limit.within_cap === false) {
+    return { error: 'That repeat would exceed your current sending cap.', cap_eval: limit };
+  }
+  if (limit.edd_required === true) {
+    return {
+      needs_edd: true,
+      edd_threshold_usd: limit.edd_threshold_usd,
+      amount_usd: amountSource,
+      source_currency: last.sourceCurrency,
+      funding_method: fundingMethod,
+      recipient_name: last.recipientName,
+      recipient_phone: recipientPhone,
+      payout_method: last.payoutMethod,
+      payout_destination: last.payoutDestination,
+    };
+  }
+
+  // Route through the EXISTING approve-card path (cap re-check, quote, draft,
+  // [Approve & pay] card). Never calls create_transfer directly — compliance
+  // re-screens at approval exactly like any other send.
+  return sendApprovePickerTool(
+    {
+      amount_usd: amountSource,
+      funding_method: fundingMethod,
+      recipient_name: last.recipientName,
+      recipient_phone: recipientPhone,
+      payout_method: last.payoutMethod,
+      payout_destination: last.payoutDestination,
+      source_currency: last.sourceCurrency,
+    },
+    ctx,
+  );
 }
 
 async function cancelDraftTool(
