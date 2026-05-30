@@ -28,6 +28,27 @@ import { screenTransfer } from './compliance';
 
 // ── Approve message helpers ──────────────────────────────────────────────────
 
+/**
+ * Masks a payout_destination string the same way maskDestination does:
+ * - UPI: returns the ID unchanged (no sensitive digits to hide).
+ * - Bank: replaces the longest all-digit run with "****<last4>" so the full
+ *   account number is never surfaced to the LLM (list_saved_recipients /
+ *   resolve_recipient return this masked form).
+ */
+export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: string): string {
+  if (payoutMethod === 'upi') return payoutDestination;
+  // Re-use the masking logic from maskDestination but return just the masked
+  // token string (without the "bank a/c" prefix), so tool responses still carry
+  // the full picture (IFSC + masked acct) and the LLM can confirm naturally.
+  const tokens = payoutDestination.split(/[,\s]+/).filter(Boolean);
+  const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
+  const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
+  const last4 = acct.slice(-4);
+  return tokens
+    .map((t) => (t === acct ? `****${last4}` : t))
+    .join(' ');
+}
+
 function maskDestination(method: PayoutMethod, dest: string): string {
   if (method === 'upi') return `UPI ${dest}`;
   // bank: tokens are "<acct> <routing/sort/ifsc/iban>" in either order, possibly
@@ -967,7 +988,7 @@ async function listSavedRecipientsTool(
         name: r.name,
         recipient_phone: r.recipientPhone,
         payout_method: r.payoutMethod,
-        payout_destination: r.payoutDestination,
+        payout_destination: maskAccount(r.payoutMethod, r.payoutDestination),
         last_used_at: r.lastUsedAt,
       })),
     };
@@ -993,11 +1014,12 @@ async function resolveRecipientTool(
   }
 
   // Customer-owned fields only — never partner/compliance/PII.
+  // payout_destination is masked so the LLM never sees a raw account number.
   const shape = (r: import('./types').Recipient) => ({
     name: r.name,
     recipient_phone: r.recipientPhone,
     payout_method: r.payoutMethod,
-    payout_destination: r.payoutDestination,
+    payout_destination: maskAccount(r.payoutMethod, r.payoutDestination),
   });
   const norm = (s: string) => (s ?? '').trim().toLowerCase();
 
