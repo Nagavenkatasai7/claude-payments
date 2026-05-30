@@ -11,6 +11,7 @@ export type SidebarActive =
   | 'partners'
   | 'compliance'
   | 'analytics'
+  | 'corridors'
   | 'team'
   | 'my-partner';
 
@@ -22,8 +23,13 @@ export function visibleNavItems(staff: Staff): NavItem[] {
     'customers', 'compliance', 'analytics',
   ];
   if (!staff.partnerId) {
-    // Platform: base + Partners list + (Team only if admin)
-    return [...base, 'partners', ...(staff.role === 'admin' ? (['team'] as NavItem[]) : [])];
+    // Platform: base + Partners list + Corridors (lead page) + (Team only if admin)
+    return [
+      ...base,
+      'partners',
+      'corridors',
+      ...(staff.role === 'admin' ? (['team'] as NavItem[]) : []),
+    ];
   }
   // Partner-scoped: base + direct link to their own partner detail
   return [...base, 'my-partner'];
@@ -42,6 +48,7 @@ const NAV_META: Record<NavItem, NavMeta> = {
   partners:     { label: 'Partners',     icon: '◆', hrefFor: () => '/dashboard/partners' },
   compliance:   { label: 'Compliance',   icon: '⚑', hrefFor: () => '/dashboard/compliance' },
   analytics:    { label: 'Analytics',    icon: '▦', hrefFor: () => '/dashboard/analytics' },
+  corridors:    { label: 'Corridors',    icon: '↗', hrefFor: () => '/dashboard/corridors' },
   team:         { label: 'Team',         icon: '◉', hrefFor: () => '/dashboard/team' },
   'my-partner': { label: 'My partner',   icon: '◆', hrefFor: (s) => `/dashboard/partners/${s.partnerId}` },
 };

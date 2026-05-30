@@ -326,7 +326,7 @@ describe('createAgent — TurnContext', () => {
     const turn: TurnContext = { isNewConversation: true };
     await agent.runAgentTurn('15551234567', 'hi', turn);
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
-    expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(true);
+    expect(sys.some((s) => typeof s === 'string' && s.includes('[NEW CONVERSATION]'))).toBe(true);
   });
 
   it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {
@@ -733,5 +733,67 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
       s.includes('first message ever from this phone') ||
       s.includes('T0 customer in their observation window')
     ))).toBe(false);
+  });
+});
+
+describe('createAgent — bug fixes (crash-safety, recipient-tap, no double message)', () => {
+  it('a thrown tool degrades to a model-visible error instead of crashing the turn', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    store.getTransferCount = async () => { throw new Error('boom'); }; // force get_quote to throw
+    let round = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(),
+      draftStore: createDraftStore(fakeRedis()),
+      ...extraDeps(redis, store),
+      chat: async () => {
+        round++;
+        if (round === 1) {
+          return { role: 'assistant', content: null, tool_calls: [{ id: 't1', type: 'function', function: { name: 'get_quote', arguments: '{"amount_usd":100,"funding_method":"bank_transfer"}' } }] };
+        }
+        return { role: 'assistant', content: 'Sorry, let me try that again.' };
+      },
+    });
+    // Must RESOLVE (not reject) even though the tool threw.
+    const reply = await agent.runAgentTurn(PHONE, 'send 100');
+    expect(reply).toBe('Sorry, let me try that again.');
+  });
+
+  it('injects [RECIPIENT SELECTED] with full details on a recipient button tap', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    await store.upsertRecipient(PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'How much?' }; },
+    });
+    const turn: TurnContext = { isNewConversation: false, buttonTap: { kind: 'recipient', recipientPhone: '919876543210' } };
+    await agent.runAgentTurn(PHONE, '[Tapped: Send to recipient 919876543210]', turn);
+    // Match the INJECTED note by its data (the SYSTEM_PROMPT also mentions the tag as guidance).
+    const note = seen[0].filter((m) => m.role === 'system').map((m) => m.content as string).find((s) => s.includes('payout_destination=mom@okhdfc'));
+    expect(note).toBeDefined();
+    expect(note).toContain('[RECIPIENT SELECTED]');
+    expect(note).toContain('name=Mom');
+  });
+
+  it('suppresses the trailing text when a tool sent an interactive (no double message)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    await store.upsertRecipient(PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
+    let round = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      chat: async () => {
+        round++;
+        if (round === 1) {
+          return { role: 'assistant', content: null, tool_calls: [{ id: 'p1', type: 'function', function: { name: 'send_recipient_picker', arguments: JSON.stringify({ recipients: [{ name: 'Mom', recipient_phone: '919876543210' }] }) } }] };
+        }
+        return { role: 'assistant', content: "I've sent you a picker — tap who!" };
+      },
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send money');
+    expect(reply).toBe(''); // the picker card IS the message; trailing text suppressed
   });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
-import type { Transfer } from '@/lib/types';
+import type { Transfer, CorridorRequest } from '@/lib/types';
 import { easternDate } from '@/lib/dates';
 
 function seedTransfer(status: Transfer['status'] = 'awaiting_payment'): Transfer {
@@ -200,5 +200,40 @@ describe('store', () => {
     const conv = await store.getConversation('p');
     expect(conv).toHaveLength(40);
     expect(conv[conv.length - 1].content).toBe('m59');
+  });
+});
+
+describe('saveCorridorRequest + listCorridorRequests', () => {
+  function makeReq(id: string, capturedAt: string, country: string): CorridorRequest {
+    return { id, senderPhone: '15551234567', destinationCountry: country, capturedAt };
+  }
+
+  it('round-trips a single corridor request', async () => {
+    const store = createStore(fakeRedis());
+    const req = makeReq('req1', '2026-05-30T10:00:00.000Z', 'UAE');
+    await store.saveCorridorRequest(req);
+    const list = await store.listCorridorRequests();
+    expect(list).toHaveLength(1);
+    expect(list[0].destinationCountry).toBe('UAE');
+    expect(list[0].senderPhone).toBe('15551234567');
+  });
+
+  it('listCorridorRequests returns newest-first', async () => {
+    const store = createStore(fakeRedis());
+    await store.saveCorridorRequest(makeReq('older', '2026-05-29T08:00:00.000Z', 'Pakistan'));
+    await store.saveCorridorRequest(makeReq('newer', '2026-05-30T12:00:00.000Z', 'UAE'));
+    const list = await store.listCorridorRequests();
+    expect(list[0].id).toBe('newer');
+    expect(list[1].id).toBe('older');
+  });
+
+  it('saving the same id twice does not duplicate the entry', async () => {
+    const store = createStore(fakeRedis());
+    const req = makeReq('dup1', '2026-05-30T10:00:00.000Z', 'UAE');
+    await store.saveCorridorRequest(req);
+    await store.saveCorridorRequest({ ...req, destinationCountry: 'UAE updated' }); // same id
+    const list = await store.listCorridorRequests();
+    expect(list).toHaveLength(1); // set deduplicates the id
+    expect(list[0].destinationCountry).toBe('UAE updated'); // last write wins
   });
 });

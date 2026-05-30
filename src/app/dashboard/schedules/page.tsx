@@ -4,6 +4,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { schedulesDueInRange } from '@/lib/dashboard';
 import { Sidebar } from '../sidebar';
+import { money } from '../format';
 import type { Schedule } from '@/lib/types';
 
 const WEEKDAYS = [
@@ -14,10 +15,6 @@ const WEEKDAYS = [
 function scheduleWhen(s: Schedule): string {
   if (s.frequency === 'monthly') return `Monthly · day ${s.dayOfMonth}`;
   return `Weekly · ${WEEKDAYS[s.dayOfWeek ?? 0]}`;
-}
-
-function usd(n: number): string {
-  return `$${n.toFixed(2)}`;
 }
 
 export default async function SchedulesPage({
@@ -72,7 +69,7 @@ export default async function SchedulesPage({
                 <div className="sh-attention-info">
                   <div className="sh-attention-recipient">{s.recipientName}</div>
                   <div className="sh-attention-meta">
-                    {usd(s.amountUsd)} · {scheduleWhen(s)}
+                    {money(s.amountSource, s.sourceCurrency)} · {scheduleWhen(s)}
                   </div>
                 </div>
               </div>
@@ -122,7 +119,7 @@ export default async function SchedulesPage({
                   {visible.map((s) => (
                     <tr key={s.id}>
                       <td><div className="sh-recipient">{s.recipientName}</div></td>
-                      <td className="sh-amount">{usd(s.amountUsd)}</td>
+                      <td className="sh-amount">{money(s.amountSource, s.sourceCurrency)}</td>
                       <td>{scheduleWhen(s)}</td>
                       <td>
                         {s.lastRunAt

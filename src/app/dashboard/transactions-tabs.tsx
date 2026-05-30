@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
+import { money } from './format';
 
 const TABS = [
   { key: 'all', label: 'All' },
@@ -14,9 +15,6 @@ const TABS = [
 
 type TabKey = (typeof TABS)[number]['key'];
 
-function money(amount: number, currency: Transfer['sourceCurrency']): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
-}
 function inr(amount: number): string {
   return `₹${amount.toLocaleString('en-IN')}`;
 }

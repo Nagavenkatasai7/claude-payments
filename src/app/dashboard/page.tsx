@@ -8,6 +8,7 @@ import {
   schedulesDueInRange,
 } from '@/lib/dashboard';
 import type { Schedule, Transfer } from '@/lib/types';
+import { money } from './format';
 import { Sidebar } from './sidebar';
 
 function usd(n: number): string {
@@ -145,7 +146,10 @@ export default async function DashboardPage() {
                         <div className="sh-recipient">{t.recipientName}</div>
                       </td>
                       <td>
-                        <div className="sh-amount">{usd(t.amountUsd)}</div>
+                        <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                        {t.sourceCurrency !== 'USD' && (
+                          <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                        )}
                         <div className="sh-recipient-sub">{inr(t.amountInr)}</div>
                       </td>
                       <td>{humanizeFunding(t.fundingMethod)}</td>
@@ -187,7 +191,7 @@ export default async function DashboardPage() {
                       <td>
                         <div className="sh-recipient">{s.recipientName}</div>
                       </td>
-                      <td className="sh-amount">{usd(s.amountUsd)}</td>
+                      <td className="sh-amount">{money(s.amountSource, s.sourceCurrency)}</td>
                       <td>{scheduleWhen(s)}</td>
                     </tr>
                   ))}

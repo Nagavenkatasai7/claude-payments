@@ -7,6 +7,7 @@ import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { evaluateCap } from '@/lib/tier-rules';
 import { maskLast4 } from '@/lib/mask';
 import { Sidebar } from '../../sidebar';
+import { money } from '../../format';
 import { markCustomerVerifiedAction, markCustomerRejectedAction } from '../actions';
 
 export default async function CustomerDetailPage({
@@ -146,7 +147,10 @@ export default async function CustomerDetailPage({
                   <tr key={t.id}>
                     <td>{t.id}</td>
                     <td>
-                      <div className="sh-amount">${t.amountUsd.toFixed(2)}</div>
+                      <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                      {t.sourceCurrency !== 'USD' && (
+                        <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                      )}
                     </td>
                     <td>{t.status}</td>
                     <td>{new Date(t.createdAt).toLocaleString()}</td>

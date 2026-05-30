@@ -177,6 +177,17 @@ export function createStore(redis: RedisLike) {
         { ex: 86400 },
       );
     },
+    async saveCorridorRequest(req: import('./types').CorridorRequest): Promise<void> {
+      await redis.set(`corridor_request:${req.id}`, JSON.stringify(req));
+      await redis.sadd('corridor_requests:ids', req.id);
+    },
+    async listCorridorRequests(): Promise<import('./types').CorridorRequest[]> {
+      const ids = await redis.smembers('corridor_requests:ids');
+      const all = await Promise.all(ids.map((id) => redis.get(`corridor_request:${id}`)));
+      const parsed: import('./types').CorridorRequest[] = [];
+      for (const raw of all) { if (raw) { try { parsed.push(JSON.parse(raw)); } catch { /* skip */ } } }
+      return parsed.sort((a, b) => (b.capturedAt ?? '').localeCompare(a.capturedAt ?? ''));
+    },
   };
 }
 

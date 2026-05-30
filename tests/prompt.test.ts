@@ -74,6 +74,27 @@ describe('SYSTEM_PROMPT — get_quote cap refusal (Bundle D)', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — non-India destination lead capture', () => {
+  it('references capture_corridor_request for non-India destinations', () => {
+    expect(SYSTEM_PROMPT).toContain('capture_corridor_request');
+  });
+
+  it('does not instruct the bot to refuse flatly for non-India destinations', () => {
+    // The old flat-refusal text must be gone
+    expect(SYSTEM_PROMPT).not.toContain('do NOT offer other destinations');
+  });
+
+  it('steers back to India after capturing the lead', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('in the meantime i can send to india');
+  });
+
+  it('instructs the bot NOT to say "corridor" to the customer', () => {
+    // The prompt must warn the bot that "corridor" is an internal term
+    // that must not be spoken to the customer.
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('do not say');
+  });
+});
+
 describe('whatsapp-ux: faster first send + clearer confirmation + destination reword', () => {
   it('B1: asks amount + funding method together in one turn', () => {
     expect(SYSTEM_PROMPT).toMatch(/how do you want to pay/i);
