@@ -93,6 +93,19 @@ describe('wouldBeFeeUsd — the repeat-send fee (for first-transfer-free framing
     expect(wouldBeFeeUsd(500, 'credit_card')).toBe(17.99); // round2(2.99 + 0.03*500)
     expect(wouldBeFeeUsd(100, 'credit_card')).toBe(5.99);
   });
+  // Lock the duplicated fee schedule to quote()'s own: wouldBeFeeUsd re-states the
+  // bank/debit/credit constants for the first-transfer-free framing, so assert it
+  // equals quote()'s repeat-send feeUsd across every funding method and a few
+  // amounts. If quote()'s schedule ever changes, this fails until both agree —
+  // the constants can't silently drift apart.
+  it('equals quote()\'s repeat-send feeUsd for every funding method (no drift)', () => {
+    const methods = ['bank_transfer', 'debit_card', 'credit_card'] as const;
+    for (const amt of [100, 500, 2999]) {
+      for (const m of methods) {
+        expect(wouldBeFeeUsd(amt, m)).toBe(quote(amt, 'USD', USD, m, 1).feeUsd);
+      }
+    }
+  });
 });
 
 describe('quote (non-USD coverage)', () => {

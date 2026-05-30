@@ -30,10 +30,15 @@ import {
 
 function maskDestination(method: PayoutMethod, dest: string): string {
   if (method === 'upi') return `UPI ${dest}`;
-  // bank: "<acct> <ifsc>" or "<acct>, <ifsc>" → mask all but last 4 of the account
-  const [acct, ...rest] = dest.split(/[,\s]+/).filter(Boolean);
-  const last4 = (acct ?? '').slice(-4);
-  const ifsc = rest.join(' ');
+  // bank: tokens are "<acct> <ifsc>" in either order, possibly comma-separated or
+  // wrapped in prose. The account is the longest all-digit run (an IFSC always
+  // contains letters); mask all but its last 4 REGARDLESS of field order so a full
+  // account number can never surface if the model passes the fields reversed.
+  const tokens = dest.split(/[,\s]+/).filter(Boolean);
+  const digitTokens = tokens.filter((t) => /^\d+$/.test(t));
+  const acct = [...digitTokens].sort((a, b) => b.length - a.length)[0] ?? tokens[0] ?? '';
+  const last4 = acct.slice(-4);
+  const ifsc = tokens.filter((t) => t !== acct).join(' ');
   return `bank a/c ****${last4}${ifsc ? `, IFSC ${ifsc}` : ''}`;
 }
 

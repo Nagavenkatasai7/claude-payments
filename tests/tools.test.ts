@@ -819,6 +819,12 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     expect(s).toContain('IFSC HDFC0001234');
     expect(s).toContain('Rate locked ~10 min');
   });
+  it('masks the account even when fields arrive reversed (ifsc before acct) — never leaks the full number', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
+    expect(s).toContain('bank a/c ****6789');
+    expect(s).toContain('IFSC HDFC0001234');
+    expect(s).not.toContain('123456789'); // the full account number must not appear
+  });
   it('shows a UPI destination in full', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
     expect(s).toContain('UPI mom@okhdfc');
