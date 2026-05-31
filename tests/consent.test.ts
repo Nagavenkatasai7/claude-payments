@@ -4,6 +4,7 @@ import {
   isResumeKeyword,
   OPT_OUT_REPLY,
   OPT_IN_REPLY,
+  OPT_OUT_REMINDER,
 } from '@/lib/consent';
 
 describe('isOptOutKeyword', () => {
@@ -53,5 +54,15 @@ describe('consent reply copy', () => {
   });
   it('opt-in reply confirms resubscription', () => {
     expect(OPT_IN_REPLY.length).toBeGreaterThan(0);
+  });
+
+  it('opt-out STATE reminder tells an already-unsubscribed user to reply START to resume', () => {
+    // Distinct from OPT_OUT_REPLY (which confirms a *fresh* STOP). This is the
+    // brief nudge sent when an already-opted-out user sends a normal message.
+    expect(OPT_OUT_REMINDER).toBe(
+      "You're unsubscribed from SmartRemit. Reply START to resume.",
+    );
+    expect(OPT_OUT_REMINDER).toMatch(/START/);
+    expect(OPT_OUT_REMINDER).not.toBe(OPT_OUT_REPLY);
   });
 });

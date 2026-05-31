@@ -3,6 +3,7 @@ import {
   BANK_FIELDS_BY_COUNTRY,
   validatePayoutFields,
   composePayoutDestination,
+  accountLast4,
 } from '@/lib/payout-format';
 import type { CountryCode } from '@/lib/types';
 
@@ -106,6 +107,127 @@ describe('validatePayoutFields', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) throw new Error('expected ok');
     expect(r.payoutDestination).not.toContain('  ');
+  });
+});
+
+// ── FIX 3: free-form field FORMAT validation (IFSC / IBAN / account min-digits) ──
+describe('validatePayoutFields — IFSC format (Fix 3)', () => {
+  it('rejects an IFSC of "X" (too short, wrong shape)', () => {
+    const r = validatePayoutFields('IN', { accountNumber: '123456789012', ifsc: 'X' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.ifsc).toBeDefined();
+  });
+
+  it('rejects an IFSC of "HDFC123" (no 0 in 5th position, wrong length)', () => {
+    const r = validatePayoutFields('IN', { accountNumber: '123456789012', ifsc: 'HDFC123' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.ifsc).toBeDefined();
+  });
+
+  it('rejects an IFSC whose 5th char is not "0"', () => {
+    const r = validatePayoutFields('IN', { accountNumber: '123456789012', ifsc: 'HDFCX001234' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.ifsc).toBeDefined();
+  });
+
+  it('accepts a valid 11-char IFSC (HDFC0001234)', () => {
+    const r = validatePayoutFields('IN', { accountNumber: '123456789012', ifsc: 'HDFC0001234' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('accepts a valid IFSC case-insensitively', () => {
+    const r = validatePayoutFields('IN', { accountNumber: '123456789012', ifsc: 'hdfc0001234' });
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('validatePayoutFields — IBAN format (Fix 3)', () => {
+  it('rejects a too-short IBAN', () => {
+    const r = validatePayoutFields('AE', { iban: 'AE07' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.iban).toBeDefined();
+  });
+
+  it('rejects an IBAN that does not start with two letters + two digits', () => {
+    const r = validatePayoutFields('AE', { iban: '12070331234567890123456' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.iban).toBeDefined();
+  });
+
+  it('accepts a well-formed AE IBAN', () => {
+    const r = validatePayoutFields('AE', { iban: 'AE070331234567890123456' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.payoutDestination).toContain('AE070331234567890123456');
+  });
+});
+
+describe('validatePayoutFields — account-number min-digits (Fix 3)', () => {
+  it('rejects a 5-digit account number ("12345")', () => {
+    const r = validatePayoutFields('US', { routingNumber: '021000021', accountNumber: '12345' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.accountNumber).toBeDefined();
+  });
+
+  it('rejects a non-numeric account-number scribble ("X")', () => {
+    const r = validatePayoutFields('US', { routingNumber: '021000021', accountNumber: 'X' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.accountNumber).toBeDefined();
+  });
+
+  it('accepts an 8-digit US account number ("12345678")', () => {
+    const r = validatePayoutFields('US', { routingNumber: '021000021', accountNumber: '12345678' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('accepts a 9-digit IN account number', () => {
+    const r = validatePayoutFields('IN', { accountNumber: '123456789', ifsc: 'HDFC0001234' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('accepts a hyphenated NZ account number (>= 6 digits after stripping)', () => {
+    const r = validatePayoutFields('NZ', { accountNumber: '01-0123-0123456-00' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('still reports the required error (not the min-digits error) for a blank account', () => {
+    const r = validatePayoutFields('US', { routingNumber: '021000021', accountNumber: '' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.accountNumber).toContain('required');
+  });
+});
+
+describe('accountLast4 — account-aware (LAST digit run, Fix 4)', () => {
+  it('US routing(9) + account(8): returns the ACCOUNT tail, not the routing tail', () => {
+    // composePayoutDestination places the account LAST, so the last digit run is
+    // the account. Previously the LONGEST run (the 9-digit routing) was used,
+    // which surfaced the routing tail "6789" instead of the account tail "5678".
+    const dest = composePayoutDestination('US', { routingNumber: '123456789', accountNumber: '12345678' });
+    expect(accountLast4(dest)).toBe('5678');
+    expect(accountLast4(dest)).not.toBe('6789');
+  });
+
+  it('IN account + IFSC: account is last among the composed fields', () => {
+    const dest = composePayoutDestination('IN', { accountNumber: '987654321012', ifsc: 'HDFC0001234' });
+    // account is placed last, so its tail is returned (not the IFSC numeric tail)
+    expect(accountLast4(dest)).toBe('1012');
+  });
+
+  it('AE IBAN: single run, returns its tail', () => {
+    const dest = composePayoutDestination('AE', { iban: 'AE070331234567890123456' });
+    expect(accountLast4(dest)).toBe('3456');
+  });
+
+  it('returns "" when there are no digits at all', () => {
+    expect(accountLast4('mom@okhdfc')).toBe('');
   });
 });
 

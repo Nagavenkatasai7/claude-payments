@@ -7,6 +7,7 @@ import {
   isResumeKeyword,
   OPT_OUT_REPLY,
   OPT_IN_REPLY,
+  OPT_OUT_REMINDER,
 } from '@/lib/consent';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
 import { chat } from '@/lib/ollama';
@@ -101,17 +102,33 @@ export async function POST(req: NextRequest) {
 
   // STOP / START consent short-circuit. AFTER the dedup guard (so a re-delivered
   // STOP isn't double-handled) and BEFORE the agent turn. WhatsApp compliance:
-  // honor opt-out and offer resume; exact-keyword only (never "cancel"). Both
-  // skip the agent entirely for this turn.
+  // honor opt-out and offer resume; exact-keyword only (never "cancel"). Each
+  // branch skips the agent entirely for this turn.
+  //
+  // Order (intentional): resume-keyword → opt-out-keyword → opt-out STATE skip.
+  //  • Resume keyword (START) clears the opt-out and confirms — it must win over
+  //    the state skip, so an opted-out user can always re-subscribe.
+  //  • Opt-out keyword (STOP) records a *fresh* opt-out and confirms it.
+  //  • Opt-out STATE skip (Fix 1): an ALREADY opted-out customer sending a normal
+  //    message must NOT reach the agent / send flow. We send a brief resume
+  //    reminder and stop. This is the high-bug fix — previously a normal message
+  //    from an opted-out user fell through to runAgentTurn and ran the send flow.
   if (incoming.kind === 'text') {
+    if (isResumeKeyword(incoming.text)) {
+      await customerStore.clearOptedOut(incoming.from);
+      await sendText(incoming.from, OPT_IN_REPLY);
+      return NextResponse.json({ ok: true });
+    }
     if (isOptOutKeyword(incoming.text)) {
       await customerStore.setOptedOut(incoming.from);
       await sendText(incoming.from, OPT_OUT_REPLY);
       return NextResponse.json({ ok: true });
     }
-    if (isResumeKeyword(incoming.text)) {
-      await customerStore.clearOptedOut(incoming.from);
-      await sendText(incoming.from, OPT_IN_REPLY);
+    // State skip: fetch the record and, if currently opted out, suppress the
+    // send flow. Only normal text reaches here (keywords returned above).
+    const existing = await customerStore.getCustomer(incoming.from);
+    if (existing?.optedOutAt) {
+      await sendText(incoming.from, OPT_OUT_REMINDER);
       return NextResponse.json({ ok: true });
     }
   }

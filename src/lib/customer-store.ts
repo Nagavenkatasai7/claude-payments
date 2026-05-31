@@ -35,7 +35,20 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
       senderPhone: string,
     ): Promise<{ customer: Customer; wasCreated: boolean }> {
       const existing = await this.getCustomer(senderPhone);
-      if (existing) return { customer: existing, wasCreated: false };
+      if (existing) {
+        // Fix 5: a returning customer whose record predates optInAt would slip
+        // through this fast path and never get consent recorded. Backfill-and-
+        // PERSIST it here (first-contact-wins, idempotent) so optInAt is reliably
+        // set at the store layer — not dependent on the route remembering to call
+        // setOptedIn. This is the path the vast majority of prod inbounds take.
+        if (!existing.optInAt) {
+          const nowIso = new Date().toISOString();
+          const updated: Customer = { ...existing, optInAt: nowIso, updatedAt: nowIso };
+          await this.saveCustomer(updated);
+          return { customer: updated, wasCreated: false };
+        }
+        return { customer: existing, wasCreated: false };
+      }
 
       const inferredCountry = countryForPhone(senderPhone) ?? DEFAULT_SENDER_COUNTRY;
 

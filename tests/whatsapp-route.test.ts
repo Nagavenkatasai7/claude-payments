@@ -21,11 +21,33 @@ vi.mock('@/lib/store', () => ({
 // Keep the downstream turn-building dependencies inert so the POST handler can
 // run to completion once it's past the gate, without real Redis / agent calls.
 // vi.hoisted: these mock fns are referenced inside the hoisted vi.mock factories.
-const { sendText, setOptedOut, clearOptedOut, setOptedIn, runAgentTurn } = vi.hoisted(() => ({
+const {
+  sendText,
+  setOptedOut,
+  clearOptedOut,
+  setOptedIn,
+  getCustomer,
+  upsertOnFirstInbound,
+  runAgentTurn,
+} = vi.hoisted(() => ({
   sendText: vi.fn(async () => {}),
   setOptedOut: vi.fn(async (_phone: string) => {}),
   clearOptedOut: vi.fn(async (_phone: string) => {}),
   setOptedIn: vi.fn(async (_phone: string) => {}),
+  // Default: an opted-IN customer (optInAt set, no optedOutAt). Tests override.
+  // Typed loosely so per-test overrides can add optedOutAt / drop optInAt.
+  getCustomer: vi.fn(
+    async (_phone: string): Promise<Record<string, unknown> | null> => ({
+      senderPhone: '15551230000',
+      optInAt: new Date().toISOString(),
+    }),
+  ),
+  upsertOnFirstInbound: vi.fn(
+    async (): Promise<{ customer: Record<string, unknown>; wasCreated: boolean }> => ({
+      customer: { firstSeenAt: new Date().toISOString(), optInAt: new Date().toISOString() },
+      wasCreated: true,
+    }),
+  ),
   runAgentTurn: vi.fn(async () => ''),
 }));
 vi.mock('@/lib/whatsapp', async (orig) => {
@@ -34,10 +56,8 @@ vi.mock('@/lib/whatsapp', async (orig) => {
 });
 vi.mock('@/lib/customer-store', () => ({
   getCustomerStore: () => ({
-    upsertOnFirstInbound: async () => ({
-      customer: { firstSeenAt: new Date().toISOString(), optInAt: new Date().toISOString() },
-      wasCreated: true,
-    }),
+    upsertOnFirstInbound,
+    getCustomer,
     setOptedOut,
     clearOptedOut,
     setOptedIn,
@@ -56,7 +76,7 @@ vi.mock('@/lib/agent', () => ({
 vi.mock('@/lib/ollama', () => ({ chat: async () => '' }));
 
 import { GET, POST } from '@/app/api/whatsapp/route';
-import { OPT_OUT_REPLY, OPT_IN_REPLY } from '@/lib/consent';
+import { OPT_OUT_REPLY, OPT_IN_REPLY, OPT_OUT_REMINDER } from '@/lib/consent';
 
 const SECRET = 'meta-app-secret';
 const inboundBody = JSON.stringify({
@@ -96,6 +116,15 @@ beforeEach(() => {
   clearOptedOut.mockClear();
   setOptedIn.mockClear();
   runAgentTurn.mockClear();
+  // Reset customer lookups to the opted-IN default each test.
+  getCustomer.mockClear().mockResolvedValue({
+    senderPhone: '15551230000',
+    optInAt: new Date().toISOString(),
+  });
+  upsertOnFirstInbound.mockClear().mockResolvedValue({
+    customer: { firstSeenAt: new Date().toISOString(), optInAt: new Date().toISOString() },
+    wasCreated: true,
+  });
 });
 
 function textBody(text: string, id = 'wamid.TXT', from = '15551230000') {
@@ -244,6 +273,79 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
     const res = await post(textBody('stop the transfer', 'wamid.STOPX'));
     expect(res.status).toBe(200);
     expect(setOptedOut).not.toHaveBeenCalled();
+    expect(runAgentTurn).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
+  it('an already-opted-out customer sending a normal message → reminder sent, agent NOT run', async () => {
+    // Customer record carries optedOutAt → the send flow must be suppressed.
+    getCustomer.mockResolvedValue({
+      senderPhone: '15551230000',
+      optInAt: '2026-01-01T00:00:00Z',
+      optedOutAt: '2026-05-01T00:00:00Z',
+    });
+    const res = await post(textBody('send $20', 'wamid.OPTEDOUT1'));
+    expect(res.status).toBe(200);
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    // Not a fresh STOP — no setOptedOut, no fresh OPT_OUT_REPLY confirmation.
+    expect(setOptedOut).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY);
+  });
+
+  it('an opted-out customer can still resume with START (clears opt-out, agent NOT run)', async () => {
+    getCustomer.mockResolvedValue({
+      senderPhone: '15551230000',
+      optInAt: '2026-01-01T00:00:00Z',
+      optedOutAt: '2026-05-01T00:00:00Z',
+    });
+    const res = await post(textBody('START', 'wamid.RESUME1'));
+    expect(res.status).toBe(200);
+    expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    // The state-skip reminder must NOT fire for a resume keyword.
+    expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
+  });
+
+  it('an opted-IN customer sending a normal message → agent IS run, NO reminder', async () => {
+    getCustomer.mockResolvedValue({
+      senderPhone: '15551230000',
+      optInAt: '2026-01-01T00:00:00Z',
+      // no optedOutAt
+    });
+    const res = await post(textBody('send $20', 'wamid.OPTEDIN1'));
+    expect(res.status).toBe(200);
+    expect(runAgentTurn).toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
+  });
+});
+
+describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', () => {
+  it('an opted-IN customer whose record lacks optInAt → setOptedIn is called (backfill)', async () => {
+    upsertOnFirstInbound.mockResolvedValue({
+      customer: { firstSeenAt: '2026-01-01T00:00:00Z' }, // NO optInAt
+      wasCreated: false,
+    });
+    getCustomer.mockResolvedValue({
+      senderPhone: '15551230000',
+      // no optInAt, no optedOutAt
+    });
+    const res = await post(textBody('hi', 'wamid.BACKFILL1'));
+    expect(res.status).toBe(200);
+    expect(setOptedIn).toHaveBeenCalledWith('15551230000');
+    expect(runAgentTurn).toHaveBeenCalled();
+  });
+
+  it('a customer that already has optInAt → setOptedIn NOT called (no churn), agent runs', async () => {
+    upsertOnFirstInbound.mockResolvedValue({
+      customer: { firstSeenAt: '2026-01-01T00:00:00Z', optInAt: '2026-02-01T00:00:00Z' },
+      wasCreated: false,
+    });
+    const res = await post(textBody('hi', 'wamid.NOCHURN1'));
+    expect(res.status).toBe(200);
+    expect(setOptedIn).not.toHaveBeenCalled();
     expect(runAgentTurn).toHaveBeenCalled();
   });
 });
