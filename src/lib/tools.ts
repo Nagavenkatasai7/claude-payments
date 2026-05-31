@@ -144,7 +144,7 @@ export const toolSchemas: ChatTool[] = [
           amount_inr: {
             type: 'number',
             description:
-              "Optional. The exact rupee amount the RECIPIENT should receive. Provide this INSTEAD of amount_usd when the customer asks in rupees ('I want mom to get ₹40000'). We back-solve the send amount and add the fee on top. If both are given, amount_inr wins.",
+              "Optional. The exact rupee amount the RECIPIENT should receive. Provide this INSTEAD of amount_usd ONLY when no send amount has been set yet, or after the user has explicitly confirmed switching to a receive-first amount (see the SEND AMOUNT LOCK rule). If a send amount is already locked in this flow, do NOT pass amount_inr until the user has confirmed the change. We back-solve the send amount and add the fee on top. If both are given, amount_inr wins.",
           },
           funding_method: {
             type: 'string',
@@ -480,7 +480,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'capture_corridor_request',
       description:
-        "Capture a lead when a user wants to send to a country we don't deliver to yet (anything other than India). Saves their destination + rough amount for the team. Call this, then steer the user to India.",
+        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 8 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 8 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
       parameters: {
         type: 'object',
         properties: {
