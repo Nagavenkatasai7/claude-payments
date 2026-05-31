@@ -1,5 +1,6 @@
 import { after, NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
+import { verifyMetaSignature } from '@/lib/providers/meta-signature-verify';
 import { parseIncoming, sendText } from '@/lib/whatsapp';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
 import { chat } from '@/lib/ollama';
@@ -37,7 +38,27 @@ function synthesizeButtonText(tap: ButtonTap): string {
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => null);
+  const raw = await req.text(); // raw bytes first — Meta signs the exact body
+
+  // Signature gate, ABOVE markMessageSeen, so a forged body can't touch the
+  // dedup set or any downstream processing.
+  const appSecret = env.metaAppSecret; // '' if unset
+  if (appSecret === '') {
+    // Dev/test + current prod (secret not yet configured): proceed, but warn.
+    console.warn('META_APP_SECRET unset — skipping X-Hub-Signature-256 verification');
+  } else {
+    const signature = req.headers.get('x-hub-signature-256') ?? '';
+    if (!verifyMetaSignature(raw, signature, appSecret)) {
+      return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
+    }
+  }
+
+  let body: unknown = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = null;
+  }
   const incoming = parseIncoming(body);
   if (!incoming) return NextResponse.json({ ok: true });
 
