@@ -175,6 +175,28 @@ describe('SYSTEM_PROMPT — QA batch 2 (multi-currency cap labels, opener, block
   });
 });
 
+describe('SYSTEM_PROMPT — anti-upsell / no-fabricated-minimum rule', () => {
+  it('states the minimum is $10 INCLUSIVE and the max is $2,999', () => {
+    expect(SYSTEM_PROMPT).toContain('$10 INCLUSIVE');
+    expect(SYSTEM_PROMPT).toContain('$2,999');
+  });
+
+  it('forbids inventing a minimum-amount error or calling $10+ too low', () => {
+    expect(SYSTEM_PROMPT).toContain('NEVER invent a minimum-amount error');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('too low');
+  });
+
+  it('forbids upselling — never suggest or ask for a HIGHER amount than requested', () => {
+    expect(SYSTEM_PROMPT).toContain('NEVER suggest or ask for a HIGHER amount than the user requested');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('no upselling');
+  });
+
+  it('only refuses when a tool actually returns a refusal, relaying that exact reason', () => {
+    expect(SYSTEM_PROMPT).toContain('ACTUALLY returns a refusal');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never a fabricated minimum');
+  });
+});
+
 describe('SYSTEM_PROMPT — recurring schedule guardrails (QA #7)', () => {
   it('tells the bot schedules run until cancelled or until an optional end date', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('until they cancel');

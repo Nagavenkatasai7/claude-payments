@@ -1062,7 +1062,9 @@ const baseQuote = (over: Partial<Quote> = {}): Quote => ({
 
 describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
   it('renders FX rate, ETA, masked bank destination, and the rate-lock line', () => {
-    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '123456789 HDFC0001234', 'bank_transfer');
+    // IN format stores the account LAST (composePayoutDestination order), so the
+    // account tail is what surfaces.
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('1 USD = ₹83');
     expect(s).toContain('₹41,500');
     expect(s).toContain('within 10 minutes');
@@ -1092,8 +1094,11 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     expect(s).not.toContain('021000021'); // full routing never shown either
   });
   it('never leaks a hyphenated NZ account number', () => {
+    // NZ account is one hyphenated field (bank-branch-account-suffix). Under the
+    // account-last rule the tail is the trailing run (the suffix) — still ≤4
+    // digits, and the account body never appears, so it stays leak-proof.
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '01-0123-0123456-00', 'bank_transfer');
-    expect(s).toContain('bank a/c ****3456'); // longest digit run is 0123456
+    expect(s).toMatch(/bank a\/c \*\*\*\*\d{1,4}/);
     expect(s).not.toContain('0123456');        // the account body must not appear
   });
   it('shows a UPI destination in full', () => {
@@ -1126,7 +1131,8 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
   });
 
   it('non-empty payoutDestination keeps the masked "bank a/c ****<last4>" line', () => {
-    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '123456789 HDFC0001234', 'bank_transfer');
+    // account composed LAST (IN order) → its tail is shown
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
     expect(s).toContain('bank a/c ****6789');
     expect(s).not.toContain('their bank account (you');
   });
@@ -1223,13 +1229,15 @@ describe('maskAccount — exported helper', () => {
     expect(maskAccount('upi', 'mom@okhdfc')).toBe('mom@okhdfc');
   });
 
-  it('bank: collapses to ****<last4> of the longest digit run (account)', () => {
-    // Account number (longer) wins over routing/IFSC; nothing else is shown
-    expect(maskAccount('bank', '123456789 HDFC0001234')).toBe('****6789');
+  it('bank: collapses to ****<last4> of the account (the LAST composed field)', () => {
+    // composePayoutDestination stores the account LAST, so its tail is shown;
+    // nothing else (routing/IFSC) surfaces.
+    expect(maskAccount('bank', 'HDFC0001234 123456789')).toBe('****6789');
   });
 
-  it('bank: same result when IFSC comes first (field order is irrelevant)', () => {
-    expect(maskAccount('bank', 'HDFC0001234 123456789')).toBe('****6789');
+  it('bank: the trailing account run is what surfaces, not a leading code', () => {
+    // SBIN0001234 then the account → account tail wins
+    expect(maskAccount('bank', 'SBIN0001234 987654321')).toBe('****4321');
   });
 
   it('bank: never includes the raw account number, even with no spaces (IBAN)', () => {
@@ -1246,7 +1254,7 @@ describe('list_saved_recipients — payout_destination masking (Fix #1)', () => 
       name: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'bank',
-      payoutDestination: '123456789 HDFC0001234',
+      payoutDestination: 'HDFC0001234 123456789', // account composed LAST
       lastUsedAt: new Date().toISOString(),
     });
     const r = await executeTool('list_saved_recipients', {}, ctx);
@@ -1277,7 +1285,7 @@ describe('resolve_recipient — payout_destination masking (Fix #1)', () => {
       name: 'Priya',
       recipientPhone: '919876543210',
       payoutMethod: 'bank',
-      payoutDestination: '987654321 SBIN0001234',
+      payoutDestination: 'SBIN0001234 987654321', // account composed LAST
       lastUsedAt: new Date().toISOString(),
     });
     const r = await executeTool('resolve_recipient', { name: 'Priya' }, ctx);

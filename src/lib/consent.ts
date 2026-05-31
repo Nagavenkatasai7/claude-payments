@@ -21,3 +21,10 @@ export const OPT_OUT_REPLY =
   "You've been unsubscribed. Reply START to resume.";
 export const OPT_IN_REPLY =
   "You're resubscribed. Welcome back! How can I help you send money today?";
+
+// Sent when an ALREADY opted-out customer sends a normal (non-keyword) message.
+// Distinct from OPT_OUT_REPLY, which confirms a *fresh* STOP. This one is the
+// brief reminder for the opted-out STATE: it nudges resume without re-running
+// the send flow (the agent is skipped entirely for opted-out senders).
+export const OPT_OUT_REMINDER =
+  "You're unsubscribed from SmartRemit. Reply START to resume.";

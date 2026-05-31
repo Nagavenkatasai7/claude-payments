@@ -244,6 +244,54 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
     expect(new Date(customer.optInAt!).toString()).not.toBe('Invalid Date');
   });
 
+  it('upsertOnFirstInbound PERSISTS optInAt for an EXISTING pre-feature record (Fix 5)', async () => {
+    // Prod bug: a returning customer whose record predates optInAt would hit the
+    // `if (existing) return` fast path and never get optInAt persisted. The store
+    // must backfill-and-persist it itself (first-contact-wins), not rely on the
+    // route remembering to call setOptedIn.
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    // Write a record with NO optInAt (simulating a pre-feature/grandfathered row)
+    await redis.set(`customer:${PHONE}`, JSON.stringify({
+      senderPhone: PHONE,
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'default',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }));
+    await redis.sadd('customers:phones', PHONE);
+
+    const cs = createCustomerStore(redis, store);
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
+    expect(wasCreated).toBe(false); // still an existing record, not a fresh create
+    expect(customer.optInAt).toBeDefined();
+    // And it is actually PERSISTED to Redis (not just filled in-memory)
+    const raw = await redis.get(`customer:${PHONE}`);
+    expect(JSON.parse(raw!).optInAt).toBeDefined();
+  });
+
+  it('upsertOnFirstInbound does NOT churn optInAt on an existing record that already has it (Fix 5 idempotent)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const existingOptIn = '2026-02-02T00:00:00Z';
+    await redis.set(`customer:${PHONE}`, JSON.stringify({
+      senderPhone: PHONE,
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'default',
+      optInAt: existingOptIn,
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }));
+    await redis.sadd('customers:phones', PHONE);
+    const cs = createCustomerStore(redis, store);
+    const { customer } = await cs.upsertOnFirstInbound(PHONE);
+    expect(customer.optInAt).toBe(existingOptIn); // first contact wins, untouched
+  });
+
   it('setOptedIn sets optInAt once and is idempotent (first contact wins)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);

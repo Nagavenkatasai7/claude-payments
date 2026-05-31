@@ -30,18 +30,17 @@ import { screenTransfer } from './compliance';
 
 /**
  * Returns the last 4 digits of the account number in a payout string, or '' if
- * it contains no digits. The account number is taken as the LONGEST run of
- * digits — a rule that holds across every supported format (US routing+acct,
- * UK sort+acct, IN acct+IFSC, AE IBAN, hyphenated NZ acct, …) because
- * routing/sort/IFSC/SWIFT codes are either shorter than the account or contain
- * letters. We never keep any other part of the string, so nothing but these 4
- * digits can ever surface — leak-proof regardless of field order or format.
+ * it contains no digits. `composePayoutDestination` (in payout-format.ts) always
+ * places the account field LAST, so the account is the LAST run of digits — we
+ * take that run's tail, consistent with `accountLast4` there. We never keep any
+ * other part of the string, so nothing but these ≤4 digits can ever surface —
+ * leak-proof in every supported format.
  */
 function accountLast4(dest: string): string {
   const runs = dest.match(/\d+/g);
   if (!runs || runs.length === 0) return '';
-  const longest = runs.reduce((a, b) => (b.length > a.length ? b : a));
-  return longest.slice(-4);
+  const last = runs[runs.length - 1];
+  return last.slice(-4);
 }
 
 /**
