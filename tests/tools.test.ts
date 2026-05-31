@@ -313,7 +313,7 @@ describe('executeTool', () => {
       ctx,
     );
     expect(link.url).toBe(
-      `https://sendhome.test/pay/${created.transfer_id}`,
+      `https://smartremit.test/pay/${created.transfer_id}`,
     );
   });
 

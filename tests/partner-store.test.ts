@@ -45,7 +45,7 @@ describe('partner store', () => {
     const ps = createPartnerStore(fakeRedis());
     const p = await ps.ensureDefaultPartner();
     expect(p.id).toBe('default');
-    expect(p.name).toBe('SendHome Default');
+    expect(p.name).toBe('SmartRemit Default');
     expect(p.countries).toEqual(['US']);
     expect(p.status).toBe('active');
     expect(await ps.getPartner('default')).toEqual(p);

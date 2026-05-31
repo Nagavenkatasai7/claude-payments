@@ -1,4 +1,4 @@
-# SendHome — WhatsApp US→India Remittance (Prototype)
+# SmartRemit (smartremit.ai) — WhatsApp US→India Remittance (Prototype)
 
 A prototype, inspired by Felix Pago, that lets a US user send money to family
 in India entirely through a WhatsApp conversation. An AI agent (Kimi K2.6 on

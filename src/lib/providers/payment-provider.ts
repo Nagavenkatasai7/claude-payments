@@ -27,7 +27,7 @@ export interface WebhookResult {
  * The pluggable settlement seam, mirroring KycProvider / SanctionsScreener.
  *
  * A REAL Uniteller-shaped partner (the AD-II / money-transmitter of record per
- * ROADMAP Lane C) implements this against the documented contract — SendHome
+ * ROADMAP Lane C) implements this against the documented contract — SmartRemit
  * NEVER holds funds:
  *
  *   initiateTransfer POSTs a settlement instruction:

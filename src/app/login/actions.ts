@@ -24,7 +24,7 @@ export async function login(
   if (staff.partnerId) {
     const partner = await getPartnerStore().getPartner(staff.partnerId);
     if (!partner || partner.status !== 'active') {
-      return 'Account unavailable. Contact SendHome support.';
+      return 'Account unavailable. Contact SmartRemit support.';
     }
   }
   const token = await getAuthStore().createSession(username);

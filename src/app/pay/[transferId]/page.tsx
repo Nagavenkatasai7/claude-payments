@@ -110,7 +110,7 @@ export default async function PayPage({
     return (
       <main className="payapp">
         <div className="card">
-          <div className="brand">SendHome</div>
+          <div className="brand">SmartRemit</div>
           <h1>This link is no longer active</h1>
         </div>
       </main>
@@ -125,7 +125,7 @@ export default async function PayPage({
   return (
     <main className="payapp">
       <div className="card">
-        <div className="brand">SendHome</div>
+        <div className="brand">SmartRemit</div>
         <h1>Secure payment</h1>
         <div className="summary">
           <Row label="Recipient" value={view.recipientName} />

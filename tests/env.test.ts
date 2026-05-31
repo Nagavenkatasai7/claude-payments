@@ -3,7 +3,7 @@ import { env } from '@/lib/env';
 
 describe('env', () => {
   it('reads a configured variable', () => {
-    expect(env.appBaseUrl).toBe('https://sendhome.test');
+    expect(env.appBaseUrl).toBe('https://smartremit.test');
   });
 
   it('throws a clear error when a variable is missing', () => {
@@ -55,8 +55,8 @@ describe('env', () => {
     });
 
     it('trims trailing slashes from explicit APP_BASE_URL', () => {
-      process.env.APP_BASE_URL = 'https://sendhome.test///';
-      expect(env.appBaseUrl).toBe('https://sendhome.test');
+      process.env.APP_BASE_URL = 'https://smartremit.test///';
+      expect(env.appBaseUrl).toBe('https://smartremit.test');
     });
   });
 

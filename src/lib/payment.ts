@@ -114,7 +114,7 @@ export async function completePaymentStage2(
   const destAmount = formatDestAmount(updated.amountInr, destCurrency);
 
   const senderMessages = [
-    `🎉 ${destAmount} delivered to ${updated.recipientName} via bank transfer. Transfer ID: ${updated.id}. Thanks for using SendHome!`,
+    `🎉 ${destAmount} delivered to ${updated.recipientName} via bank transfer. Transfer ID: ${updated.id}. Thanks for using SmartRemit!`,
   ];
 
   return { transfer: updated, senderMessages };

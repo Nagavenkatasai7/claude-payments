@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
       // which is logged and swallowed. Switch back to `sendTemplate` once
       // the template is approved.
       const text =
-        `Your scheduled SendHome transfer of $${schedule.amountUsd.toFixed(2)} ` +
+        `Your scheduled SmartRemit transfer of $${schedule.amountUsd.toFixed(2)} ` +
         `to ${schedule.recipientName} is ready. Tap to pay: ${url}`;
       try {
         await sendText(schedule.phone, text);

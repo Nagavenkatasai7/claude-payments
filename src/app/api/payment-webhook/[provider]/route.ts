@@ -48,7 +48,7 @@ export async function POST(
       try {
         await sendText(
           updated.phone,
-          `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName}. Thanks for using SendHome!`,
+          `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName}. Thanks for using SmartRemit!`,
         );
         if (updated.recipientPhone) {
           await sendTemplate(
