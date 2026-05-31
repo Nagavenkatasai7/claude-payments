@@ -112,7 +112,7 @@ export async function backfillPartnersOnce(
     const now = new Date().toISOString();
     await partnerStore.savePartner({
       id: 'default',
-      name: 'SendHome Default',
+      name: 'SmartRemit Default',
       countries: ['US'],
       status: 'active',
       createdAt: now,

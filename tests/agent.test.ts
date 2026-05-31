@@ -114,8 +114,8 @@ describe('createAgent', () => {
 
   it('replaces a typo URL in the model reply with the canonical payment link', async () => {
     const store = createStore(fakeRedis());
-    // The canonical URL is code-generated from APP_BASE_URL (https://sendhome.test in tests).
-    const canonicalUrl = 'https://sendhome.test/pay/abc123';
+    // The canonical URL is code-generated from APP_BASE_URL (https://smartremit.test in tests).
+    const canonicalUrl = 'https://smartremit.test/pay/abc123';
     const typoUrl = 'https://claude-payments.verce.app/pay/abc123';
 
     // Round 1: model calls generate_payment_link tool

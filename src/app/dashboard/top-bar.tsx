@@ -8,8 +8,8 @@ export async function TopBar() {
   return (
     <header className="sh-topbar">
       <div className="sh-brand">
-        <div className="sh-brand-mark">SH</div>
-        SendHome
+        <div className="sh-brand-mark">SR</div>
+        SmartRemit
       </div>
       <div className="sh-search" aria-hidden="true">
         🔍 &nbsp;Search transactions, recipients, schedules…

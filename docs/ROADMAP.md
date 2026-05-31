@@ -1,4 +1,4 @@
-# SendHome — Feature Inventory & Roadmap
+# SmartRemit — Feature Inventory & Roadmap
 
 Honest, up-to-date status of what's actually built vs the originally specified end-to-end remittance vision. Updated **2026-05-23**.
 

@@ -221,7 +221,7 @@ describe('backfillPartnersOnce', () => {
     expect(result.defaultPartnerCreated).toBe(true);
     expect(result.skippedSentinel).toBe(false);
     const p = await ps.getPartner('default');
-    expect(p?.name).toBe('SendHome Default');
+    expect(p?.name).toBe('SmartRemit Default');
     expect(p?.countries).toEqual(['US']);
     expect(p?.status).toBe('active');
   });
@@ -507,7 +507,7 @@ describe('backfillExpandCountriesOnce', () => {
     // Seed default partner with only US
     await partnerStore.savePartner({
       id: 'default',
-      name: 'SendHome Default',
+      name: 'SmartRemit Default',
       countries: ['US'],
       status: 'active',
       createdAt: '2026-01-01T00:00:00Z',
@@ -530,7 +530,7 @@ describe('backfillExpandCountriesOnce', () => {
     const partnerStore = createPartnerStore(redis);
     await partnerStore.savePartner({
       id: 'default',
-      name: 'SendHome Default',
+      name: 'SmartRemit Default',
       countries: ['US'],
       status: 'active',
       createdAt: '2026-01-01T00:00:00Z',
@@ -581,7 +581,7 @@ describe('backfillAllCorridorsOnce (any-to-any)', () => {
     const store = createStore(redis);
     const partnerStore = createPartnerStore(redis);
     await partnerStore.savePartner({
-      id: 'default', name: 'SendHome Default', countries: ['US'], status: 'active',
+      id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
     const result = await backfillAllCorridorsOnce(store, partnerStore);

@@ -32,7 +32,7 @@ export function createPartnerStore(redis: RedisLike) {
       const now = new Date().toISOString();
       const fresh: Partner = {
         id: 'default',
-        name: 'SendHome Default',
+        name: 'SmartRemit Default',
         countries: ['US'],
         status: 'active',
         createdAt: now,

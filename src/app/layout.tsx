@@ -2,7 +2,7 @@ import './globals.css';
 import type { ReactNode } from 'react';
 
 export const metadata = {
-  title: 'SendHome',
+  title: 'SmartRemit',
   description: 'Send money across borders via WhatsApp',
 };
 

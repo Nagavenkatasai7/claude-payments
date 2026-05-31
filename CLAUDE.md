@@ -1,10 +1,10 @@
-# CLAUDE.md — SendHome Project Context
+# CLAUDE.md — SmartRemit Project Context
 
 Project context for any Claude session working in this repo. Keep concise; update when the architecture or stack changes meaningfully.
 
 ## What this is
 
-**SendHome** — a working prototype of a WhatsApp-based US→India remittance service, inspired by Felix Pago. Customers chat with an AI agent in WhatsApp to send money; staff manage everything through a Stripe-style admin dashboard. **All real money movement is mocked** — no actual Plaid, FedNow, or UPI integration. Every transfer is realistic on screen but doesn't move a cent.
+**SmartRemit** (smartremit.ai) — a working prototype of a WhatsApp-based US→India remittance service, inspired by Felix Pago. Customers chat with an AI agent in WhatsApp to send money; staff manage everything through a Stripe-style admin dashboard. **All real money movement is mocked** — no actual Plaid, FedNow, or UPI integration. Every transfer is realistic on screen but doesn't move a cent.
 
 Live at **https://claude-payments.vercel.app** (admin credentials live in Vercel env vars `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values).
 
