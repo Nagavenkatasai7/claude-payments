@@ -208,9 +208,18 @@ describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toMatch(/name and (their )?whatsapp number/);
   });
 
-  it('A5: surfaces FX rate + ETA + payout destination in confirmations', () => {
+  it('A5: surfaces FX rate + ETA in confirmations', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('delivery time');
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain('payout destination');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('exchange rate');
+  });
+
+  // Item 2: bank details are NEVER collected in chat — the sender enters them on
+  // the secure pay page. The prompt says so and no longer carries a per-country
+  // "BANK DETAILS BY COUNTRY" block.
+  it('Item 2: bank details are entered on the secure pay page, not in chat', () => {
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('secure pay page');
+    expect(SYSTEM_PROMPT).not.toContain('BANK DETAILS BY COUNTRY');
+    expect(SYSTEM_PROMPT.toLowerCase()).not.toContain('ask 2 — bank details');
   });
 
   it('multi-country: currency is auto-detected, the bot does not ask by default', () => {
@@ -239,8 +248,10 @@ describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('which country are you sending to');
   });
 
-  it('a2a: prompt includes per-country bank-detail guidance', () => {
-    // All major formats must appear
+  it('Item 2: country bank codes appear ONLY as "never echo these" guidance, not a collect list', () => {
+    // The bank-format codes still appear — but only in the LAST-4 / never-echo
+    // rule, NOT as an "ask the user for these fields" block. The old
+    // "BANK DETAILS BY COUNTRY" collect block is gone (asserted above).
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('iban');           // AE
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('routing number'); // US
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('sort code');      // GB
@@ -248,10 +259,10 @@ describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('bsb');            // AU
   });
 
-  it('a2a: payout is always bank account, no UPI offered', () => {
+  it('Item 2: never asks for bank/account details in chat', () => {
     // UPI must not be offered as a payout option to customers
     expect(SYSTEM_PROMPT.toLowerCase()).not.toMatch(/how should they receive.*upi/i);
-    // Payout is always bank
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain("payout is always a bank account");
+    // The recipient's bank details are entered on the secure pay page, never in chat.
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never ask for card details or bank account details in chat');
   });
 });

@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
+import { accountLast4 } from '@/lib/payout-format';
 import { TransactionsTabs } from './transactions-tabs';
 
 export interface TransactionsExplorerProps {
@@ -31,7 +32,10 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
 
   const filtered = props.transfers.filter((t) => {
     if (q) {
-      const hay = `${t.recipientName} ${t.payoutDestination} ${t.phone}`.toLowerCase();
+      // Search matches the account's LAST-4 only (not the full number) — staff
+      // see ****<last4> by default and search the same masked tail. Recipient
+      // name and sender phone stay fully searchable.
+      const hay = `${t.recipientName} ${accountLast4(t.payoutDestination)} ${t.phone}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     if (fromMs !== null && Date.parse(t.createdAt) < fromMs) return false;
@@ -85,7 +89,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
         </label>
         <input
           type="text"
-          placeholder="Search recipient, destination, or sender phone…"
+          placeholder="Search recipient, account last-4, or sender phone…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="sh-input"

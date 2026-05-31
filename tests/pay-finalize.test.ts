@@ -26,6 +26,8 @@ async function makeDraft(
   stores: ReturnType<typeof buildStores>,
   amountUsd: number,
   recipientName = 'Mom',
+  payoutDestination: string | undefined = 'mom@upi',
+  payoutMethod: 'upi' | 'bank' = 'upi',
 ) {
   await stores.customerStore.upsertOnFirstInbound(PHONE);
   return stores.draftStore.createDraft({
@@ -33,8 +35,8 @@ async function makeDraft(
     recipient: {
       name: recipientName,
       recipientPhone: '919876543210',
-      payoutMethod: 'upi',
-      payoutDestination: 'mom@upi',
+      payoutMethod,
+      payoutDestination,
     },
     amountUsd,
     amountSource: amountUsd,
@@ -128,5 +130,53 @@ describe('finalizeDraftPayment', () => {
 
     const customer = await stores.customerStore.getCustomer(PHONE);
     expect(customer?.lastFundingMethod).toBe('bank_transfer');
+  });
+
+  // Item 2: bank details arrive in the pay-page POST body, not the chat. A
+  // cold-start draft has an empty payoutDestination; the bankDetails argument
+  // supplies it at pay time.
+  it('uses bankDetails from the param for the created transfer (cold-start draft has empty destination)', async () => {
+    const stores = buildStores();
+    const draftId = await makeDraft(stores, 200, 'Mom', '', 'bank');
+
+    const result = await finalizeDraftPayment(stores, draftId, {
+      payoutMethod: 'bank',
+      payoutDestination: '021000021 12345678901',
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.payoutDestination).toBe('021000021 12345678901');
+    expect(saved?.payoutMethod).toBe('bank');
+  });
+
+  it('FALLS BACK to draft.recipient.payoutDestination when bankDetails is absent (old in-flight draft)', async () => {
+    const stores = buildStores();
+    // Old-style draft that still carries the destination it was created with.
+    const draftId = await makeDraft(stores, 200, 'Mom', 'mom@upi', 'upi');
+
+    const result = await finalizeDraftPayment(stores, draftId); // no bankDetails
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.payoutDestination).toBe('mom@upi');
+    expect(saved?.payoutMethod).toBe('upi');
+  });
+
+  it('FALLS BACK to the draft destination when bankDetails has an empty payoutDestination', async () => {
+    const stores = buildStores();
+    const draftId = await makeDraft(stores, 200, 'Mom', 'mom@upi', 'upi');
+
+    const result = await finalizeDraftPayment(stores, draftId, {
+      payoutMethod: 'bank',
+      payoutDestination: '', // empty body → fall back to the draft's stored value
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.payoutDestination).toBe('mom@upi');
   });
 });

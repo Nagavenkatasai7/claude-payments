@@ -7,6 +7,7 @@ import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
+import { MaskedDestination } from '../masked-destination';
 import {
   releaseTransferAction,
   rejectTransferAction,
@@ -25,9 +26,10 @@ function TransferRow({ t }: { t: Transfer }) {
     <tr>
       <td>
         <div className="sh-recipient">{t.recipientName}</div>
-        <div className="sh-recipient-sub">
-          {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
-        </div>
+        <MaskedDestination
+          payoutMethod={t.payoutMethod}
+          payoutDestination={t.payoutDestination}
+        />
       </td>
       <td>
         <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
@@ -112,9 +114,10 @@ export default async function CompliancePage() {
                     <tr key={t.id}>
                       <td>
                         <div className="sh-recipient">{t.recipientName}</div>
-                        <div className="sh-recipient-sub">
-                          {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
-                        </div>
+                        <MaskedDestination
+                          payoutMethod={t.payoutMethod}
+                          payoutDestination={t.payoutDestination}
+                        />
                       </td>
                       <td>
                         <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>

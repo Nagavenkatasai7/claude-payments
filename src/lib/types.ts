@@ -154,8 +154,12 @@ export interface Draft {
   recipient: {
     name: string;
     recipientPhone: string;
+    // Item 2: bank details are entered by the sender on the secure pay page, not
+    // collected in chat. On a cold-start draft payoutDestination is '' (or absent
+    // for old in-flight drafts) and is filled at pay time from the POST body.
+    // payoutMethod defaults to 'bank'.
     payoutMethod: PayoutMethod;
-    payoutDestination: string;
+    payoutDestination?: string;
   };
   amountUsd: number;              // USD-equivalent (for cap re-check)
   amountSource: number;           // NEW (P4)
@@ -241,6 +245,9 @@ export interface Customer {
   country?: string;             // legacy KYC-provider free-text — DO NOT use for routing
   senderCountry: CountryCode;   // (P1) the routing field
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
+  // ── WhatsApp consent (Item 4) — both optional/dormant; absence = not-yet-set ──
+  optInAt?: string;     // ISO — first transactional inbound (sender initiating = opt-in)
+  optedOutAt?: string;  // ISO — set on STOP; cleared (undefined) on START
   createdAt: string;
   updatedAt: string;
 }

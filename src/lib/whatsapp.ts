@@ -24,9 +24,64 @@ interface WebhookShape {
             list_reply?: { id?: string; title?: string };
           };
         }[];
+        statuses?: {
+          id?: string;
+          recipient_id?: string;
+          status?: string;
+          timestamp?: string;
+          errors?: { code?: number; title?: string; message?: string }[];
+        }[];
       };
     }[];
   }[];
+}
+
+/**
+ * Normalized message-status callback (Meta `statuses` event: sent / delivered /
+ * read / failed). We do NOT map `wamid` → transfer today, so the deliverable is
+ * structured logging; the shape is future-mapping-ready (wamid + recipientId).
+ */
+export interface WebhookStatusEvent {
+  wamid: string; // statuses[].id — the message id we'd map to a transfer later
+  recipientId: string; // statuses[].recipient_id (the customer phone)
+  status: 'sent' | 'delivered' | 'read' | 'failed' | string;
+  timestamp?: string;
+  errorCode?: number; // first errors[].code when status === 'failed'
+  errorTitle?: string; // first errors[].title
+}
+
+/**
+ * Parse a Meta `statuses` webhook into normalized status events. Returns null
+ * for anything that is not a statuses event (mirrors parseIncoming → null for
+ * non-message payloads). Malformed entries (missing id or status) are skipped.
+ */
+export function parseStatusEvent(body: unknown): WebhookStatusEvent[] | null {
+  try {
+    const statuses = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value
+      ?.statuses;
+    if (!statuses || statuses.length === 0) return null;
+
+    const events: WebhookStatusEvent[] = [];
+    for (const s of statuses) {
+      if (!s.id || !s.status) continue; // defensive: skip malformed
+      const event: WebhookStatusEvent = {
+        wamid: s.id,
+        recipientId: s.recipient_id ?? '',
+        status: s.status,
+      };
+      if (s.timestamp) event.timestamp = s.timestamp;
+      const firstError = s.errors?.[0];
+      if (firstError) {
+        if (typeof firstError.code === 'number') event.errorCode = firstError.code;
+        if (firstError.title) event.errorTitle = firstError.title;
+      }
+      events.push(event);
+    }
+    if (events.length === 0) return null;
+    return events;
+  } catch {
+    return null;
+  }
 }
 
 export function parseIncoming(body: unknown): IncomingMessage | null {
@@ -73,28 +128,75 @@ export function parseIncoming(body: unknown): IncomingMessage | null {
   }
 }
 
-export async function sendText(to: string, text: string): Promise<void> {
-  const res = await fetch(
-    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.whatsappToken}`,
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body: text },
-      }),
-    },
-  );
+// ── Per-user rate-limit backoff (error 131056 = >1 msg / 6s to the same user) ──
+// Most of our sends are 1-per-user, so this is defense for bursts (e.g. a cron
+// batch that fans out to the same number). Bounded linear backoff; on a
+// non-rate-limit error we throw immediately (unchanged behavior).
+const RATE_LIMIT_MAX_RETRIES = 2; // 1 initial attempt + 2 retries = 3 total
+const RATE_LIMIT_BASE_DELAY_MS = 6500; // 6s window for 131056 + small margin
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`WhatsApp send failed (${res.status}): ${body}`);
+const GRAPH_MESSAGES_URL = () =>
+  `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`;
+
+function authedJsonInit(payload: unknown): RequestInit {
+  return {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${env.whatsappToken}`,
+    },
+    body: JSON.stringify(payload),
+  };
+}
+
+function isRateLimited(status: number, body: string): boolean {
+  return status === 429 || body.includes('131056');
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * POST to the Graph API with bounded retry on a per-user rate limit (131056 /
+ * HTTP 429). On success returns. On a non-rate-limit non-OK status it throws
+ * immediately (one fetch). On a rate-limit status it waits `BASE * attempt` and
+ * retries up to RATE_LIMIT_MAX_RETRIES times, then throws the last error so the
+ * caller's existing fallback (e.g. sendTemplateOrText) still fires.
+ */
+async function postWithBackoff(
+  url: string,
+  init: RequestInit,
+  errLabel: string,
+): Promise<void> {
+  let lastBody = '';
+  let lastStatus = 0;
+  for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+    const res = await fetch(url, init);
+    if (res.ok) return;
+    lastStatus = res.status;
+    lastBody = await res.text();
+    if (isRateLimited(res.status, lastBody) && attempt < RATE_LIMIT_MAX_RETRIES) {
+      console.warn(
+        `${errLabel}: rate limited (${res.status}); retry ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES} after backoff`,
+      );
+      await sleep(RATE_LIMIT_BASE_DELAY_MS * (attempt + 1));
+      continue;
+    }
+    break;
   }
+  throw new Error(`${errLabel} (${lastStatus}): ${lastBody}`);
+}
+
+export async function sendText(to: string, text: string): Promise<void> {
+  return postWithBackoff(
+    GRAPH_MESSAGES_URL(),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: text },
+    }),
+    'WhatsApp send failed',
+  );
 }
 
 export async function sendTemplate(
@@ -103,35 +205,93 @@ export async function sendTemplate(
   languageCode: string,
   bodyParams: string[],
 ): Promise<void> {
-  const res = await fetch(
-    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.whatsappToken}`,
+  return postWithBackoff(
+    GRAPH_MESSAGES_URL(),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        components: [
+          {
+            type: 'body',
+            parameters: bodyParams.map((text) => ({ type: 'text', text })),
+          },
+        ],
       },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'template',
-        template: {
-          name: templateName,
-          language: { code: languageCode },
-          components: [
-            {
-              type: 'body',
-              parameters: bodyParams.map((text) => ({ type: 'text', text })),
-            },
-          ],
-        },
-      }),
-    },
+    }),
+    'WhatsApp template send failed',
   );
+}
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`WhatsApp template send failed (${res.status}): ${body}`);
+/**
+ * Send a template that has a dynamic URL ("Visit website") button — the button's
+ * URL ends in one `{{1}}` suffix variable (e.g. /pay/{{1}}). Separate from
+ * sendTemplate so the live transfer_delivered send (body-only) is unaffected.
+ * `buttonToken` must be a path-safe slug (no '/' or query chars) per the §3
+ * dynamic-URL rule. Throws on any non-OK status; the caller (sendTemplateOrText)
+ * owns the fallback.
+ */
+export async function sendTemplateWithButton(
+  to: string,
+  templateName: string,
+  languageCode: string,
+  bodyParams: string[],
+  buttonToken: string,
+): Promise<void> {
+  return postWithBackoff(
+    GRAPH_MESSAGES_URL(),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        components: [
+          {
+            type: 'body',
+            parameters: bodyParams.map((text) => ({ type: 'text', text })),
+          },
+          {
+            type: 'button',
+            sub_type: 'url',
+            index: 0,
+            parameters: [{ type: 'text', text: buttonToken }],
+          },
+        ],
+      },
+    }),
+    'WhatsApp template send failed',
+  );
+}
+
+/**
+ * Business-initiated send with graceful degradation. Runs the template send
+ * (`send`); on ANY error — template not yet approved, HTTP 470 / 131047
+ * outside-window, paused/disabled template, etc. — logs a warning and falls back
+ * to the current free-form `sendText`. Until the §3 templates are approved in
+ * WhatsApp Manager, every call lands via the fallback path. The inner try/catch
+ * mirrors today's cron behavior: a free-form send legitimately fails when the
+ * customer hasn't messaged in 24h, so it must be logged + swallowed (never
+ * thrown) so one bad send doesn't abort a cron batch.
+ */
+export async function sendTemplateOrText(
+  to: string,
+  send: () => Promise<void>,
+  fallbackText: string,
+): Promise<void> {
+  try {
+    await send();
+  } catch (err) {
+    console.warn('Template send failed; falling back to free-form text:', err);
+    try {
+      await sendText(to, fallbackText);
+    } catch (textErr) {
+      console.error('Fallback sendText also failed for', to, textErr);
+    }
   }
 }
 

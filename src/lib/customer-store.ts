@@ -55,6 +55,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             kycVerifiedAt: nowIso,
             senderCountry: inferredCountry,          // NEW (P1)
             partnerId: DEFAULT_PARTNER_ID,          // NEW (P2)
+            optInAt: nowIso,                        // NEW (Item 4) — first inbound = opt-in
             createdAt: minAt,
             updatedAt: nowIso,
           }
@@ -64,12 +65,42 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             kycStatus: 'not_started',
             senderCountry: inferredCountry,          // NEW (P1)
             partnerId: DEFAULT_PARTNER_ID,          // NEW (P2)
+            optInAt: nowIso,                        // NEW (Item 4) — first inbound = opt-in
             createdAt: nowIso,
             updatedAt: nowIso,
           };
 
       await this.saveCustomer(customer);
       return { customer, wasCreated: !minAt };
+    },
+
+    // ── WhatsApp consent (Item 4) — all read-modify-write; no-op when no record ──
+
+    // Idempotent transactional opt-in: first contact wins. Used by the route to
+    // backfill optInAt for existing/grandfathered records that predate the field.
+    async setOptedIn(senderPhone: string): Promise<void> {
+      const customer = await this.getCustomer(senderPhone);
+      if (!customer) return;
+      if (customer.optInAt) return; // first contact already recorded — no churn
+      const nowIso = new Date().toISOString();
+      await this.saveCustomer({ ...customer, optInAt: nowIso, updatedAt: nowIso });
+    },
+
+    async setOptedOut(senderPhone: string): Promise<void> {
+      const customer = await this.getCustomer(senderPhone);
+      if (!customer) return;
+      const nowIso = new Date().toISOString();
+      await this.saveCustomer({ ...customer, optedOutAt: nowIso, updatedAt: nowIso });
+    },
+
+    async clearOptedOut(senderPhone: string): Promise<void> {
+      const customer = await this.getCustomer(senderPhone);
+      if (!customer) return;
+      const nowIso = new Date().toISOString();
+      // Omit optedOutAt entirely so the field disappears from the stored JSON.
+      const { optedOutAt: _drop, ...rest } = customer;
+      void _drop;
+      await this.saveCustomer({ ...rest, updatedAt: nowIso });
     },
 
     async recordFundingMethod(senderPhone: string, method: FundingMethod): Promise<void> {

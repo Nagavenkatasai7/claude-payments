@@ -57,16 +57,26 @@ export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: strin
   return last4 ? `****${last4}` : 'account on file';
 }
 
+// Cold-start placeholder for the approve card's "To:" line when no bank details
+// have been collected yet (Item 2: the sender enters them on the secure pay
+// page, never in chat). A saved/known destination still renders the masked
+// "bank a/c ****<last4>" line.
+export const NO_BANK_DETAILS_PLACEHOLDER =
+  "their bank account (you'll enter the details on the secure page)";
+
 /**
  * Masks a payout_destination for the customer-facing approval card. Shows ONLY
  * the account's last 4 digits — no routing/sort/IFSC code and no IBAN body — so
  * the card is leak-proof regardless of field order or country format. The
  * "****<last4>" form matches the last-4 convention banks use on receipts.
+ *
+ * When the destination is empty (cold-start draft, before the sender enters bank
+ * details on the secure pay page) the bank line shows the placeholder instead.
  */
 function maskDestination(method: PayoutMethod, dest: string): string {
-  if (method === 'upi') return `UPI ${dest}`;
+  if (method === 'upi' && dest) return `UPI ${dest}`;
   const last4 = accountLast4(dest);
-  return last4 ? `bank a/c ****${last4}` : 'bank a/c on file';
+  return last4 ? `bank a/c ****${last4}` : NO_BANK_DETAILS_PLACEHOLDER;
 }
 
 /**
@@ -207,8 +217,6 @@ export const toolSchemas: ChatTool[] = [
         required: [
           'amount_usd',
           'recipient_name',
-          'payout_method',
-          'payout_destination',
           'funding_method',
           'recipient_phone',
         ],
@@ -293,7 +301,7 @@ export const toolSchemas: ChatTool[] = [
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
-        required: ['amount_usd', 'recipient_name', 'recipient_phone', 'payout_method', 'payout_destination', 'funding_method', 'frequency'],
+        required: ['amount_usd', 'recipient_name', 'recipient_phone', 'funding_method', 'frequency'],
       },
     },
   },
@@ -357,7 +365,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'send_approve_picker',
       description:
-        'Lock the quote and send the sender [Approve & pay] [Cancel] buttons. Call this when you have ALL transfer details: amount, funding method, recipient name, recipient phone, payout method, payout destination.',
+        "Lock the quote and send the sender an [Approve & pay] button. Call this when you have the amount, funding method, recipient name, destination country, and recipient phone. Do NOT collect bank details — the sender enters the recipient's bank details on the secure pay page. For a saved/known recipient (repeat or scheduled), the system reuses the stored payout details automatically.",
       parameters: {
         type: 'object',
         properties: {
@@ -365,8 +373,6 @@ export const toolSchemas: ChatTool[] = [
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string' },
-          payout_method: { type: 'string', enum: ['upi', 'bank'] },
-          payout_destination: { type: 'string' },
           source_currency: {
             type: 'string',
             description:
@@ -387,8 +393,6 @@ export const toolSchemas: ChatTool[] = [
           'funding_method',
           'recipient_name',
           'recipient_phone',
-          'payout_method',
-          'payout_destination',
         ],
       },
     },
@@ -739,7 +743,7 @@ async function createTransferTool(
         recipientName: draft.recipient.name,
         recipientPhone: draft.recipient.recipientPhone,
         payoutMethod: draft.recipient.payoutMethod,
-        payoutDestination: draft.recipient.payoutDestination,
+        payoutDestination: draft.recipient.payoutDestination ?? '',
         fundingMethod: draft.fundingMethod,
         // ── KYC Travel-Rule / EDD: from the consumed draft + sender legal name ──
         recipientLegalName: draft.recipientLegalName,
@@ -807,8 +811,9 @@ async function createTransferTool(
       partnerId: legacyCustomer.partnerId ?? DEFAULT_PARTNER_ID,
       recipientName: String(args.recipient_name),
       recipientPhone,
-      payoutMethod: args.payout_method as PayoutMethod,
-      payoutDestination: String(args.payout_destination),
+      payoutMethod: (args.payout_method as PayoutMethod | undefined) ?? 'bank',
+      // Item 2: bank details come from the secure pay page; legacy reads default to ''.
+      payoutDestination: typeof args.payout_destination === 'string' ? args.payout_destination : '',
       fundingMethod: (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer',
       // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
       recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
@@ -941,9 +946,10 @@ async function createScheduleTool(
     amountUsd: amountSource, // kept as source amount (USD-equivalent when USD; else raw source)
     recipientName: String(args.recipient_name),
     recipientPhone,
-    payoutMethod: args.payout_method as Schedule['payoutMethod'],
-    payoutDestination: String(args.payout_destination),
-    fundingMethod: args.funding_method as Schedule['fundingMethod'],
+    payoutMethod: (args.payout_method as Schedule['payoutMethod'] | undefined) ?? 'bank',
+    // Item 2: bank details come from the secure pay page; legacy reads default to ''.
+    payoutDestination: typeof args.payout_destination === 'string' ? args.payout_destination : '',
+    fundingMethod: (args.funding_method as Schedule['fundingMethod'] | undefined) ?? 'bank_transfer',
     frequency,
     dayOfMonth,
     dayOfWeek,
@@ -1105,6 +1111,12 @@ async function sendApprovePickerTool(
   }
   // G: default funding_method to bank_transfer when absent
   const fundingMethod = (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer';
+  // Item 2: bank details are entered on the secure pay page, not collected in
+  // chat. On a cold start the LLM passes no payout fields → method 'bank',
+  // destination ''. When a saved recipient is reused (repeat_transfer /
+  // resolve_recipient), those args ARE supplied and we keep them verbatim.
+  const payoutMethod: PayoutMethod = (args.payout_method as PayoutMethod | undefined) ?? 'bank';
+  const payoutDestination = typeof args.payout_destination === 'string' ? args.payout_destination : '';
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
   const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
     await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
@@ -1149,8 +1161,10 @@ async function sendApprovePickerTool(
           phone: ctx.phone,
           recipientName: String(args.recipient_name),
           recipientPhone,
-          payoutMethod: args.payout_method as PayoutMethod,
-          payoutDestination: String(args.payout_destination),
+          payoutMethod,
+          // Item 2: bank details aren't collected in chat — the screener matches
+          // on name, not the account number — so a blocked attempt records ''.
+          payoutDestination,
           fundingMethod,
           amountUsd: q.amountUsd,
           amountSource: q.amountSource,
@@ -1181,8 +1195,8 @@ async function sendApprovePickerTool(
       recipient: {
         name: String(args.recipient_name),
         recipientPhone,
-        payoutMethod: args.payout_method as PayoutMethod,
-        payoutDestination: String(args.payout_destination),
+        payoutMethod,
+        payoutDestination,
       },
       amountUsd: q.amountUsd,
       amountSource: q.amountSource,
@@ -1209,8 +1223,8 @@ async function sendApprovePickerTool(
     const summary = buildApproveSummary(
       q,
       String(args.recipient_name),
-      args.payout_method as PayoutMethod,
-      String(args.payout_destination),
+      payoutMethod,
+      payoutDestination,
       fundingMethod,
       q.destinationCurrency ?? 'INR',
     );

@@ -27,6 +27,12 @@ export const env = {
   get whatsappVerifyToken() {
     return required('WHATSAPP_VERIFY_TOKEN');
   },
+  get metaAppSecret() {
+    // Meta App Secret for X-Hub-Signature-256 verification on inbound webhooks.
+    // '' ⇒ unconfigured ⇒ the /api/whatsapp POST handler skips the signature
+    // check (warns; preserves dev/test + current prod). Set ⇒ fail-closed 401.
+    return process.env.META_APP_SECRET ?? '';
+  },
   get appBaseUrl() {
     const explicit = process.env.APP_BASE_URL;
     if (explicit && explicit.trim()) return explicit.trim().replace(/\/+$/, '');

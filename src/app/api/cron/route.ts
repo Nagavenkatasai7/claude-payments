@@ -16,7 +16,12 @@ import {
   backfillExpandCountriesOnce,
   backfillAllCorridorsOnce,
 } from '@/lib/migration';
-import { sendText } from '@/lib/whatsapp';
+import { sendTemplateWithButton, sendTemplateOrText } from '@/lib/whatsapp';
+import {
+  TEMPLATE_SCHEDULED_PAYMENT_READY,
+  TEMPLATE_LANG,
+  scheduledPaymentReadyParams,
+} from '@/lib/whatsapp-templates';
 
 export const maxDuration = 300;
 
@@ -48,24 +53,39 @@ export async function GET(req: NextRequest) {
   const result = await runDueSchedules({
     store,
     partnerStore,                 // NEW (P5): corridor-aware compliance
+    customerStore,                // NEW (Item 4): skip opted-out customers
     monthlyVolumeStore,           // NEW (KYC): cumulative-month EDD trigger at run time
     scheduleStore,
     now: Date.now(),
-    sendScheduledLink: async (schedule, _transfer, url) => {
-      // TEMPORARY: the scheduled_payment_ready template is not yet approved
-      // by Meta. Until it is, fall back to a free-form WhatsApp text. This
-      // only delivers if the customer chatted with the bot within the last
-      // 24 hours; otherwise WhatsApp rejects it with a re-engagement error,
-      // which is logged and swallowed. Switch back to `sendTemplate` once
-      // the template is approved.
-      const text =
+    sendScheduledLink: async (schedule, transfer, url) => {
+      // The scheduled_payment_ready template (docs §3.3) path is now wired, but
+      // the template is not yet approved by Meta. Until it is, sendTemplateOrText
+      // tries the template send, the Graph API rejects it (template not found),
+      // and we fall back to the SAME free-form text we sent before — byte-for-byte
+      // unchanged, so there is no observable drift until the template goes live.
+      // The free-form fallback only delivers in-window; otherwise WhatsApp rejects
+      // it with a re-engagement error, which the helper logs and swallows.
+      const senderName = (await customerStore.getCustomer(schedule.phone))?.fullName ?? 'there';
+      const fallbackText =
         `Your scheduled SmartRemit transfer of $${schedule.amountUsd.toFixed(2)} ` +
         `to ${schedule.recipientName} is ready. Tap to pay: ${url}`;
-      try {
-        await sendText(schedule.phone, text);
-      } catch (err) {
-        console.error('Scheduled-link send failed:', schedule.id, err);
-      }
+      const { bodyParams, buttonToken } = scheduledPaymentReadyParams(
+        schedule,
+        transfer.id,
+        senderName,
+      );
+      await sendTemplateOrText(
+        schedule.phone,
+        () =>
+          sendTemplateWithButton(
+            schedule.phone,
+            TEMPLATE_SCHEDULED_PAYMENT_READY,
+            TEMPLATE_LANG,
+            bodyParams,
+            buttonToken,
+          ),
+        fallbackText,
+      );
     },
   });
 

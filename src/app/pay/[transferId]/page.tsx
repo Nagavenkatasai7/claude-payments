@@ -1,6 +1,6 @@
 import { getStore } from '@/lib/store';
 import { getDraftStore } from '@/lib/draft-store';
-import type { CurrencyCode } from '@/lib/types';
+import type { CountryCode } from '@/lib/types';
 import { PayForm } from './pay-form';
 
 function Row({
@@ -54,6 +54,7 @@ export default async function PayPage({
     // Destination (recipient) side
     destAmount: number;
     destCurrency: string;
+    destinationCountry: CountryCode;
     // Source (sender) side
     sourceAmount: number;
     sourceFee: number;
@@ -61,6 +62,11 @@ export default async function PayPage({
     sourceCurrency: string;
     fundingMethod: string;
     awaitingPayment: boolean;
+    // Item 2 (two-step pay page): true whenever no bank string exists yet (a
+    // cold-start DRAFT, or a SCHEDULED/cron transfer created with an empty
+    // destination) — the sender enters recipient bank details on the secure page.
+    // A re-opened link whose destination is already set skips Step 1 (bodyless POST).
+    needsBankDetails: boolean;
   };
 
   let view: View | null = null;
@@ -73,12 +79,17 @@ export default async function PayPage({
       recipientName: transfer.recipientName,
       destAmount: transfer.amountInr,
       destCurrency,
+      destinationCountry: transfer.destinationCountry ?? 'IN',
       sourceAmount: transfer.amountSource ?? transfer.amountUsd,
       sourceFee: transfer.feeSource ?? transfer.feeUsd,
       sourceTotalCharge: transfer.totalChargeSource ?? transfer.totalChargeUsd,
       sourceCurrency,
       fundingMethod: transfer.fundingMethod,
       awaitingPayment: transfer.status === 'awaiting_payment',
+      // Usually a re-opened link with the destination already set → skip Step 1.
+      // But a SCHEDULED/cron transfer is created with an EMPTY destination (Item
+      // 2: never collected in chat) — collect the recipient's bank details here.
+      needsBankDetails: (transfer.payoutDestination ?? '').trim() === '',
     };
   } else {
     // Dual-lookup: treat the segment as a draftId
@@ -91,17 +102,24 @@ export default async function PayPage({
         draft.quote.totalChargeSource ??
         draft.quote.totalChargeUsd ??
         draft.amountSource + feeSource;
+      // A cold-start draft carries NO bank string (Item 2: details are entered
+      // here on the secure page). An old in-flight draft created before Item 2
+      // may already have draft.recipient.payoutDestination — skip Step 1 and let
+      // the bodyless POST fall back to that stored destination.
+      const hasStoredDest = (draft.recipient.payoutDestination ?? '').trim() !== '';
       view = {
         id: transferId,
         recipientName: draft.recipient.name,
         destAmount: draft.quote.amountInr,
         destCurrency,
+        destinationCountry: draft.destinationCountry ?? 'IN',
         sourceAmount: draft.amountSource,
         sourceFee: feeSource,
         sourceTotalCharge: totalChargeSource,
         sourceCurrency,
         fundingMethod: draft.fundingMethod,
         awaitingPayment: true, // a draft is always awaiting payment
+        needsBankDetails: !hasStoredDest,
       };
     }
   }
@@ -146,7 +164,20 @@ export default async function PayPage({
           <Row label="Paying with" value="Bank transfer" />
         </div>
         {view.awaitingPayment ? (
-          <PayForm transferId={view.id} fundingMethod={view.fundingMethod as import('@/lib/types').FundingMethod} />
+          <PayForm
+            transferId={view.id}
+            fundingMethod={view.fundingMethod as import('@/lib/types').FundingMethod}
+            destinationCountry={view.destinationCountry}
+            needsBankDetails={view.needsBankDetails}
+            recipientName={view.recipientName}
+            summary={{
+              destAmount: view.destAmount,
+              destCurrency: view.destCurrency,
+              sourceAmount: view.sourceAmount,
+              sourceCurrency: view.sourceCurrency,
+              sourceTotalCharge: view.sourceTotalCharge,
+            }}
+          />
         ) : (
           <p className="done">&#x2705; Payment complete &mdash; money sent!</p>
         )}
