@@ -135,6 +135,86 @@ export async function sendTemplate(
   }
 }
 
+/**
+ * Send a template that has a dynamic URL ("Visit website") button — the button's
+ * URL ends in one `{{1}}` suffix variable (e.g. /pay/{{1}}). Separate from
+ * sendTemplate so the live transfer_delivered send (body-only) is unaffected.
+ * `buttonToken` must be a path-safe slug (no '/' or query chars) per the §3
+ * dynamic-URL rule. Throws on any non-OK status; the caller (sendTemplateOrText)
+ * owns the fallback.
+ */
+export async function sendTemplateWithButton(
+  to: string,
+  templateName: string,
+  languageCode: string,
+  bodyParams: string[],
+  buttonToken: string,
+): Promise<void> {
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.whatsappToken}`,
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          components: [
+            {
+              type: 'body',
+              parameters: bodyParams.map((text) => ({ type: 'text', text })),
+            },
+            {
+              type: 'button',
+              sub_type: 'url',
+              index: 0,
+              parameters: [{ type: 'text', text: buttonToken }],
+            },
+          ],
+        },
+      }),
+    },
+  );
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`WhatsApp template send failed (${res.status}): ${body}`);
+  }
+}
+
+/**
+ * Business-initiated send with graceful degradation. Runs the template send
+ * (`send`); on ANY error — template not yet approved, HTTP 470 / 131047
+ * outside-window, paused/disabled template, etc. — logs a warning and falls back
+ * to the current free-form `sendText`. Until the §3 templates are approved in
+ * WhatsApp Manager, every call lands via the fallback path. The inner try/catch
+ * mirrors today's cron behavior: a free-form send legitimately fails when the
+ * customer hasn't messaged in 24h, so it must be logged + swallowed (never
+ * thrown) so one bad send doesn't abort a cron batch.
+ */
+export async function sendTemplateOrText(
+  to: string,
+  send: () => Promise<void>,
+  fallbackText: string,
+): Promise<void> {
+  try {
+    await send();
+  } catch (err) {
+    console.warn('Template send failed; falling back to free-form text:', err);
+    try {
+      await sendText(to, fallbackText);
+    } catch (textErr) {
+      console.error('Fallback sendText also failed for', to, textErr);
+    }
+  }
+}
+
 export interface InteractiveButton {
   id: string;
   title: string;

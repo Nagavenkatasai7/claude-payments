@@ -6,6 +6,8 @@ import {
   sendInteractive,
   sendList,
   sendCtaUrl,
+  sendTemplateWithButton,
+  sendTemplateOrText,
   RECIPIENT_TEMPLATE_NAME,
   RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
@@ -134,6 +136,110 @@ describe('sendTemplate', () => {
     await expect(
       sendTemplate('1', 'transfer_delivered', 'en_US', ['a', 'b', 'c', 'd']),
     ).rejects.toThrow(/WhatsApp template send failed.*400/);
+  });
+});
+
+describe('sendTemplateWithButton', () => {
+  it('posts a 2-component template: body params + a url button param', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendTemplateWithButton(
+      '919876543210',
+      'scheduled_payment_ready',
+      'en',
+      ['Anand', '$100.00', 'Priya'],
+      'tx_a1b2c3',
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.type).toBe('template');
+    expect(body.template.name).toBe('scheduled_payment_ready');
+    const components = body.template.components;
+    expect(components).toHaveLength(2);
+    expect(components[0].type).toBe('body');
+    expect(components[0].parameters).toEqual([
+      { type: 'text', text: 'Anand' },
+      { type: 'text', text: '$100.00' },
+      { type: 'text', text: 'Priya' },
+    ]);
+    expect(components[1]).toEqual({
+      type: 'button',
+      sub_type: 'url',
+      index: 0,
+      parameters: [{ type: 'text', text: 'tx_a1b2c3' }],
+    });
+  });
+
+  it('throws on a non-OK status', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 404, text: async () => 'template not found' })),
+    );
+    await expect(
+      sendTemplateWithButton('1', 'scheduled_payment_ready', 'en', ['a'], 'tok'),
+    ).rejects.toThrow(/template send failed.*404/);
+  });
+});
+
+describe('sendTemplateOrText', () => {
+  it('does NOT call sendText when the template send succeeds', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    let sendCalled = false;
+    await sendTemplateOrText(
+      '919876543210',
+      async () => {
+        sendCalled = true;
+      },
+      'fallback body',
+    );
+
+    expect(sendCalled).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled(); // no sendText
+  });
+
+  it('falls back to sendText (type "text", fallback body) when the template send rejects', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await sendTemplateOrText(
+      '919876543210',
+      async () => {
+        throw new Error('template not approved');
+      },
+      'fallback body',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.type).toBe('text');
+    expect(body.text.body).toBe('fallback body');
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('swallows (does not throw) when the fallback sendText also fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 470, text: async () => 're-engagement' })),
+    );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      sendTemplateOrText(
+        '919876543210',
+        async () => {
+          throw new Error('template not approved');
+        },
+        'fallback body',
+      ),
+    ).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalled();
   });
 });
 

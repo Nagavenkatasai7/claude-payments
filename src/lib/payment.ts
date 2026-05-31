@@ -120,6 +120,11 @@ export async function completePaymentStage2(
   return { transfer: updated, senderMessages };
 }
 
+// DO NOT CHANGE — matches the LIVE approved transfer_delivered template (old
+// 4-param order: recipient name, dest amount, sender, account-label). The
+// multi-currency rebuild to a new 4-param order per docs/meta-whatsapp-config.md
+// §3.1 is a coordinated step the user does later (re-approve in WhatsApp Manager
+// first, then swap params here in lockstep).
 export function recipientTemplateParams(transfer: Transfer): string[] {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
