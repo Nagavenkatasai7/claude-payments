@@ -3,6 +3,7 @@ import { createTransfer } from './transfer-create';
 import { env } from './env';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
+import type { CustomerStore } from './customer-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { ScheduleStore } from './schedule-store';
 import type { Schedule, Transfer } from './types';
@@ -10,6 +11,7 @@ import type { Schedule, Transfer } from './types';
 export interface CronDeps {
   store: Store;
   partnerStore: PartnerStore;           // NEW (P5): for corridor-aware compliance
+  customerStore: CustomerStore;         // NEW (Item 4): skip opted-out customers
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month accrual + EDD trigger
   scheduleStore: ScheduleStore;
   now: number;
@@ -37,6 +39,11 @@ export async function runDueSchedules(
       }
     }
     if (!isScheduleDueToday(schedule, deps.now)) continue;
+    // Item 4: a business-initiated send to an opted-out customer is not allowed.
+    // Skip silently — do NOT count as fired, do NOT touch lastRunAt (the schedule
+    // stays active so it resumes if the customer re-subscribes with START).
+    const owner = await deps.customerStore.getCustomer(schedule.phone);
+    if (owner?.optedOutAt) continue;
     try {
       const transfer = await createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
         phone: schedule.phone,

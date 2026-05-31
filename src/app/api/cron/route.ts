@@ -53,6 +53,7 @@ export async function GET(req: NextRequest) {
   const result = await runDueSchedules({
     store,
     partnerStore,                 // NEW (P5): corridor-aware compliance
+    customerStore,                // NEW (Item 4): skip opted-out customers
     monthlyVolumeStore,           // NEW (KYC): cumulative-month EDD trigger at run time
     scheduleStore,
     now: Date.now(),

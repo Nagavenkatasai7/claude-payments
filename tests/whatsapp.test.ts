@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   parseIncoming,
+  parseStatusEvent,
   sendText,
   sendTemplate,
   sendInteractive,
@@ -65,6 +66,117 @@ describe('parseIncoming', () => {
   });
 });
 
+function statusWebhook(
+  statuses: Record<string, unknown>[],
+): Record<string, unknown> {
+  return {
+    entry: [{ changes: [{ value: { statuses } }] }],
+  };
+}
+
+describe('parseStatusEvent', () => {
+  it('returns null for a messages-only (non-status) webhook', () => {
+    expect(parseStatusEvent(textWebhook())).toBeNull();
+  });
+
+  it('returns null for malformed / empty input', () => {
+    expect(parseStatusEvent(null)).toBeNull();
+    expect(parseStatusEvent({})).toBeNull();
+    expect(parseStatusEvent(statusWebhook([]))).toBeNull();
+  });
+
+  it('parses a delivered status', () => {
+    const evs = parseStatusEvent(
+      statusWebhook([
+        {
+          id: 'wamid.D1',
+          recipient_id: '15551230000',
+          status: 'delivered',
+          timestamp: '1700000000',
+        },
+      ]),
+    );
+    expect(evs).toEqual([
+      {
+        wamid: 'wamid.D1',
+        recipientId: '15551230000',
+        status: 'delivered',
+        timestamp: '1700000000',
+      },
+    ]);
+  });
+
+  it('parses a read status', () => {
+    const evs = parseStatusEvent(
+      statusWebhook([
+        { id: 'wamid.R1', recipient_id: '15551230000', status: 'read' },
+      ]),
+    );
+    expect(evs?.[0].status).toBe('read');
+  });
+
+  it('parses a failed status and surfaces the error code + title', () => {
+    const evs = parseStatusEvent(
+      statusWebhook([
+        {
+          id: 'wamid.F1',
+          recipient_id: '15551230000',
+          status: 'failed',
+          errors: [
+            {
+              code: 131056,
+              title: 'Too many messages',
+              message: 'rate limited',
+            },
+          ],
+        },
+      ]),
+    );
+    expect(evs).toHaveLength(1);
+    expect(evs?.[0]).toMatchObject({
+      wamid: 'wamid.F1',
+      recipientId: '15551230000',
+      status: 'failed',
+      errorCode: 131056,
+      errorTitle: 'Too many messages',
+    });
+  });
+
+  it('returns every status when the value carries multiple', () => {
+    const evs = parseStatusEvent(
+      statusWebhook([
+        { id: 'wamid.1', recipient_id: '15551230000', status: 'sent' },
+        { id: 'wamid.2', recipient_id: '15551230000', status: 'delivered' },
+      ]),
+    );
+    expect(evs).toHaveLength(2);
+    expect(evs?.map((e) => e.status)).toEqual(['sent', 'delivered']);
+  });
+
+  it('skips malformed status entries missing id or status', () => {
+    const evs = parseStatusEvent(
+      statusWebhook([
+        { recipient_id: '15551230000', status: 'delivered' }, // no id
+        { id: 'wamid.OK', recipient_id: '15551230000', status: 'read' },
+        { id: 'wamid.NOSTATUS', recipient_id: '15551230000' }, // no status
+      ]),
+    );
+    expect(evs).toEqual([
+      { wamid: 'wamid.OK', recipientId: '15551230000', status: 'read' },
+    ]);
+  });
+});
+
+describe('parseIncoming + parseStatusEvent disjoint', () => {
+  it('a statuses-only webhook is null for parseIncoming (status branch owns it)', () => {
+    const body = statusWebhook([
+      { id: 'wamid.X', recipient_id: '15551230000', status: 'delivered' },
+    ]);
+    expect(parseIncoming(body)).toBeNull();
+    expect(parseStatusEvent(body)).not.toBeNull();
+  });
+});
+
 describe('sendText', () => {
   it('posts a text message to the Graph API', async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
@@ -89,6 +201,104 @@ describe('sendText', () => {
       })),
     );
     await expect(sendText('1', 'hi')).rejects.toThrow(/400/);
+  });
+
+  it('throws IMMEDIATELY on a non-rate-limit 400 (single fetch, no retry)', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => 'bad request',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendText('1', 'hi')).rejects.toThrow(/400/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('rate-limit backoff (131056 / HTTP 429)', () => {
+  it('retries on a 131056 error body, then resolves on success', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () => '{"error":{"code":131056}}',
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const p = sendText('15551230000', 'hi');
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('retries on HTTP 429, then resolves on success', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => 'rate limited' })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const p = sendText('15551230000', 'hi');
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('gives up and throws after exhausting retries on persistent 131056', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => '{"error":{"code":131056}}',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const p = sendText('15551230000', 'hi');
+    // attach a rejection handler before advancing timers so it's not unhandled
+    const assertion = expect(p).rejects.toThrow(/131056/);
+    await vi.runAllTimersAsync();
+    await assertion;
+    // 1 initial attempt + 2 retries = 3 total
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it('does NOT retry on success (single fetch)', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendText('15551230000', 'hi');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendTemplate also retries on 131056', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () => 'error 131056 too many messages',
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const p = sendTemplate('919876543210', 'transfer_delivered', 'en', ['a', 'b', 'c', 'd']);
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });
 

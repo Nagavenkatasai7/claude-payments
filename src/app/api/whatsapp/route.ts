@@ -1,7 +1,13 @@
 import { after, NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
 import { verifyMetaSignature } from '@/lib/providers/meta-signature-verify';
-import { parseIncoming, sendText } from '@/lib/whatsapp';
+import { parseIncoming, parseStatusEvent, sendText } from '@/lib/whatsapp';
+import {
+  isOptOutKeyword,
+  isResumeKeyword,
+  OPT_OUT_REPLY,
+  OPT_IN_REPLY,
+} from '@/lib/consent';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
 import { chat } from '@/lib/ollama';
 import { createAgent } from '@/lib/agent';
@@ -59,6 +65,30 @@ export async function POST(req: NextRequest) {
   } catch {
     body = null;
   }
+
+  // Message-STATUS callbacks (sent/delivered/read/failed). Meta delivers these as
+  // a `statuses` event with no `messages`, so parseIncoming would return null and
+  // we'd silently drop them. Handle BEFORE the message path. We don't map
+  // wamid → transfer yet, so the deliverable is structured logging (a future
+  // mapping plugs into the `failed` branch). This sits AFTER the signature gate
+  // (never log forged events) and BEFORE parseIncoming's null early return.
+  const statusEvents = parseStatusEvent(body);
+  if (statusEvents) {
+    for (const ev of statusEvents) {
+      if (ev.status === 'failed') {
+        console.warn(
+          `WhatsApp message delivery FAILED — recipient=${ev.recipientId} wamid=${ev.wamid} code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`,
+        );
+        // FUTURE: map ev.wamid -> transfer and surface a delivery-failure signal.
+      } else {
+        console.debug(
+          `WhatsApp status ${ev.status} — recipient=${ev.recipientId} wamid=${ev.wamid}`,
+        );
+      }
+    }
+    return NextResponse.json({ ok: true });
+  }
+
   const incoming = parseIncoming(body);
   if (!incoming) return NextResponse.json({ ok: true });
 
@@ -68,6 +98,24 @@ export async function POST(req: NextRequest) {
 
   // Build TurnContext deterministically server-side
   const customerStore = getCustomerStore(store);
+
+  // STOP / START consent short-circuit. AFTER the dedup guard (so a re-delivered
+  // STOP isn't double-handled) and BEFORE the agent turn. WhatsApp compliance:
+  // honor opt-out and offer resume; exact-keyword only (never "cancel"). Both
+  // skip the agent entirely for this turn.
+  if (incoming.kind === 'text') {
+    if (isOptOutKeyword(incoming.text)) {
+      await customerStore.setOptedOut(incoming.from);
+      await sendText(incoming.from, OPT_OUT_REPLY);
+      return NextResponse.json({ ok: true });
+    }
+    if (isResumeKeyword(incoming.text)) {
+      await customerStore.clearOptedOut(incoming.from);
+      await sendText(incoming.from, OPT_IN_REPLY);
+      return NextResponse.json({ ok: true });
+    }
+  }
+
   const dailyVolumeStore = getDailyVolumeStore();
   const monthlyVolumeStore = getMonthlyVolumeStore();
   const lastInboundAt = await store.getLastInboundAt(incoming.from);
@@ -75,6 +123,14 @@ export async function POST(req: NextRequest) {
   await store.recordInboundNow(incoming.from);
 
   const { customer, wasCreated } = await customerStore.upsertOnFirstInbound(incoming.from);
+
+  // Transactional opt-in (Item 4): a brand-new customer is opted-in at creation
+  // (upsertOnFirstInbound sets optInAt). Existing/grandfathered records that
+  // predate the field get a cheap idempotent backfill here (first contact wins).
+  if (!customer.optInAt) {
+    await customerStore.setOptedIn(incoming.from);
+  }
+
   const now = new Date();
   const tier = deriveTier(customer, now);
 

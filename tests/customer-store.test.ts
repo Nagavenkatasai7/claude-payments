@@ -235,6 +235,68 @@ describe('recordFundingMethod (Bundle C sticky funding)', () => {
   });
 });
 
+describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
+  it('upsertOnFirstInbound sets optInAt on a brand-new customer', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer } = await cs.upsertOnFirstInbound(PHONE);
+    expect(customer.optInAt).toBeDefined();
+    expect(new Date(customer.optInAt!).toString()).not.toBe('Invalid Date');
+  });
+
+  it('setOptedIn sets optInAt once and is idempotent (first contact wins)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    // start from a record with NO optInAt (simulate a grandfathered/pre-feature record)
+    await cs.saveCustomer({
+      senderPhone: PHONE,
+      firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'verified',
+      senderCountry: 'US',
+      partnerId: 'default',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await cs.setOptedIn(PHONE);
+    const first = (await cs.getCustomer(PHONE))!.optInAt;
+    expect(first).toBeDefined();
+    await new Promise((r) => setTimeout(r, 3));
+    await cs.setOptedIn(PHONE); // second call must NOT overwrite
+    const second = (await cs.getCustomer(PHONE))!.optInAt;
+    expect(second).toBe(first);
+  });
+
+  it('setOptedOut sets optedOutAt', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    await cs.upsertOnFirstInbound(PHONE);
+    await cs.setOptedOut(PHONE);
+    expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeDefined();
+  });
+
+  it('clearOptedOut removes optedOutAt (undefined)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const cs = createCustomerStore(redis, store);
+    await cs.upsertOnFirstInbound(PHONE);
+    await cs.setOptedOut(PHONE);
+    expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeDefined();
+    await cs.clearOptedOut(PHONE);
+    expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeUndefined();
+  });
+
+  it('setOptedIn / setOptedOut / clearOptedOut are no-ops when no customer exists', async () => {
+    const redis = fakeRedis();
+    const cs = createCustomerStore(redis, createStore(redis));
+    await cs.setOptedIn(PHONE); // must not throw
+    await cs.setOptedOut(PHONE);
+    await cs.clearOptedOut(PHONE);
+    expect(await cs.getCustomer(PHONE)).toBeNull();
+  });
+});
+
 describe('customer-store P2: partnerId', () => {
   it('upsertOnFirstInbound writes partnerId: default on a brand-new customer', async () => {
     const store = createStore(fakeRedis());

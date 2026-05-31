@@ -245,6 +245,9 @@ export interface Customer {
   country?: string;             // legacy KYC-provider free-text — DO NOT use for routing
   senderCountry: CountryCode;   // (P1) the routing field
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
+  // ── WhatsApp consent (Item 4) — both optional/dormant; absence = not-yet-set ──
+  optInAt?: string;     // ISO — first transactional inbound (sender initiating = opt-in)
+  optedOutAt?: string;  // ISO — set on STOP; cleared (undefined) on START
   createdAt: string;
   updatedAt: string;
 }

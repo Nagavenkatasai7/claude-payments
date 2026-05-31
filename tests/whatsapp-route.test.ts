@@ -20,16 +20,27 @@ vi.mock('@/lib/store', () => ({
 
 // Keep the downstream turn-building dependencies inert so the POST handler can
 // run to completion once it's past the gate, without real Redis / agent calls.
+// vi.hoisted: these mock fns are referenced inside the hoisted vi.mock factories.
+const { sendText, setOptedOut, clearOptedOut, setOptedIn, runAgentTurn } = vi.hoisted(() => ({
+  sendText: vi.fn(async () => {}),
+  setOptedOut: vi.fn(async (_phone: string) => {}),
+  clearOptedOut: vi.fn(async (_phone: string) => {}),
+  setOptedIn: vi.fn(async (_phone: string) => {}),
+  runAgentTurn: vi.fn(async () => ''),
+}));
 vi.mock('@/lib/whatsapp', async (orig) => {
   const real = await orig<typeof import('@/lib/whatsapp')>();
-  return { ...real, sendText: vi.fn(async () => {}) };
+  return { ...real, sendText };
 });
 vi.mock('@/lib/customer-store', () => ({
   getCustomerStore: () => ({
     upsertOnFirstInbound: async () => ({
-      customer: { firstSeenAt: new Date().toISOString() },
+      customer: { firstSeenAt: new Date().toISOString(), optInAt: new Date().toISOString() },
       wasCreated: true,
     }),
+    setOptedOut,
+    clearOptedOut,
+    setOptedIn,
   }),
 }));
 vi.mock('@/lib/daily-volume-store', () => ({ getDailyVolumeStore: () => ({}) }));
@@ -40,11 +51,12 @@ vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({}) }));
 vi.mock('@/lib/tier-rules', () => ({ deriveTier: () => 'T1' }));
 vi.mock('@/lib/providers/mock-kyc-provider', () => ({ MockKycProvider: class {} }));
 vi.mock('@/lib/agent', () => ({
-  createAgent: () => ({ runAgentTurn: async () => '' }),
+  createAgent: () => ({ runAgentTurn }),
 }));
 vi.mock('@/lib/ollama', () => ({ chat: async () => '' }));
 
 import { GET, POST } from '@/app/api/whatsapp/route';
+import { OPT_OUT_REPLY, OPT_IN_REPLY } from '@/lib/consent';
 
 const SECRET = 'meta-app-secret';
 const inboundBody = JSON.stringify({
@@ -79,7 +91,51 @@ beforeEach(() => {
   markMessageSeen.mockClear().mockResolvedValue(true);
   getLastInboundAt.mockClear();
   recordInboundNow.mockClear();
+  sendText.mockClear();
+  setOptedOut.mockClear();
+  clearOptedOut.mockClear();
+  setOptedIn.mockClear();
+  runAgentTurn.mockClear();
 });
+
+function textBody(text: string, id = 'wamid.TXT', from = '15551230000') {
+  return JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        changes: [
+          { value: { messages: [{ from, id, type: 'text', text: { body: text } }] } },
+        ],
+      },
+    ],
+  });
+}
+
+function statusBody(status: string, opts: { code?: number; title?: string } = {}) {
+  return JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        changes: [
+          {
+            value: {
+              statuses: [
+                {
+                  id: 'wamid.STATUS1',
+                  recipient_id: '15551230000',
+                  status,
+                  ...(opts.code !== undefined || opts.title
+                    ? { errors: [{ code: opts.code, title: opts.title }] }
+                    : {}),
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  });
+}
 
 afterEach(() => {
   delete process.env.META_APP_SECRET;
@@ -137,5 +193,57 @@ describe('POST /api/whatsapp — signature verification', () => {
     expect(markMessageSeen).toHaveBeenCalledWith('wamid.TEST1');
     expect(warn).toHaveBeenCalled();
     expect(warn.mock.calls.flat().join(' ')).toContain('META_APP_SECRET');
+  });
+});
+
+describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
+  it('a failed status → 200, warns with the error code, agent NOT run', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await post(statusBody('failed', { code: 131056, title: 'Too many messages' }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(markMessageSeen).not.toHaveBeenCalled(); // status path never reaches dedup
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(warn.mock.calls.flat().join(' ')).toContain('131056');
+    expect(warn.mock.calls.flat().join(' ')).toContain('FAILED');
+  });
+
+  it('a delivered status → 200, agent NOT run', async () => {
+    const res = await post(statusBody('delivered'));
+    expect(res.status).toBe(200);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', () => {
+  it('inbound "STOP" → setOptedOut, confirmation sent, agent NOT run', async () => {
+    const res = await post(textBody('STOP', 'wamid.STOP1'));
+    expect(res.status).toBe(200);
+    expect(setOptedOut).toHaveBeenCalledWith('15551230000');
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it('inbound "START" → clearOptedOut, confirmation sent, agent NOT run', async () => {
+    const res = await post(textBody('start', 'wamid.START1'));
+    expect(res.status).toBe(200);
+    expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it('a normal "hi" still runs the agent (regression — STOP detection is exact-only)', async () => {
+    const res = await post(textBody('hi', 'wamid.HI1'));
+    expect(res.status).toBe(200);
+    expect(setOptedOut).not.toHaveBeenCalled();
+    expect(clearOptedOut).not.toHaveBeenCalled();
+    expect(runAgentTurn).toHaveBeenCalled();
+  });
+
+  it('"stop the transfer" does NOT opt out (runs the agent)', async () => {
+    const res = await post(textBody('stop the transfer', 'wamid.STOPX'));
+    expect(res.status).toBe(200);
+    expect(setOptedOut).not.toHaveBeenCalled();
+    expect(runAgentTurn).toHaveBeenCalled();
   });
 });
