@@ -3,14 +3,10 @@ import { getStore } from '@/lib/store';
 import { getPaymentProvider } from '@/lib/providers/payment-provider';
 import { verifyWebhookSignature } from '@/lib/providers/payment-webhook-verify';
 import { env } from '@/lib/env';
-import { recipientTemplateParams } from '@/lib/payment';
+import { recipientTemplateParams, formatDestAmount } from '@/lib/payment';
 import {
   sendText, sendTemplate, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
-
-function inr(amount: number): string {
-  return amount.toLocaleString('en-IN');
-}
 
 export async function POST(
   req: NextRequest,
@@ -48,7 +44,7 @@ export async function POST(
       try {
         await sendText(
           updated.phone,
-          `🎉 ₹${inr(updated.amountInr)} delivered to ${updated.recipientName}. Thanks for using SmartRemit!`,
+          `🎉 ${formatDestAmount(updated.amountInr, updated.destinationCurrency ?? 'INR')} delivered to ${updated.recipientName}. Thanks for using SmartRemit!`,
         );
         if (updated.recipientPhone) {
           await sendTemplate(

@@ -11,7 +11,7 @@ export interface StageResult {
  * Gives ₹ for INR, £ for GBP, AED for AED, etc.
  * Falls back to a plain numeric string if the currency code is unrecognised.
  */
-function formatDestAmount(amount: number, currency: CurrencyCode | string): string {
+export function formatDestAmount(amount: number, currency: CurrencyCode | string): string {
   try {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',

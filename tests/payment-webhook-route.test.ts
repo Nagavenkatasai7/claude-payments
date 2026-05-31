@@ -31,6 +31,11 @@ const deliveredTransfer = {
   id: 'wh_1', phone: '15551230000', amountInr: 16600, recipientName: 'Mom',
   recipientPhone: '919876543210', payoutMethod: 'upi', status: 'delivered',
 };
+// A non-INR corridor: amountInr holds the DESTINATION amount (GBP here).
+const deliveredGbp = {
+  id: 'wh_2', phone: '447911123456', amountInr: 745, destinationCurrency: 'GBP',
+  recipientName: 'Liam', recipientPhone: '447911000000', payoutMethod: 'bank', status: 'delivered',
+};
 const SECRET = 'uniteller-secret';
 const body = JSON.stringify({ reference: 'wh_1', status: 'paid_out' });
 const sig = (b: string, s = SECRET) => createHmac('sha256', s).update(b).digest('hex');
@@ -67,6 +72,18 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect((sendText.mock.calls[0] as unknown[])[1]).toContain('delivered');
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     expect((sendTemplate.mock.calls[0] as unknown[])[1]).toBe('transfer_delivered');
+  });
+
+  it('delivered message uses the DESTINATION currency (GBP shows £, never ₹)', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_2', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredGbp);
+    const res = await post('uniteller', body, sig(body));
+    expect(res.status).toBe(200);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const msg = (sendText.mock.calls[0] as unknown[])[1] as string;
+    expect(msg).toContain('£');
+    expect(msg).not.toContain('₹');
+    expect(msg).toContain('delivered');
   });
 
   it('DUPLICATE paid_out (update returns null) → 200 but NO notification', async () => {
