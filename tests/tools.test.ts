@@ -93,6 +93,33 @@ describe('toolSchemas', () => {
     expect(props).toHaveProperty('recipient_phone');
   });
 
+  // Item 2: bank details are never collected in chat — the secure pay page
+  // gathers them. The bot no longer REQUIRES payout_destination/payout_method on
+  // the tools that previously did.
+  it('send_approve_picker no longer requires payout_destination or payout_method', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'send_approve_picker')!;
+    const required = tool.function.parameters.required as string[];
+    expect(required).not.toContain('payout_destination');
+    expect(required).not.toContain('payout_method');
+    // The recipient-identity fields stay required.
+    expect(required).toContain('recipient_name');
+    expect(required).toContain('recipient_phone');
+  });
+
+  it('create_transfer no longer requires payout_destination or payout_method', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'create_transfer')!;
+    const required = tool.function.parameters.required as string[];
+    expect(required).not.toContain('payout_destination');
+    expect(required).not.toContain('payout_method');
+  });
+
+  it('create_schedule no longer requires payout_destination or payout_method', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'create_schedule')!;
+    const required = tool.function.parameters.required as string[];
+    expect(required).not.toContain('payout_destination');
+    expect(required).not.toContain('payout_method');
+  });
+
   it('update_recipient_phone schema has transfer_id and recipient_phone', () => {
     const tool = toolSchemas.find((t) => t.function.name === 'update_recipient_phone')!;
     const props = tool.function.parameters.properties as Record<string, unknown>;
@@ -926,6 +953,33 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     expect(String(params.url)).toMatch(/^https:\/\//);
   });
 
+  it('cold-start (no payout details) → draft with empty payoutDestination, placeholder on the card', async () => {
+    const ctx = await buildClearedCtx();
+    let ctaText = '';
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      const cta = (body?.interactive as Record<string, unknown>)?.body as Record<string, unknown> | undefined;
+      if (cta && typeof cta.text === 'string') ctaText = cta.text;
+      return { ok: true, text: async () => '' };
+    }));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200,
+      funding_method: 'bank_transfer',
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      // NO payout_method / payout_destination — collected on the secure page
+    }, ctx);
+    expect(r.sent).toBe(true);
+    expect(typeof r.draft_id).toBe('string');
+    // Draft stores an EMPTY destination (filled at pay time from the POST body)
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft).not.toBeNull();
+    expect(draft!.recipient.payoutDestination).toBe('');
+    expect(draft!.recipient.payoutMethod).toBe('bank');
+    // The approve card shows the placeholder, not "bank a/c on file"
+    expect(ctaText).toContain("you'll enter the details on the secure page");
+  });
+
   it('the draft is persisted with the enriched quote (totalChargeUsd is a number)', async () => {
     const ctx = await buildClearedCtx();
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
@@ -1059,6 +1113,22 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     const s = buildApproveSummary(baseQuote({ sourceCurrency: 'GBP', amountSource: 400, feeSource: 1.6 }), 'Mom', 'upi', 'mom@okhdfc', 'bank_transfer');
     expect(s).toContain('1 GBP = ₹');
     expect(s).toContain('£');
+  });
+
+  // Item 2: bank details collected on the secure pay page, not in chat. On a
+  // cold-start draft there is no payout destination yet — the card shows a
+  // placeholder instead of "bank a/c on file".
+  it('empty payoutDestination → placeholder "their bank account (you\'ll enter the details on the secure page)"', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '', 'bank_transfer');
+    expect(s).toContain("their bank account (you'll enter the details on the secure page)");
+    expect(s).not.toContain('bank a/c on file');
+    expect(s).not.toContain('****');
+  });
+
+  it('non-empty payoutDestination keeps the masked "bank a/c ****<last4>" line', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', '123456789 HDFC0001234', 'bank_transfer');
+    expect(s).toContain('bank a/c ****6789');
+    expect(s).not.toContain('their bank account (you');
   });
 });
 

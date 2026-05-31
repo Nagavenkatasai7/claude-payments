@@ -154,8 +154,12 @@ export interface Draft {
   recipient: {
     name: string;
     recipientPhone: string;
+    // Item 2: bank details are entered by the sender on the secure pay page, not
+    // collected in chat. On a cold-start draft payoutDestination is '' (or absent
+    // for old in-flight drafts) and is filled at pay time from the POST body.
+    // payoutMethod defaults to 'bank'.
     payoutMethod: PayoutMethod;
-    payoutDestination: string;
+    payoutDestination?: string;
   };
   amountUsd: number;              // USD-equivalent (for cap re-check)
   amountSource: number;           // NEW (P4)

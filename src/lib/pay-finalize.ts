@@ -7,6 +7,17 @@ import type { DraftStore } from './draft-store';
 import type { PartnerStore } from './partner-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { DailyVolumeStore } from './daily-volume-store';
+import type { PayoutMethod } from './types';
+
+/**
+ * Bank details collected on the secure pay page (Item 2). Both fields optional:
+ * an absent/empty payoutDestination means "no body supplied" → fall back to the
+ * draft's stored destination (covers old in-flight drafts during the TTL drain).
+ */
+export interface BankDetails {
+  payoutMethod?: PayoutMethod;
+  payoutDestination?: string;
+}
 
 export interface FinalizeStores {
   store: Store;
@@ -31,6 +42,7 @@ export type FinalizeResult =
 export async function finalizeDraftPayment(
   stores: FinalizeStores,
   draftId: string,
+  bankDetails?: BankDetails,
 ): Promise<FinalizeResult> {
   const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore } = stores;
 
@@ -51,12 +63,25 @@ export async function finalizeDraftPayment(
   const draft = await draftStore.consumeDraft(draftId);
   if (!draft) return { ok: false, error: 'expired_or_used' };
 
+  // Item 2: the recipient's bank details are entered on the secure pay page and
+  // arrive here in the POST body (bankDetails). Use them for the created
+  // transfer, but FALL BACK to the draft's stored destination when the body is
+  // empty/absent (covers old in-flight drafts still draining their 30-min TTL).
+  const bodyDestination = (bankDetails?.payoutDestination ?? '').trim();
+  const payoutDestination = bodyDestination !== ''
+    ? bodyDestination
+    : draft.recipient.payoutDestination ?? '';
+  const payoutMethod =
+    bodyDestination !== '' && bankDetails?.payoutMethod
+      ? bankDetails.payoutMethod
+      : draft.recipient.payoutMethod;
+
   const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
     phone: draft.senderPhone,
     recipientName: draft.recipient.name,
     recipientPhone: draft.recipient.recipientPhone,
-    payoutMethod: draft.recipient.payoutMethod,
-    payoutDestination: draft.recipient.payoutDestination,
+    payoutMethod,
+    payoutDestination,
     fundingMethod: draft.fundingMethod,
     amountSource: draft.amountSource,
     sourceCurrency: draft.sourceCurrency,

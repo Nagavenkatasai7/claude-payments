@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { money } from './format';
+import { MaskedDestination } from './masked-destination';
 
 const TABS = [
   { key: 'all', label: 'All' },
@@ -148,9 +149,10 @@ export function TransactionsTabs({
                 <tr key={t.id}>
                   <td>
                     <div className="sh-recipient">{t.recipientName}</div>
-                    <div className="sh-recipient-sub">
-                      {t.payoutMethod.toUpperCase()} · {t.payoutDestination}
-                    </div>
+                    <MaskedDestination
+                      payoutMethod={t.payoutMethod}
+                      payoutDestination={t.payoutDestination}
+                    />
                   </td>
                   <td>{t.sourceCountry} → {t.destinationCountry}</td>
                   <td>{partnerById[t.partnerId]?.name ?? t.partnerId}</td>
