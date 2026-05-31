@@ -103,6 +103,10 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
     expect(SYSTEM_PROMPT.toUpperCase()).toContain('NEVER REPEAT A CUSTOMER');
     expect(SYSTEM_PROMPT).toContain('****6789');
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('approval card already masks it');
+    // QA batch 3: last-4-only in chat free-text — no routing/IFSC/sort/IBAN echo
+    expect(SYSTEM_PROMPT).toContain('LAST-4 ONLY in chat');
+    expect(SYSTEM_PROMPT).toContain('IFSC HDFC0005678');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never echo the routing number');
   });
 
   it('Fix #2: over_daily_cap message does NOT volunteer the amount already spent', () => {
@@ -114,10 +118,15 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
   });
 
   it('Fix #3: send-amount lock rule is present', () => {
-    expect(SYSTEM_PROMPT).toContain('amount_usd for all later get_quote calls');
+    expect(SYSTEM_PROMPT).toContain('amount_usd to every later get_quote call');
     expect(SYSTEM_PROMPT).toContain('confirm with the user first');
     // Must not silently switch to receive-first
     expect(SYSTEM_PROMPT).toContain('must NOT silently change the send amount');
+    // QA batch 3: hardened lock — explicit confirm BEFORE any re-quote
+    expect(SYSTEM_PROMPT).toContain('SEND AMOUNT LOCK');
+    expect(SYSTEM_PROMPT).toContain('that send amount is LOCKED');
+    expect(SYSTEM_PROMPT).toContain('You MUST NOT call get_quote with amount_inr');
+    expect(SYSTEM_PROMPT).toContain('Re-quoting and then showing the new numbers is NEVER itself the confirmation');
   });
 
   it('Fix #4: unsupported-country section leads with limitation, not with an affirmative opener', () => {
@@ -129,6 +138,10 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
     expect(SYSTEM_PROMPT).toContain('US, Canada, UK, UAE, Singapore, Australia, New Zealand, and India');
     // The bot must NOT start with an affirmative opener that implies the country is supported
     expect(SYSTEM_PROMPT).toContain('Do NOT start with "That sounds great!"');
+    // QA batch 3: hardened into a mandatory ordered sequence with explicit forbidden openers
+    expect(SYSTEM_PROMPT).toContain('ORDERED SEQUENCE');
+    expect(SYSTEM_PROMPT).toContain('FORBIDDEN OPENERS');
+    expect(SYSTEM_PROMPT).toContain('Roughly how much');
   });
 
   it('Fix #5: payee-name echo rule is present', () => {
