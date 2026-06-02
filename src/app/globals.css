@@ -43,23 +43,27 @@
   /* ---- Text aliases (legacy names → slate steps) ---- */
   --sh-text: #1c2024;
   --sh-text-secondary: #60646c;
-  --sh-text-tertiary: #8b8d98;
+  --sh-text-tertiary: #6e7178;     /* darkened from slate-9 → ~4.6:1 on white (WCAG AA) */
 
-  /* ---- Semantic ramps (Radix): 3 bg / 6 border / 9 dot / 11 text ---- */
-  --sh-success: #218358;           --sh-success-bg: #e6f6eb;
+  /* ---- Semantic ramps (Radix): 3 bg / 6 border / 9 dot / 11 text ----
+     Pill backgrounds lightened one step from the raw Radix step-3 so the
+     step-11 text clears 4.5:1 at the 11.5px pill size (WCAG AA). */
+  --sh-success: #1a7049;           --sh-success-bg: #effaf2;
   --sh-success-dot: #30a46c;       --sh-success-border: #adddc0;
-  --sh-warning: #ab6400;           --sh-warning-bg: #fff7c2;   /* amber-11 is brown = AA-safe text */
+  --sh-warning: #9a5b00;           --sh-warning-bg: #fdfbe7;
   --sh-warning-dot: #ffc53d;       --sh-warning-border: #f3d673;
   --sh-danger: #ce2c31;            --sh-danger-bg: #feebec;
   --sh-danger-dot: #e5484d;        --sh-danger-border: #fdbdbe;
-  --sh-info: #0d74ce;              --sh-info-bg: #e6f4fe;
+  --sh-info: #0a5fa8;              --sh-info-bg: #eff6ff;
   --sh-info-dot: #0090ff;          --sh-info-border: #acd8fc;
   --sh-neutral: #60646c;           --sh-neutral-bg: #f0f0f3;
   --sh-neutral-dot: #8b8d98;       --sh-neutral-border: #d9d9e0;
 
   /* ---- Type ---- */
-  --sh-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
-  --sh-font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* --font-inter is the self-hosted next/font face (root layout); falls back to
+     the system stack if it hasn't loaded. --sh-font-mono is system mono. */
+  --sh-font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif;
+  --sh-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
   /* ---- Spacing (4px base) ---- */
   --sh-space-1: 4px;   --sh-space-2: 8px;   --sh-space-3: 12px;  --sh-space-4: 16px;
@@ -330,6 +334,11 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .sh-icon-btn:hover { background: var(--sh-gray-3); color: var(--sh-text); }
 .sh-icon-btn svg { width: 17px; height: 17px; display: block; }
+/* Inline <Icon> SVGs have no intrinsic size — every control that embeds one must
+   size its svg or it renders at the ~300×150 browser default. */
+.sh-btn-primary svg, .sh-btn-secondary svg, .sh-mini-btn svg { width: 15px; height: 15px; flex: 0 0 auto; display: block; }
+.sh-kbd svg { width: 12px; height: 12px; display: block; }
+.sh-search .sh-cmdk-search-icon svg { width: 17px; height: 17px; display: block; }
 
 /* === Pills === */
 .sh-pill {
@@ -478,6 +487,8 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .sh-toolbar-grow { flex: 1 1 220px; min-width: 0; }
 .sh-toolbar-spacer { margin-left: auto; }
+/* date inputs in a toolbar scope-chip: roomy enough for mm/dd/yyyy on desktop */
+.sh-toolbar .sh-scope-chip .sh-inline-input { max-width: 160px; }
 
 /* Styled native select (filters) */
 .sh-select {
@@ -736,6 +747,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .sh-drawer-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 16px; border-bottom: 1px solid var(--sh-border);
+  /* respect the notch / left safe area on phones */
+  padding-top: max(14px, env(safe-area-inset-top));
+  padding-left: max(16px, env(safe-area-inset-left));
 }
 .sh-drawer-title { font-weight: 700; font-size: 14px; color: var(--sh-text); }
 .sh-drawer-close {
@@ -744,7 +758,11 @@ input, select, textarea { font: inherit; color: inherit; }
   color: var(--sh-text-secondary); font-size: 15px; cursor: pointer;
 }
 .sh-drawer-close svg { width: 16px; height: 16px; display: block; }
-.sh-drawer-nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; }
+.sh-drawer-nav {
+  padding: 10px; display: flex; flex-direction: column; gap: 2px;
+  padding-bottom: max(10px, calc(10px + env(safe-area-inset-bottom)));
+  padding-left: max(10px, env(safe-area-inset-left));
+}
 .sh-drawer-nav .sh-nav-item { min-height: 44px; }
 
 /* ---- tablet / phone: drawer takes over from the static sidebar ---- */
@@ -787,7 +805,8 @@ input, select, textarea { font: inherit; color: inherit; }
   /* toolbars + filter controls go full-width and stack */
   .sh-toolbar { flex-direction: column; align-items: stretch; }
   .sh-toolbar-spacer { margin-left: 0; }
-  .sh-toolbar .sh-select, .sh-toolbar .sh-search-box, .sh-toolbar-grow { width: 100%; }
+  .sh-toolbar .sh-select, .sh-toolbar .sh-search-box, .sh-toolbar .sh-scope-chip, .sh-toolbar-grow { width: 100%; }
+  .sh-toolbar .sh-scope-chip .sh-inline-input { flex: 1; max-width: none; }
   .sh-tabs { width: 100%; }
   .sh-audit-when { min-width: 0; flex-basis: 100%; }
   .sh-audit-row { flex-wrap: wrap; gap: 2px 10px; }

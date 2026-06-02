@@ -31,8 +31,9 @@ export async function login(
       return 'Account unavailable. Contact SmartRemit support.';
     }
   }
-  // Record an "active" signal for the Team page (cheap: one write per login).
-  await getAuthStore().saveStaff({ ...staff, lastLoginAt: new Date().toISOString() });
+  // Record an "active" signal for the Team page (re-reads fresh; won't clobber a
+  // concurrent suspend/edit — see auth-store.recordLogin).
+  await getAuthStore().recordLogin(username);
   const token = await getAuthStore().createSession(username);
   (await cookies()).set(SESSION_COOKIE, token, {
     httpOnly: true,

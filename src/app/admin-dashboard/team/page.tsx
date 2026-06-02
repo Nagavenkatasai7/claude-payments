@@ -28,7 +28,9 @@ const STAFF_COLUMNS: ExpandableColumn[] = [
 function shortDate(iso?: string): string {
   if (!iso) return '—';
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 10);
+  // date + HH:MM (UTC) so two same-day logins are distinguishable, matching the
+  // audit row's granularity.
+  return Number.isNaN(d.getTime()) ? '—' : iso.replace('T', ' ').slice(0, 16);
 }
 
 function PartnerOptions({ partners }: { partners: Partner[] }) {

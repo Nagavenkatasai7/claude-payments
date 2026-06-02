@@ -82,6 +82,39 @@ describe('getCurrentStaff suspended-staff bounce', () => {
   });
 });
 
+describe('authStore.recordLogin', () => {
+  it('does not resurrect or stamp a suspended record', async () => {
+    const s = getAuthStore();
+    await s.saveStaff({
+      username: 'a',
+      name: 'A',
+      role: 'admin',
+      permissions: { canCancel: true, canResend: true, canAssign: true },
+      passwordHash: 'salt:hash',
+      createdAt: '2026-05-27T00:00:00Z',
+      status: 'suspended',
+    });
+    await s.recordLogin('a');
+    const got = await s.getStaff('a');
+    expect(got?.status).toBe('suspended');
+    expect(got?.lastLoginAt).toBeUndefined();
+  });
+
+  it('stamps lastLoginAt on an active record', async () => {
+    const s = getAuthStore();
+    await s.saveStaff({
+      username: 'b',
+      name: 'B',
+      role: 'agent',
+      permissions: { canCancel: false, canResend: false, canAssign: false },
+      passwordHash: 'salt:hash',
+      createdAt: '2026-05-27T00:00:00Z',
+    });
+    await s.recordLogin('b');
+    expect((await s.getStaff('b'))?.lastLoginAt).toBeTruthy();
+  });
+});
+
 describe('login refuses suspended staff', () => {
   it('returns a generic error and sets no cookie', async () => {
     await getAuthStore().saveStaff({

@@ -68,9 +68,13 @@ export async function assignTransferAction(formData: FormData): Promise<void> {
   if (!assigneeStaff) {
     throw new Error('Cannot assign: unknown staff member.');
   }
-  // …who can actually see this transfer's tenant (M2: no cross-partner assignment).
+  // …who can actually see this transfer's tenant (M2: no cross-partner assignment)…
   if (!canSee(scopeOf(assigneeStaff), transfer.partnerId)) {
     throw new Error('Cannot assign: staff member is outside this transfer’s scope.');
+  }
+  // …and who is still active (don't orphan work on a suspended account).
+  if (assigneeStaff.status === 'suspended') {
+    throw new Error('Cannot assign: staff member is inactive.');
   }
   await assignTransfer(store, id, assignee, note);
   revalidatePath('/admin-dashboard', 'layout');

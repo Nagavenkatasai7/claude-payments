@@ -90,7 +90,6 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
             value={fromDate}
             onChange={(e) => setFromDate(e.target.value)}
             className="sh-inline-input"
-            style={{ maxWidth: 150 }}
           />
         </label>
         <label className="sh-scope-chip">
@@ -100,7 +99,6 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
             value={toDate}
             onChange={(e) => setToDate(e.target.value)}
             className="sh-inline-input"
-            style={{ maxWidth: 150 }}
           />
         </label>
       </div>
