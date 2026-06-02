@@ -11,6 +11,14 @@ const ARGON2_PARAMS = { memorySize: 19456, iterations: 2, parallelism: 1 } as co
  * secret (never in Redis), so a DB leak alone can't be brute-forced. When the
  * pepper is unset we return the plaintext unchanged, which keeps existing staff
  * scrypt hashes (created before any pepper) verifying.
+ *
+ * ⚠️ OPERATIONAL INVARIANT — the pepper is UNVERSIONED. Set `PASSWORD_PEPPER`
+ * ONCE before any customer registers, and NEVER rotate it without a forced
+ * password-reset migration: rotating it makes every existing Argon2id hash fail
+ * to verify (the legacy-scrypt fallthrough does NOT cover Argon2id), locking out
+ * those accounts. (Safe today: no customer accounts exist yet.) A future
+ * versioned-pepper scheme — store the pepper id alongside the hash — is the
+ * planned upgrade if rotation is ever required.
  */
 function applyPepper(plain: string): string {
   const pepper = env.passwordPepper;

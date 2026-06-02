@@ -140,6 +140,7 @@ export function encryptField(
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
+  cipher.setAAD(Buffer.from(VERSION)); // bind the version as AAD (anti-transplant)
   const ct = Buffer.concat([
     cipher.update(Buffer.from(plaintext, 'utf8')),
     cipher.final(),
@@ -183,6 +184,7 @@ export function decryptField(
 
   const dek = provider.unwrapDataKey(wrappedDek); // throws if master key mismatches
   const decipher = createDecipheriv('aes-256-gcm', dek, iv);
+  decipher.setAAD(Buffer.from(version)); // must match the AAD bound at encrypt
   decipher.setAuthTag(tag);
   const plain = Buffer.concat([decipher.update(ct), decipher.final()]);
   return plain.toString('utf8');

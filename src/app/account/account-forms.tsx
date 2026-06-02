@@ -53,7 +53,7 @@ export function RegisterForm({ token, prefillPhone }: { token?: string; prefillP
 
   // Once the action advances to the OTP step, swap to the OTP island.
   if (state?.step === 'otp' && state.phone) {
-    return <OtpForm phone={state.phone} notice={state.notice} flow="register" />;
+    return <OtpForm phone={state.phone} pendingToken={state.pendingToken} notice={state.notice} />;
   }
 
   const err = state?.error;
@@ -112,7 +112,7 @@ export function LoginForm() {
   );
 
   if (state?.step === 'otp' && state.phone) {
-    return <OtpForm phone={state.phone} notice={state.notice} flow="login" />;
+    return <OtpForm phone={state.phone} pendingToken={state.pendingToken} notice={state.notice} />;
   }
 
   const err = state?.error;
@@ -154,12 +154,12 @@ export function LoginForm() {
 // ── OTP step (shared by register + login) ───────────────────────────────────
 function OtpForm({
   phone,
+  pendingToken,
   notice,
-  flow,
 }: {
   phone: string;
+  pendingToken?: string;
   notice?: string;
-  flow: 'register' | 'login';
 }) {
   const [state, action, pending] = useActionState<AccountState | null, FormData>(
     verifyOtpAction,
@@ -172,6 +172,9 @@ function OtpForm({
 
   const err = state?.error;
   const currentNotice = resendState?.notice ?? state?.notice ?? notice;
+  // Carry the latest pending-auth token through verify/resend round-trips; the
+  // server derives the phone from it (the form phone is display-only).
+  const currentToken = state?.pendingToken ?? resendState?.pendingToken ?? pendingToken ?? '';
   return (
     <div>
       <p className="acct-sub">
@@ -185,8 +188,7 @@ function OtpForm({
         aria-describedby={err ? 'acct-form-error' : undefined}
       >
         <FormError error={err} />
-        <input type="hidden" name="phone" value={phone} />
-        <input type="hidden" name="flow" value={flow} />
+        <input type="hidden" name="pendingToken" value={currentToken} />
         <label className="acct-field">
           <span className="acct-label">Verification code</span>
           <input
@@ -206,7 +208,7 @@ function OtpForm({
         </button>
       </form>
       <form action={resendAction}>
-        <input type="hidden" name="phone" value={phone} />
+        <input type="hidden" name="pendingToken" value={currentToken} />
         <button type="submit" className="pay-secondary" disabled={resendPending}>
           {resendPending ? 'Sending…' : 'Resend code'}
         </button>
@@ -224,7 +226,7 @@ export function ResetForm() {
 
   // Once a code is dispatched, show the confirm step.
   if (state?.step === 'otp' && state.phone) {
-    return <ResetConfirmForm phone={state.phone} notice={state.notice} />;
+    return <ResetConfirmForm phone={state.phone} pendingToken={state.pendingToken} notice={state.notice} />;
   }
 
   const err = state?.error;
@@ -248,7 +250,15 @@ export function ResetForm() {
   );
 }
 
-function ResetConfirmForm({ phone, notice }: { phone: string; notice?: string }) {
+function ResetConfirmForm({
+  phone,
+  pendingToken,
+  notice,
+}: {
+  phone: string;
+  pendingToken?: string;
+  notice?: string;
+}) {
   const [state, action, pending] = useActionState<AccountState | null, FormData>(
     resetAction,
     null,
@@ -256,6 +266,7 @@ function ResetConfirmForm({ phone, notice }: { phone: string; notice?: string })
 
   // On success the action returns step:'login' with a notice — show it inline.
   const err = state?.error;
+  const currentToken = state?.pendingToken ?? pendingToken ?? '';
   return (
     <form action={action} className="acct-form" aria-describedby={err ? 'acct-form-error' : undefined}>
       <FormError error={err} />
@@ -265,7 +276,7 @@ function ResetConfirmForm({ phone, notice }: { phone: string; notice?: string })
           <p className="acct-sub">
             Enter the code we sent to <strong>{maskPhone(phone)}</strong> and choose a new password.
           </p>
-          <input type="hidden" name="phone" value={phone} />
+          <input type="hidden" name="pendingToken" value={currentToken} />
           <label className="acct-field">
             <span className="acct-label">Verification code</span>
             <input

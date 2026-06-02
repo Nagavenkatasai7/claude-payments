@@ -34,6 +34,12 @@ const ABSOLUTE_MS = 12 * 60 * 60 * 1000; // 12-h absolute window
 const SESSION_IDLE_SECONDS = IDLE_MS / 1000; // Redis ex (defense-in-depth; code is authoritative)
 const RESET_TTL_SECONDS = 30 * 60; // 30-min single-use reset token
 
+// ── Login brute-force throttle (OWASP/NIST: cap consecutive failures) ──
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const LOGIN_FAIL_MAX_PER_PHONE_DAY = 10; // temp account lock after 10 failed/day
+const LOGIN_FAIL_MAX_PER_IP_HOUR = 50; // blunt distributed credential-stuffing
+
 // ── Key schema (sr_* namespace, fully separate from staff `session:` keys) ──
 const sessionKey = (tokenHash: string) => `sr_sess:${tokenHash}`;
 const sessionIndexKey = (phone: string) => `sr_sess_idx:${phone}`;
@@ -368,6 +374,57 @@ export function createCustomerAuthStore(
      */
     async consumeResetToken(token: string): Promise<string | null> {
       return redis.getdel(resetKey(sha256hex(token)));
+    },
+
+    // ── Login brute-force throttle (per-phone/day + per-IP/hour) ──
+
+    /** True if the account or the caller IP has exceeded the failed-login cap. */
+    async isLoginLocked(phoneRaw: string, ip?: string): Promise<boolean> {
+      const t = now();
+      const phone = normalizePhone(phoneRaw);
+      const pc = Number((await redis.get(`sr_loginfail:p:${phone}:${Math.floor(t / DAY_MS)}`)) ?? 0);
+      if (pc >= LOGIN_FAIL_MAX_PER_PHONE_DAY) return true;
+      if (ip) {
+        const ic = Number(
+          (await redis.get(`sr_loginfail:ip:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`)) ?? 0,
+        );
+        if (ic >= LOGIN_FAIL_MAX_PER_IP_HOUR) return true;
+      }
+      return false;
+    },
+
+    /** Count a failed password attempt against both the account and the IP. */
+    async recordLoginFailure(phoneRaw: string, ip?: string): Promise<void> {
+      const t = now();
+      const phone = normalizePhone(phoneRaw);
+      const pKey = `sr_loginfail:p:${phone}:${Math.floor(t / DAY_MS)}`;
+      const pn = await redis.incr(pKey);
+      if (pn === 1) await redis.expire(pKey, 2 * 24 * 60 * 60);
+      if (ip) {
+        const iKey = `sr_loginfail:ip:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`;
+        const inx = await redis.incr(iKey);
+        if (inx === 1) await redis.expire(iKey, 2 * 60 * 60);
+      }
+    },
+
+    /** Clear the per-account failed-login counter (on a successful login). */
+    async clearLoginFailures(phoneRaw: string): Promise<void> {
+      const t = now();
+      await redis.del(`sr_loginfail:p:${normalizePhone(phoneRaw)}:${Math.floor(t / DAY_MS)}`);
+    },
+
+    // ── Per-IP OTP-send throttle (blunt number-rotation OTP/toll-fraud pumping) ──
+    async isOtpIpLocked(ip: string): Promise<boolean> {
+      const t = now();
+      return (
+        Number((await redis.get(`sr_otpip:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`)) ?? 0) >= 20
+      );
+    },
+    async recordOtpIp(ip: string): Promise<void> {
+      const t = now();
+      const k = `sr_otpip:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`;
+      const n = await redis.incr(k);
+      if (n === 1) await redis.expire(k, 2 * 60 * 60);
     },
   };
 }

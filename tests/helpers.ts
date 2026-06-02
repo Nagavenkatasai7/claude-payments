@@ -79,5 +79,10 @@ export function fakeRedis(): FakeRedis {
     async exists(key: string) {
       return map.has(key) || sets.has(key) || hashes.has(key) ? 1 : 0;
     },
+    // TTL is a no-op in the fake (tests drive expiry via injectable clocks, not
+    // real Redis TTL); returns 1 like Upstash when the key exists.
+    async expire(key: string, _seconds: number) {
+      return map.has(key) || sets.has(key) || hashes.has(key) ? 1 : 0;
+    },
   };
 }
