@@ -40,7 +40,7 @@ describe('ensureSeedAdmin', () => {
     await ensureSeedAdmin();
     const admin = await createAuthStore(redis).getStaff('admin');
     expect(admin?.role).toBe('admin');
-    expect(verifyPassword('admin-test-pw', admin!.passwordHash)).toBe(true);
+    expect(await verifyPassword('admin-test-pw', admin!.passwordHash)).toBe(true);
   });
 
   it('does nothing when staff already exist', async () => {

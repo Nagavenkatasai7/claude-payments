@@ -28,6 +28,7 @@ export interface RedisLike {
   hdel(key: string, field: string): Promise<unknown>;
   getdel(key: string): Promise<string | null>;
   exists(key: string): Promise<number>;
+  expire(key: string, seconds: number): Promise<unknown>;
 }
 
 const MAX_HISTORY = 40;

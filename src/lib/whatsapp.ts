@@ -1,4 +1,8 @@
 import { env } from './env';
+import {
+  authenticationTemplateParams,
+  type AuthenticationTemplateComponent,
+} from './whatsapp-templates';
 
 export const RECIPIENT_TEMPLATE_NAME = 'transfer_delivered';
 export const SCHEDULED_TEMPLATE_NAME = 'scheduled_payment_ready';
@@ -265,6 +269,74 @@ export async function sendTemplateWithButton(
       },
     }),
     'WhatsApp template send failed',
+  );
+}
+
+/**
+ * Send a template whose `components` array is already fully built (body + any
+ * button components). Mirrors sendTemplate/sendTemplateWithButton's Graph API
+ * envelope but takes the components verbatim so an AUTHENTICATION template (body
+ * code param + COPY_CODE url button param) can be sent without a bespoke body/
+ * button signature. Throws on a non-OK status (no code is ever in the error —
+ * the error is the Graph response body, which does not echo the params).
+ */
+export async function sendAuthTemplate(
+  to: string,
+  templateName: string,
+  languageCode: string,
+  components: AuthenticationTemplateComponent[],
+): Promise<void> {
+  return postWithBackoff(
+    GRAPH_MESSAGES_URL(),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        components,
+      },
+    }),
+    'WhatsApp auth template send failed',
+  );
+}
+
+// Language for the AUTHENTICATION template — 'en', matching every other §3
+// template (created as "English" => 'en', not 'en_US').
+const OTP_TEMPLATE_LANG = 'en';
+
+/** Mask a phone to its last 4 digits for safe logging (…1234). Never log the OTP. */
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return `…${digits.slice(-4)}`;
+}
+
+/**
+ * Deliver a one-time code over WhatsApp (spec §3c). The `code` MUST never appear
+ * in a log line or a thrown error — only the masked (last-4) phone is logged.
+ *
+ * Dev mode (env.otpDevMode): log a masked-phone "code ready" line and RETURN
+ * without a live send, so dev/staging works before the Meta AUTHENTICATION
+ * template is approved. (The code itself is intentionally NOT logged; operators
+ * read it from otp-store's dev surface, not from this line.)
+ *
+ * Live mode: send via the approved AUTHENTICATION template (name from
+ * env.whatsappAuthTemplate, lang 'en') with the code in BOTH the body and the
+ * COPY_CODE url button. Throws on a Graph error so the caller can surface a
+ * generic, enumeration-safe failure.
+ */
+export async function sendOtpCode(phone: string, code: string): Promise<void> {
+  if (env.otpDevMode) {
+    // No code in the log; no live send (template may not be approved yet).
+    console.log(`[otp] dev-mode: code ready for ${maskPhone(phone)}`);
+    return;
+  }
+  await sendAuthTemplate(
+    phone,
+    env.whatsappAuthTemplate,
+    OTP_TEMPLATE_LANG,
+    authenticationTemplateParams(code),
   );
 }
 

@@ -16,7 +16,7 @@ export async function login(
   const username = String(formData.get('username') ?? '').trim();
   const password = String(formData.get('password') ?? '');
   const staff = await getAuthStore().getStaff(username);
-  if (!staff || !verifyPassword(password, staff.passwordHash)) {
+  if (!staff || !(await verifyPassword(password, staff.passwordHash))) {
     return 'Invalid username or password.';
   }
   // Team: a suspended staff member cannot log in. Generic message (no leak).

@@ -255,6 +255,11 @@ export interface Customer {
   // ── WhatsApp consent (Item 4) — both optional/dormant; absence = not-yet-set ──
   optInAt?: string;     // ISO — first transactional inbound (sender initiating = opt-in)
   optedOutAt?: string;  // ISO — set on STOP; cleared (undefined) on START
+  // ── Customer onboarding Phase 1 — persistent account auth (all optional, lazy) ──
+  email?: string;            // field-crypto ciphertext blob (C2 PII), absent until they register
+  passwordHash?: string;     // Argon2id PHC string (the hash itself; not extra-encrypted)
+  passwordUpdatedAt?: string;// ISO — set on register / password change
+  phoneVerifiedAt?: string;  // ISO — set when the WhatsApp OTP is verified
   createdAt: string;
   updatedAt: string;
 }

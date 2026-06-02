@@ -122,7 +122,7 @@ describe('login refuses suspended staff', () => {
       name: 'A',
       role: 'admin',
       permissions: { canCancel: true, canResend: true, canAssign: true },
-      passwordHash: hashPassword('hunter2'),
+      passwordHash: await hashPassword('hunter2'),
       createdAt: '2026-05-27T00:00:00Z',
       status: 'suspended',
     });
@@ -137,7 +137,7 @@ describe('login refuses suspended staff', () => {
       name: 'A',
       role: 'admin',
       permissions: { canCancel: true, canResend: true, canAssign: true },
-      passwordHash: hashPassword('hunter2'),
+      passwordHash: await hashPassword('hunter2'),
       createdAt: '2026-05-27T00:00:00Z',
     });
     await expect(login(null, form({ username: 'a', password: 'hunter2' }))).rejects.toThrow(

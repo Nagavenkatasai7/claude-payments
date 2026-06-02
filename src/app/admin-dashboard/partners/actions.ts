@@ -120,7 +120,7 @@ export async function createPartnerStaffAction(
     name,
     role,
     permissions: { canCancel: false, canResend: false, canAssign: false },
-    passwordHash: hashPassword(password),
+    passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     partnerId,                  // taken from URL, not form
   });

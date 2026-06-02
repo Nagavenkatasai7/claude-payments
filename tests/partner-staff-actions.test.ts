@@ -49,7 +49,7 @@ describe('createPartnerStaffAction', () => {
     const got = await createAuthStore(redis).getStaff('p1');
     expect(got?.partnerId).toBe('acme');
     expect(got?.role).toBe('admin');
-    expect(got?.passwordHash).toMatch(/^[0-9a-f]+:[0-9a-f]+$/);
+    expect(got?.passwordHash).toMatch(/^\$argon2id\$/);
   });
 
   it('refuses to honour partnerId from the form (URL param is authoritative)', async () => {

@@ -660,6 +660,43 @@ input, select, textarea { font: inherit; color: inherit; }
   margin-top: 10px;
 }
 
+/* === Account portal (customer onboarding) — scoped under .payapp === */
+.payapp .acct-sub {
+  font-size: 14px; color: #8696a0; margin: -8px 0 20px; line-height: 1.5;
+}
+/* WCAG 2.2: every input has a visible, programmatically-associated label. The
+   16px input font-size (inherited from .payapp form input) prevents iOS zoom. */
+.payapp .acct-field { display: block; margin-bottom: 16px; }
+.payapp .acct-field > .acct-label {
+  display: block; font-size: 13px; color: #8696a0; margin-bottom: 6px;
+}
+.payapp .acct-field input { margin-top: 0; }
+/* aria-describedby target: a per-field error rendered red, announced to AT. */
+.payapp .acct-field-err { display: block; color: #f15c6d; font-size: 12px; margin-top: 6px; }
+/* Form-level error (role=alert) shown above the thumb-zone CTA. */
+.payapp .acct-error {
+  color: #f15c6d; font-size: 13px; margin: 4px 0 14px; line-height: 1.4;
+}
+.payapp .acct-notice {
+  color: #25d366; font-size: 13px; margin: 4px 0 14px; line-height: 1.4;
+}
+/* Single 6-digit code box: centered, wide tracking, numeric keypad on mobile. */
+.payapp .acct-otp-input {
+  text-align: center; letter-spacing: 0.5em; font-size: 22px !important;
+  font-variant-numeric: tabular-nums;
+}
+/* Trust copy under sensitive fields. */
+.payapp .acct-trust {
+  font-size: 12px; color: #667781; margin: 4px 0 18px; line-height: 1.5;
+}
+/* Footer link row (e.g. "Already have an account? Sign in"). */
+.payapp .acct-alt { font-size: 14px; color: #8696a0; margin-top: 18px; text-align: center; }
+.payapp .acct-alt a { color: #25d366; text-decoration: none; font-weight: 600; }
+.payapp .acct-alt a:hover { text-decoration: underline; }
+/* Signed-in landing. */
+.payapp .acct-signed-in { font-size: 15px; color: #e9edef; line-height: 1.6; margin-bottom: 20px; }
+.payapp .acct-signed-in strong { color: #25d366; }
+
 /* === Tier / status tags === */
 .sh-tag {
   display: inline-flex; align-items: center; gap: 5px;

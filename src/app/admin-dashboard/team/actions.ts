@@ -95,7 +95,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
     name,
     role,
     permissions: readPermissions(formData),
-    passwordHash: hashPassword(password),
+    passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     status: 'active',
     ...(partnerId ? { partnerId } : {}),

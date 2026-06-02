@@ -78,6 +78,28 @@ export const env = {
     // fail — the send_recipient_picker call site falls back to buttons.
     return process.env.WHATSAPP_FLOWS_ENABLED === 'true';
   },
+  // ── Customer onboarding Phase 1 ──
+  get fieldEncryptionKey(): string {
+    // 32-byte (hex/base64) master key for field-level envelope encryption.
+    // '' ⇒ unconfigured; field-crypto's EnvKeyProvider throws AT USE (not at
+    // import) so dev/test without it doesn't break. Behind EncryptionKeyProvider
+    // so a real KMS replaces this later without touching call sites.
+    return process.env.FIELD_ENCRYPTION_KEY ?? '';
+  },
+  get passwordPepper(): string {
+    // HMAC pepper applied before Argon2id. '' ⇒ no pepper (keeps existing staff
+    // scrypt hashes verifying). Kept out of Redis; lives only in this secret.
+    return process.env.PASSWORD_PEPPER ?? '';
+  },
+  get otpDevMode(): boolean {
+    // 'true' ⇒ sendOtpCode logs the code + no-ops the live send, so dev/staging
+    // works before the Meta AUTHENTICATION template is approved. Default false.
+    return process.env.OTP_DEV_MODE === 'true';
+  },
+  get whatsappAuthTemplate(): string {
+    // Name of the approved Meta AUTHENTICATION template used for OTP delivery.
+    return process.env.WHATSAPP_AUTH_TEMPLATE ?? 'verification_code';
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).

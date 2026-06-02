@@ -1,0 +1,36 @@
+import { RegisterForm } from '../account-forms';
+import { getOnboardingTokenStore } from '@/lib/onboarding-token';
+
+export const dynamic = 'force-dynamic';
+
+export const metadata = { title: 'Create your account · SmartRemit' };
+
+/**
+ * Register page. Accepts an optional `?token=` (a WhatsApp onboarding deep link):
+ * if it resolves (verify is read-only — register consumes it), we prefill the
+ * bound phone. The token is NOT required; the WhatsApp OTP is the real possession
+ * proof. We never echo the raw token into the page beyond the hidden field, and a
+ * bad/expired token simply renders the empty form.
+ */
+export default async function AccountRegisterPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ token?: string }>;
+}) {
+  const { token } = await searchParams;
+  let prefillPhone: string | undefined;
+  if (token) {
+    const bound = await getOnboardingTokenStore().verifyOnboardingToken(token);
+    if (bound) prefillPhone = bound;
+  }
+
+  return (
+    <main className="payapp">
+      <div className="card">
+        <div className="brand">SmartRemit</div>
+        <h1>Create your account</h1>
+        <RegisterForm token={token} prefillPhone={prefillPhone} />
+      </div>
+    </main>
+  );
+}
