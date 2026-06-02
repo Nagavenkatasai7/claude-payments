@@ -7,6 +7,7 @@ import {
   corridorMessage,
 } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
+import { LockIcon, RateIcon, GlobeIcon, BankIcon } from './landing/TrustIcons';
 import RateCalculator from './landing/RateCalculator';
 import ScrollReveal from './landing/ScrollReveal';
 import NavScroll from './landing/NavScroll';
@@ -32,8 +33,9 @@ export const metadata: Metadata = {
 // fast and mostly static.
 export const revalidate = 3600;
 
-// `code` = ISO-3166 alpha-2 for flagcdn.com SVGs (renders as a real flag in every
-// browser; emoji flags don't render in Chrome/Arc on macOS).
+// `code` = ISO-3166 alpha-2, used to pick a self-hosted flag SVG from /public/flags
+// (renders as a real flag in every browser; emoji flags don't render in Chrome/Arc
+// on macOS/Windows, and self-hosting removes the runtime dependency on flagcdn.com).
 const COUNTRIES = [
   { name: 'United States', short: 'US', code: 'us' },
   { name: 'Canada', short: 'Canada', code: 'ca' },
@@ -193,16 +195,16 @@ export default async function LandingPage() {
           <div className="lp-section-inner">
             <ul className="lp-trustbar-chips">
               <li>
-                <span aria-hidden="true">🔒</span> Bank-grade encryption
+                <LockIcon /> Bank-grade encryption
               </li>
               <li>
-                <span aria-hidden="true">📈</span> Live exchange rates
+                <RateIcon /> Live exchange rates
               </li>
               <li>
-                <span aria-hidden="true">🌐</span> 8 countries · any direction
+                <GlobeIcon /> 8 countries · any direction
               </li>
               <li>
-                <span aria-hidden="true">🏦</span> Money bank-to-bank
+                <BankIcon /> Money bank-to-bank
               </li>
             </ul>
             {/* PLACEHOLDER: replace these grey slots with real press/partner logos. */}
@@ -389,7 +391,7 @@ export default async function LandingPage() {
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       className="lp-flag"
-                      src={`https://flagcdn.com/${c.code}.svg`}
+                      src={`/flags/${c.code}.svg`}
                       alt=""
                       width={36}
                       height={27}
