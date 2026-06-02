@@ -42,7 +42,7 @@ button { font: inherit; }
 input, select, textarea { font: inherit; color: inherit; }
 
 /* === Shell === */
-.sh-app { display: grid; grid-template-rows: 56px 1fr; min-height: 100vh; }
+.sh-app { display: grid; grid-template-rows: 56px 1fr; min-height: 100vh; min-height: 100svh; }
 .sh-topbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 20px;
@@ -115,7 +115,11 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 
 /* === Metric cards === */
-.sh-metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 24px; }
+/* auto-fit so the metric cards reflow from a 5-up row down to 1-up on phones with
+   no media query; pages must NOT hard-code grid-template-columns inline. */
+.sh-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 24px; }
+/* Two-up chart grid (analytics) — collapses to single column when it can't fit. */
+.sh-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 16px; }
 .sh-metric {
   background: var(--sh-card); border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-card); padding: 16px 18px;
@@ -403,6 +407,142 @@ input, select, textarea { font: inherit; color: inherit; }
 .sh-tag-partner-suspended {
   background: #fee2e2;
   color: #991b1b;
+}
+
+/* ============ DASHBOARD RESPONSIVE (.sh- scope) ============ */
+/* Desktop is the baseline above; these add mobile/tablet behaviour with max-width
+   queries. Covers: accessible off-canvas drawer (<=1024), table→card disclosure
+   and form/grid reflow (<=768). The landing page has its own block further down. */
+
+/* ---- shared helpers ---- */
+.sh-cell-right { text-align: right; }
+.sh-visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---- ExpandableTable: desktop = plain table (toggle column hidden) ---- */
+.sh-exp-wrap { width: 100%; overflow-x: auto; }
+.sh-exp-toggle-cell { display: none; }
+.sh-exp-toggle {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  width: 100%; min-height: 44px; padding: 8px 12px;
+  background: var(--sh-bg); border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-button);
+  color: var(--sh-primary); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.sh-exp-toggle:hover { background: var(--sh-primary-bg); }
+.sh-exp-chevron {
+  width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(45deg); transition: transform .2s ease; margin-top: -2px;
+}
+.is-expanded .sh-exp-chevron { transform: rotate(-135deg); margin-top: 2px; }
+
+/* ---- account-creation form layout (reusable, single-column) ---- */
+.sh-form { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 16px 20px 20px; }
+.sh-form .sh-input { width: 100%; }
+.sh-form .sh-btn-primary { align-self: flex-start; margin-top: 4px; }
+.sh-fieldset { border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button); padding: 12px 14px 10px; margin: 0; }
+.sh-fieldset legend { font-size: 12px; color: var(--sh-text-secondary); padding: 0 6px; }
+
+/* ---- hamburger + off-canvas drawer (hidden on desktop) ---- */
+.sh-hamburger { display: none; }
+.sh-hamburger {
+  align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 40px; height: 40px; margin-right: 6px;
+  background: none; border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button);
+  color: var(--sh-text); cursor: pointer;
+}
+.sh-hamburger-bars { display: inline-flex; flex-direction: column; gap: 4px; width: 18px; }
+.sh-hamburger-bars span { display: block; height: 2px; background: currentColor; border-radius: 2px; }
+
+.sh-drawer-backdrop { display: none; }
+.sh-drawer {
+  display: none; flex-direction: column;
+  position: fixed; top: 0; left: 0; bottom: 0;
+  width: 84%; max-width: 300px; z-index: 1000;
+  background: var(--sh-card); box-shadow: 2px 0 18px rgba(10, 37, 64, .18);
+  transform: translateX(-100%); visibility: hidden;
+  transition: transform .25s ease, visibility 0s linear .25s;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.sh-drawer.is-open { transform: translateX(0); visibility: visible; transition: transform .25s ease; }
+.sh-drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--sh-border);
+}
+.sh-drawer-title { font-weight: 700; font-size: 14px; color: var(--sh-text); }
+.sh-drawer-close {
+  width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button);
+  color: var(--sh-text-secondary); font-size: 15px; cursor: pointer;
+}
+.sh-drawer-nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; }
+.sh-drawer-nav .sh-nav-item { min-height: 44px; }
+
+/* ---- tablet / phone: drawer takes over from the static sidebar ---- */
+@media (max-width: 1024px) {
+  .sh-body { grid-template-columns: 1fr; }
+  .sh-sidebar { display: none; }
+  .sh-hamburger { display: inline-flex; }
+  .sh-drawer { display: flex; }
+  .sh-drawer-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 999;
+    background: rgba(10, 37, 64, .45);
+    opacity: 0; pointer-events: none; transition: opacity .25s ease;
+  }
+  .sh-drawer-backdrop.is-open { opacity: 1; pointer-events: auto; }
+  .sh-search { display: none; }
+  .sh-user span { display: none; } /* keep the avatar, drop the name to save room */
+}
+
+/* ---- phone: tables become cards, forms/grids stack ---- */
+@media (max-width: 768px) {
+  .sh-main { padding: 16px 14px; }
+  .sh-page-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .sh-card-head { flex-wrap: wrap; }
+  .sh-dl { grid-template-columns: 1fr; gap: 2px 0; margin-bottom: 14px; }
+  .sh-dl dt { margin-top: 8px; }
+
+  /* iOS Safari auto-zooms focused inputs under 16px — bump every dashboard control. */
+  .sh-input, .sh-inline-input, .sh-inline-select { font-size: 16px; }
+  .sh-inline-input { max-width: none; width: 100%; }
+  .sh-btn-primary, .sh-btn-secondary { min-height: 44px; }
+  .sh-mini-btn { min-height: 40px; }
+
+  /* row-style forms stack on phones */
+  .sh-add-staff-form, .sh-inline-form { flex-direction: column; align-items: stretch; }
+  .sh-add-staff-form .sh-input, .sh-inline-form .sh-input { width: 100%; }
+  .sh-form .sh-btn-primary { width: 100%; align-self: stretch; }
+
+  /* ExpandableTable → labeled cards with a per-row disclosure */
+  .sh-exp-wrap { overflow-x: visible; }
+  .sh-table--exp thead { display: none; }
+  .sh-table--exp, .sh-table--exp tbody { display: block; width: 100%; }
+  .sh-table--exp tr {
+    display: block; background: var(--sh-card);
+    border: 1px solid var(--sh-border); border-radius: var(--sh-radius-card);
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .sh-table--exp td {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 6px 14px; padding: 10px 14px; border-top: 1px solid var(--sh-divider);
+    text-align: right; white-space: normal; word-break: break-word;
+  }
+  .sh-table--exp tr > td:first-child { border-top: none; }
+  .sh-table--exp td::before {
+    content: attr(data-label); flex: 0 0 auto;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px;
+    color: var(--sh-text-secondary); text-align: left; white-space: nowrap;
+  }
+  .sh-table--exp td.sh-td--secondary { display: none; }
+  .sh-table--exp tr.is-expanded td.sh-td--secondary { display: flex; }
+  .sh-table--exp td.sh-exp-toggle-cell { display: block; padding: 8px 14px; }
+  .sh-table--exp td.sh-exp-toggle-cell::before { content: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-drawer, .sh-drawer-backdrop, .sh-exp-chevron { transition: none; }
 }
 
 /* ============ LANDING PAGE (.lp scope) — public marketing site ============ */

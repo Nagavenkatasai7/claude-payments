@@ -1,57 +1,9 @@
 import { Fragment } from 'react';
 import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
-import type { Staff } from '@/lib/types';
+import { NAV_META, visibleNavItems, type SidebarActive } from './nav';
 
-export type SidebarActive =
-  | 'overview'
-  | 'transactions'
-  | 'schedules'
-  | 'customers'
-  | 'partners'
-  | 'compliance'
-  | 'analytics'
-  | 'corridors'
-  | 'team'
-  | 'my-partner';
-
-export type NavItem = SidebarActive;
-
-export function visibleNavItems(staff: Staff): NavItem[] {
-  const base: NavItem[] = [
-    'overview', 'transactions', 'schedules',
-    'customers', 'compliance', 'analytics',
-  ];
-  if (!staff.partnerId) {
-    // Platform: base + Partners list + Corridors (lead page) + (Team only if admin)
-    return [
-      ...base,
-      'partners',
-      'corridors',
-      ...(staff.role === 'admin' ? (['team'] as NavItem[]) : []),
-    ];
-  }
-  // Partner-scoped: base + direct link to their own partner detail
-  return [...base, 'my-partner'];
-}
-
-interface NavMeta {
-  label: string;
-  icon: string;
-  hrefFor: (staff: Staff) => string;
-}
-const NAV_META: Record<NavItem, NavMeta> = {
-  overview:     { label: 'Overview',     icon: '◾', hrefFor: () => '/admin-dashboard' },
-  transactions: { label: 'Transactions', icon: '↔', hrefFor: () => '/admin-dashboard/transactions' },
-  schedules:    { label: 'Schedules',    icon: '↻', hrefFor: () => '/admin-dashboard/schedules' },
-  customers:    { label: 'Customers',    icon: '◍', hrefFor: () => '/admin-dashboard/customers' },
-  partners:     { label: 'Partners',     icon: '◆', hrefFor: () => '/admin-dashboard/partners' },
-  compliance:   { label: 'Compliance',   icon: '⚑', hrefFor: () => '/admin-dashboard/compliance' },
-  analytics:    { label: 'Analytics',    icon: '▦', hrefFor: () => '/admin-dashboard/analytics' },
-  corridors:    { label: 'Corridors',    icon: '↗', hrefFor: () => '/admin-dashboard/corridors' },
-  team:         { label: 'Team',         icon: '◉', hrefFor: () => '/admin-dashboard/team' },
-  'my-partner': { label: 'My partner',   icon: '◆', hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
-};
+export type { SidebarActive, NavItem } from './nav';
 
 export async function Sidebar({ active }: { active: SidebarActive }) {
   const staff = await requireStaff();
