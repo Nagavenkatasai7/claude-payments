@@ -26,6 +26,22 @@ import {
  * A per-phone reverse-index set enables revoke-all on password reset/change.
  */
 
+/**
+ * A validation/policy error whose message is SAFE to show the end user (bad
+ * phone, account collision, password length, breach hit). Everything else a
+ * store method can throw — a crypto/env misconfig, an Argon2 failure, a Redis
+ * outage — is an *internal* error whose raw message must NEVER be reflected to
+ * the customer (it can leak config like env-var names). Callers surface
+ * `CustomerInputError.message` verbatim and collapse all other throws to a
+ * generic message.
+ */
+export class CustomerInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CustomerInputError';
+  }
+}
+
 // ── Policy constants ──
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 64;
@@ -113,20 +129,20 @@ export function createCustomerAuthStore(
     ): Promise<Customer> {
       const phone = normalizePhone(input.phone);
       if (!isValidPhone(phone)) {
-        throw new Error('Enter a valid phone number.');
+        throw new CustomerInputError('Enter a valid phone number.');
       }
 
       // Collision-before-create: never silently overwrite/hijack an existing
       // account. saveCustomer is an unconditional SET, so this guard is mandatory.
       const existing = await loadCustomer(phone);
       if (existing?.passwordHash) {
-        throw new Error('An account already exists for this number.');
+        throw new CustomerInputError('An account already exists for this number.');
       }
 
       // Password policy (no composition rules; just length bounds + breach check).
       const { password } = input;
       if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
-        throw new Error(
+        throw new CustomerInputError(
           `Password must be between ${PASSWORD_MIN} and ${PASSWORD_MAX} characters.`,
         );
       }
@@ -141,7 +157,7 @@ export function createCustomerAuthStore(
           pwned = false; // availability over this advisory control
         }
         if (pwned) {
-          throw new Error(
+          throw new CustomerInputError(
             'This password has appeared in a data breach — choose another.',
           );
         }
@@ -231,7 +247,7 @@ export function createCustomerAuthStore(
       if (!customer?.passwordHash) return null;
 
       if (newPassword.length < PASSWORD_MIN || newPassword.length > PASSWORD_MAX) {
-        throw new Error(
+        throw new CustomerInputError(
           `Password must be between ${PASSWORD_MIN} and ${PASSWORD_MAX} characters.`,
         );
       }
@@ -244,7 +260,7 @@ export function createCustomerAuthStore(
           pwned = false; // availability over this advisory control
         }
         if (pwned) {
-          throw new Error(
+          throw new CustomerInputError(
             'This password has appeared in a data breach — choose another.',
           );
         }
