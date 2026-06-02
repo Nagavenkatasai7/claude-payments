@@ -5,6 +5,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { Sidebar } from '../../sidebar';
+import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import {
   setPartnerStatusAction,
   updatePartnerAction,
@@ -14,6 +15,22 @@ import {
 import type { CountryCode, Partner } from '@/lib/types';
 
 const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
+
+const TRANSFER_COLUMNS: ExpandableColumn[] = [
+  { label: 'ID' },
+  { label: 'Phone', primary: true },
+  { label: 'Amount', primary: true, align: 'right' },
+  { label: 'Status', primary: true },
+  { label: 'Created' },
+];
+
+const STAFF_COLUMNS: ExpandableColumn[] = [
+  { label: 'Name', primary: true },
+  { label: 'Username' },
+  { label: 'Role', primary: true },
+  { label: 'Created' },
+  { label: 'Actions' },
+];
 
 function statusBadge(p: Partner): string {
   return p.status === 'active'
@@ -123,7 +140,7 @@ export default async function PartnerDetailPage({
             </dl>
 
             {isAdmin && (
-              <form action={updatePartnerAction} className="sh-inline-form" style={{ marginTop: 16, flexDirection: 'column', alignItems: 'stretch' }}>
+              <form action={updatePartnerAction} className="sh-form" style={{ marginTop: 16 }}>
                 <input type="hidden" name="id" value={partner.id} />
                 <input
                   className="sh-input"
@@ -132,19 +149,22 @@ export default async function PartnerDetailPage({
                   placeholder="Partner name"
                   required
                 />
-                <div className="sh-perm-row">
-                  {ALL_COUNTRIES.map((c) => (
-                    <label className="sh-perm" key={c}>
-                      <input
-                        type="checkbox"
-                        name="countries"
-                        value={c}
-                        defaultChecked={partner.countries.includes(c)}
-                      />{' '}
-                      {c}
-                    </label>
-                  ))}
-                </div>
+                <fieldset className="sh-fieldset">
+                  <legend>Operating countries</legend>
+                  <div className="sh-perm-row">
+                    {ALL_COUNTRIES.map((c) => (
+                      <label className="sh-perm" key={c}>
+                        <input
+                          type="checkbox"
+                          name="countries"
+                          value={c}
+                          defaultChecked={partner.countries.includes(c)}
+                        />{' '}
+                        {c}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
                 <input
                   className="sh-input"
                   name="brandName"
@@ -199,37 +219,23 @@ export default async function PartnerDetailPage({
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            <table className="sh-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Phone</th>
-                  <th>Amount</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mine.length === 0 && (
-                  <tr>
-                    <td colSpan={5} className="sh-empty">No transfers yet.</td>
-                  </tr>
-                )}
-                {mine.slice(0, 50).map((t) => (
-                  <tr key={t.id}>
-                    <td>{t.id}</td>
-                    <td>+{t.phone}</td>
-                    <td>
-                      <div className="sh-amount">${t.amountUsd.toFixed(2)}</div>
-                    </td>
-                    <td>{t.status}</td>
-                    <td>{new Date(t.createdAt).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ExpandableTable
+            columns={TRANSFER_COLUMNS}
+            empty={<>No transfers yet.</>}
+            rows={mine.slice(0, 50).map((t) => ({
+              key: t.id,
+              label: t.id,
+              cells: [
+                t.id,
+                `+${t.phone}`,
+                <div key="amount" className="sh-amount">
+                  ${t.amountUsd.toFixed(2)}
+                </div>,
+                t.status,
+                new Date(t.createdAt).toLocaleString(),
+              ],
+            }))}
+          />
         </section>
 
         <section className="sh-card">
@@ -241,44 +247,36 @@ export default async function PartnerDetailPage({
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            <table className="sh-table">
-              <thead>
-                <tr><th>Name</th><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr>
-              </thead>
-              <tbody>
-                {partnerStaff.length === 0 && (
-                  <tr><td colSpan={5} className="sh-empty">No staff yet.</td></tr>
-                )}
-                {partnerStaff.map((s) => (
-                  <tr key={s.username}>
-                    <td>{s.name}</td>
-                    <td>{s.username}</td>
-                    <td>
-                      <span className={`sh-pill ${s.role === 'admin' ? 'sh-pill-info' : 'sh-pill-neutral'}`}>
-                        <span className="sh-pill-dot"></span>{s.role}
-                      </span>
-                    </td>
-                    <td>{new Date(s.createdAt).toLocaleDateString()}</td>
-                    <td>
-                      {isAdmin && (
-                        <form action={removePartnerStaffAction}>
-                          <input type="hidden" name="username" value={s.username} />
-                          <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
-                        </form>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ExpandableTable
+            columns={STAFF_COLUMNS}
+            empty={<>No staff yet.</>}
+            rows={partnerStaff.map((s) => ({
+              key: s.username,
+              label: s.name,
+              cells: [
+                s.name,
+                s.username,
+                <span
+                  key="role"
+                  className={`sh-pill ${s.role === 'admin' ? 'sh-pill-info' : 'sh-pill-neutral'}`}
+                >
+                  <span className="sh-pill-dot"></span>{s.role}
+                </span>,
+                new Date(s.createdAt).toLocaleDateString(),
+                isAdmin ? (
+                  <form key="actions" action={removePartnerStaffAction}>
+                    <input type="hidden" name="username" value={s.username} />
+                    <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
+                  </form>
+                ) : null,
+              ],
+            }))}
+          />
 
           {isAdmin && (
             <form
               action={createPartnerStaffAction.bind(null, partner.id)}
-              className="sh-inline-form"
-              style={{ flexDirection: 'column', alignItems: 'stretch', padding: 20, gap: 8 }}
+              className="sh-form"
             >
               <input className="sh-input" name="username" placeholder="Username" required />
               <input className="sh-input" name="name" placeholder="Full name" required />

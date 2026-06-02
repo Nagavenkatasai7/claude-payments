@@ -7,7 +7,17 @@ import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { Sidebar } from '../sidebar';
+import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import type { Partner } from '@/lib/types';
+
+const PARTNER_COLUMNS: ExpandableColumn[] = [
+  { label: 'Name', primary: true },
+  { label: 'Countries' },
+  { label: 'Status', primary: true },
+  { label: 'Customers' },
+  { label: 'Transfers', primary: true },
+  { label: 'Created' },
+];
 
 function statusBadge(p: Partner): string {
   return p.status === 'active'
@@ -76,40 +86,26 @@ export default async function PartnersPage() {
           )}
         </div>
         <section className="sh-card">
-          <div className="sh-ledger-wrap">
-            {rows.length === 0 ? (
-              <div className="sh-empty">No partners yet.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Countries</th>
-                    <th>Status</th>
-                    <th>Customers</th>
-                    <th>Transfers</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((p) => (
-                    <tr key={p.id}>
-                      <td>
-                        <Link href={`/admin-dashboard/partners/${p.id}`}>{p.name}</Link>
-                      </td>
-                      <td>{p.countries.join(', ')}</td>
-                      <td>
-                        <span className={statusBadge(p)}>{p.status}</span>
-                      </td>
-                      <td>{customerCountByPartner.get(p.id) ?? 0}</td>
-                      <td>{transferCountByPartner.get(p.id) ?? 0}</td>
-                      <td>{new Date(p.createdAt).toLocaleDateString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={PARTNER_COLUMNS}
+            empty={<>No partners yet.</>}
+            rows={rows.map((p) => ({
+              key: p.id,
+              label: p.name,
+              cells: [
+                <Link key="name" href={`/admin-dashboard/partners/${p.id}`}>
+                  {p.name}
+                </Link>,
+                p.countries.join(', '),
+                <span key="status" className={statusBadge(p)}>
+                  {p.status}
+                </span>,
+                customerCountByPartner.get(p.id) ?? 0,
+                transferCountByPartner.get(p.id) ?? 0,
+                new Date(p.createdAt).toLocaleDateString(),
+              ],
+            }))}
+          />
         </section>
       </main>
     </>

@@ -4,6 +4,22 @@ import { useState } from 'react';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { money } from './format';
 import { MaskedDestination } from './masked-destination';
+import { ExpandableTable, type ExpandableColumn } from './expandable-table';
+
+const TRANSACTION_COLUMNS: ExpandableColumn[] = [
+  { label: 'Recipient', primary: true },
+  { label: 'Country' },
+  { label: 'Partner' },
+  { label: 'Tier' },
+  { label: 'Amount', primary: true, align: 'right' },
+  { label: 'Funding' },
+  { label: 'Payment received' },
+  { label: 'Recipient gets' },
+  { label: 'Compliance' },
+  { label: 'Status', primary: true },
+  { label: 'Assignee' },
+  { label: 'Actions' },
+];
 
 const TABS = [
   { key: 'all', label: 'All' },
@@ -123,107 +139,80 @@ export function TransactionsTabs({
           ))}
         </div>
       </div>
-      <div className="sh-ledger-wrap">
-        {visible.length === 0 ? (
-          <div className="sh-empty">No transactions in this view.</div>
-        ) : (
-          <table className="sh-table">
-            <thead>
-              <tr>
-                <th>Recipient</th>
-                <th>Country</th>
-                <th>Partner</th>
-                <th>Tier</th>
-                <th>Amount</th>
-                <th>Funding</th>
-                <th>Payment received</th>
-                <th>Recipient gets</th>
-                <th>Compliance</th>
-                <th>Status</th>
-                <th>Assignee</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    <div className="sh-recipient">{t.recipientName}</div>
-                    <MaskedDestination
-                      payoutMethod={t.payoutMethod}
-                      payoutDestination={t.payoutDestination}
-                    />
-                  </td>
-                  <td>{t.sourceCountry} → {t.destinationCountry}</td>
-                  <td>{partnerById[t.partnerId]?.name ?? t.partnerId}</td>
-                  <td>
-                    {tierByPhone[t.phone] ? (
-                      <span className={tierBadgeClass(tierByPhone[t.phone])}>
-                        {tierByPhone[t.phone]}
-                      </span>
-                    ) : (
-                      <span className="sh-recipient-sub">—</span>
-                    )}
-                  </td>
-                  <td>
-                    <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
-                    {t.sourceCurrency !== 'USD' && (
-                      <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
-                    )}
-                    <div className="sh-recipient-sub">
-                      → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
-                    </div>
-                  </td>
-                  <td>{humanizeFunding(t.fundingMethod)}</td>
-                  <td><Stage at={t.paidAt} fallback="pending" /></td>
-                  <td>
-                    <Stage
-                      at={t.deliveredAt}
-                      fallback={t.status === 'paid' ? 'in transit' : '—'}
-                    />
-                  </td>
-                  <td><ComplianceBadge status={t.complianceStatus} /></td>
-                  <td><StatusPill status={t.status} /></td>
-                  <td>
-                    {t.assignedTo
-                      ? staffByUsername[t.assignedTo] ?? t.assignedTo
-                      : <span className="sh-recipient-sub">—</span>}
-                  </td>
-                  <td>
-                    <div className="sh-attention-actions">
-                      {t.status === 'awaiting_payment' && canResend && (
-                        <form action={resendAction}>
-                          <input type="hidden" name="id" value={t.id} />
-                          <button type="submit" className="sh-mini-btn">Resend link</button>
-                        </form>
-                      )}
-                      {(t.status === 'awaiting_payment' || t.status === 'paid') && canCancel && (
-                        <form action={cancelAction}>
-                          <input type="hidden" name="id" value={t.id} />
-                          <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Cancel</button>
-                        </form>
-                      )}
-                      {canAssign && (
-                        <form action={assignAction} className="sh-inline-form">
-                          <input type="hidden" name="id" value={t.id} />
-                          <select name="assignee" className="sh-inline-select" required>
-                            <option value="">Assign…</option>
-                            {staff.map((s) => (
-                              <option key={s.username} value={s.username}>{s.name}</option>
-                            ))}
-                          </select>
-                          <input type="text" name="note" placeholder="Note" className="sh-inline-input" />
-                          <button type="submit" className="sh-mini-btn">Save</button>
-                        </form>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <ExpandableTable
+        columns={TRANSACTION_COLUMNS}
+        empty={<>No transactions in this view.</>}
+        rows={visible.map((t) => ({
+          key: t.id,
+          label: t.recipientName,
+          cells: [
+            <div key="recipient">
+              <div className="sh-recipient">{t.recipientName}</div>
+              <MaskedDestination
+                payoutMethod={t.payoutMethod}
+                payoutDestination={t.payoutDestination}
+              />
+            </div>,
+            <span key="country">{t.sourceCountry} → {t.destinationCountry}</span>,
+            partnerById[t.partnerId]?.name ?? t.partnerId,
+            tierByPhone[t.phone] ? (
+              <span key="tier" className={tierBadgeClass(tierByPhone[t.phone])}>
+                {tierByPhone[t.phone]}
+              </span>
+            ) : (
+              <span key="tier" className="sh-recipient-sub">—</span>
+            ),
+            <div key="amount">
+              <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+              {t.sourceCurrency !== 'USD' && (
+                <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+              )}
+              <div className="sh-recipient-sub">
+                → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
+              </div>
+            </div>,
+            humanizeFunding(t.fundingMethod),
+            <Stage key="paid" at={t.paidAt} fallback="pending" />,
+            <Stage
+              key="delivered"
+              at={t.deliveredAt}
+              fallback={t.status === 'paid' ? 'in transit' : '—'}
+            />,
+            <ComplianceBadge key="compliance" status={t.complianceStatus} />,
+            <StatusPill key="status" status={t.status} />,
+            t.assignedTo
+              ? staffByUsername[t.assignedTo] ?? t.assignedTo
+              : <span key="assignee" className="sh-recipient-sub">—</span>,
+            <div key="actions" className="sh-attention-actions">
+              {t.status === 'awaiting_payment' && canResend && (
+                <form action={resendAction}>
+                  <input type="hidden" name="id" value={t.id} />
+                  <button type="submit" className="sh-mini-btn">Resend link</button>
+                </form>
+              )}
+              {(t.status === 'awaiting_payment' || t.status === 'paid') && canCancel && (
+                <form action={cancelAction}>
+                  <input type="hidden" name="id" value={t.id} />
+                  <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Cancel</button>
+                </form>
+              )}
+              {canAssign && (
+                <form action={assignAction} className="sh-inline-form">
+                  <input type="hidden" name="id" value={t.id} />
+                  <select name="assignee" className="sh-inline-select" required>
+                    <option value="">Assign…</option>
+                    {staff.map((s) => (
+                      <option key={s.username} value={s.username}>{s.name}</option>
+                    ))}
+                  </select>
+                  <input type="text" name="note" placeholder="Note" className="sh-inline-input" />
+                  <button type="submit" className="sh-mini-btn">Save</button>
+                </form>
+              )}
+            </div>,
+          ],
+        }))}
+      />
     </>
   );
 }

@@ -85,10 +85,7 @@ export default async function AnalyticsPage({
           </div>
         </div>
 
-        <section
-          className="sh-metrics"
-          style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}
-        >
+        <section className="sh-metrics">
           <div className="sh-metric sh-metric-primary">
             <div className="sh-metric-label">Transfers in window</div>
             <div className="sh-metric-value">{totalTransfers}</div>
@@ -115,14 +112,7 @@ export default async function AnalyticsPage({
           </div>
         </section>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, 1fr)',
-            gap: 16,
-            marginBottom: 16,
-          }}
-        >
+        <div className="sh-chart-grid">
           <section className="sh-card" style={{ marginBottom: 0 }}>
             <div className="sh-card-head">
               <div>
@@ -147,14 +137,7 @@ export default async function AnalyticsPage({
           </section>
         </div>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, 1fr)',
-            gap: 16,
-            marginBottom: 16,
-          }}
-        >
+        <div className="sh-chart-grid">
           <section className="sh-card" style={{ marginBottom: 0 }}>
             <div className="sh-card-head">
               <div>

@@ -12,7 +12,39 @@ import {
   releaseTransferAction,
   rejectTransferAction,
 } from '../actions';
+import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import type { Transfer } from '@/lib/types';
+
+const REVIEW_COLUMNS: ExpandableColumn[] = [
+  { label: 'Recipient', primary: true },
+  { label: 'Amount', primary: true },
+  { label: 'Reasons' },
+  { label: 'Created' },
+  { label: 'Sender' },
+  { label: 'Actions' },
+];
+
+const TRANSFER_COLUMNS: ExpandableColumn[] = [
+  { label: 'Recipient', primary: true },
+  { label: 'Amount', primary: true },
+  { label: 'Reasons' },
+  { label: 'Created' },
+  { label: 'Sender' },
+];
+
+const CORRIDOR_COLUMNS: ExpandableColumn[] = [
+  { label: 'Partner', primary: true },
+  { label: 'Corridor', primary: true },
+  { label: 'Large-amount (USD)', align: 'right' },
+  { label: 'Velocity / day', align: 'right' },
+  { label: 'Watchlist' },
+];
+
+const VELOCITY_COLUMNS: ExpandableColumn[] = [
+  { label: 'Phone', primary: true },
+  { label: 'Transfers today', primary: true, align: 'right' },
+  { label: '' },
+];
 
 // "Recipient gets" is denominated in the transfer's DESTINATION currency
 // (amountInr holds the destination amount post-multi-currency). Fall back to
@@ -21,34 +53,32 @@ function recipientGets(t: Transfer): string {
   return money(t.amountInr, t.destinationCurrency ?? 'INR');
 }
 
-function TransferRow({ t }: { t: Transfer }) {
-  return (
-    <tr>
-      <td>
-        <div className="sh-recipient">{t.recipientName}</div>
-        <MaskedDestination
-          payoutMethod={t.payoutMethod}
-          payoutDestination={t.payoutDestination}
-        />
-      </td>
-      <td>
-        <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
-        {t.sourceCurrency !== 'USD' && (
-          <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
-        )}
-        <div className="sh-recipient-sub">{recipientGets(t)}</div>
-      </td>
-      <td>
-        {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
-          r === 'edd_required'
-            ? <span key={r} className="sh-pill sh-pill-warning"><span className="sh-pill-dot"></span>EDD required</span>
-            : <span key={r} style={{ marginRight: 6 }}>{r}</span>,
-        )}
-      </td>
-      <td>{new Date(t.createdAt).toLocaleString()}</td>
-      <td><span className="sh-recipient-sub">{t.phone}</span></td>
-    </tr>
-  );
+function transferCells(t: Transfer) {
+  return [
+    <div key="recipient">
+      <div className="sh-recipient">{t.recipientName}</div>
+      <MaskedDestination
+        payoutMethod={t.payoutMethod}
+        payoutDestination={t.payoutDestination}
+      />
+    </div>,
+    <div key="amount">
+      <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+      {t.sourceCurrency !== 'USD' && (
+        <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+      )}
+      <div className="sh-recipient-sub">{recipientGets(t)}</div>
+    </div>,
+    <span key="reasons">
+      {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
+        r === 'edd_required'
+          ? <span key={r} className="sh-pill sh-pill-warning"><span className="sh-pill-dot"></span>EDD required</span>
+          : <span key={r} style={{ marginRight: 6 }}>{r}</span>,
+      )}
+    </span>,
+    new Date(t.createdAt).toLocaleString(),
+    <span key="sender" className="sh-recipient-sub">{t.phone}</span>,
+  ];
 }
 
 export default async function CompliancePage() {
@@ -100,59 +130,27 @@ export default async function CompliancePage() {
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {inReview.length === 0 ? (
-              <div className="sh-empty">No transfers awaiting review.</div>
-            ) : (
-              <table className="sh-table">
-                <thead><tr>
-                  <th>Recipient</th><th>Amount</th><th>Reasons</th>
-                  <th>Created</th><th>Sender</th><th>Actions</th>
-                </tr></thead>
-                <tbody>
-                  {inReview.map((t) => (
-                    <tr key={t.id}>
-                      <td>
-                        <div className="sh-recipient">{t.recipientName}</div>
-                        <MaskedDestination
-                          payoutMethod={t.payoutMethod}
-                          payoutDestination={t.payoutDestination}
-                        />
-                      </td>
-                      <td>
-                        <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
-                        {t.sourceCurrency !== 'USD' && (
-                          <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
-                        )}
-                        <div className="sh-recipient-sub">{recipientGets(t)}</div>
-                      </td>
-                      <td>
-                        {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
-                          r === 'edd_required'
-                            ? <span key={r} className="sh-pill sh-pill-warning"><span className="sh-pill-dot"></span>EDD required</span>
-                            : <span key={r} style={{ marginRight: 6 }}>{r}</span>,
-                        )}
-                      </td>
-                      <td>{new Date(t.createdAt).toLocaleString()}</td>
-                      <td><span className="sh-recipient-sub">{t.phone}</span></td>
-                      <td>
-                        <div className="sh-attention-actions">
-                          <form action={releaseTransferAction}>
-                            <input type="hidden" name="id" value={t.id} />
-                            <button type="submit" className="sh-mini-btn">Release</button>
-                          </form>
-                          <form action={rejectTransferAction}>
-                            <input type="hidden" name="id" value={t.id} />
-                            <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Reject</button>
-                          </form>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={REVIEW_COLUMNS}
+            empty={<>No transfers awaiting review.</>}
+            rows={inReview.map((t) => ({
+              key: t.id,
+              label: t.recipientName,
+              cells: [
+                ...transferCells(t),
+                <div key="actions" className="sh-attention-actions">
+                  <form action={releaseTransferAction}>
+                    <input type="hidden" name="id" value={t.id} />
+                    <button type="submit" className="sh-mini-btn">Release</button>
+                  </form>
+                  <form action={rejectTransferAction}>
+                    <input type="hidden" name="id" value={t.id} />
+                    <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Reject</button>
+                  </form>
+                </div>,
+              ],
+            }))}
+          />
         </section>
 
         <section className="sh-card">
@@ -164,21 +162,15 @@ export default async function CompliancePage() {
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {flagged.length === 0 ? (
-              <div className="sh-empty">No flagged transfers.</div>
-            ) : (
-              <table className="sh-table">
-                <thead><tr>
-                  <th>Recipient</th><th>Amount</th><th>Reasons</th>
-                  <th>Created</th><th>Sender</th>
-                </tr></thead>
-                <tbody>
-                  {flagged.map((t) => <TransferRow key={t.id} t={t} />)}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={TRANSFER_COLUMNS}
+            empty={<>No flagged transfers.</>}
+            rows={flagged.map((t) => ({
+              key: t.id,
+              label: t.recipientName,
+              cells: transferCells(t),
+            }))}
+          />
         </section>
 
         <section className="sh-card">
@@ -190,21 +182,15 @@ export default async function CompliancePage() {
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {blocked.length === 0 ? (
-              <div className="sh-empty">No blocked transfers.</div>
-            ) : (
-              <table className="sh-table">
-                <thead><tr>
-                  <th>Recipient</th><th>Amount</th><th>Reasons</th>
-                  <th>Created</th><th>Sender</th>
-                </tr></thead>
-                <tbody>
-                  {blocked.map((t) => <TransferRow key={t.id} t={t} />)}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={TRANSFER_COLUMNS}
+            empty={<>No blocked transfers.</>}
+            rows={blocked.map((t) => ({
+              key: t.id,
+              label: t.recipientName,
+              cells: transferCells(t),
+            }))}
+          />
         </section>
 
         <section className="sh-card">
@@ -241,41 +227,33 @@ export default async function CompliancePage() {
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {corridorRows.length === 0 ? (
-              <div className="sh-empty">No corridors configured.</div>
-            ) : (
-              <table className="sh-table">
-                <thead><tr>
-                  <th>Partner</th><th>Corridor</th><th>Large-amount (USD)</th>
-                  <th>Velocity / day</th><th>Watchlist</th>
-                </tr></thead>
-                <tbody>
-                  {corridorRows.map((r) => (
-                    <tr key={r.partnerName + r.corridor}>
-                      <td>{r.partnerName}</td>
-                      <td>{r.corridor}</td>
-                      {/* largeAmountUsd is a USD-equivalent threshold, not a source amount — always USD */}
-                      <td className="sh-amount">{money(r.largeAmountUsd, 'USD')}</td>
-                      <td className="sh-amount">{r.velocityLimit}</td>
-                      <td>
-                        {r.watchlistSize}
-                        {r.watchlistExtra.length > 0 && (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
-                            {r.watchlistExtra.map((name) => (
-                              <span key={name} className="sh-pill sh-pill-danger">
-                                <span className="sh-pill-dot"></span>{name}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={CORRIDOR_COLUMNS}
+            empty={<>No corridors configured.</>}
+            rows={corridorRows.map((r) => ({
+              key: r.partnerName + r.corridor,
+              label: `${r.partnerName} ${r.corridor}`,
+              cells: [
+                r.partnerName,
+                r.corridor,
+                // largeAmountUsd is a USD-equivalent threshold, not a source amount — always USD
+                <span key="large" className="sh-amount">{money(r.largeAmountUsd, 'USD')}</span>,
+                <span key="velocity" className="sh-amount">{r.velocityLimit}</span>,
+                <span key="watchlist">
+                  {r.watchlistSize}
+                  {r.watchlistExtra.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+                      {r.watchlistExtra.map((name) => (
+                        <span key={name} className="sh-pill sh-pill-danger">
+                          <span className="sh-pill-dot"></span>{name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </span>,
+              ],
+            }))}
+          />
         </section>
 
         <section className="sh-card">
@@ -287,33 +265,25 @@ export default async function CompliancePage() {
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {topVel.length === 0 ? (
-              <div className="sh-empty">No activity today yet.</div>
-            ) : (
-              <table className="sh-table">
-                <thead><tr>
-                  <th>Phone</th><th>Transfers today</th><th></th>
-                </tr></thead>
-                <tbody>
-                  {topVel.map(({ phone, count }) => (
-                    <tr key={phone}>
-                      <td>{phone}</td>
-                      <td className="sh-amount">{count}</td>
-                      <td>
-                        <a
-                          href={`/admin-dashboard/transactions?phone=${encodeURIComponent(phone)}`}
-                          className="sh-mini-btn"
-                        >
-                          View transfers
-                        </a>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={VELOCITY_COLUMNS}
+            empty={<>No activity today yet.</>}
+            rows={topVel.map(({ phone, count }) => ({
+              key: phone,
+              label: phone,
+              cells: [
+                phone,
+                <span key="count" className="sh-amount">{count}</span>,
+                <a
+                  key="link"
+                  href={`/admin-dashboard/transactions?phone=${encodeURIComponent(phone)}`}
+                  className="sh-mini-btn"
+                >
+                  View transfers
+                </a>,
+              ],
+            }))}
+          />
         </section>
       </main>
     </>

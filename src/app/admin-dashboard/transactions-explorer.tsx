@@ -93,7 +93,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="sh-input"
-          style={{ flex: 1, minWidth: 220 }}
+          style={{ flex: 1, minWidth: 140 }}
         />
         <label
           style={{

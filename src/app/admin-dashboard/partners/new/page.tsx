@@ -28,24 +28,23 @@ export default async function NewPartnerPage() {
               <div className="sh-card-sub">Name and operating countries are required</div>
             </div>
           </div>
-          <form
-            action={createPartnerAction}
-            className="sh-inline-form"
-            style={{ flexDirection: 'column', alignItems: 'stretch', padding: '16px 20px 20px' }}
-          >
+          <form action={createPartnerAction} className="sh-form">
             <input
               className="sh-input"
               name="name"
               placeholder="Partner name (required)"
               required
             />
-            <div className="sh-perm-row">
-              {ALL_COUNTRIES.map((c) => (
-                <label className="sh-perm" key={c}>
-                  <input type="checkbox" name="countries" value={c} /> {c}
-                </label>
-              ))}
-            </div>
+            <fieldset className="sh-fieldset">
+              <legend>Operating countries</legend>
+              <div className="sh-perm-row">
+                {ALL_COUNTRIES.map((c) => (
+                  <label className="sh-perm" key={c}>
+                    <input type="checkbox" name="countries" value={c} /> {c}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <input
               className="sh-input"
               name="brandName"
