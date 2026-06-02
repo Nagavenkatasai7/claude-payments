@@ -18,7 +18,7 @@ import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
-import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import { getKycProvider } from '@/lib/providers/kyc-provider';
 import { getPartnerStore } from '@/lib/partner-store';
 import { deriveTier } from '@/lib/tier-rules';
 import type { ButtonTap, TurnContext } from '@/lib/types';
@@ -183,7 +183,7 @@ export async function POST(req: NextRequest) {
 
   after(async () => {
     try {
-      const kycProvider = new MockKycProvider(customerStore, env.appBaseUrl);
+      const kycProvider = getKycProvider(customerStore, env.appBaseUrl);
       const agent = createAgent({
         chat,
         store,
