@@ -216,6 +216,25 @@ export type KycStatus =
   | 'rejected'
   | 'grandfathered';
 
+/**
+ * The KYC *review* case state (Phase 2). SEPARATE from `kycStatus` (which drives
+ * tier/cap and is moved to a terminal value ONLY by a human). Persona webhooks
+ * move THIS field, never `kycStatus` — that is the human-review-only invariant.
+ *   none            — never started (treat undefined as 'none')
+ *   inquiry_started — inquiry created, customer in the hosted flow
+ *   pending_review  — Persona returned a clean pass; awaiting human approval
+ *   needs_review    — Persona declined/failed OR a watchlist/PEP hit → a human must decide
+ *   approved        — a human approved (mirrors kycStatus:'verified')
+ *   rejected        — a human rejected (mirrors kycStatus:'rejected')
+ */
+export type KycReviewState =
+  | 'none'
+  | 'inquiry_started'
+  | 'pending_review'
+  | 'needs_review'
+  | 'approved'
+  | 'rejected';
+
 // ── KYC tiered capture: closed-list enums (screenable, friction-free) ──
 export type GovIdType = 'passport' | 'drivers_license' | 'national_id' | 'state_id';
 
@@ -260,6 +279,17 @@ export interface Customer {
   passwordHash?: string;     // Argon2id PHC string (the hash itself; not extra-encrypted)
   passwordUpdatedAt?: string;// ISO — set on register / password change
   phoneVerifiedAt?: string;  // ISO — set when the WhatsApp OTP is verified
+  // ── Customer onboarding Phase 2 — Persona KYC (data-minimized; raw ID/SSN/images never stored) ──
+  kycInquiryId?: string;     // Persona inquiry id (inq_…); also mirrored to kycProviderRef
+  kycReviewState?: KycReviewState;
+  idLast4?: string;          // last 4 of the verified government ID (display only; full number never stored)
+  idDocType?: GovIdType;     // verified document class (mirrors the Persona result)
+  watchlistHit?: boolean;    // a Persona watchlist/sanctions report matched → hard hold
+  pepHit?: boolean;          // a Persona PEP report matched
+  kycSubmittedAt?: string;   // ISO — inquiry created / customer entered the hosted flow
+  kycApprovedBy?: string;    // staff username who approved (audit)
+  kycApprovedAt?: string;    // ISO
+  kycRejectedAt?: string;    // ISO
   createdAt: string;
   updatedAt: string;
 }

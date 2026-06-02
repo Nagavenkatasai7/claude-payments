@@ -6,10 +6,12 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { evaluateCap } from '@/lib/tier-rules';
 import { maskLast4 } from '@/lib/mask';
+import { getStore } from '@/lib/store';
+import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { Sidebar } from '../../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { money } from '../../format';
-import { markCustomerVerifiedAction, markCustomerRejectedAction } from '../actions';
+import { markCustomerVerifiedAction, markCustomerRejectedAction, reviewKycAction } from '../actions';
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'ID' },
@@ -32,11 +34,14 @@ export default async function CustomerDetailPage({
   const customer = await scoped.getCustomer(phone);
   if (!customer) notFound();
 
-  const [transfers, todayUsedCents, partner] = await Promise.all([
+  const [transfers, todayUsedCents, partner, kycAudit] = await Promise.all([
     scoped.listTransfers(),
     dailyVolumeStore.getTodayCents(phone),
     scoped.getPartner(customer.partnerId),
+    getKycCaseStore(getStore()).getAudit(phone),
   ]);
+  const inReview =
+    customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
   const mine = transfers
     .filter((t) => t.phone === phone)
     // `?? ''` defends against legacy transfers missing createdAt — see
@@ -72,6 +77,10 @@ export default async function CustomerDetailPage({
               <dt>Country</dt><dd>{customer.senderCountry}</dd>
               <dt>Partner</dt><dd>{partner ? partner.name : customer.partnerId}</dd>
               <dt>Provider ref</dt><dd>{customer.kycProviderRef ?? '—'}</dd>
+              <dt>Review state</dt><dd>{customer.kycReviewState ?? 'none'}</dd>
+              <dt>Inquiry</dt><dd>{customer.kycInquiryId ?? '—'}</dd>
+              <dt>ID last 4</dt><dd>{customer.idLast4 ? `••••${customer.idLast4}` : '—'}</dd>
+              <dt>Screening</dt><dd>{customer.watchlistHit ? '⚠ Watchlist hit' : customer.pepHit ? '⚠ PEP hit' : 'Clear'}</dd>
               <dt>Full name</dt><dd>{customer.fullName ?? '—'}</dd>
               <dt>DOB</dt><dd>{customer.dateOfBirth ?? '—'}</dd>
               <dt>Nationality</dt><dd>{customer.nationality ?? '—'}</dd>
@@ -99,6 +108,37 @@ export default async function CustomerDetailPage({
                 <input type="text" name="reason" placeholder="Rejection reason (optional)" className="sh-input" />
                 <button type="submit" className="sh-btn-secondary">Mark KYC rejected</button>
               </form>
+            )}
+
+            {isAdmin && inReview && (
+              <div className="sh-review-panel">
+                <div className="sh-card-sub">
+                  Persona {customer.kycReviewState === 'pending_review' ? 'passed — confirm to approve' : 'flagged — review required'}.
+                  A reason is required and recorded in the audit log.
+                </div>
+                <form action={reviewKycAction} className="sh-inline-form">
+                  <input type="hidden" name="phone" value={customer.senderPhone} />
+                  <textarea name="reason" required placeholder="Reviewer reason (required)" className="sh-input" rows={2} />
+                  <div className="sh-btn-row">
+                    <button type="submit" name="decision" value="approve" className="sh-btn-primary">Approve KYC</button>
+                    <button type="submit" name="decision" value="reject" className="sh-btn-secondary">Reject KYC</button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {kycAudit.length > 0 && (
+              <div className="sh-audit">
+                <div className="sh-card-sub">KYC audit trail</div>
+                <ul className="sh-audit-list">
+                  {kycAudit.map((e, i) => (
+                    <li key={i}>
+                      <span className="sh-audit-at">{e.at}</span> · <strong>{e.actor}</strong> · {e.action}
+                      {e.reason ? ` — ${e.reason}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
         </section>

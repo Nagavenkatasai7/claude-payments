@@ -100,6 +100,42 @@ export const env = {
     // Name of the approved Meta AUTHENTICATION template used for OTP delivery.
     return process.env.WHATSAPP_AUTH_TEMPLATE ?? 'verification_code';
   },
+  // ── Customer onboarding Phase 2 — Persona KYC ──
+  // All optional (`?? ''`): an unprovisioned env keeps MockKycProvider selected and
+  // the webhook fail-closed, mirroring the Phase-1 dormant-until-provisioned posture.
+  get personaApiKey(): string {
+    return process.env.PERSONA_API_KEY ?? '';
+  },
+  get personaEnvironment(): string {
+    return process.env.PERSONA_ENVIRONMENT ?? 'sandbox';
+  },
+  get personaWebhookSecret(): string {
+    // wbhsec_… HMAC secret; '' ⇒ the /api/persona-webhook route rejects (fail-closed).
+    return process.env.PERSONA_WEBHOOK_SECRET ?? '';
+  },
+  get personaInquiryTemplateVersionId(): string {
+    return process.env.PERSONA_INQUIRY_TEMPLATE_VERSION_ID ?? '';
+  },
+  get personaApiVersion(): string {
+    // Confirmed against the sandbox 2026-06-02 (Task 0 spike).
+    return process.env.PERSONA_API_VERSION ?? '2025-12-08';
+  },
+  get personaApiBase(): string {
+    return process.env.PERSONA_API_BASE ?? 'https://api.withpersona.com/api/v1';
+  },
+  // KYC status templates (degrade to free-form via sendTemplateOrText until Meta-approved).
+  get whatsappVerificationNeededTemplate(): string {
+    return process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE ?? 'verification_needed';
+  },
+  get whatsappVerificationInProgressTemplate(): string {
+    return process.env.WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE ?? 'verification_in_progress';
+  },
+  get whatsappVerificationVerifiedTemplate(): string {
+    return process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE ?? 'verification_verified';
+  },
+  get whatsappVerificationFailedTemplate(): string {
+    return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? 'verification_failed';
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).

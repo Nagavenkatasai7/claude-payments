@@ -194,3 +194,18 @@ export function verificationReminderParams(senderName: string, sessionToken: str
     buttonToken: sessionToken,
   };
 }
+
+// ── Phase 2: KYC verification status (one template per state; degrade to
+// free-form via sendTemplateOrText until Meta approves them). Params: [name, message]. ──
+export type VerificationState = 'needed' | 'in_progress' | 'received' | 'verified' | 'failed';
+
+export function verificationStatusParams(name: string, state: VerificationState): string[] {
+  const msg: Record<VerificationState, string> = {
+    needed: 'Please verify your identity to start sending money.',
+    in_progress: 'Your identity verification is in progress.',
+    received: 'Thanks — we received your verification and are reviewing it. We’ll message you shortly.',
+    verified: 'You’re verified! You can now send money.',
+    failed: 'We couldn’t verify your identity. Please tap below to try again.',
+  };
+  return [name || 'there', msg[state]];
+}

@@ -6,6 +6,8 @@ import { requireAdmin, requireScope } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
+import { getKycCaseStore } from '@/lib/kyc-case-store';
+import { sendVerificationStatus } from '@/lib/whatsapp';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
@@ -35,6 +37,38 @@ export async function markCustomerVerifiedAction(formData: FormData): Promise<vo
     kycRejectedReason: undefined,
     updatedAt: nowIso,
   });
+  revalidatePath('/admin-dashboard/customers');
+  revalidatePath(`/admin-dashboard/customers/${phone}`);
+}
+
+/**
+ * Phase 2 — the canonical, audit-logged KYC review decision (maker-checker-lite).
+ * Used by the "Needs KYC Review" queue + customer detail. Approve sets
+ * kycStatus:'verified'; reject sets 'rejected' with a MANDATORY reason. Goes
+ * through kyc-case-store.review so every decision is appended to the audit log,
+ * and notifies the customer fail-soft. Server-action checklist: own auth gate,
+ * scope check (the customer key is global), reason guard before any mutation.
+ */
+export async function reviewKycAction(formData: FormData): Promise<void> {
+  const staff = await requireAdmin();
+  const phone = String(formData.get('phone') ?? '').trim();
+  const decision = String(formData.get('decision') ?? '');
+  const reason = String(formData.get('reason') ?? '').trim();
+  if (decision !== 'approve' && decision !== 'reject') throw new Error('Invalid decision.');
+  if (!reason) throw new Error('A review reason is required.');
+
+  const cs = getCustomerStore(getStore());
+  const customer = await cs.getCustomer(phone);
+  if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
+    throw new Error('Customer not found.');
+  }
+
+  await getKycCaseStore(getStore()).review(phone, decision, staff.username, reason);
+  await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName).catch(
+    () => {},
+  );
+
+  revalidatePath('/admin-dashboard/compliance');
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(`/admin-dashboard/customers/${phone}`);
 }
