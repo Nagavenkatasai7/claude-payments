@@ -28,7 +28,7 @@ export default async function NewPartnerPage() {
               <div className="sh-card-sub">Name and operating countries are required</div>
             </div>
           </div>
-          <form action={createPartnerAction} className="sh-form">
+          <form action={createPartnerAction} className="sh-acct-form">
             <input
               className="sh-input"
               name="name"

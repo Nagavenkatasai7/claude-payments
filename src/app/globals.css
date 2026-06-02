@@ -439,9 +439,10 @@ input, select, textarea { font: inherit; color: inherit; }
 .is-expanded .sh-exp-chevron { transform: rotate(-135deg); margin-top: 2px; }
 
 /* ---- account-creation form layout (reusable, single-column) ---- */
-.sh-form { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 16px 20px 20px; }
-.sh-form .sh-input { width: 100%; }
-.sh-form .sh-btn-primary { align-self: flex-start; margin-top: 4px; }
+/* Account-creation forms (own class — must NOT collide with the login .sh-form above). */
+.sh-acct-form { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 16px 20px 20px; }
+.sh-acct-form .sh-input { width: 100%; }
+.sh-acct-form .sh-btn-primary { align-self: flex-start; margin-top: 4px; }
 .sh-field { display: flex; flex-direction: column; gap: 5px; }
 .sh-field-label { font-size: 12px; font-weight: 600; color: var(--sh-text-secondary); }
 .sh-fieldset { border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button); padding: 12px 14px 10px; margin: 0; }
@@ -515,7 +516,7 @@ input, select, textarea { font: inherit; color: inherit; }
   /* row-style forms stack on phones */
   .sh-add-staff-form, .sh-inline-form { flex-direction: column; align-items: stretch; }
   .sh-add-staff-form .sh-input, .sh-inline-form .sh-input { width: 100%; }
-  .sh-form .sh-btn-primary { width: 100%; align-self: stretch; }
+  .sh-acct-form .sh-btn-primary { width: 100%; align-self: stretch; }
 
   /* ExpandableTable → labeled cards with a per-row disclosure */
   .sh-exp-wrap { overflow-x: visible; }

@@ -19,7 +19,7 @@ const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'ID' },
   { label: 'Phone', primary: true },
-  { label: 'Amount', primary: true, align: 'right' },
+  { label: 'Amount', primary: true },
   { label: 'Status', primary: true },
   { label: 'Created' },
 ];
@@ -140,7 +140,7 @@ export default async function PartnerDetailPage({
             </dl>
 
             {isAdmin && (
-              <form action={updatePartnerAction} className="sh-form" style={{ marginTop: 16 }}>
+              <form action={updatePartnerAction} className="sh-acct-form" style={{ marginTop: 16 }}>
                 <input type="hidden" name="id" value={partner.id} />
                 <input
                   className="sh-input"
@@ -276,7 +276,7 @@ export default async function PartnerDetailPage({
           {isAdmin && (
             <form
               action={createPartnerStaffAction.bind(null, partner.id)}
-              className="sh-form"
+              className="sh-acct-form"
             >
               <input className="sh-input" name="username" placeholder="Username" required />
               <input className="sh-input" name="name" placeholder="Full name" required />

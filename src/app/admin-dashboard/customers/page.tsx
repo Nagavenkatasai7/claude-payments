@@ -78,7 +78,7 @@ export default async function CustomersPage({
     { label: 'First seen' },
     { label: 'Tier', primary: true },
     { label: 'KYC' },
-    { label: 'Lifetime sent', primary: true, align: 'right' as const },
+    { label: 'Lifetime sent', primary: true },
     { label: 'Last activity' },
   ];
 

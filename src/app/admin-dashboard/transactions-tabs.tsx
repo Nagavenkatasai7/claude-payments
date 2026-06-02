@@ -11,7 +11,7 @@ const TRANSACTION_COLUMNS: ExpandableColumn[] = [
   { label: 'Country' },
   { label: 'Partner' },
   { label: 'Tier' },
-  { label: 'Amount', primary: true, align: 'right' },
+  { label: 'Amount', primary: true },
   { label: 'Funding' },
   { label: 'Payment received' },
   { label: 'Recipient gets' },

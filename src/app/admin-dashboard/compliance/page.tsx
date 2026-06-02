@@ -35,14 +35,14 @@ const TRANSFER_COLUMNS: ExpandableColumn[] = [
 const CORRIDOR_COLUMNS: ExpandableColumn[] = [
   { label: 'Partner', primary: true },
   { label: 'Corridor', primary: true },
-  { label: 'Large-amount (USD)', align: 'right' },
-  { label: 'Velocity / day', align: 'right' },
+  { label: 'Large-amount (USD)' },
+  { label: 'Velocity / day' },
   { label: 'Watchlist' },
 ];
 
 const VELOCITY_COLUMNS: ExpandableColumn[] = [
   { label: 'Phone', primary: true },
-  { label: 'Transfers today', primary: true, align: 'right' },
+  { label: 'Transfers today', primary: true },
   { label: '' },
 ];
 

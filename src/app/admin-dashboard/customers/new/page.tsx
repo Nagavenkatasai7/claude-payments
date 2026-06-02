@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic';
 
-import { requireScope } from '@/lib/auth';
+import { requireAdmin } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { Sidebar } from '../../sidebar';
 import { createCustomerAction } from '../actions';
@@ -9,7 +9,9 @@ import type { CountryCode } from '@/lib/types';
 const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
 
 export default async function NewCustomerPage() {
-  const { staff } = await requireScope();
+  // Admins only — mirrors the action's gate and the conditionally-rendered CTA
+  // (requireAdmin redirects non-admins to the dashboard root).
+  const staff = await requireAdmin();
   const isPlatform = !staff.partnerId;
   // Platform admins choose which partner the customer belongs to; partner-admins
   // are pinned to their own partner by the server action.
@@ -33,7 +35,7 @@ export default async function NewCustomerPage() {
               <div className="sh-card-sub">Phone is required and must be unique</div>
             </div>
           </div>
-          <form action={createCustomerAction} className="sh-form">
+          <form action={createCustomerAction} className="sh-acct-form">
             <label className="sh-field">
               <span className="sh-field-label">Phone — with country code, 10–15 digits</span>
               <input

@@ -15,7 +15,7 @@ const WEEKDAYS = [
 
 const SCHEDULE_COLUMNS: ExpandableColumn[] = [
   { label: 'Recipient', primary: true },
-  { label: 'Amount', primary: true, align: 'right' },
+  { label: 'Amount', primary: true },
   { label: 'When' },
   { label: 'Last run' },
   { label: 'Status', primary: true },
