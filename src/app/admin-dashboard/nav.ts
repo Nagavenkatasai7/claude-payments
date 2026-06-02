@@ -1,4 +1,5 @@
 import type { Staff } from '@/lib/types';
+import type { IconName } from './icons';
 
 /**
  * Shared navigation model for the admin dashboard.
@@ -41,28 +42,28 @@ export function visibleNavItems(staff: Staff): NavItem[] {
 
 interface NavMeta {
   label: string;
-  icon: string;
+  icon: IconName;
   hrefFor: (staff: Staff) => string;
 }
 
 export const NAV_META: Record<NavItem, NavMeta> = {
-  overview:     { label: 'Overview',     icon: '◾', hrefFor: () => '/admin-dashboard' },
-  transactions: { label: 'Transactions', icon: '↔', hrefFor: () => '/admin-dashboard/transactions' },
-  schedules:    { label: 'Schedules',    icon: '↻', hrefFor: () => '/admin-dashboard/schedules' },
-  customers:    { label: 'Customers',    icon: '◍', hrefFor: () => '/admin-dashboard/customers' },
-  partners:     { label: 'Partners',     icon: '◆', hrefFor: () => '/admin-dashboard/partners' },
-  compliance:   { label: 'Compliance',   icon: '⚑', hrefFor: () => '/admin-dashboard/compliance' },
-  analytics:    { label: 'Analytics',    icon: '▦', hrefFor: () => '/admin-dashboard/analytics' },
-  corridors:    { label: 'Corridors',    icon: '↗', hrefFor: () => '/admin-dashboard/corridors' },
-  team:         { label: 'Team',         icon: '◉', hrefFor: () => '/admin-dashboard/team' },
-  'my-partner': { label: 'My partner',   icon: '◆', hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
+  overview:     { label: 'Overview',     icon: 'overview',     hrefFor: () => '/admin-dashboard' },
+  transactions: { label: 'Transactions', icon: 'transactions', hrefFor: () => '/admin-dashboard/transactions' },
+  schedules:    { label: 'Schedules',    icon: 'schedules',    hrefFor: () => '/admin-dashboard/schedules' },
+  customers:    { label: 'Customers',    icon: 'customers',    hrefFor: () => '/admin-dashboard/customers' },
+  partners:     { label: 'Partners',     icon: 'partners',     hrefFor: () => '/admin-dashboard/partners' },
+  compliance:   { label: 'Compliance',   icon: 'compliance',   hrefFor: () => '/admin-dashboard/compliance' },
+  analytics:    { label: 'Analytics',    icon: 'analytics',    hrefFor: () => '/admin-dashboard/analytics' },
+  corridors:    { label: 'Corridors',    icon: 'corridors',    hrefFor: () => '/admin-dashboard/corridors' },
+  team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
+  'my-partner': { label: 'My partner',   icon: 'partners',     hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
 };
 
 /** A nav entry resolved to plain serializable data — safe to pass to a client component. */
 export interface ResolvedNavItem {
   key: NavItem;
   label: string;
-  icon: string;
+  icon: IconName;
   href: string;
 }
 

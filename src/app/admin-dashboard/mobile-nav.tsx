@@ -12,6 +12,7 @@ import {
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { ResolvedNavItem } from './nav';
+import { Icon } from './icons';
 
 /**
  * Accessible off-canvas navigation for the admin dashboard on phones/tablets.
@@ -149,7 +150,7 @@ export function MobileNavDrawer({ items }: { items: ResolvedNavItem[] }) {
             aria-label="Close navigation menu"
             onClick={close}
           >
-            <span aria-hidden="true">✕</span>
+            <Icon name="close" />
           </button>
         </div>
         <nav className="sh-drawer-nav" aria-label="Dashboard">
@@ -166,7 +167,7 @@ export function MobileNavDrawer({ items }: { items: ResolvedNavItem[] }) {
                 className={`sh-nav-item ${active ? 'active' : ''}`}
                 aria-current={active ? 'page' : undefined}
               >
-                <span className="sh-nav-icon">{it.icon}</span> {it.label}
+                <span className="sh-nav-icon"><Icon name={it.icon} /></span> {it.label}
               </Link>
             );
           })}
