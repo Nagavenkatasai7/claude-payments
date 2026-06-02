@@ -12,15 +12,16 @@ spec-review → code-quality-review → fix → commit on the branch → next. *
 Checkpoint at: this plan's approval (now), any genuine design gap, and before push/PR. New server
 actions follow the mandatory security checklist. `rm -rf .next` before integration typecheck.
 
-## Decisions to confirm before Task 1 (small, but they're real)
-- **Argon2 library:** `hash-wasm` (pure-WASM, **serverless-safe on Vercel**, no native build) —
-  recommended over `@node-rs/argon2`/`argon2` (native bindings can be fragile on Vercel). Adds one
-  dependency. **Confirm OK to add `hash-wasm`.**
-- **Master encryption key for Phase 1:** a 32-byte key in a Vercel secret (`FIELD_ENCRYPTION_KEY`),
-  behind an `EncryptionKeyProvider` seam so a real **KMS** drops in during the hardening step.
-  **Confirm: app-key-now + KMS-later seam is acceptable for Phase 1.**
-- **OTP dev-mode:** until your Meta `AUTHENTICATION` template is approved, `sendOtpCode` logs the
-  code server-side in a dev/staging flag and no-ops the live send. **Confirm OK.**
+## Decisions — CONFIRMED (2026-06-02)
+- ✅ **Argon2 library = `hash-wasm`** (pure-WASM, serverless-safe on Vercel, no native build). One
+  new dependency.
+- ✅ **Phase-1 encryption key = app-managed now + KMS seam**: a 32-byte key in a Vercel secret
+  (`FIELD_ENCRYPTION_KEY`) behind an `EncryptionKeyProvider` interface, so a real **KMS** (AWS/GCP)
+  drops in later without touching call sites.
+- ✅ **OTP dev-mode**: until the Meta `AUTHENTICATION` template is approved, `sendOtpCode` logs the
+  code under a dev/staging flag and no-ops the live send.
+
+> **Status: awaiting user review of this plan + the spec. No code until the user says "approved."**
 
 ---
 
