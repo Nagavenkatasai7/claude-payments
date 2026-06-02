@@ -42,7 +42,7 @@ button { font: inherit; }
 input, select, textarea { font: inherit; color: inherit; }
 
 /* === Shell === */
-.sh-app { display: grid; grid-template-rows: 56px 1fr; min-height: 100vh; }
+.sh-app { display: grid; grid-template-rows: 56px 1fr; min-height: 100vh; min-height: 100svh; }
 .sh-topbar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 20px;
@@ -115,7 +115,11 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 
 /* === Metric cards === */
-.sh-metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 24px; }
+/* auto-fit so the metric cards reflow from a 5-up row down to 1-up on phones with
+   no media query; pages must NOT hard-code grid-template-columns inline. */
+.sh-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 24px; }
+/* Two-up chart grid (analytics) — collapses to single column when it can't fit. */
+.sh-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 16px; }
 .sh-metric {
   background: var(--sh-card); border: 1px solid var(--sh-border);
   border-radius: var(--sh-radius-card); padding: 16px 18px;
@@ -331,6 +335,7 @@ input, select, textarea { font: inherit; color: inherit; }
   background: #0b141a;
   color: #e9edef;
   min-height: 100vh;
+  min-height: 100svh; /* small-viewport unit: avoids the iOS/Android URL-bar gap */
   display: flex;
   justify-content: center;
   padding: 32px 16px;
@@ -351,7 +356,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .payapp form input {
   width: 100%; margin-top: 4px; padding: 10px;
   background: #2a3942; border: 1px solid #2a3942; border-radius: 8px;
-  color: #e9edef; font-size: 15px;
+  /* 16px (not 15) so iOS Safari does NOT auto-zoom the viewport on focus —
+     mobile Safari zooms whenever a focused input's font-size is < 16px. */
+  color: #e9edef; font-size: 16px;
 }
 .payapp .pair { display: flex; gap: 12px; }
 .payapp .pair label { flex: 1; }
@@ -361,7 +368,8 @@ input, select, textarea { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .payapp button:disabled { opacity: 0.6; cursor: default; }
-.payapp .done { color: #25d366; font-weight: 600; text-align: center; }
+.payapp .done { color: #25d366; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.payapp .done svg { flex-shrink: 0; }
 .payapp .err { color: #f15c6d; font-size: 13px; margin-top: 8px; }
 /* Two-step pay page (Item 2): step heading, inline field errors, secondary btn */
 .payapp .pay-step-label {
@@ -401,6 +409,145 @@ input, select, textarea { font: inherit; color: inherit; }
   color: #991b1b;
 }
 
+/* ============ DASHBOARD RESPONSIVE (.sh- scope) ============ */
+/* Desktop is the baseline above; these add mobile/tablet behaviour with max-width
+   queries. Covers: accessible off-canvas drawer (<=1024), table→card disclosure
+   and form/grid reflow (<=768). The landing page has its own block further down. */
+
+/* ---- shared helpers ---- */
+.sh-cell-right { text-align: right; }
+.sh-visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* ---- ExpandableTable: desktop = plain table (toggle column hidden) ---- */
+.sh-exp-wrap { width: 100%; overflow-x: auto; }
+.sh-exp-toggle-cell { display: none; }
+.sh-exp-toggle {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  width: 100%; min-height: 44px; padding: 8px 12px;
+  background: var(--sh-bg); border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-button);
+  color: var(--sh-primary); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.sh-exp-toggle:hover { background: var(--sh-primary-bg); }
+.sh-exp-chevron {
+  width: 7px; height: 7px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(45deg); transition: transform .2s ease; margin-top: -2px;
+}
+.is-expanded .sh-exp-chevron { transform: rotate(-135deg); margin-top: 2px; }
+
+/* ---- account-creation form layout (reusable, single-column) ---- */
+/* Account-creation forms (own class — must NOT collide with the login .sh-form above). */
+.sh-acct-form { display: flex; flex-direction: column; align-items: stretch; gap: 12px; padding: 16px 20px 20px; }
+.sh-acct-form .sh-input { width: 100%; }
+.sh-acct-form .sh-btn-primary { align-self: flex-start; margin-top: 4px; }
+.sh-field { display: flex; flex-direction: column; gap: 5px; }
+.sh-field-label { font-size: 12px; font-weight: 600; color: var(--sh-text-secondary); }
+.sh-fieldset { border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button); padding: 12px 14px 10px; margin: 0; }
+.sh-fieldset legend { font-size: 12px; color: var(--sh-text-secondary); padding: 0 6px; }
+
+/* ---- hamburger + off-canvas drawer (hidden on desktop) ---- */
+.sh-hamburger { display: none; }
+.sh-hamburger {
+  align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 40px; height: 40px; margin-right: 6px;
+  background: none; border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button);
+  color: var(--sh-text); cursor: pointer;
+}
+.sh-hamburger-bars { display: inline-flex; flex-direction: column; gap: 4px; width: 18px; }
+.sh-hamburger-bars span { display: block; height: 2px; background: currentColor; border-radius: 2px; }
+
+.sh-drawer-backdrop { display: none; }
+.sh-drawer {
+  display: none; flex-direction: column;
+  position: fixed; top: 0; left: 0; bottom: 0;
+  width: 84%; max-width: 300px; z-index: 1000;
+  background: var(--sh-card); box-shadow: 2px 0 18px rgba(10, 37, 64, .18);
+  transform: translateX(-100%); visibility: hidden;
+  transition: transform .25s ease, visibility 0s linear .25s;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.sh-drawer.is-open { transform: translateX(0); visibility: visible; transition: transform .25s ease; }
+.sh-drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--sh-border);
+}
+.sh-drawer-title { font-weight: 700; font-size: 14px; color: var(--sh-text); }
+.sh-drawer-close {
+  width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid var(--sh-border); border-radius: var(--sh-radius-button);
+  color: var(--sh-text-secondary); font-size: 15px; cursor: pointer;
+}
+.sh-drawer-nav { padding: 10px; display: flex; flex-direction: column; gap: 2px; }
+.sh-drawer-nav .sh-nav-item { min-height: 44px; }
+
+/* ---- tablet / phone: drawer takes over from the static sidebar ---- */
+@media (max-width: 1024px) {
+  .sh-body { grid-template-columns: 1fr; }
+  .sh-sidebar { display: none; }
+  .sh-hamburger { display: inline-flex; }
+  .sh-drawer { display: flex; }
+  .sh-drawer-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 999;
+    background: rgba(10, 37, 64, .45);
+    opacity: 0; pointer-events: none; transition: opacity .25s ease;
+  }
+  .sh-drawer-backdrop.is-open { opacity: 1; pointer-events: auto; }
+  .sh-search { display: none; }
+  .sh-user span { display: none; } /* keep the avatar, drop the name to save room */
+}
+
+/* ---- phone: tables become cards, forms/grids stack ---- */
+@media (max-width: 768px) {
+  .sh-main { padding: 16px 14px; }
+  .sh-page-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .sh-card-head { flex-wrap: wrap; }
+  .sh-dl { grid-template-columns: 1fr; gap: 2px 0; margin-bottom: 14px; }
+  .sh-dl dt { margin-top: 8px; }
+
+  /* iOS Safari auto-zooms focused inputs under 16px — bump every dashboard control. */
+  .sh-input, .sh-inline-input, .sh-inline-select { font-size: 16px; }
+  .sh-inline-input { max-width: none; width: 100%; }
+  .sh-btn-primary, .sh-btn-secondary { min-height: 44px; }
+  .sh-mini-btn { min-height: 40px; }
+
+  /* row-style forms stack on phones */
+  .sh-add-staff-form, .sh-inline-form { flex-direction: column; align-items: stretch; }
+  .sh-add-staff-form .sh-input, .sh-inline-form .sh-input { width: 100%; }
+  .sh-acct-form .sh-btn-primary { width: 100%; align-self: stretch; }
+
+  /* ExpandableTable → labeled cards with a per-row disclosure */
+  .sh-exp-wrap { overflow-x: visible; }
+  .sh-table--exp thead { display: none; }
+  .sh-table--exp, .sh-table--exp tbody { display: block; width: 100%; }
+  .sh-table--exp tr {
+    display: block; background: var(--sh-card);
+    border: 1px solid var(--sh-border); border-radius: var(--sh-radius-card);
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .sh-table--exp td {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 6px 14px; padding: 10px 14px; border-top: 1px solid var(--sh-divider);
+    text-align: right; white-space: normal; word-break: break-word;
+  }
+  .sh-table--exp tr > td:first-child { border-top: none; }
+  .sh-table--exp td::before {
+    content: attr(data-label); flex: 0 0 auto;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px;
+    color: var(--sh-text-secondary); text-align: left; white-space: nowrap;
+  }
+  .sh-table--exp td.sh-td--secondary { display: none; }
+  .sh-table--exp tr.is-expanded td.sh-td--secondary { display: flex; }
+  .sh-table--exp td.sh-exp-toggle-cell { display: block; padding: 8px 14px; }
+  .sh-table--exp td.sh-exp-toggle-cell::before { content: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-drawer, .sh-drawer-backdrop, .sh-exp-chevron { transition: none; }
+}
+
 /* ============ LANDING PAGE (.lp scope) — public marketing site ============ */
 /* Fully scoped under .lp or prefixed .lp-* — never collides with sh-* or .payapp. */
 
@@ -423,6 +570,7 @@ input, select, textarea { font: inherit; color: inherit; }
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
   min-height: 100vh;
+  min-height: 100svh; /* small-viewport unit: avoids the iOS/Android URL-bar gap */
 }
 
 .lp *,
@@ -475,6 +623,12 @@ input, select, textarea { font: inherit; color: inherit; }
     0 30px 60px -20px rgba(8, 12, 30, .7),
     inset 0 1px 0 rgba(255, 255, 255, .18);
 }
+/* Where backdrop-filter is unsupported (older Firefox, some Android webviews) the
+   translucent fill would float on the aurora with no glass — fall back to an opaque
+   panel so the text keeps its contrast. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .lp-tier2, .lp-tier3 { background: var(--lp-bg-800); }
+}
 
 /* ---- Typography ---- */
 .lp-h1 {
@@ -485,10 +639,19 @@ input, select, textarea { font: inherit; color: inherit; }
   margin: 0 0 18px;
 }
 .lp-h1-accent {
-  background: linear-gradient(100deg, var(--lp-wa), var(--lp-blue));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  /* Solid visible fallback: a browser that lacks background-clip:text would render
+     `color: transparent` as INVISIBLE text, so the gradient/transparent treatment
+     is gated behind @supports below. */
+  color: var(--lp-wa);
+}
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .lp-h1-accent {
+    background: linear-gradient(100deg, var(--lp-wa), var(--lp-blue));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
 }
 .lp-h2 {
   font-size: clamp(26px, 4vw, 40px);
@@ -533,7 +696,7 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .lp-btn-wa:hover { background: var(--lp-wa-deep); color: #F5F8FF; transform: translateY(-1px); }
 .lp-btn-wa--lg { font-size: 18px; padding: 16px 28px; min-height: 56px; }
-.lp-btn-wa--compact { padding: 9px 16px; min-height: 40px; font-size: 14px; box-shadow: none; }
+.lp-btn-wa--compact { padding: 9px 16px; min-height: 44px; font-size: 14px; box-shadow: none; } /* 44px = min comfortable touch target */
 .lp-btn-wa--block { width: 100%; }
 .lp-wa-glyph { flex: 0 0 auto; }
 
@@ -858,7 +1021,7 @@ input, select, textarea { font: inherit; color: inherit; }
   transition: transform .16s ease, border-color .16s ease, background .16s ease;
 }
 .lp-corridor-tile:hover { transform: translateY(-2px); border-color: rgba(37, 211, 102, .5); background: rgba(37, 211, 102, .08); }
-.lp-flag { width: 38px; height: auto; border-radius: 5px; box-shadow: 0 3px 9px rgba(0, 0, 0, .38); display: block; }
+.lp-flag { width: 38px; height: auto; border-radius: 5px; box-shadow: 0 3px 9px rgba(0, 0, 0, .38); display: block; background: rgba(255, 255, 255, .08); }
 .lp-corridor-name { font-size: 13.5px; font-weight: 600; color: var(--lp-text-100); }
 .lp-corridor-facts {
   grid-area: facts;
@@ -1021,6 +1184,19 @@ input, select, textarea { font: inherit; color: inherit; }
     background: radial-gradient(60% 50% at 50% 30%, rgba(37, 211, 102, .2), transparent 70%);
   }
   .lp-mock-tilt { transform: none !important; }
+
+  /* Pricing bars: drop `min-width: max-content` (it forces the bar wider than its
+     proportional %, overflowing — and `.lp` has overflow-x:hidden, so the label
+     gets CLIPPED on narrow phones). Let the bar keep its % width and wrap the
+     label instead, growing in height. */
+  .lp-bar {
+    min-width: 0;
+    white-space: normal;
+    height: auto;
+    min-height: 40px;
+    line-height: 1.25;
+    padding: 8px 12px;
+  }
 
   /* Sticky bottom CTA */
   .lp-sticky-cta {

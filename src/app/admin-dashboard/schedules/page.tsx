@@ -5,11 +5,20 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { schedulesDueInRange } from '@/lib/dashboard';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
+import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import type { Schedule } from '@/lib/types';
 
 const WEEKDAYS = [
   'Sunday', 'Monday', 'Tuesday', 'Wednesday',
   'Thursday', 'Friday', 'Saturday',
+];
+
+const SCHEDULE_COLUMNS: ExpandableColumn[] = [
+  { label: 'Recipient', primary: true },
+  { label: 'Amount', primary: true },
+  { label: 'When' },
+  { label: 'Last run' },
+  { label: 'Status', primary: true },
 ];
 
 function scheduleWhen(s: Schedule): string {
@@ -101,44 +110,27 @@ export default async function SchedulesPage({
               </a>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {visible.length === 0 ? (
-              <div className="sh-empty">No schedules.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr>
-                    <th>Recipient</th>
-                    <th>Amount</th>
-                    <th>When</th>
-                    <th>Last run</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((s) => (
-                    <tr key={s.id}>
-                      <td><div className="sh-recipient">{s.recipientName}</div></td>
-                      <td className="sh-amount">{money(s.amountSource, s.sourceCurrency)}</td>
-                      <td>{scheduleWhen(s)}</td>
-                      <td>
-                        {s.lastRunAt
-                          ? new Date(s.lastRunAt).toLocaleDateString()
-                          : <span className="sh-recipient-sub">—</span>}
-                      </td>
-                      <td>
-                        <span className={`sh-pill ${
-                          s.status === 'active' ? 'sh-pill-info' : 'sh-pill-neutral'
-                        }`}>
-                          <span className="sh-pill-dot"></span>{s.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={SCHEDULE_COLUMNS}
+            empty={<>No schedules.</>}
+            rows={visible.map((s) => ({
+              key: s.id,
+              label: s.recipientName,
+              cells: [
+                <div key="recipient" className="sh-recipient">{s.recipientName}</div>,
+                <span key="amount" className="sh-amount">{money(s.amountSource, s.sourceCurrency)}</span>,
+                scheduleWhen(s),
+                s.lastRunAt
+                  ? new Date(s.lastRunAt).toLocaleDateString()
+                  : <span key="lastrun" className="sh-recipient-sub">—</span>,
+                <span key="status" className={`sh-pill ${
+                  s.status === 'active' ? 'sh-pill-info' : 'sh-pill-neutral'
+                }`}>
+                  <span className="sh-pill-dot"></span>{s.status}
+                </span>,
+              ],
+            }))}
+          />
         </section>
       </main>
     </>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { visibleNavItems } from '@/app/admin-dashboard/sidebar';
+import { visibleNavItems } from '@/app/admin-dashboard/nav';
 import type { Staff } from '@/lib/types';
 
 function staff(role: 'admin' | 'agent', partnerId?: string): Staff {

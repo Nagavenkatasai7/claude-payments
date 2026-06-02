@@ -7,8 +7,16 @@ import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { evaluateCap } from '@/lib/tier-rules';
 import { maskLast4 } from '@/lib/mask';
 import { Sidebar } from '../../sidebar';
+import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { money } from '../../format';
 import { markCustomerVerifiedAction, markCustomerRejectedAction } from '../actions';
+
+const TRANSFER_COLUMNS: ExpandableColumn[] = [
+  { label: 'ID' },
+  { label: 'Amount', primary: true },
+  { label: 'Status', primary: true },
+  { label: 'Created' },
+];
 
 export default async function CustomerDetailPage({
   params,
@@ -127,38 +135,25 @@ export default async function CustomerDetailPage({
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            <table className="sh-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Amount</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mine.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="sh-empty">No transfers yet.</td>
-                  </tr>
-                )}
-                {mine.slice(0, 50).map((t) => (
-                  <tr key={t.id}>
-                    <td>{t.id}</td>
-                    <td>
-                      <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
-                      {t.sourceCurrency !== 'USD' && (
-                        <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
-                      )}
-                    </td>
-                    <td>{t.status}</td>
-                    <td>{new Date(t.createdAt).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ExpandableTable
+            columns={TRANSFER_COLUMNS}
+            empty={<>No transfers yet.</>}
+            rows={mine.slice(0, 50).map((t) => ({
+              key: t.id,
+              label: t.id,
+              cells: [
+                t.id,
+                <div key="amt">
+                  <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                  {t.sourceCurrency !== 'USD' && (
+                    <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                  )}
+                </div>,
+                t.status,
+                new Date(t.createdAt).toLocaleString(),
+              ],
+            }))}
+          />
         </section>
       </main>
     </>

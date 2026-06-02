@@ -5,6 +5,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
+import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import type { Customer, Partner, Tier } from '@/lib/types';
 
 function tierBadge(tier: Tier): string {
@@ -67,6 +68,19 @@ export default async function CustomersPage({
     });
 
   const t0Count = customers.filter((c) => deriveTier(c, now) === 'T0').length;
+  const isAdmin = staff.role === 'admin';
+  const isPlatform = scoped.scope.kind === 'platform';
+
+  const columns: ExpandableColumn[] = [
+    { label: 'Phone', primary: true },
+    ...(isPlatform ? [{ label: 'Partner' }] : []),
+    { label: 'Country' },
+    { label: 'First seen' },
+    { label: 'Tier', primary: true },
+    { label: 'KYC' },
+    { label: 'Lifetime sent', primary: true },
+    { label: 'Last activity' },
+  ];
 
   return (
     <>
@@ -79,6 +93,11 @@ export default async function CustomersPage({
               {customers.length} total · {t0Count} in observation window
             </div>
           </div>
+          {isAdmin && (
+            <Link href="/admin-dashboard/customers/new" className="sh-btn-primary">
+              + New customer
+            </Link>
+          )}
         </div>
         <section className="sh-card">
           {scoped.scope.kind === 'platform' && (
@@ -115,67 +134,43 @@ export default async function CustomersPage({
               <button type="submit" className="sh-btn-secondary">Apply</button>
             </form>
           )}
-          <div className="sh-ledger-wrap">
-            {rows.length === 0 ? (
-              <div className="sh-empty">No customers yet.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr>
-                    <th>Phone</th>
-                    {scoped.scope.kind === 'platform' && <th>Partner</th>}
-                    <th>Country</th>
-                    <th>First seen</th>
-                    <th>Tier</th>
-                    <th>KYC</th>
-                    <th>Lifetime sent</th>
-                    <th>Last activity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map(({ c, life }) => {
-                    const tier = deriveTier(c, now);
-                    return (
-                      <tr key={c.senderPhone}>
-                        <td>
-                          <Link href={`/admin-dashboard/customers/${c.senderPhone}`}>
-                            +{c.senderPhone}
-                          </Link>
-                        </td>
-                        {scoped.scope.kind === 'platform' && (
-                          <td>{partnerById[c.partnerId]?.name ?? c.partnerId}</td>
-                        )}
-                        <td>{c.senderCountry}</td>
-                        <td>{new Date(c.firstSeenAt).toLocaleDateString()}</td>
-                        <td>
-                          <span className={tierBadge(tier)}>
-                            {tierLabel(tier, c, now)}
-                          </span>
-                        </td>
-                        <td>{c.kycStatus}</td>
-                        <td>
-                          {/* Lifetime sent is a USD-equivalent aggregate across all transfers — always USD */}
-                          <div className="sh-amount">
-                            ${(life.cents / 100).toFixed(2)} USD
-                          </div>
-                          <div className="sh-recipient-sub">
-                            {life.count} {life.count === 1 ? 'transfer' : 'transfers'}
-                          </div>
-                        </td>
-                        <td>
-                          {life.lastAt ? (
-                            new Date(life.lastAt).toLocaleString()
-                          ) : (
-                            <span className="sh-recipient-sub">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={columns}
+            empty={<>No customers yet.</>}
+            rows={rows.map(({ c, life }) => {
+              const tier = deriveTier(c, now);
+              return {
+                key: c.senderPhone,
+                label: `+${c.senderPhone}`,
+                cells: [
+                  <Link href={`/admin-dashboard/customers/${c.senderPhone}`} key="phone">
+                    +{c.senderPhone}
+                  </Link>,
+                  ...(isPlatform
+                    ? [<span key="partner">{partnerById[c.partnerId]?.name ?? c.partnerId}</span>]
+                    : []),
+                  c.senderCountry,
+                  new Date(c.firstSeenAt).toLocaleDateString(),
+                  <span className={tierBadge(tier)} key="tier">
+                    {tierLabel(tier, c, now)}
+                  </span>,
+                  c.kycStatus,
+                  <div key="life">
+                    {/* Lifetime sent is a USD-equivalent aggregate across all transfers — always USD */}
+                    <div className="sh-amount">${(life.cents / 100).toFixed(2)} USD</div>
+                    <div className="sh-recipient-sub">
+                      {life.count} {life.count === 1 ? 'transfer' : 'transfers'}
+                    </div>
+                  </div>,
+                  life.lastAt ? (
+                    new Date(life.lastAt).toLocaleString()
+                  ) : (
+                    <span className="sh-recipient-sub" key="last">—</span>
+                  ),
+                ],
+              };
+            })}
+          />
         </section>
       </main>
     </>

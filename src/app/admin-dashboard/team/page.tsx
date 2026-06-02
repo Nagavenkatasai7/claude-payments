@@ -9,6 +9,15 @@ import {
 } from './actions';
 import type { Staff } from '@/lib/types';
 import { Sidebar } from '../sidebar';
+import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+
+const STAFF_COLUMNS: ExpandableColumn[] = [
+  { label: 'Name', primary: true },
+  { label: 'Username' },
+  { label: 'Role', primary: true },
+  { label: 'Permissions' },
+  { label: 'Actions' },
+];
 
 function PermissionCheckbox({
   name,
@@ -26,49 +35,44 @@ function PermissionCheckbox({
   );
 }
 
-function StaffRow({ staff }: { staff: Staff }) {
+function staffRow(staff: Staff) {
   if (staff.role === 'admin') {
-    return (
-      <tr>
-        <td>{staff.name}</td>
-        <td>{staff.username}</td>
-        <td>
-          <span className="sh-pill sh-pill-info">
-            <span className="sh-pill-dot"></span>admin
-          </span>
-        </td>
-        <td colSpan={2}>
-          <span className="sh-recipient-sub">Full access (all permissions)</span>
-        </td>
-      </tr>
-    );
+    return {
+      key: staff.username,
+      label: staff.name,
+      cells: [
+        staff.name,
+        staff.username,
+        <span key="role" className="sh-pill sh-pill-info">
+          <span className="sh-pill-dot"></span>admin
+        </span>,
+        <span key="perms" className="sh-recipient-sub">Full access (all permissions)</span>,
+        <></>,
+      ],
+    };
   }
-  return (
-    <tr>
-      <td>{staff.name}</td>
-      <td>{staff.username}</td>
-      <td>
-        <span className="sh-pill sh-pill-neutral">
-          <span className="sh-pill-dot"></span>agent
-        </span>
-      </td>
-      <td>
-        <form action={updatePermissionsAction} className="sh-inline-form">
-          <input type="hidden" name="username" value={staff.username} />
-          <PermissionCheckbox name="canCancel" label="Cancel/refund" checked={staff.permissions.canCancel} />
-          <PermissionCheckbox name="canResend" label="Resend" checked={staff.permissions.canResend} />
-          <PermissionCheckbox name="canAssign" label="Assign" checked={staff.permissions.canAssign} />
-          <button type="submit" className="sh-mini-btn">Save</button>
-        </form>
-      </td>
-      <td>
-        <form action={removeStaffAction}>
-          <input type="hidden" name="username" value={staff.username} />
-          <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
-        </form>
-      </td>
-    </tr>
-  );
+  return {
+    key: staff.username,
+    label: staff.name,
+    cells: [
+      staff.name,
+      staff.username,
+      <span key="role" className="sh-pill sh-pill-neutral">
+        <span className="sh-pill-dot"></span>agent
+      </span>,
+      <form key="perms" action={updatePermissionsAction} className="sh-inline-form">
+        <input type="hidden" name="username" value={staff.username} />
+        <PermissionCheckbox name="canCancel" label="Cancel/refund" checked={staff.permissions.canCancel} />
+        <PermissionCheckbox name="canResend" label="Resend" checked={staff.permissions.canResend} />
+        <PermissionCheckbox name="canAssign" label="Assign" checked={staff.permissions.canAssign} />
+        <button type="submit" className="sh-mini-btn">Save</button>
+      </form>,
+      <form key="actions" action={removeStaffAction}>
+        <input type="hidden" name="username" value={staff.username} />
+        <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
+      </form>,
+    ],
+  };
 }
 
 export default async function TeamPage() {
@@ -94,22 +98,11 @@ export default async function TeamPage() {
               <div className="sh-card-sub">{staff.length} member{staff.length === 1 ? '' : 's'}</div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            <table className="sh-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Username</th>
-                  <th>Role</th>
-                  <th>Permissions</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {staff.map((s) => <StaffRow key={s.username} staff={s} />)}
-              </tbody>
-            </table>
-          </div>
+          <ExpandableTable
+            columns={STAFF_COLUMNS}
+            rows={staff.map((s) => staffRow(s))}
+            empty={<>No staff members yet.</>}
+          />
         </section>
 
         <section className="sh-card">

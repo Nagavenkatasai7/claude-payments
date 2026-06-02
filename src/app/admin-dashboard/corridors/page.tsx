@@ -4,6 +4,14 @@ import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
+import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+
+const CORRIDOR_COLUMNS: ExpandableColumn[] = [
+  { label: 'Date' },
+  { label: 'Destination', primary: true },
+  { label: 'Approx amount', primary: true },
+  { label: 'Sender phone' },
+];
 
 export default async function CorridorsPage() {
   // Corridor requests are platform-wide (no per-partner scoping yet).
@@ -34,38 +42,24 @@ export default async function CorridorsPage() {
               </div>
             </div>
           </div>
-          <div className="sh-ledger-wrap">
-            {requests.length === 0 ? (
-              <div className="sh-empty">No corridor requests yet.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Destination</th>
-                    <th>Approx amount</th>
-                    <th>Sender phone</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {requests.map((r) => (
-                    <tr key={r.id}>
-                      <td>{new Date(r.capturedAt).toLocaleString()}</td>
-                      <td>{r.destinationCountry}</td>
-                      <td>
-                        {r.approxAmount != null
-                          ? money(r.approxAmount, r.approxCurrency ?? 'USD')
-                          : <span className="sh-recipient-sub">—</span>}
-                      </td>
-                      <td>
-                        <span className="sh-recipient-sub">+{r.senderPhone}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={CORRIDOR_COLUMNS}
+            empty={<>No corridor requests yet.</>}
+            rows={requests.map((r) => ({
+              key: r.id,
+              label: r.destinationCountry,
+              cells: [
+                new Date(r.capturedAt).toLocaleString(),
+                r.destinationCountry,
+                r.approxAmount != null ? (
+                  money(r.approxAmount, r.approxCurrency ?? 'USD')
+                ) : (
+                  <span key="amount" className="sh-recipient-sub">—</span>
+                ),
+                <span key="phone" className="sh-recipient-sub">+{r.senderPhone}</span>,
+              ],
+            }))}
+          />
         </section>
       </main>
     </>

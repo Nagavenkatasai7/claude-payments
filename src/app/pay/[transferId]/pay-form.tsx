@@ -90,7 +90,24 @@ function SimplePayForm({
   if (status === 'done') {
     return (
       <p className="done">
-        &#x2705; Payment complete! Check WhatsApp for your receipt.
+        {/* Inline SVG check (not the ✅ emoji) so the success state renders
+            identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path d="M8 12.5l2.5 2.5L16 9" />
+        </svg>
+        Payment complete! Check WhatsApp for your receipt.
       </p>
     );
   }
@@ -183,7 +200,24 @@ function BankDetailsPayForm({
   if (status === 'done') {
     return (
       <p className="done">
-        &#x2705; Payment complete! Check WhatsApp for your receipt.
+        {/* Inline SVG check (not the ✅ emoji) so the success state renders
+            identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path d="M8 12.5l2.5 2.5L16 9" />
+        </svg>
+        Payment complete! Check WhatsApp for your receipt.
       </p>
     );
   }
