@@ -2,6 +2,9 @@ export const dynamic = 'force-dynamic';
 
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
+import { scopeOf, canSee } from '@/lib/staff-scope';
+import { getStore } from '@/lib/store';
+import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { topVelocityToday } from '@/lib/dashboard';
 import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
@@ -90,6 +93,11 @@ export default async function CompliancePage() {
   const blocked = transfers.filter((t) => t.complianceStatus === 'blocked');
   const topVel = topVelocityToday(transfers, Date.now(), 10);
 
+  // KYC cases awaiting a human decision, scoped to what this staff may see.
+  const needsKyc = (await getKycCaseStore(getStore()).listNeedsReview()).filter((c) =>
+    canSee(scopeOf(staff), c.partnerId),
+  );
+
   const partners = await scoped.listPartners();
   const corridorRows = partners.flatMap((p) =>
     (p.countries ?? [])
@@ -120,6 +128,31 @@ export default async function CompliancePage() {
             </div>
           </div>
         </div>
+
+        <section className="sh-card">
+          <div className="sh-card-head">
+            <div>
+              <div className="sh-card-title">Needs KYC review</div>
+              <div className="sh-card-sub">
+                {needsKyc.length} {needsKyc.length === 1 ? 'customer' : 'customers'} — identity verification awaiting a human decision
+              </div>
+            </div>
+          </div>
+          <ExpandableTable
+            columns={[{ label: 'Phone', primary: true }, { label: 'State', primary: true }, { label: 'Screening' }, { label: '' }]}
+            empty={<>No customers awaiting KYC review.</>}
+            rows={needsKyc.map((c) => ({
+              key: c.senderPhone,
+              label: `+${c.senderPhone}`,
+              cells: [
+                <span key="phone">+{c.senderPhone}</span>,
+                <span key="state">{c.kycReviewState}</span>,
+                <span key="screen">{c.watchlistHit ? '⚠ Watchlist' : c.pepHit ? '⚠ PEP' : 'Clear'}</span>,
+                <a key="open" className="sh-mini-btn" href={`/admin-dashboard/customers/${c.senderPhone}`}>Review</a>,
+              ],
+            }))}
+          />
+        </section>
 
         <section className="sh-card">
           <div className="sh-card-head">
