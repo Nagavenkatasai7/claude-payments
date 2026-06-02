@@ -30,7 +30,6 @@ function digitsLast4(v: unknown): string | undefined {
 
 export function parsePersonaEvent(body: unknown): PersonaEvent | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const b = body as any;
     const attrs = b?.data?.attributes;
     const name = attrs?.name;
