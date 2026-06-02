@@ -20,7 +20,7 @@ vi.mock('@/lib/store', async () => {
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
-import { releaseTransferAction, rejectTransferAction } from '@/app/dashboard/actions';
+import { releaseTransferAction, rejectTransferAction } from '@/app/admin-dashboard/actions';
 
 function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   return {

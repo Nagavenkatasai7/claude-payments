@@ -22,8 +22,8 @@ export async function markCustomerVerifiedAction(formData: FormData): Promise<vo
     kycRejectedReason: undefined,
     updatedAt: nowIso,
   });
-  revalidatePath('/dashboard/customers');
-  revalidatePath(`/dashboard/customers/${phone}`);
+  revalidatePath('/admin-dashboard/customers');
+  revalidatePath(`/admin-dashboard/customers/${phone}`);
 }
 
 export async function markCustomerRejectedAction(formData: FormData): Promise<void> {
@@ -43,6 +43,6 @@ export async function markCustomerRejectedAction(formData: FormData): Promise<vo
     kycRejectedReason: reason,
     updatedAt: nowIso,
   });
-  revalidatePath('/dashboard/customers');
-  revalidatePath(`/dashboard/customers/${phone}`);
+  revalidatePath('/admin-dashboard/customers');
+  revalidatePath(`/admin-dashboard/customers/${phone}`);
 }

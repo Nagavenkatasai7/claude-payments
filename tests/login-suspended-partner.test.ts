@@ -51,7 +51,7 @@ describe('login action with partner suspension', () => {
       createdAt: '2026-05-27T00:00:00Z', partnerId: 'acme',
     });
     await expect(login(null, form({ username: 'p', password: 'hunter2' })))
-      .rejects.toThrow('REDIRECT:/dashboard');
+      .rejects.toThrow('REDIRECT:/admin-dashboard');
   });
 
   it('rejects login (generic error) when the partner is suspended', async () => {
@@ -94,6 +94,6 @@ describe('login action with partner suspension', () => {
       createdAt: '2026-05-27T00:00:00Z',
     });
     await expect(login(null, form({ username: 'admin', password: 'hunter2' })))
-      .rejects.toThrow('REDIRECT:/dashboard');
+      .rejects.toThrow('REDIRECT:/admin-dashboard');
   });
 });

@@ -7,11 +7,11 @@ import { fakeRedis } from './helpers';
 const PHONE = '15551234567';
 
 describe('MockKycProvider', () => {
-  it('startVerification returns a URL pointing at the dashboard customer page and a providerRef', async () => {
+  it('startVerification returns a URL pointing at the admin-dashboard customer page and a providerRef', async () => {
     const cs = createCustomerStore(fakeRedis(), createStore(fakeRedis()));
     const provider = new MockKycProvider(cs, 'https://example.com');
     const r = await provider.startVerification({ customerId: PHONE, senderPhone: PHONE });
-    expect(r.url).toBe(`https://example.com/dashboard/customers/${PHONE}`);
+    expect(r.url).toBe(`https://example.com/admin-dashboard/customers/${PHONE}`);
     expect(r.providerRef).toBe(`mock-${PHONE}`);
   });
 

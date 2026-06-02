@@ -41,16 +41,16 @@ interface NavMeta {
   hrefFor: (staff: Staff) => string;
 }
 const NAV_META: Record<NavItem, NavMeta> = {
-  overview:     { label: 'Overview',     icon: '◾', hrefFor: () => '/dashboard' },
-  transactions: { label: 'Transactions', icon: '↔', hrefFor: () => '/dashboard/transactions' },
-  schedules:    { label: 'Schedules',    icon: '↻', hrefFor: () => '/dashboard/schedules' },
-  customers:    { label: 'Customers',    icon: '◍', hrefFor: () => '/dashboard/customers' },
-  partners:     { label: 'Partners',     icon: '◆', hrefFor: () => '/dashboard/partners' },
-  compliance:   { label: 'Compliance',   icon: '⚑', hrefFor: () => '/dashboard/compliance' },
-  analytics:    { label: 'Analytics',    icon: '▦', hrefFor: () => '/dashboard/analytics' },
-  corridors:    { label: 'Corridors',    icon: '↗', hrefFor: () => '/dashboard/corridors' },
-  team:         { label: 'Team',         icon: '◉', hrefFor: () => '/dashboard/team' },
-  'my-partner': { label: 'My partner',   icon: '◆', hrefFor: (s) => `/dashboard/partners/${s.partnerId}` },
+  overview:     { label: 'Overview',     icon: '◾', hrefFor: () => '/admin-dashboard' },
+  transactions: { label: 'Transactions', icon: '↔', hrefFor: () => '/admin-dashboard/transactions' },
+  schedules:    { label: 'Schedules',    icon: '↻', hrefFor: () => '/admin-dashboard/schedules' },
+  customers:    { label: 'Customers',    icon: '◍', hrefFor: () => '/admin-dashboard/customers' },
+  partners:     { label: 'Partners',     icon: '◆', hrefFor: () => '/admin-dashboard/partners' },
+  compliance:   { label: 'Compliance',   icon: '⚑', hrefFor: () => '/admin-dashboard/compliance' },
+  analytics:    { label: 'Analytics',    icon: '▦', hrefFor: () => '/admin-dashboard/analytics' },
+  corridors:    { label: 'Corridors',    icon: '↗', hrefFor: () => '/admin-dashboard/corridors' },
+  team:         { label: 'Team',         icon: '◉', hrefFor: () => '/admin-dashboard/team' },
+  'my-partner': { label: 'My partner',   icon: '◆', hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
 };
 
 export async function Sidebar({ active }: { active: SidebarActive }) {
@@ -85,7 +85,7 @@ export async function Sidebar({ active }: { active: SidebarActive }) {
         );
       })}
       {showAccountLabel && (
-        <Link href="/dashboard" className="sh-nav-item">
+        <Link href="/admin-dashboard" className="sh-nav-item">
           <span className="sh-nav-icon">⚙</span> Settings
         </Link>
       )}

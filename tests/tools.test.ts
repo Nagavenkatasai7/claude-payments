@@ -559,7 +559,7 @@ describe('check_send_limit', () => {
     expect(r.daily_cap_usd).toBe(500);
     expect(r.today_remaining_usd).toBe(500);
     expect(r.day_of_window).toBe(1);
-    expect(r.kyc_url).toBe('https://example.com/dashboard/customers/15550001111');
+    expect(r.kyc_url).toBe('https://example.com/admin-dashboard/customers/15550001111');
   });
 
   it('T0 customer over the per-transfer cap returns reason=over_per_transfer_cap', async () => {

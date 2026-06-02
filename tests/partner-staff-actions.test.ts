@@ -21,7 +21,7 @@ vi.mock('@/lib/partner-store', async () => {
 vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
-import { createPartnerStaffAction, removePartnerStaffAction } from '@/app/dashboard/partners/actions';
+import { createPartnerStaffAction, removePartnerStaffAction } from '@/app/admin-dashboard/partners/actions';
 import { createAuthStore } from '@/lib/auth-store';
 import { createPartnerStore } from '@/lib/partner-store';
 

@@ -18,7 +18,7 @@ function statusBadge(p: Partner): string {
 export default async function PartnersPage() {
   const staff = await requireStaff();
   if (staff.partnerId) {
-    redirect(`/dashboard/partners/${staff.partnerId}`);
+    redirect(`/admin-dashboard/partners/${staff.partnerId}`);
   }
   const isAdmin = staff.role === 'admin';
 
@@ -70,7 +70,7 @@ export default async function PartnersPage() {
             </div>
           </div>
           {isAdmin && (
-            <Link href="/dashboard/partners/new" className="sh-btn-primary">
+            <Link href="/admin-dashboard/partners/new" className="sh-btn-primary">
               + New partner
             </Link>
           )}
@@ -95,7 +95,7 @@ export default async function PartnersPage() {
                   {rows.map((p) => (
                     <tr key={p.id}>
                       <td>
-                        <Link href={`/dashboard/partners/${p.id}`}>{p.name}</Link>
+                        <Link href={`/admin-dashboard/partners/${p.id}`}>{p.name}</Link>
                       </td>
                       <td>{p.countries.join(', ')}</td>
                       <td>

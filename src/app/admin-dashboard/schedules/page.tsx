@@ -88,13 +88,13 @@ export default async function SchedulesPage({
             </div>
             <div className="sh-tabs">
               <a
-                href="/dashboard/schedules"
+                href="/admin-dashboard/schedules"
                 className={`sh-tab ${!showAll ? 'active' : ''}`}
               >
                 Active
               </a>
               <a
-                href="/dashboard/schedules?show=all"
+                href="/admin-dashboard/schedules?show=all"
                 className={`sh-tab ${showAll ? 'active' : ''}`}
               >
                 All

@@ -35,7 +35,7 @@ export async function login(
     path: '/',
     maxAge: 7 * 24 * 60 * 60,
   });
-  redirect('/dashboard');
+  redirect('/admin-dashboard');
 }
 
 export async function logout(): Promise<void> {
