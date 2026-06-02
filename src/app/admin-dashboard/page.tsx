@@ -10,6 +10,7 @@ import {
 import type { Schedule, Transfer } from '@/lib/types';
 import { money } from './format';
 import { Sidebar } from './sidebar';
+import { Icon } from './icons';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
 
 function usd(n: number): string {
@@ -108,7 +109,7 @@ export default async function DashboardPage() {
         {attentionCount > 0 && (
           <section className="sh-attention" style={{ marginBottom: 24 }}>
             <div className="sh-attention-title" style={{ alignItems: 'center' }}>
-              ⚠ {attentionCount}{' '}
+              <Icon name="warning" /> {attentionCount}{' '}
               {attentionCount === 1
                 ? 'transfer needs'
                 : 'transfers need'}{' '}

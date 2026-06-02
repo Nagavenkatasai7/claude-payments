@@ -45,6 +45,10 @@ export default async function PartnerDetailPage({
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
+  // Suspend/reactivate is platform governance (setPartnerStatusAction now requires
+  // requirePlatformAdmin) — only show the toggle to platform admins so a
+  // partner-admin viewing their own partner doesn't get a button that errors.
+  const isPlatformAdmin = isAdmin && !staff.partnerId;
   const { id } = await params;
 
   const scoped = createScopedStore(staff);
@@ -76,7 +80,7 @@ export default async function PartnerDetailPage({
               Partner · {partner.id} · created {new Date(partner.createdAt).toLocaleDateString()}
             </div>
           </div>
-          {isAdmin && partner.id !== 'default' && (
+          {isPlatformAdmin && partner.id !== 'default' && (
             <form action={setPartnerStatusAction} className="sh-inline-form">
               <input type="hidden" name="id" value={partner.id} />
               <input

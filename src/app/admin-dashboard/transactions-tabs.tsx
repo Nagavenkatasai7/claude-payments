@@ -5,6 +5,7 @@ import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { money } from './format';
 import { MaskedDestination } from './masked-destination';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
+import { Icon } from './icons';
 
 const TRANSACTION_COLUMNS: ExpandableColumn[] = [
   { label: 'Recipient', primary: true },
@@ -72,7 +73,7 @@ function Stage({ at, fallback }: { at?: string; fallback: string }) {
   if (at) {
     return (
       <span className="sh-stage">
-        <span className="sh-check">✓</span>
+        <span className="sh-check"><Icon name="check" /></span>
         {new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
       </span>
     );

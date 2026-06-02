@@ -65,7 +65,7 @@ beforeEach(() => {
 
 describe('releaseTransferAction', () => {
   it('delivers an in_review transfer when admin calls it', async () => {
-    mockRequireAdmin.mockResolvedValue(undefined);
+    mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rr1' }));
 
@@ -82,7 +82,7 @@ describe('releaseTransferAction', () => {
   });
 
   it('throws when transfer is not in_review', async () => {
-    mockRequireAdmin.mockResolvedValue(undefined);
+    mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rr2', status: 'delivered' }));
 
@@ -92,7 +92,7 @@ describe('releaseTransferAction', () => {
 
 describe('rejectTransferAction', () => {
   it('cancels an in_review transfer with adminNote when admin calls it', async () => {
-    mockRequireAdmin.mockResolvedValue(undefined);
+    mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rj1' }));
 
@@ -110,7 +110,7 @@ describe('rejectTransferAction', () => {
   });
 
   it('throws when transfer is not in_review', async () => {
-    mockRequireAdmin.mockResolvedValue(undefined);
+    mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rj2', status: 'awaiting_payment' }));
 

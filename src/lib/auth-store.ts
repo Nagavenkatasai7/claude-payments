@@ -29,6 +29,19 @@ export function createAuthStore(redis: RedisLike) {
       await redis.del(`staff:${username}`);
       await redis.srem('staff:index', username);
     },
+    /**
+     * Stamp lastLoginAt on the freshest record only. Re-reads inside the call so a
+     * stale snapshot from earlier in the login request can't resurrect a record an
+     * admin just suspended (the full-object SET race). No-op if missing/suspended.
+     */
+    async recordLogin(username: string): Promise<void> {
+      const raw = await redis.get(`staff:${username}`);
+      if (!raw) return;
+      const staff = JSON.parse(raw) as Staff;
+      if (staff.status === 'suspended') return;
+      staff.lastLoginAt = new Date().toISOString();
+      await redis.set(`staff:${username}`, JSON.stringify(staff));
+    },
     async createSession(username: string): Promise<string> {
       const token = randomBytes(32).toString('hex');
       await redis.set(`session:${token}`, username, {

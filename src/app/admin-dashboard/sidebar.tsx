@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
 import { NAV_META, visibleNavItems, type SidebarActive } from './nav';
+import { Icon } from './icons';
 
 export type { SidebarActive, NavItem } from './nav';
 
@@ -20,8 +21,9 @@ export async function Sidebar({ active }: { active: SidebarActive }) {
               <Link
                 href={NAV_META[key].hrefFor(staff)}
                 className={`sh-nav-item ${active === key ? 'active' : ''}`}
+                aria-current={active === key ? 'page' : undefined}
               >
-                <span className="sh-nav-icon">{NAV_META[key].icon}</span> {NAV_META[key].label}
+                <span className="sh-nav-icon"><Icon name={NAV_META[key].icon} /></span> {NAV_META[key].label}
               </Link>
             </Fragment>
           );
@@ -31,14 +33,15 @@ export async function Sidebar({ active }: { active: SidebarActive }) {
             key={key}
             href={NAV_META[key].hrefFor(staff)}
             className={`sh-nav-item ${active === key ? 'active' : ''}`}
+            aria-current={active === key ? 'page' : undefined}
           >
-            <span className="sh-nav-icon">{NAV_META[key].icon}</span> {NAV_META[key].label}
+            <span className="sh-nav-icon"><Icon name={NAV_META[key].icon} /></span> {NAV_META[key].label}
           </Link>
         );
       })}
       {showAccountLabel && (
         <Link href="/admin-dashboard" className="sh-nav-item">
-          <span className="sh-nav-icon">⚙</span> Settings
+          <span className="sh-nav-icon"><Icon name="settings" /></span> Settings
         </Link>
       )}
     </aside>

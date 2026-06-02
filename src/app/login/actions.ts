@@ -19,6 +19,10 @@ export async function login(
   if (!staff || !verifyPassword(password, staff.passwordHash)) {
     return 'Invalid username or password.';
   }
+  // Team: a suspended staff member cannot log in. Generic message (no leak).
+  if (staff.status === 'suspended') {
+    return 'Account unavailable. Contact SmartRemit support.';
+  }
   // P3: block login if the staff's partner is suspended or missing.
   // Generic error so credential validity isn't leaked.
   if (staff.partnerId) {
@@ -27,6 +31,9 @@ export async function login(
       return 'Account unavailable. Contact SmartRemit support.';
     }
   }
+  // Record an "active" signal for the Team page (re-reads fresh; won't clobber a
+  // concurrent suspend/edit — see auth-store.recordLogin).
+  await getAuthStore().recordLogin(username);
   const token = await getAuthStore().createSession(username);
   (await cookies()).set(SESSION_COOKIE, token, {
     httpOnly: true,

@@ -4,6 +4,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { schedulesDueInRange } from '@/lib/dashboard';
 import { Sidebar } from '../sidebar';
+import { Icon } from '../icons';
 import { money } from '../format';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import type { Schedule } from '@/lib/types';
@@ -63,7 +64,7 @@ export default async function SchedulesPage({
             className="sh-attention-title"
             style={{ color: 'var(--sh-warning)' }}
           >
-            📅 Due in the next 7 days
+            <Icon name="calendar" /> Due in the next 7 days
             <span className="sh-attention-count">
               {dueIn7.length} {dueIn7.length === 1 ? 'schedule' : 'schedules'}
             </span>

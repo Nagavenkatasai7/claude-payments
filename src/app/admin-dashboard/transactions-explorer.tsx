@@ -4,6 +4,7 @@ import { useState } from 'react';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { accountLast4 } from '@/lib/payout-format';
 import { TransactionsTabs } from './transactions-tabs';
+import { Icon } from './icons';
 
 export interface TransactionsExplorerProps {
   transfers: Transfer[];
@@ -55,78 +56,49 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
   return (
     <>
       <div
-        style={{
-          display: 'flex',
-          gap: 10,
-          padding: '16px 20px',
-          borderBottom: '1px solid var(--sh-border)',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-        }}
+        className="sh-toolbar"
+        style={{ margin: 0, padding: '14px 16px', borderBottom: '1px solid var(--sh-border)' }}
       >
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            fontSize: 12,
-            color: 'var(--sh-text-secondary)',
-          }}
+        <select
+          value={props.currentPartner ?? ''}
+          onChange={(e) => onPartnerChange(e.target.value)}
+          className="sh-select"
+          aria-label="Filter by partner"
         >
-          Partner
-          <select
-            value={props.currentPartner ?? ''}
-            onChange={(e) => onPartnerChange(e.target.value)}
+          <option value="">All partners</option>
+          {partnerOptions.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <div className="sh-search-box sh-toolbar-grow">
+          <span className="sh-search-box-icon"><Icon name="search" /></span>
+          <input
+            type="text"
+            placeholder="Search recipient, account last-4, or sender phone…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
             className="sh-input"
-          >
-            <option value="">All partners</option>
-            {partnerOptions.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <input
-          type="text"
-          placeholder="Search recipient, account last-4, or sender phone…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="sh-input"
-          style={{ flex: 1, minWidth: 140 }}
-        />
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            fontSize: 12,
-            color: 'var(--sh-text-secondary)',
-          }}
-        >
+            aria-label="Search transactions"
+          />
+        </div>
+        <label className="sh-scope-chip">
           From
           <input
             type="date"
             value={fromDate}
             onChange={(e) => setFromDate(e.target.value)}
-            className="sh-input"
+            className="sh-inline-input"
           />
         </label>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            fontSize: 12,
-            color: 'var(--sh-text-secondary)',
-          }}
-        >
+        <label className="sh-scope-chip">
           To
           <input
             type="date"
             value={toDate}
             onChange={(e) => setToDate(e.target.value)}
-            className="sh-input"
+            className="sh-inline-input"
           />
         </label>
       </div>

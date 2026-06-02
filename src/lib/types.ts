@@ -125,6 +125,11 @@ export interface Schedule {
 
 export type StaffRole = 'admin' | 'agent';
 
+// Reversible account state. Absent ⇒ 'active' (no migration; lazy default on read),
+// so existing staff records keep working. 'suspended' = access revoked but the record
+// (and its audit history) is preserved — mirrors the Partner suspend model.
+export type StaffStatus = 'active' | 'suspended';
+
 export interface StaffPermissions {
   canCancel: boolean;
   canResend: boolean;
@@ -139,6 +144,8 @@ export interface Staff {
   passwordHash: string;
   createdAt: string;
   partnerId?: PartnerId;        // NEW (P2) — OPTIONAL: undefined = global admin; set = scoped (P3 enforces)
+  status?: StaffStatus;         // NEW (team) — absent ⇒ active; 'suspended' locks out + bounces sessions
+  lastLoginAt?: string;         // NEW (team) — ISO-8601; set at login for an "active" signal
 }
 
 export interface Recipient {
