@@ -14,7 +14,7 @@ export async function ensureSeedAdmin(
       name: 'Main Admin',
       role: 'admin',
       permissions: { canCancel: true, canResend: true, canAssign: true },
-      passwordHash: hashPassword(env.seedAdminPassword),
+      passwordHash: await hashPassword(env.seedAdminPassword),
       createdAt: new Date().toISOString(),
     };
     await store.saveStaff(admin);
@@ -44,7 +44,7 @@ export async function ensureSeedAdmin(
         name: 'Partner Staff (seed)',
         role: 'admin',
         permissions: { canCancel: false, canResend: false, canAssign: false },
-        passwordHash: hashPassword(env.seedPartnerPassword),
+        passwordHash: await hashPassword(env.seedPartnerPassword),
         createdAt: new Date().toISOString(),
         partnerId: env.seedPartnerId,
       };

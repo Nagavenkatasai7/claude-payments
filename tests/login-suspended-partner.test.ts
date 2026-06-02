@@ -47,7 +47,7 @@ describe('login action with partner suspension', () => {
     await getAuthStore().saveStaff({
       username: 'p', name: 'P', role: 'admin',
       permissions: { canCancel: false, canResend: false, canAssign: false },
-      passwordHash: hashPassword('hunter2'),
+      passwordHash: await hashPassword('hunter2'),
       createdAt: '2026-05-27T00:00:00Z', partnerId: 'acme',
     });
     await expect(login(null, form({ username: 'p', password: 'hunter2' })))
@@ -62,7 +62,7 @@ describe('login action with partner suspension', () => {
     await getAuthStore().saveStaff({
       username: 'p', name: 'P', role: 'admin',
       permissions: { canCancel: false, canResend: false, canAssign: false },
-      passwordHash: hashPassword('hunter2'),
+      passwordHash: await hashPassword('hunter2'),
       createdAt: '2026-05-27T00:00:00Z', partnerId: 'acme',
     });
     const result = await login(null, form({ username: 'p', password: 'hunter2' }));
@@ -75,7 +75,7 @@ describe('login action with partner suspension', () => {
     await getAuthStore().saveStaff({
       username: 'p', name: 'P', role: 'admin',
       permissions: { canCancel: false, canResend: false, canAssign: false },
-      passwordHash: hashPassword('hunter2'),
+      passwordHash: await hashPassword('hunter2'),
       createdAt: '2026-05-27T00:00:00Z', partnerId: 'ghost',
     });
     const result = await login(null, form({ username: 'p', password: 'hunter2' }));
@@ -90,7 +90,7 @@ describe('login action with partner suspension', () => {
     await getAuthStore().saveStaff({
       username: 'admin', name: 'Admin', role: 'admin',
       permissions: { canCancel: true, canResend: true, canAssign: true },
-      passwordHash: hashPassword('hunter2'),
+      passwordHash: await hashPassword('hunter2'),
       createdAt: '2026-05-27T00:00:00Z',
     });
     await expect(login(null, form({ username: 'admin', password: 'hunter2' })))

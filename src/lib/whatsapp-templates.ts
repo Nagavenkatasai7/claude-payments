@@ -33,6 +33,51 @@ export interface TemplateWithButton {
   buttonToken: string;
 }
 
+// ── Meta AUTHENTICATION-template OTP (spec §3c) ──
+// The approved AUTHENTICATION template carries the one-time code in BOTH the
+// message body AND the COPY_CODE url button — Meta requires the same {{1}} in
+// each. This builder emits the Graph API `components` array for that send. PURE:
+// no fetch, no Redis, no logging — so the param shape is unit-testable and the
+// code never touches I/O here. NEVER log the returned value.
+
+/** A single text parameter as the Graph API expects: { type: 'text', text }. */
+export interface TemplateTextParameter {
+  type: 'text';
+  text: string;
+}
+
+/** One Graph API template component (body or the COPY_CODE url button). */
+export interface AuthenticationTemplateComponent {
+  type: 'body' | 'button';
+  sub_type?: 'url';
+  index?: string;
+  parameters: TemplateTextParameter[];
+}
+
+/**
+ * Build the `components` array for an AUTHENTICATION-template OTP send. The code
+ * is placed in the body param AND the url button (sub_type 'url', index '0') so
+ * the WhatsApp copy-code button copies the exact same code shown in the body.
+ * The code is passed as a STRING so leading zeros survive (CSPRNG codes can
+ * start with 0). Caller: sendOtpCode in ./whatsapp — never log this.
+ */
+export function authenticationTemplateParams(
+  code: string,
+): AuthenticationTemplateComponent[] {
+  return [
+    {
+      type: 'body',
+      parameters: [{ type: 'text', text: code }],
+    },
+    {
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: code }],
+    },
+  ];
+}
+
 /**
  * Format the source-side charge (the sender's amount, e.g. $50.00) — always
  * 2 decimal places with the currency symbol, matching the §3 samples
