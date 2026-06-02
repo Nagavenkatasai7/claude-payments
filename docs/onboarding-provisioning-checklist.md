@@ -116,3 +116,38 @@ Compliance Officer**, a written **AML program** (FinCEN 31 CFR 1022.210) + **GLB
 Security Program** (16 CFR 314.4) + **Incident-Response Plan**, **DPAs** with Persona/Upstash/Vercel/
 Meta, and an **annual pen-test**. We build the technical controls; these are your organizational
 deliverables before serving real customers.
+
+---
+
+## 6. Phase 2 (Persona KYC) — go-live runbook
+
+The Phase-2 code ships **dormant**: with no `PERSONA_API_KEY`, `getKycProvider` keeps the
+MockKycProvider and `/api/persona-webhook` fail-closes on the empty secret. No migration is
+needed — every new field is optional and `kycReviewState===undefined` is treated as `none`
+(grandfathered/legacy customers are unaffected).
+
+To activate (in order):
+
+1. **Set the Vercel PROD env vars** (sandbox values are already in local `.env.local`):
+   - `PERSONA_API_KEY` (`persona_sandbox_…`)
+   - `PERSONA_ENVIRONMENT=sandbox`
+   - `PERSONA_WEBHOOK_SECRET` (`wbhsec_…`)
+   - `PERSONA_INQUIRY_TEMPLATE_VERSION_ID` (`itmplv_…`)
+   - `PERSONA_API_VERSION=2025-12-08`  (confirmed against the sandbox 2026-06-02)
+   - `PERSONA_API_BASE=https://api.withpersona.com/api/v1`  (only if overriding the default)
+2. **Merge + deploy** this phase (the PR). Vercel auto-deploys on merge.
+3. **Enable the Persona webhook** (it was created **Disabled**) → it points at
+   `https://smartremit.ai/api/persona-webhook`. Until enabled, no events are delivered.
+4. **End-to-end sandbox test:** from the `/account/verify` portal CTA (or the bot's over-cap
+   hand-off), open the hosted flow, complete a sandbox inquiry, and confirm:
+   - the webhook flips the customer to `pending_review` (NOT `verified` — human-review-only),
+   - the "Needs KYC review" queue on `/admin-dashboard/compliance` lists them,
+   - Approve on the customer-detail page sets `kycStatus:'verified'` + an audit entry.
+   - **Confirm the real `Persona-Signature` header casing** matches the verifier (Task-0 left
+     this open while the webhook was disabled); adjust the route's header lookup if needed.
+5. **(Optional, separate)** submit the 4 `verification_*` Meta templates so customer status
+   messages stop using the free-form fallback.
+
+**Deferred to later phases (not gaps):** SSN/TIN database verification step (no template in the
+org yet), Persona continuous watchlist monitoring (locked on the sandbox trial), the verify-
+before-send bot gate (Phase 3), and full maker-checker/SLA/round-robin case management (Phase 4).
