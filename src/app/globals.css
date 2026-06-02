@@ -938,7 +938,17 @@ input, select, textarea { font: inherit; color: inherit; }
 .lp-final .lp-sub { max-width: none; }
 
 /* ---- Footer ---- */
-.lp-footer { border-top: 1px solid rgba(37, 211, 102, .4); padding: 48px 0 28px; background: linear-gradient(180deg, var(--lp-bg-700) 0%, var(--lp-bg-800) 100%); box-shadow: inset 0 1px 0 rgba(37, 211, 102, .18); }
+.lp-footer {
+  border-top: 1px solid rgba(37, 211, 102, .55);
+  padding: 52px 0 28px;
+  /* Clearly brighter than the page: a green glow at the top + a distinctly
+     lighter blue base (vs the #0F1B3D page), so the footer reads as a bright
+     branded panel, not the same dark navy. */
+  background:
+    radial-gradient(140% 95% at 50% 0%, rgba(37, 211, 102, .16) 0%, rgba(37, 211, 102, 0) 52%),
+    linear-gradient(180deg, #21357A 0%, #18285C 100%);
+  box-shadow: inset 0 1px 0 rgba(37, 211, 102, .4);
+}
 .lp-footer-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; }
 .lp-footer-h { display: block; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 14px; color: #57E398; }
 .lp-footer-col ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
