@@ -1244,10 +1244,8 @@ On `account/page.tsx`, add a CTA card linking to `/account/verify` whose label r
 
 The bot already calls `ctx.kycProvider.startVerification(...)` and surfaces the returned `url`. With Task 7's factory swap, that `url` is now a real Persona one-time link instead of the dashboard URL. **Verify, don't rebuild:**
 
-- [ ] **Step 1:** Read `tools.ts:640–700` and `1360–1404`; confirm the returned `start.url` is sent to the customer and `start.providerRef` is persisted to the customer (`kycProviderRef`/`kycInquiryId`). If a call site does NOT persist `kycReviewState:'inquiry_started'`, add a `getKycCaseStore(...).applyDelta(phone, { kycReviewState:'inquiry_started', kycInquiryId: start.providerRef }, { actor:'bot', action:'kyc.start' })` call there (so the bot-initiated and portal-initiated flows converge on the same state).
-- [ ] **Step 2:** Update/extend the tools test asserting the hand-off message contains the provider URL and the customer is moved to `inquiry_started`.
-- [ ] **Step 3:** Run the tools test → PASS.
-- [ ] **Step 4: Commit** — `git add src/lib/tools.ts tests/<tools-test>.ts && git commit -m "feat(kyc): bot hand-off persists inquiry_started + uses real Persona link"`
+- [x] **RESULT (verified, no code change):** Both call sites (`tools.ts:647` in get_quote, `tools.ts:1384` in check_send_limit) already call `ctx.kycProvider.startVerification({ customerId, senderPhone })` and return `start.url` as `kyc_url`. Task 7's factory swap means that URL is now a **real Persona one-time hosted-flow link** (was the dashboard URL under the mock). **State convergence is handled by the webhook, not the call site:** creating an inquiry fires Persona's `inquiry.created` event → `/api/persona-webhook` → `applyKycEvent` → `kycReviewState:'inquiry_started'`, identically for the bot path and the portal path (both keyed by `reference-id` = phone). This honors "webhook is the source of truth." Existing tools tests use the Mock provider (`PERSONA_API_KEY` unset) and still pass.
+- [ ] **FOLLOW-UP (not Phase 2):** both call sites create a NEW inquiry on every over-cap quote/check — functionally fine (each link is valid; the webhook drives state) but wasteful. A later optimization should reuse an in-flight inquiry (guard on a non-terminal `kycReviewState` + re-`generateOneTimeLink`) instead of creating a fresh one each time.
 
 ---
 
