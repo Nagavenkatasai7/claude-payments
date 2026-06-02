@@ -66,8 +66,14 @@ async function issueAndSend(phone: string, purpose: OtpPurpose, ip: string): Pro
   if (await auth.isOtpIpLocked(ip)) return; // silent — don't reveal the throttle
   const result = await getOtpStore().issueOtp(phone, purpose);
   if (result.ok) {
-    await sendOtpCode(phone, result.code);
-    await auth.recordOtpIp(ip);
+    try {
+      await sendOtpCode(phone, result.code);
+      await auth.recordOtpIp(ip);
+    } catch {
+      // Delivery failure (e.g. the Meta AUTHENTICATION template isn't approved in
+      // this environment yet) must NOT 500 the portal — the code is still issued;
+      // the user can resend once delivery is configured. Never log the code.
+    }
   }
 }
 
