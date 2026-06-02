@@ -28,10 +28,10 @@ export async function cancelTransferAction(formData: FormData): Promise<void> {
   await requirePermission('canCancel');
   const id = formData.get('id') as string;
   await cancelTransfer(getStore(), id);
-  // 'layout' revalidates every page under /dashboard (transactions, schedules,
+  // 'layout' revalidates every page under /admin-dashboard (transactions, schedules,
   // compliance, etc.), not just the root — so the change shows up wherever the
   // viewer happens to be.
-  revalidatePath('/dashboard', 'layout');
+  revalidatePath('/admin-dashboard', 'layout');
 }
 
 export async function assignTransferAction(formData: FormData): Promise<void> {
@@ -44,10 +44,10 @@ export async function assignTransferAction(formData: FormData): Promise<void> {
     throw new Error('Cannot assign: unknown staff member.');
   }
   await assignTransfer(getStore(), id, assignee, note);
-  // 'layout' revalidates every page under /dashboard (transactions, schedules,
+  // 'layout' revalidates every page under /admin-dashboard (transactions, schedules,
   // compliance, etc.), not just the root — so the change shows up wherever the
   // viewer happens to be.
-  revalidatePath('/dashboard', 'layout');
+  revalidatePath('/admin-dashboard', 'layout');
 }
 
 export async function resendPaymentLinkAction(
@@ -56,10 +56,10 @@ export async function resendPaymentLinkAction(
   await requirePermission('canResend');
   const id = formData.get('id') as string;
   await resendPaymentLink(getStore(), sendText, id);
-  // 'layout' revalidates every page under /dashboard (transactions, schedules,
+  // 'layout' revalidates every page under /admin-dashboard (transactions, schedules,
   // compliance, etc.), not just the root — so the change shows up wherever the
   // viewer happens to be.
-  revalidatePath('/dashboard', 'layout');
+  revalidatePath('/admin-dashboard', 'layout');
 }
 
 /**
@@ -75,7 +75,7 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
   const id = formData.get('id') as string;
   if (!id) throw new Error('Missing transfer id');
   await releaseTransfer(getStore(), id);
-  revalidatePath('/dashboard', 'layout');
+  revalidatePath('/admin-dashboard', 'layout');
 }
 
 /**
@@ -91,5 +91,5 @@ export async function rejectTransferAction(formData: FormData): Promise<void> {
   const id = formData.get('id') as string;
   if (!id) throw new Error('Missing transfer id');
   await rejectTransfer(getStore(), id);
-  revalidatePath('/dashboard', 'layout');
+  revalidatePath('/admin-dashboard', 'layout');
 }

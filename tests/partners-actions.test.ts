@@ -35,7 +35,7 @@ import {
   createPartnerAction,
   updatePartnerAction,
   setPartnerStatusAction,
-} from '@/app/dashboard/partners/actions';
+} from '@/app/admin-dashboard/partners/actions';
 import { createPartnerStore } from '@/lib/partner-store';
 
 const ps = createPartnerStore(sharedRedis);

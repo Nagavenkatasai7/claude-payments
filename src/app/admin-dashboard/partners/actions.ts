@@ -32,8 +32,8 @@ export async function createPartnerAction(formData: FormData): Promise<void> {
     updatedAt: now,
   };
   await getPartnerStore().savePartner(partner);
-  revalidatePath('/dashboard/partners');
-  redirect(`/dashboard/partners/${id}`);
+  revalidatePath('/admin-dashboard/partners');
+  redirect(`/admin-dashboard/partners/${id}`);
 }
 
 export async function updatePartnerAction(formData: FormData): Promise<void> {
@@ -57,8 +57,8 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     updatedAt: new Date().toISOString(),
   };
   await ps.savePartner(updated);
-  revalidatePath('/dashboard/partners');
-  revalidatePath(`/dashboard/partners/${id}`);
+  revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
 export async function setPartnerStatusAction(formData: FormData): Promise<void> {
@@ -78,8 +78,8 @@ export async function setPartnerStatusAction(formData: FormData): Promise<void> 
     const affected = all.filter((s) => s.partnerId === id);
     for (const s of affected) await authStore.deleteAllSessionsFor(s.username);
   }
-  revalidatePath('/dashboard/partners');
-  revalidatePath(`/dashboard/partners/${id}`);
+  revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
 export async function createPartnerStaffAction(
@@ -103,7 +103,7 @@ export async function createPartnerStaffAction(
   // Reject username collision. saveStaff would silently overwrite — and the
   // existing reverse-index of sessions for the clobbered username would then
   // resolve to a record now bound to a different partner. addStaffAction in
-  // /dashboard/team/actions.ts has the same guard for the same reason.
+  // /admin-dashboard/team/actions.ts has the same guard for the same reason.
   const authStore = getAuthStore();
   if (await authStore.getStaff(username)) {
     throw new Error('That username already exists.');
@@ -118,7 +118,7 @@ export async function createPartnerStaffAction(
     createdAt: new Date().toISOString(),
     partnerId,                  // taken from URL, not form
   });
-  revalidatePath(`/dashboard/partners/${partnerId}`);
+  revalidatePath(`/admin-dashboard/partners/${partnerId}`);
 }
 
 export async function removePartnerStaffAction(formData: FormData): Promise<void> {
@@ -129,5 +129,5 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   const staff = await authStore.getStaff(username);
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);
-  if (staff?.partnerId) revalidatePath(`/dashboard/partners/${staff.partnerId}`);
+  if (staff?.partnerId) revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
 }

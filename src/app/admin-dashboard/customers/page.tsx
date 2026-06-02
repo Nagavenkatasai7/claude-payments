@@ -138,7 +138,7 @@ export default async function CustomersPage({
                     return (
                       <tr key={c.senderPhone}>
                         <td>
-                          <Link href={`/dashboard/customers/${c.senderPhone}`}>
+                          <Link href={`/admin-dashboard/customers/${c.senderPhone}`}>
                             +{c.senderPhone}
                           </Link>
                         </td>

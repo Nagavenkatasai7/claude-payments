@@ -76,7 +76,7 @@ export default async function AnalyticsPage({
             {WINDOW_DAYS.map((d) => (
               <Link
                 key={d}
-                href={`/dashboard/analytics?window=${d}`}
+                href={`/admin-dashboard/analytics?window=${d}`}
                 className={`sh-tab ${windowDays === d ? 'active' : ''}`}
               >
                 {d}d

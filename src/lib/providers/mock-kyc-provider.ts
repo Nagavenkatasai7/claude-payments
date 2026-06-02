@@ -17,7 +17,7 @@ export class MockKycProvider implements KycProvider {
     senderPhone: string;
   }): Promise<KycStartResult> {
     return {
-      url: `${this.appBaseUrl}/dashboard/customers/${input.senderPhone}`,
+      url: `${this.appBaseUrl}/admin-dashboard/customers/${input.senderPhone}`,
       providerRef: `mock-${input.senderPhone}`,
     };
   }

@@ -115,7 +115,7 @@ describe('requirePlatformAdmin', () => {
     expect(staff.username).toBe('admin');
   });
 
-  it('redirects /dashboard when role is agent', async () => {
+  it('redirects /admin-dashboard when role is agent', async () => {
     const authStore = getAuthStore();
     await authStore.saveStaff({
       username: 'a', name: 'A', role: 'agent',
@@ -125,10 +125,10 @@ describe('requirePlatformAdmin', () => {
     const token = await authStore.createSession('a');
     cookieJar.set(SESSION_COOKIE, token);
 
-    await expect(requirePlatformAdmin()).rejects.toThrow('REDIRECT:/dashboard');
+    await expect(requirePlatformAdmin()).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
 
-  it('redirects /dashboard when staff has a partnerId (partner-admin, not platform)', async () => {
+  it('redirects /admin-dashboard when staff has a partnerId (partner-admin, not platform)', async () => {
     const authStore = getAuthStore();
     const partnerStore = getPartnerStore();
     await partnerStore.savePartner({
@@ -144,6 +144,6 @@ describe('requirePlatformAdmin', () => {
     const token = await authStore.createSession('pa');
     cookieJar.set(SESSION_COOKIE, token);
 
-    await expect(requirePlatformAdmin()).rejects.toThrow('REDIRECT:/dashboard');
+    await expect(requirePlatformAdmin()).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
 });

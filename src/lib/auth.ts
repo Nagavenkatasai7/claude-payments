@@ -30,16 +30,16 @@ export async function requireStaff(): Promise<Staff> {
 
 export async function requireAdmin(): Promise<Staff> {
   const staff = await requireStaff();
-  if (staff.role !== 'admin') redirect('/dashboard');
+  if (staff.role !== 'admin') redirect('/admin-dashboard');
   return staff;
 }
 
-// P3: a platform admin = role:'admin' AND no partnerId. Used by /dashboard/team
+// P3: a platform admin = role:'admin' AND no partnerId. Used by /admin-dashboard/team
 // and partner-staff CRUD actions.
 export async function requirePlatformAdmin(): Promise<Staff> {
   const staff = await requireStaff();
   if (staff.role !== 'admin' || staff.partnerId !== undefined) {
-    redirect('/dashboard');
+    redirect('/admin-dashboard');
   }
   return staff;
 }

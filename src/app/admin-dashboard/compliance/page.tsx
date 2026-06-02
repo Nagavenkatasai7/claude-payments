@@ -302,7 +302,7 @@ export default async function CompliancePage() {
                       <td className="sh-amount">{count}</td>
                       <td>
                         <a
-                          href={`/dashboard/transactions?phone=${encodeURIComponent(phone)}`}
+                          href={`/admin-dashboard/transactions?phone=${encodeURIComponent(phone)}`}
                           className="sh-mini-btn"
                         >
                           View transfers

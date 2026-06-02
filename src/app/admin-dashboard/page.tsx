@@ -102,7 +102,7 @@ export default async function DashboardPage() {
                 : 'transfers need'}{' '}
               attention
               <a
-                href="/dashboard/compliance"
+                href="/admin-dashboard/compliance"
                 className="sh-recipient-sub"
                 style={{ marginLeft: 'auto' }}
               >
@@ -118,7 +118,7 @@ export default async function DashboardPage() {
               <div className="sh-card-title">Recent transactions</div>
               <div className="sh-card-sub">Last 5</div>
             </div>
-            <a href="/dashboard/transactions" className="sh-btn-secondary">
+            <a href="/admin-dashboard/transactions" className="sh-btn-secondary">
               View all →
             </a>
           </div>
@@ -171,7 +171,7 @@ export default async function DashboardPage() {
               <div className="sh-card-title">Next due schedules</div>
               <div className="sh-card-sub">Next 3</div>
             </div>
-            <a href="/dashboard/schedules" className="sh-btn-secondary">
+            <a href="/admin-dashboard/schedules" className="sh-btn-secondary">
               View all →
             </a>
           </div>

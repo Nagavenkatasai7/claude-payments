@@ -35,7 +35,7 @@ export async function addStaffAction(formData: FormData): Promise<void> {
     createdAt: new Date().toISOString(),
   };
   await store.saveStaff(staff);
-  revalidatePath('/dashboard/team');
+  revalidatePath('/admin-dashboard/team');
 }
 
 export async function updatePermissionsAction(
@@ -49,7 +49,7 @@ export async function updatePermissionsAction(
   if (staff.role === 'admin') return; // admins always have all permissions
   staff.permissions = readPermissions(formData);
   await store.saveStaff(staff);
-  revalidatePath('/dashboard/team');
+  revalidatePath('/admin-dashboard/team');
 }
 
 export async function removeStaffAction(formData: FormData): Promise<void> {
@@ -62,5 +62,5 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
     throw new Error('Admin accounts cannot be removed here.');
   }
   await store.deleteStaff(username);
-  revalidatePath('/dashboard/team');
+  revalidatePath('/admin-dashboard/team');
 }
