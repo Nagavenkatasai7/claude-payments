@@ -32,7 +32,10 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
   await page.getByRole('button', { name: /sign in/i }).click();
 
   await expect(page).toHaveURL(/\/admin-dashboard/);
-  await expect(page.getByText(/overview/i).first()).toBeVisible();
+  // Assert the VISIBLE page heading. (A loose getByText(/overview/i).first() now
+  // matches the hidden command-palette "Overview" option in the top bar first —
+  // it's in the DOM inside the closed <dialog> — and resolves to "hidden".)
+  await expect(page.locator('.sh-page-title')).toContainText(/overview/i);
 
   await page.getByRole('link', { name: /analytics/i }).click();
   await expect(page).toHaveURL(/\/admin-dashboard\/analytics/);
