@@ -35,8 +35,13 @@ export function createKycCaseStore(
   now: () => number = () => Date.now(),
 ) {
   async function appendAudit(phone: string, entry: AuditEntry): Promise<void> {
-    const existing = (await redis.hgetall(auditKey(phone))) ?? {};
-    const seq = Object.keys(existing).length;
+    const existing = await redis.hgetall(auditKey(phone));
+    // HGETALL is a FLAT [field0, value0, ...] array under
+    // automaticDeserialization:false (see getAudit) — so the entry count is
+    // length/2, not Object.keys().length (which would double it on the real client).
+    const seq = Array.isArray(existing)
+      ? Math.floor(existing.length / 2)
+      : Object.keys(existing ?? {}).length;
     // Field = `<iso>#<seq>` so entries sort chronologically and never collide.
     await redis.hset(auditKey(phone), { [`${entry.at}#${String(seq).padStart(6, '0')}`]: JSON.stringify(entry) });
   }
@@ -93,10 +98,31 @@ export function createKycCaseStore(
     },
 
     async getAudit(phone: string): Promise<AuditEntry[]> {
-      const h = (await redis.hgetall(auditKey(phone))) ?? {};
-      return Object.entries(h)
+      const raw = await redis.hgetall(auditKey(phone));
+      if (!raw) return [];
+      // The real Upstash client is built with `automaticDeserialization:false`,
+      // so HGETALL returns a FLAT [field0, value0, field1, value1, ...] array —
+      // NOT a {field: value} object (the in-memory fake returns the object shape).
+      // Normalize both to [field, value] pairs before parsing. Field names are
+      // `<iso>#<seq>` strings and are NOT JSON, so we must only parse the values.
+      const pairs: [string, string][] = Array.isArray(raw)
+        ? Array.from({ length: Math.floor(raw.length / 2) }, (_, i) => [
+            String(raw[i * 2]),
+            String(raw[i * 2 + 1]),
+          ])
+        : Object.entries(raw as Record<string, string>);
+      return pairs
         .sort(([a], [b]) => (a < b ? -1 : 1))
-        .map(([, v]) => JSON.parse(v) as AuditEntry);
+        .map(([, v]) => {
+          // A corrupt/partial entry from a crashed mid-write must not 500 the
+          // page — the audit trail is non-critical UI. Skip unparseable values.
+          try {
+            return JSON.parse(v) as AuditEntry;
+          } catch {
+            return null;
+          }
+        })
+        .filter((e): e is AuditEntry => e !== null);
     },
 
     async listNeedsReview(): Promise<Customer[]> {
