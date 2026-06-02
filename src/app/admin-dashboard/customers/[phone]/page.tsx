@@ -38,7 +38,12 @@ export default async function CustomerDetailPage({
     scoped.listTransfers(),
     dailyVolumeStore.getTodayCents(phone),
     scoped.getPartner(customer.partnerId),
-    getKycCaseStore(getStore()).getAudit(phone),
+    // The audit trail is non-critical UI. A store hiccup must degrade to an
+    // empty trail, never 500 the whole detail page (getAudit is already
+    // defensive about corrupt entries; this catches transport-level failures).
+    getKycCaseStore(getStore())
+      .getAudit(phone)
+      .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>),
   ]);
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';

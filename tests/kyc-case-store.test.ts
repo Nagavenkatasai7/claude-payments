@@ -79,4 +79,49 @@ describe('kyc-case-store', () => {
     await seed({ kycReviewState: undefined });
     expect(await store.listNeedsReview()).toHaveLength(0);
   });
+
+  it('getAudit returns [] for a customer with no audit log', async () => {
+    // Use a phone no other test writes an audit hash for — the fake's hash map
+    // is not cleared by beforeEach (only `dump` is), so reuse PHONE would leak.
+    expect(await store.getAudit('15559990000')).toEqual([]);
+  });
+
+  it('getAudit parses the FLAT-ARRAY hgetall reply (real Upstash, automaticDeserialization:false)', async () => {
+    // With automaticDeserialization:false, Upstash returns HGETALL as a flat
+    // [field0, value0, field1, value1, ...] array — NOT a {field: value} object.
+    // getAudit must parse only the VALUE slots and skip the field-name strings
+    // (field names like "2026-06-02T22:52:44.740Z#000000" are not valid JSON).
+    const arrayRedis = {
+      async hgetall() {
+        return [
+          '2026-06-02T22:52:44.740Z#000000',
+          JSON.stringify({ actor: 'persona', action: 'inquiry.created', at: '2026-06-02T22:52:44.740Z' }),
+          '2026-06-02T22:52:45.000Z#000001',
+          JSON.stringify({ actor: 'admin', action: 'review.approve', reason: 'ok', at: '2026-06-02T22:52:45.000Z' }),
+        ];
+      },
+    } as unknown as Parameters<typeof createKycCaseStore>[0];
+    const s = createKycCaseStore(arrayRedis, cs);
+    const audit = await s.getAudit(PHONE);
+    expect(audit).toHaveLength(2);
+    expect(audit[0]).toMatchObject({ actor: 'persona', action: 'inquiry.created' });
+    expect(audit[1]).toMatchObject({ actor: 'admin', action: 'review.approve', reason: 'ok' });
+  });
+
+  it('getAudit tolerates a corrupt/partial entry instead of throwing (degrades gracefully)', async () => {
+    const arrayRedis = {
+      async hgetall() {
+        return [
+          '2026-06-02T22:52:44.740Z#000000',
+          '{ broken json',
+          '2026-06-02T22:52:45.000Z#000001',
+          JSON.stringify({ actor: 'admin', action: 'review.approve', at: '2026-06-02T22:52:45.000Z' }),
+        ];
+      },
+    } as unknown as Parameters<typeof createKycCaseStore>[0];
+    const s = createKycCaseStore(arrayRedis, cs);
+    const audit = await s.getAudit(PHONE);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actor: 'admin', action: 'review.approve' });
+  });
 });
