@@ -14,6 +14,11 @@ export async function getCurrentStaff(): Promise<Staff | null> {
   const staff = await getAuthStore().getStaff(username);
   if (!staff) return null;
 
+  // Team: a suspended staff member is locked out immediately, mid-session, on the
+  // very next request — mirrors the suspended-partner bounce below. Suspend also
+  // revokes sessions proactively, but this is the defense-in-depth re-check.
+  if (staff.status === 'suspended') return null;
+
   // P3: partner-scoped staff bounce when their partner is suspended/missing.
   if (staff.partnerId) {
     const partner = await getPartnerStore().getPartner(staff.partnerId);

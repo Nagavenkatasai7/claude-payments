@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
+import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { hashPassword } from '@/lib/password';
@@ -10,7 +11,8 @@ import { newTransferId } from '@/lib/id';
 import type { Partner, PartnerStatus, PartnerId, StaffRole } from '@/lib/types';
 
 export async function createPartnerAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  // M5: creating a tenant is platform governance — partner-admins must not reach it.
+  await requirePlatformAdmin();
   const name = String(formData.get('name') ?? '').trim();
   if (!name) throw new Error('Partner name is required.');
 
@@ -37,13 +39,15 @@ export async function createPartnerAction(formData: FormData): Promise<void> {
 }
 
 export async function updatePartnerAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '').trim();
   if (!id) throw new Error('Partner id is required.');
 
   const ps = getPartnerStore();
   const existing = await ps.getPartner(id);
-  if (!existing) throw new Error('Partner not found.');
+  // M4: a partner-admin may edit only their OWN partner's branding; a platform
+  // admin may edit any. Generic message — don't disclose out-of-scope partners.
+  if (!existing || !canSee(scopeOf(staff), id)) throw new Error('Partner not found.');
 
   const submittedCountries = formData.getAll('countries').map(String) as Partner['countries'];
   const updated: Partner = {
@@ -62,7 +66,9 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
 }
 
 export async function setPartnerStatusAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  // M4: suspend/reactivate is platform governance (a tenant shouldn't suspend
+  // itself, and a partner-admin must not suspend a rival). Platform-admin only.
+  await requirePlatformAdmin();
   const id = String(formData.get('id') ?? '').trim();
   const status = String(formData.get('status') ?? '') as PartnerStatus;
   if (status !== 'active' && status !== 'suspended') {
@@ -127,7 +133,14 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   if (!username) throw new Error('username is required.');
   const authStore = getAuthStore();
   const staff = await authStore.getStaff(username);
+  if (!staff) return;
+  // M3: this is the PARTNER-staff endpoint. Refuse to delete a platform account
+  // here — the dedicated team/actions guard protects platform admins, and this
+  // twin must not be a bypass. Platform staff are managed from the Team page.
+  if (!staff.partnerId) {
+    throw new Error('Use the Team page to manage platform staff.');
+  }
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);
-  if (staff?.partnerId) revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
+  revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
 }

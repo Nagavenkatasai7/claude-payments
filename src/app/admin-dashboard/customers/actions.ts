@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireAdmin, requireScope } from '@/lib/auth';
+import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -14,13 +15,17 @@ import type { CountryCode, KycStatus, PartnerId } from '@/lib/types';
 const VALID_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
 
 export async function markCustomerVerifiedAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  const staff = await requireAdmin();
   const phone = String(formData.get('phone') ?? '').trim();
   if (!phone) throw new Error('Phone is required.');
 
   const cs = getCustomerStore(getStore());
   const customer = await cs.getCustomer(phone);
-  if (!customer) throw new Error('Customer not found.');
+  // H3 fix: the customer key is global (customer:<phone>), so an unscoped lookup
+  // lets a partner-admin flip another tenant's customer. Reject out-of-scope.
+  if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
+    throw new Error('Customer not found.');
+  }
 
   const nowIso = new Date().toISOString();
   await cs.saveCustomer({
@@ -106,14 +111,18 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
 }
 
 export async function markCustomerRejectedAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  const staff = await requireAdmin();
   const phone = String(formData.get('phone') ?? '').trim();
-  const reason = String(formData.get('reason') ?? '').trim() || 'Manual rejection by staff';
+  const reason =
+    String(formData.get('reason') ?? '').trim().slice(0, 500) || 'Manual rejection by staff';
   if (!phone) throw new Error('Phone is required.');
 
   const cs = getCustomerStore(getStore());
   const customer = await cs.getCustomer(phone);
-  if (!customer) throw new Error('Customer not found.');
+  // H3 fix (see markCustomerVerifiedAction): reject out-of-scope.
+  if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
+    throw new Error('Customer not found.');
+  }
 
   const nowIso = new Date().toISOString();
   await cs.saveCustomer({
