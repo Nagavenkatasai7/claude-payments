@@ -106,7 +106,14 @@ console.log('  one-time-link   : look for a *-link / url field in one-time-link.
 Run: `node --env-file=.env.local scripts/persona-spike.mjs`
 Expected: three JSON blobs written to `tests/fixtures/persona/`. If the base URL or header names are wrong, the first response is an error JSON — adjust `PERSONA_API_BASE` / header casing and re-run until `inquiry id` prints.
 
-- [ ] **Step 3: Record confirmed facts inline in this plan** — edit this Task-0 block to note the exact: (a) base URL that worked, (b) the JSON path to the one-time-link URL, (c) the inquiry-status string values, (d) header names accepted. Subsequent tasks reference these.
+- [x] **Step 3: Record confirmed facts inline in this plan** — ✅ **CONFIRMED 2026-06-02 against the live sandbox:**
+  - **Base URL:** `https://api.withpersona.com/api/v1` (create → HTTP 201).
+  - **Headers accepted:** `Authorization: Bearer <key>`, `Persona-Version: 2025-12-08`, `Key-Inflection: kebab`, `Content-Type: application/json`, `Idempotency-Key`.
+  - **Create body:** `{ data: { attributes: { 'inquiry-template-version-id': <itmplv_…>, 'reference-id': <phone> } } }` → returns `data.id` (`inq_…`), `data.attributes.status`.
+  - **One-time link:** `POST /inquiries/{id}/generate-one-time-link` → URL at **`meta.one-time-link`** (`https://withpersona.com/verify?code=…`). ⇒ Task 3's `persona-client.generateOneTimeLink` path `j.meta['one-time-link']` is CORRECT.
+  - **Inquiry attribute keys (kebab):** `status, reference-id, note, behaviors, tags, creator, reviewer-comment, updated-at, created-at, started-at, expires-at, completed-at, failed-at, marked-for-review-at, decisioned-at, expired-at, redacted-at, previous-step-name, next-step-name, fields`. ⇒ status lifecycle = `created → started → completed → {decisioned: approved|declined} | failed | marked-for-review | expired`.
+  - **⚠️ `fields` keys are snake_case** (the template's own field names), NOT kebab: e.g. `current_government_id` (type `government_id`), `selected_id_class`, `selected_country_code`, `address_street_1`. The top-level attrs are kebab; only `fields.*` is snake. **The id-number source needs a COMPLETED inquiry to confirm** (the spike inquiry is `created`, all values null) — Task 5 uses defensive multi-key extraction and `idLast4` is display-only (a miss = no last-4 shown, never a crash); confirm the exact key during go-live with a completed sandbox inquiry.
+  - **Still TODO (webhook disabled):** the exact `Persona-Signature` header casing + a real event payload — captured at go-live (runbook). The Task-4 verifier + Task-5 parser are written format-stable so only constants/field-keys may need a tweak.
 
 - [ ] **Step 4: Capture a real webhook payload + signature** — in the Persona dashboard, temporarily set the webhook to a request-capture endpoint (e.g. an RequestBin/webhook.site URL) OR use the dashboard's "send test event", complete a sandbox inquiry, and save one captured delivery's raw body to `tests/fixtures/persona/webhook-inquiry-completed.json` and note the exact `Persona-Signature` header format. (If capture isn't feasible now, Task 5 uses a hand-built fixture matching the documented shape and we reconcile when the webhook is enabled.)
 
@@ -507,10 +514,15 @@ export function parsePersonaEvent(body: unknown): PersonaEvent | null {
     if (!name || !eventId) return null;
     const inq = attrs?.payload?.data;
     const iAttrs = inq?.attributes ?? {};
+    // NB (Task-0 finding): `fields` keys are snake_case; the exact id-number key is
+    // unconfirmed until a COMPLETED sandbox inquiry. Try the likely candidates;
+    // idLast4 is display-only so an undefined result degrades gracefully.
+    const f = iAttrs?.fields ?? {};
     const idField =
-      iAttrs?.fields?.['identification-number']?.value ??
-      iAttrs?.['identification-number'] ??
-      iAttrs?.['government-id-number'];
+      f?.identification_number?.value ??
+      f?.current_government_id?.value?.identification_number ??
+      f?.government_id_number?.value ??
+      iAttrs?.['identification-number'];
     return {
       eventId,
       name,

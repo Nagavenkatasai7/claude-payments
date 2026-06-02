@@ -1,0 +1,197 @@
+{
+  "data": {
+    "type": "inquiry",
+    "id": "inq_ADJEfKWHbib2Wiq9TWrcK9nmV5bHn7",
+    "attributes": {
+      "status": "created",
+      "reference-id": "spike-customer-0001",
+      "note": null,
+      "behaviors": {
+        "api-version-less-than-minimum-count": null,
+        "autofill-cancels": null,
+        "autofill-starts": null,
+        "behavior-threat-level": null,
+        "bot-score": null,
+        "completion-time": null,
+        "debugger-attached": null,
+        "devtools-open": null,
+        "distraction-events": null,
+        "hesitation-baseline": null,
+        "hesitation-count": null,
+        "hesitation-percentage": null,
+        "hesitation-time": null,
+        "mobile-sdk-version-less-than-minimum-count": null,
+        "request-spoof-attempts": null,
+        "shortcut-copies": null,
+        "shortcut-pastes": null,
+        "user-agent-spoof-attempts": null
+      },
+      "tags": [],
+      "creator": "API",
+      "reviewer-comment": null,
+      "updated-at": "2026-06-02T22:10:03.000Z",
+      "created-at": "2026-06-02T22:10:03.000Z",
+      "started-at": null,
+      "expires-at": "2026-06-03T22:10:03.000Z",
+      "completed-at": null,
+      "failed-at": null,
+      "marked-for-review-at": null,
+      "decisioned-at": null,
+      "expired-at": null,
+      "redacted-at": null,
+      "previous-step-name": null,
+      "next-step-name": "start_biometric_a6f761_start",
+      "fields": {
+        "current_government_id": {
+          "type": "government_id",
+          "value": null
+        },
+        "selected_country_code": {
+          "type": "string",
+          "value": "US"
+        },
+        "selected_id_class": {
+          "type": "string",
+          "value": null
+        },
+        "address_street_1": {
+          "type": "string",
+          "value": null
+        },
+        "address_street_2": {
+          "type": "string",
+          "value": null
+        },
+        "address_city": {
+          "type": "string",
+          "value": null
+        },
+        "address_subdivision": {
+          "type": "string",
+          "value": null
+        },
+        "address_postal_code": {
+          "type": "string",
+          "value": null
+        },
+        "address_country_code": {
+          "type": "string",
+          "value": null
+        },
+        "birthdate": {
+          "type": "date",
+          "value": null
+        },
+        "expiration_date": {
+          "type": "date",
+          "value": null
+        },
+        "email_address": {
+          "type": "string",
+          "value": null
+        },
+        "identification_class": {
+          "type": "string",
+          "value": null
+        },
+        "identification_number": {
+          "type": "string",
+          "value": null
+        },
+        "hashed_identification_number": {
+          "type": "string",
+          "value": null
+        },
+        "name_first": {
+          "type": "string",
+          "value": null
+        },
+        "name_middle": {
+          "type": "string",
+          "value": null
+        },
+        "name_last": {
+          "type": "string",
+          "value": null
+        },
+        "phone_number": {
+          "type": "string",
+          "value": null
+        },
+        "card_access_number": {
+          "type": "string",
+          "value": null
+        },
+        "issue_date": {
+          "type": "date",
+          "value": null
+        },
+        "issuing_authority": {
+          "type": "string",
+          "value": null
+        },
+        "government_identification_number_map": {
+          "type": "json",
+          "value": null
+        },
+        "current_selfie": {
+          "type": "selfie",
+          "value": null
+        }
+      }
+    },
+    "relationships": {
+      "account": {
+        "data": {
+          "type": "account",
+          "id": "act_ADJEfKWpRbUMXQPEyRi38B3pjxXX1x"
+        }
+      },
+      "template": {
+        "data": null
+      },
+      "inquiry-template": {
+        "data": {
+          "type": "inquiry-template",
+          "id": "itmpl_ADJEfKW8HdKZFvQCUgQPXBasxaESVz"
+        }
+      },
+      "inquiry-template-version": {
+        "data": {
+          "type": "inquiry-template-version",
+          "id": "itmplv_ADJEfKWDHSQvU4PiEEbRyf8U1JrQ9p"
+        }
+      },
+      "transaction": {
+        "data": null
+      },
+      "reviewer": {
+        "data": null
+      },
+      "reports": {
+        "data": []
+      },
+      "verifications": {
+        "data": []
+      },
+      "sessions": {
+        "data": [
+          {
+            "type": "inquiry-session",
+            "id": "iqse_ADJEfKWK8MYJuWML8ta6A4oqCZvq7N"
+          }
+        ]
+      },
+      "documents": {
+        "data": []
+      },
+      "selfies": {
+        "data": []
+      }
+    }
+  },
+  "meta": {
+    "one-time-link": "https://withpersona.com/verify?code=SCRUBBED-SANDBOX-TOKEN",
+    "one-time-link-short": "https://perso.na/s/SCRUBBED-SANDBOX-TOKEN"
+  }
+}
