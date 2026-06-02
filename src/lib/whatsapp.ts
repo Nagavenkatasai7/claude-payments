@@ -2,6 +2,9 @@ import { env } from './env';
 import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
+  verificationStatusParams,
+  type VerificationState,
+  TEMPLATE_LANG,
 } from './whatsapp-templates';
 
 export const RECIPIENT_TEMPLATE_NAME = 'transfer_delivered';
@@ -551,4 +554,30 @@ export async function sendCtaUrl(
   const body = await res.text().catch(() => '');
   console.warn(`sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`);
   await sendText(to, fallbackText);
+}
+
+/**
+ * Phase 2 — notify a customer of a KYC verification state change. Uses the
+ * per-state template name (env getter), degrading to free-form text via
+ * sendTemplateOrText until the verification_* templates are Meta-approved
+ * (mirrors the OTP/cron fail-soft pattern). Never throws.
+ */
+export async function sendVerificationStatus(
+  phone: string,
+  state: VerificationState,
+  name?: string,
+): Promise<void> {
+  const params = verificationStatusParams(name ?? 'there', state);
+  const templateName = {
+    needed: env.whatsappVerificationNeededTemplate,
+    in_progress: env.whatsappVerificationInProgressTemplate,
+    received: env.whatsappVerificationInProgressTemplate,
+    verified: env.whatsappVerificationVerifiedTemplate,
+    failed: env.whatsappVerificationFailedTemplate,
+  }[state];
+  await sendTemplateOrText(
+    phone,
+    () => sendTemplate(phone, templateName, TEMPLATE_LANG, params),
+    `${params[0]}, ${params[1]}`,
+  );
 }
