@@ -2,7 +2,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { getCustomerAuthStore } from '@/lib/customer-auth-store';
+import { getCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
 import { getOtpStore, type OtpPurpose } from '@/lib/otp-store';
 import { getPendingAuthStore } from '@/lib/pending-auth-store';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
@@ -110,8 +110,14 @@ export async function registerAction(
       { pwnedCheck: isPwnedPassword },
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Could not create your account.';
-    return { step: 'register', error: message };
+    // Only reflect intentional validation/policy messages. Any other throw — a
+    // crypto/env misconfig (e.g. an unset FIELD_ENCRYPTION_KEY), an Argon2
+    // failure, a Redis outage — is internal and must NOT leak to the customer.
+    if (err instanceof CustomerInputError) {
+      return { step: 'register', error: err.message };
+    }
+    console.error('registerAction: unexpected failure', err);
+    return { step: 'register', error: 'Could not create your account. Please try again.' };
   }
 
   if (onboardToken) {
@@ -268,8 +274,11 @@ export async function resetAction(
   try {
     updated = await authStore.setPassword(phone, password, { pwnedCheck: isPwnedPassword });
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Could not reset your password.';
-    return { step: 'otp', phone, pendingToken, error: message };
+    if (err instanceof CustomerInputError) {
+      return { step: 'otp', phone, pendingToken, error: err.message };
+    }
+    console.error('resetAction: unexpected failure', err);
+    return { step: 'otp', phone, pendingToken, error: 'Could not reset your password. Please try again.' };
   }
   if (!updated) return { step: 'login', error: SESSION_EXPIRED };
 

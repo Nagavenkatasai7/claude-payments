@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
-import { createCustomerAuthStore } from '@/lib/customer-auth-store';
+import { createCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
 import { createOtpStore } from '@/lib/otp-store';
 import { createOnboardingTokenStore } from '@/lib/onboarding-token';
 import { createPendingAuthStore } from '@/lib/pending-auth-store';
@@ -117,6 +117,32 @@ describe('registerAction', () => {
     const second = await register();
     expect(second.step).toBe('register');
     expect(second.error).toBeTruthy();
+  });
+
+  it('does NOT leak an internal/config error to the customer (generic fallback)', async () => {
+    // Simulate an unset FIELD_ENCRYPTION_KEY (or any internal failure): the raw
+    // message names an env var and must never reach the form.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = vi
+      .spyOn(authStore, 'registerCustomer')
+      .mockRejectedValueOnce(new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes'));
+    const state = await register();
+    expect(state.step).toBe('register');
+    expect(state.error).toBe('Could not create your account. Please try again.');
+    expect(state.error).not.toMatch(/FIELD_ENCRYPTION_KEY/);
+    expect(state.error).not.toMatch(/32 bytes/);
+    spy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it('still surfaces an intentional CustomerInputError message verbatim', async () => {
+    const spy = vi
+      .spyOn(authStore, 'registerCustomer')
+      .mockRejectedValueOnce(new CustomerInputError('An account already exists for this number.'));
+    const state = await register();
+    expect(state.step).toBe('register');
+    expect(state.error).toMatch(/already exists/i);
+    spy.mockRestore();
   });
 });
 
