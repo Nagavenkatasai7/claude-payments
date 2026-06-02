@@ -19,7 +19,7 @@ describe('persona-client', () => {
     const res = await client.createInquiry({ referenceId: '15551230000', idempotencyKey: 'k1' });
     expect(res.inquiryId).toBe('inq_abc123');
     expect(res.status).toBe('created');
-    const [url, init] = (fetchImpl.mock.calls[0] as [string, any]);
+    const [url, init] = (fetchImpl.mock.calls[0] as unknown as [string, any]);
     expect(url).toBe('https://api.withpersona.com/api/v1/inquiries');
     expect(init.method).toBe('POST');
     expect(init.headers['Authorization']).toBe('Bearer persona_sandbox_x');
