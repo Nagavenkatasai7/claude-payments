@@ -103,34 +103,22 @@ export default async function CustomersPage({
           {scoped.scope.kind === 'platform' && (
             <form
               method="get"
-              style={{
-                display: 'flex',
-                gap: 10,
-                padding: '16px 20px',
-                borderBottom: '1px solid var(--sh-border)',
-                flexWrap: 'wrap',
-                alignItems: 'center',
-              }}
+              className="sh-toolbar"
+              style={{ margin: 0, padding: '14px 16px', borderBottom: '1px solid var(--sh-border)' }}
             >
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  fontSize: 12,
-                  color: 'var(--sh-text-secondary)',
-                }}
+              <select
+                name="partner"
+                defaultValue={partnerFilter}
+                className="sh-select"
+                aria-label="Filter by partner"
               >
-                Partner
-                <select name="partner" defaultValue={partnerFilter} className="sh-input">
-                  <option value="">All partners</option>
-                  {Object.values(partnerById).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                <option value="">All partners</option>
+                {Object.values(partnerById).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
               <button type="submit" className="sh-btn-secondary">Apply</button>
             </form>
           )}

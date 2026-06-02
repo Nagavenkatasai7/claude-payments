@@ -16,15 +16,18 @@ import {
   Cell,
 } from 'recharts';
 
+// Aligned to the refreshed sh-* token palette (Radix-grounded). Recharts needs
+// literal colors (it can't read CSS custom properties), so these mirror the
+// --sh-* dot/border values used elsewhere in the dashboard.
 const COLORS = {
-  primary: '#635bff',
-  success: '#16a34a',
-  warning: '#f0c000',
-  danger: '#df1b41',
-  info: '#635bff',
-  neutral: '#697386',
-  bgGrid: '#e6ebf1',
-  text: '#697386',
+  primary: '#533afd',
+  success: '#30a46c',
+  warning: '#ffc53d',
+  danger: '#e5484d',
+  info: '#0090ff',
+  neutral: '#8b8d98',
+  bgGrid: '#e8e8ec',
+  text: '#60646c',
 };
 
 const STATUS_COLORS: Record<string, string> = {
