@@ -10,6 +10,7 @@ import {
 import type { Schedule, Transfer } from '@/lib/types';
 import { money } from './format';
 import { Sidebar } from './sidebar';
+import { ExpandableTable, type ExpandableColumn } from './expandable-table';
 
 function usd(n: number): string {
   return `$${n.toFixed(2)}`;
@@ -29,6 +30,20 @@ function scheduleWhen(s: Schedule): string {
   if (s.frequency === 'monthly') return `Monthly · day ${s.dayOfMonth}`;
   return `Weekly · ${WEEKDAYS[s.dayOfWeek ?? 0]}`;
 }
+
+// Glance table: Recipient/Amount/Status always visible on mobile; Funding behind tap.
+const RECENT_TX_COLUMNS: ExpandableColumn[] = [
+  { label: 'Recipient', primary: true },
+  { label: 'Amount', primary: true },
+  { label: 'Funding' },
+  { label: 'Status', primary: true },
+];
+// 3-column table: all primary → renders as a plain card on mobile (no toggle).
+const NEXT_DUE_COLUMNS: ExpandableColumn[] = [
+  { label: 'Recipient', primary: true },
+  { label: 'Amount', primary: true },
+  { label: 'When', primary: true },
+];
 
 function statusPillClass(status: Transfer['status']): string {
   if (status === 'delivered') return 'sh-pill-success';
@@ -71,10 +86,7 @@ export default async function DashboardPage() {
           </div>
         </div>
 
-        <section
-          className="sh-metrics"
-          style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}
-        >
+        <section className="sh-metrics">
           <div className="sh-metric sh-metric-primary">
             <div className="sh-metric-label">Commission today</div>
             <div className="sh-metric-value">{usd(summary.commissionToday)}</div>
@@ -122,47 +134,31 @@ export default async function DashboardPage() {
               View all →
             </a>
           </div>
-          <div className="sh-ledger-wrap">
-            {recent.length === 0 ? (
-              <div className="sh-empty">No transactions yet.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr>
-                    <th>Recipient</th>
-                    <th>Amount</th>
-                    <th>Funding</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recent.map((t) => (
-                    <tr key={t.id}>
-                      <td>
-                        <div className="sh-recipient">{t.recipientName}</div>
-                      </td>
-                      <td>
-                        <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
-                        {t.sourceCurrency !== 'USD' && (
-                          <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
-                        )}
-                        <div className="sh-recipient-sub">
-                          → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
-                        </div>
-                      </td>
-                      <td>{humanizeFunding(t.fundingMethod)}</td>
-                      <td>
-                        <span className={`sh-pill ${statusPillClass(t.status)}`}>
-                          <span className="sh-pill-dot"></span>
-                          {t.status.replace('_', ' ')}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={RECENT_TX_COLUMNS}
+            empty={<>No transactions yet.</>}
+            rows={recent.map((t) => ({
+              key: t.id,
+              label: t.recipientName,
+              cells: [
+                <div className="sh-recipient" key="r">{t.recipientName}</div>,
+                <div key="a">
+                  <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                  {t.sourceCurrency !== 'USD' && (
+                    <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                  )}
+                  <div className="sh-recipient-sub">
+                    → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
+                  </div>
+                </div>,
+                humanizeFunding(t.fundingMethod),
+                <span className={`sh-pill ${statusPillClass(t.status)}`} key="s">
+                  <span className="sh-pill-dot"></span>
+                  {t.status.replace('_', ' ')}
+                </span>,
+              ],
+            }))}
+          />
         </section>
 
         <section className="sh-card">
@@ -175,28 +171,19 @@ export default async function DashboardPage() {
               View all →
             </a>
           </div>
-          <div className="sh-ledger-wrap">
-            {nextDue.length === 0 ? (
-              <div className="sh-empty">No schedules due soon.</div>
-            ) : (
-              <table className="sh-table">
-                <thead>
-                  <tr><th>Recipient</th><th>Amount</th><th>When</th></tr>
-                </thead>
-                <tbody>
-                  {nextDue.map((s) => (
-                    <tr key={s.id}>
-                      <td>
-                        <div className="sh-recipient">{s.recipientName}</div>
-                      </td>
-                      <td className="sh-amount">{money(s.amountSource, s.sourceCurrency)}</td>
-                      <td>{scheduleWhen(s)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          <ExpandableTable
+            columns={NEXT_DUE_COLUMNS}
+            empty={<>No schedules due soon.</>}
+            rows={nextDue.map((s) => ({
+              key: s.id,
+              label: s.recipientName,
+              cells: [
+                <div className="sh-recipient" key="r">{s.recipientName}</div>,
+                <span className="sh-amount" key="a">{money(s.amountSource, s.sourceCurrency)}</span>,
+                scheduleWhen(s),
+              ],
+            }))}
+          />
         </section>
       </main>
     </>
