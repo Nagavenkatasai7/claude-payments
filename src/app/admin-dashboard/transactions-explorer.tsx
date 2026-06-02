@@ -5,12 +5,14 @@ import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { accountLast4 } from '@/lib/payout-format';
 import { TransactionsTabs } from './transactions-tabs';
 import { Icon } from './icons';
+import type { KycInfo } from './kyc-badge';
 
 export interface TransactionsExplorerProps {
   transfers: Transfer[];
   staff: Staff[];
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
+  kycByPhone: Record<string, KycInfo>;
   partnerById: Record<string, Partner>;
   currentPartner: string;
   canCancel: boolean;
@@ -107,6 +109,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
         staff={props.staff}
         staffByUsername={props.staffByUsername}
         tierByPhone={props.tierByPhone}
+        kycByPhone={props.kycByPhone}
         partnerById={props.partnerById}
         canCancel={props.canCancel}
         canResend={props.canResend}

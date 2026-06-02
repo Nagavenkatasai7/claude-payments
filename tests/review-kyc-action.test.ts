@@ -10,7 +10,7 @@ const cs = createCustomerStore(redis, {} as unknown as Store);
 const kcs = createKycCaseStore(redis, cs);
 const notify = vi.hoisted(() => vi.fn(async () => {}));
 
-vi.mock('@/lib/auth', () => ({ requireAdmin: async () => ({ username: 'admin', role: 'admin' }), requireScope: async () => ({}) }));
+vi.mock('@/lib/auth', () => ({ requireAdmin: async () => ({ username: 'admin', name: 'Main Admin', role: 'admin' }), requireScope: async () => ({}) }));
 vi.mock('@/lib/staff-scope', () => ({ scopeOf: () => 'platform', canSee: (_s: unknown, pid: string) => pid !== 'other' }));
 vi.mock('@/lib/store', () => ({ getStore: () => ({}) }));
 vi.mock('@/lib/customer-store', async (o) => ({ ...(await o() as object), getCustomerStore: () => cs }));
@@ -39,7 +39,7 @@ describe('reviewKycAction', () => {
     const c = await cs.getCustomer(PHONE);
     expect(c?.kycStatus).toBe('verified');
     expect(c?.kycReviewState).toBe('approved');
-    expect(c?.kycApprovedBy).toBe('admin');
+    expect(c?.kycApprovedBy).toBe('Main Admin (admin)'); // display name + stable username
     expect((await kcs.getAudit(PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
     expect(notify).toHaveBeenCalledWith(PHONE, 'verified', undefined);
   });

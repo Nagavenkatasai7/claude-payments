@@ -358,6 +358,8 @@ input, select, textarea { font: inherit; color: inherit; }
 .sh-pill-info .sh-pill-dot { background: var(--sh-info-dot); }
 .sh-pill-neutral { background: var(--sh-neutral-bg); color: var(--sh-neutral); border-color: var(--sh-neutral-border); }
 .sh-pill-neutral .sh-pill-dot { background: var(--sh-neutral-dot); }
+/* KYC column: a status pill plus optional review/screening badges, wrapping. */
+.sh-kyc-cell { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
 
 /* === Tabs (segmented) === */
 .sh-tabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--sh-gray-3); border-radius: var(--sh-radius-sm); flex-wrap: wrap; }

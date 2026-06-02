@@ -7,6 +7,7 @@ import { hasPermission } from '@/lib/permissions';
 import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
 import { TransactionsExplorer } from '../transactions-explorer';
+import type { KycInfo } from '../kyc-badge';
 import {
   cancelTransferAction,
   assignTransferAction,
@@ -29,7 +30,16 @@ export default async function TransactionsPage({
   ]);
   const now = new Date();
   const tierByPhone: Record<string, Tier> = {};
-  for (const c of customers) tierByPhone[c.senderPhone] = deriveTier(c, now);
+  const kycByPhone: Record<string, KycInfo> = {};
+  for (const c of customers) {
+    tierByPhone[c.senderPhone] = deriveTier(c, now);
+    kycByPhone[c.senderPhone] = {
+      kycStatus: c.kycStatus,
+      kycReviewState: c.kycReviewState,
+      watchlistHit: c.watchlistHit,
+      pepHit: c.pepHit,
+    };
+  }
 
   const partnerById: Record<string, Partner> = {};
   for (const p of partners) partnerById[p.id] = p;
@@ -59,6 +69,7 @@ export default async function TransactionsPage({
               allStaff.map((s) => [s.username, s.name]),
             )}
             tierByPhone={tierByPhone}
+            kycByPhone={kycByPhone}
             partnerById={partnerById}
             currentPartner={partnerFilter}
             canCancel={hasPermission(viewer, 'canCancel')}
