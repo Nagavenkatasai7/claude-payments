@@ -858,7 +858,7 @@ input, select, textarea { font: inherit; color: inherit; }
   transition: transform .16s ease, border-color .16s ease, background .16s ease;
 }
 .lp-corridor-tile:hover { transform: translateY(-2px); border-color: rgba(37, 211, 102, .5); background: rgba(37, 211, 102, .08); }
-.lp-flag { font-size: 26px; line-height: 1; }
+.lp-flag { width: 38px; height: auto; border-radius: 5px; box-shadow: 0 3px 9px rgba(0, 0, 0, .38); display: block; }
 .lp-corridor-name { font-size: 13.5px; font-weight: 600; color: var(--lp-text-100); }
 .lp-corridor-facts {
   grid-area: facts;
@@ -938,13 +938,13 @@ input, select, textarea { font: inherit; color: inherit; }
 .lp-final .lp-sub { max-width: none; }
 
 /* ---- Footer ---- */
-.lp-footer { border-top: 1px solid var(--lp-border); padding: 48px 0 28px; background: var(--lp-bg-800); }
+.lp-footer { border-top: 1px solid rgba(37, 211, 102, .4); padding: 48px 0 28px; background: linear-gradient(180deg, var(--lp-bg-700) 0%, var(--lp-bg-800) 100%); box-shadow: inset 0 1px 0 rgba(37, 211, 102, .18); }
 .lp-footer-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; }
-.lp-footer-h { display: block; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 14px; color: var(--lp-text-100); }
+.lp-footer-h { display: block; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 14px; color: #57E398; }
 .lp-footer-col ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
-.lp-footer-col li, .lp-footer-col a { font-size: 14px; color: var(--lp-text-300); }
-.lp-footer-col a:hover { color: var(--lp-text-100); }
-.lp-footer-legal { font-size: 12.5px; color: var(--lp-text-300); line-height: 1.6; margin: 0; }
+.lp-footer-col li, .lp-footer-col a { font-size: 14px; color: #C9D6F2; }
+.lp-footer-col a:hover { color: #FFFFFF; }
+.lp-footer-legal { font-size: 12.5px; color: #BAC6E2; line-height: 1.6; margin: 0; }
 .lp-footer-bottom { max-width: 1120px; margin: 32px auto 0; padding: 22px 20px 0; border-top: 1px solid var(--lp-border); font-size: 13px; color: var(--lp-text-300); }
 
 /* ---- Mobile sticky CTA (hidden by default; shown ≤600px) ---- */

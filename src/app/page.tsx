@@ -32,15 +32,17 @@ export const metadata: Metadata = {
 // fast and mostly static.
 export const revalidate = 3600;
 
+// `code` = ISO-3166 alpha-2 for flagcdn.com SVGs (renders as a real flag in every
+// browser; emoji flags don't render in Chrome/Arc on macOS).
 const COUNTRIES = [
-  { name: 'United States', short: 'US', flag: '🇺🇸' },
-  { name: 'Canada', short: 'Canada', flag: '🇨🇦' },
-  { name: 'United Kingdom', short: 'UK', flag: '🇬🇧' },
-  { name: 'UAE', short: 'UAE', flag: '🇦🇪' },
-  { name: 'Singapore', short: 'Singapore', flag: '🇸🇬' },
-  { name: 'Australia', short: 'Australia', flag: '🇦🇺' },
-  { name: 'New Zealand', short: 'New Zealand', flag: '🇳🇿' },
-  { name: 'India', short: 'India', flag: '🇮🇳' },
+  { name: 'United States', short: 'US', code: 'us' },
+  { name: 'Canada', short: 'Canada', code: 'ca' },
+  { name: 'United Kingdom', short: 'UK', code: 'gb' },
+  { name: 'UAE', short: 'UAE', code: 'ae' },
+  { name: 'Singapore', short: 'Singapore', code: 'sg' },
+  { name: 'Australia', short: 'Australia', code: 'au' },
+  { name: 'New Zealand', short: 'New Zealand', code: 'nz' },
+  { name: 'India', short: 'India', code: 'in' },
 ];
 
 function fmtRate(rate: number): string {
@@ -384,9 +386,15 @@ export default async function LandingPage() {
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    <span className="lp-flag" aria-hidden="true">
-                      {c.flag}
-                    </span>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      className="lp-flag"
+                      src={`https://flagcdn.com/${c.code}.svg`}
+                      alt=""
+                      width={36}
+                      height={27}
+                      loading="lazy"
+                    />
                     <span className="lp-corridor-name">{c.short}</span>
                   </a>
                 ))}
