@@ -1,12 +1,14 @@
 import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
+import { isSendVerified } from './kyc-gate';
 import { env } from './env';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type { CustomerStore } from './customer-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { ScheduleStore } from './schedule-store';
-import type { Schedule, Transfer } from './types';
+import type { KycProvider } from './providers/kyc-provider';
+import type { Customer, Schedule, Transfer } from './types';
 
 export interface CronDeps {
   store: Store;
@@ -14,11 +16,18 @@ export interface CronDeps {
   customerStore: CustomerStore;         // NEW (Item 4): skip opted-out customers
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month accrual + EDD trigger
   scheduleStore: ScheduleStore;
+  kycProvider: KycProvider;             // NEW (Phase 3) — verify-before-send hand-off url
   now: number;
   sendScheduledLink: (
     schedule: Schedule,
     transfer: Transfer,
     url: string,
+  ) => Promise<void>;
+  // NEW (Phase 3) — notify the owner their scheduled send was skipped pending KYC.
+  sendScheduledSkipped?: (
+    schedule: Schedule,
+    owner: Customer | null,
+    kycUrl: string,
   ) => Promise<void>;
 }
 
@@ -44,6 +53,19 @@ export async function runDueSchedules(
     // stays active so it resumes if the customer re-subscribes with START).
     const owner = await deps.customerStore.getCustomer(schedule.phone);
     if (owner?.optedOutAt) continue;
+    // Phase 3 verify-before-send gate — skip an unverified owner's scheduled send
+    // and notify them. Do NOT createTransfer and do NOT bump lastRunAt, so the
+    // schedule stays active and resumes automatically once they verify.
+    if (!isSendVerified(owner)) {
+      if (deps.sendScheduledSkipped) {
+        const start = await deps.kycProvider.startVerification({
+          customerId: schedule.phone,
+          senderPhone: schedule.phone,
+        });
+        await deps.sendScheduledSkipped(schedule, owner ?? null, start.url);
+      }
+      continue;
+    }
     try {
       const transfer = await createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
         phone: schedule.phone,
@@ -55,6 +77,7 @@ export async function runDueSchedules(
         payoutMethod: schedule.payoutMethod,
         payoutDestination: schedule.payoutDestination,
         fundingMethod: schedule.fundingMethod,
+        senderKycStatus: owner.kycStatus,
       });
       if (transfer.status !== 'blocked') {
         const url = `${env.appBaseUrl}/pay/${transfer.id}`;

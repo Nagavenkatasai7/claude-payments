@@ -8,6 +8,25 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Schedule } from '@/lib/types';
+import type { CustomerStore } from '@/lib/customer-store';
+import type { KycProvider } from '@/lib/providers/kyc-provider';
+
+// Phase 3: cron now requires a kycProvider for the verify-before-send hand-off.
+const kycProvider: KycProvider = {
+  startVerification: async () => ({ url: 'https://kyc.example/verify', providerRef: 'ref_1' }),
+  getStatus: async () => 'pending',
+  handleWebhook: async () => null,
+};
+
+// Seed a verified owner for the schedule's phone so the verify-before-send gate
+// passes for the existing-behavior tests (they exercise the fire path).
+async function seedVerified(cs: CustomerStore, phone = '15551234567'): Promise<void> {
+  await cs.saveCustomer({
+    senderPhone: phone, firstSeenAt: '2026-01-01T00:00:00Z',
+    kycStatus: 'verified', senderCountry: 'US', partnerId: 'default',
+    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+  });
+}
 
 beforeEach(() => {
   resetRateCacheForTests();
@@ -60,12 +79,13 @@ describe('runDueSchedules', () => {
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
+    await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     await scheduleStore.saveSchedule(sched('due', 21));
     await scheduleStore.saveSchedule(sched('notdue', 5));
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -84,13 +104,14 @@ describe('runDueSchedules', () => {
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
+    await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     const blocked = sched('b', 21);
     blocked.recipientName = 'John Doe'; // on the watchlist
     await scheduleStore.saveSchedule(blocked);
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -105,6 +126,7 @@ describe('runDueSchedules', () => {
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
+    await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     // Schedule is due today (day 21) but its endDate is yesterday
     const pastEnded: Schedule = {
       ...sched('past-ended', 21),
@@ -115,7 +137,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -133,6 +155,7 @@ describe('runDueSchedules', () => {
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
+    await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     // Due today with an end date well in the future
     const futureEnded: Schedule = {
       ...sched('future-ended', 21),
@@ -142,7 +165,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -160,12 +183,13 @@ describe('runDueSchedules', () => {
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
+    await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     // sched() helper does not set endDate — plain active schedule
     await scheduleStore.saveSchedule(sched('no-end', 21));
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -192,7 +216,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -220,11 +244,39 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, now: NOW,
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
     expect(result.fired).toBe(1);
     expect(notified).toHaveLength(1);
+  });
+
+  it('Phase 3: SKIPS a due schedule whose owner is unverified — no transfer, lastRunAt untouched, sendScheduledSkipped called once', async () => {
+    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = makeDeps();
+    await scheduleStore.saveSchedule(sched('unverified', 21));
+    await customerStore.saveCustomer({
+      senderPhone: '15551234567', firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'grandfathered', senderCountry: 'US', partnerId: 'default',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const notified: string[] = [];
+    const skipped: { id: string; url: string }[] = [];
+
+    const result = await runDueSchedules({
+      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+      sendScheduledSkipped: async (s, _owner, url) => { skipped.push({ id: s.id, url }); },
+    });
+
+    expect(result.fired).toBe(0);
+    expect(notified).toHaveLength(0);
+    expect(await store.listTransfers()).toHaveLength(0); // no transfer minted
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].id).toBe('unverified');
+    expect(skipped[0].url).toContain('kyc.example');
+    const saved = await scheduleStore.getSchedule('unverified');
+    expect(saved?.status).toBe('active');           // stays active — resumes once verified
+    expect(saved?.lastRunAt).toBeUndefined();        // not bumped
   });
 });

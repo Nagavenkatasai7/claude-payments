@@ -12,8 +12,8 @@ export const SEND_GATE_REASON = 'kyc_required' as const;
  * cap invariant stays byte-for-byte (deriveTier still treats grandfathered as
  * T1 for *amount* limits; this gate governs whether they may send AT ALL).
  */
-export function isSendVerified(
-  customer: { kycStatus: KycStatus } | null | undefined,
-): boolean {
+export function isSendVerified<T extends { kycStatus: KycStatus }>(
+  customer: T | null | undefined,
+): customer is T & { kycStatus: 'verified' } {
   return customer?.kycStatus === 'verified';
 }

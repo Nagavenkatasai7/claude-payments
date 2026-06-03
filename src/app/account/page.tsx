@@ -18,7 +18,7 @@ function maskPhone(phone: string): string {
  */
 /** Map the KYC state to a CTA label + sublabel for the account-home card. */
 function kycCta(customer: { kycStatus: string; kycReviewState?: string }): { label: string; note: string; done: boolean } {
-  if (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered') {
+  if (customer.kycStatus === 'verified') {
     return { label: 'Identity verified', note: 'You can send money in WhatsApp.', done: true };
   }
   switch (customer.kycReviewState) {

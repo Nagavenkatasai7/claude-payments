@@ -74,6 +74,7 @@ describe('customer store', () => {
       payoutMethod: 'upi',
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified',
     });
     // Ensure a measurable gap so firstSeenAt (transfer.createdAt) and
     // updatedAt (now) fall in different milliseconds on fast hardware.
@@ -132,6 +133,7 @@ describe('customer-store P1: senderCountry', () => {
       payoutMethod: 'upi',
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified',
     });
     const cs = createCustomerStore(fakeRedis(), store);
     const { customer } = await cs.upsertOnFirstInbound('15550008888');

@@ -31,6 +31,22 @@ function toolCall(id: string, name: string, args: object): ChatMessage {
   };
 }
 
+// Phase 3: the verify-before-send gate blocks any non-'verified' sender. These
+// end-to-end flows exercise the send path, so seed the sender verified up front.
+// firstSeenAt is "now", so the customer is still T0 within the 3-day window —
+// cap behavior in the flows is unchanged.
+async function seedVerifiedCustomer(
+  customerStore: ReturnType<typeof createCustomerStore>,
+  phone: string,
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  await customerStore.saveCustomer({
+    senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
+    senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+    createdAt: nowIso, updatedAt: nowIso,
+  });
+}
+
 beforeEach(() => {
   resetRateCacheForTests();
   vi.stubGlobal(
@@ -53,6 +69,7 @@ describe('end-to-end happy path', () => {
     const customerStore = createCustomerStore(redis, store);
     const scheduleStore = createScheduleStore(redis, customerStore);
     const draftStore = createDraftStore(redis);
+    await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
     // Scripted Kimi: quote -> create -> link -> final reply.
     const script: ChatMessage[] = [
@@ -139,6 +156,7 @@ describe('end-to-end returning customer', () => {
     const draftStore = createDraftStore(redis);
     const customerStore = createCustomerStore(redis, store);
     const scheduleStore = createScheduleStore(redis, customerStore);
+    await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
     // Pre-seed: Mom is a saved recipient from a previous (mock) transfer.
     await store.upsertRecipient(PHONE, {
@@ -286,6 +304,11 @@ describe('end-to-end new customer with cap', () => {
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const scheduleStore = createScheduleStore(redis, customerStore);
     const draftStore = createDraftStore(redis);
+    // Phase 3: a verified sender (still T0 within the 3-day window, so the cap UX
+    // below is unchanged) — required for send_approve_picker/create_transfer to
+    // pass the verify-before-send gate. The observation invariant (verified
+    // mid-window stays T0/$500) is still asserted at the end of this test.
+    await seedVerifiedCustomer(customerStore, PHONE);
 
     // Turn 1: [NEW CUSTOMER] greeting — bot calls check_send_limit({amount_usd: 0})
     const turn1: ChatMessage[] = [
@@ -341,7 +364,7 @@ describe('end-to-end new customer with cap', () => {
     active = [...scripts[idx++]];
     await agent.runAgentTurn(PHONE, 'hi', { isNewConversation: true, isNewCustomer: true });
     const customerAfterT1 = await customerStore.getCustomer(PHONE);
-    expect(customerAfterT1?.kycStatus).toBe('not_started');
+    expect(customerAfterT1?.kycStatus).toBe('verified'); // Phase 3: seeded verified so the send path passes the gate
 
     // Turn 2: over-cap
     active = [...scripts[idx++]];

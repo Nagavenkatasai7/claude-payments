@@ -37,7 +37,7 @@ describe('backfillCustomersOnce', () => {
       await createTransfer(store, ps, mvs, {
         phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
         recipientName: 'Mom', recipientPhone: '919876543210',
-        payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
+        payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified',
       });
     }
     const result = await backfillCustomersOnce(store, cs);
@@ -56,7 +56,7 @@ describe('backfillCustomersOnce', () => {
     await createTransfer(store, ps, mvs, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified',
     });
     const first = await backfillCustomersOnce(store, cs);
     const second = await backfillCustomersOnce(store, cs);
@@ -74,7 +74,7 @@ describe('backfillCustomersOnce', () => {
     await createTransfer(store, ps, mvs, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'm@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified',
     });
     // Pre-existing customer record (e.g. lazy backfill from webhook ran first)
     await cs.saveCustomer({

@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { createStore } from '@/lib/store';
+import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import type { Transfer } from '@/lib/types';
 
@@ -24,9 +25,18 @@ vi.mock('@/lib/whatsapp', () => ({
 }));
 
 let store: ReturnType<typeof createStore>;
+let customerStore: ReturnType<typeof createCustomerStore>;
 vi.mock('@/lib/store', async (orig) => {
   const real = await orig<typeof import('@/lib/store')>();
   return { ...real, getStore: () => store };
+});
+
+// Phase 3: the pay route's existing-transfer branch loads the owner via
+// getCustomerStore and gates on verified. Back it with the SAME fake store so
+// the seeded verified owner is visible to the route.
+vi.mock('@/lib/customer-store', async (orig) => {
+  const real = await orig<typeof import('@/lib/customer-store')>();
+  return { ...real, getCustomerStore: () => customerStore };
 });
 
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
@@ -58,8 +68,17 @@ function post(id: string, body?: unknown) {
   return POST(req, { params: Promise.resolve({ transferId: id }) }) as Promise<{ status: number }>;
 }
 
-beforeEach(() => {
-  store = createStore(fakeRedis());
+beforeEach(async () => {
+  const redis = fakeRedis();
+  store = createStore(redis);
+  customerStore = createCustomerStore(redis, store);
+  // Verified owner for the transfer's phone so the verify-before-send gate passes.
+  const nowIso = new Date().toISOString();
+  await customerStore.saveCustomer({
+    senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified',
+    senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+    createdAt: nowIso, updatedAt: nowIso,
+  });
   initiateTransfer.mockClear();
 });
 
@@ -87,5 +106,19 @@ describe('pay route — scheduled transfer with no bank details (Item 2)', () =>
     const res = await post('s3'); // bodyless, like today's scheduled/re-open links
     expect(res.status).toBe(200);
     expect(initiateTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  it('Phase 3: an UNVERIFIED owner is blocked with 403 (kyc_required) — never charged', async () => {
+    // Overwrite the verified seed for this phone with an unverified status.
+    const nowIso = new Date().toISOString();
+    await customerStore.saveCustomer({
+      senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'grandfathered',
+      senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+    await store.saveTransfer(makeTransfer({ id: 's4', payoutDestination: '123456789 HDFC0001234' }));
+    const res = await post('s4');
+    expect(res.status).toBe(403);
+    expect(initiateTransfer).not.toHaveBeenCalled();
   });
 });

@@ -1,4 +1,5 @@
 import { createTransfer } from './transfer-create';
+import { isSendVerified } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Store } from './store';
@@ -30,7 +31,7 @@ export interface FinalizeStores {
 
 export type FinalizeResult =
   | { ok: true; transferId: string }
-  | { ok: false; error: 'expired_or_used' | 'cap' | 'blocked'; transferId?: string };
+  | { ok: false; error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required'; transferId?: string };
 
 /**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
@@ -53,6 +54,10 @@ export async function finalizeDraftPayment(
   const customer =
     (await customerStore.getCustomer(peek.senderPhone)) ??
     (await customerStore.upsertOnFirstInbound(peek.senderPhone)).customer;
+
+  // Phase 3 verify-before-send gate — refuse BEFORE consuming the draft so an
+  // unverified sender keeps their (single-use) draft and can retry once verified.
+  if (!isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
   const todayUsedCents = await dailyVolumeStore.getTodayCents(peek.senderPhone);
@@ -94,6 +99,7 @@ export async function finalizeDraftPayment(
     sourceOfFunds: draft.sourceOfFunds,
     occupation: draft.occupation,
     senderName: customer.fullName,
+    senderKycStatus: customer.kycStatus,
   });
 
   if (transfer.complianceStatus === 'blocked') {

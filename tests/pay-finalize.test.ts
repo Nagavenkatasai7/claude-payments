@@ -29,7 +29,10 @@ async function makeDraft(
   payoutDestination: string | undefined = 'mom@upi',
   payoutMethod: 'upi' | 'bank' = 'upi',
 ) {
-  await stores.customerStore.upsertOnFirstInbound(PHONE);
+  const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+  // Phase 3: these existing-behavior tests exercise the success path, so the
+  // sender must be verified (upsertOnFirstInbound defaults to 'not_started').
+  await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
   return stores.draftStore.createDraft({
     senderPhone: PHONE,
     recipient: {
@@ -79,6 +82,23 @@ describe('finalizeDraftPayment', () => {
 
     // Transfer count incremented
     expect(await stores.store.getTransferCount(PHONE)).toBe(1);
+  });
+
+  it('Phase 3: an unverified owner → { ok:false, error:"kyc_required" }, draft NOT consumed, no transfer', async () => {
+    const stores = buildStores();
+    const draftId = await makeDraft(stores, 200);
+    // Override the (verified) seed from makeDraft with an unverified status.
+    const c = await stores.customerStore.getCustomer(PHONE);
+    await stores.customerStore.saveCustomer({ ...c!, kycStatus: 'grandfathered' });
+
+    const result = await finalizeDraftPayment(stores, draftId);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unexpected');
+    expect(result.error).toBe('kyc_required');
+    // Draft preserved (peek-before-consume) and no transfer minted.
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await stores.store.getTransferCount(PHONE)).toBe(0);
   });
 
   it('unknown/expired draftId → { ok:false, error:"expired_or_used" }', async () => {

@@ -5,6 +5,7 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, recordBlockedAttempt } from './transfer-create';
+import { isSendVerified, SEND_GATE_REASON } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
@@ -622,6 +623,17 @@ async function getQuoteTool(
     const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
       await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
 
+    // Phase 3 verify-before-send gate — a NEW condition on kycStatus, independent
+    // of the existing T0/Suspended cap branch below. Hand off the kyc_url before
+    // building any quote so the bot directs the customer to verify first.
+    if (!isSendVerified(customer)) {
+      const start = await ctx.kycProvider.startVerification({
+        customerId: ctx.phone,
+        senderPhone: ctx.phone,
+      });
+      return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
+    }
+
     // Receive-first (Win A): when a finite, positive target rupee amount is
     // given, back-solve the send amount; the recipient gets exactly that INR
     // and the fee is added on top (today's model). amount_inr wins over
@@ -720,6 +732,11 @@ async function createTransferTool(
     const customer =
       (await ctx.customerStore.getCustomer(ctx.phone)) ??
       (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+    // Phase 3 verify-before-send gate (last bot chokepoint before mint).
+    if (!isSendVerified(customer)) {
+      const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+      return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
+    }
     {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
@@ -751,6 +768,7 @@ async function createTransferTool(
         sourceOfFunds: draft.sourceOfFunds,
         occupation: draft.occupation,
         senderName: customer.fullName,
+        senderKycStatus: customer.kycStatus,
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
@@ -784,6 +802,11 @@ async function createTransferTool(
     args.source_currency,
     args.destination_country,
   );
+  // Phase 3 verify-before-send gate (legacy explicit-args create path).
+  if (!isSendVerified(legacyCustomer)) {
+    const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+    return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
+  }
   const amountSource = Number(args.amount_usd);
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap check on the legacy path (cron-fired or no-button cold-start)
@@ -821,6 +844,7 @@ async function createTransferTool(
       sourceOfFunds: legacySof,
       occupation: legacyOcc,
       senderName: legacyCustomer.fullName,
+      senderKycStatus: legacyCustomer.kycStatus,
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
@@ -1119,6 +1143,12 @@ async function sendApprovePickerTool(
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
   const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
     await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
+  // Phase 3 verify-before-send gate — refuse to build the approval card / draft
+  // for an unverified sender; hand off the kyc_url instead.
+  if (!isSendVerified(customer)) {
+    const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+    return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
+  }
   const amountSource = Number(args.amount_usd);
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
@@ -1367,6 +1397,13 @@ async function checkSendLimitTool(
 ): Promise<ToolResult> {
   // Resolve currency+rates and reuse `customer` — no second getCustomer.
   const { customer, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  // Phase 3 verify-before-send gate — direct the customer to verify BEFORE the
+  // cap/EDD logic. A NEW condition on kycStatus, independent of the T0/Suspended
+  // branch below (which is left intact).
+  if (!isSendVerified(customer)) {
+    const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+    return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
+  }
   const amountSource = Number(args.amount_usd ?? 0);
   // Convert to USD-equivalent for the cap evaluation (for USD partners toUsd===1).
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;

@@ -62,6 +62,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified',
     });
     await scheduleStore.saveSchedule({
       id: 'SCH-' + phone, phone, amountUsd: 50,
