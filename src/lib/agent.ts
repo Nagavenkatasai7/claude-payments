@@ -165,7 +165,7 @@ export function createAgent(deps: AgentDeps) {
           messages.push({
             role: 'system',
             content:
-              '[NEW CUSTOMER] This is the first message ever from this phone. Greet warmly, mention the $500/day cap for the first 3 days, call check_send_limit({amount_usd: 0}) to fetch the kyc_url, then share that URL and ask how much they want to send.',
+              '[NEW CUSTOMER] This is the first message ever from this phone. Greet warmly, explain they must verify their identity before their first send, call check_send_limit({amount_usd: 0}) to fetch the kyc_url, and share that URL asking them to verify first. You may mention they can send up to $500/day for their first 3 days once verified. Do NOT ask how much they want to send until they are verified.',
           });
         } else if (turn.tierReminderDayOfWindow) {
           messages.push({
@@ -190,6 +190,23 @@ export function createAgent(deps: AgentDeps) {
       }
       if (round === 0 && senderDefaultsNote) {
         messages.push({ role: 'system', content: senderDefaultsNote });
+      }
+      // Deterministic verify-before-send guard. The hard gate is enforced at the
+      // tool level (every quote/transfer re-checks isSendVerified), but the model
+      // must ALSO lead the conversation with verification instead of collecting an
+      // amount — otherwise an unverified sender gets "how much?" before being asked
+      // to verify. Server-injected so it never depends on the model reading prompt.ts.
+      if (round === 0 && !isSendVerified(noteCustomer)) {
+        messages.push({
+          role: 'system',
+          content:
+            '[UNVERIFIED SENDER] This customer is NOT identity-verified, so they cannot send money yet — ' +
+            'every quote and transfer is blocked at the tool level until they verify. If they signal any ' +
+            'intent to send (even before naming an amount), do NOT ask "how much", do NOT call get_quote ' +
+            'or send_approve_picker, and do NOT collect recipient/payment details. Instead call ' +
+            'check_send_limit({amount_usd: 0}) for the kyc_url and ask them to verify first, sharing the link. ' +
+            'Do not claim their verification is complete or in progress — just ask them to finish verifying.',
+        });
       }
       messages.push(...history);
 
