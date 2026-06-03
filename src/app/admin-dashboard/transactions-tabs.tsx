@@ -6,12 +6,14 @@ import { money } from './format';
 import { MaskedDestination } from './masked-destination';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
 import { Icon } from './icons';
+import { KycBadge, type KycInfo } from './kyc-badge';
 
 const TRANSACTION_COLUMNS: ExpandableColumn[] = [
   { label: 'Recipient', primary: true },
   { label: 'Country' },
   { label: 'Partner' },
   { label: 'Tier' },
+  { label: 'KYC' },
   { label: 'Amount', primary: true },
   { label: 'Funding' },
   { label: 'Payment received' },
@@ -86,6 +88,7 @@ export interface TransactionsTabsProps {
   staff: Staff[];
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
+  kycByPhone: Record<string, KycInfo>;
   partnerById: Record<string, Partner>;
   canCancel: boolean;
   canResend: boolean;
@@ -106,6 +109,7 @@ export function TransactionsTabs({
   staff,
   staffByUsername,
   tierByPhone,
+  kycByPhone,
   partnerById,
   canCancel,
   canResend,
@@ -163,6 +167,7 @@ export function TransactionsTabs({
             ) : (
               <span key="tier" className="sh-recipient-sub">—</span>
             ),
+            <KycBadge key="kyc" kyc={kycByPhone[t.phone]} />,
             <div key="amount">
               <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
               {t.sourceCurrency !== 'USD' && (

@@ -63,7 +63,10 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
     throw new Error('Customer not found.');
   }
 
-  await getKycCaseStore(getStore()).review(phone, decision, staff.username, reason);
+  // Attribute the reviewer by display name + stable username, e.g. "Main Admin (forextransfer)".
+  const reviewer =
+    staff.name && staff.name !== staff.username ? `${staff.name} (${staff.username})` : staff.username;
+  await getKycCaseStore(getStore()).review(phone, decision, reviewer, reason);
   await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName).catch(
     () => {},
   );

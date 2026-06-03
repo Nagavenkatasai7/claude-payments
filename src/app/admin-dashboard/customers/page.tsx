@@ -6,6 +6,7 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+import { KycBadge } from '../kyc-badge';
 import type { Customer, Partner, Tier } from '@/lib/types';
 
 function tierBadge(tier: Tier): string {
@@ -142,7 +143,7 @@ export default async function CustomersPage({
                   <span className={tierBadge(tier)} key="tier">
                     {tierLabel(tier, c, now)}
                   </span>,
-                  c.kycStatus,
+                  <KycBadge kyc={c} key="kyc" />,
                   <div key="life">
                     {/* Lifetime sent is a USD-equivalent aggregate across all transfers — always USD */}
                     <div className="sh-amount">${(life.cents / 100).toFixed(2)} USD</div>
