@@ -11,6 +11,7 @@ import type { PartnerStore } from './partner-store';
 import type {
   CountryCode, CurrencyCode, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
+  KycStatus,                                                                 // NEW (Phase 3 gate)
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
@@ -33,6 +34,7 @@ export interface CreateTransferInput {
   sourceOfFunds?: SourceOfFunds;
   occupation?: Occupation;
   senderName?: string;          // sender legal name for sanctions screening (from customer.fullName)
+  senderKycStatus: KycStatus;   // NEW (Phase 3) — the chokepoint backstop refuses unless 'verified'
 }
 
 export async function createTransfer(
@@ -41,6 +43,12 @@ export async function createTransfer(
   monthlyVolumeStore: MonthlyVolumeStore,   // NEW (KYC) — cumulative-month accrual + EDD trigger
   input: CreateTransferInput,
 ): Promise<Transfer> {
+  // Phase 3 backstop: the chokepoint refuses to mint a transfer for an unverified
+  // sender. Callers gate earlier with friendly UX (a kyc_url hand-off / a cron
+  // skip); this is the last line of defense so no future caller can bypass it.
+  if (input.senderKycStatus !== 'verified') {
+    throw new Error('kyc_required');
+  }
   const transferCount = await store.getTransferCount(input.phone);
   const rates = await getFxRates(input.sourceCurrency);
   // Resolve destination — default to IN/INR for full back-compat (all existing tests unchanged).

@@ -121,6 +121,7 @@ describe('createTransfer side-effects', () => {
       payoutMethod: 'upi',
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified',
     });
     const saved = await store.listRecipients('15551234567', 3);
     expect(saved).toHaveLength(1);
@@ -144,6 +145,7 @@ describe('createTransfer side-effects', () => {
       payoutMethod: 'upi' as const,
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer' as const,
+      senderKycStatus: 'verified' as const,
     };
     await createTransfer(store, partnerStore, monthlyVolumeStore, input);
     const firstList = await store.listRecipients('15551234567', 3);

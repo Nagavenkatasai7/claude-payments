@@ -21,6 +21,17 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
   const dailyVolumeStore = createDailyVolumeStore(redis);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+  // Phase 3: the verify-before-send gate blocks any non-'verified' sender. These
+  // existing-behavior tests exercise the send path, so seed the default customer
+  // as verified up front (still T0 within the 3-day window → cap behavior intact).
+  // Written synchronously into the fake store so it's present before any tool runs;
+  // tests that want a different status saveCustomer() over it afterward.
+  const nowIso = new Date().toISOString();
+  redis.dump.set(`customer:${phone}`, JSON.stringify({
+    senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
+    senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+    createdAt: nowIso, updatedAt: nowIso,
+  }));
   return {
     phone,
     store,
@@ -628,11 +639,11 @@ describe('create_transfer — daily volume increment', () => {
     }));
     const redis = fakeRedis();
     const ctx = buildCtx(redis, '15551234567');
-    // Mark customer grandfathered so the cap doesn't block
+    // Verified + outside the 3-day window (T1) so the gate passes and the cap doesn't block
     await ctx.customerStore.saveCustomer({
       senderPhone: '15551234567',
       firstSeenAt: '2026-01-01T00:00:00Z',
-      kycStatus: 'grandfathered',
+      kycStatus: 'verified',
       kycVerifiedAt: '2026-01-01T00:00:00Z',
       senderCountry: 'US',
       createdAt: '2026-01-01T00:00:00Z',
@@ -652,11 +663,14 @@ describe('create_transfer — daily volume increment', () => {
 });
 
 describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
+  // Phase 3: a SENDABLE customer (verified) outside the 3-day window so the
+  // verify-before-send gate passes and the cap (T1) doesn't block these
+  // EDD/Travel-Rule plumbing assertions.
   async function grandfathered(ctx: ReturnType<typeof buildCtx>) {
     await ctx.customerStore.saveCustomer({
       senderPhone: ctx.phone,
       firstSeenAt: '2026-01-01T00:00:00Z',
-      kycStatus: 'grandfathered',
+      kycStatus: 'verified',
       kycVerifiedAt: '2026-01-01T00:00:00Z',
       senderCountry: 'US',
       createdAt: '2026-01-01T00:00:00Z',
@@ -760,7 +774,7 @@ describe('multi-currency dormancy invariant', () => {
     await ctx.customerStore.saveCustomer({
       senderPhone: '15559991111',
       firstSeenAt: now,
-      kycStatus: 'not_started',
+      kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'multi-test',
       createdAt: now,
@@ -869,7 +883,7 @@ describe('get_quote: receive-first (amount_inr) branch', () => {
     await ctx.customerStore.saveCustomer({
       senderPhone: '15559991111',
       firstSeenAt: now,
-      kycStatus: 'not_started',
+      kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'multi-gbp-test',
       createdAt: now,
@@ -1554,5 +1568,64 @@ describe('any-to-any corridors — destination_country threading', () => {
     expect(s).toContain('AED');
     expect(s).not.toContain('₹');
     expect(s).toContain('1 USD = AED');
+  });
+});
+
+describe('Phase 3 verify-before-send gate (bot tools)', () => {
+  const UNVERIFIED = '15557770000';
+
+  // Seed an unverified (grandfathered) customer, overwriting buildCtx's verified seed.
+  async function seedUnverified(ctx: ReturnType<typeof buildCtx>) {
+    const nowIso = new Date().toISOString();
+    await ctx.customerStore.saveCustomer({
+      senderPhone: ctx.phone, firstSeenAt: nowIso, kycStatus: 'grandfathered',
+      senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+  }
+
+  it('check_send_limit returns within_cap:false + reason kyc_required + a kyc_url; no cap fields needed', async () => {
+    const ctx = buildCtx(fakeRedis(), UNVERIFIED);
+    await seedUnverified(ctx);
+    const r = await executeTool('check_send_limit', { amount_usd: 100 }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.reason).toBe('kyc_required');
+    expect(typeof r.kyc_url).toBe('string');
+  });
+
+  it('get_quote returns within_cap:false + kyc_url and does NOT produce a quote', async () => {
+    const ctx = buildCtx(fakeRedis(), UNVERIFIED);
+    await seedUnverified(ctx);
+    const r = await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.reason).toBe('kyc_required');
+    expect(typeof r.kyc_url).toBe('string');
+    expect(r.amount_inr).toBeUndefined(); // no quote built
+  });
+
+  it('create_transfer (legacy path) returns kyc_required and creates NO transfer', async () => {
+    const redis = fakeRedis();
+    const ctx = buildCtx(redis, UNVERIFIED);
+    await seedUnverified(ctx);
+    const r = await executeTool('create_transfer', {
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    expect(r.kyc_required).toBe(true);
+    expect(r.reason).toBe('kyc_required');
+    expect(typeof r.kyc_url).toBe('string');
+    expect([...redis.dump.keys()].filter((k) => k.startsWith('transfer:'))).toHaveLength(0);
+  });
+
+  it('send_approve_picker returns kyc_required and creates NO draft', async () => {
+    const ctx = buildCtx(fakeRedis(), UNVERIFIED);
+    await seedUnverified(ctx);
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    expect(r.kyc_required).toBe(true);
+    expect(r.sent).toBeUndefined();
+    expect(r.draft_id).toBeUndefined();
   });
 });

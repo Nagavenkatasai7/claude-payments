@@ -13,7 +13,7 @@ export const metadata = { title: 'Verify your identity · SmartRemit' };
  */
 export default async function VerifyPage() {
   const customer = await requireCustomer();
-  const done = customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered';
+  const done = customer.kycStatus === 'verified';
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
 

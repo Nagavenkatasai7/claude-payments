@@ -7,6 +7,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
+import { isSendVerified } from '@/lib/kyc-gate';
 import { completePaymentStage1 } from '@/lib/payment';
 import { sendText } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
@@ -118,6 +119,15 @@ export async function POST(
 
     if (transfer) {
       // ── Existing transfer branch ──────────────────────────────────────
+      // Phase 3 verify-before-send gate — covers scheduled/cron transfers paid
+      // on this page. Refuse BEFORE any charge if the owner isn't verified.
+      const owner = await getCustomerStore(store).getCustomer(transfer.phone);
+      if (!isSendVerified(owner)) {
+        return NextResponse.json(
+          { ok: false, error: 'Please verify your identity before sending.', kyc_required: true },
+          { status: 403 },
+        );
+      }
       const hasDestination = (transfer.payoutDestination ?? '').trim() !== '';
       if (!hasDestination) {
         // A SCHEDULED/cron transfer is created with an empty destination (Item 2:
@@ -153,6 +163,12 @@ export async function POST(
     };
     const result = await finalizeDraftPayment(stores, transferId, bankDetails);
     if (!result.ok) {
+      if (result.error === 'kyc_required') {
+        return NextResponse.json(
+          { ok: false, error: 'Please verify your identity before sending.', kyc_required: true },
+          { status: 403 },
+        );
+      }
       const msg =
         result.error === 'cap'
           ? 'That amount exceeds your current limit.'

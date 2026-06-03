@@ -6,6 +6,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
+import { getKycProvider } from '@/lib/providers/kyc-provider';
 import {
   backfillCustomersOnce,
   backfillCountryCurrencyOnce,
@@ -16,7 +17,7 @@ import {
   backfillExpandCountriesOnce,
   backfillAllCorridorsOnce,
 } from '@/lib/migration';
-import { sendTemplateWithButton, sendTemplateOrText } from '@/lib/whatsapp';
+import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus } from '@/lib/whatsapp';
 import {
   TEMPLATE_SCHEDULED_PAYMENT_READY,
   TEMPLATE_LANG,
@@ -50,13 +51,24 @@ export async function GET(req: NextRequest) {
   const expandCountriesBackfill = await backfillExpandCountriesOnce(store, partnerStore); // NEW (multicountry)
   const allCorridorsBackfill = await backfillAllCorridorsOnce(store, partnerStore); // NEW (any-to-any)
 
+  const kycProvider = getKycProvider(customerStore, env.appBaseUrl);
+
   const result = await runDueSchedules({
     store,
     partnerStore,                 // NEW (P5): corridor-aware compliance
     customerStore,                // NEW (Item 4): skip opted-out customers
     monthlyVolumeStore,           // NEW (KYC): cumulative-month EDD trigger at run time
     scheduleStore,
+    kycProvider,                  // NEW (Phase 3): verify-before-send hand-off url
     now: Date.now(),
+    // NEW (Phase 3) — fail-soft nudge when a scheduled send is skipped pending KYC.
+    sendScheduledSkipped: async (schedule, owner, kycUrl) => {
+      await sendTemplateOrText(
+        schedule.phone,
+        () => sendVerificationStatus(schedule.phone, 'needed', owner?.fullName),
+        `Verify your identity to resume your scheduled SmartRemit transfer: ${kycUrl}`,
+      );
+    },
     sendScheduledLink: async (schedule, transfer, url) => {
       // The scheduled_payment_ready template (docs §3.3) path is now wired, but
       // the template is not yet approved by Meta. Until it is, sendTemplateOrText

@@ -25,6 +25,7 @@ const base = {
   payoutMethod: 'upi' as const,
   payoutDestination: 'mom@upi',
   fundingMethod: 'bank_transfer' as const,
+  senderKycStatus: 'verified' as const,
 };
 
 describe('createTransfer', () => {
@@ -86,6 +87,7 @@ describe('createTransfer P1: country + currency fields', () => {
       payoutMethod: 'upi',
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified' as const,
     });
     expect(t.sourceCountry).toBe('US');
     expect(t.sourceCurrency).toBe('USD');
@@ -110,6 +112,7 @@ describe('createTransfer P2: partnerId', () => {
       payoutMethod: 'upi',
       payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified' as const,
     });
     expect(t.partnerId).toBe('default');
   });
@@ -131,6 +134,7 @@ describe('createTransfer P4: source-currency fields', () => {
       payoutMethod: 'upi',
       payoutDestination: 'asha@upi',
       fundingMethod: 'bank_transfer',
+      senderKycStatus: 'verified' as const,
     });
     expect(t.amountSource).toBe(100);
     expect(t.sourceCurrency).toBe('USD');
@@ -152,7 +156,7 @@ describe('createTransfer P5: corridor-aware compliance', () => {
       phone: '15551230000',
       amountSource: 1500, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
     expect(t.complianceStatus).toBe('flagged');              // >= 1000 today
     expect(t.complianceReasons).toContain('Large transfer amount.');
@@ -177,7 +181,7 @@ describe('createTransfer P5: corridor-aware compliance', () => {
       phone: '15551239999',
       amountSource: 1200, sourceCurrency: 'GBP', partnerId: 'gb-co',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
     // 1200 GBP → USD-equivalent (~1524) is below the 5000 override → not flagged for amount.
     expect(t.complianceReasons).not.toContain('Large transfer amount.');
@@ -194,7 +198,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230000', amountSource: 200, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
     expect(t.complianceStatus).toBe('cleared');
     expect(t.complianceReasons).toEqual([]);
@@ -211,7 +215,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230001', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
     expect(t.complianceStatus).toBe('flagged');
     expect(t.complianceReasons).toContain('edd_required');
@@ -229,7 +233,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230002', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
       sourceOfFunds: 'employment', occupation: 'salaried',
     });
     expect(t.complianceReasons).not.toContain('edd_required');
@@ -246,7 +250,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
       phone: '15551230003', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'John Doe',  // on WATCHLIST
       recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
     expect(t.complianceStatus).toBe('blocked');
     expect(t.complianceReasons).not.toContain('edd_required');
@@ -261,7 +265,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230004', amountSource: 200, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
     expect(await mvs.getMonthCents('15551230004')).toBe(Math.round(t.amountUsd * 100));
   });
@@ -275,7 +279,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230005', amountSource: 200, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
+      payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
       recipientLegalName: 'Mother Legal Name', relationship: 'parent', purpose: 'family_support',
     });
     expect(t.recipientLegalName).toBe('Mother Legal Name');
