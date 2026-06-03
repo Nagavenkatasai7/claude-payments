@@ -88,7 +88,11 @@ export default async function LandingPage() {
           <a href="#how">How it works</a>
           <a href="#countries">Countries</a>
           <a href="#faq">FAQ</a>
+          <a href="/account/login">Log in</a>
         </div>
+        <a className="lp-nav-account" href="/account/register">
+          Create account
+        </a>
         <a
           className="lp-btn-wa lp-btn-wa--compact"
           href={genericHref}
@@ -631,6 +635,17 @@ export default async function LandingPage() {
               </li>
               <li>
                 <a href="#faq">FAQ</a>
+              </li>
+            </ul>
+          </div>
+          <div className="lp-footer-col">
+            <span className="lp-footer-h">Account</span>
+            <ul>
+              <li>
+                <a href="/account/login">Log in</a>
+              </li>
+              <li>
+                <a href="/account/register">Create account</a>
               </li>
             </ul>
           </div>
