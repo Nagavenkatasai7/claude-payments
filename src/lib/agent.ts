@@ -13,6 +13,8 @@ import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
 import { normalizePhone } from './phone';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
+import { isSendVerified } from './kyc-gate';
+import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 
 const MAX_TOOL_ROUNDS = 6;
 const FALLBACK_REPLY =
@@ -51,6 +53,21 @@ export function sanitizeReply(reply: string, paymentLinks: string[]): string {
 }
 
 export function createAgent(deps: AgentDeps) {
+  // One retry on a transient chat() failure (Ollama Cloud 5xx / timeout / a
+  // momentarily malformed response). A throw means history.push(assistant) never
+  // ran, so the retry re-sends the identical messages cleanly.
+  async function chatWithRetry(
+    messages: ChatMessage[],
+    tools: ChatTool[],
+  ): Promise<ChatMessage> {
+    try {
+      return await deps.chat(messages, tools);
+    } catch (err) {
+      console.warn('chat() failed once — retrying:', err);
+      return await deps.chat(messages, tools);
+    }
+  }
+
   async function runAgentTurn(
     phone: string,
     incomingText: string,
@@ -59,6 +76,28 @@ export function createAgent(deps: AgentDeps) {
     const history = await deps.store.getConversation(phone);
     history.push({ role: 'user', content: incomingText });
 
+    // A throw anywhere below (Ollama after its retry, a Redis blip mid-turn, …)
+    // would otherwise surface the route's bare "something went wrong" catch-all
+    // AND drop the turn. Degrade to a friendly retry line and PRESERVE history
+    // (the inbound message + any partial turns) so the customer can just resend.
+    try {
+      return await completeTurn(phone, turn, history);
+    } catch (err) {
+      console.error('runAgentTurn failed — returning fallback:', err);
+      try {
+        await deps.store.saveConversation(phone, history);
+      } catch (saveErr) {
+        console.error('saveConversation after failure also failed:', saveErr);
+      }
+      return FALLBACK_REPLY;
+    }
+  }
+
+  async function completeTurn(
+    phone: string,
+    turn: TurnContext,
+    history: ChatMessage[],
+  ): Promise<string> {
     // Resolve the partner's allowed send currencies ONCE before the round loop.
     // Use distinct names (noteCustomer / notePartner) to avoid shadowing any
     // variables introduced by tool calls later in the same scope.
@@ -154,7 +193,7 @@ export function createAgent(deps: AgentDeps) {
       }
       messages.push(...history);
 
-      const assistant = await deps.chat(messages, toolSchemas);
+      const assistant = await chatWithRetry(messages, toolSchemas);
       history.push(assistant);
 
       if (assistant.tool_calls && assistant.tool_calls.length > 0) {
@@ -213,6 +252,27 @@ export function createAgent(deps: AgentDeps) {
 
       reply = assistant.content || '';
       break;
+    }
+
+    // Deterministic verify-link backstop. The model is NOT trusted to deliver the
+    // verify link: on "resend the verify link" it often echoes a URL from history
+    // with NO tool call, which sanitizeReply then strips → a 👉 with no link. If
+    // the customer still needs KYC, no tool minted a link this turn, and the reply
+    // reads as a verify hand-off, we mint the canonical (code-generated) link here
+    // and append it via the same paymentLinks path — independent of any tool call.
+    if (
+      !interactiveSent &&
+      paymentLinks.length === 0 &&
+      !isSendVerified(noteCustomer) &&
+      looksLikeVerifyHandoff(reply)
+    ) {
+      const url = await issueVerifyLink({
+        phone,
+        customer: noteCustomer,
+        kycProvider: deps.kycProvider,
+        customerStore: deps.customerStore,
+      });
+      if (url) paymentLinks.push(url);
     }
 
     // If a tool already sent an interactive message this turn, that card IS the

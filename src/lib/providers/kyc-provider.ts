@@ -25,7 +25,18 @@ export interface KycWebhookResult {
 }
 
 export interface KycProvider {
-  startVerification(input: { customerId: string; senderPhone: string }): Promise<KycStartResult>;
+  /**
+   * Begin (or re-issue) identity verification and return a hosted-flow link.
+   * When `existingInquiryId` is supplied, providers MUST reuse that inquiry and
+   * only mint a fresh one-time link — never create a new inquiry. This lets a
+   * customer who taps "resend the verify link" get a working link without
+   * minting a new Persona inquiry on every tap.
+   */
+  startVerification(input: {
+    customerId: string;
+    senderPhone: string;
+    existingInquiryId?: string;
+  }): Promise<KycStartResult>;
   getStatus(providerRef: string): Promise<KycStatus>;
   handleWebhook(body: unknown): Promise<KycWebhookResult | null>;
 }
