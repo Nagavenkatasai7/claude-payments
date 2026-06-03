@@ -19,10 +19,23 @@ vi.mock('next/server', async (orig) => {
 
 vi.mock('@/lib/whatsapp', () => ({
   sendText: vi.fn().mockResolvedValue(undefined),
+  sendTransactionOtp: vi.fn().mockResolvedValue(undefined),
   sendTemplate: vi.fn().mockResolvedValue(undefined),
   RECIPIENT_TEMPLATE_NAME: 'transfer_delivered',
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
+
+// Phase 3 Part B: the route now gates on a per-transaction OTP + peeks the draft
+// store for phone resolution. These tests exercise the bank-detail + KYC logic,
+// not the OTP (that's pay-route-otp.test) — so stub the OTP to always pass and
+// the draft peek to "no draft" (phone resolves from the existing transfer).
+vi.mock('@/lib/transaction-otp', () => ({
+  getTransactionOtpStore: () => ({
+    issue: async () => ({ ok: true, code: '000000' }),
+    verify: async () => ({ ok: true }),
+  }),
+}));
+vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
 
 let store: ReturnType<typeof createStore>;
 let customerStore: ReturnType<typeof createCustomerStore>;

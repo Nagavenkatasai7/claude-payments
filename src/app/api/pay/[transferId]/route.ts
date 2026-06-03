@@ -9,7 +9,8 @@ import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified } from '@/lib/kyc-gate';
 import { completePaymentStage1 } from '@/lib/payment';
-import { sendText } from '@/lib/whatsapp';
+import { getTransactionOtpStore } from '@/lib/transaction-otp';
+import { sendText, sendTransactionOtp } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import type { CountryCode, Transfer } from '@/lib/types';
 
@@ -78,12 +79,40 @@ export async function POST(
     // truth); any 400 here happens BEFORE any charge. A bodyless POST (old
     // in-flight draft, or a re-opened link that already has a destination) skips
     // validation and falls back to the stored destination.
-    let body: { country?: unknown; fields?: unknown } = {};
+    let body: { country?: unknown; fields?: unknown; action?: unknown; otp?: unknown } = {};
     try {
       body = (await req.json()) as typeof body;
     } catch {
       body = {};
     }
+
+    // ── Phase 3 Part B: per-transaction OTP step-up ──────────────────────────
+    // Resolve the sender phone from the id (draft PEEK — never consumes — else
+    // an existing transfer) so the code is bound to this exact transaction.
+    const otpDraft = await getDraftStore().getDraft(transferId);
+    const otpPhone = otpDraft?.senderPhone ?? (await store.getTransfer(transferId))?.phone ?? null;
+
+    // (1) "request_otp": issue + deliver a code in-session (free-form). No charge.
+    if (typeof body.action === 'string' && body.action === 'request_otp') {
+      if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
+      const issued = await getTransactionOtpStore().issue(transferId, otpPhone);
+      if (issued.ok) {
+        try { await sendTransactionOtp(otpPhone, issued.code); } catch { /* generic surface; never log the code */ }
+      }
+      return NextResponse.json({ ok: true, sent: true });
+    }
+
+    // (2) Require a valid code before ANY money movement (covers BOTH branches).
+    if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
+    const otpCode = String(body.otp ?? '').replace(/\D/g, '');
+    const otpCheck = await getTransactionOtpStore().verify(transferId, otpPhone, otpCode);
+    if (!otpCheck.ok) {
+      return NextResponse.json(
+        { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' },
+        { status: 403 },
+      );
+    }
+
     const country =
       typeof body.country === 'string' && VALID_COUNTRY_CODES.has(body.country.toUpperCase())
         ? (body.country.toUpperCase() as CountryCode)
