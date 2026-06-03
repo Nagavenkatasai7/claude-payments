@@ -176,6 +176,51 @@ describe('createAgent', () => {
     expect(calls).toBe(2); // failed once, retried once
   });
 
+  it('injects the [UNVERIFIED SENDER] guard note for an unverified customer', async () => {
+    // Regression: an unverified sender said "send money" and the bot asked "how much?"
+    // instead of leading with verification. The deterministic note must be present so
+    // the model leads with the verify link, not the amount.
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
+      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    let captured: ChatMessage[] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      chat: async (messages) => { captured = messages; return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'I want to send money to my mom in India');
+    const sys = captured.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    expect(sys).toContain('[UNVERIFIED SENDER]');
+  });
+
+  it('does NOT inject the [UNVERIFIED SENDER] note for a verified customer', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    let captured: ChatMessage[] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      chat: async (messages) => { captured = messages; return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'I want to send money to my mom in India');
+    const sys = captured.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    expect(sys).not.toContain('[UNVERIFIED SENDER]');
+  });
+
   it('executes a tool call, then returns the follow-up reply', async () => {
     const store = createStore(fakeRedis());
     const responses: ChatMessage[] = [
