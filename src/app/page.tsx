@@ -494,35 +494,36 @@ export default async function LandingPage() {
           </div>
         </section>
 
-        {/* ============ SOCIAL PROOF (PLACEHOLDER) ============ */}
+        {/* ============ WHY US — real product promises ============ */}
+        {/* Pre-launch: no real customers yet, so we show true product promises
+            instead of inventing testimonials/names/ratings. Swap these for real,
+            attributable customer quotes once they exist. */}
         <section className="lp-proof lp-reveal" aria-labelledby="proof-h">
           <div className="lp-section-inner">
             <h2 id="proof-h" className="lp-h2 lp-center">
               Built for families who send money home.
             </h2>
-            {/* PLACEHOLDER: replace each slot with a real, attributable customer
-                quote. Do NOT invent quotes, names, photos, or star ratings. */}
             <div className="lp-proof-grid">
               <figure className="lp-proof-card lp-tier2">
                 <blockquote>
-                  [PLACEHOLDER testimonial — replace with a real, attributable
-                  quote]
+                  The real mid-market exchange rate — one flat fee, never a hidden
+                  markup on your rate.
                 </blockquote>
-                <figcaption>— [Name, city]</figcaption>
+                <figcaption>Honest pricing</figcaption>
               </figure>
               <figure className="lp-proof-card lp-tier2">
                 <blockquote>
-                  [PLACEHOLDER testimonial — replace with a real, attributable
-                  quote]
+                  Bank-grade identity verification and encrypted details keep every
+                  transfer secure.
                 </blockquote>
-                <figcaption>— [Name, city]</figcaption>
+                <figcaption>Verified &amp; protected</figcaption>
               </figure>
               <figure className="lp-proof-card lp-tier2">
                 <blockquote>
-                  [PLACEHOLDER testimonial — replace with a real, attributable
-                  quote]
+                  No new app to download — start a transfer right in the WhatsApp
+                  chat you already use.
                 </blockquote>
-                <figcaption>— [Name, city]</figcaption>
+                <figcaption>Right from WhatsApp</figcaption>
               </figure>
             </div>
             <p className="lp-center lp-muted">
