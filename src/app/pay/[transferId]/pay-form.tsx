@@ -65,7 +65,75 @@ export function PayForm({
   );
 }
 
-// ── Existing single-step path (unchanged behaviour: bodyless POST) ──────────
+// ── Phase 3 Part B: per-transaction OTP step-up (shared by both forms) ───────
+// Sends a code to WhatsApp (free-form, in-session) and collects the 6 digits the
+// sender enters. The parent includes `code` in its pay POST; a 403 reason:'otp'
+// bounces here with an inline error.
+
+function OtpFields({
+  transferId,
+  code,
+  setCode,
+  sent,
+  setSent,
+  otpError,
+}: {
+  transferId: string;
+  code: string;
+  setCode: (v: string) => void;
+  sent: boolean;
+  setSent: (v: boolean) => void;
+  otpError?: string;
+}) {
+  const [requesting, setRequesting] = useState(false);
+
+  async function requestCode() {
+    setRequesting(true);
+    try {
+      const res = await fetch(`/api/pay/${transferId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'request_otp' }),
+      });
+      if (res.ok) setSent(true);
+    } catch {
+      /* leave !sent so the button stays available to retry */
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  if (!sent) {
+    return (
+      <button type="button" className="pay-secondary" onClick={requestCode} disabled={requesting}>
+        {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+      </button>
+    );
+  }
+  return (
+    <div className="otp-fields">
+      <label>
+        Confirmation code
+        <input
+          inputMode="numeric"
+          maxLength={6}
+          pattern="\d{6}"
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
+          placeholder="••••••"
+          autoComplete="one-time-code"
+          aria-label="6-digit confirmation code"
+        />
+      </label>
+      {otpError && <span className="field-err">{otpError}</span>}
+      <button type="button" className="pay-secondary" onClick={requestCode} disabled={requesting}>
+        {requesting ? 'Sending…' : 'Resend code'}
+      </button>
+    </div>
+  );
+}
+
+// ── Single-step path (scheduled / re-opened links) ──────────────────────────
 
 function SimplePayForm({
   transferId,
@@ -75,13 +143,31 @@ function SimplePayForm({
   fundingMethod: FundingMethod;
 }) {
   const [status, setStatus] = useState<Status>('idle');
+  const [code, setCode] = useState('');
+  const [sent, setSent] = useState(false);
+  const [otpError, setOtpError] = useState('');
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setStatus('paying');
+    setOtpError('');
     try {
-      const res = await fetch(`/api/pay/${transferId}`, { method: 'POST' });
-      setStatus(res.ok ? 'done' : 'error');
+      const res = await fetch(`/api/pay/${transferId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ otp: code }),
+      });
+      if (res.ok) {
+        setStatus('done');
+        return;
+      }
+      try {
+        const data = (await res.json()) as { reason?: string };
+        if (data.reason === 'otp') setOtpError('That code is incorrect or expired — resend and try again.');
+      } catch {
+        /* generic */
+      }
+      setStatus('error');
     } catch {
       setStatus('error');
     }
@@ -115,10 +201,11 @@ function SimplePayForm({
   return (
     <form onSubmit={handleSubmit}>
       {fundingMethod === 'bank_transfer' ? <BankForm /> : <CardForm />}
-      <button type="submit" disabled={status === 'paying'}>
+      <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
+      <button type="submit" disabled={status === 'paying' || !sent || code.length !== 6}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
-      {status === 'error' && (
+      {status === 'error' && !otpError && (
         <p className="err">Something went wrong. Please try again.</p>
       )}
     </form>
@@ -146,6 +233,9 @@ function BankDetailsPayForm({
     Object.fromEntries(defs.map((d) => [d.key, ''])),
   );
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [code, setCode] = useState('');
+  const [sent, setSent] = useState(false);
+  const [otpError, setOtpError] = useState('');
 
   function setField(key: string, v: string) {
     setValues((prev) => ({ ...prev, [key]: v }));
@@ -170,21 +260,24 @@ function BankDetailsPayForm({
   // string), so we send the raw fields, not the composed string.
   async function handlePay() {
     setStatus('paying');
+    setOtpError('');
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ country: destinationCountry, fields: values }),
+        body: JSON.stringify({ country: destinationCountry, fields: values, otp: code }),
       });
       if (res.ok) {
         setStatus('done');
         return;
       }
-      // Surface server-side field errors (e.g. a digit rule the client missed),
-      // bounce back to Step 1 so the sender can fix them.
+      // Surface server-side errors: a wrong/expired OTP stays on the review step;
+      // a bank-field error bounces back to Step 1 so the sender can fix it.
       try {
-        const data = (await res.json()) as { fieldErrors?: Record<string, string> };
-        if (data.fieldErrors) {
+        const data = (await res.json()) as { fieldErrors?: Record<string, string>; reason?: string };
+        if (data.reason === 'otp') {
+          setOtpError('That code is incorrect or expired — resend and try again.');
+        } else if (data.fieldErrors) {
           setErrors(data.fieldErrors);
           setStep('details');
         }
@@ -245,7 +338,8 @@ function BankDetailsPayForm({
             <span>{formatMoney(summary.sourceTotalCharge, summary.sourceCurrency)}</span>
           </div>
         </div>
-        <button type="button" onClick={handlePay} disabled={status === 'paying'}>
+        <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
+        <button type="button" onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
         </button>
         <button
@@ -259,7 +353,7 @@ function BankDetailsPayForm({
         >
           Edit bank details
         </button>
-        {status === 'error' && (
+        {status === 'error' && !otpError && (
           <p className="err">Something went wrong. Please try again.</p>
         )}
       </div>
