@@ -120,13 +120,50 @@ describe('sendOtpCode — live mode', () => {
     expect(buttonComp.parameters).toEqual([{ type: 'text', text: '135790' }]);
   });
 
-  it('NEVER includes the code in a thrown error when the Graph API rejects', async () => {
+  it('falls back to a free-form text carrying the code when the AUTHENTICATION template send fails', async () => {
+    // The real-world case: the `verification_code` template isn't approved yet, so
+    // the template send 400s. The customer must STILL receive the code in-session.
     process.env.OTP_DEV_MODE = 'false';
     process.env.WHATSAPP_AUTH_TEMPLATE = 'verification_code';
+    // Key the mock on the request body so it's robust to any retry: template send
+    // fails, free-form text send succeeds.
+    const fetchMock = vi.fn(
+      async (
+        _url: string,
+        init: RequestInit,
+      ): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        const body = JSON.parse(init.body as string);
+        if (body.type === 'template') {
+          return { ok: false, status: 400, text: async () => 'template not approved' };
+        }
+        return { ok: true, text: async () => '' };
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(sendOtpCode('15551234567', '135790')).resolves.toBeUndefined();
+
+    // A free-form text send happened, addressed to the phone, carrying the code.
+    const textCall = fetchMock.mock.calls.find(([, init]) => {
+      const b = JSON.parse((init as RequestInit).body as string);
+      return b.type === 'text';
+    });
+    expect(textCall).toBeDefined();
+    const textBody = JSON.parse((textCall![1] as RequestInit).body as string);
+    expect(textBody.to).toBe('15551234567');
+    expect(textBody.text.body).toContain('135790');
+  });
+
+  it('NEVER includes the code in the thrown error when BOTH the template AND the text send fail', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'verification_code';
+    // Every send fails (template 400, then the free-form fallback 400 too).
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => ({ ok: false, status: 400, text: async () => 'template not approved' })),
+      vi.fn(async () => ({ ok: false, status: 400, text: async () => 'send rejected' })),
     );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     let caught: unknown;
     try {
