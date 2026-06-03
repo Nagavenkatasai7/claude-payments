@@ -19,6 +19,7 @@ describe('visibleNavItems', () => {
     expect(items).toContain('schedules');
     expect(items).toContain('customers');
     expect(items).toContain('compliance');
+    expect(items).toContain('kyc');
     expect(items).toContain('analytics');
     expect(items).toContain('partners');
     expect(items).toContain('team');
@@ -36,6 +37,7 @@ describe('visibleNavItems', () => {
     const items = visibleNavItems(staff('admin', 'acme'));
     expect(items).toContain('overview');
     expect(items).toContain('transactions');
+    expect(items).toContain('kyc');
     expect(items).toContain('my-partner');
     expect(items).not.toContain('partners');
     expect(items).not.toContain('team');
