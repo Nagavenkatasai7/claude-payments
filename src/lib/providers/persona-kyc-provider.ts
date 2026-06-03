@@ -32,11 +32,22 @@ export class PersonaKycProvider implements KycProvider {
     private readonly appBaseUrl: string,
   ) {}
 
-  async startVerification(input: { customerId: string; senderPhone: string }): Promise<KycStartResult> {
-    const { inquiryId } = await this.client.createInquiry({
-      referenceId: input.senderPhone,
-      idempotencyKey: `kyc-${input.senderPhone}-${Date.now()}`,
-    });
+  async startVerification(input: {
+    customerId: string;
+    senderPhone: string;
+    existingInquiryId?: string;
+  }): Promise<KycStartResult> {
+    // Reuse an existing inquiry when the caller has one (the "resend" path) —
+    // mint a brand-new inquiry ONLY on the first verify, so repeated resends
+    // don't create a fresh Persona inquiry each time.
+    const inquiryId =
+      input.existingInquiryId ??
+      (
+        await this.client.createInquiry({
+          referenceId: input.senderPhone,
+          idempotencyKey: `kyc-${input.senderPhone}-${Date.now()}`,
+        })
+      ).inquiryId;
     const url = await this.client.generateOneTimeLink(inquiryId);
     return { url, providerRef: inquiryId };
   }

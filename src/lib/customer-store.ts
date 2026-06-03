@@ -128,6 +128,25 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
       });
     },
 
+    // Record a bot-minted Persona inquiry id so a later "resend the verify link"
+    // can REUSE it instead of minting a new inquiry. Deliberately does NOT touch
+    // kycStatus or kycReviewState — the webhook/human-review state machine owns
+    // those (the human-review-only invariant). No-op for unknown customers and
+    // idempotent when the id is unchanged (avoids write churn on every resend).
+    async recordKycInquiry(senderPhone: string, inquiryId: string): Promise<void> {
+      const customer = await this.getCustomer(senderPhone);
+      if (!customer) return;
+      if (customer.kycInquiryId === inquiryId) return;
+      const nowIso = new Date().toISOString();
+      await this.saveCustomer({
+        ...customer,
+        kycInquiryId: inquiryId,
+        kycProviderRef: inquiryId,
+        kycSubmittedAt: customer.kycSubmittedAt ?? nowIso,
+        updatedAt: nowIso,
+      });
+    },
+
     async listCustomers(): Promise<Customer[]> {
       const phones = await redis.smembers('customers:phones');
       const all = await Promise.all(phones.map((p) => this.getCustomer(p)));

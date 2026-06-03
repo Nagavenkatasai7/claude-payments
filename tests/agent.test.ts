@@ -91,6 +91,91 @@ describe('createAgent', () => {
     expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical kyc_url appended
   });
 
+  it('DETERMINISTIC backstop: delivers the verify link on "resend" even when the model calls NO tool', async () => {
+    // The exact bug: on "resend the verify link" the model answers from history
+    // with NO tool call, pasting a stale URL. sanitizeReply strips it → blank 👉.
+    // The backstop must mint + append the canonical link with zero tool calls.
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
+      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      // Single plain-text reply, NO tool_calls — the model echoing a stale link.
+      chat: async () => ({
+        role: 'assistant',
+        content: 'Sure! Here is your verification link again 👉 https://stale-from-history.example/x',
+      }),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'resend the verify link');
+    expect(reply).not.toContain('stale-from-history.example'); // model's echoed URL stripped
+    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical link appended by the backstop
+  });
+
+  it('backstop does NOT fire for a verified customer (no spurious verify link)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      chat: async () => ({ role: 'assistant', content: "You're all set — your identity is verified!" }),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'am I verified?');
+    expect(reply).toBe("You're all set — your identity is verified!");
+    expect(reply).not.toContain('/admin-dashboard/customers/'); // no link appended
+  });
+
+  it('graceful error: a chat() failure returns the fallback line AND preserves history', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => { throw new Error('Ollama request failed (503)'); }, // throws on both the call and its retry
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'hello');
+    expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?");
+    // History (the inbound message) must be saved so the customer can resend
+    // without losing context — not dropped by the error path.
+    const saved = await store.getConversation(PHONE);
+    expect(saved.some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
+  });
+
+  it('chat() retry: a single transient failure self-heals and returns the real reply', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    let calls = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('Ollama request failed (502)');
+        return { role: 'assistant', content: 'Back online — how can I help?' };
+      },
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'hello');
+    expect(reply).toBe('Back online — how can I help?');
+    expect(calls).toBe(2); // failed once, retried once
+  });
+
   it('executes a tool call, then returns the follow-up reply', async () => {
     const store = createStore(fakeRedis());
     const responses: ChatMessage[] = [

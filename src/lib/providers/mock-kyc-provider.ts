@@ -15,10 +15,11 @@ export class MockKycProvider implements KycProvider {
   async startVerification(input: {
     customerId: string;
     senderPhone: string;
+    existingInquiryId?: string;
   }): Promise<KycStartResult> {
     return {
       url: `${this.appBaseUrl}/admin-dashboard/customers/${input.senderPhone}`,
-      providerRef: `mock-${input.senderPhone}`,
+      providerRef: input.existingInquiryId ?? `mock-${input.senderPhone}`,
     };
   }
 

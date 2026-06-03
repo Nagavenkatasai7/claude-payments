@@ -25,7 +25,15 @@ export async function chat(
   }
 
   const data = (await res.json()) as {
-    choices: { message: ChatMessage }[];
+    choices?: { message?: ChatMessage }[];
   };
-  return data.choices[0].message;
+  // Guard the happy-path indexing: a missing/empty `choices` (a momentarily
+  // malformed upstream response) must throw a CLEAR, catchable error rather than
+  // a bare "cannot read properties of undefined" TypeError — the agent retries
+  // chat() once and otherwise degrades to a friendly fallback.
+  const message = data?.choices?.[0]?.message;
+  if (!message) {
+    throw new Error('Ollama response missing choices[0].message');
+  }
+  return message;
 }
