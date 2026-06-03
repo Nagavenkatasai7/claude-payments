@@ -15,6 +15,7 @@ export type SidebarActive =
   | 'customers'
   | 'partners'
   | 'compliance'
+  | 'kyc'
   | 'analytics'
   | 'corridors'
   | 'team'
@@ -25,7 +26,7 @@ export type NavItem = SidebarActive;
 export function visibleNavItems(staff: Staff): NavItem[] {
   const base: NavItem[] = [
     'overview', 'transactions', 'schedules',
-    'customers', 'compliance', 'analytics',
+    'customers', 'compliance', 'kyc', 'analytics',
   ];
   if (!staff.partnerId) {
     // Platform: base + Partners list + Corridors (lead page) + (Team only if admin)
@@ -53,6 +54,7 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   customers:    { label: 'Customers',    icon: 'customers',    hrefFor: () => '/admin-dashboard/customers' },
   partners:     { label: 'Partners',     icon: 'partners',     hrefFor: () => '/admin-dashboard/partners' },
   compliance:   { label: 'Compliance',   icon: 'compliance',   hrefFor: () => '/admin-dashboard/compliance' },
+  kyc:          { label: 'KYC',          icon: 'kyc',          hrefFor: () => '/admin-dashboard/kyc' },
   analytics:    { label: 'Analytics',    icon: 'analytics',    hrefFor: () => '/admin-dashboard/analytics' },
   corridors:    { label: 'Corridors',    icon: 'corridors',    hrefFor: () => '/admin-dashboard/corridors' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
