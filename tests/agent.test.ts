@@ -59,6 +59,38 @@ describe('createAgent', () => {
     expect(reply).toBe('Hi there!');
   });
 
+  it('appends the canonical kyc_url on a verify hand-off (model-emitted URLs are stripped)', async () => {
+    // Regression: an unverified sender hits the verify-before-send gate; the model
+    // writes a "verify here 👉" message, but sanitizeReply strips ALL model URLs —
+    // so the real kyc_url (code-generated) must be COLLECTED + appended by us, else
+    // the customer gets a 👉 with no link.
+    const redis = fakeRedis();
+    const store = createStore(redis);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
+      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'check_send_limit', arguments: JSON.stringify({ amount_usd: 500 }) } }],
+      },
+      { role: 'assistant', content: 'Before I can send that, verify your identity here: 👉 https://model-made-up.example/foo' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
+    expect(reply).not.toContain('model-made-up.example'); // model's invented URL stripped
+    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical kyc_url appended
+  });
+
   it('executes a tool call, then returns the follow-up reply', async () => {
     const store = createStore(fakeRedis());
     const responses: ChatMessage[] = [
@@ -82,11 +114,17 @@ describe('createAgent', () => {
       { role: 'assistant', content: 'You send $500, they get a lot of INR.' },
     ];
     let call = 0;
+    const deps = extraDeps(fakeRedis(), store);
+    // Phase 3: a verified sender so get_quote returns a quote (not a kyc_required gate).
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     const agent = createAgent({
       store,
       scheduleStore: freshScheduleStore(),
       draftStore: createDraftStore(fakeRedis()),
-      ...extraDeps(fakeRedis(), store),
+      ...deps,
       chat: async () => responses[call++],
     });
 
