@@ -195,6 +195,13 @@ export function createAgent(deps: AgentDeps) {
           ) {
             paymentLinks.push((result as Record<string, unknown>).url as string);
           }
+          // Collect the canonical VERIFY link from ANY tool that returns a kyc_url
+          // (the verify-before-send gate + the cap hand-offs). sanitizeReply strips
+          // every model-emitted URL, so the real, code-generated link must be
+          // appended by us — otherwise a verify message arrives as a 👉 with no link.
+          if (typeof (result as Record<string, unknown>).kyc_url === 'string') {
+            paymentLinks.push((result as Record<string, unknown>).kyc_url as string);
+          }
           history.push({
             role: 'tool',
             tool_call_id: call.id,
