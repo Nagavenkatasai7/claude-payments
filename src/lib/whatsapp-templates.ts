@@ -209,3 +209,13 @@ export function verificationStatusParams(name: string, state: VerificationState)
   };
   return [name || 'there', msg[state]];
 }
+
+/**
+ * Phase 3: the per-transaction step-up OTP message. Delivered IN-SESSION as
+ * free-form text (the customer is actively paying → inside the 24-h window), so
+ * it needs no AUTHENTICATION template. Pure (testable); the code is interpolated
+ * by the caller and must never be logged.
+ */
+export function transactionOtpMessage(code: string): string {
+  return `Your SmartRemit confirmation code is ${code}. Enter it on the payment page to send this transfer. It expires in 10 minutes.`;
+}

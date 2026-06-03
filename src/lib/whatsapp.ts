@@ -3,6 +3,7 @@ import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
   verificationStatusParams,
+  transactionOtpMessage,
   type VerificationState,
   TEMPLATE_LANG,
 } from './whatsapp-templates';
@@ -580,4 +581,15 @@ export async function sendVerificationStatus(
     () => sendTemplate(phone, templateName, TEMPLATE_LANG, params),
     `${params[0]}, ${params[1]}`,
   );
+}
+
+/**
+ * Phase 3 — deliver a per-transaction step-up OTP. A send is in-session (the
+ * customer is actively paying), so free-form text works without an
+ * AUTHENTICATION template. Never logs the code. Throws on a hard delivery
+ * failure (the caller surfaces a generic error; the pay route still won't
+ * finalize without a verified code, so a failed send never lets money through).
+ */
+export async function sendTransactionOtp(phone: string, code: string): Promise<void> {
+  await sendText(phone, transactionOtpMessage(code));
 }
