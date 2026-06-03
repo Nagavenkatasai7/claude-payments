@@ -4,6 +4,7 @@ import {
   type AuthenticationTemplateComponent,
   verificationStatusParams,
   transactionOtpMessage,
+  otpMessage,
   type VerificationState,
   TEMPLATE_LANG,
 } from './whatsapp-templates';
@@ -325,23 +326,39 @@ function maskPhone(phone: string): string {
  * template is approved. (The code itself is intentionally NOT logged; operators
  * read it from otp-store's dev surface, not from this line.)
  *
- * Live mode: send via the approved AUTHENTICATION template (name from
+ * Live mode: try the approved AUTHENTICATION template (name from
  * env.whatsappAuthTemplate, lang 'en') with the code in BOTH the body and the
- * COPY_CODE url button. Throws on a Graph error so the caller can surface a
- * generic, enumeration-safe failure.
+ * COPY_CODE url button. If that fails — most commonly because the template isn't
+ * approved in WhatsApp Manager yet — fall back to a free-form `sendText` so an
+ * in-session customer (within the 24-h window) still RECEIVES the code. This
+ * mirrors sendTemplateOrText's degradation and the per-transaction OTP, and is
+ * the reason a verification code now arrives even before the template is live.
+ * The code never appears in a log line; a thrown Graph error never echoes the
+ * params, and the free-form fallback message is built by the pure otpMessage().
  */
 export async function sendOtpCode(phone: string, code: string): Promise<void> {
   if (env.otpDevMode) {
-    // No code in the log; no live send (template may not be approved yet).
+    // No code in the log; no live send (used for local/CI, never prod).
     console.log(`[otp] dev-mode: code ready for ${maskPhone(phone)}`);
     return;
   }
-  await sendAuthTemplate(
-    phone,
-    env.whatsappAuthTemplate,
-    OTP_TEMPLATE_LANG,
-    authenticationTemplateParams(code),
-  );
+  try {
+    await sendAuthTemplate(
+      phone,
+      env.whatsappAuthTemplate,
+      OTP_TEMPLATE_LANG,
+      authenticationTemplateParams(code),
+    );
+  } catch (err) {
+    // Template path unavailable (e.g. not yet approved) → deliver in-session via
+    // free-form text. Log only the masked phone + the error MESSAGE (never the
+    // code, never the request body).
+    console.warn(
+      `OTP template send failed for ${maskPhone(phone)}; falling back to free-form text:`,
+      err instanceof Error ? err.message : 'unknown error',
+    );
+    await sendText(phone, otpMessage(code));
+  }
 }
 
 /**

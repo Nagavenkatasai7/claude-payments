@@ -219,3 +219,14 @@ export function verificationStatusParams(name: string, state: VerificationState)
 export function transactionOtpMessage(code: string): string {
   return `Your SmartRemit confirmation code is ${code}. Enter it on the payment page to send this transfer. It expires in 10 minutes.`;
 }
+
+/**
+ * Account verification OTP (register / login step-up / password reset). The
+ * approved Meta AUTHENTICATION template is preferred, but until it's live this
+ * free-form text is the in-session fallback so a customer still receives the
+ * code. Pure (testable); the code is interpolated by the caller and must never
+ * be logged.
+ */
+export function otpMessage(code: string): string {
+  return `Your SmartRemit verification code is ${code}. It expires in 10 minutes. Don't share it with anyone.`;
+}
