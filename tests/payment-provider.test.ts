@@ -99,6 +99,27 @@ describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', 
     const run = afterCbs[0](); await vi.advanceTimersByTimeAsync(DELIVERY_DELAY_MS); await run;
     expect(sendTemplate).not.toHaveBeenCalled();
   });
+
+  it('WL1: the delivery message uses the PARTNER brand when provided, SmartRemit by default', async () => {
+    // default (no brand) → SmartRemit
+    const store = createStore(fakeRedis());
+    await store.saveTransfer(fixture());
+    await new MockPaymentProvider(store).initiateTransfer(fixture());
+    sendText.mockClear();
+    let run = afterCbs[0](); await vi.advanceTimersByTimeAsync(DELIVERY_DELAY_MS); await run;
+    expect((sendText.mock.calls[0] as [string, string])[1]).toContain('Thanks for using SmartRemit!');
+
+    // branded partner → its brand
+    afterCbs.length = 0; sendText.mockClear();
+    const store2 = createStore(fakeRedis());
+    await store2.saveTransfer(fixture());
+    await new MockPaymentProvider(store2, 'Acme Pay').initiateTransfer(fixture());
+    sendText.mockClear();
+    run = afterCbs[0](); await vi.advanceTimersByTimeAsync(DELIVERY_DELAY_MS); await run;
+    const msg = (sendText.mock.calls[0] as [string, string])[1];
+    expect(msg).toContain('Thanks for using Acme Pay!');
+    expect(msg).not.toContain('SmartRemit');
+  });
 });
 
 describe('MockPaymentProvider.getStatus (derives from stored TransferStatus)', () => {

@@ -8,6 +8,7 @@ import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
+import { resolvePartnerBranding } from '@/lib/partner-config';
 import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendText, sendTransactionOtp } from '@/lib/whatsapp';
@@ -46,10 +47,12 @@ async function processTransferPayment(
   }
 
   // cleared (or any future status): normal auto-delivery path via the payment provider.
-  // WL1: the per-partner settlement rail (getIntegrations(transfer.partnerId).payment)
-  // is wired here in Phase C — in Phase A every partner is mock, so we keep the
-  // single-arg call. The seam already accepts the optional config (payment-provider.ts).
-  const provider = getPaymentProvider(store);
+  // WL1: brand the delivery message with the owning partner (default ⇒ SmartRemit).
+  // The per-partner settlement RAIL (getIntegrations(...).payment) is wired here in
+  // Phase C — in Phase A every partner is mock, so the rail arg stays undefined.
+  const owningPartner = await getPartnerStore().getPartner(transfer.partnerId);
+  const brand = resolvePartnerBranding(owningPartner).brand;
+  const provider = getPaymentProvider(store, undefined, brand);
   const { providerRef } = await provider.initiateTransfer(transfer);
 
   // Persist the settlement ref WITHOUT clobbering the 'paid' write initiateTransfer
