@@ -1,9 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer, type CreateTransferInput } from '@/lib/transfer-create';
+import { resetRateCacheForTests } from '@/lib/rate';
+
+// Stub FX — createTransfer calls getFxRates; a real network fetch here makes
+// the test flaky (and rate-limited) under repeated runs.
+beforeEach(() => {
+  resetRateCacheForTests();
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ rates: { INR: 85.2, USD: 1 } }),
+  }));
+});
+afterEach(() => vi.restoreAllMocks());
 
 function baseInput(over: Partial<CreateTransferInput> = {}): CreateTransferInput {
   return {

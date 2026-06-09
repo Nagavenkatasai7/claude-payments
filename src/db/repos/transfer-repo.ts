@@ -1,0 +1,194 @@
+import { and, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { transfers } from '@/db/schema';
+import type { DbOrTx } from '@/db/client';
+import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import type { PartnerId, Transfer, TransferStatus } from '@/lib/types';
+
+// transfer-repo — the Postgres ledger for transfers. Mirrors the function
+// surface call sites already use (getTransfer/saveTransfer/
+// updateTransferFromWebhook) and adds the indexed queries that replace every
+// full-ledger scan (listByPartner/listByPhone/adminList keyset pagination,
+// firstTransferAt, countByPhone) plus the reconciliation query (findStuckPaid).
+//
+// Tenant isolation is app-level: partner-facing methods take partnerId and
+// bake it into the WHERE — getOwnedTransfer returns null for out-of-scope ids
+// (the partner API's 404-never-403 contract).
+
+export interface PageReq {
+  limit: number;
+  /** Keyset cursor: the `createdAt|id` of the last row of the previous page. */
+  cursor?: string;
+}
+
+export interface Page<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+function cursorOf(t: Transfer): string {
+  return `${t.createdAt}|${t.id}`;
+}
+
+function parseCursor(cursor: string | undefined): { createdAt: Date; id: string } | null {
+  if (!cursor) return null;
+  const sep = cursor.lastIndexOf('|');
+  if (sep < 0) return null;
+  const at = new Date(cursor.slice(0, sep));
+  if (isNaN(at.getTime())) return null;
+  return { createdAt: at, id: cursor.slice(sep + 1) };
+}
+
+export function createTransferRepo(
+  db: DbOrTx,
+  provider: EncryptionKeyProvider = defaultProvider(),
+) {
+  const toDomain = (row: TransferRow, decrypt = false) =>
+    rowToTransfer(row, { decrypt, provider });
+
+  async function page(
+    where: ReturnType<typeof and>,
+    req: PageReq,
+    decrypt = false,
+  ): Promise<Page<Transfer>> {
+    const cur = parseCursor(req.cursor);
+    const cursorCond = cur
+      ? or(
+          lt(transfers.createdAt, cur.createdAt),
+          and(eq(transfers.createdAt, cur.createdAt), lt(transfers.id, cur.id)),
+        )
+      : undefined;
+    const rows = await db
+      .select()
+      .from(transfers)
+      .where(cursorCond ? and(where, cursorCond) : where)
+      .orderBy(desc(transfers.createdAt), desc(transfers.id))
+      .limit(req.limit + 1);
+    const items = rows.slice(0, req.limit).map((r) => toDomain(r, decrypt));
+    return {
+      items,
+      nextCursor: rows.length > req.limit ? cursorOf(items[items.length - 1]) : undefined,
+    };
+  }
+
+  return {
+    async getTransfer(id: string, opts?: { decrypt?: boolean }): Promise<Transfer | null> {
+      const rows = await db.select().from(transfers).where(eq(transfers.id, id)).limit(1);
+      return rows[0] ? toDomain(rows[0], opts?.decrypt ?? false) : null;
+    },
+
+    /** Partner-scoped read: null for missing OR out-of-scope (404-never-403). */
+    async getOwnedTransfer(partnerId: PartnerId, id: string): Promise<Transfer | null> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(eq(transfers.id, id), eq(transfers.partnerId, partnerId)))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Compat upsert (mirrors the Redis saveTransfer SET semantics). */
+    async saveTransfer(t: Transfer): Promise<void> {
+      const row = transferToRow(t, provider);
+      await db
+        .insert(transfers)
+        .values(row)
+        .onConflictDoUpdate({ target: transfers.id, set: row });
+    },
+
+    /** Transaction-aware insert for the money paths (no upsert — must be new). */
+    async insertTransfer(t: Transfer): Promise<void> {
+      await db.insert(transfers).values(transferToRow(t, provider));
+    },
+
+    /**
+     * Atomic, forward-only webhook transition — ONE guarded UPDATE, immune to
+     * the concurrent funded/paid_out race. Terminal states (cancelled, blocked,
+     * in_review) never move; equal-or-backward ranks no-op. Non-null return ⇒
+     * a REAL transition (the caller's notify contract, unchanged).
+     */
+    async updateTransferFromWebhook(
+      id: string,
+      status: TransferStatus,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({
+          status,
+          paidAt: sql`CASE WHEN ${status} IN ('paid','delivered') THEN COALESCE(${transfers.paidAt}, now()) ELSE ${transfers.paidAt} END`,
+          deliveredAt: sql`CASE WHEN ${status} = 'delivered' THEN COALESCE(${transfers.deliveredAt}, now()) ELSE ${transfers.deliveredAt} END`,
+        })
+        .where(
+          and(
+            eq(transfers.id, id),
+            sql`${transfers.status} NOT IN ('cancelled','blocked','in_review')`,
+            sql`(CASE ${transfers.status} WHEN 'awaiting_payment' THEN 0 WHEN 'paid' THEN 1 ELSE 2 END)
+              < (CASE ${status} WHEN 'paid' THEN 1 WHEN 'delivered' THEN 2 ELSE -1 END)`,
+          ),
+        )
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Persist the settlement ref exactly once (never clobbers an existing ref). */
+    async setProviderRef(id: string, ref: string): Promise<void> {
+      await db
+        .update(transfers)
+        .set({ paymentProviderRef: ref })
+        .where(and(eq(transfers.id, id), isNull(transfers.paymentProviderRef)));
+    },
+
+    listByPartner(partnerId: PartnerId, req: PageReq): Promise<Page<Transfer>> {
+      return page(and(eq(transfers.partnerId, partnerId)), req);
+    },
+
+    listByPhone(phone: string, req: PageReq): Promise<Page<Transfer>> {
+      return page(and(eq(transfers.phone, phone)), req);
+    },
+
+    /** Staff-only unscoped list (server actions behind requireStaff). */
+    adminList(req: PageReq & { partnerId?: PartnerId; status?: TransferStatus }): Promise<Page<Transfer>> {
+      const conds = [
+        req.partnerId ? eq(transfers.partnerId, req.partnerId) : undefined,
+        req.status ? eq(transfers.status, req.status) : undefined,
+      ].filter((c): c is NonNullable<typeof c> => Boolean(c));
+      return page(conds.length ? and(...conds) : and(sql`true`), req);
+    },
+
+    /** Replaces the full-ledger scan in upsertOnFirstInbound (grandfathering). */
+    async firstTransferAt(phone: string): Promise<string | null> {
+      const rows = await db
+        .select({ min: sql<string | null>`min(${transfers.createdAt})` })
+        .from(transfers)
+        .where(eq(transfers.phone, phone));
+      const v = rows[0]?.min;
+      return v ? new Date(v).toISOString() : null;
+    },
+
+    /** All-time transfer count for the fee tier (replaces count:{phone}). */
+    async countByPhone(phone: string): Promise<number> {
+      const rows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(transfers)
+        .where(eq(transfers.phone, phone));
+      return rows[0]?.n ?? 0;
+    },
+
+    /** Reconciliation: webhook-driven transfers stuck in 'paid' too long. */
+    async findStuckPaid(olderThanMinutes: number): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.status, 'paid'),
+            sql`${transfers.paidAt} < now() - make_interval(mins => ${olderThanMinutes})`,
+          ),
+        )
+        .orderBy(transfers.paidAt);
+      return rows.map((r) => toDomain(r));
+    },
+  };
+}
+
+export type TransferRepo = ReturnType<typeof createTransferRepo>;
