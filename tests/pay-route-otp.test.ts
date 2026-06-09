@@ -32,6 +32,13 @@ vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig<typeof import(
 vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import('@/lib/transaction-otp')>()), getTransactionOtpStore: () => txOtp }));
 // No draft for these ids → otpPhone resolves from the existing transfer.
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
+// WL1: existing-transfer branch resolves the owning partner for the gate toggle
+// (default ⇒ gate ON). Back getPartnerStore with a fake store, not real Redis.
+vi.mock('@/lib/partner-store', async (orig) => {
+  const real = await orig<typeof import('@/lib/partner-store')>();
+  const ps = real.createPartnerStore(fakeRedis());
+  return { ...real, getPartnerStore: () => ps };
+});
 
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
 vi.mock('@/lib/providers/payment-provider', () => ({ getPaymentProvider: () => ({ initiateTransfer }) }));

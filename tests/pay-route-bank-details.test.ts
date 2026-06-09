@@ -52,6 +52,15 @@ vi.mock('@/lib/customer-store', async (orig) => {
   return { ...real, getCustomerStore: () => customerStore };
 });
 
+// WL1: the existing-transfer branch now resolves the owning partner to decide
+// whether OUR KYC gate applies (default ⇒ gate ON, unchanged). Back getPartnerStore
+// with a fake store so it doesn't reach real Redis.
+vi.mock('@/lib/partner-store', async (orig) => {
+  const real = await orig<typeof import('@/lib/partner-store')>();
+  const ps = real.createPartnerStore(fakeRedis());
+  return { ...real, getPartnerStore: () => ps };
+});
+
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
 vi.mock('@/lib/providers/payment-provider', () => ({
   getPaymentProvider: () => ({ initiateTransfer }),

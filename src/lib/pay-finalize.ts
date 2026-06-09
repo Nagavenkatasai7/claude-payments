@@ -1,5 +1,5 @@
 import { createTransfer } from './transfer-create';
-import { isSendVerified } from './kyc-gate';
+import { isSendVerified, sendGateActive } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Store } from './store';
@@ -54,10 +54,15 @@ export async function finalizeDraftPayment(
   const customer =
     (await customerStore.getCustomer(peek.senderPhone)) ??
     (await customerStore.upsertOnFirstInbound(peek.senderPhone)).customer;
+  // WL1: resolve the owning partner — drives the gate toggle + requiresKyc.
+  const partner =
+    (await partnerStore.getPartner(customer.partnerId)) ??
+    (await partnerStore.ensureDefaultPartner());
 
   // Phase 3 verify-before-send gate — refuse BEFORE consuming the draft so an
   // unverified sender keeps their (single-use) draft and can retry once verified.
-  if (!isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  // WL1: skipped for a 'delegated' partner; sanctions still run in createTransfer.
+  if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
   const todayUsedCents = await dailyVolumeStore.getTodayCents(peek.senderPhone);
@@ -100,6 +105,7 @@ export async function finalizeDraftPayment(
     occupation: draft.occupation,
     senderName: customer.fullName,
     senderKycStatus: customer.kycStatus,
+    requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
   });
 
   if (transfer.complianceStatus === 'blocked') {

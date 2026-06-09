@@ -1,6 +1,6 @@
 import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
-import { isSendVerified } from './kyc-gate';
+import { isSendVerified, sendGateActive } from './kyc-gate';
 import { env } from './env';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
@@ -53,10 +53,15 @@ export async function runDueSchedules(
     // stays active so it resumes if the customer re-subscribes with START).
     const owner = await deps.customerStore.getCustomer(schedule.phone);
     if (owner?.optedOutAt) continue;
+    // WL1: resolve the schedule's partner — drives the gate toggle + requiresKyc.
+    const partner =
+      (await deps.partnerStore.getPartner(schedule.partnerId)) ??
+      (await deps.partnerStore.ensureDefaultPartner());
     // Phase 3 verify-before-send gate — skip an unverified owner's scheduled send
     // and notify them. Do NOT createTransfer and do NOT bump lastRunAt, so the
     // schedule stays active and resumes automatically once they verify.
-    if (!isSendVerified(owner)) {
+    // WL1: skipped for a 'delegated' partner (they run KYC); sanctions still run.
+    if (sendGateActive(partner) && !isSendVerified(owner)) {
       if (deps.sendScheduledSkipped) {
         const start = await deps.kycProvider.startVerification({
           customerId: schedule.phone,
@@ -77,7 +82,8 @@ export async function runDueSchedules(
         payoutMethod: schedule.payoutMethod,
         payoutDestination: schedule.payoutDestination,
         fundingMethod: schedule.fundingMethod,
-        senderKycStatus: owner.kycStatus,
+        senderKycStatus: owner?.kycStatus ?? 'not_started',
+        requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
       });
       if (transfer.status !== 'blocked') {
         const url = `${env.appBaseUrl}/pay/${transfer.id}`;

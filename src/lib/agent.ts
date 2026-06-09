@@ -1,4 +1,4 @@
-import { SYSTEM_PROMPT } from './prompt';
+import { buildSystemPrompt } from './prompt';
 import { toolSchemas, executeTool } from './tools';
 import type { ChatMessage, ChatTool, TurnContext } from './types';
 import type { Store } from './store';
@@ -13,7 +13,8 @@ import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
 import { normalizePhone } from './phone';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
-import { isSendVerified } from './kyc-gate';
+import { isSendVerified, sendGateActive } from './kyc-gate';
+import { resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 
 const MAX_TOOL_ROUNDS = 6;
@@ -107,6 +108,15 @@ export function createAgent(deps: AgentDeps) {
       : await deps.partnerStore.ensureDefaultPartner();
     const sendCurrencies = allowedSendCurrencies(notePartner);
 
+    // WL1 white-label: resolve the partner's brand + KYC posture ONCE. The
+    // default/unconfigured partner ⇒ brand 'SmartRemit', persona '', gate ON —
+    // identical to today (buildSystemPrompt({brand:'SmartRemit',botPersona:''})
+    // === the original SYSTEM_PROMPT). A 'delegated' partner runs KYC on their
+    // side, so we suppress every verify-leading note + the verify backstop.
+    // (Sanctions are unaffected and still run inside createTransfer.)
+    const branding = resolvePartnerBranding(notePartner);
+    const gateActive = sendGateActive(notePartner);
+
     // Recent-transfer memory: the customer's OWN recent sends, surfaced once at
     // round 0 so the model can reference "you sent Mom $500 yesterday". '' when
     // the customer has no history ⇒ nothing is injected (behavior unchanged).
@@ -129,7 +139,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona }) },
       ];
       if (turn.isNewConversation && round === 0) {
         messages.push({
@@ -160,7 +170,10 @@ export function createAgent(deps: AgentDeps) {
           console.warn('recipient-tap hydration failed:', err);
         }
       }
-      if (round === 0) {
+      // These two notes LEAD with verify-before-send; only inject them when our
+      // KYC gate is active. A 'delegated' partner (gateActive=false) handles KYC
+      // on their side, so a brand-new customer just gets the normal warm greeting.
+      if (round === 0 && gateActive) {
         if (turn.isNewCustomer) {
           messages.push({
             role: 'system',
@@ -196,7 +209,7 @@ export function createAgent(deps: AgentDeps) {
       // must ALSO lead the conversation with verification instead of collecting an
       // amount — otherwise an unverified sender gets "how much?" before being asked
       // to verify. Server-injected so it never depends on the model reading prompt.ts.
-      if (round === 0 && !isSendVerified(noteCustomer)) {
+      if (round === 0 && gateActive && !isSendVerified(noteCustomer)) {
         messages.push({
           role: 'system',
           content:
@@ -280,6 +293,7 @@ export function createAgent(deps: AgentDeps) {
     if (
       !interactiveSent &&
       paymentLinks.length === 0 &&
+      gateActive &&
       !isSendVerified(noteCustomer) &&
       looksLikeVerifyHandoff(reply)
     ) {

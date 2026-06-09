@@ -5,7 +5,7 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, recordBlockedAttempt } from './transfer-create';
-import { isSendVerified, SEND_GATE_REASON } from './kyc-gate';
+import { isSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
@@ -620,13 +620,14 @@ async function getQuoteTool(
 ): Promise<ToolResult> {
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
+    const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
       await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
 
     // Phase 3 verify-before-send gate — a NEW condition on kycStatus, independent
     // of the existing T0/Suspended cap branch below. Hand off the kyc_url before
     // building any quote so the bot directs the customer to verify first.
-    if (!isSendVerified(customer)) {
+    // WL1: skipped for a 'delegated' partner (they run KYC). Sanctions unaffected.
+    if (sendGateActive(partner) && !isSendVerified(customer)) {
       const start = await ctx.kycProvider.startVerification({
         customerId: ctx.phone,
         senderPhone: ctx.phone,
@@ -732,8 +733,13 @@ async function createTransferTool(
     const customer =
       (await ctx.customerStore.getCustomer(ctx.phone)) ??
       (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+    // WL1: resolve the owning partner once (drives both the gate toggle below and
+    // requiresKyc into createTransfer). Default/'ours' ⇒ gate ON (unchanged).
+    const partner =
+      (await ctx.partnerStore.getPartner(customer.partnerId)) ??
+      (await ctx.partnerStore.ensureDefaultPartner());
     // Phase 3 verify-before-send gate (last bot chokepoint before mint).
-    if (!isSendVerified(customer)) {
+    if (sendGateActive(partner) && !isSendVerified(customer)) {
       const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
       return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
     }
@@ -769,6 +775,7 @@ async function createTransferTool(
         occupation: draft.occupation,
         senderName: customer.fullName,
         senderKycStatus: customer.kycStatus,
+        requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
@@ -797,13 +804,14 @@ async function createTransferTool(
     };
   }
   // Resolve currency + rates and reuse customer for cap check + partnerId.
-  const { customer: legacyCustomer, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = await resolveCurrencyAndRates(
+  const { customer: legacyCustomer, partner: legacyPartner, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = await resolveCurrencyAndRates(
     ctx,
     args.source_currency,
     args.destination_country,
   );
   // Phase 3 verify-before-send gate (legacy explicit-args create path).
-  if (!isSendVerified(legacyCustomer)) {
+  // WL1: skipped for a 'delegated' partner; sanctions still run in createTransfer.
+  if (sendGateActive(legacyPartner) && !isSendVerified(legacyCustomer)) {
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
@@ -845,6 +853,7 @@ async function createTransferTool(
       occupation: legacyOcc,
       senderName: legacyCustomer.fullName,
       senderKycStatus: legacyCustomer.kycStatus,
+      requiresKyc: sendGateActive(legacyPartner), // WL1: delegated ⇒ false; sanctions still run
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
@@ -1141,11 +1150,12 @@ async function sendApprovePickerTool(
   const payoutMethod: PayoutMethod = (args.payout_method as PayoutMethod | undefined) ?? 'bank';
   const payoutDestination = typeof args.payout_destination === 'string' ? args.payout_destination : '';
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
-  const { customer, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
+  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
     await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
   // Phase 3 verify-before-send gate — refuse to build the approval card / draft
   // for an unverified sender; hand off the kyc_url instead.
-  if (!isSendVerified(customer)) {
+  // WL1: skipped for a 'delegated' partner; sanctions still run at mint time.
+  if (sendGateActive(partner) && !isSendVerified(customer)) {
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
@@ -1396,11 +1406,11 @@ async function checkSendLimitTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   // Resolve currency+rates and reuse `customer` — no second getCustomer.
-  const { customer, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  const { customer, partner, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
   // Phase 3 verify-before-send gate — direct the customer to verify BEFORE the
   // cap/EDD logic. A NEW condition on kycStatus, independent of the T0/Suspended
-  // branch below (which is left intact).
-  if (!isSendVerified(customer)) {
+  // branch below (which is left intact). WL1: skipped for a 'delegated' partner.
+  if (sendGateActive(partner) && !isSendVerified(customer)) {
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
   }
