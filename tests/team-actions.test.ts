@@ -1,12 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { createAuthStore } from '@/lib/auth-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createAuditLogStore } from '@/lib/audit-log-store';
+import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
 
 const redis = fakeRedis();
 let actor: Staff;
+
+// Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
+// The vi.mock factory closes over the let-variable (assigned in beforeEach).
+let db: Db;
+let partnerStore: import('@/lib/partner-store').PartnerStore;
 
 vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor }));
 vi.mock('@/lib/auth-store', async () => {
@@ -15,7 +22,7 @@ vi.mock('@/lib/auth-store', async () => {
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+  return { ...actual, getPartnerStore: () => partnerStore };
 });
 vi.mock('@/lib/audit-log-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/audit-log-store')>('@/lib/audit-log-store');
@@ -32,7 +39,6 @@ import {
 } from '@/app/admin-dashboard/team/actions';
 
 const authStore = createAuthStore(redis);
-const partnerStore = createPartnerStore(redis);
 const auditStore = createAuditLogStore(redis);
 
 function staff(overrides: Partial<Staff>): Staff {
@@ -60,6 +66,8 @@ async function seedBoss() {
 
 beforeEach(async () => {
   redis.dump.clear();
+  db = await freshDb();
+  partnerStore = createPartnerStore(db);
   await seedBoss();
 });
 

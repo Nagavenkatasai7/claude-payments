@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import type { Db } from '@/db/client';
 
 vi.mock('@/lib/auth', () => ({
   requireAdmin: async () => ({ username: 'admin', role: 'admin' }),
@@ -7,15 +9,20 @@ vi.mock('@/lib/auth', () => ({
   requirePlatformAdmin: async () => ({ username: 'admin', role: 'admin' }),
 }));
 
-const sharedRedis = fakeRedis();
+// Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
+// The vi.mock factory closes over the let-variable (assigned in beforeEach).
+let db: Db;
+let ps: import('@/lib/partner-store').PartnerStore;
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return {
     ...actual,
-    getPartnerStore: () => actual.createPartnerStore(sharedRedis),
+    getPartnerStore: () => ps,
   };
 });
 
+// Auth store (staff/sessions) is STILL Redis.
+const sharedRedis = fakeRedis();
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(sharedRedis) };
@@ -28,7 +35,11 @@ vi.mock('next/navigation', () => ({
 
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
-beforeEach(() => sharedRedis.dump.clear());
+beforeEach(async () => {
+  sharedRedis.dump.clear();
+  db = await freshDb();
+  ps = createPartnerStore(db);
+});
 afterEach(() => vi.clearAllMocks());
 
 import {
@@ -38,15 +49,14 @@ import {
 } from '@/app/admin-dashboard/partners/actions';
 import { createPartnerStore } from '@/lib/partner-store';
 
-const ps = createPartnerStore(sharedRedis);
-
 describe('createPartnerAction', () => {
   it('creates a Partner with status active and a fresh id', async () => {
     const fd = new FormData();
     fd.set('name', 'Acme Remit');
     fd.append('countries', 'CA');
     await createPartnerAction(fd);
-    const all = await ps.listPartners();
+    // freshDb seeds the 'default' partner; ignore it here.
+    const all = (await ps.listPartners()).filter((p) => p.id !== 'default');
     expect(all).toHaveLength(1);
     expect(all[0].name).toBe('Acme Remit');
     expect(all[0].countries).toEqual(['CA']);
@@ -75,8 +85,8 @@ describe('updatePartnerAction', () => {
       name: 'Old',
       countries: ['CA'],
       status: 'active',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
     });
     const fd = new FormData();
     fd.set('id', 'p1');
@@ -86,14 +96,14 @@ describe('updatePartnerAction', () => {
     const got = await ps.getPartner('p1');
     expect(got?.name).toBe('Renamed');
     expect(got?.countries).toEqual(['GB']);
-    expect(got?.createdAt).toBe('2026-01-01T00:00:00Z');
-    expect(got?.updatedAt).not.toBe('2026-01-01T00:00:00Z');
+    expect(got?.createdAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(got?.updatedAt).not.toBe('2026-01-01T00:00:00.000Z');
   });
 
   it('WL: persists displayName + delegated KYC mode + requireKycBeforeSend', async () => {
     await ps.savePartner({
       id: 'p2', name: 'Acme', countries: ['US'], status: 'active',
-      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     });
     const fd = new FormData();
     fd.set('id', 'p2');
@@ -113,7 +123,7 @@ describe('updatePartnerAction', () => {
     await ps.savePartner({
       id: 'p3', name: 'Bee', countries: ['US'], status: 'active',
       kycMode: 'delegated', requireKycBeforeSend: true,
-      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     });
     const fd = new FormData();
     fd.set('id', 'p3');
@@ -135,8 +145,8 @@ describe('setPartnerStatusAction', () => {
       name: 'X',
       countries: ['CA'],
       status: 'active',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
     });
     const fd = new FormData();
     fd.set('id', 'p1');
@@ -151,8 +161,8 @@ describe('setPartnerStatusAction', () => {
       name: 'X',
       countries: ['CA'],
       status: 'suspended',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
     });
     const fd = new FormData();
     fd.set('id', 'p1');
@@ -168,7 +178,7 @@ describe('setPartnerStatusAction session revocation', () => {
     const authStore = getAuthStore();
     await ps.savePartner({
       id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
-      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
     });
     await authStore.saveStaff({
       username: 'p', name: 'P', role: 'admin',

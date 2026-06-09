@@ -11,8 +11,10 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { evaluateCap } from '@/lib/tier-rules';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.2;
@@ -47,8 +49,13 @@ async function seedVerifiedCustomer(
   });
 }
 
-beforeEach(() => {
+// Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
+// PGlite and reseeds the 'default' partner, so it MUST run per-test.
+let db: Db;
+
+beforeEach(async () => {
   resetRateCacheForTests();
+  db = await freshDb();
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue({
@@ -105,7 +112,7 @@ describe('end-to-end happy path', () => {
       dailyVolumeStore,
       monthlyVolumeStore,
       kycProvider,
-      partnerStore: createPartnerStore(redis), // NEW (P4)
+      partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
       async chat() {
         const msg = script[turn++];
         // Patch the real transfer id into the link tool call.
@@ -226,7 +233,7 @@ describe('end-to-end returning customer', () => {
       dailyVolumeStore,
       monthlyVolumeStore,
       kycProvider,
-      partnerStore: createPartnerStore(redis), // NEW (P4)
+      partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
       async chat() {
         const msg = activeScript.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
@@ -347,7 +354,7 @@ describe('end-to-end new customer with cap', () => {
 
     const agent = createAgent({
       store, scheduleStore, draftStore, customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider,
-      partnerStore: createPartnerStore(redis), // NEW (P4)
+      partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
       async chat() {
         const msg = active.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {

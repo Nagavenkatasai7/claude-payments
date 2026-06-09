@@ -8,7 +8,7 @@ import {
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { EMPTY_PARTNER_INTEGRATIONS } from '@/lib/partner-integrations';
-import { fakeRedis } from './helpers';
+import { freshDb, seedPartner } from './helpers-db';
 import type { Partner } from '@/lib/types';
 
 const now = '2026-06-08T00:00:00Z';
@@ -77,17 +77,21 @@ describe('resolvePartnerIntegrations', () => {
   const provider = new EnvKeyProvider(Buffer.alloc(32, 7));
 
   it('null partner ⇒ EMPTY (mock payment / env KYC / shared WhatsApp)', async () => {
-    const store = createPartnerIntegrationsStore(fakeRedis(), provider);
+    const db = await freshDb();
+    const store = createPartnerIntegrationsStore(db, provider);
     expect(await resolvePartnerIntegrations(null, store)).toEqual(EMPTY_PARTNER_INTEGRATIONS);
   });
 
   it('partner with no row ⇒ EMPTY', async () => {
-    const store = createPartnerIntegrationsStore(fakeRedis(), provider);
+    const db = await freshDb();
+    const store = createPartnerIntegrationsStore(db, provider);
     expect(await resolvePartnerIntegrations(partner({}), store)).toEqual(EMPTY_PARTNER_INTEGRATIONS);
   });
 
   it('partner with a row ⇒ its decrypted config', async () => {
-    const store = createPartnerIntegrationsStore(fakeRedis(), provider);
+    const db = await freshDb();
+    await seedPartner(db, 'acme');
+    const store = createPartnerIntegrationsStore(db, provider);
     await store.saveIntegrations('acme', { kyc: {}, payment: { providerType: 'mock' }, whatsapp: { phoneNumberId: '999' } });
     expect(await resolvePartnerIntegrations(partner({ id: 'acme' }), store)).toEqual({ kyc: {}, payment: { providerType: 'mock' }, whatsapp: { phoneNumberId: '999' } });
   });

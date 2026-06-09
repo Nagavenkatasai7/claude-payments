@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import type { Db } from '@/db/client';
 
 const redis = fakeRedis();
+// Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
+// The vi.mock factory closes over the let-variable (assigned in beforeEach).
+let db: Db;
+let ps: import('@/lib/partner-store').PartnerStore;
 const envOverrides: Record<string, string> = {};
 vi.mock('@/lib/env', () => ({
   env: new Proxy({}, {
@@ -21,15 +27,18 @@ vi.mock('@/lib/auth-store', async () => {
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+  return { ...actual, getPartnerStore: () => ps };
 });
 
 import { ensureSeedAdmin } from '@/lib/seed';
 import { createAuthStore } from '@/lib/auth-store';
+import { createPartnerStore } from '@/lib/partner-store';
 import { verifyPassword } from '@/lib/password';
 
-beforeEach(() => {
+beforeEach(async () => {
   redis.dump.clear();
+  db = await freshDb();
+  ps = createPartnerStore(db);
   for (const k of Object.keys(envOverrides)) delete envOverrides[k];
 });
 afterEach(() => vi.clearAllMocks());

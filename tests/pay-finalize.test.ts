@@ -8,22 +8,24 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 
 const PHONE = '15551234567';
 
-function buildStores() {
+async function buildStores() {
   const redis = fakeRedis();
+  const db = await freshDb(); // truncates + reseeds 'default' partner
   const store = createStore(redis);
   const customerStore = createCustomerStore(redis, store);
   const draftStore = createDraftStore(redis);
-  const partnerStore = createPartnerStore(redis);
+  const partnerStore = createPartnerStore(db);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const dailyVolumeStore = createDailyVolumeStore(redis);
   return { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore };
 }
 
 async function makeDraft(
-  stores: ReturnType<typeof buildStores>,
+  stores: Awaited<ReturnType<typeof buildStores>>,
   amountUsd: number,
   recipientName = 'Mom',
   payoutDestination: string | undefined = 'mom@upi',
@@ -62,7 +64,7 @@ beforeEach(() => {
 
 describe('finalizeDraftPayment', () => {
   it('happy path ($200): returns ok:true with a transferId, persists the transfer, consumes the draft, increments transfer count', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
 
     const result = await finalizeDraftPayment(stores, draftId);
@@ -85,7 +87,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('Phase 3: an unverified owner → { ok:false, error:"kyc_required" }, draft NOT consumed, no transfer', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
     // Override the (verified) seed from makeDraft with an unverified status.
     const c = await stores.customerStore.getCustomer(PHONE);
@@ -102,7 +104,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('unknown/expired draftId → { ok:false, error:"expired_or_used" }', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
 
     const result = await finalizeDraftPayment(stores, 'nonexistent-draft-id');
 
@@ -112,7 +114,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('over-cap: daily cap exhausted → { ok:false, error:"cap" }, draft NOT consumed', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
 
     // Exhaust the T0 daily cap ($500 = 50_000 cents)
@@ -130,7 +132,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('blocked recipient ("John Doe") → { ok:false, error:"blocked", transferId } where transferId is a string', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200, 'John Doe');
 
     const result = await finalizeDraftPayment(stores, draftId);
@@ -142,7 +144,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('sticky funding: after happy path, customer.lastFundingMethod === "bank_transfer"', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
 
     const result = await finalizeDraftPayment(stores, draftId);
@@ -156,7 +158,7 @@ describe('finalizeDraftPayment', () => {
   // cold-start draft has an empty payoutDestination; the bankDetails argument
   // supplies it at pay time.
   it('uses bankDetails from the param for the created transfer (cold-start draft has empty destination)', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200, 'Mom', '', 'bank');
 
     const result = await finalizeDraftPayment(stores, draftId, {
@@ -172,7 +174,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('FALLS BACK to draft.recipient.payoutDestination when bankDetails is absent (old in-flight draft)', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     // Old-style draft that still carries the destination it was created with.
     const draftId = await makeDraft(stores, 200, 'Mom', 'mom@upi', 'upi');
 
@@ -186,7 +188,7 @@ describe('finalizeDraftPayment', () => {
   });
 
   it('FALLS BACK to the draft destination when bankDetails has an empty payoutDestination', async () => {
-    const stores = buildStores();
+    const stores = await buildStores();
     const draftId = await makeDraft(stores, 200, 'Mom', 'mom@upi', 'upi');
 
     const result = await finalizeDraftPayment(stores, draftId, {

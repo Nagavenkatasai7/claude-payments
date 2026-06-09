@@ -6,6 +6,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Schedule } from '@/lib/types';
 import type { CustomerStore } from '@/lib/customer-store';
@@ -61,10 +62,10 @@ function makeScheduleStore() {
 
 // Build a complete, self-consistent set of cron deps against a single redis so
 // the customerStore the cron reads is the same one tests write to.
-function makeDeps() {
+async function makeDeps() {
   const redis = fakeRedis();
   const store = createStore(redis);
-  const partnerStore = createPartnerStore(redis);
+  const partnerStore = createPartnerStore(await freshDb());
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const customerStore = createCustomerStore(redis, store);
   const scheduleStore = createScheduleStore(redis, customerStore);
@@ -75,7 +76,7 @@ describe('runDueSchedules', () => {
   it('fires a due schedule: creates a transfer, notifies, records lastRunAt', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
@@ -100,7 +101,7 @@ describe('runDueSchedules', () => {
   it('does not notify when the created transfer is compliance-blocked', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
@@ -122,7 +123,7 @@ describe('runDueSchedules', () => {
   it('endDate in the PAST: does NOT fire the schedule and marks it cancelled', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
@@ -151,7 +152,7 @@ describe('runDueSchedules', () => {
   it('endDate in the FUTURE: schedule still fires when due', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
@@ -179,7 +180,7 @@ describe('runDueSchedules', () => {
   it('no endDate (absent): schedule fires as usual when due', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const scheduleStore = makeScheduleStore();
     const customerStore = createCustomerStore(fakeRedis(), store); // no records ⇒ getCustomer null ⇒ not opted out
@@ -200,7 +201,7 @@ describe('runDueSchedules', () => {
   });
 
   it('Item 4: SKIPS a due schedule whose owning customer is opted-out (not fired, lastRunAt untouched, still active)', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = makeDeps();
+    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await scheduleStore.saveSchedule(sched('opted-out', 21));
     // Save the owning customer with optedOutAt set
     await customerStore.saveCustomer({
@@ -229,7 +230,7 @@ describe('runDueSchedules', () => {
   });
 
   it('Item 4: an owner who is NOT opted-out (no optedOutAt) still fires', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = makeDeps();
+    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await scheduleStore.saveSchedule(sched('opted-in', 21));
     await customerStore.saveCustomer({
       senderPhone: '15551234567',
@@ -253,7 +254,7 @@ describe('runDueSchedules', () => {
   });
 
   it('Phase 3: SKIPS a due schedule whose owner is unverified — no transfer, lastRunAt untouched, sendScheduledSkipped called once', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = makeDeps();
+    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await scheduleStore.saveSchedule(sched('unverified', 21));
     await customerStore.saveCustomer({
       senderPhone: '15551234567', firstSeenAt: '2026-01-01T00:00:00Z',

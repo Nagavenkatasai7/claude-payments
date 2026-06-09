@@ -10,10 +10,16 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
+import type { Db } from '@/db/client';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
+
+// Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
+// PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
+let db: Db;
 
 function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
   const store = createStore(redis);
@@ -42,7 +48,7 @@ function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
     dailyVolumeStore,
     monthlyVolumeStore,
     kycProvider,
-    partnerStore: createPartnerStore(redis), // NEW (P4)
+    partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
   };
 }
 
@@ -56,8 +62,9 @@ function stubFetch(rate: number = MOCK_RATE) {
   );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   resetRateCacheForTests();
+  db = await freshDb();
   stubFetch();
 });
 

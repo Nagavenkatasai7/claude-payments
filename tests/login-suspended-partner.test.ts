@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
 
 const redis = fakeRedis();
+let pgPartnerStore: PartnerStore;
 const cookieJar = new Map<string, string>();
 
 vi.mock('next/headers', () => ({
@@ -20,7 +23,7 @@ vi.mock('@/lib/auth-store', async () => {
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+  return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 vi.mock('@/lib/seed', () => ({ ensureSeedAdmin: async () => {} }));
 
@@ -29,7 +32,12 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { hashPassword } from '@/lib/password';
 
-beforeEach(() => { redis.dump.clear(); cookieJar.clear(); redirectMock.mockClear(); });
+beforeEach(async () => {
+  redis.dump.clear();
+  cookieJar.clear();
+  redirectMock.mockClear();
+  pgPartnerStore = createPartnerStore(await freshDb());
+});
 afterEach(() => vi.clearAllMocks());
 
 function form(values: Record<string, string>): FormData {

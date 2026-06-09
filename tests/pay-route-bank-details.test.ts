@@ -53,21 +53,25 @@ vi.mock('@/lib/customer-store', async (orig) => {
 });
 
 // WL1: the existing-transfer branch now resolves the owning partner to decide
-// whether OUR KYC gate applies (default ⇒ gate ON, unchanged). Back getPartnerStore
-// with a fake store so it doesn't reach real Redis.
-vi.mock('@/lib/partner-store', async (orig) => {
-  const real = await orig<typeof import('@/lib/partner-store')>();
-  const ps = real.createPartnerStore(fakeRedis());
-  return { ...real, getPartnerStore: () => ps };
-});
+// whether OUR KYC gate applies (default ⇒ gate ON, unchanged). Plain-object stub
+// — no partner row ⇒ ensureDefaultPartner's default (kycMode 'ours' ⇒ gate ON).
+vi.mock('@/lib/partner-store', () => ({
+  getPartnerStore: () => ({
+    getPartner: async () => null,
+    ensureDefaultPartner: async () => ({
+      id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    }),
+  }),
+}));
 
 // WL3: the route also resolves the partner's integrations (rail + WhatsApp creds).
-// No row ⇒ EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
-vi.mock('@/lib/partner-integrations-store', async (orig) => {
-  const real = await orig<typeof import('@/lib/partner-integrations-store')>();
-  const is = real.createPartnerIntegrationsStore(fakeRedis());
-  return { ...real, getPartnerIntegrationsStore: () => is };
-});
+// EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
+vi.mock('@/lib/partner-integrations-store', () => ({
+  getPartnerIntegrationsStore: () => ({
+    getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }),
+  }),
+}));
 
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
 vi.mock('@/lib/providers/payment-provider', () => ({

@@ -3,6 +3,7 @@ import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
 
@@ -109,7 +110,7 @@ describe('createTransfer side-effects', () => {
   it('upserts the recipient after a successful transfer', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     await createTransfer(store, partnerStore, monthlyVolumeStore, {
       phone: '15551234567',
@@ -133,7 +134,7 @@ describe('createTransfer side-effects', () => {
   it('idempotently bumps lastUsedAt on a repeat transfer to the same recipient', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const input = {
       phone: '15551234567',

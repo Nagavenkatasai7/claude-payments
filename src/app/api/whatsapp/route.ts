@@ -3,8 +3,7 @@ import { env } from '@/lib/env';
 import { verifyMetaSignature } from '@/lib/providers/meta-signature-verify';
 import { parsePhoneNumberId } from '@/lib/whatsapp';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
-import { getPartnerWhatsappIndex } from '@/lib/partner-whatsapp-index';
-import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { getPartnerIntegrationsStore, partnerForPhoneNumberId } from '@/lib/partner-integrations-store';
 import { processInboundWebhook } from '@/lib/whatsapp-inbound';
 
 // The SHARED Meta webhook. The default/SmartRemit number lives here; partner-
@@ -41,7 +40,7 @@ export async function POST(req: NextRequest) {
   // WL2 routing: the receiving number's phone_number_id → owning partner.
   const pnid = parsePhoneNumberId(body);
   const routedPartnerId = pnid
-    ? await getPartnerWhatsappIndex().partnerForPnid(pnid)
+    ? await partnerForPhoneNumberId(pnid)
     : null;
   const integrations = routedPartnerId
     ? await getPartnerIntegrationsStore().getIntegrations(routedPartnerId)

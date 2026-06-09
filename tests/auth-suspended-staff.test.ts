@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
 
 /** Team: a suspended staff member is locked out at login AND mid-session. */
 
 const redis = fakeRedis();
+let pgPartnerStore: PartnerStore;
 const cookieJar = new Map<string, string>();
 
 vi.mock('next/headers', () => ({
@@ -25,7 +28,7 @@ vi.mock('@/lib/auth-store', async () => {
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+  return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 vi.mock('@/lib/seed', () => ({ ensureSeedAdmin: async () => {} }));
 
@@ -35,10 +38,11 @@ import { getAuthStore } from '@/lib/auth-store';
 import { hashPassword } from '@/lib/password';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 
-beforeEach(() => {
+beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   redirectMock.mockClear();
+  pgPartnerStore = createPartnerStore(await freshDb());
 });
 afterEach(() => vi.clearAllMocks());
 

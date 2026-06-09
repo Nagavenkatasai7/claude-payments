@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { createAuthStore } from '@/lib/auth-store';
-import { createPartnerStore } from '@/lib/partner-store';
+import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
 
 // Mock next/headers + next/navigation BEFORE importing auth.ts
 const cookieJar = new Map<string, string>();
@@ -17,15 +18,16 @@ const { redirectMock } = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ redirect: redirectMock }));
 
-// Shared redis so auth-store + partner-store see the same data
+// Staff stay on fakeRedis; partners are pg-backed (PGlite via freshDb, assigned per-test).
 const redis = fakeRedis();
+let pgPartnerStore: PartnerStore;
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+  return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 
 import { getCurrentStaff, requirePlatformAdmin } from '@/lib/auth';
@@ -33,10 +35,11 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 
-beforeEach(() => {
+beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   redirectMock.mockClear();
+  pgPartnerStore = createPartnerStore(await freshDb());
 });
 afterEach(() => vi.clearAllMocks());
 

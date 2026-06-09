@@ -17,6 +17,7 @@ import { createScheduleStore } from '@/lib/schedule-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 
 beforeEach(() => {
   resetRateCacheForTests();
@@ -31,7 +32,7 @@ describe('backfillCustomersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     for (const phone of ['15551111111', '15552222222']) {
       await createTransfer(store, ps, mvs, {
@@ -51,7 +52,7 @@ describe('backfillCustomersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await createTransfer(store, ps, mvs, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
@@ -69,7 +70,7 @@ describe('backfillCustomersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await createTransfer(store, ps, mvs, {
       phone: '15551111111', amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
@@ -216,7 +217,10 @@ describe('backfillPartnersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const db = await freshDb();
+    const ps = createPartnerStore(db);
+    // freshDb auto-seeds 'default' — remove it so the backfill's seeding path runs.
+    await db.execute(`DELETE FROM partners WHERE id = 'default'`);
     const result = await backfillPartnersOnce(store, cs, ps);
     expect(result.defaultPartnerCreated).toBe(true);
     expect(result.skippedSentinel).toBe(false);
@@ -230,7 +234,7 @@ describe('backfillPartnersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     // Pre-existing default with a custom name
     await ps.savePartner({
       id: 'default',
@@ -253,7 +257,7 @@ describe('backfillPartnersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
 
     // Pre-P2 customer (missing partnerId)
     await redis.set('customer:15551111111', JSON.stringify({
@@ -305,7 +309,7 @@ describe('backfillPartnersOnce', () => {
     const redis = fakeRedis();
     const store = createStore(redis);
     const cs = createCustomerStore(redis, store);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     const first = await backfillPartnersOnce(store, cs, ps);
     const second = await backfillPartnersOnce(store, cs, ps);
     expect(first.skippedSentinel).toBe(false);
@@ -437,16 +441,15 @@ describe('backfillCorridorComplianceOnce', () => {
   it('P5: backfillCorridorComplianceOnce is sentinel-guarded and leaves default untouched', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const def = await partnerStore.ensureDefaultPartner();
-    const before = JSON.stringify(await redis.get('partner:default'));
 
     const first = await backfillCorridorComplianceOnce(store, partnerStore);
     expect(first.skippedSentinel).toBe(false);
 
-    // default has no corridorCompliance → not re-saved → byte-for-byte identical
-    const after = JSON.stringify(await redis.get('partner:default'));
-    expect(after).toBe(before);
+    // default has no corridorCompliance → not re-saved → record unchanged.
+    // (The old byte-for-byte Redis-blob check was a Redis internal; equality of
+    // the reloaded record pins the same "untouched" behavior on Postgres.)
     const reloaded = await partnerStore.getPartner('default');
     expect(reloaded).toEqual(def);
     expect(reloaded?.corridorCompliance).toBeUndefined();
@@ -459,7 +462,7 @@ describe('backfillCorridorComplianceOnce', () => {
   it('P5: a partner WITH corridorCompliance is preserved by the re-save (spread)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     await partnerStore.savePartner({
       id: 'gb-co', name: 'GB Co', countries: ['US', 'GB'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
@@ -503,7 +506,7 @@ describe('backfillExpandCountriesOnce', () => {
   it('unions AE+GB into a partner with countries: [US] and reports partnersTouched >= 1', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     // Seed default partner with only US
     await partnerStore.savePartner({
       id: 'default',
@@ -527,7 +530,7 @@ describe('backfillExpandCountriesOnce', () => {
   it('is idempotent — second run returns { partnersTouched: 0, skippedSentinel: true }', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     await partnerStore.savePartner({
       id: 'default',
       name: 'SmartRemit Default',
@@ -555,7 +558,7 @@ describe('backfillExpandCountriesOnce', () => {
     // Fresh redis so the sentinel is not already claimed from the tests above
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     await partnerStore.savePartner({
       id: 'partner-ca',
       name: 'CA Partner',
@@ -579,7 +582,7 @@ describe('backfillAllCorridorsOnce (any-to-any)', () => {
   it('unions all 8 Phase-1 countries into every partner', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     await partnerStore.savePartner({
       id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
@@ -595,7 +598,7 @@ describe('backfillAllCorridorsOnce (any-to-any)', () => {
   it('is idempotent (second run touches 0, sentinel claimed)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     await partnerStore.savePartner({
       id: 'default', name: 'D', countries: ['US'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',

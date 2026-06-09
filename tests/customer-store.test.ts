@@ -5,6 +5,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 
 const PHONE = '15551234567';
@@ -61,7 +62,7 @@ describe('customer store', () => {
     }));
     const redis = fakeRedis();
     const store = createStore(redis);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     // Pre-existing transfer (e.g. from before this batch shipped)
     await createTransfer(store, ps, mvs, {
@@ -121,7 +122,7 @@ describe('customer-store P1: senderCountry', () => {
     }));
     const redis = fakeRedis();
     const store = createStore(redis);
-    const ps = createPartnerStore(redis);
+    const ps = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await createTransfer(store, ps, mvs, {
       phone: '15550008888',

@@ -10,8 +10,10 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
 import { fakeRedis, type FakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage, Partner } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 // WL1 lib-level integration test: drive the agent's runAgentTurn for a fully
 // provisioned WHITE-LABEL + KYC-DELEGATED partner end-to-end on the mock rail,
@@ -37,7 +39,7 @@ function buildHarness(redis: FakeRedis) {
   const draftStore = createDraftStore(redis);
   const dailyVolumeStore = createDailyVolumeStore(redis);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
-  const partnerStore = createPartnerStore(redis);
+  const partnerStore = createPartnerStore(db); // pg-backed (Stage 2a cutover)
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
 
   // Capture the system-message content of every chat() call so we can assert on
@@ -68,8 +70,13 @@ function partnerRecord(over: Partial<Partner>): Partner {
   return { id: 'acme', name: 'Acme', countries: ['US'], status: 'active', createdAt: now, updatedAt: now, ...over };
 }
 
-beforeEach(() => {
+// Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
+// PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
+let db: Db;
+
+beforeEach(async () => {
   resetRateCacheForTests();
+  db = await freshDb();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
   }));

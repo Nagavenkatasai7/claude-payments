@@ -4,6 +4,7 @@ import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 
 beforeEach(() => {
@@ -32,7 +33,7 @@ describe('createTransfer', () => {
   it('creates a cleared transfer in awaiting_payment', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, base);
     expect(t.status).toBe('awaiting_payment');
@@ -43,7 +44,7 @@ describe('createTransfer', () => {
   it('blocks a watchlisted recipient and sets status blocked', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'John Doe' });
     expect(t.complianceStatus).toBe('blocked');
@@ -53,7 +54,7 @@ describe('createTransfer', () => {
   it('flags a large amount but stays awaiting_payment', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, { ...base, amountSource: 1500 });
     expect(t.complianceStatus).toBe('flagged');
@@ -63,7 +64,7 @@ describe('createTransfer', () => {
   it('increments the all-time and today counters', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await createTransfer(store, partnerStore, mvs, base);
     expect(await store.getTransferCount(base.phone)).toBe(1);
@@ -75,7 +76,7 @@ describe('createTransfer P1: country + currency fields', () => {
   it('populates all 4 new fields with defaults', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551112222',
@@ -100,7 +101,7 @@ describe('createTransfer P2: partnerId', () => {
   it('populates partnerId: default on new transfers', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551112222',
@@ -122,7 +123,7 @@ describe('createTransfer P4: source-currency fields', () => {
   it('P4: populates source-currency fields (USD scaffold) from the quote', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230000',
@@ -149,7 +150,7 @@ describe('createTransfer P5: corridor-aware compliance', () => {
   it('P5 regression: default/USD path produces today\'s compliance result', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner(); // countries: ['US'], no corridorCompliance
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -165,7 +166,7 @@ describe('createTransfer P5: corridor-aware compliance', () => {
   it('P5: a corridor override raises the threshold so a flagged-today amount clears', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.savePartner({
       id: 'gb-co', name: 'GB Co', countries: ['US', 'GB'], status: 'active',
@@ -192,7 +193,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC dormant: a sub-$3k send produces today\'s compliance result exactly (regression)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner();
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -208,7 +209,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC: a $3k-cumulative send with missing EDD fields → flagged + edd_required (NOT blocked)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner();
     await mvs.addCents('15551230001', 250_000);  // $2,500 already this month
@@ -226,7 +227,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC: $3k send WITH EDD fields present → no EDD flag', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner();
     await mvs.addCents('15551230002', 250_000);
@@ -242,7 +243,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC precedence: a watchlist hit still BLOCKS even when EDD would flag', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner();
     await mvs.addCents('15551230003', 250_000);
@@ -259,7 +260,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC: monthlyVolumeStore.addCents called with USD-equivalent cents after save', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner();
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -273,7 +274,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC: Travel-Rule fields are written onto the Transfer when supplied', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     await partnerStore.ensureDefaultPartner();
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -292,7 +293,7 @@ describe('createTransfer any-to-any corridors', () => {
   it('a transfer with destinationCountry AE has destinationCurrency AED and amountInr in AED', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     // Mock: USD rates return {INR:85}; AED rates return {INR:23.1, USD:0.27}
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -318,7 +319,7 @@ describe('createTransfer any-to-any corridors', () => {
   it('a transfer with NO destinationCountry defaults to IN/INR (back-compat invariant)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     // Standard mock: USD→INR=85
     vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -334,7 +335,7 @@ describe('createTransfer any-to-any corridors', () => {
   it('existing India tests are unchanged — US→IN transfer complianceStatus cleared at $200', async () => {
     const redis = fakeRedis();
     const store = createStore(redis);
-    const partnerStore = createPartnerStore(redis);
+    const partnerStore = createPartnerStore(await freshDb());
     const mvs = createMonthlyVolumeStore(redis);
     const t = await createTransfer(store, partnerStore, mvs, base);
     expect(t.complianceStatus).toBe('cleared');
