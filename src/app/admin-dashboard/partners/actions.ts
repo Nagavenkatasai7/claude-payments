@@ -6,9 +6,28 @@ import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
+import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
+import { getPartnerWhatsappIndex } from '@/lib/partner-whatsapp-index';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
-import type { Partner, PartnerStatus, PartnerId, StaffRole } from '@/lib/types';
+import type { Partner, PartnerStatus, PartnerId, StaffRole, KycMode } from '@/lib/types';
+
+// Write-only secret merge: a blank form field means "leave the stored secret
+// unchanged" (secrets are never rendered back, so blank ≠ delete).
+function keepOrUpdate(submitted: string, existing: string | undefined): string | undefined {
+  const v = submitted.trim();
+  return v !== '' ? v : existing;
+}
+
+// Shared gate for every partner-config action: admin role + same-partner scope
+// (a partner-admin configures only their OWN partner; a platform admin any).
+async function gatePartnerConfig(id: string): Promise<void> {
+  const staff = await requireAdmin();
+  if (!id) throw new Error('Partner id is required.');
+  const partner = await getPartnerStore().getPartner(id);
+  if (!partner || !canSee(scopeOf(staff), id)) throw new Error('Partner not found.');
+}
 
 export async function createPartnerAction(formData: FormData): Promise<void> {
   // M5: creating a tenant is platform governance — partner-admins must not reach it.
@@ -27,6 +46,7 @@ export async function createPartnerAction(formData: FormData): Promise<void> {
     countries,
     status: 'active',
     brandName: String(formData.get('brandName') ?? '').trim() || undefined,
+    displayName: String(formData.get('displayName') ?? '').trim() || undefined,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: String(formData.get('logoUrl') ?? '').trim() || undefined,
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
@@ -50,14 +70,24 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   if (!existing || !canSee(scopeOf(staff), id)) throw new Error('Partner not found.');
 
   const submittedCountries = formData.getAll('countries').map(String) as Partner['countries'];
+  // WL: KYC posture. 'delegated' = the partner runs KYC on their side, so our
+  // verify-gate steps aside (sanctions still always run). Absent/anything-else ⇒
+  // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend only matters when
+  // delegated (resolveKycMode forces it true under 'ours' regardless).
+  const kycMode: KycMode = formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours';
   const updated: Partner = {
     ...existing,
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
     countries: submittedCountries.length > 0 ? submittedCountries : existing.countries,
     brandName: String(formData.get('brandName') ?? '').trim() || undefined,
+    displayName: String(formData.get('displayName') ?? '').trim() || undefined,
+    supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
+    botPersona: String(formData.get('botPersona') ?? '').trim() || undefined,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: String(formData.get('logoUrl') ?? '').trim() || undefined,
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
+    kycMode,
+    requireKycBeforeSend: kycMode === 'delegated' ? formData.get('requireKycBeforeSend') === 'on' : undefined,
     updatedAt: new Date().toISOString(),
   };
   await ps.savePartner(updated);
@@ -143,4 +173,75 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);
   revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
+}
+
+// ── WL self-service: WhatsApp / settlement / API-key configuration ──────────
+// Secrets are write-only (blank ⇒ keep existing) and envelope-encrypted inside
+// the integrations store. Non-secret routing data (phoneNumberId, providerType)
+// is stored in the clear and may be shown back in the form.
+
+export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
+  const id = String(formData.get('id') ?? '').trim();
+  await gatePartnerConfig(id);
+  const store = getPartnerIntegrationsStore();
+  const existing = await store.getIntegrations(id);
+  const newPnid = String(formData.get('phoneNumberId') ?? '').trim();
+  await store.saveIntegrations(id, {
+    ...existing,
+    whatsapp: {
+      phoneNumberId: newPnid || undefined,
+      token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
+      verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
+      appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
+    },
+  });
+  // Maintain the phone_number_id → partner reverse index (clear old, set new).
+  const index = getPartnerWhatsappIndex();
+  const oldPnid = existing.whatsapp.phoneNumberId;
+  if (oldPnid && oldPnid !== newPnid) await index.clearPnid(oldPnid);
+  if (newPnid) await index.setPnid(newPnid, id);
+  revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+export async function savePaymentConfigAction(formData: FormData): Promise<void> {
+  const id = String(formData.get('id') ?? '').trim();
+  await gatePartnerConfig(id);
+  const store = getPartnerIntegrationsStore();
+  const existing = await store.getIntegrations(id);
+  const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
+  const settlementUrl = keepOrUpdate(String(formData.get('settlementUrl') ?? ''), existing.payment.credentials?.settlementUrl);
+  const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), existing.payment.credentials?.signingSecret);
+  const credentials: Record<string, string> = {};
+  if (settlementUrl) credentials.settlementUrl = settlementUrl;
+  if (signingSecret) credentials.signingSecret = signingSecret;
+  await store.saveIntegrations(id, {
+    ...existing,
+    payment: {
+      providerType,
+      credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+      webhookSecret: keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret),
+    },
+  });
+  revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+/** Issue a new API key. Returns the plaintext ONCE — the client surfaces it then discards it. */
+export async function issueApiKeyAction(
+  partnerId: PartnerId,
+): Promise<{ plaintext: string; keyId: string; last4: string }> {
+  await gatePartnerConfig(partnerId);
+  const issued = await getPartnerApiKeyStore().issue(partnerId);
+  revalidatePath(`/admin-dashboard/partners/${partnerId}`);
+  return { plaintext: issued.plaintext, keyId: issued.keyId, last4: issued.last4 };
+}
+
+export async function revokeApiKeyAction(partnerId: PartnerId, formData: FormData): Promise<void> {
+  await gatePartnerConfig(partnerId);
+  const keyId = String(formData.get('keyId') ?? '').trim();
+  if (!keyId) throw new Error('keyId is required.');
+  // Cross-tenant guard: the key must belong to THIS partner before we revoke it.
+  const keys = await getPartnerApiKeyStore().list(partnerId);
+  if (!keys.some((k) => k.keyId === keyId)) throw new Error('Key not found.');
+  await getPartnerApiKeyStore().revoke(keyId);
+  revalidatePath(`/admin-dashboard/partners/${partnerId}`);
 }

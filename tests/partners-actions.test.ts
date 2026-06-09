@@ -89,6 +89,43 @@ describe('updatePartnerAction', () => {
     expect(got?.createdAt).toBe('2026-01-01T00:00:00Z');
     expect(got?.updatedAt).not.toBe('2026-01-01T00:00:00Z');
   });
+
+  it('WL: persists displayName + delegated KYC mode + requireKycBeforeSend', async () => {
+    await ps.savePartner({
+      id: 'p2', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const fd = new FormData();
+    fd.set('id', 'p2');
+    fd.set('name', 'Acme');
+    fd.append('countries', 'US');
+    fd.set('displayName', 'Acme Pay');
+    fd.set('kycMode', 'delegated');
+    fd.set('requireKycBeforeSend', 'on');
+    await updatePartnerAction(fd);
+    const got = await ps.getPartner('p2');
+    expect(got?.displayName).toBe('Acme Pay');
+    expect(got?.kycMode).toBe('delegated');
+    expect(got?.requireKycBeforeSend).toBe(true);
+  });
+
+  it("WL: kycMode defaults to 'ours' and clears requireKycBeforeSend when not delegated", async () => {
+    await ps.savePartner({
+      id: 'p3', name: 'Bee', countries: ['US'], status: 'active',
+      kycMode: 'delegated', requireKycBeforeSend: true,
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const fd = new FormData();
+    fd.set('id', 'p3');
+    fd.set('name', 'Bee');
+    fd.append('countries', 'US');
+    fd.set('kycMode', 'ours');
+    fd.set('requireKycBeforeSend', 'on'); // ignored under 'ours'
+    await updatePartnerAction(fd);
+    const got = await ps.getPartner('p3');
+    expect(got?.kycMode).toBe('ours');
+    expect(got?.requireKycBeforeSend).toBeUndefined();
+  });
 });
 
 describe('setPartnerStatusAction', () => {

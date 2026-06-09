@@ -15,7 +15,7 @@ const FULL = {
     credentials: { clientId: 'cid', clientSecret: 'csecret' },
     webhookSecret: 'whk_pay',
   },
-  whatsapp: { phoneNumberId: '123456', token: 'EAAtoken', verifyToken: 'verify123' },
+  whatsapp: { phoneNumberId: '123456', token: 'EAAtoken', verifyToken: 'verify123', appSecret: 'metaappsecret' },
 };
 
 describe('partner-integrations store', () => {
@@ -36,7 +36,7 @@ describe('partner-integrations store', () => {
     await s.saveIntegrations('acme', FULL);
     const atRest = redis.dump.get('partner:acme:integrations')!;
     // secrets must NOT appear in cleartext
-    for (const secret of ['persona_secret_key', 'whk_kyc', 'csecret', 'whk_pay', 'EAAtoken', 'verify123']) {
+    for (const secret of ['persona_secret_key', 'whk_kyc', 'csecret', 'whk_pay', 'EAAtoken', 'verify123', 'metaappsecret']) {
       expect(atRest).not.toContain(secret);
     }
     // and the encrypted blobs carry the field-crypto version marker
