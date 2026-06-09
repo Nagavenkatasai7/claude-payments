@@ -4,6 +4,7 @@ import { env } from './env';
 import type { RedisLike } from './store';
 import { getStore } from './store';
 import { getPartnerStore } from './partner-store';
+import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { getMonthlyVolumeStore } from './monthly-volume-store';
 import { authenticatePartner } from './partner-api-auth';
 import { checkPartnerRateLimit } from './partner-rate-limit';
@@ -57,6 +58,7 @@ export async function guardPartner(
     store: getStore(),
     partnerStore,
     monthlyVolumeStore: getMonthlyVolumeStore(),
+    integrationsStore: getPartnerIntegrationsStore(), // WL3 — per-partner rail/creds
     redis,
   };
   return { ok: true, ctx: { partner, keyId: auth.keyId, deps } };

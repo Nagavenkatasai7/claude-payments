@@ -48,7 +48,12 @@ export default async function NewPartnerPage() {
             <input
               className="sh-input"
               name="brandName"
-              placeholder="Brand name (optional)"
+              placeholder="Brand name (internal, optional)"
+            />
+            <input
+              className="sh-input"
+              name="displayName"
+              placeholder="Display name — the brand customers see (optional)"
             />
             <input
               className="sh-input"

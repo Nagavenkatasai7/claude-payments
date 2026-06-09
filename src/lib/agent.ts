@@ -8,6 +8,7 @@ import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
+import type { WaCreds } from './whatsapp';
 import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
@@ -31,6 +32,7 @@ export interface AgentDeps {
   monthlyVolumeStore: MonthlyVolumeStore;  // NEW (KYC)
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
+  waCreds?: WaCreds; // WL2 — partner's outbound WhatsApp creds (absent ⇒ shared env number)
 }
 
 /**
@@ -249,6 +251,7 @@ export function createAgent(deps: AgentDeps) {
               monthlyVolumeStore: deps.monthlyVolumeStore,  // NEW (KYC)
               kycProvider: deps.kycProvider,
               partnerStore: deps.partnerStore, // NEW (P4)
+              waCreds: deps.waCreds, // WL2 — partner's outbound creds for interactive sends
               turn,
             });
           } catch (err) {

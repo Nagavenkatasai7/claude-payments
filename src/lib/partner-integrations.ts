@@ -30,9 +30,10 @@ export interface PartnerPaymentConfig {
 
 /** BYO WhatsApp (Meta WABA) routing + creds. absent ⇒ the shared SmartRemit number. */
 export interface PartnerWhatsappConfig {
-  phoneNumberId?: string; // non-secret routing id
-  token?: string; // SECRET
-  verifyToken?: string; // SECRET
+  phoneNumberId?: string; // non-secret routing id (Meta sends it on every inbound)
+  token?: string; // SECRET — Graph API access token for outbound sends
+  verifyToken?: string; // SECRET — webhook GET-verify challenge token
+  appSecret?: string; // SECRET — Meta App secret for inbound x-hub-signature-256 verification
 }
 
 /** The fully-resolved technical config (all sub-objects always present, possibly empty). */

@@ -12,6 +12,8 @@ import { createTransfer } from './transfer-create';
 import { sendGateActive } from './kyc-gate';
 import { getPaymentProvider } from './providers/payment-provider';
 import { resolvePartnerBranding } from './partner-config';
+import { waCredsFrom } from './whatsapp-creds';
+import type { PartnerIntegrationsStore } from './partner-integrations-store';
 import { newTransferId } from './id';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
@@ -31,6 +33,7 @@ export interface PartnerApiDeps {
   store: Store;
   partnerStore: PartnerStore;
   monthlyVolumeStore: MonthlyVolumeStore;
+  integrationsStore: PartnerIntegrationsStore; // WL3 — per-partner rail + WhatsApp creds
   redis: RedisLike;
   // Injectable so the route uses the real provider while tests stub settlement
   // (the mock provider sends WhatsApp + arms a timer we don't want in unit tests).
@@ -282,8 +285,13 @@ export async function confirmTransaction(
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
 
   const initiate = deps.initiatePayment ?? (async (tr: Transfer) => {
+    // WL3: drive THIS partner's configured settlement rail (mock ⇒ sandbox
+    // self-advance; http/simulator ⇒ signed instruction + webhook-driven delivery),
+    // with the partner's brand + WhatsApp creds on the stage messages.
     const brand = resolvePartnerBranding(partner).brand;
-    await getPaymentProvider(deps.store, undefined, brand).initiateTransfer(tr);
+    const integrations = await deps.integrationsStore.getIntegrations(partner.id);
+    await getPaymentProvider(deps.store, integrations.payment, brand, waCredsFrom(integrations))
+      .initiateTransfer(tr);
   });
   await initiate(t);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);

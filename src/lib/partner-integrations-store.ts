@@ -39,6 +39,7 @@ interface StoredIntegrations {
     phoneNumberId?: string;
     tokenEnc?: string;
     verifyTokenEnc?: string;
+    appSecretEnc?: string;
   };
 }
 
@@ -103,6 +104,7 @@ export function createPartnerIntegrationsStore(
           phoneNumberId: stored.whatsapp?.phoneNumberId,
           token: open(stored.whatsapp?.tokenEnc, provider),
           verifyToken: open(stored.whatsapp?.verifyTokenEnc, provider),
+          appSecret: open(stored.whatsapp?.appSecretEnc, provider),
         }) as PartnerIntegrations['whatsapp'],
       };
     },
@@ -128,6 +130,7 @@ export function createPartnerIntegrationsStore(
           phoneNumberId: config.whatsapp?.phoneNumberId,
           tokenEnc: seal(config.whatsapp?.token, provider),
           verifyTokenEnc: seal(config.whatsapp?.verifyToken, provider),
+          appSecretEnc: seal(config.whatsapp?.appSecret, provider),
         }),
       };
       await redis.set(key(id), JSON.stringify(stored));

@@ -1,27 +1,17 @@
-import { after, NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
 import { verifyMetaSignature } from '@/lib/providers/meta-signature-verify';
-import { parseIncoming, parseStatusEvent, sendText } from '@/lib/whatsapp';
-import {
-  isOptOutKeyword,
-  isResumeKeyword,
-  OPT_OUT_REPLY,
-  OPT_IN_REPLY,
-  OPT_OUT_REMINDER,
-} from '@/lib/consent';
-import { parseButtonId } from '@/lib/whatsapp-buttons';
-import { chat } from '@/lib/ollama';
-import { createAgent } from '@/lib/agent';
-import { getStore } from '@/lib/store';
-import { getScheduleStore } from '@/lib/schedule-store';
-import { getDraftStore } from '@/lib/draft-store';
-import { getCustomerStore } from '@/lib/customer-store';
-import { getDailyVolumeStore } from '@/lib/daily-volume-store';
-import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
-import { getKycProvider } from '@/lib/providers/kyc-provider';
-import { getPartnerStore } from '@/lib/partner-store';
-import { deriveTier } from '@/lib/tier-rules';
-import type { ButtonTap, TurnContext } from '@/lib/types';
+import { parsePhoneNumberId } from '@/lib/whatsapp';
+import { waCredsFrom } from '@/lib/whatsapp-creds';
+import { getPartnerWhatsappIndex } from '@/lib/partner-whatsapp-index';
+import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { processInboundWebhook } from '@/lib/whatsapp-inbound';
+
+// The SHARED Meta webhook. The default/SmartRemit number lives here; partner-
+// owned numbers may also land here (their Meta app pointed at the shared URL) —
+// they are routed by metadata.phone_number_id through the pnid→partner index and
+// verified with THAT partner's app secret. Partners can instead use their
+// dedicated /api/whatsapp/[partnerId] endpoint (strict, fail-closed).
 
 export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
@@ -35,23 +25,35 @@ export async function GET(req: NextRequest) {
   return new NextResponse('Forbidden', { status: 403 });
 }
 
-function synthesizeButtonText(tap: ButtonTap): string {
-  switch (tap.kind) {
-    case 'recipient':      return `[Tapped: Send to recipient ${tap.recipientPhone}]`;
-    case 'recipient_new':  return '[Tapped: Someone new]';
-    case 'approve':        return '[Tapped: Approve & pay]';
-    case 'cancel':         return '[Tapped: Cancel]';
-  }
-}
-
 export async function POST(req: NextRequest) {
   const raw = await req.text(); // raw bytes first — Meta signs the exact body
 
+  // Parse early ONLY to discover which number (and thus which partner + app
+  // secret) this event belongs to. Nothing acts on the body until the signature
+  // gate below passes — JSON.parse + two Redis reads are side-effect-free.
+  let body: unknown = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    body = null;
+  }
+
+  // WL2 routing: the receiving number's phone_number_id → owning partner.
+  const pnid = parsePhoneNumberId(body);
+  const routedPartnerId = pnid
+    ? await getPartnerWhatsappIndex().partnerForPnid(pnid)
+    : null;
+  const integrations = routedPartnerId
+    ? await getPartnerIntegrationsStore().getIntegrations(routedPartnerId)
+    : null;
+
   // Signature gate, ABOVE markMessageSeen, so a forged body can't touch the
-  // dedup set or any downstream processing.
-  const appSecret = env.metaAppSecret; // '' if unset
+  // dedup set or any downstream processing. Secret precedence: the routed
+  // partner's own app secret, else the platform META_APP_SECRET. Fail-closed
+  // whenever ANY secret is configured; warn-and-proceed only when none is
+  // (dev/test + pre-provisioning prod — unchanged legacy behavior).
+  const appSecret = integrations?.whatsapp.appSecret || env.metaAppSecret;
   if (appSecret === '') {
-    // Dev/test + current prod (secret not yet configured): proceed, but warn.
     console.warn('META_APP_SECRET unset — skipping X-Hub-Signature-256 verification');
   } else {
     const signature = req.headers.get('x-hub-signature-256') ?? '';
@@ -60,157 +62,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  let body: unknown = null;
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    body = null;
-  }
-
-  // Message-STATUS callbacks (sent/delivered/read/failed). Meta delivers these as
-  // a `statuses` event with no `messages`, so parseIncoming would return null and
-  // we'd silently drop them. Handle BEFORE the message path. We don't map
-  // wamid → transfer yet, so the deliverable is structured logging (a future
-  // mapping plugs into the `failed` branch). This sits AFTER the signature gate
-  // (never log forged events) and BEFORE parseIncoming's null early return.
-  const statusEvents = parseStatusEvent(body);
-  if (statusEvents) {
-    for (const ev of statusEvents) {
-      if (ev.status === 'failed') {
-        console.warn(
-          `WhatsApp message delivery FAILED — recipient=${ev.recipientId} wamid=${ev.wamid} code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`,
-        );
-        // FUTURE: map ev.wamid -> transfer and surface a delivery-failure signal.
-      } else {
-        console.debug(
-          `WhatsApp status ${ev.status} — recipient=${ev.recipientId} wamid=${ev.wamid}`,
-        );
-      }
-    }
-    return NextResponse.json({ ok: true });
-  }
-
-  const incoming = parseIncoming(body);
-  if (!incoming) return NextResponse.json({ ok: true });
-
-  const store = getStore();
-  const isNew = await store.markMessageSeen(incoming.messageId);
-  if (!isNew) return NextResponse.json({ ok: true });
-
-  // Build TurnContext deterministically server-side
-  const customerStore = getCustomerStore(store);
-
-  // STOP / START consent short-circuit. AFTER the dedup guard (so a re-delivered
-  // STOP isn't double-handled) and BEFORE the agent turn. WhatsApp compliance:
-  // honor opt-out and offer resume; exact-keyword only (never "cancel"). Each
-  // branch skips the agent entirely for this turn.
-  //
-  // Order (intentional): resume-keyword → opt-out-keyword → opt-out STATE skip.
-  //  • Resume keyword (START) clears the opt-out and confirms — it must win over
-  //    the state skip, so an opted-out user can always re-subscribe.
-  //  • Opt-out keyword (STOP) records a *fresh* opt-out and confirms it.
-  //  • Opt-out STATE skip (Fix 1): an ALREADY opted-out customer sending a normal
-  //    message must NOT reach the agent / send flow. We send a brief resume
-  //    reminder and stop. This is the high-bug fix — previously a normal message
-  //    from an opted-out user fell through to runAgentTurn and ran the send flow.
-  if (incoming.kind === 'text') {
-    if (isResumeKeyword(incoming.text)) {
-      await customerStore.clearOptedOut(incoming.from);
-      await sendText(incoming.from, OPT_IN_REPLY);
-      return NextResponse.json({ ok: true });
-    }
-    if (isOptOutKeyword(incoming.text)) {
-      await customerStore.setOptedOut(incoming.from);
-      await sendText(incoming.from, OPT_OUT_REPLY);
-      return NextResponse.json({ ok: true });
-    }
-    // State skip: fetch the record and, if currently opted out, suppress the
-    // send flow. Only normal text reaches here (keywords returned above).
-    const existing = await customerStore.getCustomer(incoming.from);
-    if (existing?.optedOutAt) {
-      await sendText(incoming.from, OPT_OUT_REMINDER);
-      return NextResponse.json({ ok: true });
-    }
-  }
-
-  const dailyVolumeStore = getDailyVolumeStore();
-  const monthlyVolumeStore = getMonthlyVolumeStore();
-  const lastInboundAt = await store.getLastInboundAt(incoming.from);
-  const isNewConversation = lastInboundAt === null;
-  await store.recordInboundNow(incoming.from);
-
-  const { customer, wasCreated } = await customerStore.upsertOnFirstInbound(incoming.from);
-
-  // Transactional opt-in (Item 4): a brand-new customer is opted-in at creation
-  // (upsertOnFirstInbound sets optInAt). Existing/grandfathered records that
-  // predate the field get a cheap idempotent backfill here (first contact wins).
-  if (!customer.optInAt) {
-    await customerStore.setOptedIn(incoming.from);
-  }
-
-  const now = new Date();
-  const tier = deriveTier(customer, now);
-
-  // Tier reminder: only on T0, only when starting a new conversation, never on the
-  // very first message (that's covered by [NEW CUSTOMER]).
-  let tierReminderDayOfWindow: 1 | 2 | 3 | undefined;
-  if (tier === 'T0' && isNewConversation && !wasCreated) {
-    const ageMs = now.getTime() - new Date(customer.firstSeenAt).getTime();
-    const day = Math.min(3, Math.floor(ageMs / (24 * 60 * 60 * 1000)) + 1) as 1 | 2 | 3;
-    tierReminderDayOfWindow = day;
-  }
-
-  let messageText: string;
-  let buttonTap: ButtonTap | undefined;
-  if (incoming.kind === 'text') {
-    messageText = incoming.text;
-  } else {
-    const parsed = parseButtonId(incoming.buttonId);
-    if (!parsed) {
-      messageText = '(unrecognized button)';
-    } else {
-      buttonTap = parsed;
-      messageText = synthesizeButtonText(parsed);
-    }
-  }
-
-  const turn: TurnContext = {
-    isNewConversation,
-    buttonTap,
-    isNewCustomer: wasCreated,
-    tierReminderDayOfWindow,
-  };
-
-  after(async () => {
-    try {
-      const kycProvider = getKycProvider(customerStore, env.appBaseUrl);
-      const agent = createAgent({
-        chat,
-        store,
-        scheduleStore: getScheduleStore(),
-        draftStore: getDraftStore(),
-        customerStore,
-        dailyVolumeStore,
-        monthlyVolumeStore,   // NEW (KYC)
-        kycProvider,
-        partnerStore: getPartnerStore(), // NEW (P4)
-      });
-      const reply = await agent.runAgentTurn(incoming.from, messageText, turn);
-      // An empty reply means a tool already sent an interactive card this turn —
-      // sending an empty text would be a stray/blank message, so skip it.
-      if (reply.trim()) await sendText(incoming.from, reply);
-    } catch (err) {
-      console.error('Failed to process WhatsApp message:', err);
-      try {
-        await sendText(
-          incoming.from,
-          'Sorry, something went wrong on our side. Please try again.',
-        );
-      } catch {
-        // best effort
-      }
-    }
+  const result = await processInboundWebhook(body, {
+    routedPartnerId,
+    waCreds: waCredsFrom(integrations),
   });
-
-  return NextResponse.json({ ok: true });
+  return NextResponse.json(result);
 }

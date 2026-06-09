@@ -17,12 +17,16 @@ import {
   backfillExpandCountriesOnce,
   backfillAllCorridorsOnce,
 } from '@/lib/migration';
-import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus } from '@/lib/whatsapp';
+import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
   TEMPLATE_SCHEDULED_PAYMENT_READY,
   TEMPLATE_LANG,
   scheduledPaymentReadyParams,
 } from '@/lib/whatsapp-templates';
+import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { resolvePartnerBranding } from '@/lib/partner-config';
+import { waCredsFrom } from '@/lib/whatsapp-creds';
+import type { PartnerId } from '@/lib/types';
 
 export const maxDuration = 300;
 
@@ -53,6 +57,16 @@ export async function GET(req: NextRequest) {
 
   const kycProvider = getKycProvider(customerStore, env.appBaseUrl);
 
+  // WL2: scheduled notifications carry the OWNING partner's brand and leave from
+  // the partner's number. Default/unconfigured ⇒ SmartRemit + env number.
+  const partnerSendContext = async (
+    partnerId: PartnerId,
+  ): Promise<{ brand: string; waCreds?: WaCreds }> => {
+    const partner = await partnerStore.getPartner(partnerId);
+    const integrations = await getPartnerIntegrationsStore().getIntegrations(partnerId);
+    return { brand: resolvePartnerBranding(partner).brand, waCreds: waCredsFrom(integrations) };
+  };
+
   const result = await runDueSchedules({
     store,
     partnerStore,                 // NEW (P5): corridor-aware compliance
@@ -63,10 +77,12 @@ export async function GET(req: NextRequest) {
     now: Date.now(),
     // NEW (Phase 3) — fail-soft nudge when a scheduled send is skipped pending KYC.
     sendScheduledSkipped: async (schedule, owner, kycUrl) => {
+      const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
       await sendTemplateOrText(
         schedule.phone,
         () => sendVerificationStatus(schedule.phone, 'needed', owner?.fullName),
-        `Verify your identity to resume your scheduled SmartRemit transfer: ${kycUrl}`,
+        `Verify your identity to resume your scheduled ${brand} transfer: ${kycUrl}`,
+        waCreds,
       );
     },
     sendScheduledLink: async (schedule, transfer, url) => {
@@ -78,8 +94,9 @@ export async function GET(req: NextRequest) {
       // The free-form fallback only delivers in-window; otherwise WhatsApp rejects
       // it with a re-engagement error, which the helper logs and swallows.
       const senderName = (await customerStore.getCustomer(schedule.phone))?.fullName ?? 'there';
+      const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
       const fallbackText =
-        `Your scheduled SmartRemit transfer of $${schedule.amountUsd.toFixed(2)} ` +
+        `Your scheduled ${brand} transfer of $${schedule.amountUsd.toFixed(2)} ` +
         `to ${schedule.recipientName} is ready. Tap to pay: ${url}`;
       const { bodyParams, buttonToken } = scheduledPaymentReadyParams(
         schedule,
@@ -95,8 +112,10 @@ export async function GET(req: NextRequest) {
             TEMPLATE_LANG,
             bodyParams,
             buttonToken,
+            waCreds,
           ),
         fallbackText,
+        waCreds,
       );
     },
   });
