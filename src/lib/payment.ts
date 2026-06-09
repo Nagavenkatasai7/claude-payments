@@ -85,6 +85,7 @@ export async function completePaymentStage1(
 export async function completePaymentStage2(
   store: Store,
   transferId: string,
+  opts?: { brand?: string }, // WL1: end-customer-facing brand; absent ⇒ 'SmartRemit'
 ): Promise<StageResult> {
   const transfer = await store.getTransfer(transferId);
   if (!transfer) {
@@ -113,8 +114,9 @@ export async function completePaymentStage2(
   const destCurrency = updated.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(updated.amountInr, destCurrency);
 
+  const brand = opts?.brand?.trim() || 'SmartRemit';
   const senderMessages = [
-    `🎉 ${destAmount} delivered to ${updated.recipientName} via bank transfer. Transfer ID: ${updated.id}. Thanks for using SmartRemit!`,
+    `🎉 ${destAmount} delivered to ${updated.recipientName} via bank transfer. Transfer ID: ${updated.id}. Thanks for using ${brand}!`,
   ];
 
   return { transfer: updated, senderMessages };

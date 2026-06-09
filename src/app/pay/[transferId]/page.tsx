@@ -1,7 +1,34 @@
 import { getStore } from '@/lib/store';
 import { getDraftStore } from '@/lib/draft-store';
+import { getCustomerStore } from '@/lib/customer-store';
+import { getPartnerStore } from '@/lib/partner-store';
+import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-config';
 import type { CountryCode } from '@/lib/types';
 import { PayForm } from './pay-form';
+
+// WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
+// customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
+// with no color/logo override — byte-for-byte today.
+function Brand({ branding }: { branding: ResolvedBranding }) {
+  if (branding.logoUrl) {
+    return (
+      <div className="brand">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={branding.logoUrl} alt={branding.brand} style={{ maxHeight: 28, verticalAlign: 'middle' }} />
+      </div>
+    );
+  }
+  return (
+    <div className="brand" style={branding.primaryColor ? { color: branding.primaryColor } : undefined}>
+      {branding.brand}
+    </div>
+  );
+}
+
+async function resolveBrandFor(partnerId: string | null): Promise<ResolvedBranding> {
+  if (!partnerId) return resolvePartnerBranding(null);
+  return resolvePartnerBranding(await getPartnerStore().getPartner(partnerId));
+}
 
 function Row({
   label,
@@ -70,8 +97,11 @@ export default async function PayPage({
   };
 
   let view: View | null = null;
+  // WL1: the partner that owns this payment — drives the page branding below.
+  let brandPartnerId: string | null = null;
 
   if (transfer) {
+    brandPartnerId = transfer.partnerId;
     const destCurrency: string = transfer.destinationCurrency ?? 'INR';
     const sourceCurrency: string = transfer.sourceCurrency ?? 'USD';
     view = {
@@ -95,6 +125,9 @@ export default async function PayPage({
     // Dual-lookup: treat the segment as a draftId
     const draft = await getDraftStore().getDraft(transferId);
     if (draft) {
+      // Drafts carry no partnerId — resolve the brand from the owning customer.
+      const owner = await getCustomerStore(getStore()).getCustomer(draft.senderPhone);
+      brandPartnerId = owner?.partnerId ?? null;
       const destCurrency: string = draft.quote.destinationCurrency ?? draft.destinationCurrency ?? 'INR';
       const sourceCurrency: string = draft.sourceCurrency ?? 'USD';
       const feeSource = draft.quote.feeSource ?? draft.quote.feeUsd;
@@ -124,11 +157,13 @@ export default async function PayPage({
     }
   }
 
+  const branding = await resolveBrandFor(brandPartnerId);
+
   if (!view) {
     return (
       <main className="payapp">
         <div className="card">
-          <div className="brand">SmartRemit</div>
+          <Brand branding={branding} />
           <h1>This link is no longer active</h1>
         </div>
       </main>
@@ -143,7 +178,7 @@ export default async function PayPage({
   return (
     <main className="payapp">
       <div className="card">
-        <div className="brand">SmartRemit</div>
+        <Brand branding={branding} />
         <h1>Secure payment</h1>
         <div className="summary">
           <Row label="Recipient" value={view.recipientName} />

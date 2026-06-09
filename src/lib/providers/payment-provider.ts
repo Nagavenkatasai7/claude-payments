@@ -60,7 +60,9 @@ export interface PaymentProvider {
 }
 
 export class MockPaymentProvider implements PaymentProvider {
-  constructor(private readonly store: Store) {}
+  // WL1: `brand` flavors only the stage-2 "Thanks for using …" line; absent ⇒
+  // 'SmartRemit' (default partner unchanged).
+  constructor(private readonly store: Store, private readonly brand?: string) {}
 
   async initiateTransfer(transfer: Transfer): Promise<InitiateResult> {
     // Stage 1 — identical to today's route body (payment.ts UNTOUCHED).
@@ -71,7 +73,7 @@ export class MockPaymentProvider implements PaymentProvider {
     after(async () => {
       try {
         await new Promise((resolve) => setTimeout(resolve, DELIVERY_DELAY_MS));
-        const stage2 = await completePaymentStage2(this.store, transfer.id);
+        const stage2 = await completePaymentStage2(this.store, transfer.id, { brand: this.brand });
         for (const msg of stage2.senderMessages) await sendText(stage2.transfer.phone, msg);
         if (stage2.transfer.recipientPhone) {
           await sendTemplate(
@@ -115,12 +117,13 @@ export class MockPaymentProvider implements PaymentProvider {
 export function getPaymentProvider(
   store: Store,
   payment?: PartnerPaymentConfig,
+  brand?: string, // WL1: end-customer brand for the mock's stage-2 message
 ): PaymentProvider {
   switch (payment?.providerType) {
     // case '<real-rail-id>': return new RealPaymentProvider(...);  // Phase C — NOT built in this batch
     case undefined:
     case 'mock':
     default:
-      return new MockPaymentProvider(store);
+      return new MockPaymentProvider(store, brand);
   }
 }
