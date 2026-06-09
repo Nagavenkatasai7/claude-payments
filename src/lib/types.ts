@@ -354,16 +354,31 @@ export type PartnerId = string;  // 'default' or newTransferId() output
 
 export type PartnerStatus = 'active' | 'suspended';
 
+// White-label KYC posture (WL1). 'ours' = SmartRemit runs full KYC (the default,
+// unchanged behavior). 'delegated' = the partner is the licensed entity and runs
+// KYC on their side; our send-gate short-circuits. ⚠️ Sanctions/OFAC screening
+// (`screenTransfer`) is NEVER affected by this and runs in BOTH modes.
+export type KycMode = 'ours' | 'delegated';
+
 export interface Partner {
   id: PartnerId;
   name: string;                       // staff-facing display name
   countries: CountryCode[];           // which Phase-1 countries this partner operates in
   status: PartnerStatus;
-  // Whitelabel placeholders — optional until a real partner needs them.
-  brandName?: string;                 // end-customer-facing brand (NOT used in P2; future whitelabel)
-  primaryColor?: string;              // hex string e.g. '#1a73e8'
-  logoUrl?: string;                   // CDN URL
+  // Whitelabel branding (WL1) — the end-customer-facing identity. All optional;
+  // ABSENCE is what keeps the `default` partner byte-for-byte 'SmartRemit'. The
+  // resolver (partner-config.ts) supplies defaults so callers never branch on
+  // undefined — never seed these into ensureDefaultPartner().
+  brandName?: string;                 // end-customer-facing brand
+  displayName?: string;               // preferred end-customer brand (falls back to brandName, then 'SmartRemit')
+  primaryColor?: string;              // hex string e.g. '#1a73e8' — null/absent = no override (default CSS)
+  logoUrl?: string;                   // CDN URL — absent = no logo override
+  supportContact?: string;            // e.g. 'support@acme.com' — surfaced in branded surfaces
+  botPersona?: string;                // freeform tone/persona hint appended to the system prompt
   adminNote?: string;                 // internal staff annotation
+  // KYC delegation (WL1). Absent ⇒ 'ours' ⇒ full SmartRemit KYC (default flow).
+  kycMode?: KycMode;
+  requireKycBeforeSend?: boolean;     // only consulted when kycMode==='delegated' (absent ⇒ false = skip our gate)
   corridorCompliance?: Partial<Record<CountryCode, CorridorComplianceRule>>;  // NEW (P5) — optional override map (default partner never gets it)
   createdAt: string;
   updatedAt: string;
