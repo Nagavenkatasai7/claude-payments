@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb, seedPartner } from './helpers-db';
+import type { Db } from '@/db/client';
 
 const redis = fakeRedis();
 
@@ -14,9 +16,13 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+// Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
+// The vi.mock factory closes over the let-variable (assigned in beforeEach).
+let db: Db;
+let ps: import('@/lib/partner-store').PartnerStore;
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
-  return { ...actual, getPartnerStore: () => actual.createPartnerStore(redis) };
+  return { ...actual, getPartnerStore: () => ps };
 });
 vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
@@ -27,11 +33,10 @@ import { createPartnerStore } from '@/lib/partner-store';
 
 beforeEach(async () => {
   redis.dump.clear();
+  db = await freshDb();
+  ps = createPartnerStore(db);
   // Seed the 'acme' partner that every createPartnerStaffAction test references.
-  await createPartnerStore(redis).savePartner({
-    id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
-    createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
-  });
+  await seedPartner(db, 'acme', 'Acme');
 });
 afterEach(() => vi.clearAllMocks());
 

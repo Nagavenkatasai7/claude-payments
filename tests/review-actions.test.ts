@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
-import { createStore } from '@/lib/store';
+import { createStore, type Store } from '@/lib/store';
+import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
 
-const redis = fakeRedis();
+// pg-backed store rebuilt per test (freshDb truncates); the hoisted mock
+// factory must NOT construct it — getStore closes over the let lazily.
+let store: Store;
 
 // Mock auth so we can control who is calling
 const mockRequireAdmin = vi.fn();
@@ -16,7 +19,7 @@ vi.mock('@/lib/auth', () => ({
 }));
 vi.mock('@/lib/store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/store')>('@/lib/store');
-  return { ...actual, getStore: () => actual.createStore(redis) };
+  return { ...actual, getStore: () => store };
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
@@ -58,15 +61,14 @@ function form(values: Record<string, string>): FormData {
   return fd;
 }
 
-beforeEach(() => {
-  redis.dump.clear();
+beforeEach(async () => {
+  store = createStore(fakeRedis(), await freshDb());
   mockRequireAdmin.mockReset();
 });
 
 describe('releaseTransferAction', () => {
   it('delivers an in_review transfer when admin calls it', async () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
-    const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rr1' }));
 
     await releaseTransferAction(form({ id: 'rr1' }));
@@ -83,7 +85,6 @@ describe('releaseTransferAction', () => {
 
   it('throws when transfer is not in_review', async () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
-    const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rr2', status: 'delivered' }));
 
     await expect(releaseTransferAction(form({ id: 'rr2' }))).rejects.toThrow(/not in_review/i);
@@ -93,7 +94,6 @@ describe('releaseTransferAction', () => {
 describe('rejectTransferAction', () => {
   it('cancels an in_review transfer with adminNote when admin calls it', async () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
-    const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rj1' }));
 
     await rejectTransferAction(form({ id: 'rj1' }));
@@ -111,7 +111,6 @@ describe('rejectTransferAction', () => {
 
   it('throws when transfer is not in_review', async () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
-    const store = createStore(redis);
     await store.saveTransfer(makeTransfer({ id: 'rj2', status: 'awaiting_payment' }));
 
     await expect(rejectTransferAction(form({ id: 'rj2' }))).rejects.toThrow(/not in_review/i);

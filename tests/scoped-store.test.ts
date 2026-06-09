@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { createScopedStore } from '@/lib/scoped-store';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
@@ -35,11 +36,12 @@ function partnerStaff(partnerId: string): Staff {
 }
 
 async function seedTwoPartnersData(redis = fakeRedis()) {
-  const store = createStore(redis);
-  const customerStore = createCustomerStore(redis, store);
-  const partnerStore = createPartnerStore(redis);
+  const db = await freshDb(); // truncates + reseeds the 'default' partner
+  const store = createStore(redis, db);
+  const customerStore = createCustomerStore(db, store);
+  const partnerStore = createPartnerStore(db);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
-  const scheduleStore = createScheduleStore(redis, customerStore);
+  const scheduleStore = createScheduleStore(db);
 
   for (const id of ['acme', 'beta']) {
     await partnerStore.savePartner({
@@ -96,7 +98,8 @@ describe('createScopedStore', () => {
     expect((await scoped.listTransfers()).length).toBe(4);
     expect((await scoped.listCustomers()).length).toBe(4);
     expect((await scoped.listSchedules()).length).toBe(4);
-    expect((await scoped.listPartners()).length).toBe(2);
+    // 3 = acme + beta + the 'default' partner auto-seeded by freshDb
+    expect((await scoped.listPartners()).length).toBe(3);
   });
 
   it('partner staff sees only their own partner\'s data', async () => {

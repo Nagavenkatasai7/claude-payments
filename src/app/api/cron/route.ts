@@ -7,16 +7,6 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
-import {
-  backfillCustomersOnce,
-  backfillCountryCurrencyOnce,
-  backfillPartnersOnce,
-  backfillSchedulesOnce,
-  backfillSourceAmountsOnce,
-  backfillCorridorComplianceOnce,
-  backfillExpandCountriesOnce,
-  backfillAllCorridorsOnce,
-} from '@/lib/migration';
 import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
   TEMPLATE_SCHEDULED_PAYMENT_READY,
@@ -45,16 +35,8 @@ export async function GET(req: NextRequest) {
   const monthlyVolumeStore = getMonthlyVolumeStore();
   const scheduleStore = getScheduleStore();
 
-  // Idempotent backfills — sentinel-guarded.
-  const backfill = await backfillCustomersOnce(store, customerStore);
-  const countryCurrencyBackfill = await backfillCountryCurrencyOnce(store, customerStore);
-  const partnerBackfill = await backfillPartnersOnce(store, customerStore, partnerStore);
-  const schedulePartnerBackfill = await backfillSchedulesOnce(store, scheduleStore);
-  const sourceAmountBackfill = await backfillSourceAmountsOnce(store, scheduleStore); // NEW (P4)
-  const corridorComplianceBackfill = await backfillCorridorComplianceOnce(store, partnerStore); // NEW (P5)
-  const expandCountriesBackfill = await backfillExpandCountriesOnce(store, partnerStore); // NEW (multicountry)
-  const allCorridorsBackfill = await backfillAllCorridorsOnce(store, partnerStore); // NEW (any-to-any)
-
+  // (The one-shot Redis-era backfills are gone — the Postgres ledger is born
+  // complete; schema changes ship as drizzle migrations now.)
   const kycProvider = getKycProvider(customerStore, env.appBaseUrl);
 
   // WL2: scheduled notifications carry the OWNING partner's brand and leave from
@@ -120,16 +102,5 @@ export async function GET(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({
-    ok: true,
-    fired: result.fired,
-    backfill,
-    countryCurrencyBackfill,
-    partnerBackfill,          // NEW (P2)
-    schedulePartnerBackfill,  // NEW (P3)
-    sourceAmountBackfill,     // NEW (P4)
-    corridorComplianceBackfill,  // NEW (P5)
-    expandCountriesBackfill,     // NEW (multicountry)
-    allCorridorsBackfill,        // NEW (any-to-any)
-  });
+  return NextResponse.json({ ok: true, fired: result.fired });
 }

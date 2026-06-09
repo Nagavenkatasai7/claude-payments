@@ -1,4 +1,4 @@
-import { asc, eq } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 import { schedules } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -83,7 +83,7 @@ export function createScheduleRepo(
     },
 
     async listSchedules(): Promise<Schedule[]> {
-      const rows = await db.select().from(schedules).orderBy(asc(schedules.createdAt));
+      const rows = await db.select().from(schedules).orderBy(desc(schedules.createdAt));
       return rows.map(rowToSchedule);
     },
 
@@ -92,7 +92,7 @@ export function createScheduleRepo(
         .select()
         .from(schedules)
         .where(eq(schedules.status, 'active'))
-        .orderBy(asc(schedules.createdAt));
+        .orderBy(desc(schedules.createdAt));
       return rows.map(rowToSchedule);
     },
   };

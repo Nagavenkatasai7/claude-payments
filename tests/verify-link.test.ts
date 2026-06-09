@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   looksLikeVerifyHandoff,
   reusableInquiryId,
@@ -8,10 +8,20 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import type { Customer } from '@/lib/types';
+import type { Db } from '@/db/client';
 import type { KycProvider, KycStartResult } from '@/lib/providers/kyc-provider';
 
 const PHONE = '15550007777';
+
+// Customers + transfers are pg-backed (core ledger cutover): freshDb()
+// truncates the shared PGlite and reseeds the 'default' partner per test.
+let db: Db;
+
+beforeEach(async () => {
+  db = await freshDb();
+});
 
 function customer(overrides: Partial<Customer> = {}): Customer {
   return {
@@ -60,8 +70,8 @@ describe('reusableInquiryId', () => {
 describe('issueVerifyLink', () => {
   it('mints a fresh inquiry and PERSISTS its id when the customer has none', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     await customerStore.saveCustomer(customer());
     const provider = new MockKycProvider(customerStore, 'https://example.com');
 
@@ -79,8 +89,8 @@ describe('issueVerifyLink', () => {
 
   it('REUSES an existing inquiry (no new mint) and does not re-persist', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     const cust = customer({ kycInquiryId: 'inq_existing', kycReviewState: 'inquiry_started' });
     await customerStore.saveCustomer(cust);
 
@@ -104,8 +114,8 @@ describe('issueVerifyLink', () => {
 
   it('falls back to a fresh inquiry when reuse throws', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     const cust = customer({ kycInquiryId: 'inq_stale', kycReviewState: 'inquiry_started' });
     await customerStore.saveCustomer(cust);
 
@@ -130,8 +140,8 @@ describe('issueVerifyLink', () => {
 
   it('returns null (never throws) when the provider fails on every attempt', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     await customerStore.saveCustomer(customer());
     const provider: KycProvider = {
       async startVerification(): Promise<KycStartResult> { throw new Error('Persona createInquiry 503'); },

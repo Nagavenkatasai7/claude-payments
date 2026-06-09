@@ -126,15 +126,12 @@ export function createKycCaseStore(
     },
 
     async listNeedsReview(): Promise<Customer[]> {
-      const phones = await redis.smembers('customers:phones');
-      const out: Customer[] = [];
-      for (const p of phones) {
-        const c = await customers.getCustomer(p);
-        if (c && (c.kycReviewState === 'pending_review' || c.kycReviewState === 'needs_review')) {
-          out.push(c);
-        }
-      }
-      return out;
+      // Stage 2a: customers live in Postgres now — the Redis phones-set walk is
+      // gone. (Stage 4 narrows this to a WHERE kyc_review_state IN (...) query.)
+      const all = await customers.listCustomers();
+      return all.filter(
+        (c) => c.kycReviewState === 'pending_review' || c.kycReviewState === 'needs_review',
+      );
     },
   };
 }

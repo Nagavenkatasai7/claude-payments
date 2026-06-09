@@ -5,6 +5,8 @@ import { verifyWebhookSignature } from '@/lib/providers/payment-webhook-verify';
 import { railCallbackTransferId } from '@/lib/providers/http-payment-provider';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { getDb } from '@/db/client';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
@@ -58,7 +60,7 @@ export async function POST(
     }
   }
 
-  const result = await getPaymentProvider(store, integrations?.payment).handleWebhook(body);
+  const result = await getPaymentProvider(store, createOutboxRepo(getDb()), integrations?.payment).handleWebhook(body);
   if (!result) {
     return NextResponse.json({ ok: true, ignored: true });  // unparseable/irrelevant → 200, no mutation
   }

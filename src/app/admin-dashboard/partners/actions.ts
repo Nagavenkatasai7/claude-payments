@@ -8,7 +8,6 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
-import { getPartnerWhatsappIndex } from '@/lib/partner-whatsapp-index';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { randomBytes } from 'node:crypto';
@@ -197,11 +196,8 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
       appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
     },
   });
-  // Maintain the phone_number_id → partner reverse index (clear old, set new).
-  const index = getPartnerWhatsappIndex();
-  const oldPnid = existing.whatsapp.phoneNumberId;
-  if (oldPnid && oldPnid !== newPnid) await index.clearPnid(oldPnid);
-  if (newPnid) await index.setPnid(newPnid, id);
+  // No separate reverse index to maintain anymore — inbound routing resolves
+  // the partner straight off the integrations row (partnerForPhoneNumberId).
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 

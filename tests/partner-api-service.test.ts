@@ -5,6 +5,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
+import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
@@ -14,21 +15,29 @@ import type { Partner } from '@/lib/types';
 
 const NOW = '2026-06-08T00:00:00Z';
 
-function harness() {
+async function harness() {
   const redis = fakeRedis();
-  const store = createStore(redis);
+  // partnerStore + integrationsStore + the transfer ledger are Postgres-backed
+  // now; they share ONE db handle. Beneficiaries/volume/idempotency/audit stay
+  // on fakeRedis this slice.
+  const db = await freshDb();
+  await seedPartner(db, 'acme');
+  await seedPartner(db, 'globex');
+  const store = createStore(redis, db);
   let n = 0;
   const deps: PartnerApiDeps = {
     store,
-    partnerStore: createPartnerStore(redis),
+    partnerStore: createPartnerStore(db),
     monthlyVolumeStore: createMonthlyVolumeStore(redis),
-    integrationsStore: createPartnerIntegrationsStore(redis, new EnvKeyProvider(Buffer.alloc(32, 7))),
-    redis,
+    integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
+    db,
     now: () => NOW,
     genId: () => `b${n++}`,
-    // Deterministic settlement: mark paid without WhatsApp/timers.
+    // Deterministic settlement: mark paid without WhatsApp/timers. Read the
+    // DECRYPTED row — re-saving a default (masked) read would clobber the
+    // stored payout destination with the mask.
     initiatePayment: async (t) => {
-      const cur = await store.getTransfer(t.id);
+      const cur = await store.getTransferDecrypted(t.id);
       if (cur) await store.saveTransfer({ ...cur, status: 'paid', paidAt: NOW });
     },
   };
@@ -64,7 +73,7 @@ describe('partner-api-service: read endpoints', () => {
   });
 
   it('createQuote returns a quote; rejects a non-positive amount', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     const okq = await createQuote(deps, DELEGATED, { amount_source: 500 });
     expect(okq.ok).toBe(true);
     if (okq.ok) expect(okq.data).toMatchObject({ source_currency: 'USD', destination_currency: 'INR' });
@@ -81,14 +90,14 @@ describe('partner-api-service: read endpoints', () => {
 
 describe('partner-api-service: createTransaction', () => {
   it('delegated partner mints for an UNVERIFIED sender (201), sanctions still ran', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
     expect(r).toMatchObject({ ok: true, status: 201 });
     if (r.ok) expect((r.data as { status: string }).status).toBe('awaiting_payment');
   });
 
   it('is IDEMPOTENT — the same Idempotency-Key returns the same transaction', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     const first = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
     const second = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody({ amount_source: 999 }));
     expect(first.ok && second.ok).toBe(true);
@@ -99,32 +108,32 @@ describe('partner-api-service: createTransaction', () => {
   });
 
   it('requires an Idempotency-Key and a sender phone', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     expect(await createTransaction(deps, DELEGATED, 'pk_1', '', txBody())).toMatchObject({ ok: false, status: 400 });
     expect(await createTransaction(deps, DELEGATED, 'pk_1', 'k', txBody({ sender: {} }))).toMatchObject({ ok: false, status: 400 });
   });
 
   it('SANCTIONS SURVIVE DELEGATION — a watchlisted beneficiary is 422 (and recorded blocked)', async () => {
-    const { deps, store } = harness();
+    const { deps, store } = await harness();
     const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-x', txBody({
       beneficiary: { name: 'John Doe', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
     }));
     expect(r).toMatchObject({ ok: false, status: 422 });
-    const key = [...store_keys(deps)].find((k) => k.startsWith('transfer:'));
-    expect(key).toBeDefined();
-    const t = await store.getTransfer(key!.replace('transfer:', ''));
-    expect(t!.status).toBe('blocked');
+    // Transfers live in Postgres now — find the recorded row via the store API.
+    const [t] = await store.listTransfers();
+    expect(t).toBeDefined();
+    expect(t.status).toBe('blocked');
   });
 
   it("an 'ours' partner rejects an UNVERIFIED sender with 422 (KYC required)", async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     await deps.partnerStore.savePartner(OURS);
     const r = await createTransaction(deps, OURS, 'pk_1', 'idem-2', txBody());
     expect(r).toMatchObject({ ok: false, status: 422 });
   });
 
   it('resolves a stored beneficiary by id (partner-scoped)', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     const ben = await createBeneficiary(deps, 'acme', { name: 'Anita', country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' }, recipient_phone: '919876543210' });
     expect(ben).toMatchObject({ ok: true, status: 201 });
     const benId = ben.ok ? (ben.data as { id: string }).id : '';
@@ -136,7 +145,7 @@ describe('partner-api-service: createTransaction', () => {
 
 describe('partner-api-service: cross-tenant isolation', () => {
   it('getTransaction returns 404 for a transfer owned by another partner', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     const created = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
     const id = created.ok ? (created.data as { id: string }).id : '';
     // owner can read
@@ -146,7 +155,7 @@ describe('partner-api-service: cross-tenant isolation', () => {
   });
 
   it('confirmTransaction is owner-scoped and drives settlement', async () => {
-    const { deps } = harness();
+    const { deps } = await harness();
     const created = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
     const id = created.ok ? (created.data as { id: string }).id : '';
     // a rival cannot confirm someone else's transfer
@@ -157,8 +166,3 @@ describe('partner-api-service: cross-tenant isolation', () => {
     if (r.ok) expect((r.data as { status: string }).status).toBe('paid');
   });
 });
-
-// Small helper to peek the fake redis keymap via the store's underlying map.
-function store_keys(deps: PartnerApiDeps): IterableIterator<string> {
-  return (deps.redis as unknown as { dump: Map<string, string> }).dump.keys();
-}

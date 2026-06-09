@@ -2,6 +2,8 @@ import { Redis } from '@upstash/redis';
 import { createHash, randomBytes } from 'node:crypto';
 import { env } from './env';
 import type { RedisLike } from './store';
+import { getStore } from './store';
+import { getCustomerStore, type CustomerStore } from './customer-store';
 import type { Customer } from './types';
 import { normalizePhone, isValidPhone } from './phone';
 import { countryForPhone } from './partner-currency';
@@ -60,7 +62,6 @@ const LOGIN_FAIL_MAX_PER_IP_HOUR = 50; // blunt distributed credential-stuffing
 const sessionKey = (tokenHash: string) => `sr_sess:${tokenHash}`;
 const sessionIndexKey = (phone: string) => `sr_sess_idx:${phone}`;
 const resetKey = (tokenHash: string) => `sr_reset:${tokenHash}`;
-const customerKey = (phone: string) => `customer:${phone}`;
 
 function sha256hex(s: string): string {
   return createHash('sha256').update(s).digest('hex');
@@ -92,23 +93,20 @@ export interface CustomerAuthStoreOptions {
 
 export function createCustomerAuthStore(
   redis: RedisLike,
+  customers: CustomerStore,
   opts: CustomerAuthStoreOptions = {},
 ) {
   const now = opts.now ?? (() => Date.now());
 
+  // Stage 2a: customer RECORDS live in Postgres now — these helpers delegate
+  // to the injected customer store. Sessions / reset tokens / throttles below
+  // stay on Redis (hot, TTL'd, exactly where they belong).
   async function loadCustomer(phone: string): Promise<Customer | null> {
-    const raw = await redis.get(customerKey(phone));
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as Customer;
-    } catch {
-      return null;
-    }
+    return customers.getCustomer(phone);
   }
 
   async function saveCustomer(customer: Customer): Promise<void> {
-    await redis.set(customerKey(customer.senderPhone), JSON.stringify(customer));
-    await redis.sadd('customers:phones', customer.senderPhone);
+    await customers.saveCustomer(customer);
   }
 
   return {
@@ -456,7 +454,10 @@ export function getCustomerAuthStore(): CustomerAuthStore {
       token: env.kvToken,
       automaticDeserialization: false,
     });
-    cached = createCustomerAuthStore(redis as unknown as RedisLike);
+    cached = createCustomerAuthStore(
+      redis as unknown as RedisLike,
+      getCustomerStore(getStore()),
+    );
   }
   return cached;
 }

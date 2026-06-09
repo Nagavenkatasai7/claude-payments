@@ -101,8 +101,11 @@ describe('transfer-memory: recent-transfers module + rendered note stay partner-
   it('a rendered note (incl. a blocked transfer) leaks no tenant/compliance internals', async () => {
     const { createStore } = await import('@/lib/store');
     const { fakeRedis } = await import('./helpers');
+    const { freshDb } = await import('./helpers-db');
     const { getRecentTransfersNote } = await import('@/lib/recent-transfers');
-    const store = createStore(fakeRedis());
+    // Transfers live in Postgres now (core ledger cutover).
+    const db = await freshDb();
+    const store = createStore(fakeRedis(), db);
     const base = {
       id: 'g1', phone: '+1555', amountUsd: 500, feeUsd: 5, totalChargeUsd: 505, fxRate: 83,
       amountInr: 41500, recipientName: 'Mom', recipientPhone: '919', payoutMethod: 'upi',

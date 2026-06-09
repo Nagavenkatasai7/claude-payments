@@ -1,38 +1,62 @@
 import { describe, it, expect } from 'vitest';
-import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { createAuditLogStore, type StaffAuditEntry } from '@/lib/audit-log-store';
 
-function entry(i: number): StaffAuditEntry {
-  return { at: `2026-06-0${(i % 9) + 1}T00:00:00Z`, actor: 'boss', action: 'created', target: `u${i}` };
+// audit-log-store — Postgres-backed (audit_events, actor_type 'staff'). The
+// `at` on a listed entry is the DB's now() at insert time, NOT the value the
+// caller provided — so we assert presence/order/contents, never an exact at.
+
+function entry(i: number, detail?: string): StaffAuditEntry {
+  const e: StaffAuditEntry = {
+    at: '2026-06-01T00:00:00.000Z', // ignored on write — at comes from DB now()
+    actor: 'boss',
+    action: 'created',
+    target: `u${i}`,
+  };
+  if (detail) e.detail = detail;
+  return e;
 }
 
-describe('audit-log-store', () => {
-  it('records newest-first and lists them', async () => {
-    const s = createAuditLogStore(fakeRedis());
+/** Tiny gap so consecutive rows get strictly increasing DB now() timestamps. */
+const tick = () => new Promise((r) => setTimeout(r, 2));
+
+describe('audit-log-store (Postgres)', () => {
+  it('records newest-first and round-trips actor/action/target', async () => {
+    const s = createAuditLogStore(await freshDb());
     await s.record(entry(1));
+    await tick();
     await s.record(entry(2));
     const log = await s.list();
     expect(log).toHaveLength(2);
-    expect(log[0].target).toBe('u2'); // newest first
-    expect(log[1].target).toBe('u1');
+    expect(log[0]).toMatchObject({ actor: 'boss', action: 'created', target: 'u2' }); // newest first
+    expect(log[1]).toMatchObject({ actor: 'boss', action: 'created', target: 'u1' });
+    // `at` is assigned by the DB — present, ISO, and non-increasing down the list.
+    for (const e of log) expect(new Date(e.at).getTime()).not.toBeNaN();
+    expect(new Date(log[0].at).getTime()).toBeGreaterThanOrEqual(new Date(log[1].at).getTime());
   });
 
-  it('caps the stored history at 200', async () => {
-    const s = createAuditLogStore(fakeRedis());
-    for (let i = 0; i < 210; i++) await s.record(entry(i));
-    const log = await s.list(1000);
-    expect(log).toHaveLength(200);
-    expect(log[0].target).toBe('u209'); // most recent retained
+  it('round-trips the optional detail (and omits it when absent)', async () => {
+    const s = createAuditLogStore(await freshDb());
+    await s.record(entry(1, 'role admin → agent'));
+    await tick();
+    await s.record(entry(2));
+    const log = await s.list();
+    expect(log[0].detail).toBeUndefined();
+    expect(log[1].detail).toBe('role admin → agent');
   });
 
   it('respects the list limit', async () => {
-    const s = createAuditLogStore(fakeRedis());
-    for (let i = 0; i < 10; i++) await s.record(entry(i));
+    const s = createAuditLogStore(await freshDb());
+    for (let i = 0; i < 10; i++) {
+      await s.record(entry(i));
+      await tick();
+    }
     expect(await s.list(3)).toHaveLength(3);
+    expect((await s.list(3))[0].target).toBe('u9'); // most recent first
   });
 
   it('returns an empty array when there is no history', async () => {
-    const s = createAuditLogStore(fakeRedis());
+    const s = createAuditLogStore(await freshDb());
     expect(await s.list()).toEqual([]);
   });
 });

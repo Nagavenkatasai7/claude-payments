@@ -1,18 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
-import { createCustomerStore } from '@/lib/customer-store';
-import { createKycCaseStore } from '@/lib/kyc-case-store';
-import type { Store } from '@/lib/store';
+import { freshDb, seedPartner } from './helpers-db';
+import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
+import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
+import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 
-const redis = fakeRedis();
-const cs = createCustomerStore(redis, {} as unknown as Store);
-const kcs = createKycCaseStore(redis, cs);
+// pg-backed stores rebuilt per test (freshDb truncates); the hoisted mock
+// factories must NOT construct them — the getters close over the lets lazily.
+let cs: CustomerStore;
+let kcs: KycCaseStore;
 const notify = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@/lib/auth', () => ({ requireAdmin: async () => ({ username: 'admin', name: 'Main Admin', role: 'admin' }), requireScope: async () => ({}) }));
 vi.mock('@/lib/staff-scope', () => ({ scopeOf: () => 'platform', canSee: (_s: unknown, pid: string) => pid !== 'other' }));
-vi.mock('@/lib/store', () => ({ getStore: () => ({}) }));
+vi.mock('@/lib/store', async (orig) => ({ ...(await orig() as object), getStore: () => ({}) }));
 vi.mock('@/lib/customer-store', async (o) => ({ ...(await o() as object), getCustomerStore: () => cs }));
 vi.mock('@/lib/kyc-case-store', async (o) => ({ ...(await o() as object), getKycCaseStore: () => kcs }));
 vi.mock('@/lib/whatsapp', () => ({ sendVerificationStatus: notify }));
@@ -27,10 +29,17 @@ function form(values: Record<string, string>): FormData {
   for (const [k, v] of Object.entries(values)) fd.set(k, v);
   return fd;
 }
+const ISO = '2026-06-01T00:00:00.000Z';
 const seed = (over: Partial<Customer> = {}) =>
-  cs.saveCustomer({ senderPhone: PHONE, firstSeenAt: '', kycStatus: 'pending', kycReviewState: 'pending_review', senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '', ...over } as Customer);
+  cs.saveCustomer({ senderPhone: PHONE, firstSeenAt: ISO, kycStatus: 'pending', kycReviewState: 'pending_review', senderCountry: 'US', partnerId: 'default', createdAt: ISO, updatedAt: ISO, ...over } as Customer);
 
-beforeEach(() => { redis.dump.clear(); notify.mockClear(); });
+beforeEach(async () => {
+  const db = await freshDb();
+  await seedPartner(db, 'other'); // customers FK partners — needed for the out-of-scope test
+  cs = createCustomerStore(db, createStore(fakeRedis(), db));
+  kcs = createKycCaseStore(fakeRedis(), cs);
+  notify.mockClear();
+});
 
 describe('reviewKycAction', () => {
   it('approve → verified + approver + audit + customer notified', async () => {

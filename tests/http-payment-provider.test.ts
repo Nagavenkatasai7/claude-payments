@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { freshDb, seedPartner } from './helpers-db';
+import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
 const sendText = vi.fn(async (..._a: unknown[]) => {});
@@ -23,7 +25,7 @@ function fixture(): Transfer {
     fxRate: 83, amountInr: 16600, recipientName: 'Anita', recipientPhone: '919876543210',
     payoutMethod: 'bank', payoutDestination: '1234567890', fundingMethod: 'bank_transfer',
     status: 'awaiting_payment', complianceStatus: 'cleared', complianceReasons: [],
-    createdAt: '2026-06-09T00:00:00Z', partnerId: 'acme',
+    createdAt: '2026-06-09T00:00:00.000Z', partnerId: 'acme',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
     amountSource: 200, feeSource: 5, totalChargeSource: 205,
   } as Transfer;
@@ -35,7 +37,12 @@ const PAYMENT = {
   webhookSecret: 'cb-secret',
 };
 
-beforeEach(() => sendText.mockClear());
+let db: Db;
+beforeEach(async () => {
+  db = await freshDb();
+  await seedPartner(db, 'acme'); // transfers.partner_id has a real FK to partners
+  sendText.mockClear();
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe('normalizeRailStatus', () => {
@@ -69,7 +76,7 @@ describe('railCallbackTransferId', () => {
 
 describe('HttpPaymentProvider.initiateTransfer (the real rail loop, outbound leg)', () => {
   it('fires stage-1, POSTs the SIGNED instruction, returns the rail providerRef, arms NO timer', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
     let captured: { url: string; body: string; sig: string } | null = null;
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
@@ -101,7 +108,7 @@ describe('HttpPaymentProvider.initiateTransfer (the real rail loop, outbound leg
   });
 
   it('fail-closed: no settlementUrl configured → throws, nothing charged', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
     const provider = new HttpPaymentProvider(store, { providerType: 'http' });
     await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/not configured/);
@@ -109,7 +116,7 @@ describe('HttpPaymentProvider.initiateTransfer (the real rail loop, outbound leg
   });
 
   it('rail rejection (non-2xx) throws after stage-1 (caller surfaces the error)', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down' }) as unknown as Response));
     const provider = new HttpPaymentProvider(store, PAYMENT);
@@ -119,14 +126,14 @@ describe('HttpPaymentProvider.initiateTransfer (the real rail loop, outbound leg
 
 describe('HttpPaymentProvider.handleWebhook', () => {
   it('normalizes a rail callback to our domain', async () => {
-    const provider = new HttpPaymentProvider(createStore(fakeRedis()), PAYMENT);
+    const provider = new HttpPaymentProvider(createStore(fakeRedis(), db), PAYMENT);
     expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'paid_out' }))
       .toEqual({ transferId: 'rail_t1', status: 'delivered' });
     expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'funded' }))
       .toEqual({ transferId: 'rail_t1', status: 'paid' });
   });
   it('null for missing reference or unmapped status', async () => {
-    const provider = new HttpPaymentProvider(createStore(fakeRedis()), PAYMENT);
+    const provider = new HttpPaymentProvider(createStore(fakeRedis(), db), PAYMENT);
     expect(await provider.handleWebhook({ status: 'paid_out' })).toBeNull();
     expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'failed' })).toBeNull();
   });

@@ -9,6 +9,7 @@ import { NextRequest } from 'next/server';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
 
 // Keep the real NextRequest/NextResponse; only no-op after() so stage-2 never runs.
@@ -53,21 +54,25 @@ vi.mock('@/lib/customer-store', async (orig) => {
 });
 
 // WL1: the existing-transfer branch now resolves the owning partner to decide
-// whether OUR KYC gate applies (default ⇒ gate ON, unchanged). Back getPartnerStore
-// with a fake store so it doesn't reach real Redis.
-vi.mock('@/lib/partner-store', async (orig) => {
-  const real = await orig<typeof import('@/lib/partner-store')>();
-  const ps = real.createPartnerStore(fakeRedis());
-  return { ...real, getPartnerStore: () => ps };
-});
+// whether OUR KYC gate applies (default ⇒ gate ON, unchanged). Plain-object stub
+// — no partner row ⇒ ensureDefaultPartner's default (kycMode 'ours' ⇒ gate ON).
+vi.mock('@/lib/partner-store', () => ({
+  getPartnerStore: () => ({
+    getPartner: async () => null,
+    ensureDefaultPartner: async () => ({
+      id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    }),
+  }),
+}));
 
 // WL3: the route also resolves the partner's integrations (rail + WhatsApp creds).
-// No row ⇒ EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
-vi.mock('@/lib/partner-integrations-store', async (orig) => {
-  const real = await orig<typeof import('@/lib/partner-integrations-store')>();
-  const is = real.createPartnerIntegrationsStore(fakeRedis());
-  return { ...real, getPartnerIntegrationsStore: () => is };
-});
+// EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
+vi.mock('@/lib/partner-integrations-store', () => ({
+  getPartnerIntegrationsStore: () => ({
+    getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }),
+  }),
+}));
 
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
 vi.mock('@/lib/providers/payment-provider', () => ({
@@ -99,9 +104,9 @@ function post(id: string, body?: unknown) {
 }
 
 beforeEach(async () => {
-  const redis = fakeRedis();
-  store = createStore(redis);
-  customerStore = createCustomerStore(redis, store);
+  const db = await freshDb();
+  store = createStore(fakeRedis(), db);
+  customerStore = createCustomerStore(db, store);
   // Verified owner for the transfer's phone so the verify-before-send gate passes.
   const nowIso = new Date().toISOString();
   await customerStore.saveCustomer({
@@ -126,9 +131,18 @@ describe('pay route — scheduled transfer with no bank details (Item 2)', () =>
     const res = await post('s2', { country: 'IN', fields: { accountNumber: '123456789', ifsc: 'HDFC0001234' } });
     expect(res.status).toBe(200);
     expect(initiateTransfer).toHaveBeenCalledTimes(1);
+    // The settlement rail received the FULL collected details…
+    const charged = initiateTransfer.mock.calls[0][0] as Transfer;
+    expect(charged.payoutDestination).toContain('123456789');
+    expect(charged.payoutDestination).toContain('HDFC0001234');
+    // …and the stored row now has a destination (default reads are MASKED)…
     const t = await store.getTransfer('s2');
-    expect(t?.payoutDestination).toContain('123456789'); // account now set
-    expect(t?.payoutDestination).toContain('HDFC0001234');
+    expect(t?.payoutDestination).toMatch(/^\*\*\*\*\d{4}$/);
+    // …while the FULL value survives at rest through the charge's RMW re-save
+    // (the mask-aware upsert never lets a masked read clobber the ciphertext).
+    const full = await store.getTransferDecrypted('s2');
+    expect(full?.payoutDestination).toContain('123456789');
+    expect(full?.payoutDestination).toContain('HDFC0001234');
   });
 
   it('destination already set + NO body → processes (re-opened link regression)', async () => {

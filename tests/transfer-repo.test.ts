@@ -80,6 +80,20 @@ describe('transfer-repo: round-trip + encryption at rest', () => {
     const t = await repo.getTransfer('tr_empty', { decrypt: true });
     expect(t!.payoutDestination).toBe('');
   });
+
+  it('RMW GUARD: re-saving a MASKED read never clobbers the encrypted account at rest', async () => {
+    await repo.saveTransfer(fixture({ recipientLegalName: 'Anita K Sharma' }));
+    // The classic read-modify-write: default (masked) read → mutate → save.
+    const masked = (await repo.getTransfer('tr_1'))!;
+    expect(masked.payoutDestination).toBe('****1234');
+    await repo.saveTransfer({ ...masked, status: 'paid', paidAt: new Date().toISOString() });
+    // Status advanced…
+    const after = await repo.getTransfer('tr_1', { decrypt: true });
+    expect(after!.status).toBe('paid');
+    // …and the ciphertext (account + legal name) is untouched.
+    expect(after!.payoutDestination).toBe('123456789012|HDFC0001234');
+    expect(after!.recipientLegalName).toBe('Anita K Sharma');
+  });
 });
 
 describe('transfer-repo: atomic webhook transition (rank-guarded UPDATE)', () => {

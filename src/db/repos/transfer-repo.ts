@@ -87,13 +87,33 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
-    /** Compat upsert (mirrors the Redis saveTransfer SET semantics). */
+    /**
+     * Compat upsert (mirrors the Redis saveTransfer SET semantics) — with a
+     * structural guard: DEFAULT reads return a MASKED payout destination
+     * (****last4) and omit the decrypt-only recipientLegalName, so a
+     * read-modify-write that re-saves such a transfer must NEVER overwrite the
+     * encrypted columns at rest. When the incoming destination is the mask, the
+     * conflict-update leaves payout_destination_enc/_last4 and
+     * recipient_legal_name_enc untouched.
+     */
     async saveTransfer(t: Transfer): Promise<void> {
       const row = transferToRow(t, provider);
+      const masked = /^\*{4}/.test(t.payoutDestination ?? '');
+      let set: Partial<typeof row> = row;
+      if (masked) {
+        const {
+          payoutDestinationEnc: _enc,
+          payoutDestinationLast4: _l4,
+          recipientLegalNameEnc: _legal,
+          ...rest
+        } = row;
+        void _enc; void _l4; void _legal;
+        set = rest;
+      }
       await db
         .insert(transfers)
         .values(row)
-        .onConflictDoUpdate({ target: transfers.id, set: row });
+        .onConflictDoUpdate({ target: transfers.id, set });
     },
 
     /** Transaction-aware insert for the money paths (no upsert — must be new). */
@@ -165,13 +185,28 @@ export function createTransferRepo(
       return v ? new Date(v).toISOString() : null;
     },
 
-    /** All-time transfer count for the fee tier (replaces count:{phone}). */
+    /**
+     * All-time transfer count for the fee tier (replaces the count:{phone}
+     * counter). DERIVED now, with cleaner semantics than the old counter:
+     * blocked rows don't count — a watchlist-blocked attempt no longer burns
+     * the customer's free first transfer (the old counter incremented on the
+     * createTransfer-blocked path; that was a latent bug, not a contract).
+     */
     async countByPhone(phone: string): Promise<number> {
       const rows = await db
         .select({ n: sql<number>`count(*)::int` })
         .from(transfers)
-        .where(eq(transfers.phone, phone));
+        .where(and(eq(transfers.phone, phone), sql`${transfers.status} != 'blocked'`));
       return rows[0]?.n ?? 0;
+    },
+
+    /** Full newest-first list (dashboard compat until Stage-4 pagination). */
+    async listAll(): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .orderBy(desc(transfers.createdAt), desc(transfers.id));
+      return rows.map((r) => toDomain(r));
     },
 
     /** Reconciliation: webhook-driven transfers stuck in 'paid' too long. */

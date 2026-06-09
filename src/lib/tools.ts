@@ -1303,6 +1303,17 @@ async function repeatTransferTool(
     return { error: "I don't see a past transfer to that number — who would you like to send to?" };
   }
 
+  // The default ledger read MASKS payout destinations (****last4) — a repeat
+  // must carry the REAL account into the new draft. Hydrate it from the saved
+  // recipient (decrypted), else a decrypted read of that exact transfer.
+  const savedRecipient = (await ctx.store.listRecipients(ctx.phone, 25)).find(
+    (r) => normalizePhone(r.recipientPhone) === recipientPhone,
+  );
+  const realPayoutDestination =
+    savedRecipient?.payoutDestination ||
+    (await ctx.store.getTransferDecrypted(last.id))?.payoutDestination ||
+    '';
+
   // Amount + funding fallback chain.
   const overrideAmount = Number(args.amount_usd);
   const amountSource =
@@ -1336,7 +1347,7 @@ async function repeatTransferTool(
       recipient_name: last.recipientName,
       recipient_phone: recipientPhone,
       payout_method: last.payoutMethod,
-      payout_destination: last.payoutDestination,
+      payout_destination: realPayoutDestination,
     };
   }
 
@@ -1350,7 +1361,7 @@ async function repeatTransferTool(
       recipient_name: last.recipientName,
       recipient_phone: recipientPhone,
       payout_method: last.payoutMethod,
-      payout_destination: last.payoutDestination,
+      payout_destination: realPayoutDestination,
       source_currency: last.sourceCurrency,
     },
     ctx,

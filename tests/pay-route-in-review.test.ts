@@ -6,6 +6,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
 
 // Mock next/server after() to be a no-op (prevents stage-2 from running in tests)
@@ -56,7 +57,7 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
 
 describe('pay route logic: flagged transfer → in_review', () => {
   it('flagged: completePaymentStage1(held=true) sets status=paid; route then saves in_review', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), await freshDb());
     const t = makeTransfer({ id: 'f1', complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
     await store.saveTransfer(t);
 
@@ -74,7 +75,7 @@ describe('pay route logic: flagged transfer → in_review', () => {
   });
 
   it('flagged: the held message does NOT promise delivery time', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), await freshDb());
     const t = makeTransfer({ id: 'f2', complianceStatus: 'flagged' });
     await store.saveTransfer(t);
 
@@ -84,7 +85,7 @@ describe('pay route logic: flagged transfer → in_review', () => {
   });
 
   it('cleared: completePaymentStage1 (normal) sends delivery-time message', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), await freshDb());
     const t = makeTransfer({ id: 'c1', complianceStatus: 'cleared' });
     await store.saveTransfer(t);
 

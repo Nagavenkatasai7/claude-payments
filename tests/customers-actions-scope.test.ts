@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb, seedPartner } from './helpers-db';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import type { Staff, Customer } from '@/lib/types';
@@ -8,6 +9,10 @@ import type { Staff, Customer } from '@/lib/types';
 
 const redis = fakeRedis();
 let currentStaff: Staff;
+// Customers/transfers live in Postgres now — stores are rebuilt per test in
+// beforeEach (vi.mock factories are hoisted/sync; they close over these lets).
+let store: ReturnType<typeof createStore>;
+let cs: ReturnType<typeof createCustomerStore>;
 
 vi.mock('@/lib/auth', () => ({
   requireAdmin: async () => currentStaff,
@@ -17,14 +22,11 @@ vi.mock('@/lib/auth', () => ({
 }));
 vi.mock('@/lib/store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/store')>('@/lib/store');
-  return { ...actual, getStore: () => actual.createStore(redis) };
+  return { ...actual, getStore: () => store };
 });
 vi.mock('@/lib/customer-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/customer-store')>('@/lib/customer-store');
-  return {
-    ...actual,
-    getCustomerStore: (store: import('@/lib/store').Store) => actual.createCustomerStore(redis, store),
-  };
+  return { ...actual, getCustomerStore: () => cs };
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
@@ -33,9 +35,6 @@ import {
   markCustomerVerifiedAction,
   markCustomerRejectedAction,
 } from '@/app/admin-dashboard/customers/actions';
-
-const store = createStore(redis);
-const cs = createCustomerStore(redis, store);
 
 function staff(overrides: Partial<Staff>): Staff {
   return {
@@ -67,7 +66,15 @@ function form(values: Record<string, string>): FormData {
   return fd;
 }
 
-beforeEach(() => redis.dump.clear());
+beforeEach(async () => {
+  redis.dump.clear();
+  const db = await freshDb();
+  // Customers carry a REAL FK to partners — seed the two tenants used below.
+  await seedPartner(db, 'A');
+  await seedPartner(db, 'B');
+  store = createStore(redis, db);
+  cs = createCustomerStore(db, store);
+});
 
 describe('markCustomerVerifiedAction partner scope (H3)', () => {
   it('rejects a partner-admin verifying another partner’s customer', async () => {

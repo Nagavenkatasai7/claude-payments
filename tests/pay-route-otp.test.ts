@@ -8,6 +8,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import type { Transfer, Customer } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -33,20 +34,25 @@ vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import
 // No draft for these ids → otpPhone resolves from the existing transfer.
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
 // WL1: existing-transfer branch resolves the owning partner for the gate toggle
-// (default ⇒ gate ON). Back getPartnerStore with a fake store, not real Redis.
-vi.mock('@/lib/partner-store', async (orig) => {
-  const real = await orig<typeof import('@/lib/partner-store')>();
-  const ps = real.createPartnerStore(fakeRedis());
-  return { ...real, getPartnerStore: () => ps };
-});
+// (default ⇒ gate ON). Plain-object stub — no partner row ⇒ ensureDefaultPartner's
+// default (kycMode 'ours' ⇒ gate ON).
+vi.mock('@/lib/partner-store', () => ({
+  getPartnerStore: () => ({
+    getPartner: async () => null,
+    ensureDefaultPartner: async () => ({
+      id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    }),
+  }),
+}));
 
 // WL3: the route also resolves the partner's integrations (rail + WhatsApp creds).
-// No row ⇒ EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
-vi.mock('@/lib/partner-integrations-store', async (orig) => {
-  const real = await orig<typeof import('@/lib/partner-integrations-store')>();
-  const is = real.createPartnerIntegrationsStore(fakeRedis());
-  return { ...real, getPartnerIntegrationsStore: () => is };
-});
+// EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
+vi.mock('@/lib/partner-integrations-store', () => ({
+  getPartnerIntegrationsStore: () => ({
+    getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }),
+  }),
+}));
 
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
 vi.mock('@/lib/providers/payment-provider', () => ({ getPaymentProvider: () => ({ initiateTransfer }) }));
@@ -62,15 +68,18 @@ const transfer: Transfer = {
   createdAt: '2026-05-30T00:00:00Z', sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN',
   destinationCurrency: 'INR', partnerId: 'default', amountSource: 200, feeSource: 0, totalChargeSource: 200,
 } as Transfer;
-const customer: Customer = { senderPhone: PHONE, firstSeenAt: '', kycStatus: 'verified', senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '' } as Customer;
+// Postgres customer rows need real timestamps (new Date('') is invalid).
+const T0 = '2026-05-01T00:00:00.000Z';
+const customer: Customer = { senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', senderCountry: 'US', partnerId: 'default', createdAt: T0, updatedAt: T0 } as Customer;
 
 const req = (b: object) => new NextRequest('http://x/api/pay/' + TID, { method: 'POST', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
 const ctx = { params: Promise.resolve({ transferId: TID }) };
 
 beforeEach(async () => {
   const r = fakeRedis();
-  store = createStore(r);
-  customerStore = createCustomerStore(r, store);
+  const db = await freshDb();
+  store = createStore(r, db);
+  customerStore = createCustomerStore(db, store);
   txOtp = createTransactionOtpStore(r, { randomInt: () => 654321 });
   await store.saveTransfer(transfer);
   await customerStore.saveCustomer(customer);
