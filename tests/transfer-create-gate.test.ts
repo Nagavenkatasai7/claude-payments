@@ -40,3 +40,40 @@ describe('createTransfer KYC backstop (Phase 3)', () => {
     expect(t.id).toBeTruthy();
   });
 });
+
+describe('createTransfer WL1 delegated-KYC gate (requiresKyc)', () => {
+  it('requiresKyc absent ⇒ still throws for an unverified sender (default unchanged)', async () => {
+    const [s, p, m] = stores();
+    await expect(
+      createTransfer(s, p, m, baseInput({ senderKycStatus: 'not_started' })),
+    ).rejects.toThrow(/kyc_required/);
+  });
+
+  it('requiresKyc:false (delegated) mints even when the sender is NOT verified', async () => {
+    const [s, p, m] = stores();
+    const t = await createTransfer(
+      s,
+      p,
+      m,
+      baseInput({ senderKycStatus: 'not_started', requiresKyc: false }),
+    );
+    expect(t.id).toBeTruthy();
+    expect(t.status).toBe('awaiting_payment');
+  });
+
+  it('SANCTIONS SURVIVE DELEGATION: a watchlisted recipient is still blocked with requiresKyc:false', async () => {
+    const [s, p, m] = stores();
+    const t = await createTransfer(
+      s,
+      p,
+      m,
+      baseInput({
+        senderKycStatus: 'not_started',
+        requiresKyc: false,
+        recipientName: 'John Doe', // on WATCHLIST
+      }),
+    );
+    expect(t.complianceStatus).toBe('blocked');
+    expect(t.status).toBe('blocked');
+  });
+});

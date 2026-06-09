@@ -35,6 +35,7 @@ export interface CreateTransferInput {
   occupation?: Occupation;
   senderName?: string;          // sender legal name for sanctions screening (from customer.fullName)
   senderKycStatus: KycStatus;   // NEW (Phase 3) — the chokepoint backstop refuses unless 'verified'
+  requiresKyc?: boolean;        // NEW (WL1) — absent ⇒ true (default/'ours'). 'delegated' partners pass false to skip OUR verify gate. Sanctions still run regardless.
 }
 
 export async function createTransfer(
@@ -46,7 +47,13 @@ export async function createTransfer(
   // Phase 3 backstop: the chokepoint refuses to mint a transfer for an unverified
   // sender. Callers gate earlier with friendly UX (a kyc_url hand-off / a cron
   // skip); this is the last line of defense so no future caller can bypass it.
-  if (input.senderKycStatus !== 'verified') {
+  //
+  // WL1: a 'delegated' partner (the licensed entity runs KYC on their side) passes
+  // requiresKyc:false to lift OUR verify gate. Absent ⇒ true ⇒ unchanged default
+  // behavior. ⚠️ This does NOT touch sanctions — screenTransfer below runs in
+  // BOTH modes and screens the recipient (and sender, when a name is present).
+  const requiresKyc = input.requiresKyc ?? true;
+  if (requiresKyc && input.senderKycStatus !== 'verified') {
     throw new Error('kyc_required');
   }
   const transferCount = await store.getTransferCount(input.phone);
