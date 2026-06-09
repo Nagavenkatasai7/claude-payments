@@ -1,0 +1,161 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createStore } from '@/lib/store';
+import { createPartnerStore } from '@/lib/partner-store';
+import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
+import { fakeRedis } from './helpers';
+import { resetRateCacheForTests } from '@/lib/rate';
+import {
+  listCorridors, createQuote, validateBeneficiary, createBeneficiary,
+  createTransaction, getTransaction, confirmTransaction, type PartnerApiDeps,
+} from '@/lib/partner-api-service';
+import type { Partner } from '@/lib/types';
+
+const NOW = '2026-06-08T00:00:00Z';
+
+function harness() {
+  const redis = fakeRedis();
+  const store = createStore(redis);
+  let n = 0;
+  const deps: PartnerApiDeps = {
+    store,
+    partnerStore: createPartnerStore(redis),
+    monthlyVolumeStore: createMonthlyVolumeStore(redis),
+    redis,
+    now: () => NOW,
+    genId: () => `b${n++}`,
+    // Deterministic settlement: mark paid without WhatsApp/timers.
+    initiatePayment: async (t) => {
+      const cur = await store.getTransfer(t.id);
+      if (cur) await store.saveTransfer({ ...cur, status: 'paid', paidAt: NOW });
+    },
+  };
+  return { redis, store, deps };
+}
+
+function partner(over: Partial<Partner>): Partner {
+  return { id: 'acme', name: 'Acme', countries: ['US'], status: 'active', createdAt: NOW, updatedAt: NOW, ...over };
+}
+const DELEGATED = partner({ id: 'acme', displayName: 'Acme Pay', kycMode: 'delegated', requireKycBeforeSend: false });
+const OURS = partner({ id: 'globex' }); // default kycMode ⇒ 'ours' ⇒ gate ON
+
+const txBody = (over: Record<string, unknown> = {}) => ({
+  amount_source: 200,
+  sender: { phone: '15551230000', name: 'Sender', kyc_status: 'not_started' },
+  beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+  ...over,
+});
+
+beforeEach(() => {
+  resetRateCacheForTests();
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
+  }));
+});
+afterEach(() => vi.restoreAllMocks());
+
+describe('partner-api-service: read endpoints', () => {
+  it('listCorridors maps the partner countries → IN corridors + brand', () => {
+    const r = listCorridors(DELEGATED);
+    expect(r.brand).toBe('Acme Pay');
+    expect(r.corridors[0]).toMatchObject({ source_currency: 'USD', destination_country: 'IN', destination_currency: 'INR' });
+  });
+
+  it('createQuote returns a quote; rejects a non-positive amount', async () => {
+    const { deps } = harness();
+    const okq = await createQuote(deps, DELEGATED, { amount_source: 500 });
+    expect(okq.ok).toBe(true);
+    if (okq.ok) expect(okq.data).toMatchObject({ source_currency: 'USD', destination_currency: 'INR' });
+    expect(await createQuote(deps, DELEGATED, { amount_source: 0 })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it('validateBeneficiary: valid IN fields pass, bad ones 422', () => {
+    expect(validateBeneficiary({ country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' } }))
+      .toMatchObject({ ok: true });
+    expect(validateBeneficiary({ country: 'IN', fields: { accountNumber: '1', ifsc: 'bad' } }))
+      .toMatchObject({ ok: false, status: 422 });
+  });
+});
+
+describe('partner-api-service: createTransaction', () => {
+  it('delegated partner mints for an UNVERIFIED sender (201), sanctions still ran', async () => {
+    const { deps } = harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect((r.data as { status: string }).status).toBe('awaiting_payment');
+  });
+
+  it('is IDEMPOTENT — the same Idempotency-Key returns the same transaction', async () => {
+    const { deps } = harness();
+    const first = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
+    const second = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody({ amount_source: 999 }));
+    expect(first.ok && second.ok).toBe(true);
+    if (first.ok && second.ok) {
+      expect(second.status).toBe(200); // replay
+      expect((second.data as { id: string }).id).toBe((first.data as { id: string }).id);
+    }
+  });
+
+  it('requires an Idempotency-Key and a sender phone', async () => {
+    const { deps } = harness();
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', '', txBody())).toMatchObject({ ok: false, status: 400 });
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'k', txBody({ sender: {} }))).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it('SANCTIONS SURVIVE DELEGATION — a watchlisted beneficiary is 422 (and recorded blocked)', async () => {
+    const { deps, store } = harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-x', txBody({
+      beneficiary: { name: 'John Doe', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    }));
+    expect(r).toMatchObject({ ok: false, status: 422 });
+    const key = [...store_keys(deps)].find((k) => k.startsWith('transfer:'));
+    expect(key).toBeDefined();
+    const t = await store.getTransfer(key!.replace('transfer:', ''));
+    expect(t!.status).toBe('blocked');
+  });
+
+  it("an 'ours' partner rejects an UNVERIFIED sender with 422 (KYC required)", async () => {
+    const { deps } = harness();
+    await deps.partnerStore.savePartner(OURS);
+    const r = await createTransaction(deps, OURS, 'pk_1', 'idem-2', txBody());
+    expect(r).toMatchObject({ ok: false, status: 422 });
+  });
+
+  it('resolves a stored beneficiary by id (partner-scoped)', async () => {
+    const { deps } = harness();
+    const ben = await createBeneficiary(deps, 'acme', { name: 'Anita', country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' }, recipient_phone: '919876543210' });
+    expect(ben).toMatchObject({ ok: true, status: 201 });
+    const benId = ben.ok ? (ben.data as { id: string }).id : '';
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-3', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: benId });
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect((r.data as { recipient_name: string }).recipient_name).toBe('Anita');
+  });
+});
+
+describe('partner-api-service: cross-tenant isolation', () => {
+  it('getTransaction returns 404 for a transfer owned by another partner', async () => {
+    const { deps } = harness();
+    const created = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
+    const id = created.ok ? (created.data as { id: string }).id : '';
+    // owner can read
+    expect(await getTransaction(deps, 'acme', id)).toMatchObject({ ok: true, status: 200 });
+    // a different partner gets 404 (never 403 — don't disclose existence)
+    expect(await getTransaction(deps, 'rival', id)).toMatchObject({ ok: false, status: 404 });
+  });
+
+  it('confirmTransaction is owner-scoped and drives settlement', async () => {
+    const { deps } = harness();
+    const created = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-1', txBody());
+    const id = created.ok ? (created.data as { id: string }).id : '';
+    // a rival cannot confirm someone else's transfer
+    expect(await confirmTransaction(deps, partner({ id: 'rival' }), 'pk_r', id)).toMatchObject({ ok: false, status: 404 });
+    // owner confirms → paid
+    const r = await confirmTransaction(deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as { status: string }).status).toBe('paid');
+  });
+});
+
+// Small helper to peek the fake redis keymap via the store's underlying map.
+function store_keys(deps: PartnerApiDeps): IterableIterator<string> {
+  return (deps.redis as unknown as { dump: Map<string, string> }).dump.keys();
+}
