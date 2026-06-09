@@ -7,6 +7,7 @@ import {
 import {
   sendText, sendTemplate, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
 } from '../whatsapp';
+import type { PartnerPaymentConfig } from '../partner-integrations';
 
 export const DELIVERY_DELAY_MS = 120000; // 2 minutes — moved from the pay route, SAME value
 
@@ -102,10 +103,24 @@ export class MockPaymentProvider implements PaymentProvider {
 }
 
 /**
- * Single switch point (mirrors getSanctionsScreener). v1 has only the mock;
- * a real provider is added here, selected by env.paymentProviderMode — no
- * call-site change. Takes `store` because the mock runs the stages against it.
+ * Single switch point (mirrors getSanctionsScreener / getKycProvider). Now
+ * PER-PARTNER (WL1): the optional `payment` config selects this partner's
+ * settlement rail. absent / 'mock' / unknown ⇒ MockPaymentProvider — so the
+ * default partner (no integrations row) and every sandbox partner are
+ * byte-for-byte unchanged. A REAL rail (Phase C only) is added as a new case,
+ * gated on a signed licensed partner + creds; NON-CUSTODIAL boundary applies
+ * (see the PaymentProvider contract above — SmartRemit never holds funds).
+ * Takes `store` because the mock runs the stages against it.
  */
-export function getPaymentProvider(store: Store): PaymentProvider {
-  return new MockPaymentProvider(store);
+export function getPaymentProvider(
+  store: Store,
+  payment?: PartnerPaymentConfig,
+): PaymentProvider {
+  switch (payment?.providerType) {
+    // case '<real-rail-id>': return new RealPaymentProvider(...);  // Phase C — NOT built in this batch
+    case undefined:
+    case 'mock':
+    default:
+      return new MockPaymentProvider(store);
+  }
 }

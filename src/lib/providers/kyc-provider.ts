@@ -1,5 +1,6 @@
 import { env } from '../env';
 import type { CustomerStore } from '../customer-store';
+import type { PartnerKycConfig } from '../partner-integrations';
 import { MockKycProvider } from './mock-kyc-provider';
 import { PersonaKycProvider } from './persona-kyc-provider';
 import { createPersonaClient } from './persona-client';
@@ -42,11 +43,28 @@ export interface KycProvider {
 }
 
 // ── Factory (Phase 2) — mirrors getPaymentProvider/getSanctionsScreener ──
-// Selects the real Persona provider once PERSONA_API_KEY is provisioned; until
-// then the Mock keeps existing behavior. Single switch point; no call-site change.
+// Selection order (WL1, per-partner): a partner's OWN Persona credentials first,
+// then the global env Persona key, then the Mock. The optional `kyc` arg is
+// additive — omit it (or pass a partner with no Persona creds) and the behavior
+// is byte-for-byte today (env-driven). Single switch point; no call-site change
+// for the default partner.
 // (The mock/persona modules import only TYPES from this file, so there is no
 // runtime import cycle despite the static imports above.)
-export function getKycProvider(customerStore: CustomerStore, appBaseUrl: string): KycProvider {
+export function getKycProvider(
+  customerStore: CustomerStore,
+  appBaseUrl: string,
+  kyc?: PartnerKycConfig,
+): KycProvider {
+  // Per-partner Persona account (the partner brings their own KYC vendor creds).
+  if (kyc?.providerType === 'persona' && kyc.apiKey) {
+    const client = createPersonaClient({
+      apiKey: kyc.apiKey,
+      apiVersion: env.personaApiVersion,
+      base: env.personaApiBase,
+      templateVersionId: env.personaInquiryTemplateVersionId,
+    });
+    return new PersonaKycProvider(client, appBaseUrl);
+  }
   if (env.personaApiKey) {
     const client = createPersonaClient({
       apiKey: env.personaApiKey,

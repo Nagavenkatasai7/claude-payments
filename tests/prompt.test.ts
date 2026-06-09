@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SYSTEM_PROMPT } from '@/lib/prompt';
+import { SYSTEM_PROMPT, buildSystemPrompt } from '@/lib/prompt';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -286,5 +286,34 @@ describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).not.toMatch(/how should they receive.*upi/i);
     // The recipient's bank details are entered on the secure pay page, never in chat.
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('never ask for card details or bank account details in chat');
+  });
+});
+
+describe('buildSystemPrompt (WL1 white-label factory)', () => {
+  it('the default export is byte-for-byte the SmartRemit-branded prompt', () => {
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt({ brand: 'SmartRemit' }));
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt());
+    expect(SYSTEM_PROMPT).toContain('You are the assistant for SmartRemit');
+  });
+
+  it('a partner brand replaces SmartRemit in the bot identity — no SmartRemit leaks', () => {
+    const p = buildSystemPrompt({ brand: 'Acme Pay' });
+    expect(p).toContain('You are the assistant for Acme Pay');
+    expect(p).toContain('Acme Pay currently pays out to 8 countries');
+    expect(p).not.toContain('SmartRemit');
+    // all the behavioral rules survive the rebrand
+    expect(p).toContain('get_quote');
+    expect(p).toContain('Approve & Pay');
+  });
+
+  it('an empty/blank brand falls back to SmartRemit', () => {
+    expect(buildSystemPrompt({ brand: '   ' })).toBe(SYSTEM_PROMPT);
+  });
+
+  it('botPersona is appended only when provided', () => {
+    expect(buildSystemPrompt({ brand: 'Acme Pay' })).not.toContain('BRAND VOICE');
+    const withPersona = buildSystemPrompt({ brand: 'Acme Pay', botPersona: 'crisp and formal' });
+    expect(withPersona).toContain('BRAND VOICE');
+    expect(withPersona).toContain('crisp and formal');
   });
 });

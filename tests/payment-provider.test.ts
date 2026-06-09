@@ -128,4 +128,12 @@ describe('MockPaymentProvider.handleWebhook + factory', () => {
     const provider = getPaymentProvider(createStore(fakeRedis()));
     expect(provider).toBeInstanceOf(MockPaymentProvider);
   });
+  it('WL1: getPaymentProvider falls back to mock for absent / "mock" / unknown providerType', () => {
+    const store = createStore(fakeRedis());
+    expect(getPaymentProvider(store, undefined)).toBeInstanceOf(MockPaymentProvider);
+    expect(getPaymentProvider(store, {})).toBeInstanceOf(MockPaymentProvider);
+    expect(getPaymentProvider(store, { providerType: 'mock' })).toBeInstanceOf(MockPaymentProvider);
+    // An unconfigured / not-yet-built real rail must NOT silently move money — mock.
+    expect(getPaymentProvider(store, { providerType: 'some-future-rail' })).toBeInstanceOf(MockPaymentProvider);
+  });
 });
