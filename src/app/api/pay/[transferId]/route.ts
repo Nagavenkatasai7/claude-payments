@@ -10,6 +10,9 @@ import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { getDb } from '@/db/client';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
@@ -17,7 +20,7 @@ import { sendText, sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import type { CountryCode, Transfer } from '@/lib/types';
 
-export const maxDuration = 300; // unchanged — the mock still sleeps 120s inside after()
+// (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
 /**
  * Process payment for a resolved transfer, branching on complianceStatus:
@@ -59,8 +62,9 @@ async function processTransferPayment(
   // cleared (or any future status): the partner's settlement rail. mock ⇒ timer
   // self-advance (sandbox); http/simulator ⇒ signed instruction out, delivery
   // arrives via the partner's signed callback to /api/payment-webhook (WL3).
-  const provider = getPaymentProvider(store, integrations.payment, brand, waCreds);
+  const provider = getPaymentProvider(store, createOutboxRepo(getDb()), integrations.payment, brand, waCreds);
   const { providerRef } = await provider.initiateTransfer(transfer);
+  pokeWorker(); // fast-path drain for the enqueued stage-2 / settlement effects
 
   // Persist the settlement ref WITHOUT clobbering the 'paid' write initiateTransfer
   // just made: re-read, write the ref only when not already set, spread-merge.

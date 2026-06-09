@@ -21,6 +21,7 @@ import {
   createAuditRepo,
   type BeneficiaryRecord,
 } from '@/db/repos/aux-repos';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { newTransferId } from './id';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
@@ -288,8 +289,13 @@ export async function confirmTransaction(
     // with the partner's brand + WhatsApp creds on the stage messages.
     const brand = resolvePartnerBranding(partner).brand;
     const integrations = await deps.integrationsStore.getIntegrations(partner.id);
-    await getPaymentProvider(deps.store, integrations.payment, brand, waCredsFrom(integrations))
-      .initiateTransfer(tr);
+    await getPaymentProvider(
+      deps.store,
+      createOutboxRepo(deps.db),
+      integrations.payment,
+      brand,
+      waCredsFrom(integrations),
+    ).initiateTransfer(tr);
   });
   await initiate(t);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);

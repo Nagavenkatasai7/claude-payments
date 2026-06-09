@@ -1,0 +1,24 @@
+# The durability GUARANTEE for the outbox worker (free-tier choice, locked):
+# Vercel's plan only allows daily crons, so this 5-minute GitHub Actions
+# schedule is the heartbeat that drains anything the best-effort after() poke
+# missed (crashed function, lost poke, delayed retries). Overlap-safe: the
+# worker claims rows with FOR UPDATE SKIP LOCKED.
+name: worker-heartbeat
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Drain the outbox
+        run: |
+          curl -sS --max-time 90 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://claude-payments.vercel.app/api/worker" \
+            -o /dev/null -w "worker drain HTTP %{http_code}\n"

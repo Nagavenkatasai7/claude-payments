@@ -1,7 +1,8 @@
-import { NextRequest, NextResponse, after } from 'next/server';
-import { env } from '@/lib/env';
+import { NextRequest, NextResponse } from 'next/server';
 import { verifyWebhookSignature } from '@/lib/providers/payment-webhook-verify';
-import { signBody } from '@/lib/providers/http-payment-provider';
+import { getDb } from '@/db/client';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 
 // partner-rail — SmartRemit's HOSTED REFERENCE RAIL (WL3). This endpoint plays
@@ -46,28 +47,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
 
-  // Settle asynchronously: after a realistic lag, POST the SIGNED status callback
-  // through the public webhook — the REAL delivery path (no internal shortcut).
-  const webhookSecret = integrations.payment.webhookSecret ?? '';
-  after(async () => {
-    try {
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_DELAY_MS));
-      const callbackBody = JSON.stringify({ reference, status: 'paid_out' });
-      const res = await fetch(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(webhookSecret ? { 'x-signature': signBody(callbackBody, webhookSecret) } : {}),
-        },
-        body: callbackBody,
-      });
-      if (!res.ok) {
-        console.error(`partner-rail: status callback rejected (${res.status}) for ${reference}`);
-      }
-    } catch (err) {
-      console.error('partner-rail: status callback failed:', err);
-    }
-  });
+  // Settle asynchronously: a DELAYED outbox row (Stage 2b — was a best-effort
+  // after() sleep). The worker POSTs the SIGNED status callback through the
+  // public webhook with retries/backoff/dead-letter — the REAL delivery path,
+  // now guaranteed-eventually even if this function dies.
+  await createOutboxRepo(getDb()).enqueue(
+    'rail.callback',
+    { reference, partner_id: partnerId },
+    { delayMs: SETTLE_DELAY_MS, dedupeKey: `railcb:${reference}` },
+  );
+  pokeWorker();
 
   return NextResponse.json({ ok: true, providerRef: `simrail-${reference}` });
 }
