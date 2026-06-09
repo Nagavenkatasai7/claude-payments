@@ -9,6 +9,16 @@ function required(name: string): string {
 }
 
 export const env = {
+  // Neon Postgres pooled connection string (auto-injected by the Vercel
+  // Marketplace integration). The LEDGER lives here from Stage 2 on.
+  get databaseUrl() {
+    return required('DATABASE_URL');
+  },
+  // Ops alert destination — WhatsApp number that receives stuck-money /
+  // dead-letter alerts from the reconciliation sweep (Stage 2). '' ⇒ no alerts.
+  get opsAlertPhone(): string {
+    return process.env.OPS_ALERT_PHONE ?? '';
+  },
   get ollamaBaseUrl() {
     return required('OLLAMA_BASE_URL');
   },

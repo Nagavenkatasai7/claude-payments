@@ -1,0 +1,314 @@
+import {
+  pgTable,
+  text,
+  boolean,
+  numeric,
+  timestamp,
+  jsonb,
+  integer,
+  bigint,
+  date,
+  index,
+  uniqueIndex,
+  primaryKey,
+  check,
+} from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
+
+// SmartRemit ledger schema (Stage 1, Postgres/Neon via Drizzle).
+//
+// Conventions:
+//  • text PKs reuse the existing newTransferId() ids — no id-format migration.
+//  • Money as numeric(12,2); FX as numeric(14,6). Mappers convert to/from the
+//    existing number-based domain types in src/lib/types.ts.
+//  • `*_enc` columns hold field-crypto envelope blobs (AES-256-GCM, unchanged
+//    format); sibling `*_last4` columns are computed at write time so list and
+//    dashboard queries NEVER decrypt.
+//  • partner_id is NOT NULL + FK on every tenant-owned table — the relational
+//    backbone of cross-tenant isolation (app-level scoping in the repos).
+//  • The ledger is FRESH-START: no Redis backfill; migration 0001 seeds only
+//    the `default` partner row (mirroring ensureDefaultPartner()).
+
+export const partners = pgTable('partners', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  status: text('status').notNull().default('active'),
+  countries: jsonb('countries').notNull().default([]),
+  brandName: text('brand_name'),
+  displayName: text('display_name'),
+  primaryColor: text('primary_color'),
+  logoUrl: text('logo_url'),
+  supportContact: text('support_contact'),
+  botPersona: text('bot_persona'),
+  adminNote: text('admin_note'),
+  kycMode: text('kyc_mode').notNull().default('ours'),
+  requireKycBeforeSend: boolean('require_kyc_before_send'),
+  corridorCompliance: jsonb('corridor_compliance'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const transfers = pgTable(
+  'transfers',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(),
+    status: text('status').notNull(),
+    complianceStatus: text('compliance_status').notNull(),
+    complianceReasons: jsonb('compliance_reasons').notNull().default([]),
+    amountUsd: numeric('amount_usd', { precision: 12, scale: 2 }).notNull(),
+    feeUsd: numeric('fee_usd', { precision: 12, scale: 2 }).notNull(),
+    totalChargeUsd: numeric('total_charge_usd', { precision: 12, scale: 2 }).notNull(),
+    amountSource: numeric('amount_source', { precision: 12, scale: 2 }).notNull(),
+    feeSource: numeric('fee_source', { precision: 12, scale: 2 }).notNull(),
+    totalChargeSource: numeric('total_charge_source', { precision: 12, scale: 2 }).notNull(),
+    fxRate: numeric('fx_rate', { precision: 14, scale: 6 }).notNull(),
+    amountDest: numeric('amount_dest', { precision: 14, scale: 2 }).notNull(), // domain: amountInr
+    sourceCountry: text('source_country').notNull(),
+    sourceCurrency: text('source_currency').notNull(),
+    destinationCountry: text('destination_country').notNull(),
+    destinationCurrency: text('destination_currency').notNull(),
+    recipientName: text('recipient_name').notNull(),
+    recipientPhone: text('recipient_phone').notNull().default(''),
+    payoutMethod: text('payout_method').notNull(),
+    payoutDestinationEnc: text('payout_destination_enc').notNull().default(''), // ENCRYPTED full account
+    payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
+    fundingMethod: text('funding_method').notNull(),
+    paymentProviderRef: text('payment_provider_ref'),
+    recipientLegalNameEnc: text('recipient_legal_name_enc'), // ENCRYPTED
+    relationship: text('relationship'),
+    purpose: text('purpose'),
+    eddRequired: boolean('edd_required'),
+    assignedTo: text('assigned_to'),
+    adminNote: text('admin_note'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  },
+  (t) => [
+    check(
+      'transfers_status_check',
+      sql`${t.status} IN ('awaiting_payment','paid','in_review','delivered','cancelled','blocked')`,
+    ),
+    index('transfers_partner_created').on(t.partnerId, t.createdAt.desc()),
+    index('transfers_phone_created').on(t.phone, t.createdAt.desc()),
+    index('transfers_status_paid').on(t.status, t.paidAt), // reconciliation sweep
+    index('transfers_provider_ref').on(t.paymentProviderRef),
+  ],
+);
+
+export const customers = pgTable(
+  'customers',
+  {
+    phone: text('phone').primaryKey(), // senderPhone
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull(),
+    senderCountry: text('sender_country').notNull(),
+    kycStatus: text('kyc_status').notNull().default('not_started'),
+    kycReviewState: text('kyc_review_state'),
+    kycInquiryId: text('kyc_inquiry_id'),
+    kycProviderRef: text('kyc_provider_ref'),
+    kycRejectedReason: text('kyc_rejected_reason'),
+    kycVerifiedAt: timestamp('kyc_verified_at', { withTimezone: true }),
+    kycSubmittedAt: timestamp('kyc_submitted_at', { withTimezone: true }),
+    kycApprovedBy: text('kyc_approved_by'),
+    kycApprovedAt: timestamp('kyc_approved_at', { withTimezone: true }),
+    kycRejectedAt: timestamp('kyc_rejected_at', { withTimezone: true }),
+    fullNameEnc: text('full_name_enc'), // ENCRYPTED
+    dateOfBirthEnc: text('date_of_birth_enc'), // ENCRYPTED
+    residentialAddressEnc: text('residential_address_enc'), // ENCRYPTED
+    emailEnc: text('email_enc'), // ENCRYPTED
+    govIdNumberEnc: text('gov_id_number_enc'), // ENCRYPTED
+    govIdType: text('gov_id_type'),
+    idLast4: text('id_last4'),
+    idDocType: text('id_doc_type'),
+    nationality: text('nationality'),
+    pepDeclared: boolean('pep_declared'),
+    watchlistHit: boolean('watchlist_hit'),
+    pepHit: boolean('pep_hit'),
+    sourceOfFunds: text('source_of_funds'),
+    occupation: text('occupation'),
+    eddCapturedAt: timestamp('edd_captured_at', { withTimezone: true }),
+    lastFundingMethod: text('last_funding_method'),
+    lastFundingMethodAt: timestamp('last_funding_method_at', { withTimezone: true }),
+    passwordHash: text('password_hash'),
+    passwordUpdatedAt: timestamp('password_updated_at', { withTimezone: true }),
+    phoneVerifiedAt: timestamp('phone_verified_at', { withTimezone: true }),
+    optInAt: timestamp('opt_in_at', { withTimezone: true }),
+    optedOutAt: timestamp('opted_out_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('customers_partner_created').on(t.partnerId, t.createdAt.desc())],
+);
+
+export const partnerIntegrations = pgTable('partner_integrations', {
+  partnerId: text('partner_id').primaryKey().references(() => partners.id),
+  kycProviderType: text('kyc_provider_type'),
+  kycApiKeyEnc: text('kyc_api_key_enc'),
+  kycWebhookSecretEnc: text('kyc_webhook_secret_enc'),
+  paymentProviderType: text('payment_provider_type'),
+  paymentCredentialsEnc: text('payment_credentials_enc'),
+  paymentWebhookSecretEnc: text('payment_webhook_secret_enc'),
+  waPhoneNumberId: text('wa_phone_number_id'),
+  waTokenEnc: text('wa_token_enc'),
+  waVerifyTokenEnc: text('wa_verify_token_enc'),
+  waAppSecretEnc: text('wa_app_secret_enc'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: text('id').primaryKey(), // keyId
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    keyHash: text('key_hash').notNull(),
+    label: text('label'),
+    last4: text('last4').notNull().default(''),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('api_keys_hash').on(t.keyHash), // O(1) auth lookup
+    index('api_keys_partner').on(t.partnerId),
+  ],
+);
+
+export const schedules = pgTable(
+  'schedules',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(),
+    amountUsd: numeric('amount_usd', { precision: 12, scale: 2 }).notNull(),
+    amountSource: numeric('amount_source', { precision: 12, scale: 2 }).notNull(),
+    sourceCurrency: text('source_currency').notNull(),
+    recipientName: text('recipient_name').notNull(),
+    recipientPhone: text('recipient_phone').notNull(),
+    payoutMethod: text('payout_method').notNull(),
+    payoutDestinationEnc: text('payout_destination_enc').notNull().default(''), // ENCRYPTED
+    payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
+    fundingMethod: text('funding_method').notNull(),
+    frequency: text('frequency').notNull(),
+    dayOfMonth: integer('day_of_month'),
+    dayOfWeek: integer('day_of_week'),
+    status: text('status').notNull().default('active'),
+    endDate: date('end_date'),
+    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('schedules_status').on(t.status, t.frequency)],
+);
+
+export const beneficiaries = pgTable(
+  'beneficiaries',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    name: text('name').notNull(),
+    country: text('country').notNull(),
+    payoutMethod: text('payout_method').notNull(),
+    payoutDestinationEnc: text('payout_destination_enc').notNull(), // ENCRYPTED
+    payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
+    recipientPhone: text('recipient_phone'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('beneficiaries_partner').on(t.partnerId, t.createdAt.desc())],
+);
+
+// Per-sender saved recipients (the recipients:{phone} Redis hash today). Holds
+// full bank accounts → encrypted; the last plaintext account store leaves Redis.
+export const recipients = pgTable(
+  'recipients',
+  {
+    senderPhone: text('sender_phone').notNull(),
+    recipientPhone: text('recipient_phone').notNull(),
+    name: text('name').notNull(),
+    payoutMethod: text('payout_method').notNull(),
+    payoutDestinationEnc: text('payout_destination_enc').notNull(), // ENCRYPTED
+    payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.senderPhone, t.recipientPhone] })],
+);
+
+export const auditEvents = pgTable(
+  'audit_events',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    partnerId: text('partner_id'),
+    actor: text('actor').notNull(),
+    actorType: text('actor_type').notNull(), // 'staff' | 'api_key' | 'system'
+    action: text('action').notNull(),
+    subjectId: text('subject_id'),
+    meta: jsonb('meta'),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('audit_partner_at').on(t.partnerId, t.at.desc())],
+);
+
+// The duplicate-window killer: PK (partner_id, key) makes a replayed create
+// structurally unable to mint a second transfer.
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    partnerId: text('partner_id').notNull(),
+    key: text('key').notNull(),
+    transferId: text('transfer_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.partnerId, t.key] })],
+);
+
+export const kycCases = pgTable(
+  'kyc_cases',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull(),
+    phone: text('phone').notNull(),
+    state: text('state').notNull(),
+    providerRef: text('provider_ref'),
+    notes: jsonb('notes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('kyc_cases_state').on(t.state, t.updatedAt.desc())],
+);
+
+export const corridorRequests = pgTable('corridor_requests', {
+  id: text('id').primaryKey(),
+  senderPhone: text('sender_phone').notNull(),
+  destinationCountry: text('destination_country').notNull(),
+  approxAmount: numeric('approx_amount', { precision: 12, scale: 2 }),
+  approxCurrency: text('approx_currency'),
+  capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
+});
+
+// The durability backbone (Stage 2): every external effect (WhatsApp send,
+// settlement instruction, rail callback, mock settle, agent turn, ops alert)
+// is written here IN THE SAME TRANSACTION as the state change that implies it,
+// then drained by /api/worker with retries → dead-letter → ops alert.
+export const outbox = pgTable(
+  'outbox',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    kind: text('kind').notNull(),
+    payload: jsonb('payload').notNull(),
+    status: text('status').notNull().default('pending'), // pending|processing|done|failed|dead
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lockedAt: timestamp('locked_at', { withTimezone: true }),
+    lockedBy: text('locked_by'),
+    lastError: text('last_error'),
+    dedupeKey: text('dedupe_key'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('outbox_dedupe').on(t.dedupeKey).where(sql`${t.dedupeKey} IS NOT NULL`),
+    index('outbox_drain')
+      .on(t.status, t.nextAttemptAt)
+      .where(sql`${t.status} IN ('pending','failed')`),
+  ],
+);
