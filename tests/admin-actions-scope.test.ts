@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb, seedPartner } from './helpers-db';
 import { createStore } from '@/lib/store';
 import type { Staff, Transfer } from '@/lib/types';
 
@@ -11,6 +12,9 @@ import type { Staff, Transfer } from '@/lib/types';
 
 const redis = fakeRedis();
 let currentStaff: Staff;
+// Transfers live in Postgres now — the store is rebuilt per test in beforeEach
+// (vi.mock factories are hoisted/sync, so they close over this let-variable).
+let store: ReturnType<typeof createStore>;
 
 vi.mock('@/lib/auth', () => ({
   requireStaff: async () => currentStaff,
@@ -21,7 +25,7 @@ vi.mock('@/lib/auth', () => ({
 }));
 vi.mock('@/lib/store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/store')>('@/lib/store');
-  return { ...actual, getStore: () => actual.createStore(redis) };
+  return { ...actual, getStore: () => store };
 });
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
@@ -37,7 +41,6 @@ import {
 } from '@/app/admin-dashboard/actions';
 import { createAuthStore } from '@/lib/auth-store';
 
-const store = createStore(redis);
 const authStore = createAuthStore(redis);
 
 function staff(overrides: Partial<Staff>): Staff {
@@ -87,8 +90,13 @@ function form(values: Record<string, string>): FormData {
   return fd;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   redis.dump.clear();
+  const db = await freshDb();
+  // Transfers carry a REAL FK to partners — seed the two tenants used below.
+  await seedPartner(db, 'A');
+  await seedPartner(db, 'B');
+  store = createStore(redis, db);
 });
 
 describe('cancelTransferAction partner scope (H1)', () => {

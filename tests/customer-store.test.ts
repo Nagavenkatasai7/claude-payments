@@ -1,34 +1,59 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer } from '@/lib/transfer-create';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
+import type { Db } from '@/db/client';
+import type { Transfer } from '@/lib/types';
 
 const PHONE = '15551234567';
 
+let db: Db;
+beforeEach(async () => {
+  db = await freshDb();
+});
 afterEach(() => vi.restoreAllMocks());
+
+function mkStores(redis = fakeRedis()) {
+  const store = createStore(redis, db);
+  const cs = createCustomerStore(db, store);
+  return { store, cs };
+}
+
+let n = 0;
+function mkTransfer(over: Partial<Transfer> = {}): Transfer {
+  n += 1;
+  return {
+    id: `T_${n}`, phone: PHONE, amountUsd: 100, feeUsd: 1.99, totalChargeUsd: 101.99,
+    fxRate: 85.2, amountInr: 8520, recipientName: 'Mom', recipientPhone: '919876543210',
+    payoutMethod: 'upi', payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer',
+    complianceStatus: 'cleared', complianceReasons: [], status: 'delivered',
+    createdAt: '2026-04-01T00:00:00.000Z', partnerId: 'default',
+    sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+    amountSource: 100, feeSource: 1.99, totalChargeSource: 101.99,
+    ...over,
+  } as Transfer;
+}
 
 describe('customer store', () => {
   it('getCustomer returns null when no record', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     expect(await cs.getCustomer(PHONE)).toBeNull();
   });
 
   it('saveCustomer + getCustomer round-trips', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     const c = {
       senderPhone: PHONE,
-      firstSeenAt: '2026-05-24T12:00:00Z',
+      firstSeenAt: '2026-05-24T12:00:00.000Z',
       kycStatus: 'not_started' as const,
       senderCountry: 'US' as const,
-      createdAt: '2026-05-24T12:00:00Z',
-      updatedAt: '2026-05-24T12:00:00Z',
+      createdAt: '2026-05-24T12:00:00.000Z',
+      updatedAt: '2026-05-24T12:00:00.000Z',
       partnerId: 'default' as const,
     };
     await cs.saveCustomer(c);
@@ -36,8 +61,7 @@ describe('customer store', () => {
   });
 
   it('upsertOnFirstInbound creates a brand-new customer (wasCreated=true) when no transfers exist', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
     expect(wasCreated).toBe(true);
     expect(customer.kycStatus).toBe('not_started');
@@ -46,8 +70,7 @@ describe('customer store', () => {
   });
 
   it('upsertOnFirstInbound is idempotent: second call returns existing record with wasCreated=false', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     const first = await cs.upsertOnFirstInbound(PHONE);
     const second = await cs.upsertOnFirstInbound(PHONE);
     expect(second.wasCreated).toBe(false);
@@ -61,8 +84,8 @@ describe('customer store', () => {
       json: async () => ({ rates: { INR: 85.2 } }),
     }));
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const ps = createPartnerStore(await freshDb());
+    const store = createStore(redis, db);
+    const ps = createPartnerStore(db);
     const mvs = createMonthlyVolumeStore(redis);
     // Pre-existing transfer (e.g. from before this batch shipped)
     await createTransfer(store, ps, mvs, {
@@ -80,7 +103,7 @@ describe('customer store', () => {
     // Ensure a measurable gap so firstSeenAt (transfer.createdAt) and
     // updatedAt (now) fall in different milliseconds on fast hardware.
     await new Promise((r) => setTimeout(r, 5));
-    const cs = createCustomerStore(fakeRedis(), store);
+    const cs = createCustomerStore(db, store);
     const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
     expect(wasCreated).toBe(false); // grandfathered, not a "real" new customer
     expect(customer.kycStatus).toBe('grandfathered');
@@ -90,27 +113,17 @@ describe('customer store', () => {
   });
 
   it('listCustomers returns every saved customer', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     await cs.upsertOnFirstInbound('15551111111');
     await cs.upsertOnFirstInbound('15552222222');
     const all = await cs.listCustomers();
     expect(all.map((c) => c.senderPhone).sort()).toEqual(['15551111111', '15552222222']);
   });
-
-  it('returns null on JSON corruption rather than throwing', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    await redis.set(`customer:${PHONE}`, 'not-json');
-    const cs = createCustomerStore(redis, store);
-    expect(await cs.getCustomer(PHONE)).toBeNull();
-  });
 });
 
 describe('customer-store P1: senderCountry', () => {
   it('upsertOnFirstInbound writes senderCountry: US on a brand-new customer', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound('15550009999');
     expect(customer.senderCountry).toBe('US');
   });
@@ -121,8 +134,8 @@ describe('customer-store P1: senderCountry', () => {
       ok: true, json: async () => ({ rates: { INR: 85.2 } }),
     }));
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const ps = createPartnerStore(await freshDb());
+    const store = createStore(redis, db);
+    const ps = createPartnerStore(db);
     const mvs = createMonthlyVolumeStore(redis);
     await createTransfer(store, ps, mvs, {
       phone: '15550008888',
@@ -136,83 +149,48 @@ describe('customer-store P1: senderCountry', () => {
       fundingMethod: 'bank_transfer',
       senderKycStatus: 'verified',
     });
-    const cs = createCustomerStore(fakeRedis(), store);
+    const cs = createCustomerStore(db, store);
     const { customer } = await cs.upsertOnFirstInbound('15550008888');
     expect(customer.senderCountry).toBe('US');
     expect(customer.kycStatus).toBe('grandfathered');
-  });
-
-  it('getCustomer fills missing senderCountry in-memory without persisting', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    // Manually write a customer record missing senderCountry (simulating pre-P1 data)
-    await redis.set('customer:15550007777', JSON.stringify({
-      senderPhone: '15550007777',
-      firstSeenAt: '2026-01-01T00:00:00Z',
-      kycStatus: 'verified',
-      kycVerifiedAt: '2026-01-01T00:00:00Z',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-    const cs = createCustomerStore(redis, store);
-    const c1 = await cs.getCustomer('15550007777');
-    expect(c1?.senderCountry).toBe('US');
-    // Verify NO persist happened — raw value in Redis still missing the field
-    const raw = await redis.get('customer:15550007777');
-    expect(JSON.parse(raw!).senderCountry).toBeUndefined();
   });
 });
 
 describe('customer-store multicountry: senderCountry inferred from phone', () => {
   it('AE phone (971...) → senderCountry AE', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound('971501234567');
     expect(customer.senderCountry).toBe('AE');
   });
 
   it('GB phone (44...) → senderCountry GB', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound('447911123456');
     expect(customer.senderCountry).toBe('GB');
   });
 
   it('US phone (1...) → senderCountry US', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound('15551234567');
     expect(customer.senderCountry).toBe('US');
   });
 
   it('unknown calling code (886...) → senderCountry falls back to DEFAULT_SENDER_COUNTRY (US)', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound('886123456');
     expect(customer.senderCountry).toBe('US');
   });
 
   it('AE phone on grandfathered path → senderCountry AE', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    // Seed a raw transfer record for this phone (no createTransfer dependency)
-    await redis.set('transfer:AETRANSFER', JSON.stringify({
+    const { store, cs } = mkStores();
+    // Seed an existing transfer row for this phone (born complete in Postgres)
+    await store.saveTransfer(mkTransfer({
       id: 'AETRANSFER', phone: '971509999999', amountUsd: 200, feeUsd: 2,
       totalChargeUsd: 202, fxRate: 85, amountInr: 17000,
-      recipientName: 'Cousin', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'cousin@upi',
-      fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
-      complianceReasons: [], status: 'delivered',
-      createdAt: '2026-04-01T00:00:00Z',
+      recipientName: 'Cousin', payoutDestination: 'cousin@upi',
       sourceCountry: 'AE', sourceCurrency: 'AED',
-      destinationCountry: 'IN', destinationCurrency: 'INR',
+      amountSource: 200, feeSource: 2, totalChargeSource: 202,
     }));
-    await redis.sadd('transfers:ids', 'AETRANSFER');
-    const cs = createCustomerStore(fakeRedis(), store);
     const { customer } = await cs.upsertOnFirstInbound('971509999999');
     expect(customer.senderCountry).toBe('AE');
     expect(customer.kycStatus).toBe('grandfathered');
@@ -221,9 +199,7 @@ describe('customer-store multicountry: senderCountry inferred from phone', () =>
 
 describe('recordFundingMethod (Bundle C sticky funding)', () => {
   it('persists lastFundingMethod + lastFundingMethodAt on an existing customer', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     await cs.upsertOnFirstInbound(PHONE); // creates the customer record
     await cs.recordFundingMethod(PHONE, 'credit_card');
     const c = await cs.getCustomer(PHONE);
@@ -231,8 +207,7 @@ describe('recordFundingMethod (Bundle C sticky funding)', () => {
     expect(typeof c?.lastFundingMethodAt).toBe('string');
   });
   it('is a no-op when there is no customer record yet', async () => {
-    const redis = fakeRedis();
-    const cs = createCustomerStore(redis, createStore(redis));
+    const { cs } = mkStores();
     await cs.recordFundingMethod(PHONE, 'bank_transfer'); // must not throw
     expect(await cs.getCustomer(PHONE)).toBeNull();
   });
@@ -240,8 +215,7 @@ describe('recordFundingMethod (Bundle C sticky funding)', () => {
 
 describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
   it('upsertOnFirstInbound sets optInAt on a brand-new customer', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound(PHONE);
     expect(customer.optInAt).toBeDefined();
     expect(new Date(customer.optInAt!).toString()).not.toBe('Invalid Date');
@@ -252,62 +226,54 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
     // `if (existing) return` fast path and never get optInAt persisted. The store
     // must backfill-and-persist it itself (first-contact-wins), not rely on the
     // route remembering to call setOptedIn.
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    // Write a record with NO optInAt (simulating a pre-feature/grandfathered row)
-    await redis.set(`customer:${PHONE}`, JSON.stringify({
+    const { cs } = mkStores();
+    // Save a record with NO optInAt (simulating a pre-feature/grandfathered row)
+    await cs.saveCustomer({
       senderPhone: PHONE,
-      firstSeenAt: '2026-01-01T00:00:00Z',
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
       kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'default',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-    await redis.sadd('customers:phones', PHONE);
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
 
-    const cs = createCustomerStore(redis, store);
     const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
     expect(wasCreated).toBe(false); // still an existing record, not a fresh create
     expect(customer.optInAt).toBeDefined();
-    // And it is actually PERSISTED to Redis (not just filled in-memory)
-    const raw = await redis.get(`customer:${PHONE}`);
-    expect(JSON.parse(raw!).optInAt).toBeDefined();
+    // And it is actually PERSISTED (not just filled in-memory)
+    const persisted = await cs.getCustomer(PHONE);
+    expect(persisted?.optInAt).toBeDefined();
   });
 
   it('upsertOnFirstInbound does NOT churn optInAt on an existing record that already has it (Fix 5 idempotent)', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const existingOptIn = '2026-02-02T00:00:00Z';
-    await redis.set(`customer:${PHONE}`, JSON.stringify({
+    const { cs } = mkStores();
+    const existingOptIn = '2026-02-02T00:00:00.000Z';
+    await cs.saveCustomer({
       senderPhone: PHONE,
-      firstSeenAt: '2026-01-01T00:00:00Z',
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
       kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'default',
       optInAt: existingOptIn,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-    await redis.sadd('customers:phones', PHONE);
-    const cs = createCustomerStore(redis, store);
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
     const { customer } = await cs.upsertOnFirstInbound(PHONE);
     expect(customer.optInAt).toBe(existingOptIn); // first contact wins, untouched
   });
 
   it('setOptedIn sets optInAt once and is idempotent (first contact wins)', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     // start from a record with NO optInAt (simulate a grandfathered/pre-feature record)
     await cs.saveCustomer({
       senderPhone: PHONE,
-      firstSeenAt: '2026-01-01T00:00:00Z',
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
       kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'default',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
     });
     await cs.setOptedIn(PHONE);
     const first = (await cs.getCustomer(PHONE))!.optInAt;
@@ -319,18 +285,14 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
   });
 
   it('setOptedOut sets optedOutAt', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     await cs.upsertOnFirstInbound(PHONE);
     await cs.setOptedOut(PHONE);
     expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeDefined();
   });
 
   it('clearOptedOut removes optedOutAt (undefined)', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    const cs = createCustomerStore(redis, store);
+    const { cs } = mkStores();
     await cs.upsertOnFirstInbound(PHONE);
     await cs.setOptedOut(PHONE);
     expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeDefined();
@@ -339,8 +301,7 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
   });
 
   it('setOptedIn / setOptedOut / clearOptedOut are no-ops when no customer exists', async () => {
-    const redis = fakeRedis();
-    const cs = createCustomerStore(redis, createStore(redis));
+    const { cs } = mkStores();
     await cs.setOptedIn(PHONE); // must not throw
     await cs.setOptedOut(PHONE);
     await cs.clearOptedOut(PHONE);
@@ -350,70 +311,38 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
 
 describe('customer-store P2: partnerId', () => {
   it('upsertOnFirstInbound writes partnerId: default on a brand-new customer', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    const { cs } = mkStores();
     const { customer } = await cs.upsertOnFirstInbound('15550009999');
     expect(customer.partnerId).toBe('default');
   });
 
   it('upsertOnFirstInbound writes partnerId: default on a grandfathered customer', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    // Pre-seed an old transfer for this phone (simulating pre-P2 data) without
-    // depending on createTransfer (Task 5 hasn't shipped yet).
-    await redis.set('transfer:OLDGRAND', JSON.stringify({
+    const { store, cs } = mkStores();
+    // Pre-seed an old transfer for this phone (rows are born complete in
+    // Postgres — partnerId 'default' is the auto-seeded FK target).
+    await store.saveTransfer(mkTransfer({
       id: 'OLDGRAND', phone: '15550008888', amountUsd: 50, feeUsd: 1.99,
-      totalChargeUsd: 51.99, fxRate: 85.2, amountInr: 4260,
-      recipientName: 'Mom', recipientPhone: '919876543210',
-      payoutMethod: 'upi', payoutDestination: 'mom@upi',
-      fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
-      complianceReasons: [], status: 'delivered',
-      createdAt: '2026-04-01T00:00:00Z',
-      sourceCountry: 'US', sourceCurrency: 'USD',
-      destinationCountry: 'IN', destinationCurrency: 'INR',
-      // Note: NO partnerId — simulates pre-P2 record
+      totalChargeUsd: 51.99, amountInr: 4260,
+      amountSource: 50, feeSource: 1.99, totalChargeSource: 51.99,
     }));
-    await redis.sadd('transfers:ids', 'OLDGRAND');
-    const cs = createCustomerStore(fakeRedis(), store);
     const { customer } = await cs.upsertOnFirstInbound('15550008888');
     expect(customer.partnerId).toBe('default');
     expect(customer.kycStatus).toBe('grandfathered');
-  });
-
-  it('getCustomer fills missing partnerId in-memory without persisting', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis);
-    // Manually write a customer record missing partnerId (simulating pre-P2 data)
-    await redis.set('customer:15550007777', JSON.stringify({
-      senderPhone: '15550007777',
-      firstSeenAt: '2026-01-01T00:00:00Z',
-      kycStatus: 'verified',
-      kycVerifiedAt: '2026-01-01T00:00:00Z',
-      senderCountry: 'US',
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-    const cs = createCustomerStore(redis, store);
-    const c = await cs.getCustomer('15550007777');
-    expect(c?.partnerId).toBe('default');
-    // Verify NO persist happened
-    const raw = await redis.get('customer:15550007777');
-    expect(JSON.parse(raw!).partnerId).toBeUndefined();
   });
 });
 
 describe('WL2 follow-the-number routing (upsertOnFirstInbound + routedPartnerId)', () => {
   it('creates a NEW customer under the routed partner', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
     const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE, 'acme');
     expect(wasCreated).toBe(true);
     expect(customer.partnerId).toBe('acme');
   });
 
   it('MOVES an existing default-partner customer to the partner that owns the number', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
     await cs.upsertOnFirstInbound(PHONE); // created under 'default'
     const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE, 'acme');
     expect(wasCreated).toBe(false);
@@ -423,16 +352,16 @@ describe('WL2 follow-the-number routing (upsertOnFirstInbound + routedPartnerId)
   });
 
   it('no routedPartnerId ⇒ existing customer keeps their partner (no churn)', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
     await cs.upsertOnFirstInbound(PHONE, 'acme');
     const { customer } = await cs.upsertOnFirstInbound(PHONE);
     expect(customer.partnerId).toBe('acme');
   });
 
   it('same routedPartnerId ⇒ idempotent (no extra write needed)', async () => {
-    const store = createStore(fakeRedis());
-    const cs = createCustomerStore(fakeRedis(), store);
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
     const first = await cs.upsertOnFirstInbound(PHONE, 'acme');
     const second = await cs.upsertOnFirstInbound(PHONE, 'acme');
     expect(second.customer.updatedAt).toBe(first.customer.updatedAt);

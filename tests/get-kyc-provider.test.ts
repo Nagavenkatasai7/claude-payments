@@ -2,11 +2,11 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { PersonaKycProvider } from '@/lib/providers/persona-kyc-provider';
-import { fakeRedis } from './helpers';
-import { createCustomerStore } from '@/lib/customer-store';
-import type { Store } from '@/lib/store';
+import type { CustomerStore } from '@/lib/customer-store';
 
-const cs = createCustomerStore(fakeRedis(), {} as unknown as Store);
+// getKycProvider only THREADS the customer store into provider constructors —
+// it never calls it — so a bare stub avoids building a pg store at module level.
+const cs = {} as unknown as CustomerStore;
 
 describe('getKycProvider', () => {
   afterEach(() => vi.unstubAllEnvs());

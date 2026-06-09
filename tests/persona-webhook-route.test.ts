@@ -1,19 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { fakeRedis } from './helpers';
-import { createCustomerStore } from '@/lib/customer-store';
-import { createKycCaseStore } from '@/lib/kyc-case-store';
-import type { Store } from '@/lib/store';
+import { freshDb } from './helpers-db';
+import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
+import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
+import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 
-const redis = fakeRedis();
-const cs = createCustomerStore(redis, {} as unknown as Store);
-const kcs = createKycCaseStore(redis, cs);
+// pg-backed stores rebuilt per test (freshDb truncates); the hoisted mock
+// factories must NOT construct them — the getters close over the lets lazily.
+// Event dedup + audit stay on fakeRedis inside kcs.
+let cs: CustomerStore;
+let kcs: KycCaseStore;
 // vi.hoisted so the (eager) whatsapp mock factory can reference it before init.
 const notify = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@/lib/env', () => ({ env: { personaWebhookSecret: 'wbhsec_test' } }));
-vi.mock('@/lib/store', () => ({ getStore: () => ({}) }));
+vi.mock('@/lib/store', async (orig) => ({ ...(await orig() as object), getStore: () => ({}) }));
 vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig() as object), getCustomerStore: () => cs }));
 vi.mock('@/lib/kyc-case-store', async (orig) => ({ ...(await orig() as object), getKycCaseStore: () => kcs }));
 vi.mock('@/lib/whatsapp', () => ({ sendVerificationStatus: notify }));
@@ -22,8 +25,9 @@ vi.mock('next/server', async (orig) => ({ ...(await orig() as object), after: (f
 import { POST } from '@/app/api/persona-webhook/route';
 
 const PHONE = '15551230000';
+const ISO = '2026-06-01T00:00:00.000Z';
 const seed = (over: Partial<Customer> = {}) =>
-  cs.saveCustomer({ senderPhone: PHONE, firstSeenAt: '2026-06-01T00:00:00Z', kycStatus: 'pending', senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '', ...over } as Customer);
+  cs.saveCustomer({ senderPhone: PHONE, firstSeenAt: ISO, kycStatus: 'pending', senderCountry: 'US', partnerId: 'default', createdAt: ISO, updatedAt: ISO, ...over } as Customer);
 
 const eventBody = (name: string, eventId: string) =>
   JSON.stringify({ data: { id: eventId, type: 'event', attributes: { name, 'created-at': '2026-06-02T20:00:00Z', payload: { data: { id: 'inq_1', attributes: { status: name.split('.')[1] ?? 'completed', 'reference-id': PHONE } } } } } });
@@ -35,7 +39,12 @@ function signed(body: string) {
 const req = (body: string, header: string) =>
   ({ text: async () => body, headers: { get: (h: string) => (h.toLowerCase() === 'persona-signature' ? header : null) } }) as unknown as Parameters<typeof POST>[0];
 
-beforeEach(() => { redis.dump.clear(); notify.mockClear(); });
+beforeEach(async () => {
+  const db = await freshDb();
+  cs = createCustomerStore(db, createStore(fakeRedis(), db));
+  kcs = createKycCaseStore(fakeRedis(), cs);
+  notify.mockClear();
+});
 
 describe('POST /api/persona-webhook', () => {
   it('401 on a bad signature (does not touch state)', async () => {

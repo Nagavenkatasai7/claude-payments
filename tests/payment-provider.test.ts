@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
 // Capture the after() callback so we can flush stage 2 deterministically.
@@ -28,13 +30,18 @@ function fixture(): Transfer {
     fxRate: 83, amountInr: 16600, recipientName: 'Mom', recipientPhone: '919876543210',
     payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer',
     status: 'awaiting_payment', complianceStatus: 'cleared', complianceReasons: [],
-    createdAt: '2026-05-29T00:00:00Z', partnerId: 'default',
+    createdAt: '2026-05-29T00:00:00.000Z', partnerId: 'default',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
     amountSource: 200, feeSource: 5, totalChargeSource: 205,
   } as Transfer;
 }
 
-beforeEach(() => { afterCbs.length = 0; sendText.mockClear(); sendTemplate.mockClear(); vi.useFakeTimers(); });
+let db: Db;
+beforeEach(async () => {
+  // freshDb BEFORE the fake clock — PGlite init/truncate must run on real timers.
+  db = await freshDb();
+  afterCbs.length = 0; sendText.mockClear(); sendTemplate.mockClear(); vi.useFakeTimers();
+});
 afterEach(() => vi.useRealTimers());
 
 describe('DELIVERY_DELAY_MS', () => {
@@ -45,7 +52,7 @@ describe('DELIVERY_DELAY_MS', () => {
 
 describe('MockPaymentProvider.initiateTransfer (stage 1 — byte-for-byte today)', () => {
   it('marks the transfer paid, sends the sender "received" text, returns mock-<id>', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
     const provider = new MockPaymentProvider(store);
 
@@ -65,7 +72,7 @@ describe('MockPaymentProvider.initiateTransfer (stage 1 — byte-for-byte today)
 
 describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', () => {
   it('marks delivered, sends sender "delivered" text + recipient template after the delay', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
     const provider = new MockPaymentProvider(store);
     await provider.initiateTransfer(fixture());
@@ -91,7 +98,7 @@ describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', 
   });
 
   it('skips the recipient template when there is no recipientPhone', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     const t = fixture(); t.recipientPhone = '';
     await store.saveTransfer(t);
     const provider = new MockPaymentProvider(store);
@@ -102,7 +109,7 @@ describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', 
 
   it('WL1: the delivery message uses the PARTNER brand when provided, SmartRemit by default', async () => {
     // default (no brand) → SmartRemit
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
     await new MockPaymentProvider(store).initiateTransfer(fixture());
     sendText.mockClear();
@@ -111,7 +118,7 @@ describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', 
 
     // branded partner → its brand
     afterCbs.length = 0; sendText.mockClear();
-    const store2 = createStore(fakeRedis());
+    const store2 = createStore(fakeRedis(), db);
     await store2.saveTransfer(fixture());
     await new MockPaymentProvider(store2, 'Acme Pay').initiateTransfer(fixture());
     sendText.mockClear();
@@ -124,7 +131,7 @@ describe('MockPaymentProvider stage 2 self-advance (after the 120000ms sleep)', 
 
 describe('MockPaymentProvider.getStatus (derives from stored TransferStatus)', () => {
   it('maps awaiting_payment→created, paid→funded, delivered→paid_out', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     const t = fixture(); await store.saveTransfer(t);
     const provider = new MockPaymentProvider(store);
     expect(await provider.getStatus('mock-pay_seam_1')).toBe('created');
@@ -134,7 +141,7 @@ describe('MockPaymentProvider.getStatus (derives from stored TransferStatus)', (
     expect(await provider.getStatus('mock-pay_seam_1')).toBe('paid_out');
   });
   it('returns created for an unknown / malformed ref', async () => {
-    const provider = new MockPaymentProvider(createStore(fakeRedis()));
+    const provider = new MockPaymentProvider(createStore(fakeRedis(), db));
     expect(await provider.getStatus('mock-nope')).toBe('created');
     expect(await provider.getStatus('garbage')).toBe('created');
   });
@@ -142,15 +149,15 @@ describe('MockPaymentProvider.getStatus (derives from stored TransferStatus)', (
 
 describe('MockPaymentProvider.handleWebhook + factory', () => {
   it('handleWebhook is a no-op returning null (mirrors MockKycProvider)', async () => {
-    const provider = new MockPaymentProvider(createStore(fakeRedis()));
+    const provider = new MockPaymentProvider(createStore(fakeRedis(), db));
     expect(await provider.handleWebhook({ any: 'thing' })).toBeNull();
   });
   it('getPaymentProvider returns the mock under the default mode', () => {
-    const provider = getPaymentProvider(createStore(fakeRedis()));
+    const provider = getPaymentProvider(createStore(fakeRedis(), db));
     expect(provider).toBeInstanceOf(MockPaymentProvider);
   });
   it('WL1: getPaymentProvider falls back to mock for absent / "mock" / unknown providerType', () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     expect(getPaymentProvider(store, undefined)).toBeInstanceOf(MockPaymentProvider);
     expect(getPaymentProvider(store, {})).toBeInstanceOf(MockPaymentProvider);
     expect(getPaymentProvider(store, { providerType: 'mock' })).toBeInstanceOf(MockPaymentProvider);

@@ -1,7 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { createStore } from '@/lib/store';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { createStore, type Store } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { getRecentTransfersNote } from '@/lib/recent-transfers';
+import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 
 let n = 0;
@@ -12,17 +14,29 @@ function mk(over: Partial<Transfer> = {}): Transfer {
     fxRate: 83, amountInr: 41500, recipientName: 'Mom', recipientPhone: '919876543210',
     payoutMethod: 'upi', payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer',
     complianceStatus: 'cleared', complianceReasons: [], status: 'delivered',
-    createdAt: '2026-05-28T12:00:00Z', partnerId: 'default',
+    createdAt: '2026-05-28T12:00:00.000Z', partnerId: 'default',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
     amountSource: 500, feeSource: 5, totalChargeSource: 505,
     ...over,
   } as Transfer;
 }
 
+let db: Db;
+beforeEach(async () => {
+  db = await freshDb();
+});
+
 async function storeWith(...transfers: Transfer[]) {
-  const store = createStore(fakeRedis());
+  const store = createStore(fakeRedis(), db);
   for (const t of transfers) await store.saveTransfer(t);
   return store;
+}
+
+// Postgres rows are born complete (phone/createdAt/amounts are NOT NULL), so
+// pre-P1 "legacy" malformed records can no longer exist at rest. The renderer's
+// defensive invariants still hold as units — exercised via a listTransfers stub.
+function stubStore(...transfers: Transfer[]): Store {
+  return { listTransfers: async () => transfers } as unknown as Store;
 }
 
 describe('getRecentTransfersNote — empty-history invariant', () => {
@@ -31,7 +45,7 @@ describe('getRecentTransfersNote — empty-history invariant', () => {
     expect(await getRecentTransfersNote('+15551230000', store)).toBe('');
   });
   it('returns "" for a totally empty store', async () => {
-    expect(await getRecentTransfersNote('+15551230000', createStore(fakeRedis()))).toBe('');
+    expect(await getRecentTransfersNote('+15551230000', createStore(fakeRedis(), db))).toBe('');
   });
 });
 
@@ -46,7 +60,7 @@ describe('getRecentTransfersNote — own transfers only (strict phone filter)', 
     expect(note).not.toContain('Stranger');
   });
   it('drops a legacy record with a missing phone (fail-closed, never leaks)', async () => {
-    const store = await storeWith(
+    const store = stubStore(
       mk({ id: 'mine', recipientName: 'Mom' }),
       mk({ id: 'legacy', recipientName: 'Ghost', phone: undefined as unknown as string }),
     );
@@ -59,7 +73,7 @@ describe('getRecentTransfersNote — own transfers only (strict phone filter)', 
 describe('getRecentTransfersNote — caps at the newest 5', () => {
   it('a 7-transfer customer yields exactly 5 lines, the newest 5, newest-first', async () => {
     const seven = Array.from({ length: 7 }, (_, i) =>
-      mk({ id: `c_${i}`, recipientName: `R${i}`, createdAt: `2026-05-2${i}T00:00:00Z` }),
+      mk({ id: `c_${i}`, recipientName: `R${i}`, createdAt: `2026-05-2${i}T00:00:00.000Z` }),
     );
     const store = await storeWith(...seven);
     const note = await getRecentTransfersNote('+15551230000', store);
@@ -75,7 +89,7 @@ describe('getRecentTransfersNote — per-line content', () => {
   it('renders date (easternDate) · recipientName · source-currency amount · status label', async () => {
     const store = await storeWith(
       mk({ recipientName: 'Mom', amountSource: 500, sourceCurrency: 'USD', status: 'delivered',
-           createdAt: '2026-05-28T12:00:00Z' }),
+           createdAt: '2026-05-28T12:00:00.000Z' }),
     );
     const note = await getRecentTransfersNote('+15551230000', store);
     expect(note).toContain('5/28/2026'); // easternDate(Date.parse(createdAt)) in ET
@@ -98,8 +112,8 @@ describe('getRecentTransfersNote — per-line content', () => {
   });
   it('renders human labels for each status', async () => {
     const store = await storeWith(
-      mk({ id: 'a', recipientName: 'A', status: 'awaiting_payment', createdAt: '2026-05-28T05:00:00Z' }),
-      mk({ id: 'c', recipientName: 'C', status: 'cancelled',        createdAt: '2026-05-28T04:00:00Z' }),
+      mk({ id: 'a', recipientName: 'A', status: 'awaiting_payment', createdAt: '2026-05-28T05:00:00.000Z' }),
+      mk({ id: 'c', recipientName: 'C', status: 'cancelled',        createdAt: '2026-05-28T04:00:00.000Z' }),
     );
     const note = await getRecentTransfersNote('+15551230000', store);
     expect(note).toContain('awaiting payment');
@@ -109,7 +123,7 @@ describe('getRecentTransfersNote — per-line content', () => {
 
 describe('getRecentTransfersNote — defensive on missing fields', () => {
   it('never throws on missing createdAt / recipientName / sourceCurrency', async () => {
-    const store = await storeWith(
+    const store = stubStore(
       mk({ recipientName: '', createdAt: '' as unknown as string,
            sourceCurrency: undefined as unknown as Transfer['sourceCurrency'],
            amountSource: undefined as unknown as number }),
@@ -124,7 +138,7 @@ describe('getRecentTransfersNote — token budget', () => {
   it('a 5-line note over long names stays within a fixed budget (6 lines, < 600 chars)', async () => {
     const long = Array.from({ length: 5 }, (_, i) =>
       mk({ id: `L_${i}`, recipientName: `Very Long Recipient Name Number ${i}`,
-           createdAt: `2026-05-2${i}T00:00:00Z` }),
+           createdAt: `2026-05-2${i}T00:00:00.000Z` }),
     );
     const store = await storeWith(...long);
     const note = await getRecentTransfersNote('+15551230000', store);

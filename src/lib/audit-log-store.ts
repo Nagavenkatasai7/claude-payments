@@ -1,17 +1,10 @@
-import { Redis } from '@upstash/redis';
-import { env } from './env';
-import type { RedisLike } from './store';
+import { getDb, type DbOrTx } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 
-/**
- * Append-only audit log for staff (team) mutations.
- *
- * Every create / update / suspend / reactivate / remove of a staff account is
- * recorded with the acting admin, the target, and a human summary — table stakes
- * for a remittance/compliance tool (per the team-management research). Stored as a
- * single JSON array under one key (newest first, capped) so it fits the existing
- * RedisLike abstraction (get/set) without needing native list ops; volume here is
- * low (admin actions only). Read-only on the Team page, gated to platform admins.
- */
+// audit-log-store — CUT OVER to Postgres (Stage 2a). Staff (team) mutations now
+// land in the append-only `audit_events` table (actor_type 'staff') instead of
+// a capped Redis JSON blob — durable, uncapped, queryable. Module path + the
+// record/list surface are unchanged for the Team page + actions.
 
 export type StaffAuditAction =
   | 'created'
@@ -28,21 +21,33 @@ export interface StaffAuditEntry {
   detail?: string; // human-readable summary
 }
 
-const KEY = 'audit:staff';
-const MAX = 200;
-
-export function createAuditLogStore(redis: RedisLike) {
+export function createAuditLogStore(db: DbOrTx) {
+  const repo = createAuditRepo(db);
   return {
     async record(entry: StaffAuditEntry): Promise<void> {
-      const raw = await redis.get(KEY);
-      const list: StaffAuditEntry[] = raw ? (JSON.parse(raw) as StaffAuditEntry[]) : [];
-      list.unshift(entry);
-      await redis.set(KEY, JSON.stringify(list.slice(0, MAX)));
+      await repo.record({
+        actor: entry.actor,
+        actorType: 'staff',
+        action: entry.action,
+        subjectId: entry.target,
+        meta: entry.detail ? { detail: entry.detail } : undefined,
+      });
     },
     async list(limit = 50): Promise<StaffAuditEntry[]> {
-      const raw = await redis.get(KEY);
-      const list: StaffAuditEntry[] = raw ? (JSON.parse(raw) as StaffAuditEntry[]) : [];
-      return list.slice(0, Math.max(0, limit));
+      const rows = await repo.listRecent(limit);
+      return rows
+        .filter((r) => r.actorType === 'staff')
+        .map((r) => {
+          const e: StaffAuditEntry = {
+            at: r.at.toISOString(),
+            actor: r.actor,
+            action: r.action as StaffAuditAction,
+            target: r.subjectId ?? '',
+          };
+          const detail = (r.meta as { detail?: string } | null)?.detail;
+          if (detail) e.detail = detail;
+          return e;
+        });
     },
   };
 }
@@ -52,13 +57,6 @@ export type AuditLogStore = ReturnType<typeof createAuditLogStore>;
 let cached: AuditLogStore | null = null;
 
 export function getAuditLogStore(): AuditLogStore {
-  if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createAuditLogStore(redis as unknown as RedisLike);
-  }
+  if (!cached) cached = createAuditLogStore(getDb());
   return cached;
 }

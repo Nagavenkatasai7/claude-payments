@@ -1,8 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createScheduleStore } from '@/lib/schedule-store';
-import { createStore } from '@/lib/store';
-import { createCustomerStore } from '@/lib/customer-store';
-import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import type { Schedule } from '@/lib/types';
 
 function schedule(id: string, status: Schedule['status'] = 'active'): Schedule {
@@ -18,60 +16,51 @@ function schedule(id: string, status: Schedule['status'] = 'active'): Schedule {
   };
 }
 
-function makeStore() {
-  const redis = fakeRedis();
-  const store = createStore(redis);
-  const cs = createCustomerStore(redis, store);
-  return createScheduleStore(redis, cs);
+async function makeStore() {
+  const db = await freshDb(); // truncates + reseeds the 'default' partner
+  return createScheduleStore(db);
 }
 
 describe('schedule-store', () => {
   it('round-trips a schedule', async () => {
-    const s = makeStore();
+    const s = await makeStore();
     await s.saveSchedule(schedule('a'));
-    expect((await s.getSchedule('a'))?.amountUsd).toBe(200);
+    const got = await s.getSchedule('a');
+    expect(got?.amountUsd).toBe(200);
+    // Payout destination is encrypted at rest but decrypted on the schedule
+    // read (the cron run needs the full account to mint the transfer).
+    expect(got?.payoutDestination).toBe('mom@upi');
+    expect(got?.createdAt).toBe('2026-05-21T00:00:00.000Z');
   });
 
   it('returns null for an unknown schedule', async () => {
-    expect(await makeStore().getSchedule('nope')).toBeNull();
+    expect(await (await makeStore()).getSchedule('nope')).toBeNull();
   });
 
   it('lists all schedules', async () => {
-    const s = makeStore();
+    const s = await makeStore();
     await s.saveSchedule(schedule('a'));
     await s.saveSchedule(schedule('b'));
     expect(await s.listSchedules()).toHaveLength(2);
   });
 
   it('listActiveSchedules excludes cancelled', async () => {
-    const s = makeStore();
+    const s = await makeStore();
     await s.saveSchedule(schedule('a', 'active'));
     await s.saveSchedule(schedule('b', 'cancelled'));
     const active = await s.listActiveSchedules();
     expect(active.map((x) => x.id)).toEqual(['a']);
   });
 
-  it('re-saving a schedule does not duplicate it in the index', async () => {
-    const s = makeStore();
+  it('re-saving a schedule does not duplicate it in the list', async () => {
+    const s = await makeStore();
     await s.saveSchedule(schedule('a'));
     await s.saveSchedule(schedule('a'));
     expect(await s.listSchedules()).toHaveLength(1);
   });
 });
 
-describe('schedule-store P4 lazy-fills', () => {
-  it('P4: lazy-fills sourceCurrency/amountSource for pre-P4 schedules', async () => {
-    const redis = fakeRedis();
-    await redis.set('schedule:s1', JSON.stringify({
-      id: 's1', phone: '15551230000', amountUsd: 100, recipientName: 'Asha',
-      recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'asha@upi',
-      fundingMethod: 'bank_transfer', frequency: 'monthly', dayOfMonth: 1,
-      status: 'active', createdAt: '2026-01-01T00:00:00Z', partnerId: 'default',
-    }));
-    await redis.sadd('schedules:ids', 's1');
-    const store = createScheduleStore(redis, createCustomerStore(redis, createStore(redis)));
-    const s = await store.getSchedule('s1');
-    expect(s?.sourceCurrency).toBe('USD');
-    expect(s?.amountSource).toBe(100);
-  });
-});
+// The pre-P4 "lazy-fills sourceCurrency/amountSource" case is gone with the
+// Postgres cutover: legacy Redis records no longer exist and every schedule
+// row is born complete (NOT NULL columns). Round-trip coverage above asserts
+// the fields persist as written.

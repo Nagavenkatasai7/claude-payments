@@ -17,12 +17,13 @@ const NOW = '2026-06-08T00:00:00Z';
 
 async function harness() {
   const redis = fakeRedis();
-  // partnerStore + integrationsStore are Postgres-backed now; they share ONE
-  // db handle. Transfers/volume/idempotency/audit stay on fakeRedis this slice.
+  // partnerStore + integrationsStore + the transfer ledger are Postgres-backed
+  // now; they share ONE db handle. Beneficiaries/volume/idempotency/audit stay
+  // on fakeRedis this slice.
   const db = await freshDb();
   await seedPartner(db, 'acme');
   await seedPartner(db, 'globex');
-  const store = createStore(redis);
+  const store = createStore(redis, db);
   let n = 0;
   const deps: PartnerApiDeps = {
     store,
@@ -32,9 +33,11 @@ async function harness() {
     redis,
     now: () => NOW,
     genId: () => `b${n++}`,
-    // Deterministic settlement: mark paid without WhatsApp/timers.
+    // Deterministic settlement: mark paid without WhatsApp/timers. Read the
+    // DECRYPTED row — re-saving a default (masked) read would clobber the
+    // stored payout destination with the mask.
     initiatePayment: async (t) => {
-      const cur = await store.getTransfer(t.id);
+      const cur = await store.getTransferDecrypted(t.id);
       if (cur) await store.saveTransfer({ ...cur, status: 'paid', paidAt: NOW });
     },
   };
@@ -116,10 +119,10 @@ describe('partner-api-service: createTransaction', () => {
       beneficiary: { name: 'John Doe', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
     }));
     expect(r).toMatchObject({ ok: false, status: 422 });
-    const key = [...store_keys(deps)].find((k) => k.startsWith('transfer:'));
-    expect(key).toBeDefined();
-    const t = await store.getTransfer(key!.replace('transfer:', ''));
-    expect(t!.status).toBe('blocked');
+    // Transfers live in Postgres now — find the recorded row via the store API.
+    const [t] = await store.listTransfers();
+    expect(t).toBeDefined();
+    expect(t.status).toBe('blocked');
   });
 
   it("an 'ours' partner rejects an UNVERIFIED sender with 422 (KYC required)", async () => {
@@ -163,8 +166,3 @@ describe('partner-api-service: cross-tenant isolation', () => {
     if (r.ok) expect((r.data as { status: string }).status).toBe('paid');
   });
 });
-
-// Small helper to peek the fake redis keymap via the store's underlying map.
-function store_keys(deps: PartnerApiDeps): IterableIterator<string> {
-  return (deps.redis as unknown as { dump: Map<string, string> }).dump.keys();
-}

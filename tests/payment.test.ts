@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   completePaymentStage1,
   completePaymentStage2,
@@ -6,7 +6,14 @@ import {
 } from '@/lib/payment';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
+
+let db: Db;
+beforeEach(async () => {
+  db = await freshDb();
+});
 
 function awaitingTransfer(): Transfer {
   return {
@@ -68,7 +75,7 @@ function awaitingAedTransfer(): Transfer {
 
 describe('completePaymentStage1', () => {
   it('sets status to paid and paidAt, returns sender messages (INR → ₹)', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(awaitingTransfer());
 
     const result = await completePaymentStage1(store, 'pay12345');
@@ -90,7 +97,7 @@ describe('completePaymentStage1', () => {
   });
 
   it('formats non-INR destination currency correctly (AED)', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(awaitingAedTransfer());
 
     const result = await completePaymentStage1(store, 'pay99999');
@@ -107,7 +114,7 @@ describe('completePaymentStage1', () => {
   });
 
   it('is idempotent — if already paid, returns empty message arrays', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(awaitingTransfer());
     await completePaymentStage1(store, 'pay12345');
 
@@ -117,7 +124,7 @@ describe('completePaymentStage1', () => {
   });
 
   it('is idempotent — if already delivered, returns empty message arrays', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer({ ...awaitingTransfer(), status: 'delivered' });
 
     const result = await completePaymentStage1(store, 'pay12345');
@@ -126,7 +133,7 @@ describe('completePaymentStage1', () => {
   });
 
   it('throws for a missing transfer', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await expect(completePaymentStage1(store, 'missing')).rejects.toThrow(
       /not found/i,
     );
@@ -135,7 +142,7 @@ describe('completePaymentStage1', () => {
 
 describe('completePaymentStage1 — held=true (flagged transfer)', () => {
   it('sends a held message (no delivery ETA) when held=true', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(awaitingTransfer());
 
     const result = await completePaymentStage1(store, 'pay12345', { held: true });
@@ -153,7 +160,7 @@ describe('completePaymentStage1 — held=true (flagged transfer)', () => {
   });
 
   it('held=false (default) still sends the normal message', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer(awaitingTransfer());
 
     const result = await completePaymentStage1(store, 'pay12345');
@@ -165,7 +172,7 @@ describe('completePaymentStage1 — held=true (flagged transfer)', () => {
 
 describe('completePaymentStage2', () => {
   it('sets status to delivered and deliveredAt, returns sender messages (INR → ₹)', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     // Pre-seed a paid transfer
     await store.saveTransfer({
       ...awaitingTransfer(),
@@ -190,7 +197,7 @@ describe('completePaymentStage2', () => {
   });
 
   it('always uses "via bank transfer" label (payout method is irrelevant for message)', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer({
       ...awaitingTransfer(),
       payoutMethod: 'bank',
@@ -205,7 +212,7 @@ describe('completePaymentStage2', () => {
   });
 
   it('formats non-INR destination currency correctly (AED) in stage-2 message', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer({
       ...awaitingAedTransfer(),
       status: 'paid',
@@ -223,7 +230,7 @@ describe('completePaymentStage2', () => {
   });
 
   it('is idempotent — if already delivered, returns empty message arrays', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer({
       ...awaitingTransfer(),
       status: 'delivered',
@@ -237,7 +244,7 @@ describe('completePaymentStage2', () => {
   });
 
   it('does NOT deliver a cancelled transfer — returns empty messages', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.saveTransfer({
       ...awaitingTransfer(),
       status: 'cancelled',
@@ -249,7 +256,7 @@ describe('completePaymentStage2', () => {
   });
 
   it('sets paidAt if somehow unset when delivering', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     // Transfer is awaiting_payment (no paidAt)
     await store.saveTransfer(awaitingTransfer());
 
@@ -260,7 +267,7 @@ describe('completePaymentStage2', () => {
   });
 
   it('throws for a missing transfer', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await expect(completePaymentStage2(store, 'missing')).rejects.toThrow(
       /not found/i,
     );

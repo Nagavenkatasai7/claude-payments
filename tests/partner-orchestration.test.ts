@@ -33,9 +33,9 @@ function toolCall(id: string, name: string, args: object): ChatMessage {
 }
 
 function buildHarness(redis: FakeRedis) {
-  const store = createStore(redis);
-  const customerStore = createCustomerStore(redis, store);
-  const scheduleStore = createScheduleStore(redis, customerStore);
+  const store = createStore(redis, db);
+  const customerStore = createCustomerStore(db, store);
+  const scheduleStore = createScheduleStore(db);
   const draftStore = createDraftStore(redis);
   const dailyVolumeStore = createDailyVolumeStore(redis);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
@@ -122,9 +122,10 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
       isNewConversation: false, buttonTap: { kind: 'approve', draftId },
     });
 
-    const transferKey = [...redis.dump.keys()].find((k) => k.startsWith('transfer:'));
-    expect(transferKey).toBeDefined();
-    const transferId = transferKey!.replace('transfer:', '');
+    // Transfers live in Postgres now — find the minted row via the store API.
+    const mintedAll = await h.store.listTransfers();
+    expect(mintedAll).toHaveLength(1);
+    const transferId = mintedAll[0].id;
     const minted = await h.store.getTransfer(transferId);
     expect(minted!.status).toBe('awaiting_payment'); // not blocked, not kyc-gated
 
@@ -155,9 +156,9 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
     ]);
     await h.agent.runAgentTurn(PHONE, 'send $100 to John Doe 919876543210 bank 1234567890');
 
-    const transferKey = [...redis.dump.keys()].find((k) => k.startsWith('transfer:'));
-    expect(transferKey).toBeDefined();
-    const t = await h.store.getTransfer(transferKey!.replace('transfer:', ''));
+    const blockedAll = await h.store.listTransfers();
+    expect(blockedAll).toHaveLength(1);
+    const t = await h.store.getTransfer(blockedAll[0].id);
     // Delegated lifted OUR KYC gate, but sanctions screening still blocked the send.
     expect(t!.complianceStatus).toBe('blocked');
     expect(t!.status).toBe('blocked');
@@ -187,8 +188,8 @@ describe('WL1 default partner is byte-for-byte unchanged', () => {
     // prompt is SmartRemit-branded and the verify note IS injected
     expect(h.systemSnapshots[0]).toContain('You are the assistant for SmartRemit');
     expect(h.systemSnapshots[0]).toContain('[UNVERIFIED SENDER]');
-    // the gate blocked the send → NO draft, NO transfer minted
+    // the gate blocked the send → NO draft (still Redis), NO transfer minted (Postgres)
     expect([...redis.dump.keys()].some((k) => k.startsWith('recipient_draft:'))).toBe(false);
-    expect([...redis.dump.keys()].some((k) => k.startsWith('transfer:'))).toBe(false);
+    expect(await h.store.listTransfers()).toHaveLength(0);
   });
 });

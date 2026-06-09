@@ -72,9 +72,9 @@ afterEach(() => {
 describe('end-to-end happy path', () => {
   it('quotes, creates a transfer, sends a link, and delivers', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
-    const scheduleStore = createScheduleStore(redis, customerStore);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
+    const scheduleStore = createScheduleStore(db);
     const draftStore = createDraftStore(redis);
     await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
@@ -117,10 +117,8 @@ describe('end-to-end happy path', () => {
         const msg = script[turn++];
         // Patch the real transfer id into the link tool call.
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
-          const transferKey = [...redis.dump.keys()].find((k) =>
-            k.startsWith('transfer:'),
-          )!;
-          const id = transferKey.replace('transfer:', '');
+          // Transfers live in Postgres now — find it via the store API.
+          const id = (await store.listTransfers())[0]!.id;
           msg.tool_calls[0].function.arguments = JSON.stringify({
             transfer_id: id,
           });
@@ -135,11 +133,10 @@ describe('end-to-end happy path', () => {
     );
     expect(reply).toContain('pay');
 
-    // A transfer was created and the user count incremented.
-    const transferKey = [...redis.dump.keys()].find((k) =>
-      k.startsWith('transfer:'),
-    )!;
-    const transferId = transferKey.replace('transfer:', '');
+    // A transfer was created; the count is now DERIVED from non-blocked rows.
+    const transfers = await store.listTransfers();
+    expect(transfers).toHaveLength(1);
+    const transferId = transfers[0].id;
     expect(await store.getTransferCount(PHONE)).toBe(1);
 
     // Completing payment: stage 1 marks paid, stage 2 delivers.
@@ -159,10 +156,10 @@ describe('end-to-end happy path', () => {
 describe('end-to-end returning customer', () => {
   it('seeded recipient → picker → tap Mom → amount → quote → tap Approve → delivered', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
-    const customerStore = createCustomerStore(redis, store);
-    const scheduleStore = createScheduleStore(redis, customerStore);
+    const customerStore = createCustomerStore(db, store);
+    const scheduleStore = createScheduleStore(db);
     await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
     // Pre-seed: Mom is a saved recipient from a previous (mock) transfer.
@@ -237,11 +234,9 @@ describe('end-to-end returning customer', () => {
       async chat() {
         const msg = activeScript.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
-          const key = [...redis.dump.keys()].find((k) =>
-            k.startsWith('transfer:'),
-          )!;
+          // Transfers live in Postgres now — find it via the store API.
           msg.tool_calls[0].function.arguments = JSON.stringify({
-            transfer_id: key.replace('transfer:', ''),
+            transfer_id: (await store.listTransfers())[0]!.id,
           });
         }
         return msg;
@@ -285,11 +280,8 @@ describe('end-to-end returning customer', () => {
       },
     );
 
-    // A transfer must have been created.
-    const transferKey = [...redis.dump.keys()].find((k) =>
-      k.startsWith('transfer:'),
-    );
-    expect(transferKey).toBeDefined();
+    // A transfer must have been created (Postgres ledger).
+    expect(await store.listTransfers()).toHaveLength(1);
 
     // The draft must have been consumed.
     expect(await draftStore.getDraft(draftId)).toBeNull();
@@ -304,12 +296,12 @@ describe('end-to-end returning customer', () => {
 describe('end-to-end new customer with cap', () => {
   it('greeted → over-cap → under-cap → approve creates transfer + increments daily volume', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
-    const scheduleStore = createScheduleStore(redis, customerStore);
+    const scheduleStore = createScheduleStore(db);
     const draftStore = createDraftStore(redis);
     // Phase 3: a verified sender (still T0 within the 3-day window, so the cap UX
     // below is unchanged) — required for send_approve_picker/create_transfer to
@@ -358,9 +350,9 @@ describe('end-to-end new customer with cap', () => {
       async chat() {
         const msg = active.shift()!;
         if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
-          const key = [...redis.dump.keys()].find((k) => k.startsWith('transfer:'))!;
+          // Transfers live in Postgres now — find it via the store API.
           msg.tool_calls[0].function.arguments = JSON.stringify({
-            transfer_id: key.replace('transfer:', ''),
+            transfer_id: (await store.listTransfers())[0]!.id,
           });
         }
         return msg;
@@ -393,9 +385,8 @@ describe('end-to-end new customer with cap', () => {
       buttonTap: { kind: 'approve', draftId },
     });
 
-    // Transfer must exist
-    const transferKey = [...redis.dump.keys()].find((k) => k.startsWith('transfer:'));
-    expect(transferKey).toBeDefined();
+    // Transfer must exist (Postgres ledger)
+    expect(await store.listTransfers()).toHaveLength(1);
     // Daily volume must be 40000 cents
     expect(await dailyVolumeStore.getTodayCents(PHONE)).toBe(40_000);
 

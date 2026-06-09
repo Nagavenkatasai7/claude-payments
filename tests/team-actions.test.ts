@@ -10,10 +10,12 @@ import type { Staff } from '@/lib/types';
 const redis = fakeRedis();
 let actor: Staff;
 
-// Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
-// The vi.mock factory closes over the let-variable (assigned in beforeEach).
+// Partner + audit-log stores are Postgres-backed now; rebuilt from a fresh
+// PGlite per test. The vi.mock factories close over the let-variables
+// (assigned in beforeEach).
 let db: Db;
 let partnerStore: import('@/lib/partner-store').PartnerStore;
+let auditStore: import('@/lib/audit-log-store').AuditLogStore;
 
 vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor }));
 vi.mock('@/lib/auth-store', async () => {
@@ -26,7 +28,7 @@ vi.mock('@/lib/partner-store', async () => {
 });
 vi.mock('@/lib/audit-log-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/audit-log-store')>('@/lib/audit-log-store');
-  return { ...actual, getAuditLogStore: () => actual.createAuditLogStore(redis) };
+  return { ...actual, getAuditLogStore: () => auditStore };
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
@@ -39,7 +41,6 @@ import {
 } from '@/app/admin-dashboard/team/actions';
 
 const authStore = createAuthStore(redis);
-const auditStore = createAuditLogStore(redis);
 
 function staff(overrides: Partial<Staff>): Staff {
   return {
@@ -68,6 +69,7 @@ beforeEach(async () => {
   redis.dump.clear();
   db = await freshDb();
   partnerStore = createPartnerStore(db);
+  auditStore = createAuditLogStore(db);
   await seedBoss();
 });
 

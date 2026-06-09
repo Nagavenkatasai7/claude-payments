@@ -1,29 +1,38 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { fakeRedis } from './helpers';
-import { createCustomerStore } from '@/lib/customer-store';
-import { createKycCaseStore } from '@/lib/kyc-case-store';
-import type { Store } from '@/lib/store';
+import { fakeRedis, type FakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
+import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
+import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
+import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 
-const redis = fakeRedis();
-const cs = createCustomerStore(redis, {} as unknown as Store);
+// Customers live in Postgres now (PGlite per test); the audit hash + event
+// dedup stay on Redis (fakeRedis) — those assertions are unchanged.
+let redis: FakeRedis;
+let cs: CustomerStore;
+let store: KycCaseStore;
 let seq = 0;
-const store = createKycCaseStore(redis, cs, () => 1_700_000_000_000 + seq++); // monotonic clock
 const PHONE = '15551230000';
 
 const seed = (over: Partial<Customer> = {}) =>
   cs.saveCustomer({
     senderPhone: PHONE,
-    firstSeenAt: '2026-06-01T00:00:00Z',
+    firstSeenAt: '2026-06-01T00:00:00.000Z',
     kycStatus: 'pending',
     senderCountry: 'US',
     partnerId: 'default',
-    createdAt: '',
-    updatedAt: '',
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-06-01T00:00:00.000Z',
     ...over,
   } as Customer);
 
-beforeEach(() => { redis.dump.clear(); seq = 0; });
+beforeEach(async () => {
+  const db = await freshDb();
+  redis = fakeRedis();
+  cs = createCustomerStore(db, createStore(fakeRedis(), db));
+  seq = 0;
+  store = createKycCaseStore(redis, cs, () => 1_700_000_000_000 + seq++); // monotonic clock
+});
 
 describe('kyc-case-store', () => {
   it('markEventSeen is true once, false on replay (idempotency)', async () => {
@@ -70,7 +79,7 @@ describe('kyc-case-store', () => {
 
   it('listNeedsReview returns only pending_review/needs_review customers', async () => {
     await seed({ kycReviewState: 'pending_review' });
-    await cs.saveCustomer({ senderPhone: '15550000001', firstSeenAt: '', kycStatus: 'verified', kycReviewState: 'approved', senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '' } as Customer);
+    await cs.saveCustomer({ senderPhone: '15550000001', firstSeenAt: '2026-06-01T00:00:00.000Z', kycStatus: 'verified', kycReviewState: 'approved', senderCountry: 'US', partnerId: 'default', createdAt: '2026-06-01T00:00:00.000Z', updatedAt: '2026-06-01T00:00:00.000Z' } as Customer);
     const list = await store.listNeedsReview();
     expect(list.map((c) => c.senderPhone)).toEqual([PHONE]);
   });
@@ -81,8 +90,6 @@ describe('kyc-case-store', () => {
   });
 
   it('getAudit returns [] for a customer with no audit log', async () => {
-    // Use a phone no other test writes an audit hash for — the fake's hash map
-    // is not cleared by beforeEach (only `dump` is), so reuse PHONE would leak.
     expect(await store.getAudit('15559990000')).toEqual([]);
   });
 

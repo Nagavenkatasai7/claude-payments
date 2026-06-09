@@ -15,8 +15,8 @@ const PHONE = '15551234567';
 async function buildStores() {
   const redis = fakeRedis();
   const db = await freshDb(); // truncates + reseeds 'default' partner
-  const store = createStore(redis);
-  const customerStore = createCustomerStore(redis, store);
+  const store = createStore(redis, db);
+  const customerStore = createCustomerStore(db, store);
   const draftStore = createDraftStore(redis);
   const partnerStore = createPartnerStore(db);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
@@ -168,7 +168,11 @@ describe('finalizeDraftPayment', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unexpected');
-    const saved = await stores.store.getTransfer(result.transferId);
+    // Default reads mask the payout destination ('****8901'); the full value
+    // only comes back via the decrypted read.
+    const masked = await stores.store.getTransfer(result.transferId);
+    expect(masked?.payoutDestination).toBe('****8901');
+    const saved = await stores.store.getTransferDecrypted(result.transferId);
     expect(saved?.payoutDestination).toBe('021000021 12345678901');
     expect(saved?.payoutMethod).toBe('bank');
   });
@@ -182,7 +186,7 @@ describe('finalizeDraftPayment', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unexpected');
-    const saved = await stores.store.getTransfer(result.transferId);
+    const saved = await stores.store.getTransferDecrypted(result.transferId);
     expect(saved?.payoutDestination).toBe('mom@upi');
     expect(saved?.payoutMethod).toBe('upi');
   });
@@ -198,7 +202,7 @@ describe('finalizeDraftPayment', () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unexpected');
-    const saved = await stores.store.getTransfer(result.transferId);
+    const saved = await stores.store.getTransferDecrypted(result.transferId);
     expect(saved?.payoutDestination).toBe('mom@upi');
   });
 });

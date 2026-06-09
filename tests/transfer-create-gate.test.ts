@@ -37,7 +37,7 @@ function baseInput(over: Partial<CreateTransferInput> = {}): CreateTransferInput
 async function stores() {
   const r = fakeRedis();
   const db = await freshDb(); // truncates + reseeds 'default' partner
-  return [createStore(r), createPartnerStore(db), createMonthlyVolumeStore(r)] as const;
+  return [createStore(r, db), createPartnerStore(db), createMonthlyVolumeStore(r)] as const;
 }
 
 describe('createTransfer KYC backstop (Phase 3)', () => {

@@ -124,7 +124,7 @@ export async function createTransfer(
     eddRequired: eddCheck.eddRequired,               // NEW (KYC)
   };
   await store.saveTransfer(transfer);
-  await store.incrementTransferCount(input.phone);
+  // (transfer count is now DERIVED from the ledger — no counter to bump)
   await store.incrementTodayTransferCount(input.phone);
   await monthlyVolumeStore.addCents(input.phone, Math.round(transfer.amountUsd * 100));   // NEW (KYC)
 

@@ -37,11 +37,11 @@ function partnerStaff(partnerId: string): Staff {
 
 async function seedTwoPartnersData(redis = fakeRedis()) {
   const db = await freshDb(); // truncates + reseeds the 'default' partner
-  const store = createStore(redis);
-  const customerStore = createCustomerStore(redis, store);
+  const store = createStore(redis, db);
+  const customerStore = createCustomerStore(db, store);
   const partnerStore = createPartnerStore(db);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
-  const scheduleStore = createScheduleStore(redis, customerStore);
+  const scheduleStore = createScheduleStore(db);
 
   for (const id of ['acme', 'beta']) {
     await partnerStore.savePartner({

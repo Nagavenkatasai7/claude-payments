@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import { createCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
+import { createCustomerStore } from '@/lib/customer-store';
+import { createStore } from '@/lib/store';
 import { createOtpStore } from '@/lib/otp-store';
 import { createOnboardingTokenStore } from '@/lib/onboarding-token';
 import { createPendingAuthStore } from '@/lib/pending-auth-store';
@@ -34,7 +37,10 @@ const redirectMock = vi.fn((path: string) => {
 });
 vi.mock('next/navigation', () => ({ redirect: (p: string) => redirectMock(p) }));
 
-const authStore = createCustomerAuthStore(redis);
+// pg-backed: the auth store needs a customer store over a fresh Postgres per
+// test — module-scope `let` rebuilt in beforeEach (NEVER inside the hoisted
+// vi.mock factory; the closure below dereferences it at call time).
+let authStore: ReturnType<typeof createCustomerAuthStore>;
 const otpStore = createOtpStore(redis);
 const onboardStore = createOnboardingTokenStore(redis);
 const pendingStore = createPendingAuthStore(redis);
@@ -90,13 +96,15 @@ async function register() {
   return registerAction(null, form({ phone: PHONE, email: 'a@example.com', password: PASSWORD }));
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
   sentCodes.length = 0;
   cookieSet.mockClear();
   cookieDelete.mockClear();
   redirectMock.mockClear();
+  const db = await freshDb();
+  authStore = createCustomerAuthStore(redis, createCustomerStore(db, createStore(fakeRedis(), db)));
 });
 
 describe('registerAction', () => {

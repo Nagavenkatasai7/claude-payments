@@ -4,11 +4,17 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import type { Db } from '@/db/client';
 import { createTransfer } from '@/lib/transfer-create';
 import { resetRateCacheForTests } from '@/lib/rate';
 
 const SENDER = '15551234567';
 const OTHER = '15559999999';
+
+let db: Db;
+beforeEach(async () => {
+  db = await freshDb();
+});
 
 function mom(at: string) {
   return {
@@ -32,63 +38,63 @@ function brother(at: string) {
 
 describe('recipient store', () => {
   it('returns [] when no recipients are saved', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     expect(await store.listRecipients(SENDER, 3)).toEqual([]);
   });
 
   it('upsertRecipient saves a recipient that listRecipients then returns', async () => {
-    const store = createStore(fakeRedis());
-    await store.upsertRecipient(SENDER, mom('2026-05-23T12:00:00Z'));
+    const store = createStore(fakeRedis(), db);
+    await store.upsertRecipient(SENDER, mom('2026-05-23T12:00:00.000Z'));
     expect(await store.listRecipients(SENDER, 3)).toEqual([
-      mom('2026-05-23T12:00:00Z'),
+      mom('2026-05-23T12:00:00.000Z'),
     ]);
   });
 
   it('upsertRecipient updates lastUsedAt on the same recipientPhone', async () => {
-    const store = createStore(fakeRedis());
-    await store.upsertRecipient(SENDER, mom('2026-05-23T12:00:00Z'));
+    const store = createStore(fakeRedis(), db);
+    await store.upsertRecipient(SENDER, mom('2026-05-23T12:00:00.000Z'));
     await store.upsertRecipient(SENDER, {
-      ...mom('2026-05-23T13:00:00Z'),
+      ...mom('2026-05-23T13:00:00.000Z'),
       payoutDestination: 'mommy@upi',
     });
     const list = await store.listRecipients(SENDER, 3);
     expect(list).toHaveLength(1);
     expect(list[0].payoutDestination).toBe('mommy@upi');
-    expect(list[0].lastUsedAt).toBe('2026-05-23T13:00:00Z');
+    expect(list[0].lastUsedAt).toBe('2026-05-23T13:00:00.000Z');
   });
 
   it('listRecipients returns top-N sorted by lastUsedAt descending', async () => {
-    const store = createStore(fakeRedis());
-    await store.upsertRecipient(SENDER, mom('2026-05-23T10:00:00Z'));
-    await store.upsertRecipient(SENDER, brother('2026-05-23T12:00:00Z'));
+    const store = createStore(fakeRedis(), db);
+    await store.upsertRecipient(SENDER, mom('2026-05-23T10:00:00.000Z'));
+    await store.upsertRecipient(SENDER, brother('2026-05-23T12:00:00.000Z'));
     const list = await store.listRecipients(SENDER, 3);
     expect(list.map((r) => r.name)).toEqual(['Brother', 'Mom']);
   });
 
   it('listRecipients limits to N', async () => {
-    const store = createStore(fakeRedis());
-    await store.upsertRecipient(SENDER, mom('2026-05-23T10:00:00Z'));
-    await store.upsertRecipient(SENDER, brother('2026-05-23T12:00:00Z'));
+    const store = createStore(fakeRedis(), db);
+    await store.upsertRecipient(SENDER, mom('2026-05-23T10:00:00.000Z'));
+    await store.upsertRecipient(SENDER, brother('2026-05-23T12:00:00.000Z'));
     const list = await store.listRecipients(SENDER, 1);
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe('Brother');
   });
 
   it('two senders do not see each others recipients', async () => {
-    const store = createStore(fakeRedis());
-    await store.upsertRecipient(SENDER, mom('2026-05-23T12:00:00Z'));
+    const store = createStore(fakeRedis(), db);
+    await store.upsertRecipient(SENDER, mom('2026-05-23T12:00:00.000Z'));
     expect(await store.listRecipients(OTHER, 3)).toEqual([]);
   });
 });
 
 describe('last-inbound tracking', () => {
   it('getLastInboundAt returns null before any inbound', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     expect(await store.getLastInboundAt(SENDER)).toBeNull();
   });
 
   it('recordInboundNow then getLastInboundAt returns a present value', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     await store.recordInboundNow(SENDER);
     expect(await store.getLastInboundAt(SENDER)).not.toBeNull();
   });
@@ -109,8 +115,8 @@ describe('createTransfer side-effects', () => {
 
   it('upserts the recipient after a successful transfer', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const partnerStore = createPartnerStore(await freshDb());
+    const store = createStore(redis, db);
+    const partnerStore = createPartnerStore(db);
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     await createTransfer(store, partnerStore, monthlyVolumeStore, {
       phone: '15551234567',
@@ -133,8 +139,8 @@ describe('createTransfer side-effects', () => {
 
   it('idempotently bumps lastUsedAt on a repeat transfer to the same recipient', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
-    const partnerStore = createPartnerStore(await freshDb());
+    const store = createStore(redis, db);
+    const partnerStore = createPartnerStore(db);
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const input = {
       phone: '15551234567',

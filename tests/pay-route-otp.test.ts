@@ -8,6 +8,7 @@ import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
 import { fakeRedis } from './helpers';
+import { freshDb } from './helpers-db';
 import type { Transfer, Customer } from '@/lib/types';
 
 vi.mock('next/server', async (orig) => {
@@ -67,15 +68,18 @@ const transfer: Transfer = {
   createdAt: '2026-05-30T00:00:00Z', sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN',
   destinationCurrency: 'INR', partnerId: 'default', amountSource: 200, feeSource: 0, totalChargeSource: 200,
 } as Transfer;
-const customer: Customer = { senderPhone: PHONE, firstSeenAt: '', kycStatus: 'verified', senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '' } as Customer;
+// Postgres customer rows need real timestamps (new Date('') is invalid).
+const T0 = '2026-05-01T00:00:00.000Z';
+const customer: Customer = { senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', senderCountry: 'US', partnerId: 'default', createdAt: T0, updatedAt: T0 } as Customer;
 
 const req = (b: object) => new NextRequest('http://x/api/pay/' + TID, { method: 'POST', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
 const ctx = { params: Promise.resolve({ transferId: TID }) };
 
 beforeEach(async () => {
   const r = fakeRedis();
-  store = createStore(r);
-  customerStore = createCustomerStore(r, store);
+  const db = await freshDb();
+  store = createStore(r, db);
+  customerStore = createCustomerStore(db, store);
   txOtp = createTransactionOtpStore(r, { randomInt: () => 654321 });
   await store.saveTransfer(transfer);
   await customerStore.saveCustomer(customer);

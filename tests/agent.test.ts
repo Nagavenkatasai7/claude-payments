@@ -18,8 +18,8 @@ import type { Db } from '@/db/client';
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
 let db: Db;
 
-function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
-  const customerStore = createCustomerStore(redis, store);
+function extraDeps(redis = fakeRedis(), store = createStore(redis, db)) {
+  const customerStore = createCustomerStore(db, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
@@ -27,10 +27,10 @@ function extraDeps(redis = fakeRedis(), store = createStore(redis)) {
   return { customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
 }
 
-function freshScheduleStore(redis = fakeRedis()) {
-  const store = createStore(redis);
-  const customerStore = createCustomerStore(redis, store);
-  return createScheduleStore(redis, customerStore);
+// Schedules are pg-backed now — the redis arg is gone; accept (and ignore) the
+// legacy call-site shape to keep the diff minimal.
+function freshScheduleStore(_redis = fakeRedis()) {
+  return createScheduleStore(db);
 }
 
 const PHONE = '15551234567';
@@ -54,7 +54,7 @@ afterEach(() => {
 describe('createAgent', () => {
   it('returns a plain reply when the model uses no tools', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const agent = createAgent({
       store,
       scheduleStore: freshScheduleStore(),
@@ -72,11 +72,11 @@ describe('createAgent', () => {
     // so the real kyc_url (code-generated) must be COLLECTED + appended by us, else
     // the customer gets a 👉 with no link.
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const deps = extraDeps(redis, store);
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     const responses: ChatMessage[] = [
       {
@@ -103,11 +103,11 @@ describe('createAgent', () => {
     // with NO tool call, pasting a stale URL. sanitizeReply strips it → blank 👉.
     // The backstop must mint + append the canonical link with zero tool calls.
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const deps = extraDeps(redis, store);
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     const agent = createAgent({
       store,
@@ -127,11 +127,11 @@ describe('createAgent', () => {
 
   it('backstop does NOT fire for a verified customer (no spurious verify link)', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const deps = extraDeps(redis, store);
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'verified',
-      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     const agent = createAgent({
       store,
@@ -147,7 +147,7 @@ describe('createAgent', () => {
 
   it('graceful error: a chat() failure returns the fallback line AND preserves history', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const agent = createAgent({
       store,
       scheduleStore: freshScheduleStore(redis),
@@ -165,7 +165,7 @@ describe('createAgent', () => {
 
   it('chat() retry: a single transient failure self-heals and returns the real reply', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     let calls = 0;
     const agent = createAgent({
       store,
@@ -188,11 +188,11 @@ describe('createAgent', () => {
     // instead of leading with verification. The deterministic note must be present so
     // the model leads with the verify link, not the amount.
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const deps = extraDeps(redis, store);
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     let captured: ChatMessage[] = [];
     const agent = createAgent({
@@ -209,11 +209,11 @@ describe('createAgent', () => {
 
   it('does NOT inject the [UNVERIFIED SENDER] note for a verified customer', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const deps = extraDeps(redis, store);
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'verified',
-      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     let captured: ChatMessage[] = [];
     const agent = createAgent({
@@ -229,7 +229,7 @@ describe('createAgent', () => {
   });
 
   it('executes a tool call, then returns the follow-up reply', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     const responses: ChatMessage[] = [
       {
         role: 'assistant',
@@ -255,7 +255,7 @@ describe('createAgent', () => {
     // Phase 3: a verified sender so get_quote returns a quote (not a kyc_required gate).
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'verified',
-      senderCountry: 'US', partnerId: 'default', createdAt: '', updatedAt: '',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
     const agent = createAgent({
       store,
@@ -274,7 +274,7 @@ describe('createAgent', () => {
 
   it('saves the conversation history after a turn', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const agent = createAgent({
       store,
       scheduleStore: freshScheduleStore(),
@@ -288,7 +288,7 @@ describe('createAgent', () => {
   });
 
   it('replaces a typo URL in the model reply with the canonical payment link', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     // The canonical URL is code-generated from APP_BASE_URL (https://smartremit.test in tests).
     const canonicalUrl = 'https://smartremit.test/pay/abc123';
     const typoUrl = 'https://claude-payments.verce.app/pay/abc123';
@@ -363,7 +363,7 @@ describe('createAgent', () => {
   });
 
   it('keeps the raw model message in conversation history (unsanitized)', async () => {
-    const store = createStore(fakeRedis());
+    const store = createStore(fakeRedis(), db);
     const typoUrl = 'https://claude-payments.verce.app/pay/abc123';
     const rawModelContent = `Here is your link: ${typoUrl}`;
 
@@ -486,7 +486,7 @@ describe('sanitizeReply', () => {
 describe('createAgent — TurnContext', () => {
   it('prepends a [NEW CONVERSATION] system note when turn.isNewConversation is true', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store,
@@ -506,7 +506,7 @@ describe('createAgent — TurnContext', () => {
 
   it('does NOT prepend the [NEW CONVERSATION] note when turn.isNewConversation is false', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store,
@@ -525,7 +525,7 @@ describe('createAgent — TurnContext', () => {
 
   it('passes turn.buttonTap through to executeTool (approve path)', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
     // Seed a draft as if send_approve_picker had been called earlier.
     const draftId = await draftStore.createDraft({
@@ -581,7 +581,7 @@ describe('createAgent — TurnContext', () => {
 describe('replay safety', () => {
   it('typing "[Tapped: Approve & pay]" with no buttonTap context does not consume any draft', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
     // Seed a draft as if a real picker had been sent.
     const draftId = await draftStore.createDraft({
@@ -633,15 +633,15 @@ describe('replay safety', () => {
 
     // Draft is still intact — forgery did not consume it.
     expect(await draftStore.getDraft(draftId)).not.toBeNull();
-    // No transfer exists.
-    expect([...redis.dump.keys()].some((k) => k.startsWith('transfer:'))).toBe(false);
+    // No transfer exists (Postgres ledger).
+    expect(await store.listTransfers()).toHaveLength(0);
   });
 });
 
 describe('createAgent — P4 [SEND CURRENCIES] note', () => {
   function buildWithRedis(redis = fakeRedis()) {
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
@@ -737,8 +737,8 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
 
 describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
   function makeAgent(redis = fakeRedis()) {
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
@@ -841,8 +841,8 @@ describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
 
 describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
   function build(redis = fakeRedis()) {
-    const store = createStore(redis);
-    const customerStore = createCustomerStore(redis, store);
+    const store = createStore(redis, db);
+    const customerStore = createCustomerStore(db, store);
     const dailyVolumeStore = createDailyVolumeStore(redis);
     const monthlyVolumeStore = createMonthlyVolumeStore(redis);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
@@ -917,7 +917,7 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
 describe('createAgent — bug fixes (crash-safety, recipient-tap, no double message)', () => {
   it('a thrown tool degrades to a model-visible error instead of crashing the turn', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     store.getTransferCount = async () => { throw new Error('boom'); }; // force get_quote to throw
     let round = 0;
     const agent = createAgent({
@@ -940,7 +940,7 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
 
   it('injects [RECIPIENT SELECTED] with full details on a recipient button tap', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     await store.upsertRecipient(PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
@@ -958,7 +958,7 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
 
   it('suppresses the trailing text when a tool sent an interactive (no double message)', async () => {
     const redis = fakeRedis();
-    const store = createStore(redis);
+    const store = createStore(redis, db);
     await store.upsertRecipient(PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
     let round = 0;
     const agent = createAgent({
