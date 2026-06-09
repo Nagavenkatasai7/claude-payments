@@ -7,7 +7,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
-import { isSendVerified } from '@/lib/kyc-gate';
+import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendText, sendTransactionOtp } from '@/lib/whatsapp';
@@ -46,6 +46,9 @@ async function processTransferPayment(
   }
 
   // cleared (or any future status): normal auto-delivery path via the payment provider.
+  // WL1: the per-partner settlement rail (getIntegrations(transfer.partnerId).payment)
+  // is wired here in Phase C — in Phase A every partner is mock, so we keep the
+  // single-arg call. The seam already accepts the optional config (payment-provider.ts).
   const provider = getPaymentProvider(store);
   const { providerRef } = await provider.initiateTransfer(transfer);
 
@@ -151,7 +154,11 @@ export async function POST(
       // Phase 3 verify-before-send gate — covers scheduled/cron transfers paid
       // on this page. Refuse BEFORE any charge if the owner isn't verified.
       const owner = await getCustomerStore(store).getCustomer(transfer.phone);
-      if (!isSendVerified(owner)) {
+      // WL1: skipped for a 'delegated' partner (they run KYC on their side).
+      const owningPartner =
+        (await getPartnerStore().getPartner(transfer.partnerId)) ??
+        (await getPartnerStore().ensureDefaultPartner());
+      if (sendGateActive(owningPartner) && !isSendVerified(owner)) {
         return NextResponse.json(
           { ok: false, error: 'Please verify your identity before sending.', kyc_required: true },
           { status: 403 },
