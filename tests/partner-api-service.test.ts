@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
+import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { resetRateCacheForTests } from '@/lib/rate';
 import {
@@ -20,6 +22,7 @@ function harness() {
     store,
     partnerStore: createPartnerStore(redis),
     monthlyVolumeStore: createMonthlyVolumeStore(redis),
+    integrationsStore: createPartnerIntegrationsStore(redis, new EnvKeyProvider(Buffer.alloc(32, 7))),
     redis,
     now: () => NOW,
     genId: () => `b${n++}`,

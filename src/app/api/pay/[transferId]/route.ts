@@ -9,9 +9,11 @@ import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { resolvePartnerBranding } from '@/lib/partner-config';
+import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
-import { sendText, sendTransactionOtp } from '@/lib/whatsapp';
+import { sendText, sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import type { CountryCode, Transfer } from '@/lib/types';
 
@@ -31,12 +33,20 @@ async function processTransferPayment(
     return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
   }
 
+  // WL2/WL3: the owning partner's brand, outbound WhatsApp creds, and settlement
+  // rail drive everything below. Default/unconfigured ⇒ SmartRemit + env number
+  // + mock rail (byte-for-byte today).
+  const owningPartner = await getPartnerStore().getPartner(transfer.partnerId);
+  const brand = resolvePartnerBranding(owningPartner).brand;
+  const integrations = await getPartnerIntegrationsStore().getIntegrations(transfer.partnerId);
+  const waCreds = waCredsFrom(integrations);
+
   if (transfer.complianceStatus === 'flagged') {
     // Charge the card but do NOT deliver — hold for manual review.
     const { transfer: paid, senderMessages } = await completePaymentStage1(
       store, transfer.id, { held: true },
     );
-    for (const msg of senderMessages) await sendText(paid.phone, msg);
+    for (const msg of senderMessages) await sendText(paid.phone, msg, waCreds);
 
     // Re-read after stage1 write (paidAt is now set) then update to in_review.
     const afterPay = await store.getTransfer(transfer.id);
@@ -46,13 +56,10 @@ async function processTransferPayment(
     return NextResponse.json({ ok: true, status: 'in_review' });
   }
 
-  // cleared (or any future status): normal auto-delivery path via the payment provider.
-  // WL1: brand the delivery message with the owning partner (default ⇒ SmartRemit).
-  // The per-partner settlement RAIL (getIntegrations(...).payment) is wired here in
-  // Phase C — in Phase A every partner is mock, so the rail arg stays undefined.
-  const owningPartner = await getPartnerStore().getPartner(transfer.partnerId);
-  const brand = resolvePartnerBranding(owningPartner).brand;
-  const provider = getPaymentProvider(store, undefined, brand);
+  // cleared (or any future status): the partner's settlement rail. mock ⇒ timer
+  // self-advance (sandbox); http/simulator ⇒ signed instruction out, delivery
+  // arrives via the partner's signed callback to /api/payment-webhook (WL3).
+  const provider = getPaymentProvider(store, integrations.payment, brand, waCreds);
   const { providerRef } = await provider.initiateTransfer(transfer);
 
   // Persist the settlement ref WITHOUT clobbering the 'paid' write initiateTransfer
@@ -61,7 +68,9 @@ async function processTransferPayment(
   if (settled && !settled.paymentProviderRef) {
     await store.saveTransfer({ ...settled, paymentProviderRef: providerRef });
   }
-  return NextResponse.json({ ok: true, status: 'paid' });
+  const isWebhookDriven =
+    integrations.payment.providerType === 'http' || integrations.payment.providerType === 'simulator';
+  return NextResponse.json({ ok: true, status: isWebhookDriven ? 'processing' : 'paid' });
 }
 
 const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
@@ -103,7 +112,17 @@ export async function POST(
       if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
       const issued = await getTransactionOtpStore().issue(transferId, otpPhone);
       if (issued.ok) {
-        try { await sendTransactionOtp(otpPhone, issued.code); } catch { /* generic surface; never log the code */ }
+        // WL2: the code arrives from the number the customer is mid-payment with.
+        let otpCreds: WaCreds | undefined;
+        try {
+          const otpPartnerId = otpDraft
+            ? (await getCustomerStore(store).getCustomer(otpDraft.senderPhone))?.partnerId
+            : (await store.getTransfer(transferId))?.partnerId;
+          if (otpPartnerId) {
+            otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
+          }
+        } catch { /* fall back to the shared env number */ }
+        try { await sendTransactionOtp(otpPhone, issued.code, otpCreds); } catch { /* generic surface; never log the code */ }
       }
       return NextResponse.json({ ok: true, sent: true });
     }

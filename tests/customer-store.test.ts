@@ -400,3 +400,40 @@ describe('customer-store P2: partnerId', () => {
     expect(JSON.parse(raw!).partnerId).toBeUndefined();
   });
 });
+
+describe('WL2 follow-the-number routing (upsertOnFirstInbound + routedPartnerId)', () => {
+  it('creates a NEW customer under the routed partner', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE, 'acme');
+    expect(wasCreated).toBe(true);
+    expect(customer.partnerId).toBe('acme');
+  });
+
+  it('MOVES an existing default-partner customer to the partner that owns the number', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    await cs.upsertOnFirstInbound(PHONE); // created under 'default'
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE, 'acme');
+    expect(wasCreated).toBe(false);
+    expect(customer.partnerId).toBe('acme');
+    // persisted, not just in-memory
+    expect((await cs.getCustomer(PHONE))!.partnerId).toBe('acme');
+  });
+
+  it('no routedPartnerId ⇒ existing customer keeps their partner (no churn)', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    await cs.upsertOnFirstInbound(PHONE, 'acme');
+    const { customer } = await cs.upsertOnFirstInbound(PHONE);
+    expect(customer.partnerId).toBe('acme');
+  });
+
+  it('same routedPartnerId ⇒ idempotent (no extra write needed)', async () => {
+    const store = createStore(fakeRedis());
+    const cs = createCustomerStore(fakeRedis(), store);
+    const first = await cs.upsertOnFirstInbound(PHONE, 'acme');
+    const second = await cs.upsertOnFirstInbound(PHONE, 'acme');
+    expect(second.customer.updatedAt).toBe(first.customer.updatedAt);
+  });
+});

@@ -18,7 +18,7 @@ import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
-import { sendInteractive, sendCtaUrl, type InteractiveButton } from './whatsapp';
+import { sendInteractive, sendCtaUrl, type InteractiveButton, type WaCreds } from './whatsapp';
 import {
   recipientButtonId,
   someoneNewButtonId,
@@ -518,6 +518,7 @@ export interface ToolContext {
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
+  waCreds?: WaCreds; // WL2 — partner's outbound WhatsApp creds (absent ⇒ shared env number)
 }
 
 type ToolResult = Record<string, unknown>;
@@ -1126,6 +1127,7 @@ async function sendRecipientPickerTool(
     ctx.phone,
     'Welcome back 👋 Who are we sending to?',
     buttons,
+    ctx.waCreds, // WL2 — picker leaves from the partner's number
   );
   return { sent: true };
 }
@@ -1268,7 +1270,14 @@ async function sendApprovePickerTool(
       q.destinationCurrency ?? 'INR',
     );
     const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
-    await sendCtaUrl(ctx.phone, `${summary}\n\nTap to pay securely, or reply cancel to stop.`, { displayText: 'Approve & Pay', url: payUrl });
+    await sendCtaUrl(
+      ctx.phone,
+      `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+      { displayText: 'Approve & Pay', url: payUrl },
+      undefined,
+      undefined,
+      ctx.waCreds, // WL2 — approve card leaves from the partner's number
+    );
     return { sent: true, draft_id: draftId };
   } catch (err) {
     if (err instanceof QuoteError) return { error: err.message };

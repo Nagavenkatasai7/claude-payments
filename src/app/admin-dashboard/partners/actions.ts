@@ -11,6 +11,8 @@ import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { getPartnerWhatsappIndex } from '@/lib/partner-whatsapp-index';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
+import { randomBytes } from 'node:crypto';
+import { env } from '@/lib/env';
 import type { Partner, PartnerStatus, PartnerId, StaffRole, KycMode } from '@/lib/types';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
@@ -209,17 +211,29 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
   const store = getPartnerIntegrationsStore();
   const existing = await store.getIntegrations(id);
   const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
-  const settlementUrl = keepOrUpdate(String(formData.get('settlementUrl') ?? ''), existing.payment.credentials?.settlementUrl);
-  const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), existing.payment.credentials?.signingSecret);
-  const credentials: Record<string, string> = {};
+  // Spread-merge so fields this form doesn't manage are never silently wiped.
+  const credentials: Record<string, string> = { ...existing.payment.credentials };
+  const settlementUrl = keepOrUpdate(String(formData.get('settlementUrl') ?? ''), credentials.settlementUrl);
+  const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), credentials.signingSecret);
   if (settlementUrl) credentials.settlementUrl = settlementUrl;
   if (signingSecret) credentials.signingSecret = signingSecret;
+  let webhookSecret = keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret);
+
+  // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
+  // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
+  // rail exercises the exact signed instruction→callback loop a real rail would.
+  if (providerType === 'simulator') {
+    if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+    if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
+    if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
+  }
+
   await store.saveIntegrations(id, {
     ...existing,
     payment: {
       providerType,
       credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-      webhookSecret: keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret),
+      webhookSecret,
     },
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);

@@ -6,8 +6,10 @@ import {
 } from '../payment';
 import {
   sendText, sendTemplate, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
+  type WaCreds,
 } from '../whatsapp';
 import type { PartnerPaymentConfig } from '../partner-integrations';
+import { HttpPaymentProvider } from './http-payment-provider';
 
 export const DELIVERY_DELAY_MS = 120000; // 2 minutes — moved from the pay route, SAME value
 
@@ -61,24 +63,30 @@ export interface PaymentProvider {
 
 export class MockPaymentProvider implements PaymentProvider {
   // WL1: `brand` flavors only the stage-2 "Thanks for using …" line; absent ⇒
-  // 'SmartRemit' (default partner unchanged).
-  constructor(private readonly store: Store, private readonly brand?: string) {}
+  // 'SmartRemit' (default partner unchanged). WL2: `waCreds` sends the stage
+  // messages from the partner's own number (absent ⇒ shared env number).
+  constructor(
+    private readonly store: Store,
+    private readonly brand?: string,
+    private readonly waCreds?: WaCreds,
+  ) {}
 
   async initiateTransfer(transfer: Transfer): Promise<InitiateResult> {
     // Stage 1 — identical to today's route body (payment.ts UNTOUCHED).
     const { transfer: t1, senderMessages } = await completePaymentStage1(this.store, transfer.id);
-    for (const msg of senderMessages) await sendText(t1.phone, msg);
+    for (const msg of senderMessages) await sendText(t1.phone, msg, this.waCreds);
 
     // Stage 2 — the SAME after()/setTimeout(DELIVERY_DELAY_MS) self-advance.
     after(async () => {
       try {
         await new Promise((resolve) => setTimeout(resolve, DELIVERY_DELAY_MS));
         const stage2 = await completePaymentStage2(this.store, transfer.id, { brand: this.brand });
-        for (const msg of stage2.senderMessages) await sendText(stage2.transfer.phone, msg);
+        for (const msg of stage2.senderMessages) await sendText(stage2.transfer.phone, msg, this.waCreds);
         if (stage2.transfer.recipientPhone) {
           await sendTemplate(
             stage2.transfer.recipientPhone, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
             recipientTemplateParams(stage2.transfer),
+            this.waCreds,
           );
         }
       } catch (err) {
@@ -117,13 +125,20 @@ export class MockPaymentProvider implements PaymentProvider {
 export function getPaymentProvider(
   store: Store,
   payment?: PartnerPaymentConfig,
-  brand?: string, // WL1: end-customer brand for the mock's stage-2 message
+  brand?: string, // WL1: end-customer brand for the stage messages
+  waCreds?: WaCreds, // WL2: partner's outbound WhatsApp creds for the stage messages
 ): PaymentProvider {
   switch (payment?.providerType) {
-    // case '<real-rail-id>': return new RealPaymentProvider(...);  // Phase C — NOT built in this batch
+    // WL3: the REAL rail adapter — the partner's settlement endpoint executes the
+    // payout (non-custodial; we relay the signed instruction + mirror callbacks).
+    // 'simulator' is the SAME adapter pointed at our hosted reference rail
+    // (/api/partner-rail), so even the demo exercises the genuine webhook loop.
+    case 'http':
+    case 'simulator':
+      return new HttpPaymentProvider(store, payment!, brand, waCreds);
     case undefined:
     case 'mock':
     default:
-      return new MockPaymentProvider(store, brand);
+      return new MockPaymentProvider(store, brand, waCreds);
   }
 }

@@ -61,6 +61,14 @@ vi.mock('@/lib/partner-store', async (orig) => {
   return { ...real, getPartnerStore: () => ps };
 });
 
+// WL3: the route also resolves the partner's integrations (rail + WhatsApp creds).
+// No row ⇒ EMPTY ⇒ mock rail + env number — the legacy behavior these tests pin.
+vi.mock('@/lib/partner-integrations-store', async (orig) => {
+  const real = await orig<typeof import('@/lib/partner-integrations-store')>();
+  const is = real.createPartnerIntegrationsStore(fakeRedis());
+  return { ...real, getPartnerIntegrationsStore: () => is };
+});
+
 const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
 vi.mock('@/lib/providers/payment-provider', () => ({
   getPaymentProvider: () => ({ initiateTransfer }),

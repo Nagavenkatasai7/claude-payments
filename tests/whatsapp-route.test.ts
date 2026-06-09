@@ -249,7 +249,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
     const res = await post(textBody('STOP', 'wamid.STOP1'));
     expect(res.status).toBe(200);
     expect(setOptedOut).toHaveBeenCalledWith('15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY);
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
     expect(runAgentTurn).not.toHaveBeenCalled();
   });
 
@@ -257,7 +257,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
     const res = await post(textBody('start', 'wamid.START1'));
     expect(res.status).toBe(200);
     expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY);
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
     expect(runAgentTurn).not.toHaveBeenCalled();
   });
 
@@ -287,7 +287,7 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     });
     const res = await post(textBody('send $20', 'wamid.OPTEDOUT1'));
     expect(res.status).toBe(200);
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER, undefined);
     expect(runAgentTurn).not.toHaveBeenCalled();
     // Not a fresh STOP — no setOptedOut, no fresh OPT_OUT_REPLY confirmation.
     expect(setOptedOut).not.toHaveBeenCalled();
@@ -303,7 +303,7 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     const res = await post(textBody('START', 'wamid.RESUME1'));
     expect(res.status).toBe(200);
     expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY);
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
     expect(runAgentTurn).not.toHaveBeenCalled();
     // The state-skip reminder must NOT fire for a resume keyword.
     expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);

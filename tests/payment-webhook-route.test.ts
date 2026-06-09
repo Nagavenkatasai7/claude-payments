@@ -2,11 +2,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { createHmac } from 'node:crypto';
 
-// after() runs the notify callback inline so we can assert sends.
+// after() callbacks are captured as promises so tests can deterministically
+// await them before asserting sends (the WL3 notify path now awaits partner
+// resolution before the first send, so fire-and-forget would race).
+const afterPending: Promise<void>[] = [];
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
-  return { ...real, after: (cb: () => Promise<void> | void) => { void cb(); } };
+  return {
+    ...real,
+    after: (cb: () => Promise<void> | void) => {
+      afterPending.push(Promise.resolve().then(cb));
+    },
+  };
 });
+const flushAfter = async () => { await Promise.all(afterPending.splice(0)); };
 
 const sendText = vi.fn(async (..._a: unknown[]) => {});
 const sendTemplate = vi.fn(async (..._a: unknown[]) => {});
@@ -17,12 +26,25 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
 
-// In-memory store double + a controllable handleWebhook.
+// In-memory store double + a controllable handleWebhook. getTransfer → null so
+// the WL3 partner-secret resolution falls through to the env per-provider secret
+// (the legacy contract these tests pin).
 const updateTransferFromWebhook = vi.fn();
 const handleWebhook = vi.fn();
-vi.mock('@/lib/store', () => ({ getStore: () => ({ updateTransferFromWebhook }) }));
+vi.mock('@/lib/store', () => ({
+  getStore: () => ({ updateTransferFromWebhook, getTransfer: async () => null }),
+}));
 vi.mock('@/lib/providers/payment-provider', () => ({
   getPaymentProvider: () => ({ handleWebhook }),
+}));
+// WL3: the route resolves the owning partner for branding/creds; stub to defaults.
+vi.mock('@/lib/partner-store', () => ({
+  getPartnerStore: () => ({ getPartner: async () => null }),
+}));
+vi.mock('@/lib/partner-integrations-store', () => ({
+  getPartnerIntegrationsStore: () => ({
+    getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }),
+  }),
 }));
 
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
@@ -67,6 +89,7 @@ describe('POST /api/payment-webhook/[provider]', () => {
     updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
     const res = await post('uniteller', body, sig(body));
     expect(res.status).toBe(200);
+    await flushAfter();
     expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
     expect(sendText).toHaveBeenCalledTimes(1);
     expect((sendText.mock.calls[0] as unknown[])[1]).toContain('delivered');
@@ -79,6 +102,7 @@ describe('POST /api/payment-webhook/[provider]', () => {
     updateTransferFromWebhook.mockResolvedValue(deliveredGbp);
     const res = await post('uniteller', body, sig(body));
     expect(res.status).toBe(200);
+    await flushAfter();
     expect(sendText).toHaveBeenCalledTimes(1);
     const msg = (sendText.mock.calls[0] as unknown[])[1] as string;
     expect(msg).toContain('£');
@@ -91,6 +115,7 @@ describe('POST /api/payment-webhook/[provider]', () => {
     updateTransferFromWebhook.mockResolvedValue(null); // no real transition
     const res = await post('uniteller', body, sig(body));
     expect(res.status).toBe(200);
+    await flushAfter();
     expect(sendText).not.toHaveBeenCalled();
     expect(sendTemplate).not.toHaveBeenCalled();
   });

@@ -18,10 +18,22 @@ export const RECIPIENT_TEMPLATE_LANG = 'en';
 import type { IncomingMessage } from './types';
 export type { IncomingMessage }; // re-export for any caller using @/lib/whatsapp
 
+/**
+ * WL2 per-partner WhatsApp credentials. Every send function accepts an optional
+ * trailing `creds` — absent ⇒ the env (shared SmartRemit) number, so existing
+ * callers are byte-for-byte unchanged. A white-label partner's outbound traffic
+ * is sent FROM their own number with their own token.
+ */
+export interface WaCreds {
+  phoneNumberId: string;
+  token: string;
+}
+
 interface WebhookShape {
   entry?: {
     changes?: {
       value?: {
+        metadata?: { phone_number_id?: string };
         messages?: {
           type?: string;
           from?: string;
@@ -93,6 +105,22 @@ export function parseStatusEvent(body: unknown): WebhookStatusEvent[] | null {
   }
 }
 
+/**
+ * WL2: the receiving number's phone_number_id, present on EVERY Meta webhook
+ * event (messages and statuses) at entry[].changes[].value.metadata. The route
+ * uses it to resolve the owning partner BEFORE signature verification, so the
+ * right partner's app secret is checked. Null when absent/malformed.
+ */
+export function parsePhoneNumberId(body: unknown): string | null {
+  try {
+    const pnid = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value
+      ?.metadata?.phone_number_id;
+    return typeof pnid === 'string' && pnid !== '' ? pnid : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseIncoming(body: unknown): IncomingMessage | null {
   try {
     const message = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value
@@ -144,15 +172,15 @@ export function parseIncoming(body: unknown): IncomingMessage | null {
 const RATE_LIMIT_MAX_RETRIES = 2; // 1 initial attempt + 2 retries = 3 total
 const RATE_LIMIT_BASE_DELAY_MS = 6500; // 6s window for 131056 + small margin
 
-const GRAPH_MESSAGES_URL = () =>
-  `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`;
+const GRAPH_MESSAGES_URL = (creds?: WaCreds) =>
+  `https://graph.facebook.com/v21.0/${creds?.phoneNumberId ?? env.whatsappPhoneNumberId}/messages`;
 
-function authedJsonInit(payload: unknown): RequestInit {
+function authedJsonInit(payload: unknown, creds?: WaCreds): RequestInit {
   return {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${env.whatsappToken}`,
+      Authorization: `Bearer ${creds?.token ?? env.whatsappToken}`,
     },
     body: JSON.stringify(payload),
   };
@@ -195,15 +223,15 @@ async function postWithBackoff(
   throw new Error(`${errLabel} (${lastStatus}): ${lastBody}`);
 }
 
-export async function sendText(to: string, text: string): Promise<void> {
+export async function sendText(to: string, text: string, creds?: WaCreds): Promise<void> {
   return postWithBackoff(
-    GRAPH_MESSAGES_URL(),
+    GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
       messaging_product: 'whatsapp',
       to,
       type: 'text',
       text: { body: text },
-    }),
+    }, creds),
     'WhatsApp send failed',
   );
 }
@@ -213,9 +241,10 @@ export async function sendTemplate(
   templateName: string,
   languageCode: string,
   bodyParams: string[],
+  creds?: WaCreds,
 ): Promise<void> {
   return postWithBackoff(
-    GRAPH_MESSAGES_URL(),
+    GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
       messaging_product: 'whatsapp',
       to,
@@ -230,7 +259,7 @@ export async function sendTemplate(
           },
         ],
       },
-    }),
+    }, creds),
     'WhatsApp template send failed',
   );
 }
@@ -249,9 +278,10 @@ export async function sendTemplateWithButton(
   languageCode: string,
   bodyParams: string[],
   buttonToken: string,
+  creds?: WaCreds,
 ): Promise<void> {
   return postWithBackoff(
-    GRAPH_MESSAGES_URL(),
+    GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
       messaging_product: 'whatsapp',
       to,
@@ -272,7 +302,7 @@ export async function sendTemplateWithButton(
           },
         ],
       },
-    }),
+    }, creds),
     'WhatsApp template send failed',
   );
 }
@@ -375,13 +405,14 @@ export async function sendTemplateOrText(
   to: string,
   send: () => Promise<void>,
   fallbackText: string,
+  creds?: WaCreds,
 ): Promise<void> {
   try {
     await send();
   } catch (err) {
     console.warn('Template send failed; falling back to free-form text:', err);
     try {
-      await sendText(to, fallbackText);
+      await sendText(to, fallbackText, creds);
     } catch (textErr) {
       console.error('Fallback sendText also failed for', to, textErr);
     }
@@ -403,6 +434,7 @@ export async function sendInteractive(
   to: string,
   bodyText: string,
   buttons: InteractiveButton[],
+  creds?: WaCreds,
 ): Promise<void> {
   if (buttons.length === 0 || buttons.length > 3) {
     throw new Error(
@@ -415,29 +447,22 @@ export async function sendInteractive(
   const fullBody = `${bodyText}\n\n${numbered}`;
 
   const res = await fetch(
-    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.whatsappToken}`,
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: { text: fullBody },
-          action: {
-            buttons: buttons.map((b) => ({
-              type: 'reply',
-              reply: { id: b.id, title: b.title },
-            })),
-          },
+    GRAPH_MESSAGES_URL(creds),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: fullBody },
+        action: {
+          buttons: buttons.map((b) => ({
+            type: 'reply',
+            reply: { id: b.id, title: b.title },
+          })),
         },
-      }),
-    },
+      },
+    }, creds),
   );
 
   if (res.ok) return;
@@ -446,7 +471,7 @@ export async function sendInteractive(
     console.warn(
       'sendInteractive hit 24h-window error; falling back to sendText',
     );
-    await sendText(to, fullBody);
+    await sendText(to, fullBody, creds);
     return;
   }
 
@@ -472,6 +497,7 @@ export async function sendList(
   bodyText: string,
   buttonText: string,
   rows: ListRow[],
+  creds?: WaCreds,
 ): Promise<void> {
   if (rows.length === 0 || rows.length > 10) {
     throw new Error(`sendList: WhatsApp accepts 1-10 list rows (got ${rows.length}).`);
@@ -480,34 +506,27 @@ export async function sendList(
   const fullBody = `${bodyText}\n\n${numbered}`;
 
   const res = await fetch(
-    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.whatsappToken}`,
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'list',
-          body: { text: bodyText },
-          action: {
-            button: buttonText,
-            sections: [{ rows: rows.map((r) => ({ id: r.id, title: r.title })) }],
-          },
+    GRAPH_MESSAGES_URL(creds),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        body: { text: bodyText },
+        action: {
+          button: buttonText,
+          sections: [{ rows: rows.map((r) => ({ id: r.id, title: r.title })) }],
         },
-      }),
-    },
+      },
+    }, creds),
   );
 
   if (res.ok) return;
 
   if (res.status === 470) {
     console.warn('sendList hit 24h-window error; falling back to sendText');
-    await sendText(to, fullBody);
+    await sendText(to, fullBody, creds);
     return;
   }
 
@@ -530,38 +549,32 @@ export async function sendCtaUrl(
   button: CtaButton,
   headerText?: string,
   footerText?: string,
+  creds?: WaCreds,
 ): Promise<void> {
   if (!button.url.startsWith('https://')) throw new Error('sendCtaUrl: URL must be https://');
   if (button.displayText.length > 20) throw new Error('sendCtaUrl: displayText must be <= 20 chars');
   const fallbackText = `${bodyText}\n\n${button.displayText}\n${button.url}`;
 
   const res = await fetch(
-    `https://graph.facebook.com/v21.0/${env.whatsappPhoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.whatsappToken}`,
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'cta_url',
-          ...(headerText && { header: { type: 'text', text: headerText } }),
-          body: { text: bodyText },
-          ...(footerText && { footer: { text: footerText } }),
-          action: {
-            name: 'cta_url',
-            parameters: {
-              display_text: button.displayText,
-              url: button.url,
-            },
+    GRAPH_MESSAGES_URL(creds),
+    authedJsonInit({
+      messaging_product: 'whatsapp',
+      to,
+      type: 'interactive',
+      interactive: {
+        type: 'cta_url',
+        ...(headerText && { header: { type: 'text', text: headerText } }),
+        body: { text: bodyText },
+        ...(footerText && { footer: { text: footerText } }),
+        action: {
+          name: 'cta_url',
+          parameters: {
+            display_text: button.displayText,
+            url: button.url,
           },
         },
-      }),
-    },
+      },
+    }, creds),
   );
 
   if (res.ok) return;
@@ -571,7 +584,7 @@ export async function sendCtaUrl(
   // the link inline rather than throwing — the customer still gets a tappable link.
   const body = await res.text().catch(() => '');
   console.warn(`sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`);
-  await sendText(to, fallbackText);
+  await sendText(to, fallbackText, creds);
 }
 
 /**
@@ -607,6 +620,6 @@ export async function sendVerificationStatus(
  * failure (the caller surfaces a generic error; the pay route still won't
  * finalize without a verified code, so a failed send never lets money through).
  */
-export async function sendTransactionOtp(phone: string, code: string): Promise<void> {
-  await sendText(phone, transactionOtpMessage(code));
+export async function sendTransactionOtp(phone: string, code: string, creds?: WaCreds): Promise<void> {
+  await sendText(phone, transactionOtpMessage(code), creds);
 }

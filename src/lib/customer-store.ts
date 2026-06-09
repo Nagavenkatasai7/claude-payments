@@ -33,6 +33,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
 
     async upsertOnFirstInbound(
       senderPhone: string,
+      routedPartnerId?: string,
     ): Promise<{ customer: Customer; wasCreated: boolean }> {
       const existing = await this.getCustomer(senderPhone);
       if (existing) {
@@ -41,9 +42,22 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
         // PERSIST it here (first-contact-wins, idempotent) so optInAt is reliably
         // set at the store layer — not dependent on the route remembering to call
         // setOptedIn. This is the path the vast majority of prod inbounds take.
-        if (!existing.optInAt) {
+        //
+        // WL2 follow-the-number: the PARTNER owns the WhatsApp channel. When the
+        // number this customer messaged is mapped to a partner (routedPartnerId)
+        // and the record points elsewhere, the customer moves to the channel's
+        // partner. Past transfers keep their original partnerId (history is never
+        // rewritten); only the customer's go-forward tenant changes.
+        const needsOptIn = !existing.optInAt;
+        const needsRoute = Boolean(routedPartnerId) && existing.partnerId !== routedPartnerId;
+        if (needsOptIn || needsRoute) {
           const nowIso = new Date().toISOString();
-          const updated: Customer = { ...existing, optInAt: nowIso, updatedAt: nowIso };
+          const updated: Customer = {
+            ...existing,
+            ...(needsOptIn ? { optInAt: nowIso } : {}),
+            ...(needsRoute ? { partnerId: routedPartnerId! } : {}),
+            updatedAt: nowIso,
+          };
           await this.saveCustomer(updated);
           return { customer: updated, wasCreated: false };
         }
@@ -60,6 +74,8 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
         .sort()[0];
 
       const nowIso = new Date().toISOString();
+      // WL2: a customer created via a partner-owned number belongs to that partner.
+      const partnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
       const customer: Customer = minAt
         ? {
             senderPhone,
@@ -67,7 +83,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             kycStatus: 'grandfathered',
             kycVerifiedAt: nowIso,
             senderCountry: inferredCountry,          // NEW (P1)
-            partnerId: DEFAULT_PARTNER_ID,          // NEW (P2)
+            partnerId,                               // NEW (P2) + WL2 routed
             optInAt: nowIso,                        // NEW (Item 4) — first inbound = opt-in
             createdAt: minAt,
             updatedAt: nowIso,
@@ -77,7 +93,7 @@ export function createCustomerStore(redis: RedisLike, store: Store) {
             firstSeenAt: nowIso,
             kycStatus: 'not_started',
             senderCountry: inferredCountry,          // NEW (P1)
-            partnerId: DEFAULT_PARTNER_ID,          // NEW (P2)
+            partnerId,                               // NEW (P2) + WL2 routed
             optInAt: nowIso,                        // NEW (Item 4) — first inbound = opt-in
             createdAt: nowIso,
             updatedAt: nowIso,

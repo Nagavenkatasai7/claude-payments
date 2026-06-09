@@ -6,9 +6,11 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
+import { env } from '@/lib/env';
 import { Sidebar } from '../../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
+import { CopyField } from '../copy-field';
 import {
   setPartnerStatusAction,
   updatePartnerAction,
@@ -421,7 +423,14 @@ export default async function PartnerDetailPage({
                       <option value="http">HTTP rail (your live settlement endpoint)</option>
                     </select>
                   </div>
-                  <input className="sh-input" name="settlementUrl" type="password" autoComplete="off" placeholder="Settlement endpoint URL (leave blank to keep / auto for simulator)" />
+                  <input
+                    className="sh-input"
+                    name="settlementUrl"
+                    type="url"
+                    autoComplete="off"
+                    defaultValue={integrations.payment.credentials?.settlementUrl ?? ''}
+                    placeholder="Settlement endpoint URL — we POST signed instructions here (auto-filled for Simulator)"
+                  />
                   <input className="sh-input" name="signingSecret" type="password" autoComplete="off" placeholder="Outbound signing secret (leave blank to keep)" />
                   <input className="sh-input" name="webhookSecret" type="password" autoComplete="off" placeholder="Inbound webhook secret (leave blank to keep)" />
                   <button type="submit" className="sh-btn-primary">Save settlement config</button>
@@ -441,7 +450,7 @@ export default async function PartnerDetailPage({
               </div>
               <div className="sh-card-body">
                 {apiKeys.length === 0 ? (
-                  <p className="sh-recipient-sub">No keys yet.</p>
+                  <p className="sh-recipient-sub">No keys yet — issue one below to connect your systems.</p>
                 ) : (
                   <dl className="sh-dl">
                     {apiKeys.map((k) => (
@@ -468,6 +477,80 @@ export default async function PartnerDetailPage({
                   </dl>
                 )}
                 <IssueKeyButton partnerId={partner.id} />
+              </div>
+            </section>
+
+            {/* ── Integration guide (the partner's technical handoff) ── */}
+            <section className="sh-card">
+              <div className="sh-card-head">
+                <div>
+                  <div className="sh-card-title">Integration guide</div>
+                  <div className="sh-card-sub">
+                    Everything your engineers need to connect — webhook URLs, signatures, and API examples.
+                    All signatures are HMAC-SHA256 (hex) over the exact raw request body, sent in a header.
+                  </div>
+                </div>
+              </div>
+              <div className="sh-card-body">
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>1 · WhatsApp (your Meta app → us)</div>
+                <CopyField label="Webhook callback URL (paste into Meta → WhatsApp → Configuration)" value={`${env.appBaseUrl}/api/whatsapp/${partner.id}`} />
+                <p className="sh-recipient-sub" style={{ marginBottom: 16 }}>
+                  Use the <strong>verify token</strong> you saved in the WhatsApp channel card above. Inbound
+                  events are verified against your <strong>app secret</strong> (x-hub-signature-256) — this
+                  endpoint rejects anything unsigned.
+                </p>
+
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>2 · Settlement instructions (us → your rail)</div>
+                <p className="sh-recipient-sub" style={{ marginBottom: 8 }}>
+                  On confirm we POST a settlement instruction to your endpoint, signed with your
+                  <strong> outbound signing secret</strong> in <code>x-signature</code>. You are the licensed
+                  money-transmitter — funds never touch SmartRemit.
+                </p>
+                <pre style={{ background: 'var(--sh-surface-2, #f6f8fa)', border: '1px solid var(--sh-border)', borderRadius: 6, padding: 10, fontSize: 12, overflowX: 'auto', marginBottom: 16 }}>
+{`POST <your settlement endpoint>   x-signature: HMAC-SHA256(body)
+{ "reference": "<transfer id>", "partner_id": "${partner.id}",
+  "corridor": {"source": "US", "destination": "IN"},
+  "payout": {"rail": "bank", "destination": "<account>"},
+  "recipient": {"name": "...", "phone": "..."},
+  "amount": {"source": 200, "currency": "USD",
+             "destination": 16600, "destination_currency": "INR", "fx_rate": 83} }
+→ 200 { "providerRef": "<your settlement id>" }`}
+                </pre>
+
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>3 · Status callbacks (your rail → us)</div>
+                <CopyField label="Status callback URL (POST lifecycle events here)" value={`${env.appBaseUrl}/api/payment-webhook/${integrations.payment.providerType === 'simulator' ? 'simulator' : 'http'}`} />
+                <pre style={{ background: 'var(--sh-surface-2, #f6f8fa)', border: '1px solid var(--sh-border)', borderRadius: 6, padding: 10, fontSize: 12, overflowX: 'auto', marginBottom: 16 }}>
+{`POST ...   x-signature: HMAC-SHA256(body) with your INBOUND webhook secret
+{ "reference": "<transfer id>", "status": "created | funded | paid_out" }
+Delivery fires on "paid_out". Duplicates and out-of-order events are ignored.`}
+                </pre>
+
+                <div style={{ fontWeight: 600, marginBottom: 8 }}>4 · Partner API (your systems → us)</div>
+                <CopyField label="API base URL" value={`${env.appBaseUrl}/api/partner/v1`} />
+                <pre style={{ background: 'var(--sh-surface-2, #f6f8fa)', border: '1px solid var(--sh-border)', borderRadius: 6, padding: 10, fontSize: 12, overflowX: 'auto' }}>
+{`# Quote
+curl -X POST ${env.appBaseUrl}/api/partner/v1/quote \\
+  -H "Authorization: Bearer sr_live_..." -H "Content-Type: application/json" \\
+  -d '{"amount_source": 200}'
+
+# Create a transaction (Idempotency-Key is REQUIRED)
+curl -X POST ${env.appBaseUrl}/api/partner/v1/transactions \\
+  -H "Authorization: Bearer sr_live_..." -H "Idempotency-Key: <unique-key>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"amount_source": 200,
+       "sender": {"phone": "15551230000", "kyc_status": "verified"},
+       "beneficiary": {"name": "Anita Kumar", "phone": "919876543210",
+                       "payout_method": "bank", "payout_destination": "123456789012"}}'
+
+# Confirm (drives settlement on YOUR rail) · then poll
+curl -X POST ${env.appBaseUrl}/api/partner/v1/transactions/<id>/confirm \\
+  -H "Authorization: Bearer sr_live_..."
+curl ${env.appBaseUrl}/api/partner/v1/transactions/<id> \\
+  -H "Authorization: Bearer sr_live_..."
+
+# Also: GET /corridors · POST /beneficiaries · POST /beneficiaries/validate
+# Rate limit: 120 req/min per partner. Errors: 401 bad key · 404 not yours · 429 slow down.`}
+                </pre>
               </div>
             </section>
           </>
