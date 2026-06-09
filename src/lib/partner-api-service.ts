@@ -1,4 +1,4 @@
-import type { Store, RedisLike } from './store';
+import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type {
@@ -14,6 +14,13 @@ import { getPaymentProvider } from './providers/payment-provider';
 import { resolvePartnerBranding } from './partner-config';
 import { waCredsFrom } from './whatsapp-creds';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
+import type { DbOrTx } from '@/db/client';
+import {
+  createBeneficiaryRepo,
+  createIdempotencyRepo,
+  createAuditRepo,
+  type BeneficiaryRecord,
+} from '@/db/repos/aux-repos';
 import { newTransferId } from './id';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
@@ -34,7 +41,7 @@ export interface PartnerApiDeps {
   partnerStore: PartnerStore;
   monthlyVolumeStore: MonthlyVolumeStore;
   integrationsStore: PartnerIntegrationsStore; // WL3 — per-partner rail + WhatsApp creds
-  redis: RedisLike;
+  db: DbOrTx; // beneficiaries / idempotency keys / api audit (Stage 2a-3)
   // Injectable so the route uses the real provider while tests stub settlement
   // (the mock provider sends WhatsApp + arms a timer we don't want in unit tests).
   initiatePayment?: (transfer: Transfer) => Promise<void>;
@@ -126,16 +133,6 @@ export function validateBeneficiary(body: Record<string, unknown>): SvcResult<un
 }
 
 // ── POST /beneficiaries ───────────────────────────────────────────────────
-interface StoredBeneficiary {
-  id: string;
-  partnerId: PartnerId;
-  name: string;
-  country: CountryCode;
-  payoutMethod: PayoutMethod;
-  payoutDestination: string;
-  recipientPhone?: string;
-  createdAt: string;
-}
 
 export async function createBeneficiary(
   deps: PartnerApiDeps,
@@ -150,15 +147,15 @@ export async function createBeneficiary(
   const validation = validatePayoutFields(country, fields);
   if (!validation.ok) return err(422, JSON.stringify(validation.errors));
   const id = `ben_${(deps.genId ?? newTransferId)()}`;
-  const ben: StoredBeneficiary = {
+  const ben: BeneficiaryRecord = {
     id, partnerId, name, country,
     payoutMethod: (str(body.payout_method) as PayoutMethod) || 'bank',
     payoutDestination: validation.payoutDestination,
     recipientPhone: str(body.recipient_phone) || undefined,
     createdAt: (deps.now ?? (() => new Date().toISOString()))(),
   };
-  await deps.redis.set(`partner:${partnerId}:ben:${id}`, JSON.stringify(ben));
-  await deps.redis.sadd(`partner:${partnerId}:bens`, id);
+  // Postgres row, partner-scoped, payout destination ENCRYPTED at rest.
+  await createBeneficiaryRepo(deps.db).createBeneficiary(ben);
   return ok(201, { id, name, country, payout_destination: ben.payoutDestination });
 }
 
@@ -166,16 +163,10 @@ async function getStoredBeneficiary(
   deps: PartnerApiDeps,
   partnerId: PartnerId,
   id: string,
-): Promise<StoredBeneficiary | null> {
-  const raw = await deps.redis.get(`partner:${partnerId}:ben:${id}`);
-  if (!raw) return null;
-  try {
-    const b = JSON.parse(raw) as StoredBeneficiary;
-    // Defense-in-depth: the key is already partner-scoped, but re-check.
-    return b.partnerId === partnerId ? b : null;
-  } catch {
-    return null;
-  }
+): Promise<BeneficiaryRecord | null> {
+  // Partner-scoped (WHERE partner_id) + decrypted — the transaction needs the
+  // FULL payout destination to mint the transfer.
+  return createBeneficiaryRepo(deps.db).getOwnedBeneficiary(partnerId, id);
 }
 
 // ── POST /transactions (idempotency-key REQUIRED) ─────────────────────────
@@ -188,8 +179,8 @@ export async function createTransaction(
 ): Promise<SvcResult<unknown>> {
   if (!idempotencyKey) return err(400, 'Idempotency-Key header is required.');
 
-  const idemKey = `idem:${partner.id}:${idempotencyKey}`;
-  const existing = await deps.redis.get(idemKey);
+  const idem = createIdempotencyRepo(deps.db);
+  const existing = await idem.find(partner.id, idempotencyKey);
   if (existing) {
     const t = await deps.store.getTransfer(existing);
     if (t && t.partnerId === partner.id) return ok(200, transferView(t)); // replay
@@ -249,8 +240,15 @@ export async function createTransaction(
     throw e;
   }
 
-  // Bind the idempotency key → transfer id (replay returns the same transfer).
-  await deps.redis.set(idemKey, transfer.id);
+  // Bind the idempotency key → transfer id. PK(partner_id, key) makes this
+  // first-writer-wins: if a concurrent duplicate already bound the key, surface
+  // THAT transfer (ours stays as an orphan row, never double-charged — 2c moves
+  // this claim inside the transfer's transaction).
+  const winnerId = await idem.claim(partner.id, idempotencyKey, transfer.id);
+  if (winnerId !== transfer.id) {
+    const winner = await deps.store.getTransfer(winnerId);
+    if (winner && winner.partnerId === partner.id) return ok(200, transferView(winner));
+  }
   await appendAudit(deps, partner.id, keyId, 'transaction.create', transfer.id);
   // A sanctions block is surfaced as 422 (the row exists, status 'blocked').
   if (transfer.complianceStatus === 'blocked') {
@@ -307,10 +305,11 @@ async function appendAudit(
   action: string,
   transferId?: string,
 ): Promise<void> {
-  const key = `partner:${partnerId}:apiaudit`;
-  const at = (deps.now ?? (() => new Date().toISOString()))();
-  const raw = await deps.redis.get(key);
-  const list: unknown[] = raw ? (JSON.parse(raw) as unknown[]) : [];
-  list.unshift({ at, keyId, action, transferId });
-  await deps.redis.set(key, JSON.stringify(list.slice(0, 500)));
+  await createAuditRepo(deps.db).record({
+    partnerId,
+    actor: keyId,
+    actorType: 'api_key',
+    action,
+    subjectId: transferId,
+  });
 }

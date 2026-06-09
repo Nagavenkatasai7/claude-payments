@@ -1,6 +1,7 @@
 import { Redis } from '@upstash/redis';
 import { NextResponse, type NextRequest } from 'next/server';
 import { env } from './env';
+import { getDb } from '@/db/client';
 import type { RedisLike } from './store';
 import { getStore } from './store';
 import { getPartnerStore } from './partner-store';
@@ -59,7 +60,7 @@ export async function guardPartner(
     partnerStore,
     monthlyVolumeStore: getMonthlyVolumeStore(),
     integrationsStore: getPartnerIntegrationsStore(), // WL3 — per-partner rail/creds
-    redis,
+    db: getDb(), // beneficiaries / idempotency / api audit (Stage 2a-3)
   };
   return { ok: true, ctx: { partner, keyId: auth.keyId, deps } };
 }

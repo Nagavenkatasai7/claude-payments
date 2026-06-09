@@ -149,6 +149,16 @@ export type CorridorRequestRepo = ReturnType<typeof createCorridorRequestRepo>;
 // ── Idempotency keys (PK (partner_id, key) — the duplicate-window killer) ────
 export function createIdempotencyRepo(db: DbOrTx) {
   return {
+    /** The transferId already bound to this key, or null. */
+    async find(partnerId: PartnerId, key: string): Promise<string | null> {
+      const rows = await db
+        .select({ transferId: idempotencyKeys.transferId })
+        .from(idempotencyKeys)
+        .where(sql`${idempotencyKeys.partnerId} = ${partnerId} AND ${idempotencyKeys.key} = ${key}`)
+        .limit(1);
+      return rows[0]?.transferId ?? null;
+    },
+
     /**
      * Claim the key for this transfer. Returns the WINNING transferId — the
      * caller's own id when the insert won, or the EXISTING transfer's id on a

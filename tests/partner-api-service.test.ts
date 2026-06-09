@@ -30,7 +30,7 @@ async function harness() {
     partnerStore: createPartnerStore(db),
     monthlyVolumeStore: createMonthlyVolumeStore(redis),
     integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
-    redis,
+    db,
     now: () => NOW,
     genId: () => `b${n++}`,
     // Deterministic settlement: mark paid without WhatsApp/timers. Read the
