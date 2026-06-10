@@ -40,16 +40,13 @@ function formatLine(transfer: Transfer): string {
  * A compact, round-0 system note of the customer's OWN most-recent transfers.
  * Returns '' (inject nothing) when the customer has no transfer history.
  *
- * Read-only: calls store.listTransfers() and nothing else — no Redis writes,
- * no schema change, no new key. Tenant-blind by construction: surfaces only
- * recipientName + source-currency amount + status label + date (fields the
- * customer already owns). Strict own-phone filter; a legacy record with a
- * missing phone matches nothing and is dropped (fail-closed).
+ * Read-only. Tenant-blind by construction: surfaces only recipientName +
+ * source-currency amount + status label + date (fields the customer already
+ * owns). Stage 4: an INDEXED own-phone query (WHERE phone = $1) — this runs
+ * on every chat turn and must never scan the ledger.
  */
 export async function getRecentTransfersNote(phone: string, store: Store): Promise<string> {
-  const all = await store.listTransfers();                   // newest-first, defensively sorted
-  const mine = all.filter((t) => (t.phone ?? '') === phone); // strict own-phone filter
-  const top = mine.slice(0, MAX_RECENT);
+  const top = await store.listTransfersByPhone(phone, MAX_RECENT); // newest-first, indexed
   if (top.length === 0) return '';                           // history-less ⇒ unchanged behavior
   const lines = top.map(formatLine);
   return (

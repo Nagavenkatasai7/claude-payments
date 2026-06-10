@@ -20,7 +20,10 @@ export const FALLBACK_FX_RATES: Record<CurrencyCode, FxRates> = {
   INR: { toInr: 1, toUsd: 0.0118 }, // ≈ 1/85, consistent with FALLBACK_FX_RATE; never a source currency, present for type completeness
 };
 
-const CACHE_TTL_MS = 3_600_000; // 1 hour
+// Stage 4: 5-minute freshness (was 1h) — quotes on a money product should
+// track the market. L1 = per-instance memory; L2 = shared Redis, so a cold
+// instance reuses the fleet's fetch instead of dialing Frankfurter again.
+const CACHE_TTL_MS = 300_000;
 
 interface CacheEntry {
   rates: FxRates;
@@ -33,10 +36,44 @@ export function resetRateCacheForTests(): void {
   cache.clear();
 }
 
+// L2 is skipped under vitest: unit tests stub GLOBAL fetch with a Frankfurter
+// response, and the Upstash client rides the same fetch — it would parse the
+// FX payload as a Redis REST reply. Lazy + fail-open: no Redis, no L2.
+async function l2Get(source: CurrencyCode): Promise<FxRates | null> {
+  if (process.env.VITEST) return null;
+  try {
+    const { getRedis } = await import('./redis');
+    const raw = await getRedis().get(`fx:${source}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as FxRates;
+    return Number.isFinite(parsed.toInr) && Number.isFinite(parsed.toUsd) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function l2Set(source: CurrencyCode, rates: FxRates): Promise<void> {
+  if (process.env.VITEST) return;
+  try {
+    const { getRedis } = await import('./redis');
+    await getRedis().set(`fx:${source}`, JSON.stringify(rates), { ex: 300 });
+  } catch {
+    /* best effort */
+  }
+}
+
 export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
   const now = Date.now();
   const cached = cache.get(source);
   if (cached && now - cached.fetchedAt < CACHE_TTL_MS) return cached.rates;
+
+  // Shared L2 before the upstream call — one Frankfurter fetch per 5 min
+  // across the whole fleet, not per instance.
+  const shared = await l2Get(source);
+  if (shared) {
+    cache.set(source, { rates: shared, fetchedAt: now });
+    return shared;
+  }
 
   try {
     const to = source === 'USD' ? 'INR' : 'USD,INR';
@@ -59,6 +96,7 @@ export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
     }
     const rates: FxRates = { toInr: inr, toUsd };
     cache.set(source, { rates, fetchedAt: now });
+    await l2Set(source, rates);
     return rates;
   } catch {
     return cached ? cached.rates : FALLBACK_FX_RATES[source];

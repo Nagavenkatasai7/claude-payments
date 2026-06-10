@@ -1,6 +1,5 @@
+import { getRedis } from './redis';
 import { createHash, randomInt as cryptoRandomInt, timingSafeEqual } from 'node:crypto';
-import { Redis } from '@upstash/redis';
-import { env } from './env';
 import type { RedisLike } from './store';
 
 /**
@@ -95,12 +94,7 @@ let cached: TransactionOtpStore | null = null;
 
 export function getTransactionOtpStore(): TransactionOtpStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createTransactionOtpStore(redis as unknown as RedisLike);
+    cached = createTransactionOtpStore(getRedis());
   }
   return cached;
 }

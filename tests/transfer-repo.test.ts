@@ -189,3 +189,53 @@ describe('transfer-repo: tenant scoping + keyset pagination', () => {
     await expect(repo.saveTransfer(fixture({ id: 'tr_ghost', partnerId: 'nope' }))).rejects.toThrow();
   });
 });
+
+describe('transfer-repo: summary() — one-query dashboard aggregates + change stamp (Stage 4)', () => {
+  it('aggregates today (eastern) vs all-time, per-status counts, needs-attention', async () => {
+    const nowIso = new Date().toISOString();
+    const oldIso = '2026-01-15T12:00:00.000Z';
+    // Today: one delivered (fee 1.99) + one flagged awaiting (fresh — not abandoned).
+    await repo.saveTransfer(fixture({ id: 's1', createdAt: nowIso, status: 'delivered', paidAt: nowIso, deliveredAt: nowIso }));
+    await repo.saveTransfer(fixture({ id: 's2', createdAt: nowIso, complianceStatus: 'flagged' }));
+    // Old: a paid row (fee counts all-time, not today) + an ancient abandoned awaiting.
+    await repo.saveTransfer(fixture({ id: 's3', createdAt: oldIso, status: 'paid', paidAt: oldIso }));
+    await repo.saveTransfer(fixture({ id: 's4', createdAt: oldIso }));
+
+    const s = await repo.summary();
+    expect(s.total).toBe(4);
+    expect(s.countToday).toBe(2);
+    expect(s.volumeToday).toBe(400);
+    expect(s.commissionToday).toBe(1.99);       // only the delivered today
+    expect(s.commissionAllTime).toBe(3.98);     // delivered today + paid old
+    expect(s.flaggedToday).toBe(1);
+    // flagged s2 + abandoned s4 (s1 delivered, s3 paid are fine)
+    expect(s.needsAttention).toBe(2);
+    expect(s.byStatus).toMatchObject({ delivered: 1, paid: 1, awaiting_payment: 2 });
+    expect(s.latest).toBeTruthy();
+  });
+
+  it('is partner-scoped at the WHERE', async () => {
+    await seedPartner(db, 'acme');
+    await repo.saveTransfer(fixture({ id: 'p1', partnerId: 'acme' }));
+    await repo.saveTransfer(fixture({ id: 'p2', partnerId: 'default' }));
+    expect((await repo.summary('acme')).total).toBe(1);
+    expect((await repo.summary()).total).toBe(2);
+  });
+
+  it('the stamp ingredients move on a pure status flip (paid → delivered)', async () => {
+    const nowIso = new Date().toISOString();
+    await repo.saveTransfer(fixture({ id: 'f1', status: 'paid', createdAt: nowIso, paidAt: nowIso }));
+    const before = await repo.summary();
+    await repo.updateTransferFromWebhook('f1', 'delivered');
+    const after = await repo.summary();
+    expect(after.byStatus.delivered).toBe(before.byStatus.delivered + 1);
+    expect(after.byStatus.paid).toBe(before.byStatus.paid - 1);
+  });
+
+  it('an empty ledger summarizes to zeros, latest null', async () => {
+    const s = await repo.summary();
+    expect(s.total).toBe(0);
+    expect(s.latest).toBeNull();
+    expect(s.commissionAllTime).toBe(0);
+  });
+});

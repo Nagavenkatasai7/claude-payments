@@ -1,5 +1,4 @@
-import { Redis } from '@upstash/redis';
-import { env } from './env';
+import { getRedis } from './redis';
 import { easternDate } from './dates';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -61,7 +60,11 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
       return raw ? (JSON.parse(raw) as ChatMessage[]) : [];
     },
     async saveConversation(phone: string, messages: ChatMessage[]): Promise<void> {
-      await redis.set(`conv:${phone}`, JSON.stringify(trimHistory(messages)));
+      // 30-day TTL (Stage 4): a conversation untouched for a month is dead
+      // weight — every save renews the clock, so active chats never expire.
+      await redis.set(`conv:${phone}`, JSON.stringify(trimHistory(messages)), {
+        ex: 30 * 24 * 3600,
+      });
     },
 
     // ── Transfer ledger (Postgres) ───────────────────────────────────────
@@ -85,6 +88,23 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     },
     async listTransfers(): Promise<Transfer[]> {
       return transfersRepo.listAll();
+    },
+    /** Indexed per-customer list (Stage 4) — replaces filter-the-whole-ledger. */
+    async listTransfersByPhone(phone: string, limit = 50): Promise<Transfer[]> {
+      return (await transfersRepo.listByPhone(phone, { limit })).items;
+    },
+    /** Keyset page for staff views (Stage 4). Scope via partnerId. */
+    async listTransfersPage(req: {
+      limit: number;
+      cursor?: string;
+      partnerId?: import('./types').PartnerId;
+      status?: TransferStatus;
+    }): Promise<import('@/db/repos/transfer-repo').Page<Transfer>> {
+      return transfersRepo.adminList(req);
+    },
+    /** One-query SQL aggregates for the dashboard (Stage 4). */
+    async transfersSummary(partnerId?: import('./types').PartnerId) {
+      return transfersRepo.summary(partnerId);
     },
     async getTransferCount(phone: string): Promise<number> {
       // Derived (blocked rows excluded) — the count:{phone} counter is gone.
@@ -146,12 +166,7 @@ let cached: Store | null = null;
 
 export function getStore(): Store {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createStore(redis as unknown as RedisLike, getDb());
+    cached = createStore(getRedis(), getDb());
   }
   return cached;
 }

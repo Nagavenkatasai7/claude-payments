@@ -34,9 +34,13 @@ async function storeWith(...transfers: Transfer[]) {
 
 // Postgres rows are born complete (phone/createdAt/amounts are NOT NULL), so
 // pre-P1 "legacy" malformed records can no longer exist at rest. The renderer's
-// defensive invariants still hold as units — exercised via a listTransfers stub.
+// defensive invariants still hold as units — exercised via a stub that mirrors
+// the Stage-4 indexed query (WHERE phone = $1, newest-first, LIMIT n).
 function stubStore(...transfers: Transfer[]): Store {
-  return { listTransfers: async () => transfers } as unknown as Store;
+  return {
+    listTransfersByPhone: async (phone: string, limit: number) =>
+      transfers.filter((t) => (t.phone ?? '') === phone).slice(0, limit),
+  } as unknown as Store;
 }
 
 describe('getRecentTransfersNote — empty-history invariant', () => {

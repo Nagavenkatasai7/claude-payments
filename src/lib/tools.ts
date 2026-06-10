@@ -1295,8 +1295,9 @@ async function repeatTransferTool(
   }
 
   // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
-  const mine = (await ctx.store.listTransfers()).filter(
-    (t) => (t.phone ?? '') === ctx.phone && t.recipientPhone === recipientPhone,
+  // Stage 4: indexed per-phone page, then a small in-JS recipient filter.
+  const mine = (await ctx.store.listTransfersByPhone(ctx.phone, 100)).filter(
+    (t) => t.recipientPhone === recipientPhone,
   );
   const last = mine[0];
   if (!last) {

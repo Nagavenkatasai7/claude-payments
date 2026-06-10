@@ -257,6 +257,25 @@ export async function createTransaction(
   return ok(201, transferView(transfer));
 }
 
+// ── GET /transactions (keyset list, ownership-scoped) ─────────────────────
+export async function listTransactions(
+  deps: PartnerApiDeps,
+  partnerId: PartnerId,
+  query: { limit?: string | null; cursor?: string | null },
+): Promise<SvcResult<unknown>> {
+  const rawLimit = num(query.limit ?? undefined);
+  const limit = Math.min(100, Math.max(1, rawLimit ?? 25));
+  const page = await deps.store.listTransfersPage({
+    limit,
+    cursor: query.cursor ?? undefined,
+    partnerId, // authoritative: from the API key, never the query
+  });
+  return ok(200, {
+    transactions: page.items.map(transferView),
+    next_cursor: page.nextCursor ?? null,
+  });
+}
+
 // ── GET /transactions/:id (ownership-scoped) ──────────────────────────────
 export async function getTransaction(
   deps: PartnerApiDeps,

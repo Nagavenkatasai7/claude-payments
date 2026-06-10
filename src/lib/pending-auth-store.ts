@@ -1,6 +1,5 @@
-import { Redis } from '@upstash/redis';
+import { getRedis } from './redis';
 import { createHash, randomBytes } from 'node:crypto';
-import { env } from './env';
 import type { RedisLike } from './store';
 
 /**
@@ -78,12 +77,7 @@ let cached: PendingAuthStore | null = null;
 
 export function getPendingAuthStore(): PendingAuthStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createPendingAuthStore(redis as unknown as RedisLike);
+    cached = createPendingAuthStore(getRedis());
   }
   return cached;
 }

@@ -1,6 +1,5 @@
-import { Redis } from '@upstash/redis';
+import { getRedis } from './redis';
 import { NextResponse, type NextRequest } from 'next/server';
-import { env } from './env';
 import { getDb } from '@/db/client';
 import type { RedisLike } from './store';
 import { getStore } from './store';
@@ -19,14 +18,7 @@ import type { Partner } from './types';
 
 let redisSingleton: RedisLike | null = null;
 function apiRedis(): RedisLike {
-  if (!redisSingleton) {
-    redisSingleton = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    }) as unknown as RedisLike;
-  }
-  return redisSingleton;
+  return getRedis();
 }
 
 export interface PartnerContext {

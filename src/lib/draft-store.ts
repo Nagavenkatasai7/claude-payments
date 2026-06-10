@@ -1,5 +1,4 @@
-import { Redis } from '@upstash/redis';
-import { env } from './env';
+import { getRedis } from './redis';
 import { newTransferId } from './id';
 import type { RedisLike } from './store';
 import type { Draft } from './types';
@@ -46,12 +45,7 @@ let cached: DraftStore | null = null;
 
 export function getDraftStore(): DraftStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createDraftStore(redis as unknown as RedisLike);
+    cached = createDraftStore(getRedis());
   }
   return cached;
 }

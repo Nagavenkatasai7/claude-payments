@@ -1,6 +1,5 @@
-import { Redis } from '@upstash/redis';
+import { getRedis } from './redis';
 import { createHash, randomBytes } from 'node:crypto';
-import { env } from './env';
 import type { RedisLike } from './store';
 import { normalizePhone } from './phone';
 
@@ -68,12 +67,7 @@ let cached: OnboardingTokenStore | null = null;
 
 export function getOnboardingTokenStore(): OnboardingTokenStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createOnboardingTokenStore(redis as unknown as RedisLike);
+    cached = createOnboardingTokenStore(getRedis());
   }
   return cached;
 }

@@ -230,6 +230,77 @@ export function createTransferRepo(
       return rows[0]?.n ?? 0;
     },
 
+    /**
+     * One-query dashboard aggregates (Stage 4) — replaces serializing the
+     * whole ledger through JS on every overview render. "Today" uses the
+     * EASTERN calendar day, matching lib/dashboard.ts summarize() exactly
+     * (Postgres handles the DST boundary; JS-side epoch math can't).
+     *
+     * The result doubles as the LIVE-REFRESH CHANGE STAMP: per-status counts
+     * catch every status transition, `latest` (greatest of the three
+     * timestamps) catches new rows and paid/delivered flips — if no number
+     * moves, nothing on a dashboard could have changed.
+     */
+    async summary(partnerId?: PartnerId): Promise<{
+      countToday: number;
+      volumeToday: number;
+      commissionToday: number;
+      flaggedToday: number;
+      commissionAllTime: number;
+      needsAttention: number;
+      byStatus: Record<string, number>;
+      latest: string | null;
+      total: number;
+    }> {
+      const where = partnerId ? sql`WHERE partner_id = ${partnerId}` : sql``;
+      const res = await db.execute(sql`
+        WITH t AS (
+          SELECT *, (created_at AT TIME ZONE 'America/New_York')::date
+                    = (now() AT TIME ZONE 'America/New_York')::date AS is_today
+          FROM transfers ${where}
+        )
+        SELECT
+          count(*)::int AS total,
+          count(*) FILTER (WHERE is_today)::int AS count_today,
+          coalesce(sum(amount_usd) FILTER (WHERE is_today), 0)::float8 AS volume_today,
+          coalesce(sum(fee_usd) FILTER (WHERE is_today AND status IN ('paid','delivered')), 0)::float8 AS commission_today,
+          count(*) FILTER (WHERE is_today AND compliance_status IN ('flagged','blocked'))::int AS flagged_today,
+          coalesce(sum(fee_usd) FILTER (WHERE status IN ('paid','delivered')), 0)::float8 AS commission_all_time,
+          count(*) FILTER (
+            WHERE compliance_status IN ('flagged','blocked')
+               OR (status = 'awaiting_payment' AND created_at < now() - interval '30 minutes')
+          )::int AS needs_attention,
+          count(*) FILTER (WHERE status = 'awaiting_payment')::int AS s_awaiting,
+          count(*) FILTER (WHERE status = 'paid')::int AS s_paid,
+          count(*) FILTER (WHERE status = 'delivered')::int AS s_delivered,
+          count(*) FILTER (WHERE status = 'in_review')::int AS s_in_review,
+          count(*) FILTER (WHERE status = 'cancelled')::int AS s_cancelled,
+          count(*) FILTER (WHERE status = 'blocked')::int AS s_blocked,
+          max(greatest(created_at, coalesce(paid_at, created_at), coalesce(delivered_at, created_at))) AS latest
+        FROM t;
+      `);
+      const r = (res as unknown as { rows: Record<string, unknown>[] }).rows[0];
+      const round2 = (v: unknown) => Math.round(Number(v) * 100) / 100;
+      return {
+        total: Number(r.total),
+        countToday: Number(r.count_today),
+        volumeToday: round2(r.volume_today),
+        commissionToday: round2(r.commission_today),
+        flaggedToday: Number(r.flagged_today),
+        commissionAllTime: round2(r.commission_all_time),
+        needsAttention: Number(r.needs_attention),
+        byStatus: {
+          awaiting_payment: Number(r.s_awaiting),
+          paid: Number(r.s_paid),
+          delivered: Number(r.s_delivered),
+          in_review: Number(r.s_in_review),
+          cancelled: Number(r.s_cancelled),
+          blocked: Number(r.s_blocked),
+        },
+        latest: r.latest ? new Date(String(r.latest)).toISOString() : null,
+      };
+    },
+
     /** Full newest-first list (dashboard compat until Stage-4 pagination). */
     async listAll(): Promise<Transfer[]> {
       const rows = await db
