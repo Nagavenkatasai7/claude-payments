@@ -247,6 +247,7 @@ export function createTransferRepo(
       commissionToday: number;
       flaggedToday: number;
       commissionAllTime: number;
+      volumeAllTime: number;
       needsAttention: number;
       byStatus: Record<string, number>;
       latest: string | null;
@@ -266,6 +267,7 @@ export function createTransferRepo(
           coalesce(sum(fee_usd) FILTER (WHERE is_today AND status IN ('paid','delivered')), 0)::float8 AS commission_today,
           count(*) FILTER (WHERE is_today AND compliance_status IN ('flagged','blocked'))::int AS flagged_today,
           coalesce(sum(fee_usd) FILTER (WHERE status IN ('paid','delivered')), 0)::float8 AS commission_all_time,
+          coalesce(sum(amount_usd), 0)::float8 AS volume_all_time,
           count(*) FILTER (
             WHERE compliance_status IN ('flagged','blocked')
                OR (status = 'awaiting_payment' AND created_at < now() - interval '30 minutes')
@@ -288,6 +290,7 @@ export function createTransferRepo(
         commissionToday: round2(r.commission_today),
         flaggedToday: Number(r.flagged_today),
         commissionAllTime: round2(r.commission_all_time),
+        volumeAllTime: round2(r.volume_all_time),
         needsAttention: Number(r.needs_attention),
         byStatus: {
           awaiting_payment: Number(r.s_awaiting),
