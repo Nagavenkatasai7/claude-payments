@@ -65,12 +65,23 @@ describe('productionBootProblems — names only, never values', () => {
     ]);
   });
 
-  it('rejects a malformed FIELD_ENCRYPTION_KEY (wrong length / non-hex)', () => {
+  it('accepts BOTH key shapes EnvKeyProvider accepts: 64-hex AND base64-32-bytes', () => {
+    // hex (already in FULL_ENV) — and the base64 form `openssl rand -base64 32`
+    // emits, which is what production actually carries. The first deploy of
+    // this assert was hex-only and bricked prod middleware — regression-pinned.
+    const b64 = Buffer.alloc(32, 7).toString('base64');
+    expect(productionBootProblems({ ...FULL_ENV, FIELD_ENCRYPTION_KEY: b64 })).toEqual([]);
+  });
+
+  it('rejects a malformed FIELD_ENCRYPTION_KEY (wrong length, junk)', () => {
     expect(productionBootProblems({ ...FULL_ENV, FIELD_ENCRYPTION_KEY: 'abc123' }).join(' '))
-      .toContain('64 hex');
+      .toContain('FIELD_ENCRYPTION_KEY');
     expect(
-      productionBootProblems({ ...FULL_ENV, FIELD_ENCRYPTION_KEY: 'zz'.repeat(32) }).join(' '),
-    ).toContain('64 hex');
+      productionBootProblems({
+        ...FULL_ENV,
+        FIELD_ENCRYPTION_KEY: Buffer.alloc(16, 7).toString('base64'), // 16 bytes ≠ 32
+      }).join(' '),
+    ).toContain('FIELD_ENCRYPTION_KEY');
   });
 
   it('never echoes a value into a problem string', () => {
