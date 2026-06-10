@@ -8,7 +8,9 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
-import type { Partner } from '@/lib/types';
+import { Card } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 
 const PARTNER_COLUMNS: ExpandableColumn[] = [
   { label: 'Name', primary: true },
@@ -18,12 +20,6 @@ const PARTNER_COLUMNS: ExpandableColumn[] = [
   { label: 'Transfers', primary: true },
   { label: 'Created' },
 ];
-
-function statusBadge(p: Partner): string {
-  return p.status === 'active'
-    ? 'sh-tag sh-tag-partner-active'
-    : 'sh-tag sh-tag-partner-suspended';
-}
 
 export default async function PartnersPage() {
   const staff = await requireStaff();
@@ -80,12 +76,12 @@ export default async function PartnersPage() {
             </div>
           </div>
           {isAdmin && (
-            <Link href="/admin-dashboard/partners/new" className="sh-btn-primary">
-              + New partner
-            </Link>
+            <Button asChild>
+              <Link href="/admin-dashboard/partners/new">+ New partner</Link>
+            </Button>
           )}
         </div>
-        <section className="sh-card">
+        <Card className="mb-6">
           <ExpandableTable
             columns={PARTNER_COLUMNS}
             empty={<>No partners yet.</>}
@@ -93,20 +89,27 @@ export default async function PartnersPage() {
               key: p.id,
               label: p.name,
               cells: [
-                <Link key="name" href={`/admin-dashboard/partners/${p.id}`}>
+                <Link
+                  key="name"
+                  href={`/admin-dashboard/partners/${p.id}`}
+                  className="text-primary underline-offset-2 hover:underline"
+                >
                   {p.name}
                 </Link>,
                 p.countries.join(', '),
-                <span key="status" className={statusBadge(p)}>
+                <Badge
+                  key="status"
+                  variant={p.status === 'active' ? 'secondary' : 'destructive'}
+                >
                   {p.status}
-                </span>,
+                </Badge>,
                 customerCountByPartner.get(p.id) ?? 0,
                 transferCountByPartner.get(p.id) ?? 0,
                 new Date(p.createdAt).toLocaleDateString(),
               ],
             }))}
           />
-        </section>
+        </Card>
       </main>
     </>
   );

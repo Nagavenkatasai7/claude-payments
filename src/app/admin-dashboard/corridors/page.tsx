@@ -5,6 +5,7 @@ import { getStore } from '@/lib/store';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 
 const CORRIDOR_COLUMNS: ExpandableColumn[] = [
   { label: 'Date' },
@@ -33,34 +34,34 @@ export default async function CorridorsPage() {
           </div>
         </div>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">All requests</div>
-              <div className="sh-card-sub">
-                {requests.length} {requests.length === 1 ? 'request' : 'requests'}, newest first
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={CORRIDOR_COLUMNS}
-            empty={<>No corridor requests yet.</>}
-            rows={requests.map((r) => ({
-              key: r.id,
-              label: r.destinationCountry,
-              cells: [
-                new Date(r.capturedAt).toLocaleString(),
-                r.destinationCountry,
-                r.approxAmount != null ? (
-                  money(r.approxAmount, r.approxCurrency ?? 'USD')
-                ) : (
-                  <span key="amount" className="sh-recipient-sub">—</span>
-                ),
-                <span key="phone" className="sh-recipient-sub">+{r.senderPhone}</span>,
-              ],
-            }))}
-          />
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>All requests</CardTitle>
+            <CardDescription>
+              {requests.length} {requests.length === 1 ? 'request' : 'requests'}, newest first
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={CORRIDOR_COLUMNS}
+              empty={<>No corridor requests yet.</>}
+              rows={requests.map((r) => ({
+                key: r.id,
+                label: r.destinationCountry,
+                cells: [
+                  new Date(r.capturedAt).toLocaleString(),
+                  r.destinationCountry,
+                  r.approxAmount != null ? (
+                    money(r.approxAmount, r.approxCurrency ?? 'USD')
+                  ) : (
+                    <span key="amount" className="text-xs text-muted-foreground">—</span>
+                  ),
+                  <span key="phone" className="text-xs text-muted-foreground">+{r.senderPhone}</span>,
+                ],
+              }))}
+            />
+          </CardContent>
+        </Card>
       </main>
     </>
   );

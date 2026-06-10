@@ -9,6 +9,10 @@ import type { Partner, Staff } from '@/lib/types';
 import { Sidebar } from '../sidebar';
 import { Icon } from '../icons';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import {
   updateStaffAction,
   setStaffStatusAction,
@@ -54,68 +58,77 @@ function staffRow(s: Staff, opts: { isSelf: boolean; partners: Partner[]; partne
     key: s.username,
     label: s.name,
     cells: [
-      <span key="m" className="sh-name-cell">
-        <span className={`sh-name-avatar${status === 'suspended' ? ' sh-name-avatar--muted' : ''}`}>{initial}</span>
-        <span>
-          <span className="sh-recipient">
+      <span key="m" className="flex items-center gap-3">
+        <span
+          className={`flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+            status === 'suspended' ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary'
+          }`}
+        >
+          {initial}
+        </span>
+        <span className="min-w-0">
+          <span className="flex items-center gap-1.5 text-sm font-medium">
             {s.name}
-            {opts.isSelf ? <span className="sh-you-tag">You</span> : null}
+            {opts.isSelf ? <Badge variant="outline">You</Badge> : null}
           </span>
-          <span className="sh-recipient-sub">{s.username}</span>
+          <span className="block text-xs text-muted-foreground">{s.username}</span>
         </span>
       </span>,
-      <span key="r" className={`sh-pill ${s.role === 'admin' ? 'sh-pill-info' : 'sh-pill-neutral'}`}>
-        <span className="sh-pill-dot" />
+      <Badge key="r" variant={s.role === 'admin' ? 'default' : 'secondary'}>
         {s.role}
-      </span>,
-      <span key="sc" className="sh-scope-chip">
+      </Badge>,
+      <Badge key="sc" variant="outline" className="gap-1">
         <Icon name={s.partnerId ? 'building' : 'shield'} />
         {opts.partnerName(s.partnerId)}
-      </span>,
-      <span key="st" className={`sh-pill ${status === 'active' ? 'sh-pill-success' : 'sh-pill-danger'}`}>
-        <span className="sh-pill-dot" />
+      </Badge>,
+      <Badge key="st" variant={status === 'active' ? 'secondary' : 'destructive'}>
         {status}
-      </span>,
-      <span key="la" className="sh-num">{shortDate(s.lastLoginAt)}</span>,
-      <form key="ed" action={updateStaffAction} className="sh-inline-form">
+      </Badge>,
+      <span key="la" className="text-sm tabular-nums">{shortDate(s.lastLoginAt)}</span>,
+      <form key="ed" action={updateStaffAction} className="flex flex-wrap items-center gap-2">
         <input type="hidden" name="username" value={s.username} />
-        <select name="role" className="sh-inline-select" defaultValue={s.role} aria-label={`Role for ${s.name}`}>
+        <select
+          name="role"
+          className="h-8 rounded-md border border-input bg-card px-2 text-xs"
+          defaultValue={s.role}
+          aria-label={`Role for ${s.name}`}
+        >
           <option value="agent">agent</option>
           <option value="admin">admin</option>
         </select>
         <select
           name="partnerId"
-          className="sh-inline-select"
+          className="h-8 rounded-md border border-input bg-card px-2 text-xs"
           defaultValue={s.partnerId ?? ''}
           aria-label={`Scope for ${s.name}`}
         >
           <PartnerOptions partners={opts.partners} />
         </select>
-        <label className="sh-perm">
+        <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" name="canCancel" defaultChecked={s.permissions.canCancel} /> Cancel
         </label>
-        <label className="sh-perm">
+        <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" name="canResend" defaultChecked={s.permissions.canResend} /> Resend
         </label>
-        <label className="sh-perm">
+        <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" name="canAssign" defaultChecked={s.permissions.canAssign} /> Assign
         </label>
-        <button type="submit" className="sh-mini-btn">Save</button>
+        <Button type="submit" size="sm" variant="outline">Save</Button>
       </form>,
       opts.isSelf ? (
-        <span key="ac" className="sh-recipient-sub">—</span>
+        <span key="ac" className="text-xs text-muted-foreground">—</span>
       ) : (
-        <span key="ac" className="sh-inline-form">
+        <span key="ac" className="flex flex-wrap items-center gap-2">
           <form action={setStaffStatusAction}>
             <input type="hidden" name="username" value={s.username} />
             <input type="hidden" name="status" value={status === 'active' ? 'suspended' : 'active'} />
-            <button type="submit" className="sh-mini-btn">
+            <Button type="submit" size="sm" variant="outline">
               {status === 'active' ? 'Suspend' : 'Reactivate'}
-            </button>
+            </Button>
           </form>
           <form action={removeStaffAction}>
             <input type="hidden" name="username" value={s.username} />
-            <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
+            <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
           </form>
         </span>
       ),
@@ -148,64 +161,69 @@ export default async function TeamPage() {
               Manage who can access SmartRemit, their role, scope, and permissions
             </div>
           </div>
-          <Link href="/admin-dashboard/team/new" className="sh-btn-primary">
-            <Icon name="plus" />
-            Add teammate
-          </Link>
+          <Button asChild>
+            <Link href="/admin-dashboard/team/new">
+              <Icon name="plus" />
+              Add teammate
+            </Link>
+          </Button>
         </div>
 
         {platformAdmins <= 1 && (
-          <div className="sh-banner sh-banner-warning" role="status">
-            <span className="sh-banner-icon"><Icon name="warning" /></span>
-            <span>
-              <strong>Only one platform admin.</strong> Add a second platform admin so the account
-              can always be managed if one is locked out.
-            </span>
-          </div>
+          <Alert role="status" className="mb-6 border-warning/50">
+            <Icon name="warning" />
+            <AlertTitle>Only one platform admin.</AlertTitle>
+            <AlertDescription>
+              Add a second platform admin so the account can always be managed if one is locked
+              out.
+            </AlertDescription>
+          </Alert>
         )}
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Members</div>
-              <div className="sh-card-sub">
-                {allStaff.length} member{allStaff.length === 1 ? '' : 's'} across platform and partners
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={STAFF_COLUMNS}
-            rows={allStaff.map((s) =>
-              staffRow(s, { isSelf: s.username === me.username, partners, partnerName }),
-            )}
-            empty={<>No teammates yet — add your first.</>}
-          />
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Members</CardTitle>
+            <CardDescription>
+              {allStaff.length} member{allStaff.length === 1 ? '' : 's'} across platform and partners
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={STAFF_COLUMNS}
+              rows={allStaff.map((s) =>
+                staffRow(s, { isSelf: s.username === me.username, partners, partnerName }),
+              )}
+              empty={<>No teammates yet — add your first.</>}
+            />
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Recent activity</div>
-              <div className="sh-card-sub">Audit trail of team changes</div>
-            </div>
-          </div>
-          {audit.length === 0 ? (
-            <div className="sh-empty">No team changes recorded yet.</div>
-          ) : (
-            <ul className="sh-audit">
-              {audit.map((e, i) => (
-                <li key={i} className="sh-audit-row">
-                  <span className="sh-audit-when">{e.at.replace('T', ' ').slice(0, 16)}</span>
-                  <span className="sh-audit-text">
-                    <span className="sh-audit-actor">{e.actor}</span> {e.action}{' '}
-                    <span className="sh-audit-actor">{e.target}</span>
-                    {e.detail ? ` — ${e.detail}` : ''}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Recent activity</CardTitle>
+            <CardDescription>Audit trail of team changes</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {audit.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No team changes recorded yet.</p>
+            ) : (
+              <ul className="divide-y divide-border text-sm">
+                {audit.map((e, i) => (
+                  <li key={i} className="flex flex-wrap gap-x-3 gap-y-0.5 py-2">
+                    <span className="shrink-0 text-xs leading-5 tabular-nums text-muted-foreground">
+                      {e.at.replace('T', ' ').slice(0, 16)}
+                    </span>
+                    <span>
+                      <span className="font-medium">{e.actor}</span> {e.action}{' '}
+                      <span className="font-medium">{e.target}</span>
+                      {e.detail ? ` — ${e.detail}` : ''}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
       </main>
     </>
   );
