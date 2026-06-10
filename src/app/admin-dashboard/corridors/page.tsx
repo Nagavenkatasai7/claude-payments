@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic';
 
+import { redirect } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { Sidebar } from '../sidebar';
@@ -15,11 +16,14 @@ const CORRIDOR_COLUMNS: ExpandableColumn[] = [
 ];
 
 export default async function CorridorsPage() {
-  // Corridor requests are platform-wide (no per-partner scoping yet).
-  // Require any authenticated staff; render nothing sensitive if partner-scoped.
-  await requireScope();
+  // Corridor requests are PLATFORM-WIDE demand data carrying sender phone
+  // numbers across every tenant — partner-scoped staff must never see it
+  // (Stage 5e fix; the nav already hides it, this closes the direct URL).
+  const { scope } = await requireScope();
+  if (scope.kind !== 'platform') redirect('/admin-dashboard');
 
-  const requests = await getStore().listCorridorRequests();
+  // Bounded render: corridor demand is a lead list, not a ledger.
+  const requests = (await getStore().listCorridorRequests()).slice(0, 200);
 
   return (
     <>

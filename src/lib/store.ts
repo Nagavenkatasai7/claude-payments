@@ -106,6 +106,17 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async transfersSummary(partnerId?: import('./types').PartnerId) {
       return transfersRepo.summary(partnerId);
     },
+    /** Compliance views by compliance_status (Stage 5e scan fixes). */
+    async listTransfersByCompliance(
+      complianceStatus: 'flagged' | 'blocked',
+      opts: { partnerId?: import('./types').PartnerId; limit?: number } = {},
+    ): Promise<Transfer[]> {
+      return transfersRepo.listByCompliance(complianceStatus, opts);
+    },
+    /** Today's velocity leaderboard — one GROUP BY, not a ledger scan. */
+    async topVelocityToday(limit: number, partnerId?: import('./types').PartnerId) {
+      return transfersRepo.topVelocityToday(limit, partnerId);
+    },
     async getTransferCount(phone: string): Promise<number> {
       // Derived (blocked rows excluded) — the count:{phone} counter is gone.
       return transfersRepo.countByPhone(phone);
