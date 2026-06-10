@@ -1,0 +1,84 @@
+/*
+ * Tailwind v4 entry (Stage 5). PREFLIGHT IS DELIBERATELY OMITTED during the
+ * migration — the legacy hand-rolled themes (sh-* dashboard, .payapp pay page,
+ * .lp landing) depend on browser default styles; preflight would reset them
+ * out from under pages we haven't rebuilt yet. The FINAL Stage-5 PR adds
+ * `@import "tailwindcss/preflight.css" layer(base);` and deletes globals.css.
+ */
+@layer theme, base, components, utilities;
+
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+/* shadcn/ui token contract, mapped from the proven --sh-* palette (Radix
+ * Slate neutrals + the Stripe-class indigo accent) so rebuilt pages keep the
+ * exact same visual language as the legacy ones during the migration. */
+:root {
+  --background: #f9f9fb; /* --sh-bg */
+  --foreground: #1c2024; /* --sh-text */
+  --card: #ffffff;
+  --card-foreground: #1c2024;
+  --popover: #ffffff;
+  --popover-foreground: #1c2024;
+  --primary: #533afd; /* --sh-primary */
+  --primary-foreground: #ffffff;
+  --secondary: #f0f0f3; /* --sh-gray-3 */
+  --secondary-foreground: #1c2024;
+  --muted: #f0f0f3;
+  --muted-foreground: #60646c; /* --sh-text-secondary */
+  --accent: #efeefe; /* --sh-primary-bg */
+  --accent-foreground: #2e2b8c; /* --sh-primary-12 */
+  --destructive: #ce2c31;
+  --destructive-foreground: #ffffff;
+  --success: #1a7049;
+  --warning: #ab6400;
+  --border: #e6e8ec; /* --sh-border */
+  --input: #cdced6; /* --sh-border-strong */
+  --ring: #533afd;
+  --radius: 0.5rem;
+  --sidebar: #fcfcfd;
+  --sidebar-foreground: #1c2024;
+  --sidebar-primary: #533afd;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #efeefe;
+  --sidebar-accent-foreground: #2e2b8c;
+  --sidebar-border: #e6e8ec;
+  --sidebar-ring: #533afd;
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}

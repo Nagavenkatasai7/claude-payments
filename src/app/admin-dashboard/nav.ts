@@ -10,6 +10,7 @@ import type { IconName } from './icons';
  */
 export type SidebarActive =
   | 'overview'
+  | 'ops'
   | 'transactions'
   | 'schedules'
   | 'customers'
@@ -19,6 +20,7 @@ export type SidebarActive =
   | 'analytics'
   | 'corridors'
   | 'team'
+  | 'api-keys'
   | 'my-partner';
 
 export type NavItem = SidebarActive;
@@ -29,12 +31,15 @@ export function visibleNavItems(staff: Staff): NavItem[] {
     'customers', 'compliance', 'kyc', 'analytics',
   ];
   if (!staff.partnerId) {
-    // Platform: base + Partners list + Corridors (lead page) + (Team only if admin)
+    // Platform: base + Operations (stuck money) + Partners + Corridors +
+    // (Team + API keys only if admin)
     return [
-      ...base,
+      base[0], // overview first
+      'ops',
+      ...base.slice(1),
       'partners',
       'corridors',
-      ...(staff.role === 'admin' ? (['team'] as NavItem[]) : []),
+      ...(staff.role === 'admin' ? (['team', 'api-keys'] as NavItem[]) : []),
     ];
   }
   // Partner-scoped: base + direct link to their own partner detail
@@ -49,6 +54,8 @@ interface NavMeta {
 
 export const NAV_META: Record<NavItem, NavMeta> = {
   overview:     { label: 'Overview',     icon: 'overview',     hrefFor: () => '/admin-dashboard' },
+  ops:          { label: 'Operations',   icon: 'ops',          hrefFor: () => '/admin-dashboard/ops' },
+  'api-keys':   { label: 'API keys',     icon: 'keys',         hrefFor: () => '/admin-dashboard/api-keys' },
   transactions: { label: 'Transactions', icon: 'transactions', hrefFor: () => '/admin-dashboard/transactions' },
   schedules:    { label: 'Schedules',    icon: 'schedules',    hrefFor: () => '/admin-dashboard/schedules' },
   customers:    { label: 'Customers',    icon: 'customers',    hrefFor: () => '/admin-dashboard/customers' },

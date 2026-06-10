@@ -17,6 +17,8 @@ import type { ReactNode } from 'react';
 export type IconName =
   // nav
   | 'overview'
+  | 'ops'
+  | 'keys'
   | 'transactions'
   | 'schedules'
   | 'customers'
@@ -52,6 +54,16 @@ const PATHS: Record<IconName, ReactNode> = {
       <rect x="14" y="3" width="7" height="5" rx="1" />
       <rect x="14" y="12" width="7" height="9" rx="1" />
       <rect x="3" y="16" width="7" height="5" rx="1" />
+    </>
+  ),
+  ops: (
+    <>
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+    </>
+  ),
+  keys: (
+    <>
+      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
     </>
   ),
   transactions: (
