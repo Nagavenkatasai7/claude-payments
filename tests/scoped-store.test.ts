@@ -161,3 +161,34 @@ describe('createScopedStore', () => {
     expect(scoped.scope).toEqual({ kind: 'partner', partnerId: 'acme' });
   });
 });
+
+describe('transfersPage (Stage 5b cursor paging)', () => {
+  it('a partner-scoped viewer is PINNED to their tenant even with a hostile partnerFilter', async () => {
+    const env = await seedTwoPartnersData();
+    const scoped = createScopedStore(partnerStaff('acme'), {
+      store: env.store, customerStore: env.customerStore,
+      partnerStore: env.partnerStore, scheduleStore: env.scheduleStore,
+    });
+    const page = await scoped.transfersPage({ limit: 50, partnerFilter: 'beta' });
+    expect(page.items.length).toBeGreaterThan(0);
+    expect(page.items.every((t) => t.partnerId === 'acme')).toBe(true);
+  });
+
+  it('a platform viewer can narrow by partner and page by cursor', async () => {
+    const env = await seedTwoPartnersData();
+    const scoped = createScopedStore(platformAdmin(), {
+      store: env.store, customerStore: env.customerStore,
+      partnerStore: env.partnerStore, scheduleStore: env.scheduleStore,
+    });
+    const narrowed = await scoped.transfersPage({ limit: 50, partnerFilter: 'beta' });
+    expect(narrowed.items.every((t) => t.partnerId === 'beta')).toBe(true);
+
+    const page1 = await scoped.transfersPage({ limit: 2 });
+    expect(page1.items).toHaveLength(2);
+    expect(page1.nextCursor).toBeTruthy();
+    const page2 = await scoped.transfersPage({ limit: 2, cursor: page1.nextCursor });
+    expect(page2.items.length).toBeGreaterThan(0);
+    const ids1 = new Set(page1.items.map((t) => t.id));
+    expect(page2.items.every((t) => !ids1.has(t.id))).toBe(true);
+  });
+});

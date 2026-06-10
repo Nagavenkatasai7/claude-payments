@@ -25,25 +25,44 @@ export type SidebarActive =
 
 export type NavItem = SidebarActive;
 
-export function visibleNavItems(staff: Staff): NavItem[] {
-  const base: NavItem[] = [
-    'overview', 'transactions', 'schedules',
-    'customers', 'compliance', 'kyc', 'analytics',
-  ];
+/** A labelled sidebar section (Stage 5 IA). `label` undefined ⇒ top group. */
+export interface NavGroup {
+  label?: string;
+  items: NavItem[];
+}
+
+export function visibleNavGroups(staff: Staff): NavGroup[] {
   if (!staff.partnerId) {
-    // Platform: base + Operations (stuck money) + Partners + Corridors +
-    // (Team + API keys only if admin)
+    // Platform IA: Home/Operations · Money · People · Insights · Platform.
     return [
-      base[0], // overview first
-      'ops',
-      ...base.slice(1),
-      'partners',
-      'corridors',
-      ...(staff.role === 'admin' ? (['team', 'api-keys'] as NavItem[]) : []),
+      { items: ['overview', 'ops'] },
+      { label: 'Money', items: ['transactions', 'schedules'] },
+      { label: 'People', items: ['customers', 'kyc', 'compliance'] },
+      { label: 'Insights', items: ['analytics'] },
+      {
+        label: 'Platform',
+        items: [
+          'partners',
+          'corridors',
+          ...(staff.role === 'admin' ? (['team', 'api-keys'] as NavItem[]) : []),
+        ],
+      },
     ];
   }
-  // Partner-scoped: base + direct link to their own partner detail
-  return [...base, 'my-partner'];
+  // Partner-scoped staff: same operational groups, their own partner instead
+  // of the platform section.
+  return [
+    { items: ['overview'] },
+    { label: 'Money', items: ['transactions', 'schedules'] },
+    { label: 'People', items: ['customers', 'kyc', 'compliance'] },
+    { label: 'Insights', items: ['analytics'] },
+    { label: 'Partner', items: ['my-partner'] },
+  ];
+}
+
+/** Flat view of the visible nav (mobile drawer + membership tests). */
+export function visibleNavItems(staff: Staff): NavItem[] {
+  return visibleNavGroups(staff).flatMap((g) => g.items);
 }
 
 interface NavMeta {

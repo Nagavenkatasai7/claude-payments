@@ -50,3 +50,27 @@ describe('visibleNavItems', () => {
     expect(items).not.toContain('team');
   });
 });
+
+describe('visibleNavGroups (Stage 5b IA)', () => {
+  it('platform groups: top(overview+ops) · Money · People · Insights · Platform', async () => {
+    const { visibleNavGroups } = await import('@/app/admin-dashboard/nav');
+    const groups = visibleNavGroups(staff('admin', undefined));
+    expect(groups[0].items).toEqual(['overview', 'ops']);
+    expect(groups.map((g) => g.label)).toEqual([undefined, 'Money', 'People', 'Insights', 'Platform']);
+    const platform = groups.find((g) => g.label === 'Platform')!;
+    expect(platform.items).toEqual(['partners', 'corridors', 'team', 'api-keys']);
+  });
+
+  it('platform agent: no team, no api-keys in the Platform group', async () => {
+    const { visibleNavGroups } = await import('@/app/admin-dashboard/nav');
+    const platform = visibleNavGroups(staff('agent', undefined)).find((g) => g.label === 'Platform')!;
+    expect(platform.items).toEqual(['partners', 'corridors']);
+  });
+
+  it('partner-scoped staff: no ops, Partner group with my-partner', async () => {
+    const { visibleNavGroups } = await import('@/app/admin-dashboard/nav');
+    const groups = visibleNavGroups(staff('admin', 'acme'));
+    expect(groups.flatMap((g) => g.items)).not.toContain('ops');
+    expect(groups.find((g) => g.label === 'Partner')!.items).toEqual(['my-partner']);
+  });
+});
