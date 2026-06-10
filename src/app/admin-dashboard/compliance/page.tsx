@@ -58,6 +58,7 @@ function transferCells(t: Transfer) {
     <div key="recipient">
       <div className="sh-recipient">{t.recipientName}</div>
       <MaskedDestination
+        transferId={t.id}
         payoutMethod={t.payoutMethod}
         payoutDestination={t.payoutDestination}
       />

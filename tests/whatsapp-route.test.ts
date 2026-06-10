@@ -228,8 +228,11 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
     expect(await res.json()).toEqual({ ok: true });
     expect(markMessageSeen).not.toHaveBeenCalled(); // status path never reaches dedup
     expect(enqueue).not.toHaveBeenCalled();
-    expect(warn.mock.calls.flat().join(' ')).toContain('131056');
-    expect(warn.mock.calls.flat().join(' ')).toContain('FAILED');
+    const logged = warn.mock.calls.flat().join(' ');
+    expect(logged).toContain('131056');
+    expect(logged).toContain('delivery_failed');
+    // Stage 3: the structured warn line must NOT carry the full phone.
+    expect(logged).not.toContain('15551230000');
   });
 
   it('a delivered status → 200, agent NOT run', async () => {

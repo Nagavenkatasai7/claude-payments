@@ -154,6 +154,7 @@ export function TransactionsTabs({
             <div key="recipient">
               <div className="sh-recipient">{t.recipientName}</div>
               <MaskedDestination
+                transferId={t.id}
                 payoutMethod={t.payoutMethod}
                 payoutDestination={t.payoutDestination}
               />
