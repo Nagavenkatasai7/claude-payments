@@ -33,9 +33,9 @@ jobs:
           BASE_URL: https://claude-payments.vercel.app
           E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
-          E2E_PARTNER_USERNAME: ${{ secrets.E2E_PARTNER_USERNAME }}
+          # The partner fixture is SELF-PROVISIONED by the spec via the admin
+          # UI (post fresh-start); only its login password stays a secret.
           E2E_PARTNER_PASSWORD: ${{ secrets.E2E_PARTNER_PASSWORD }}
-          E2E_PARTNER_ID: ${{ secrets.E2E_PARTNER_ID }}
         run: npm run e2e
 
       - name: Upload trace on failure

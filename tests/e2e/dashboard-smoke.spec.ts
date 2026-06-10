@@ -1,13 +1,25 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 // `||` not `??`: GitHub Actions sets env vars to empty string when the
 // referenced secret doesn't exist, and `??` only falls back on undefined.
 const USERNAME = process.env.E2E_USERNAME || 'forextransfer';
 const PASSWORD = process.env.E2E_PASSWORD || 'forex@123';
-
-const PARTNER_USERNAME = process.env.E2E_PARTNER_USERNAME || '';
 const PARTNER_PASSWORD = process.env.E2E_PARTNER_PASSWORD || '';
-const PARTNER_ID = process.env.E2E_PARTNER_ID || '';
+
+// SELF-PROVISIONED partner fixture (post Postgres fresh-start): the old
+// E2E_PARTNER_USERNAME/_ID secrets referenced a partner row that only existed
+// in the abandoned Redis ledger. This spec now finds-or-creates its own
+// partner + partner-scoped agent THROUGH THE REAL ADMIN UI, so it heals
+// itself on any fresh environment. Only E2E_PARTNER_PASSWORD remains a secret.
+const SMOKE_PARTNER_NAME = 'E2E Smoke Partner';
+const SMOKE_USERNAME = 'e2e-smoke-partner';
+
+async function loginAs(page: Page, username: string, password: string) {
+  await page.goto('/login');
+  await page.getByLabel(/username/i).fill(username);
+  await page.getByLabel(/password/i).fill(password);
+  await page.getByRole('button', { name: /sign in/i }).click();
+}
 
 test('public landing page renders at / without auth and links to WhatsApp', async ({ page }) => {
   // `/` must be the public SmartRemit landing page — NOT a redirect to login.
@@ -26,10 +38,7 @@ test('public landing page renders at / without auth and links to WhatsApp', asyn
 });
 
 test('staff can log in and reach dashboard pages', async ({ page }) => {
-  await page.goto('/login');
-  await page.getByLabel(/username/i).fill(USERNAME);
-  await page.getByLabel(/password/i).fill(PASSWORD);
-  await page.getByRole('button', { name: /sign in/i }).click();
+  await loginAs(page, USERNAME, PASSWORD);
 
   await expect(page).toHaveURL(/\/admin-dashboard/);
   // Assert the VISIBLE page heading. (A loose getByText(/overview/i).first() now
@@ -44,43 +53,80 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
 
   await page.getByRole('link', { name: /transactions/i }).click();
   await expect(page).toHaveURL(/\/admin-dashboard\/transactions/);
+  // A fresh (post-cutover) ledger is legitimately empty — accept the page's
+  // ACTUAL empty state alongside a populated table.
   await expect(
-    page.getByRole('table').or(page.getByText(/no transfers/i)),
+    page.getByRole('table').or(page.getByText(/no transactions in this view/i)).first(),
   ).toBeVisible();
 
   await page.getByRole('link', { name: /customers/i }).click();
   await expect(page).toHaveURL(/\/admin-dashboard\/customers/);
-  await expect(
-    page.getByRole('table').or(page.getByText(/no customers yet/i)),
-  ).toBeVisible();
-  // P1: assert the new Country column header exists
-  await expect(page.getByRole('columnheader', { name: /country/i })).toBeVisible();
+  const customersTable = page.getByRole('table');
+  await expect(customersTable.or(page.getByText(/no customers yet/i)).first()).toBeVisible();
+  // P1: the Country column header — only present when the table itself is.
+  if (await customersTable.count()) {
+    await expect(page.getByRole('columnheader', { name: /country/i })).toBeVisible();
+  }
 
   // P2: navigate to /admin-dashboard/partners and assert the table renders
+  // (the seeded 'default' partner guarantees at least one row).
   await page.getByRole('link', { name: /partners/i }).click();
   await expect(page).toHaveURL(/\/admin-dashboard\/partners/);
   await expect(
-    page.getByRole('table').or(page.getByText(/no partners yet/i)),
+    page.getByRole('table').or(page.getByText(/no partners yet/i)).first(),
   ).toBeVisible();
 });
 
 test('partner-scoped staff is restricted to their partner', async ({ page }) => {
-  const partnerEnvMissing = !PARTNER_USERNAME || !PARTNER_PASSWORD || !PARTNER_ID;
-  // Fail loud in CI: a missing partner-seed secret is a misconfiguration, not a
+  // Fail loud in CI: a missing partner password is a misconfiguration, not a
   // reason to silently pass the most security-sensitive smoke check. Skip only
-  // for local runs where the operator hasn't wired up a partner account.
-  if (partnerEnvMissing && process.env.CI) {
+  // for local runs where the operator hasn't wired it up.
+  if (!PARTNER_PASSWORD && process.env.CI) {
     throw new Error(
-      'E2E_PARTNER_USERNAME/_PASSWORD/_ID must be set in CI — partner-isolation smoke cannot be skipped.',
+      'E2E_PARTNER_PASSWORD must be set in CI — partner-isolation smoke cannot be skipped.',
     );
   }
-  test.skip(partnerEnvMissing, 'partner-seed env vars not configured (local run)');
+  test.skip(!PARTNER_PASSWORD, 'E2E_PARTNER_PASSWORD not configured (local run)');
 
-  await page.goto('/login');
-  await page.getByLabel(/username/i).fill(PARTNER_USERNAME);
-  await page.getByLabel(/password/i).fill(PARTNER_PASSWORD);
-  await page.getByRole('button', { name: /sign in/i }).click();
+  // ── Provision (idempotent, via the real admin UI) ────────────────────────
+  await loginAs(page, USERNAME, PASSWORD);
+  await expect(page).toHaveURL(/\/admin-dashboard/);
 
+  // Find or create the smoke partner; capture its id from the detail link/URL.
+  await page.goto('/admin-dashboard/partners');
+  const partnerLink = page
+    .locator('a[href*="/admin-dashboard/partners/"]')
+    .filter({ hasText: SMOKE_PARTNER_NAME })
+    .first();
+  let partnerId: string;
+  if (await partnerLink.count()) {
+    partnerId = (await partnerLink.getAttribute('href'))!.split('/').pop()!;
+  } else {
+    await page.goto('/admin-dashboard/partners/new');
+    await page.locator('input[name="name"]').fill(SMOKE_PARTNER_NAME);
+    await page.locator('input[name="countries"][value="US"]').check();
+    await page.getByRole('button', { name: /create partner/i }).click();
+    await expect(page).toHaveURL(/\/admin-dashboard\/partners\/[^/]+$/);
+    partnerId = page.url().split('/').pop()!;
+  }
+
+  // Find or create the partner-scoped agent bound to that partner.
+  await page.goto('/admin-dashboard/team');
+  const staffRow = page.locator(`input[name="username"][value="${SMOKE_USERNAME}"]`);
+  if ((await staffRow.count()) === 0) {
+    await page.goto('/admin-dashboard/team/new');
+    await page.locator('input[name="name"]').fill('E2E Partner Smoke');
+    await page.locator('input[name="username"]').fill(SMOKE_USERNAME);
+    await page.locator('input[name="password"]').fill(PARTNER_PASSWORD);
+    await page.locator('select[name="role"]').selectOption('agent');
+    await page.locator('select[name="partnerId"]').selectOption(partnerId);
+    await page.getByRole('button', { name: /create teammate/i }).click();
+    await expect(page).toHaveURL(/\/admin-dashboard\/team\/?$/);
+  }
+
+  // ── Verify isolation AS the partner-scoped agent ─────────────────────────
+  await page.context().clearCookies();
+  await loginAs(page, SMOKE_USERNAME, PARTNER_PASSWORD);
   await expect(page).toHaveURL(/\/admin-dashboard/);
 
   // Sidebar: should NOT contain "Partners" (list) or "Team" links.
@@ -94,7 +140,7 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
 
   // Visiting /admin-dashboard/partners redirects to /admin-dashboard/partners/<id>.
   await page.goto('/admin-dashboard/partners');
-  await expect(page).toHaveURL(new RegExp(`/admin-dashboard/partners/${PARTNER_ID}$`));
+  await expect(page).toHaveURL(new RegExp(`/admin-dashboard/partners/${partnerId}$`));
 
   // Visiting /admin-dashboard/team redirects to /admin-dashboard.
   await page.goto('/admin-dashboard/team');
