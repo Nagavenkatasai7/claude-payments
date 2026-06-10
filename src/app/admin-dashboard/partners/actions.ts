@@ -255,3 +255,126 @@ export async function revokeApiKeyAction(partnerId: PartnerId, formData: FormDat
   await getPartnerApiKeyStore().revoke(keyId);
   revalidatePath(`/admin-dashboard/partners/${partnerId}`);
 }
+
+// ── Stage 5c: the partner SETUP WIZARD's single commit ───────────────────────
+// The wizard collects everything client-side and commits ONCE: partner record
+// → integrations (WhatsApp + settlement, simulator auto-provisioned) → first
+// API key. Self-gated (public POST endpoint): platform-admin only — tenant
+// creation is platform governance. Returns everything the "done" screen needs;
+// the API-key plaintext appears ONLY in this return value, never at rest.
+
+const WIZARD_COUNTRIES: ReadonlySet<string> = new Set(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
+
+export interface PartnerWizardInput {
+  name: string;
+  countries: string[];
+  displayName?: string;
+  brandName?: string;
+  primaryColor?: string;
+  logoUrl?: string;
+  supportContact?: string;
+  botPersona?: string;
+  kycMode?: string;
+  requireKycBeforeSend?: boolean;
+  whatsapp?: { phoneNumberId?: string; token?: string; verifyToken?: string; appSecret?: string };
+  payment?: { providerType?: string; settlementUrl?: string; signingSecret?: string; webhookSecret?: string };
+}
+
+export interface PartnerWizardResult {
+  id: string;
+  apiKey: string; // shown once by the wizard, then discarded
+  apiKeyLast4: string;
+  whatsappCallbackUrl: string;
+  statusCallbackUrl: string;
+  apiBaseUrl: string;
+  whatsappConfigured: boolean;
+  settlementConfigured: boolean;
+}
+
+const clean = (v: unknown): string | undefined => {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s === '' ? undefined : s;
+};
+
+export async function wizardCreatePartnerAction(
+  input: PartnerWizardInput,
+): Promise<PartnerWizardResult> {
+  await requirePlatformAdmin();
+
+  const name = clean(input.name);
+  if (!name) throw new Error('Partner name is required.');
+  const countries = (Array.isArray(input.countries) ? input.countries : [])
+    .map(String)
+    .filter((c) => WIZARD_COUNTRIES.has(c)) as Partner['countries'];
+  if (countries.length === 0) throw new Error('At least one country is required.');
+  const kycMode: KycMode = input.kycMode === 'delegated' ? 'delegated' : 'ours';
+
+  const id = newTransferId();
+  const now = new Date().toISOString();
+  const partner: Partner = {
+    id,
+    name,
+    countries,
+    status: 'active',
+    brandName: clean(input.brandName),
+    displayName: clean(input.displayName),
+    supportContact: clean(input.supportContact),
+    botPersona: clean(input.botPersona),
+    primaryColor: clean(input.primaryColor),
+    logoUrl: clean(input.logoUrl),
+    kycMode,
+    requireKycBeforeSend: kycMode === 'delegated' ? input.requireKycBeforeSend === true : undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await getPartnerStore().savePartner(partner);
+
+  // Integrations — only persisted when the wizard actually captured something.
+  const wa = input.whatsapp ?? {};
+  const pay = input.payment ?? {};
+  const providerType = ['mock', 'simulator', 'http'].includes(pay.providerType ?? '')
+    ? pay.providerType
+    : undefined;
+  const credentials: Record<string, string> = {};
+  const settlementUrl = clean(pay.settlementUrl);
+  const signingSecret = clean(pay.signingSecret);
+  if (settlementUrl) credentials.settlementUrl = settlementUrl;
+  if (signingSecret) credentials.signingSecret = signingSecret;
+  let webhookSecret = clean(pay.webhookSecret);
+  if (providerType === 'simulator') {
+    // Zero-hassle reference rail: auto-provision endpoint + both HMAC secrets.
+    if (!credentials.settlementUrl) credentials.settlementUrl = `${env.appBaseUrl}/api/partner-rail`;
+    if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
+    if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
+  }
+  const whatsappConfigured = Boolean(clean(wa.phoneNumberId) && clean(wa.token));
+  const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
+  await getPartnerIntegrationsStore().saveIntegrations(id, {
+    kyc: {},
+    whatsapp: {
+      phoneNumberId: clean(wa.phoneNumberId),
+      token: clean(wa.token),
+      verifyToken: clean(wa.verifyToken),
+      appSecret: clean(wa.appSecret),
+    },
+    payment: {
+      providerType,
+      credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+      webhookSecret,
+    },
+  });
+
+  const issued = await getPartnerApiKeyStore().issue(id);
+
+  revalidatePath('/admin-dashboard/partners');
+  return {
+    id,
+    apiKey: issued.plaintext,
+    apiKeyLast4: issued.last4,
+    whatsappCallbackUrl: `${env.appBaseUrl}/api/whatsapp/${id}`,
+    statusCallbackUrl: `${env.appBaseUrl}/api/payment-webhook/${providerType === 'simulator' ? 'simulator' : 'http'}`,
+    apiBaseUrl: `${env.appBaseUrl}/api/partner/v1`,
+    whatsappConfigured,
+    settlementConfigured,
+  };
+}

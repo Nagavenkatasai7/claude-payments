@@ -102,12 +102,18 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
   if (await partnerLink.count()) {
     partnerId = (await partnerLink.getAttribute('href'))!.split('/').pop()!;
   } else {
+    // Stage 5c: creation is a 6-step wizard (nothing persists until the final
+    // commit). US is pre-checked; walk Continue → Create, then capture the id
+    // from the done screen's "Open partner page" link.
     await page.goto('/admin-dashboard/partners/new');
-    await page.locator('input[name="name"]').fill(SMOKE_PARTNER_NAME);
-    await page.locator('input[name="countries"][value="US"]').check();
+    await page.getByPlaceholder('Acme Remit Inc.').fill(SMOKE_PARTNER_NAME);
+    for (let i = 0; i < 5; i++) {
+      await page.getByRole('button', { name: /continue/i }).click();
+    }
     await page.getByRole('button', { name: /create partner/i }).click();
-    await expect(page).toHaveURL(/\/admin-dashboard\/partners\/[^/]+$/);
-    partnerId = page.url().split('/').pop()!;
+    const openLink = page.getByRole('link', { name: /open partner page/i });
+    await expect(openLink).toBeVisible({ timeout: 15_000 });
+    partnerId = (await openLink.getAttribute('href'))!.split('/').pop()!;
   }
 
   // Find or create the partner-scoped agent bound to that partner.
