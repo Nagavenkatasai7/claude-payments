@@ -39,6 +39,19 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
       });
       return page.items;
     },
+    /**
+     * Cursor-paged transfers for staff list views (Stage 5b). A platform
+     * viewer may narrow to one partner; a partner-scoped viewer is ALWAYS
+     * pinned to their own tenant regardless of the filter argument.
+     */
+    async transfersPage(req: { limit: number; cursor?: string; partnerFilter?: string }) {
+      return store.listTransfersPage({
+        limit: req.limit,
+        cursor: req.cursor,
+        partnerId:
+          scope.kind === 'partner' ? scope.partnerId : (req.partnerFilter || undefined),
+      });
+    },
     async listTransfers() {
       const all = await store.listTransfers();
       return scope.kind === 'platform'
