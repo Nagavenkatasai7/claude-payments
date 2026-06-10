@@ -16,6 +16,7 @@ import {
   topRecipientsByCount,
 } from '@/lib/analytics';
 import { Sidebar } from '../sidebar';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import {
   DailyTransfers,
   DailyVolume,
@@ -72,12 +73,16 @@ export default async function AnalyticsPage({
             <div className="sh-page-title">Analytics</div>
             <div className="sh-page-sub">Trends over the selected window</div>
           </div>
-          <div className="sh-tabs">
+          <div className="inline-flex items-center gap-1 rounded-lg bg-muted p-1">
             {WINDOW_DAYS.map((d) => (
               <Link
                 key={d}
                 href={`/admin-dashboard/analytics?window=${d}`}
-                className={`sh-tab ${windowDays === d ? 'active' : ''}`}
+                className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                  windowDays === d
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
               >
                 {d}d
               </Link>
@@ -85,110 +90,102 @@ export default async function AnalyticsPage({
           </div>
         </div>
 
-        <section className="sh-metrics">
-          <div className="sh-metric sh-metric-primary">
-            <div className="sh-metric-label">Transfers in window</div>
-            <div className="sh-metric-value">{totalTransfers}</div>
-          </div>
-          <div className="sh-metric">
-            <div className="sh-metric-label">Volume in window</div>
-            <div className="sh-metric-value">{usd(totalVolume)}</div>
-          </div>
-          <div className="sh-metric">
-            <div className="sh-metric-label">Commission in window</div>
-            <div className="sh-metric-value">{usd(totalCommission)}</div>
-          </div>
+        <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <Card className="border-primary/30 bg-accent/40">
+            <CardHeader className="pb-2">
+              <CardDescription>Transfers in window</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{totalTransfers}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>Volume in window</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{usd(totalVolume)}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>Commission in window</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{usd(totalCommission)}</CardTitle>
+            </CardHeader>
+          </Card>
         </section>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Daily transfers</div>
-              <div className="sh-card-sub">Last {windowDays} days</div>
-            </div>
-          </div>
-          <div style={{ padding: 16 }}>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Daily transfers</CardTitle>
+            <CardDescription>Last {windowDays} days</CardDescription>
+          </CardHeader>
+          <CardContent>
             <DailyTransfers data={counts} />
-          </div>
-        </section>
+          </CardContent>
+        </Card>
 
-        <div className="sh-chart-grid">
-          <section className="sh-card" style={{ marginBottom: 0 }}>
-            <div className="sh-card-head">
-              <div>
-                <div className="sh-card-title">Daily volume (USD)</div>
-                <div className="sh-card-sub">Total amount sent per day</div>
-              </div>
-            </div>
-            <div style={{ padding: 16 }}>
+        <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card className="min-w-0">
+            <CardHeader>
+              <CardTitle>Daily volume (USD)</CardTitle>
+              <CardDescription>Total amount sent per day</CardDescription>
+            </CardHeader>
+            <CardContent>
               <DailyVolume data={volume} />
-            </div>
-          </section>
-          <section className="sh-card" style={{ marginBottom: 0 }}>
-            <div className="sh-card-head">
-              <div>
-                <div className="sh-card-title">Daily commission (USD)</div>
-                <div className="sh-card-sub">Fees on paid/delivered transfers</div>
-              </div>
-            </div>
-            <div style={{ padding: 16 }}>
+            </CardContent>
+          </Card>
+          <Card className="min-w-0">
+            <CardHeader>
+              <CardTitle>Daily commission (USD)</CardTitle>
+              <CardDescription>Fees on paid/delivered transfers</CardDescription>
+            </CardHeader>
+            <CardContent>
               <DailyCommission data={commission} />
-            </div>
-          </section>
+            </CardContent>
+          </Card>
         </div>
 
-        <div className="sh-chart-grid">
-          <section className="sh-card" style={{ marginBottom: 0 }}>
-            <div className="sh-card-head">
-              <div>
-                <div className="sh-card-title">Status distribution</div>
-                <div className="sh-card-sub">Transfers in window by lifecycle status</div>
-              </div>
-            </div>
-            <div style={{ padding: 16 }}>
+        <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card className="min-w-0">
+            <CardHeader>
+              <CardTitle>Status distribution</CardTitle>
+              <CardDescription>Transfers in window by lifecycle status</CardDescription>
+            </CardHeader>
+            <CardContent>
               <StatusDonut data={statusDist} />
-            </div>
-          </section>
-          <section className="sh-card" style={{ marginBottom: 0 }}>
-            <div className="sh-card-head">
-              <div>
-                <div className="sh-card-title">Compliance distribution</div>
-                <div className="sh-card-sub">Cleared / flagged / blocked breakdown</div>
-              </div>
-            </div>
-            <div style={{ padding: 16 }}>
+            </CardContent>
+          </Card>
+          <Card className="min-w-0">
+            <CardHeader>
+              <CardTitle>Compliance distribution</CardTitle>
+              <CardDescription>Cleared / flagged / blocked breakdown</CardDescription>
+            </CardHeader>
+            <CardContent>
               <ComplianceDonut data={complianceDist} />
-            </div>
-          </section>
+            </CardContent>
+          </Card>
         </div>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Funding method mix</div>
-              <div className="sh-card-sub">How customers paid</div>
-            </div>
-          </div>
-          <div style={{ padding: 16 }}>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Funding method mix</CardTitle>
+            <CardDescription>How customers paid</CardDescription>
+          </CardHeader>
+          <CardContent>
             <FundingMix data={funding} />
-          </div>
-        </section>
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Top 10 recipients</div>
-              <div className="sh-card-sub">By number of transfers in window</div>
-            </div>
-          </div>
-          <div style={{ padding: 16 }}>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Top 10 recipients</CardTitle>
+            <CardDescription>By number of transfers in window</CardDescription>
+          </CardHeader>
+          <CardContent>
             {topReci.length === 0 ? (
-              <div className="sh-empty">No transfers in window.</div>
+              <p className="text-sm text-muted-foreground">No transfers in window.</p>
             ) : (
               <TopRecipients data={topReci} />
             )}
-          </div>
-        </section>
+          </CardContent>
+        </Card>
       </main>
     </>
   );

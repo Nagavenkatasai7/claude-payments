@@ -2,12 +2,15 @@ export const dynamic = 'force-dynamic';
 
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
+import Link from 'next/link';
 import { schedulesDueInRange } from '@/lib/dashboard';
 import type { Schedule, Transfer } from '@/lib/types';
 import { money } from './format';
 import { Sidebar } from './sidebar';
 import { Icon } from './icons';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 
 function usd(n: number): string {
   return `$${n.toFixed(2)}`;
@@ -86,54 +89,58 @@ export default async function DashboardPage() {
           </div>
         </div>
 
-        <section className="sh-metrics">
-          <div className="sh-metric sh-metric-primary">
-            <div className="sh-metric-label">Commission today</div>
-            <div className="sh-metric-value">{usd(summary.commissionToday)}</div>
-          </div>
-          <div className="sh-metric">
-            <div className="sh-metric-label">Volume today</div>
-            <div className="sh-metric-value">{usd(summary.volumeToday)}</div>
-          </div>
-          <div className="sh-metric">
-            <div className="sh-metric-label">Transactions today</div>
-            <div className="sh-metric-value">{summary.countToday}</div>
-          </div>
-          <div className="sh-metric sh-metric-alert">
-            <div className="sh-metric-label">Flagged today</div>
-            <div className="sh-metric-value">{summary.flaggedToday}</div>
-          </div>
+        <section className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <Card className="border-primary/30 bg-accent/40">
+            <CardHeader className="pb-2">
+              <CardDescription>Commission today</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{usd(summary.commissionToday)}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>Volume today</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{usd(summary.volumeToday)}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>Transactions today</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{summary.countToday}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card className={summary.flaggedToday > 0 ? 'border-destructive/50' : ''}>
+            <CardHeader className="pb-2">
+              <CardDescription>Flagged today</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{summary.flaggedToday}</CardTitle>
+            </CardHeader>
+          </Card>
         </section>
 
         {attentionCount > 0 && (
-          <section className="sh-attention" style={{ marginBottom: 24 }}>
-            <div className="sh-attention-title" style={{ alignItems: 'center' }}>
-              <Icon name="warning" /> {attentionCount}{' '}
-              {attentionCount === 1
-                ? 'transfer needs'
-                : 'transfers need'}{' '}
-              attention
-              <a
+          <Card className="mb-6 border-warning/50">
+            <CardContent className="flex items-center gap-2 py-4 text-sm">
+              <Icon name="warning" /> <strong>{attentionCount}</strong>{' '}
+              {attentionCount === 1 ? 'transfer needs' : 'transfers need'} attention
+              <Link
                 href="/admin-dashboard/compliance"
-                className="sh-recipient-sub"
-                style={{ marginLeft: 'auto' }}
+                className="ml-auto text-primary underline-offset-2 hover:underline"
               >
                 View on Compliance →
-              </a>
-            </div>
-          </section>
+              </Link>
+            </CardContent>
+          </Card>
         )}
 
-        <section className="sh-card">
-          <div className="sh-card-head">
+        <Card className="mb-6">
+          <CardHeader className="flex flex-row items-start justify-between space-y-0">
             <div>
-              <div className="sh-card-title">Recent transactions</div>
-              <div className="sh-card-sub">Last 5</div>
+              <CardTitle>Recent transactions</CardTitle>
+              <CardDescription>Last 5</CardDescription>
             </div>
-            <a href="/admin-dashboard/transactions" className="sh-btn-secondary">
-              View all →
-            </a>
-          </div>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/admin-dashboard/transactions">View all →</Link>
+            </Button>
+          </CardHeader>
           <ExpandableTable
             columns={RECENT_TX_COLUMNS}
             empty={<>No transactions yet.</>}
@@ -159,18 +166,18 @@ export default async function DashboardPage() {
               ],
             }))}
           />
-        </section>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between space-y-0">
             <div>
-              <div className="sh-card-title">Next due schedules</div>
-              <div className="sh-card-sub">Next 3</div>
+              <CardTitle>Next due schedules</CardTitle>
+              <CardDescription>Next 3</CardDescription>
             </div>
-            <a href="/admin-dashboard/schedules" className="sh-btn-secondary">
-              View all →
-            </a>
-          </div>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/admin-dashboard/schedules">View all →</Link>
+            </Button>
+          </CardHeader>
           <ExpandableTable
             columns={NEXT_DUE_COLUMNS}
             empty={<>No schedules due soon.</>}
@@ -184,7 +191,7 @@ export default async function DashboardPage() {
               ],
             }))}
           />
-        </section>
+        </Card>
       </main>
     </>
   );

@@ -13,6 +13,9 @@ import {
   rejectTransferAction,
 } from '../actions';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import type { Transfer } from '@/lib/types';
 
 const REVIEW_COLUMNS: ExpandableColumn[] = [
@@ -56,7 +59,7 @@ function recipientGets(t: Transfer): string {
 function transferCells(t: Transfer) {
   return [
     <div key="recipient">
-      <div className="sh-recipient">{t.recipientName}</div>
+      <div className="font-semibold">{t.recipientName}</div>
       <MaskedDestination
         transferId={t.id}
         payoutMethod={t.payoutMethod}
@@ -64,21 +67,21 @@ function transferCells(t: Transfer) {
       />
     </div>,
     <div key="amount">
-      <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+      <div className="font-semibold tabular-nums">{money(t.amountSource, t.sourceCurrency)}</div>
       {t.sourceCurrency !== 'USD' && (
-        <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+        <div className="mt-0.5 text-xs text-muted-foreground">≈ {money(t.amountUsd, 'USD')}</div>
       )}
-      <div className="sh-recipient-sub">{recipientGets(t)}</div>
+      <div className="mt-0.5 text-xs text-muted-foreground">{recipientGets(t)}</div>
     </div>,
-    <span key="reasons">
+    <span key="reasons" className="inline-flex flex-wrap items-center gap-1.5">
       {t.complianceReasons.length === 0 ? '—' : t.complianceReasons.map((r) =>
         r === 'edd_required'
-          ? <span key={r} className="sh-pill sh-pill-warning"><span className="sh-pill-dot"></span>EDD required</span>
-          : <span key={r} style={{ marginRight: 6 }}>{r}</span>,
+          ? <Badge key={r} variant="outline" className="border-warning/50 text-warning">EDD required</Badge>
+          : <span key={r}>{r}</span>,
       )}
     </span>,
     new Date(t.createdAt).toLocaleString(),
-    <span key="sender" className="sh-recipient-sub">{t.phone}</span>,
+    <span key="sender" className="text-xs text-muted-foreground">{t.phone}</span>,
   ];
 }
 
@@ -122,170 +125,155 @@ export default async function CompliancePage() {
           </div>
         </div>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Needs review</div>
-              <div className="sh-card-sub">
-                {inReview.length} {inReview.length === 1 ? 'transfer' : 'transfers'} — payment captured, pending staff decision
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={REVIEW_COLUMNS}
-            empty={<>No transfers awaiting review.</>}
-            rows={inReview.map((t) => ({
-              key: t.id,
-              label: t.recipientName,
-              cells: [
-                ...transferCells(t),
-                <div key="actions" className="sh-attention-actions">
-                  <form action={releaseTransferAction}>
-                    <input type="hidden" name="id" value={t.id} />
-                    <button type="submit" className="sh-mini-btn">Release</button>
-                  </form>
-                  <form action={rejectTransferAction}>
-                    <input type="hidden" name="id" value={t.id} />
-                    <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Reject</button>
-                  </form>
-                </div>,
-              ],
-            }))}
-          />
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Needs review</CardTitle>
+            <CardDescription>
+              {inReview.length} {inReview.length === 1 ? 'transfer' : 'transfers'} — payment captured, pending staff decision
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={REVIEW_COLUMNS}
+              empty={<>No transfers awaiting review.</>}
+              rows={inReview.map((t) => ({
+                key: t.id,
+                label: t.recipientName,
+                cells: [
+                  ...transferCells(t),
+                  <div key="actions" className="flex flex-wrap gap-2">
+                    <form action={releaseTransferAction}>
+                      <input type="hidden" name="id" value={t.id} />
+                      <Button type="submit" size="sm">Release</Button>
+                    </form>
+                    <form action={rejectTransferAction}>
+                      <input type="hidden" name="id" value={t.id} />
+                      <Button type="submit" size="sm" variant="outline" className="text-destructive">Reject</Button>
+                    </form>
+                  </div>,
+                ],
+              }))}
+            />
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Flagged transfers</div>
-              <div className="sh-card-sub">
-                {flagged.length} {flagged.length === 1 ? 'transfer' : 'transfers'}
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={TRANSFER_COLUMNS}
-            empty={<>No flagged transfers.</>}
-            rows={flagged.map((t) => ({
-              key: t.id,
-              label: t.recipientName,
-              cells: transferCells(t),
-            }))}
-          />
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Flagged transfers</CardTitle>
+            <CardDescription>
+              {flagged.length} {flagged.length === 1 ? 'transfer' : 'transfers'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={TRANSFER_COLUMNS}
+              empty={<>No flagged transfers.</>}
+              rows={flagged.map((t) => ({
+                key: t.id,
+                label: t.recipientName,
+                cells: transferCells(t),
+              }))}
+            />
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Blocked transfers</div>
-              <div className="sh-card-sub">
-                {blocked.length} {blocked.length === 1 ? 'transfer' : 'transfers'}
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={TRANSFER_COLUMNS}
-            empty={<>No blocked transfers.</>}
-            rows={blocked.map((t) => ({
-              key: t.id,
-              label: t.recipientName,
-              cells: transferCells(t),
-            }))}
-          />
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Blocked transfers</CardTitle>
+            <CardDescription>
+              {blocked.length} {blocked.length === 1 ? 'transfer' : 'transfers'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={TRANSFER_COLUMNS}
+              empty={<>No blocked transfers.</>}
+              rows={blocked.map((t) => ({
+                key: t.id,
+                label: t.recipientName,
+                cells: transferCells(t),
+              }))}
+            />
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Watchlist</div>
-              <div className="sh-card-sub">
-                Recipient names that hard-block a transfer (read-only)
-              </div>
-            </div>
-          </div>
-          <div
-            style={{
-              padding: '16px 20px',
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 8,
-            }}
-          >
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Watchlist</CardTitle>
+            <CardDescription>
+              Recipient names that hard-block a transfer (read-only)
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
             {WATCHLIST.map((name) => (
-              <span key={name} className="sh-pill sh-pill-danger">
-                <span className="sh-pill-dot"></span>{name}
-              </span>
+              <Badge key={name} variant="destructive">{name}</Badge>
             ))}
-          </div>
-        </section>
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Corridor rules</div>
-              <div className="sh-card-sub">
-                Resolved compliance rules per corridor (read-only). Full rule-creation UI is deferred.
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={CORRIDOR_COLUMNS}
-            empty={<>No corridors configured.</>}
-            rows={corridorRows.map((r) => ({
-              key: r.partnerName + r.corridor,
-              label: `${r.partnerName} ${r.corridor}`,
-              cells: [
-                r.partnerName,
-                r.corridor,
-                // largeAmountUsd is a USD-equivalent threshold, not a source amount — always USD
-                <span key="large" className="sh-amount">{money(r.largeAmountUsd, 'USD')}</span>,
-                <span key="velocity" className="sh-amount">{r.velocityLimit}</span>,
-                <span key="watchlist">
-                  {r.watchlistSize}
-                  {r.watchlistExtra.length > 0 && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
-                      {r.watchlistExtra.map((name) => (
-                        <span key={name} className="sh-pill sh-pill-danger">
-                          <span className="sh-pill-dot"></span>{name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </span>,
-              ],
-            }))}
-          />
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Corridor rules</CardTitle>
+            <CardDescription>
+              Resolved compliance rules per corridor (read-only). Full rule-creation UI is deferred.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={CORRIDOR_COLUMNS}
+              empty={<>No corridors configured.</>}
+              rows={corridorRows.map((r) => ({
+                key: r.partnerName + r.corridor,
+                label: `${r.partnerName} ${r.corridor}`,
+                cells: [
+                  r.partnerName,
+                  r.corridor,
+                  // largeAmountUsd is a USD-equivalent threshold, not a source amount — always USD
+                  <span key="large" className="font-semibold tabular-nums">{money(r.largeAmountUsd, 'USD')}</span>,
+                  <span key="velocity" className="font-semibold tabular-nums">{r.velocityLimit}</span>,
+                  <span key="watchlist">
+                    {r.watchlistSize}
+                    {r.watchlistExtra.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-2">
+                        {r.watchlistExtra.map((name) => (
+                          <Badge key={name} variant="destructive">{name}</Badge>
+                        ))}
+                      </div>
+                    )}
+                  </span>,
+                ],
+              }))}
+            />
+          </CardContent>
+        </Card>
 
-        <section className="sh-card">
-          <div className="sh-card-head">
-            <div>
-              <div className="sh-card-title">Top velocity today</div>
-              <div className="sh-card-sub">
-                Phones with the most transfers today
-              </div>
-            </div>
-          </div>
-          <ExpandableTable
-            columns={VELOCITY_COLUMNS}
-            empty={<>No activity today yet.</>}
-            rows={topVel.map(({ phone, count }) => ({
-              key: phone,
-              label: phone,
-              cells: [
-                phone,
-                <span key="count" className="sh-amount">{count}</span>,
-                <a
-                  key="link"
-                  href={`/admin-dashboard/transactions?phone=${encodeURIComponent(phone)}`}
-                  className="sh-mini-btn"
-                >
-                  View transfers
-                </a>,
-              ],
-            }))}
-          />
-        </section>
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Top velocity today</CardTitle>
+            <CardDescription>
+              Phones with the most transfers today
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={VELOCITY_COLUMNS}
+              empty={<>No activity today yet.</>}
+              rows={topVel.map(({ phone, count }) => ({
+                key: phone,
+                label: phone,
+                cells: [
+                  phone,
+                  <span key="count" className="font-semibold tabular-nums">{count}</span>,
+                  <Button key="link" asChild size="sm" variant="outline">
+                    <a href={`/admin-dashboard/transactions?phone=${encodeURIComponent(phone)}`}>
+                      View transfers
+                    </a>
+                  </Button>,
+                ],
+              }))}
+            />
+          </CardContent>
+        </Card>
       </main>
     </>
   );

@@ -7,12 +7,15 @@ import { deriveTier } from '@/lib/tier-rules';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { KycBadge } from '../kyc-badge';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import type { Customer, Partner, Tier } from '@/lib/types';
 
-function tierBadge(tier: Tier): string {
-  if (tier === 'T0') return 'sh-tag sh-tag-tier-t0';
-  if (tier === 'T1') return 'sh-tag sh-tag-tier-t1';
-  return 'sh-tag sh-tag-tier-suspended';
+function tierVariant(tier: Tier): 'outline' | 'secondary' | 'destructive' {
+  if (tier === 'T0') return 'outline';
+  if (tier === 'T1') return 'secondary';
+  return 'destructive';
 }
 
 function tierLabel(tier: Tier, c: Customer, now: Date): string {
@@ -95,72 +98,74 @@ export default async function CustomersPage({
             </div>
           </div>
           {isAdmin && (
-            <Link href="/admin-dashboard/customers/new" className="sh-btn-primary">
-              + New customer
-            </Link>
+            <Button asChild>
+              <Link href="/admin-dashboard/customers/new">+ New customer</Link>
+            </Button>
           )}
         </div>
-        <section className="sh-card">
-          {scoped.scope.kind === 'platform' && (
-            <form
-              method="get"
-              className="sh-toolbar"
-              style={{ margin: 0, padding: '14px 16px', borderBottom: '1px solid var(--sh-border)' }}
-            >
-              <select
-                name="partner"
-                defaultValue={partnerFilter}
-                className="sh-select"
-                aria-label="Filter by partner"
-              >
-                <option value="">All partners</option>
-                {Object.values(partnerById).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <button type="submit" className="sh-btn-secondary">Apply</button>
-            </form>
-          )}
-          <ExpandableTable
-            columns={columns}
-            empty={<>No customers yet.</>}
-            rows={rows.map(({ c, life }) => {
-              const tier = deriveTier(c, now);
-              return {
-                key: c.senderPhone,
-                label: `+${c.senderPhone}`,
-                cells: [
-                  <Link href={`/admin-dashboard/customers/${c.senderPhone}`} key="phone">
-                    +{c.senderPhone}
-                  </Link>,
-                  ...(isPlatform
-                    ? [<span key="partner">{partnerById[c.partnerId]?.name ?? c.partnerId}</span>]
-                    : []),
-                  c.senderCountry,
-                  new Date(c.firstSeenAt).toLocaleDateString(),
-                  <span className={tierBadge(tier)} key="tier">
-                    {tierLabel(tier, c, now)}
-                  </span>,
-                  <KycBadge kyc={c} key="kyc" />,
-                  <div key="life">
-                    {/* Lifetime sent is a USD-equivalent aggregate across all transfers — always USD */}
-                    <div className="sh-amount">${(life.cents / 100).toFixed(2)} USD</div>
-                    <div className="sh-recipient-sub">
-                      {life.count} {life.count === 1 ? 'transfer' : 'transfers'}
-                    </div>
-                  </div>,
-                  life.lastAt ? (
-                    new Date(life.lastAt).toLocaleString()
-                  ) : (
-                    <span className="sh-recipient-sub" key="last">—</span>
-                  ),
-                ],
-              };
-            })}
-          />
-        </section>
+        <Card>
+          <CardContent className="space-y-4">
+            {scoped.scope.kind === 'platform' && (
+              <form method="get" className="flex flex-wrap items-center gap-2">
+                <select
+                  name="partner"
+                  defaultValue={partnerFilter}
+                  className="h-9 rounded-md border border-input bg-card px-3 text-sm"
+                  aria-label="Filter by partner"
+                >
+                  <option value="">All partners</option>
+                  {Object.values(partnerById).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+                <Button type="submit" variant="outline">Apply</Button>
+              </form>
+            )}
+            <ExpandableTable
+              columns={columns}
+              empty={<>No customers yet.</>}
+              rows={rows.map(({ c, life }) => {
+                const tier = deriveTier(c, now);
+                return {
+                  key: c.senderPhone,
+                  label: `+${c.senderPhone}`,
+                  cells: [
+                    <Link
+                      href={`/admin-dashboard/customers/${c.senderPhone}`}
+                      className="text-primary underline-offset-2 hover:underline"
+                      key="phone"
+                    >
+                      +{c.senderPhone}
+                    </Link>,
+                    ...(isPlatform
+                      ? [<span key="partner">{partnerById[c.partnerId]?.name ?? c.partnerId}</span>]
+                      : []),
+                    c.senderCountry,
+                    new Date(c.firstSeenAt).toLocaleDateString(),
+                    <Badge variant={tierVariant(tier)} key="tier">
+                      {tierLabel(tier, c, now)}
+                    </Badge>,
+                    <KycBadge kyc={c} key="kyc" />,
+                    <div key="life">
+                      {/* Lifetime sent is a USD-equivalent aggregate across all transfers — always USD */}
+                      <div className="font-medium tabular-nums">${(life.cents / 100).toFixed(2)} USD</div>
+                      <div className="text-xs text-muted-foreground">
+                        {life.count} {life.count === 1 ? 'transfer' : 'transfers'}
+                      </div>
+                    </div>,
+                    life.lastAt ? (
+                      new Date(life.lastAt).toLocaleString()
+                    ) : (
+                      <span className="text-muted-foreground" key="last">—</span>
+                    ),
+                  ],
+                };
+              })}
+            />
+          </CardContent>
+        </Card>
       </main>
     </>
   );
