@@ -3,6 +3,7 @@ import { env } from '@/lib/env';
 import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
+import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import {
   sendText,
   sendTemplate,
@@ -10,10 +11,20 @@ import {
   RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
 import { newTransferId } from '@/lib/id';
+import { chat } from '@/lib/ollama';
+import { createAgent } from '@/lib/agent';
+import { getCustomerStore } from '@/lib/customer-store';
+import { getScheduleStore } from '@/lib/schedule-store';
+import { getDraftStore } from '@/lib/draft-store';
+import { getDailyVolumeStore } from '@/lib/daily-volume-store';
+import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
+import { getKycProvider } from '@/lib/providers/kyc-provider';
+import { getPartnerStore } from '@/lib/partner-store';
 
 export const maxDuration = 60;
 
-// /api/worker — drains the durability outbox (Stage 2b). Invoked two ways:
+// /api/worker — drains the durability outbox (Stage 2b) and runs the
+// reconciliation sweep (Stage 2d). Invoked two ways:
 //   • the after() POKE from any enqueue site (fast path, best effort),
 //   • the GitHub Actions 5-minute heartbeat (the delivery guarantee).
 // Claiming uses FOR UPDATE SKIP LOCKED, so overlapping invocations are safe by
@@ -29,15 +40,42 @@ async function run(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  const store = getStore();
   const deps: WorkerDeps = {
     db: getDb(),
-    store: getStore(),
+    store,
     sendText,
     sendTemplate,
     fetchFn: fetch,
     recipientTemplateName: RECIPIENT_TEMPLATE_NAME,
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
+    runAgentTurn: async (phone, message, turn, waCreds) => {
+      const customerStore = getCustomerStore(store);
+      const agent = createAgent({
+        chat,
+        store,
+        scheduleStore: getScheduleStore(),
+        draftStore: getDraftStore(),
+        customerStore,
+        dailyVolumeStore: getDailyVolumeStore(),
+        monthlyVolumeStore: getMonthlyVolumeStore(),
+        kycProvider: getKycProvider(customerStore, env.appBaseUrl),
+        partnerStore: getPartnerStore(),
+        waCreds, // WL2: interactive sends + replies leave from the partner's number
+      });
+      return agent.runAgentTurn(phone, message, turn);
+    },
   };
+
+  // Safety-net sweep FIRST so its enqueued effects drain in this same
+  // invocation. Two indexed queries that normally return zero rows — cheap
+  // enough to run on every poke.
+  let sweep: SweepResult = { stuckPaid: 0, reinstructed: 0, staleReviews: 0 };
+  try {
+    sweep = await reconcileSweep(deps.db);
+  } catch (err) {
+    console.error('Reconcile sweep failed (drain continues):', err);
+  }
 
   const workerId = `w_${newTransferId()}`;
   const started = Date.now();
@@ -54,7 +92,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     if (drainedNothing || Date.now() - started > TIME_BUDGET_MS) break;
   }
 
-  return NextResponse.json({ ok: true, processed, failed, dead });
+  return NextResponse.json({ ok: true, processed, failed, dead, sweep });
 }
 
 export async function POST(req: NextRequest) {

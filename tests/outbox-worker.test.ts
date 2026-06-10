@@ -35,6 +35,7 @@ let outbox: ReturnType<typeof createOutboxRepo>;
 const sendText = vi.fn(async (..._a: unknown[]) => {});
 const sendTemplate = vi.fn(async (..._a: unknown[]) => {});
 const fetchFn = vi.fn();
+const runAgentTurn = vi.fn(async (..._a: unknown[]) => '');
 
 function deps(): WorkerDeps {
   return {
@@ -44,6 +45,7 @@ function deps(): WorkerDeps {
     fetchFn: fetchFn as unknown as typeof fetch,
     recipientTemplateName: 'transfer_delivered',
     recipientTemplateLang: 'en',
+    runAgentTurn: runAgentTurn as unknown as WorkerDeps['runAgentTurn'],
   };
 }
 
@@ -55,6 +57,8 @@ beforeEach(async () => {
   sendText.mockReset();
   sendTemplate.mockReset();
   fetchFn.mockReset();
+  runAgentTurn.mockReset();
+  runAgentTurn.mockResolvedValue('');
 });
 
 describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () => {
@@ -153,6 +157,55 @@ describe('drainOnce — plain sends', () => {
     await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}`);
     const r = await drainOnce(deps(), 'w1');
     expect(r.dead).toBe(1);
+  });
+});
+
+describe('drainOnce — agent.turn (the durable inbound turn)', () => {
+  it('runs the agent and sends a non-empty reply (default number: no creds)', async () => {
+    runAgentTurn.mockResolvedValue('Here is your quote!');
+    await outbox.enqueue(
+      'agent.turn',
+      { phone: '15551230000', messageText: 'send $200 to mom', turn: { isNewConversation: true } },
+      { dedupeKey: 'wamid:abc123' },
+    );
+
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(runAgentTurn).toHaveBeenCalledWith(
+      '15551230000', 'send $200 to mom', { isNewConversation: true }, undefined,
+    );
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'Here is your quote!', undefined);
+  });
+
+  it("resolves the ROUTED partner's creds at run time and replies from their number", async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'mock' },
+      whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+    runAgentTurn.mockResolvedValue('hola');
+    await outbox.enqueue('agent.turn', {
+      phone: '15551230000', messageText: 'hi', turn: {}, routedPartnerId: 'acme',
+    });
+
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    const creds = (runAgentTurn.mock.calls[0] as unknown[])[3];
+    expect(creds).toMatchObject({ phoneNumberId: 'pn_acme' });
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'hola', creds);
+  });
+
+  it('an empty reply sends nothing; an agent failure retries instead of eating the message', async () => {
+    runAgentTurn.mockResolvedValue('   ');
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'ok', turn: {} });
+    let r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).not.toHaveBeenCalled();
+
+    runAgentTurn.mockRejectedValue(new Error('ollama blip'));
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'again', turn: {} });
+    r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1); // retried with backoff — NOT lost
   });
 });
 

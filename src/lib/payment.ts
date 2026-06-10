@@ -41,6 +41,23 @@ function formatSourceCharge(amount: number, currency: CurrencyCode | string): st
   }
 }
 
+/**
+ * The customer-facing stage-1 ("payment received") message — pure, so the
+ * transactional settlement path (Stage 2c) can enqueue the EXACT text that
+ * completePaymentStage1 would have sent.
+ */
+export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }): string {
+  const destCurrency = transfer.destinationCurrency ?? 'INR';
+  const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
+  const sourceCharge = formatSourceCharge(
+    transfer.totalChargeSource ?? transfer.totalChargeUsd,
+    transfer.sourceCurrency ?? 'USD',
+  );
+  return opts?.held
+    ? `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
+    : `✅ Payment received — ${sourceCharge} charged. ${transfer.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
+}
+
 export async function completePaymentStage1(
   store: Store,
   transferId: string,
@@ -64,22 +81,7 @@ export async function completePaymentStage1(
   };
   await store.saveTransfer(updated);
 
-  const destCurrency = updated.destinationCurrency ?? 'INR';
-  const destAmount = formatDestAmount(updated.amountInr, destCurrency);
-  const sourceCharge = formatSourceCharge(
-    updated.totalChargeSource ?? updated.totalChargeUsd,
-    updated.sourceCurrency ?? 'USD',
-  );
-
-  const senderMessages = opts?.held
-    ? [
-        `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${updated.id}`,
-      ]
-    : [
-        `✅ Payment received — ${sourceCharge} charged. ${updated.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${updated.id}`,
-      ];
-
-  return { transfer: updated, senderMessages };
+  return { transfer: updated, senderMessages: [buildStage1Message(updated, opts)] };
 }
 
 export async function completePaymentStage2(

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
-import { getPaymentProvider } from '@/lib/providers/payment-provider';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getDraftStore } from '@/lib/draft-store';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -8,11 +7,10 @@ import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
-import { resolvePartnerBranding } from '@/lib/partner-config';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
-import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
+import { beginSettlement } from '@/lib/settlement';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
@@ -26,7 +24,8 @@ import type { CountryCode, Transfer } from '@/lib/types';
  * Process payment for a resolved transfer, branching on complianceStatus:
  *  - blocked  → hard stop (no charge)
  *  - flagged  → charge via stage 1 (held message), set status in_review, no delivery
- *  - cleared  → normal: provider.initiateTransfer (stage1 + auto stage2 via after())
+ *  - cleared  → beginSettlement: ONE transaction flips paid + enqueues the
+ *               stage-1 message and the rail effect (Stage 2c — atomic).
  */
 async function processTransferPayment(
   store: ReturnType<typeof getStore>,
@@ -36,11 +35,8 @@ async function processTransferPayment(
     return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
   }
 
-  // WL2/WL3: the owning partner's brand, outbound WhatsApp creds, and settlement
-  // rail drive everything below. Default/unconfigured ⇒ SmartRemit + env number
-  // + mock rail (byte-for-byte today).
-  const owningPartner = await getPartnerStore().getPartner(transfer.partnerId);
-  const brand = resolvePartnerBranding(owningPartner).brand;
+  // WL2/WL3: the owning partner's outbound WhatsApp creds + settlement rail
+  // drive everything below. Default/unconfigured ⇒ env number + mock rail.
   const integrations = await getPartnerIntegrationsStore().getIntegrations(transfer.partnerId);
   const waCreds = waCredsFrom(integrations);
 
@@ -59,22 +55,16 @@ async function processTransferPayment(
     return NextResponse.json({ ok: true, status: 'in_review' });
   }
 
-  // cleared (or any future status): the partner's settlement rail. mock ⇒ timer
-  // self-advance (sandbox); http/simulator ⇒ signed instruction out, delivery
-  // arrives via the partner's signed callback to /api/payment-webhook (WL3).
-  const provider = getPaymentProvider(store, createOutboxRepo(getDb()), integrations.payment, brand, waCreds);
-  const { providerRef } = await provider.initiateTransfer(transfer);
-  pokeWorker(); // fast-path drain for the enqueued stage-2 / settlement effects
-
-  // Persist the settlement ref WITHOUT clobbering the 'paid' write initiateTransfer
-  // just made: re-read, write the ref only when not already set, spread-merge.
-  const settled = await store.getTransfer(transfer.id);
-  if (settled && !settled.paymentProviderRef) {
-    await store.saveTransfer({ ...settled, paymentProviderRef: providerRef });
+  // cleared: the atomic settlement transaction (status flip + stage-1 message +
+  // rail effect commit together; every effect dedupe-keyed; worker delivers).
+  const result = await beginSettlement(getDb(), transfer, integrations, waCreds);
+  pokeWorker(); // fast-path drain
+  if (result.kind === 'already') {
+    // Double submit / replay — the first settlement won; report current truth.
+    const current = await store.getTransfer(transfer.id);
+    return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
   }
-  const isWebhookDriven =
-    integrations.payment.providerType === 'http' || integrations.payment.providerType === 'simulator';
-  return NextResponse.json({ ok: true, status: isWebhookDriven ? 'processing' : 'paid' });
+  return NextResponse.json({ ok: true, status: result.webhookDriven ? 'processing' : 'paid' });
 }
 
 const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
@@ -222,6 +212,7 @@ export async function POST(
       partnerStore: getPartnerStore(),
       monthlyVolumeStore: getMonthlyVolumeStore(),
       dailyVolumeStore: getDailyVolumeStore(),
+      db: getDb(),
     };
     const result = await finalizeDraftPayment(stores, transferId, bankDetails);
     if (!result.ok) {

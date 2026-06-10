@@ -19,8 +19,10 @@ vi.mock('@/lib/store', () => ({
 }));
 
 // Keep the downstream turn-building dependencies inert so the POST handler can
-// run to completion once it's past the gate, without real Redis / agent calls.
+// run to completion once it's past the gate, without real Redis / Postgres.
 // vi.hoisted: these mock fns are referenced inside the hoisted vi.mock factories.
+// Stage 2c: the agent turn is ENQUEUED to the outbox, not run inline — so the
+// "agent ran / didn't run" assertions become "agent.turn enqueued / not".
 const {
   sendText,
   setOptedOut,
@@ -28,7 +30,7 @@ const {
   setOptedIn,
   getCustomer,
   upsertOnFirstInbound,
-  runAgentTurn,
+  enqueue,
 } = vi.hoisted(() => ({
   sendText: vi.fn(async () => {}),
   setOptedOut: vi.fn(async (_phone: string) => {}),
@@ -48,7 +50,7 @@ const {
       wasCreated: true,
     }),
   ),
-  runAgentTurn: vi.fn(async () => ''),
+  enqueue: vi.fn(async () => true),
 }));
 vi.mock('@/lib/whatsapp', async (orig) => {
   const real = await orig<typeof import('@/lib/whatsapp')>();
@@ -63,17 +65,10 @@ vi.mock('@/lib/customer-store', () => ({
     setOptedIn,
   }),
 }));
-vi.mock('@/lib/daily-volume-store', () => ({ getDailyVolumeStore: () => ({}) }));
-vi.mock('@/lib/monthly-volume-store', () => ({ getMonthlyVolumeStore: () => ({}) }));
-vi.mock('@/lib/schedule-store', () => ({ getScheduleStore: () => ({}) }));
-vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({}) }));
-vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({}) }));
 vi.mock('@/lib/tier-rules', () => ({ deriveTier: () => 'T1' }));
-vi.mock('@/lib/providers/mock-kyc-provider', () => ({ MockKycProvider: class {} }));
-vi.mock('@/lib/agent', () => ({
-  createAgent: () => ({ runAgentTurn }),
-}));
-vi.mock('@/lib/ollama', () => ({ chat: async () => '' }));
+vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+vi.mock('@/db/repos/outbox-repo', () => ({ createOutboxRepo: () => ({ enqueue }) }));
+vi.mock('@/lib/outbox', () => ({ pokeWorker: vi.fn() }));
 
 import { GET, POST } from '@/app/api/whatsapp/route';
 import { OPT_OUT_REPLY, OPT_IN_REPLY, OPT_OUT_REMINDER } from '@/lib/consent';
@@ -115,7 +110,7 @@ beforeEach(() => {
   setOptedOut.mockClear();
   clearOptedOut.mockClear();
   setOptedIn.mockClear();
-  runAgentTurn.mockClear();
+  enqueue.mockClear();
   // Reset customer lookups to the opted-IN default each test.
   getCustomer.mockClear().mockResolvedValue({
     senderPhone: '15551230000',
@@ -232,7 +227,7 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(markMessageSeen).not.toHaveBeenCalled(); // status path never reaches dedup
-    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
     expect(warn.mock.calls.flat().join(' ')).toContain('131056');
     expect(warn.mock.calls.flat().join(' ')).toContain('FAILED');
   });
@@ -240,7 +235,7 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
   it('a delivered status → 200, agent NOT run', async () => {
     const res = await post(statusBody('delivered'));
     expect(res.status).toBe(200);
-    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
 
@@ -250,7 +245,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
     expect(res.status).toBe(200);
     expect(setOptedOut).toHaveBeenCalledWith('15551230000');
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
-    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('inbound "START" → clearOptedOut, confirmation sent, agent NOT run', async () => {
@@ -258,7 +253,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
     expect(res.status).toBe(200);
     expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
-    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('a normal "hi" still runs the agent (regression — STOP detection is exact-only)', async () => {
@@ -266,14 +261,14 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
     expect(res.status).toBe(200);
     expect(setOptedOut).not.toHaveBeenCalled();
     expect(clearOptedOut).not.toHaveBeenCalled();
-    expect(runAgentTurn).toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalled();
   });
 
   it('"stop the transfer" does NOT opt out (runs the agent)', async () => {
     const res = await post(textBody('stop the transfer', 'wamid.STOPX'));
     expect(res.status).toBe(200);
     expect(setOptedOut).not.toHaveBeenCalled();
-    expect(runAgentTurn).toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalled();
   });
 });
 
@@ -288,7 +283,7 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     const res = await post(textBody('send $20', 'wamid.OPTEDOUT1'));
     expect(res.status).toBe(200);
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER, undefined);
-    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
     // Not a fresh STOP — no setOptedOut, no fresh OPT_OUT_REPLY confirmation.
     expect(setOptedOut).not.toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY);
@@ -304,7 +299,7 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     expect(res.status).toBe(200);
     expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
-    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
     // The state-skip reminder must NOT fire for a resume keyword.
     expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
   });
@@ -317,7 +312,7 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     });
     const res = await post(textBody('send $20', 'wamid.OPTEDIN1'));
     expect(res.status).toBe(200);
-    expect(runAgentTurn).toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
   });
 });
@@ -335,7 +330,7 @@ describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', ()
     const res = await post(textBody('hi', 'wamid.BACKFILL1'));
     expect(res.status).toBe(200);
     expect(setOptedIn).toHaveBeenCalledWith('15551230000');
-    expect(runAgentTurn).toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalled();
   });
 
   it('a customer that already has optInAt → setOptedIn NOT called (no churn), agent runs', async () => {
@@ -346,6 +341,6 @@ describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', ()
     const res = await post(textBody('hi', 'wamid.NOCHURN1'));
     expect(res.status).toBe(200);
     expect(setOptedIn).not.toHaveBeenCalled();
-    expect(runAgentTurn).toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalled();
   });
 });

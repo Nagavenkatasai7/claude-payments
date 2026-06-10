@@ -1,5 +1,3 @@
-import { after } from 'next/server';
-import { env } from '@/lib/env';
 import { parseIncoming, parseStatusEvent, sendText, type WaCreds } from '@/lib/whatsapp';
 import {
   isOptOutKeyword,
@@ -9,24 +7,19 @@ import {
   OPT_OUT_REMINDER,
 } from '@/lib/consent';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
-import { chat } from '@/lib/ollama';
-import { createAgent } from '@/lib/agent';
 import { getStore } from '@/lib/store';
-import { getScheduleStore } from '@/lib/schedule-store';
-import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
-import { getDailyVolumeStore } from '@/lib/daily-volume-store';
-import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
-import { getKycProvider } from '@/lib/providers/kyc-provider';
-import { getPartnerStore } from '@/lib/partner-store';
 import { deriveTier } from '@/lib/tier-rules';
+import { getDb } from '@/db/client';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
 // (/api/whatsapp/[partnerId]) run THIS after their own signature gate:
 //   status events → parse → dedup → consent → customer upsert (routed to the
-//   owning partner; follow-the-number) → agent turn → reply.
+//   owning partner; follow-the-number) → agent turn ENQUEUED (durable outbox).
 // `routedPartnerId` is the partner that OWNS the receiving number (null ⇒ the
 // shared/default number); `waCreds` are that partner's outbound credentials so
 // every reply leaves FROM the number the customer messaged.
@@ -99,8 +92,6 @@ export async function processInboundWebhook(
     }
   }
 
-  const dailyVolumeStore = getDailyVolumeStore();
-  const monthlyVolumeStore = getMonthlyVolumeStore();
   const lastInboundAt = await store.getLastInboundAt(incoming.from);
   const isNewConversation = lastInboundAt === null;
   await store.recordInboundNow(incoming.from);
@@ -147,36 +138,17 @@ export async function processInboundWebhook(
     tierReminderDayOfWindow,
   };
 
-  after(async () => {
-    try {
-      const kycProvider = getKycProvider(customerStore, env.appBaseUrl);
-      const agent = createAgent({
-        chat,
-        store,
-        scheduleStore: getScheduleStore(),
-        draftStore: getDraftStore(),
-        customerStore,
-        dailyVolumeStore,
-        monthlyVolumeStore,
-        kycProvider,
-        partnerStore: getPartnerStore(),
-        waCreds, // WL2: interactive sends + replies leave from the partner's number
-      });
-      const reply = await agent.runAgentTurn(incoming.from, messageText, turn);
-      if (reply.trim()) await sendText(incoming.from, reply, waCreds);
-    } catch (err) {
-      console.error('Failed to process WhatsApp message:', err);
-      try {
-        await sendText(
-          incoming.from,
-          'Sorry, something went wrong on our side. Please try again.',
-          waCreds,
-        );
-      } catch {
-        // best effort
-      }
-    }
-  });
+  // Stage 2c: the agent turn is a DURABLE outbox row (wamid-deduped), not a
+  // best-effort after() — a killed function or an Ollama blip can no longer eat
+  // a customer message; the worker retries with backoff. The payload carries
+  // routedPartnerId (NOT the creds themselves) so the worker re-resolves the
+  // partner's WhatsApp credentials at run time — no token copied to rest.
+  await createOutboxRepo(getDb()).enqueue(
+    'agent.turn',
+    { phone: incoming.from, messageText, turn, routedPartnerId },
+    { dedupeKey: `wamid:${incoming.messageId}` },
+  );
+  pokeWorker(); // fast path — the heartbeat is the guarantee
 
   return { ok: true };
 }
