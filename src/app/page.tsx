@@ -611,6 +611,70 @@ export default async function LandingPage() {
             </a>
           </div>
         </section>
+
+        {/* ============ FOR PARTNERS (Stage 5d — dual-audience band) ============
+            Tailwind-native (no .lp classes) so it survives the legacy-CSS
+            retirement untouched. */}
+        <section id="partners" className="border-t border-[#e6e8ec] bg-[#0e1430] px-6 py-16 text-white">
+          <div className="mx-auto max-w-5xl">
+            <p className="text-sm font-semibold uppercase tracking-wider text-[#8f9bff]">For partners</p>
+            <h2 className="mt-2 max-w-2xl text-3xl font-semibold leading-tight">
+              White-label remittance infrastructure — your brand, your rail, our orchestration.
+            </h2>
+            <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <div className="font-medium">Your brand in WhatsApp</div>
+                <p className="mt-1 text-sm text-white/70">
+                  Bring your own Meta number — the agent, OTPs, and delivery notifications speak
+                  as you, end to end.
+                </p>
+              </div>
+              <div>
+                <div className="font-medium">You settle, we orchestrate</div>
+                <p className="mt-1 text-sm text-white/70">
+                  Signed settlement instructions to your rail; signed status callbacks back.
+                  Funds never touch SmartRemit.
+                </p>
+              </div>
+              <div>
+                <div className="font-medium">KYC your way</div>
+                <p className="mt-1 text-sm text-white/70">
+                  Run verification yourself (delegated) or use our tiered KYC. Sanctions screening
+                  always stays on — never delegable.
+                </p>
+              </div>
+              <div>
+                <div className="font-medium">A real REST API</div>
+                <p className="mt-1 text-sm text-white/70">
+                  Quotes, beneficiaries, idempotent transactions, webhooks — plus a hosted
+                  reference rail to integrate against in minutes.
+                </p>
+              </div>
+            </div>
+            <div className="mt-8 flex flex-wrap gap-3">
+              <a
+                href="/docs"
+                className="rounded-lg bg-white px-5 py-2.5 text-sm font-semibold text-[#0e1430] hover:bg-white/90"
+              >
+                Read the integration docs
+              </a>
+              <a
+                href={genericHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-lg border border-white/30 px-5 py-2.5 text-sm font-semibold text-white hover:bg-white/10"
+              >
+                Talk to us
+              </a>
+            </div>
+            <p className="mt-8 max-w-3xl border-t border-white/15 pt-5 text-xs leading-relaxed text-white/60">
+              Non-custodial by design: SmartRemit provides the technology platform — conversation,
+              quoting, compliance screening, and orchestration. Partners are the licensed money
+              transmitters and settle all funds on their own rails. SmartRemit never holds,
+              receives, or disburses customer money.
+            </p>
+          </div>
+        </section>
       </main>
 
       {/* ============ FOOTER ============ */}

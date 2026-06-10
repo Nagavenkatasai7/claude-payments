@@ -49,6 +49,11 @@ export default async function AccountHomePage() {
           <p className="acct-sub">{cta.note}</p>
           {cta.done ? null : <a className="acct-cta" href="/account/verify">{cta.label}</a>}
         </div>
+        <div className="acct-kyc-card">
+          <p className="acct-kyc-status">Transfer history</p>
+          <p className="acct-sub">Every transfer you&rsquo;ve sent, with receipts.</p>
+          <a className="acct-cta" href="/account/history">View history</a>
+        </div>
         <LogoutButton />
       </div>
     </main>
