@@ -2,6 +2,9 @@ import { createTransfer } from './transfer-create';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
+import { newTransferId } from './id';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
 import type { DraftStore } from './draft-store';
@@ -27,6 +30,7 @@ export interface FinalizeStores {
   partnerStore: PartnerStore;
   monthlyVolumeStore: MonthlyVolumeStore;
   dailyVolumeStore: DailyVolumeStore;
+  db: DbOrTx; // idempotency claims (Stage 2c)
 }
 
 export type FinalizeResult =
@@ -36,42 +40,78 @@ export type FinalizeResult =
 /**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
  * Transfer at the moment of payment (create-at-pay). Mirrors the createTransferTool
- * button-tap parity: peek → cap re-check → atomic consume → createTransfer (screens +
- * accrues count/today/monthly + saves recipient) → daily-cents → sticky EDD → sticky
- * funding. Returns the new transferId for the caller to run completePaymentStage1.
+ * button-tap parity: peek → gates → cap re-check → CLAIM-FIRST mint → consume →
+ * accruals. Returns the new transferId for the caller to run the payment path.
+ *
+ * Stage 2c crash-safety: the idempotency key `draft:<draftId>` is bound to a
+ * pre-generated transfer id BEFORE minting, and the draft is consumed AFTER.
+ * A crash anywhere in between leaves a replayable state — re-POSTing the same
+ * pay link deterministically converges on the same transfer instead of losing
+ * the customer's link (the old consume-then-create order destroyed it).
  */
 export async function finalizeDraftPayment(
   stores: FinalizeStores,
   draftId: string,
   bankDetails?: BankDetails,
 ): Promise<FinalizeResult> {
-  const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore } = stores;
+  const { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db } = stores;
 
-  // Peek first so a cap failure doesn't destroy the (single-use) draft.
-  const peek = await draftStore.getDraft(draftId);
-  if (!peek) return { ok: false, error: 'expired_or_used' };
+  // Peek (never consumes) so a gate/cap failure keeps the single-use draft alive.
+  const draft = await draftStore.getDraft(draftId);
+  if (!draft) {
+    // Expired draft — but a crash-replay of an ALREADY-FINALIZED link lands
+    // here too (the draft was consumed after the mint). The idempotency claim
+    // is the durable record: if this draftId minted a transfer, return it.
+    const minted = await createIdempotencyRepo(db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`)
+      ?? null;
+    if (minted) {
+      const t = await store.getTransfer(minted);
+      if (t) {
+        return t.status === 'blocked'
+          ? { ok: false, error: 'blocked', transferId: t.id }
+          : { ok: true, transferId: t.id };
+      }
+    }
+    return { ok: false, error: 'expired_or_used' };
+  }
 
   const customer =
-    (await customerStore.getCustomer(peek.senderPhone)) ??
-    (await customerStore.upsertOnFirstInbound(peek.senderPhone)).customer;
+    (await customerStore.getCustomer(draft.senderPhone)) ??
+    (await customerStore.upsertOnFirstInbound(draft.senderPhone)).customer;
   // WL1: resolve the owning partner — drives the gate toggle + requiresKyc.
   const partner =
     (await partnerStore.getPartner(customer.partnerId)) ??
     (await partnerStore.ensureDefaultPartner());
 
-  // Phase 3 verify-before-send gate — refuse BEFORE consuming the draft so an
+  // Phase 3 verify-before-send gate — refuse BEFORE claiming/consuming so an
   // unverified sender keeps their (single-use) draft and can retry once verified.
   // WL1: skipped for a 'delegated' partner; sanctions still run in createTransfer.
   if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
-  const todayUsedCents = await dailyVolumeStore.getTodayCents(peek.senderPhone);
-  const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(peek.amountUsd * 100));
+  const todayUsedCents = await dailyVolumeStore.getTodayCents(draft.senderPhone);
+  const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100));
   if (!ev.withinCap) return { ok: false, error: 'cap' };
 
-  // Atomic single-use consume (guards double-pay / double-click).
-  const draft = await draftStore.consumeDraft(draftId);
-  if (!draft) return { ok: false, error: 'expired_or_used' };
+  // CLAIM-FIRST: bind `draft:<draftId>` to a pre-generated id before minting.
+  // PK(partner_id, key) means exactly one id can ever own this draft — a double
+  // submit or crash-replay converges on the winner. The claim is keyed under
+  // DEFAULT_PARTNER_ID deliberately: a draftId is globally unique, and the
+  // expired-draft replay above must find it without knowing the customer's partner.
+  const idem = createIdempotencyRepo(db);
+  const candidateId = newTransferId();
+  const reservedId = await idem.claim(DEFAULT_PARTNER_ID, `draft:${draftId}`, candidateId);
+  if (reservedId !== candidateId) {
+    // A prior attempt owns this draft. If it minted, replay its outcome; a
+    // bound-but-unminted id means it crashed mid-mint — fall through and mint
+    // THAT id so the replay completes the original attempt.
+    const existing = await store.getTransfer(reservedId);
+    if (existing) {
+      return existing.status === 'blocked'
+        ? { ok: false, error: 'blocked', transferId: existing.id }
+        : { ok: true, transferId: existing.id };
+    }
+  }
 
   // Item 2: the recipient's bank details are entered on the secure pay page and
   // arrive here in the POST body (bankDetails). Use them for the created
@@ -87,6 +127,7 @@ export async function finalizeDraftPayment(
       : draft.recipient.payoutMethod;
 
   const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
+    id: reservedId, // the claimed id — crash-replay re-mints the SAME row
     phone: draft.senderPhone,
     recipientName: draft.recipient.name,
     recipientPhone: draft.recipient.recipientPhone,
@@ -107,6 +148,11 @@ export async function finalizeDraftPayment(
     senderKycStatus: customer.kycStatus,
     requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
   });
+
+  // Consume AFTER the mint: the transfer now exists, so losing the draft here
+  // costs nothing (the claim replays it); losing the transfer there was fatal.
+  // A null consume just means a concurrent request beat us to it — harmless.
+  await draftStore.consumeDraft(draftId);
 
   if (transfer.complianceStatus === 'blocked') {
     return { ok: false, error: 'blocked', transferId: transfer.id };

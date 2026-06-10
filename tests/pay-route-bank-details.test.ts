@@ -38,8 +38,15 @@ vi.mock('@/lib/transaction-otp', () => ({
 }));
 vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
 
+let db: Awaited<ReturnType<typeof freshDb>>;
 let store: ReturnType<typeof createStore>;
 let customerStore: ReturnType<typeof createCustomerStore>;
+// Stage 2c: the cleared branch runs beginSettlement(getDb(), …) — point the
+// route's db handle at THIS test's PGlite instance.
+vi.mock('@/db/client', async (orig) => {
+  const real = await orig<typeof import('@/db/client')>();
+  return { ...real, getDb: () => db };
+});
 vi.mock('@/lib/store', async (orig) => {
   const real = await orig<typeof import('@/lib/store')>();
   return { ...real, getStore: () => store };
@@ -74,11 +81,6 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 
-const initiateTransfer = vi.fn(async (_t: Transfer) => ({ providerRef: 'ref_1' }));
-vi.mock('@/lib/providers/payment-provider', () => ({
-  getPaymentProvider: () => ({ initiateTransfer }),
-}));
-
 import { POST } from '@/app/api/pay/[transferId]/route';
 
 function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
@@ -104,7 +106,7 @@ function post(id: string, body?: unknown) {
 }
 
 beforeEach(async () => {
-  const db = await freshDb();
+  db = await freshDb();
   store = createStore(fakeRedis(), db);
   customerStore = createCustomerStore(db, store);
   // Verified owner for the transfer's phone so the verify-before-send gate passes.
@@ -114,15 +116,18 @@ beforeEach(async () => {
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
   });
-  initiateTransfer.mockClear();
 });
+
+// "Charged" is now observable in the LEDGER (Stage 2c beginSettlement): the
+// status flips awaiting_payment → paid in the same transaction as the effects.
+const status = async (id: string) => (await store.getTransfer(id))?.status;
 
 describe('pay route — scheduled transfer with no bank details (Item 2)', () => {
   it('empty destination + NO body → 400, never charged', async () => {
     await store.saveTransfer(makeTransfer({ id: 's1', payoutDestination: '' }));
     const res = await post('s1'); // bodyless
     expect(res.status).toBe(400);
-    expect(initiateTransfer).not.toHaveBeenCalled();
+    expect(await status('s1')).toBe('awaiting_payment'); // never charged
     expect((await store.getTransfer('s1'))?.payoutDestination).toBe(''); // untouched
   });
 
@@ -130,16 +135,15 @@ describe('pay route — scheduled transfer with no bank details (Item 2)', () =>
     await store.saveTransfer(makeTransfer({ id: 's2', payoutDestination: '' }));
     const res = await post('s2', { country: 'IN', fields: { accountNumber: '123456789', ifsc: 'HDFC0001234' } });
     expect(res.status).toBe(200);
-    expect(initiateTransfer).toHaveBeenCalledTimes(1);
-    // The settlement rail received the FULL collected details…
-    const charged = initiateTransfer.mock.calls[0][0] as Transfer;
-    expect(charged.payoutDestination).toContain('123456789');
-    expect(charged.payoutDestination).toContain('HDFC0001234');
-    // …and the stored row now has a destination (default reads are MASKED)…
+    // Charged: paid in the settlement transaction, mock providerRef set with it.
+    expect(await status('s2')).toBe('paid');
+    expect((await store.getTransfer('s2'))?.paymentProviderRef).toBe('mock-s2');
+    // The stored row now has a destination (default reads are MASKED)…
     const t = await store.getTransfer('s2');
     expect(t?.payoutDestination).toMatch(/^\*\*\*\*\d{4}$/);
     // …while the FULL value survives at rest through the charge's RMW re-save
-    // (the mask-aware upsert never lets a masked read clobber the ciphertext).
+    // (the mask-aware upsert never lets a masked read clobber the ciphertext) —
+    // the settlement.instruct worker leg reads THIS decrypted value for the rail.
     const full = await store.getTransferDecrypted('s2');
     expect(full?.payoutDestination).toContain('123456789');
     expect(full?.payoutDestination).toContain('HDFC0001234');
@@ -149,7 +153,7 @@ describe('pay route — scheduled transfer with no bank details (Item 2)', () =>
     await store.saveTransfer(makeTransfer({ id: 's3', payoutDestination: '123456789 HDFC0001234' }));
     const res = await post('s3'); // bodyless, like today's scheduled/re-open links
     expect(res.status).toBe(200);
-    expect(initiateTransfer).toHaveBeenCalledTimes(1);
+    expect(await status('s3')).toBe('paid');
   });
 
   it('Phase 3: an UNVERIFIED owner is blocked with 403 (kyc_required) — never charged', async () => {
@@ -163,6 +167,6 @@ describe('pay route — scheduled transfer with no bank details (Item 2)', () =>
     await store.saveTransfer(makeTransfer({ id: 's4', payoutDestination: '123456789 HDFC0001234' }));
     const res = await post('s4');
     expect(res.status).toBe(403);
-    expect(initiateTransfer).not.toHaveBeenCalled();
+    expect(await status('s4')).toBe('awaiting_payment'); // never charged
   });
 });

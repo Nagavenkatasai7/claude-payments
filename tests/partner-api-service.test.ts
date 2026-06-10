@@ -107,6 +107,32 @@ describe('partner-api-service: createTransaction', () => {
     }
   });
 
+  it('CLAIM-FIRST: a crash between claim and mint replays into the SAME claimed id', async () => {
+    const { deps } = await harness();
+    // Simulate the crash window: the key is bound but no transfer was minted.
+    const { createIdempotencyRepo } = await import('@/db/repos/aux-repos');
+    const claimed = await createIdempotencyRepo(deps.db).claim('acme', 'idem-crash', 'tr_crashed');
+    expect(claimed).toBe('tr_crashed');
+
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-crash', txBody());
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect((r.data as { id: string }).id).toBe('tr_crashed');
+    expect(await deps.store.getTransfer('tr_crashed')).not.toBeNull();
+  });
+
+  it('CONCURRENT duplicates with the same key converge on ONE transfer row', async () => {
+    const { deps, store } = await harness();
+    const [a, b] = await Promise.all([
+      createTransaction(deps, DELEGATED, 'pk_1', 'idem-race', txBody()),
+      createTransaction(deps, DELEGATED, 'pk_1', 'idem-race', txBody()),
+    ]);
+    expect(a.ok && b.ok).toBe(true);
+    if (a.ok && b.ok) {
+      expect((a.data as { id: string }).id).toBe((b.data as { id: string }).id);
+    }
+    expect(await store.listTransfers()).toHaveLength(1);
+  });
+
   it('requires an Idempotency-Key and a sender phone', async () => {
     const { deps } = await harness();
     expect(await createTransaction(deps, DELEGATED, 'pk_1', '', txBody())).toMatchObject({ ok: false, status: 400 });

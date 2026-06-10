@@ -13,6 +13,7 @@ import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
+import type { TurnContext } from '@/lib/types';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
 // outbox row written transactionally with the state change that implies it;
@@ -38,6 +39,18 @@ export interface WorkerDeps {
   fetchFn: typeof fetch;
   recipientTemplateName: string;
   recipientTemplateLang: string;
+  /**
+   * Run one conversational agent turn and return the reply text (Stage 2c —
+   * the inbound webhook enqueues 'agent.turn' instead of running the agent in
+   * a best-effort after()). DI'd: the route wires the real createAgent+Ollama;
+   * tests stub it.
+   */
+  runAgentTurn: (
+    phone: string,
+    message: string,
+    turn: TurnContext,
+    waCreds?: WaCreds,
+  ) => Promise<string>;
 }
 
 type Payload = Record<string, unknown>;
@@ -156,7 +169,25 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
       return;
     }
 
-    // 'agent.turn' lands in Stage 2c with the inbound pipeline change.
+    // ── One durable agent turn (was the webhook's best-effort after()) ──────
+    case 'agent.turn': {
+      const phone = str(p.phone);
+      const routedPartnerId = str(p.routedPartnerId);
+      // Re-resolve the routing partner's outbound creds at RUN time (the
+      // payload never carries tokens; rotation is picked up automatically).
+      const waCreds = routedPartnerId
+        ? (await partnerContext(deps, routedPartnerId)).waCreds
+        : undefined;
+      const reply = await deps.runAgentTurn(
+        phone,
+        str(p.messageText),
+        (p.turn ?? {}) as TurnContext,
+        waCreds,
+      );
+      if (reply.trim()) await deps.sendText(phone, reply, waCreds);
+      return;
+    }
+
     default:
       throw new Error(`Unknown outbox kind: ${row.kind}`);
   }

@@ -21,7 +21,7 @@ async function buildStores() {
   const partnerStore = createPartnerStore(db);
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const dailyVolumeStore = createDailyVolumeStore(redis);
-  return { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore };
+  return { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db };
 }
 
 async function makeDraft(
@@ -204,5 +204,63 @@ describe('finalizeDraftPayment', () => {
     if (!result.ok) throw new Error('unexpected');
     const saved = await stores.store.getTransferDecrypted(result.transferId);
     expect(saved?.payoutDestination).toBe('mom@upi');
+  });
+
+  // ── Stage 2c: claim-first idempotency ──────────────────────────────────────
+
+  it('REPLAY: re-finalizing after the draft was consumed returns the SAME transfer (crash-safe pay link)', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+
+    const first = await finalizeDraftPayment(stores, draftId);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error('unexpected');
+
+    // The draft is consumed — the OLD code would now say expired_or_used and
+    // the customer's link would be dead. The claim makes the re-POST converge.
+    expect(await stores.draftStore.getDraft(draftId)).toBeNull();
+    const second = await finalizeDraftPayment(stores, draftId);
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error('unexpected');
+    expect(second.transferId).toBe(first.transferId);
+
+    // No duplicate mint, no double accrual.
+    expect(await stores.store.getTransferCount(PHONE)).toBe(1);
+    expect(await stores.dailyVolumeStore.getTodayCents(PHONE)).toBe(20_000);
+  });
+
+  it('REPLAY preserves blocked semantics: a blocked transfer replays as blocked, same id', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200, 'John Doe');
+
+    const first = await finalizeDraftPayment(stores, draftId);
+    expect(first.ok).toBe(false);
+    if (first.ok) throw new Error('unexpected');
+    expect(first.error).toBe('blocked');
+
+    const second = await finalizeDraftPayment(stores, draftId);
+    expect(second.ok).toBe(false);
+    if (second.ok) throw new Error('unexpected');
+    expect(second.error).toBe('blocked');
+    expect(second.transferId).toBe(first.transferId);
+  });
+
+  it('crash BETWEEN claim and mint: the replay completes the original attempt with the claimed id', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+
+    // Simulate the crash window: the claim row exists but no transfer was minted.
+    const { createIdempotencyRepo } = await import('@/db/repos/aux-repos');
+    const claimed = await createIdempotencyRepo(stores.db).claim(
+      'default', `draft:${draftId}`, 'tr_crashed_attempt',
+    );
+    expect(claimed).toBe('tr_crashed_attempt');
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    // The replay mints THE CLAIMED id — not a fresh one.
+    expect(result.transferId).toBe('tr_crashed_attempt');
+    expect(await stores.store.getTransfer('tr_crashed_attempt')).not.toBeNull();
   });
 });

@@ -10,7 +10,6 @@ import { validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
 import { createTransfer } from './transfer-create';
 import { sendGateActive } from './kyc-gate';
-import { getPaymentProvider } from './providers/payment-provider';
 import { resolvePartnerBranding } from './partner-config';
 import { waCredsFrom } from './whatsapp-creds';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
@@ -21,7 +20,8 @@ import {
   createAuditRepo,
   type BeneficiaryRecord,
 } from '@/db/repos/aux-repos';
-import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { beginSettlement } from './settlement';
+import type { Db } from '@/db/client';
 import { newTransferId } from './id';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
@@ -180,11 +180,18 @@ export async function createTransaction(
 ): Promise<SvcResult<unknown>> {
   if (!idempotencyKey) return err(400, 'Idempotency-Key header is required.');
 
+  // CLAIM-FIRST idempotency (Stage 2c): pre-generate the transfer id and bind
+  // the key BEFORE minting. PK(partner_id, key) means exactly one id can ever
+  // own this key — a concurrent duplicate or crash-replay deterministically
+  // converges on the winner, and a crash after the claim re-mints the SAME id.
   const idem = createIdempotencyRepo(deps.db);
-  const existing = await idem.find(partner.id, idempotencyKey);
-  if (existing) {
-    const t = await deps.store.getTransfer(existing);
-    if (t && t.partnerId === partner.id) return ok(200, transferView(t)); // replay
+  const candidateId = (deps.genId ?? newTransferId)();
+  const reservedId = await idem.claim(partner.id, idempotencyKey, candidateId);
+  if (reservedId !== candidateId) {
+    // The key was already bound — replay. (A bound-but-unminted id means a
+    // prior attempt crashed mid-mint; fall through and mint THAT id.)
+    const t = await deps.store.getTransfer(reservedId);
+    if (t && t.partnerId === partner.id) return ok(200, transferView(t));
   }
 
   const amount = num(body.amount_source ?? body.amount);
@@ -218,6 +225,7 @@ export async function createTransaction(
   let transfer: Transfer;
   try {
     transfer = await createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
+      id: reservedId, // the idempotency-claimed id — crash-replay mints the same row
       phone: senderPhone,
       partnerId: partner.id, // authoritative: from the key, not the body
       requiresKyc,
@@ -241,15 +249,6 @@ export async function createTransaction(
     throw e;
   }
 
-  // Bind the idempotency key → transfer id. PK(partner_id, key) makes this
-  // first-writer-wins: if a concurrent duplicate already bound the key, surface
-  // THAT transfer (ours stays as an orphan row, never double-charged — 2c moves
-  // this claim inside the transfer's transaction).
-  const winnerId = await idem.claim(partner.id, idempotencyKey, transfer.id);
-  if (winnerId !== transfer.id) {
-    const winner = await deps.store.getTransfer(winnerId);
-    if (winner && winner.partnerId === partner.id) return ok(200, transferView(winner));
-  }
   await appendAudit(deps, partner.id, keyId, 'transaction.create', transfer.id);
   // A sanctions block is surfaced as 422 (the row exists, status 'blocked').
   if (transfer.complianceStatus === 'blocked') {
@@ -284,18 +283,11 @@ export async function confirmTransaction(
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
 
   const initiate = deps.initiatePayment ?? (async (tr: Transfer) => {
-    // WL3: drive THIS partner's configured settlement rail (mock ⇒ sandbox
-    // self-advance; http/simulator ⇒ signed instruction + webhook-driven delivery),
-    // with the partner's brand + WhatsApp creds on the stage messages.
-    const brand = resolvePartnerBranding(partner).brand;
+    // Stage 2c: the atomic settlement transaction — paid flip + stage-1 message
+    // + rail effect (signed instruct / delayed mock settle) commit together,
+    // with the partner's WhatsApp creds on the customer message.
     const integrations = await deps.integrationsStore.getIntegrations(partner.id);
-    await getPaymentProvider(
-      deps.store,
-      createOutboxRepo(deps.db),
-      integrations.payment,
-      brand,
-      waCredsFrom(integrations),
-    ).initiateTransfer(tr);
+    await beginSettlement(deps.db as Db, tr, integrations, waCredsFrom(integrations));
   });
   await initiate(t);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);

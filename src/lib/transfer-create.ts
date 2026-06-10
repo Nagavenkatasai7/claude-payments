@@ -16,6 +16,10 @@ import type {
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
 export interface CreateTransferInput {
+  // Stage 2c: callers running CLAIM-FIRST idempotency (partner API, draft
+  // finalize) pre-generate and reserve the id, so a crash-replay re-mints the
+  // SAME row instead of a duplicate. Absent ⇒ a fresh id (chat-tool paths).
+  id?: string;
   phone: string;
   recipientName: string;
   recipientPhone: string;
@@ -94,7 +98,7 @@ export async function createTransfer(
     complianceReasons = [...complianceReasons, eddCheck.flagReason];
   }
   const transfer: Transfer = {
-    id: newTransferId(),
+    id: input.id ?? newTransferId(),
     phone: input.phone,
     amountUsd: q.amountUsd,
     feeUsd: q.feeUsd,

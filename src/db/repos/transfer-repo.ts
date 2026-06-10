@@ -158,6 +158,36 @@ export function createTransferRepo(
         .where(and(eq(transfers.id, id), isNull(transfers.paymentProviderRef)));
     },
 
+    /**
+     * Atomically claim the awaiting_payment → paid transition (Stage 2c). Used
+     * inside the settlement transaction so the status flip + outbox rows commit
+     * together. Null ⇒ the transfer was already past awaiting_payment (double
+     * submit / replay) — the caller treats it as an idempotent no-op.
+     */
+    async markPaidIfAwaiting(id: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ status: 'paid', paidAt: sql`COALESCE(${transfers.paidAt}, now())` })
+        .where(and(eq(transfers.id, id), eq(transfers.status, 'awaiting_payment')))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Reconciliation: compliance holds nobody has reviewed in `hours`. */
+    async findInReviewOlderThan(hours: number): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.status, 'in_review'),
+            sql`${transfers.paidAt} < now() - make_interval(hours => ${hours})`,
+          ),
+        )
+        .orderBy(transfers.paidAt);
+      return rows.map((r) => toDomain(r));
+    },
+
     listByPartner(partnerId: PartnerId, req: PageReq): Promise<Page<Transfer>> {
       return page(and(eq(transfers.partnerId, partnerId)), req);
     },
