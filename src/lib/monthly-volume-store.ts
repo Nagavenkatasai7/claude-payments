@@ -1,5 +1,4 @@
-import { Redis } from '@upstash/redis';
-import { env } from './env';
+import { getRedis } from './redis';
 import { easternMonth } from './dates';
 import type { RedisLike } from './store';
 
@@ -30,12 +29,7 @@ let cached: MonthlyVolumeStore | null = null;
 
 export function getMonthlyVolumeStore(): MonthlyVolumeStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createMonthlyVolumeStore(redis as unknown as RedisLike);
+    cached = createMonthlyVolumeStore(getRedis());
   }
   return cached;
 }

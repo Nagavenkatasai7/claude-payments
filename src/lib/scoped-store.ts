@@ -27,6 +27,18 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
 
   return {
     scope,
+    /** One-query SQL aggregates, partner-scoped at the WHERE (Stage 4). */
+    async transfersSummary() {
+      return store.transfersSummary(scope.kind === 'partner' ? scope.partnerId : undefined);
+    },
+    /** Newest-first keyset page, partner-scoped at the WHERE (Stage 4). */
+    async recentTransfers(limit: number) {
+      const page = await store.listTransfersPage({
+        limit,
+        partnerId: scope.kind === 'partner' ? scope.partnerId : undefined,
+      });
+      return page.items;
+    },
     async listTransfers() {
       const all = await store.listTransfers();
       return scope.kind === 'platform'

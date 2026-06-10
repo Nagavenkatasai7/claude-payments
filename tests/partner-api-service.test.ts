@@ -9,7 +9,8 @@ import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
-  createTransaction, getTransaction, confirmTransaction, type PartnerApiDeps,
+  createTransaction, getTransaction, confirmTransaction, listTransactions,
+  type PartnerApiDeps,
 } from '@/lib/partner-api-service';
 import type { Partner } from '@/lib/types';
 
@@ -190,5 +191,39 @@ describe('partner-api-service: cross-tenant isolation', () => {
     const r = await confirmTransaction(deps, DELEGATED, 'pk_1', id);
     expect(r).toMatchObject({ ok: true, status: 200 });
     if (r.ok) expect((r.data as { status: string }).status).toBe('paid');
+  });
+});
+
+describe('partner-api-service: GET /transactions list (Stage 4 keyset)', () => {
+  it('lists ONLY the key-resolved partner, newest-first, with a working cursor', async () => {
+    const { deps } = await harness();
+    for (let i = 0; i < 3; i++) {
+      const r = await createTransaction(deps, DELEGATED, 'pk_1', `idem-l${i}`, txBody());
+      expect(r.ok).toBe(true);
+    }
+    // Another tenant's transfer must never appear.
+    await deps.partnerStore.savePartner(OURS);
+    await createTransaction(deps, { ...OURS, kycMode: 'delegated', requireKycBeforeSend: false }, 'pk_2', 'idem-other', txBody());
+
+    const page1 = await listTransactions(deps, 'acme', { limit: '2', cursor: null });
+    expect(page1.ok).toBe(true);
+    if (!page1.ok) throw new Error('unexpected');
+    const d1 = page1.data as { transactions: { partner_id: string }[]; next_cursor: string | null };
+    expect(d1.transactions).toHaveLength(2);
+    expect(d1.transactions.every((t) => t.partner_id === 'acme')).toBe(true);
+    expect(d1.next_cursor).toBeTruthy();
+
+    const page2 = await listTransactions(deps, 'acme', { limit: '2', cursor: d1.next_cursor });
+    if (!page2.ok) throw new Error('unexpected');
+    const d2 = page2.data as { transactions: { id: string }[]; next_cursor: string | null };
+    expect(d2.transactions).toHaveLength(1);
+    expect(d2.next_cursor).toBeNull();
+  });
+
+  it('clamps a hostile limit to [1,100] and defaults to 25', async () => {
+    const { deps } = await harness();
+    expect((await listTransactions(deps, 'acme', { limit: '999999', cursor: null })).ok).toBe(true);
+    expect((await listTransactions(deps, 'acme', { limit: '-5', cursor: null })).ok).toBe(true);
+    expect((await listTransactions(deps, 'acme', { limit: null, cursor: null })).ok).toBe(true);
   });
 });

@@ -2,11 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
-import {
-  summarize,
-  needsAttention,
-  schedulesDueInRange,
-} from '@/lib/dashboard';
+import { schedulesDueInRange } from '@/lib/dashboard';
 import type { Schedule, Transfer } from '@/lib/types';
 import { money } from './format';
 import { Sidebar } from './sidebar';
@@ -57,12 +53,15 @@ function statusPillClass(status: Transfer['status']): string {
 export default async function DashboardPage() {
   const { staff } = await requireScope();
   const scoped = createScopedStore(staff);
-  const transfers = await scoped.listTransfers();
-  const schedules = await scoped.listSchedules();
+  // Stage 4: SQL aggregates + an indexed recent-5 page — the overview no
+  // longer serializes the whole ledger through JS on every render.
+  const [summary, recent, schedules] = await Promise.all([
+    scoped.transfersSummary(),
+    scoped.recentTransfers(5),
+    scoped.listSchedules(),
+  ]);
   const now = Date.now();
-  const summary = summarize(transfers, now);
-  const attentionCount = transfers.filter((t) => needsAttention(t, now)).length;
-  const recent = transfers.slice(0, 5);
+  const attentionCount = summary.needsAttention;
   const nextDue = schedulesDueInRange(
     schedules.filter((s) => s.status === 'active'),
     now,

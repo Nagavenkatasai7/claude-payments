@@ -1,5 +1,4 @@
-import { Redis } from '@upstash/redis';
-import { env } from './env';
+import { getRedis } from './redis';
 import type { RedisLike, Store } from './store';
 import type { CustomerStore } from './customer-store';
 import { getCustomerStore } from './customer-store';
@@ -143,12 +142,7 @@ let cached: KycCaseStore | null = null;
 /** Singleton accessor backed by the real Upstash client (mirrors getCustomerStore). */
 export function getKycCaseStore(store: Store): KycCaseStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createKycCaseStore(redis as unknown as RedisLike, getCustomerStore(store));
+    cached = createKycCaseStore(getRedis(), getCustomerStore(store));
   }
   return cached;
 }

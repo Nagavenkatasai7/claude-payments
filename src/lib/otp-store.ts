@@ -1,6 +1,5 @@
-import { Redis } from '@upstash/redis';
+import { getRedis } from './redis';
 import { createHash, randomInt as cryptoRandomInt, timingSafeEqual } from 'node:crypto';
-import { env } from './env';
 import { normalizePhone } from './phone';
 import { countryForPhone } from './partner-currency';
 import type { RedisLike } from './store';
@@ -197,12 +196,7 @@ let cached: OtpStore | null = null;
 
 export function getOtpStore(): OtpStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
-    cached = createOtpStore(redis as unknown as RedisLike);
+    cached = createOtpStore(getRedis());
   }
   return cached;
 }

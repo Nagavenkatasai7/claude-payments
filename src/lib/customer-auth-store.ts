@@ -1,6 +1,5 @@
-import { Redis } from '@upstash/redis';
+import { getRedis } from './redis';
 import { createHash, randomBytes } from 'node:crypto';
-import { env } from './env';
 import type { RedisLike } from './store';
 import { getStore } from './store';
 import { getCustomerStore, type CustomerStore } from './customer-store';
@@ -449,13 +448,8 @@ let cached: CustomerAuthStore | null = null;
 
 export function getCustomerAuthStore(): CustomerAuthStore {
   if (!cached) {
-    const redis = new Redis({
-      url: env.kvUrl,
-      token: env.kvToken,
-      automaticDeserialization: false,
-    });
     cached = createCustomerAuthStore(
-      redis as unknown as RedisLike,
+      getRedis(),
       getCustomerStore(getStore()),
     );
   }
