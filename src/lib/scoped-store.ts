@@ -52,6 +52,17 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
           scope.kind === 'partner' ? scope.partnerId : (req.partnerFilter || undefined),
       });
     },
+    /** Compliance views, partner-scoped at the WHERE (Stage 5e scan fixes). */
+    async complianceViews(limit = 100) {
+      const partnerId = scope.kind === 'partner' ? scope.partnerId : undefined;
+      const [inReview, flagged, blocked, topVelocity] = await Promise.all([
+        store.listTransfersPage({ limit, partnerId, status: 'in_review' }).then((p) => p.items),
+        store.listTransfersByCompliance('flagged', { partnerId, limit }),
+        store.listTransfersByCompliance('blocked', { partnerId, limit }),
+        store.topVelocityToday(10, partnerId),
+      ]);
+      return { inReview, flagged, blocked, topVelocity };
+    },
     async listTransfers() {
       const all = await store.listTransfers();
       return scope.kind === 'platform'

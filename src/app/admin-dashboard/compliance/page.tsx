@@ -2,7 +2,6 @@ export const dynamic = 'force-dynamic';
 
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
-import { topVelocityToday } from '@/lib/dashboard';
 import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { Sidebar } from '../sidebar';
@@ -88,11 +87,10 @@ function transferCells(t: Transfer) {
 export default async function CompliancePage() {
   const { staff } = await requireScope();
   const scoped = createScopedStore(staff);
-  const transfers = await scoped.listTransfers();
-  const inReview = transfers.filter((t) => t.status === 'in_review');
-  const flagged = transfers.filter((t) => t.complianceStatus === 'flagged');
-  const blocked = transfers.filter((t) => t.complianceStatus === 'blocked');
-  const topVel = topVelocityToday(transfers, Date.now(), 10);
+  // Stage 5e scan fix: four indexed queries (status / compliance_status /
+  // GROUP BY velocity), partner-scoped at the WHERE — no more loading the
+  // whole ledger and filtering in JS per render.
+  const { inReview, flagged, blocked, topVelocity: topVel } = await scoped.complianceViews();
 
   const partners = await scoped.listPartners();
   const corridorRows = partners.flatMap((p) =>

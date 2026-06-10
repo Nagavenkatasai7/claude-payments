@@ -239,3 +239,31 @@ describe('transfer-repo: summary() — one-query dashboard aggregates + change s
     expect(s.commissionAllTime).toBe(0);
   });
 });
+
+describe('transfer-repo: compliance views + velocity leaderboard (Stage 5e scan fixes)', () => {
+  it('listByCompliance filters by compliance_status and partner, newest-first', async () => {
+    await seedPartner(db, 'acme');
+    await repo.saveTransfer(fixture({ id: 'c1', complianceStatus: 'flagged', createdAt: '2026-06-09T10:00:00.000Z' }));
+    await repo.saveTransfer(fixture({ id: 'c2', complianceStatus: 'flagged', partnerId: 'acme', createdAt: '2026-06-09T11:00:00.000Z' }));
+    await repo.saveTransfer(fixture({ id: 'c3', complianceStatus: 'blocked', status: 'blocked' }));
+
+    const flagged = await repo.listByCompliance('flagged');
+    expect(flagged.map((t) => t.id)).toEqual(['c2', 'c1']); // newest first
+    expect((await repo.listByCompliance('flagged', { partnerId: 'acme' })).map((t) => t.id)).toEqual(['c2']);
+    expect((await repo.listByCompliance('blocked')).map((t) => t.id)).toEqual(['c3']);
+  });
+
+  it('topVelocityToday counts only today (eastern), grouped by phone, partner-scoped', async () => {
+    await seedPartner(db, 'acme');
+    const nowIso = new Date().toISOString();
+    await repo.saveTransfer(fixture({ id: 'v1', phone: '15551110000', createdAt: nowIso }));
+    await repo.saveTransfer(fixture({ id: 'v2', phone: '15551110000', createdAt: nowIso }));
+    await repo.saveTransfer(fixture({ id: 'v3', phone: '15552220000', createdAt: nowIso, partnerId: 'acme' }));
+    await repo.saveTransfer(fixture({ id: 'v4', phone: '15553330000', createdAt: '2026-01-15T12:00:00.000Z' })); // old — excluded
+
+    const top = await repo.topVelocityToday(10);
+    expect(top[0]).toEqual({ phone: '15551110000', count: 2 });
+    expect(top.find((r) => r.phone === '15553330000')).toBeUndefined();
+    expect(await repo.topVelocityToday(10, 'acme')).toEqual([{ phone: '15552220000', count: 1 }]);
+  });
+});

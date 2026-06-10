@@ -173,6 +173,45 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /** Compliance views: newest-first by compliance_status (indexed-friendly). */
+    async listByCompliance(
+      complianceStatus: 'flagged' | 'blocked',
+      opts: { partnerId?: PartnerId; limit?: number } = {},
+    ): Promise<Transfer[]> {
+      const conds = [
+        eq(transfers.complianceStatus, complianceStatus),
+        ...(opts.partnerId ? [eq(transfers.partnerId, opts.partnerId)] : []),
+      ];
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(...conds))
+        .orderBy(desc(transfers.createdAt), desc(transfers.id))
+        .limit(opts.limit ?? 100);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
+     * Today's velocity leaderboard (eastern day, matching summarize()) — one
+     * GROUP BY instead of scanning the ledger through JS per render.
+     */
+    async topVelocityToday(
+      limit: number,
+      partnerId?: PartnerId,
+    ): Promise<{ phone: string; count: number }[]> {
+      const where = partnerId
+        ? sql`WHERE (created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date AND partner_id = ${partnerId}`
+        : sql`WHERE (created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date`;
+      const res = await db.execute(sql`
+        SELECT phone, count(*)::int AS n FROM transfers ${where}
+        GROUP BY phone ORDER BY n DESC, phone ASC LIMIT ${limit};
+      `);
+      return (res as unknown as { rows: { phone: string; n: number }[] }).rows.map((r) => ({
+        phone: r.phone,
+        count: Number(r.n),
+      }));
+    },
+
     /** Reconciliation: compliance holds nobody has reviewed in `hours`. */
     async findInReviewOlderThan(hours: number): Promise<Transfer[]> {
       const rows = await db

@@ -40,8 +40,10 @@ export default async function CustomerDetailPage({
   const customer = await scoped.getCustomer(phone);
   if (!customer) notFound();
 
-  const [transfers, todayUsedCents, partner, kycAudit] = await Promise.all([
-    scoped.listTransfers(),
+  const [mine, todayUsedCents, partner, kycAudit] = await Promise.all([
+    // Stage 5e scan fix: indexed WHERE phone = $1 (newest-first), not a full
+    // ledger load filtered in JS. The customer above is already scope-checked.
+    getStore().listTransfersByPhone(phone, 50),
     dailyVolumeStore.getTodayCents(phone),
     scoped.getPartner(customer.partnerId),
     // The audit trail is non-critical UI. A store hiccup must degrade to an
@@ -53,11 +55,6 @@ export default async function CustomerDetailPage({
   ]);
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
-  const mine = transfers
-    .filter((t) => t.phone === phone)
-    // `?? ''` defends against legacy transfers missing createdAt — see
-    // store.listTransfers for the canonical pattern.
-    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
   const now = new Date();
   const capEval = evaluateCap(customer, now, todayUsedCents, 0);
 
