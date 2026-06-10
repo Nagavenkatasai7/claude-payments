@@ -13,6 +13,7 @@ import { deriveTier } from '@/lib/tier-rules';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
+import { logWarn } from '@/lib/log';
 import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
@@ -52,13 +53,13 @@ export async function processInboundWebhook(
   if (statusEvents) {
     for (const ev of statusEvents) {
       if (ev.status === 'failed') {
-        console.warn(
-          `WhatsApp message delivery FAILED — recipient=${ev.recipientId} wamid=${ev.wamid} code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`,
-        );
+        // Stage 3: structured + PII-scrubbed (recipientId is a phone number).
+        logWarn('whatsapp.delivery_failed', `code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`, {
+          recipient: ev.recipientId,
+          wamid: ev.wamid,
+        });
       } else {
-        console.debug(
-          `WhatsApp status ${ev.status} — recipient=${ev.recipientId} wamid=${ev.wamid}`,
-        );
+        console.debug(`WhatsApp status ${ev.status} — wamid=${ev.wamid}`);
       }
     }
     return { ok: true };

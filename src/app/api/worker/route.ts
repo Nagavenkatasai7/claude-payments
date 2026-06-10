@@ -4,6 +4,7 @@ import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
+import { logError } from '@/lib/log';
 import {
   sendText,
   sendTemplate,
@@ -74,7 +75,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
   try {
     sweep = await reconcileSweep(deps.db);
   } catch (err) {
-    console.error('Reconcile sweep failed (drain continues):', err);
+    logError('worker.sweep', err);
   }
 
   const workerId = `w_${newTransferId()}`;

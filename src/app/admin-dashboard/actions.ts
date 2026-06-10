@@ -14,6 +14,8 @@ import {
 import { requireStaff, requireAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { scopeOf, canSee } from '@/lib/staff-scope';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { getDb } from '@/db/client';
 import type { Staff, StaffPermissions } from '@/lib/types';
 
 async function requirePermission(
@@ -116,4 +118,34 @@ export async function rejectTransferAction(formData: FormData): Promise<void> {
   const { store } = await getScopedTransfer(staff, id);
   await rejectTransfer(store, id);
   revalidatePath('/admin-dashboard', 'layout');
+}
+
+/**
+ * Reveal the FULL payout destination of one transfer (Stage 3 audited reveal).
+ * List reads are masked at the repo layer (****last4), so this action is the
+ * ONLY path from a staff view to the decrypted value — self-gated (staff
+ * session + partner scope) and every call writes an append-only audit_events
+ * row. The decrypted value is returned to the caller, never logged.
+ */
+export async function revealDestinationAction(
+  transferId: string,
+): Promise<{ destination: string } | { error: string }> {
+  const staff = await requireStaff();
+  try {
+    const { store, transfer } = await getScopedTransfer(staff, transferId);
+    const full = await store.getTransferDecrypted(transferId);
+    if (!full) return { error: 'Transfer not found' };
+    await createAuditRepo(getDb()).record({
+      partnerId: transfer.partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'pii.reveal',
+      subjectId: transferId,
+      meta: { field: 'payout_destination' },
+    });
+    return { destination: full.payoutDestination };
+  } catch {
+    // Out-of-scope reads collapse to the same generic shape as missing ones.
+    return { error: 'Transfer not found' };
+  }
 }

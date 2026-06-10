@@ -3,6 +3,7 @@ import { getFxRates } from './rate';
 import { screenTransfer } from './compliance';
 import { resolveCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
+import { logWarn } from './log';
 import { countryForCurrency } from './partner-currency';
 import { evaluateEddForTransfer } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
@@ -141,7 +142,7 @@ export async function createTransfer(
       lastUsedAt: new Date().toISOString(),
     });
   } catch (err) {
-    console.warn('upsertRecipient failed (non-fatal):', err);
+    logWarn('transfer.upsert_recipient', err, { transferId: transfer.id });
   }
 
   return transfer;

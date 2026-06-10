@@ -10,6 +10,8 @@ import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { pokeWorker } from '@/lib/outbox';
+import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
+import { logError } from '@/lib/log';
 import { beginSettlement } from '@/lib/settlement';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { completePaymentStage1 } from '@/lib/payment';
@@ -79,6 +81,13 @@ export async function POST(
   // never trust an id in the body. The body only carries the bank-detail fields
   // the sender entered on the secure pay page (Item 2).
   const { transferId } = await params;
+
+  // Stage 3: per-IP ceiling over the whole route (request_otp + pay attempts).
+  // The OTP gate + per-transaction caps are the inner rings; this stops one
+  // address from hammering the money endpoint at all. Fail-open by design.
+  const limited = await enforceIpRateLimit(req, 'pay', 30);
+  if (limited) return limited;
+
   try {
     const store = getStore();
 
@@ -238,7 +247,7 @@ export async function POST(
     }
     return await processTransferPayment(store, created);
   } catch (err) {
-    console.error('Payment processing failed:', err);
+    logError('pay.route', err, { transferId });
     return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
   }
 }

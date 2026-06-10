@@ -4,6 +4,7 @@ import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 
 // partner-rail — SmartRemit's HOSTED REFERENCE RAIL (WL3). This endpoint plays
 // the role of a partner's settlement system, end to end and for real:
@@ -20,6 +21,10 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 const SETTLE_DELAY_MS = 12_000; // a realistic, demo-friendly settlement lag
 
 export async function POST(req: NextRequest) {
+  // Stage 3: blunt per-IP ceiling (signature gate below is the real auth).
+  const limited = await enforceIpRateLimit(req, 'rail', 120);
+  if (limited) return limited;
+
   const raw = await req.text();
 
   let body: { reference?: unknown; partner_id?: unknown } = {};

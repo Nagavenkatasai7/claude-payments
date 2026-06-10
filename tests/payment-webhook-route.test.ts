@@ -47,6 +47,9 @@ vi.mock('@/lib/partner-integrations-store', () => ({
   }),
 }));
 
+// Stage 3: the per-IP limiter would dial Upstash — always allow in unit tests.
+vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
+
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
 
 const deliveredTransfer = {

@@ -11,6 +11,8 @@ import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
 import { recipientTemplateParams, formatDestAmount } from '@/lib/payment';
+import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
+import { logError } from '@/lib/log';
 import {
   sendText, sendTemplate, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
@@ -27,6 +29,11 @@ export async function POST(
   { params }: { params: Promise<{ provider: string }> },
 ) {
   const { provider } = await params;
+  // Stage 3: LOOSE per-IP ceiling — real rails retry on 429, and the HMAC gate
+  // below is the actual auth; this only blunts raw flooding.
+  const limited = await enforceIpRateLimit(req, 'pwhk', 600);
+  if (limited) return limited;
+
   const raw = await req.text();                           // raw body first (for HMAC)
   const store = getStore();
 
@@ -87,7 +94,7 @@ export async function POST(
           );
         }
       } catch (err) {
-        console.error('Webhook stage-2 notify failed:', err);
+        logError('payment-webhook.notify', err, { transferId: updated.id });
       }
     });
   }
