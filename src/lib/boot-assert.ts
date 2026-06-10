@@ -41,6 +41,27 @@ export function shouldAssertProductionBoot(env: EnvRecord): boolean {
 }
 
 /**
+ * Whether the master key is one of the TWO shapes EnvKeyProvider actually
+ * accepts (field-crypto.ts): 64 hex chars, or base64 decoding to exactly
+ * 32 bytes. This MUST mirror that code — the first deploy of this assert
+ * used a hex-only check, rejected the (valid, base64) production key, and
+ * took down every function and the middleware platform-wide. The assert's
+ * contract is the code's contract, not an idealized one.
+ */
+export function isValidMasterKey(raw: string): boolean {
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) return true;
+  // A runtime without Buffer (edge bundle without the polyfill) must fail
+  // OPEN on the shape check — presence is still enforced above, and the Node
+  // functions (where crypto actually runs) enforce the shape.
+  if (typeof Buffer === 'undefined') return true;
+  try {
+    return Buffer.from(raw, 'base64').length === 32;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Every problem that must block a production boot. Returns var NAMES and
  * shape complaints only — never values.
  */
@@ -53,8 +74,8 @@ export function productionBootProblems(env: EnvRecord): string[] {
   }
   // A malformed master key must never silently produce garbage crypto.
   const key = (env.FIELD_ENCRYPTION_KEY ?? '').trim();
-  if (key !== '' && !/^[0-9a-fA-F]{64}$/.test(key)) {
-    problems.push('FIELD_ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes)');
+  if (key !== '' && !isValidMasterKey(key)) {
+    problems.push('FIELD_ENCRYPTION_KEY must be 64 hex chars or base64 for exactly 32 bytes');
   }
   return problems;
 }
