@@ -1,13 +1,19 @@
 /*
- * Tailwind v4 entry (Stage 5). PREFLIGHT IS DELIBERATELY OMITTED during the
- * migration — the legacy hand-rolled themes (sh-* dashboard, .payapp pay page,
- * .lp landing) depend on browser default styles; preflight would reset them
- * out from under pages we haven't rebuilt yet. The FINAL Stage-5 PR adds
- * `@import "tailwindcss/preflight.css" layer(base);` and deletes globals.css.
+ * Tailwind v4 entry — the ONE stylesheet pipeline (Stage 5e).
+ *
+ * Layering is the whole trick: preflight lives in `base`, and the three
+ * legacy theme vocabularies (sh-* dashboard, .payapp pay/account, .lp
+ * landing — formerly globals.css) live ABOVE it in `components`, so their
+ * scoped rules beat the reset and the proven visuals survive unchanged.
+ * New surfaces use shadcn/ui + utilities; legacy scopes shrink per-page as
+ * conversions land, and each fully-converted scope gets deleted from
+ * legacy-themes.css.
  */
 @layer theme, base, components, utilities;
 
 @import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/preflight.css' layer(base);
+@import './legacy-themes.css' layer(components);
 @import 'tailwindcss/utilities.css' layer(utilities);
 
 /* shadcn/ui token contract, mapped from the proven --sh-* palette (Radix

@@ -1,9 +1,8 @@
 import type { NextConfig } from 'next';
 
-// Stage 3 security headers, applied to EVERY response. CSP ships REPORT-ONLY
-// until the Stage-5 design-system rebuild lands (the legacy globals.css +
-// Next's inline runtime need 'unsafe-inline'); the final Stage-5 PR flips it
-// to enforced. Everything else is enforced now.
+// Security headers on EVERY response (Stage 3; CSP enforced as of Stage 5e —
+// it ran report-only through the design migration with zero violations
+// beyond the known inline allowances).
 const securityHeaders = [
   // 2 years, ready for preload submission. Vercel already redirects http→https.
   { key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains; preload' },
@@ -13,10 +12,13 @@ const securityHeaders = [
   { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
   { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=()' },
   {
-    key: 'Content-Security-Policy-Report-Only',
+    key: 'Content-Security-Policy',
     value: [
       "default-src 'self'",
-      // 'unsafe-inline'/'unsafe-eval' tolerated during report-only; Stage 5 tightens.
+      // 'unsafe-inline'/'unsafe-eval' remain for Next's inline runtime + React
+      // hydration. The ENFORCED wins here are the network/framing axes:
+      // default/connect/img/font pinned to self, framing+base+form locked.
+      // Nonce-based script-src is the follow-up hardening item.
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",

@@ -1,5 +1,4 @@
-import './globals.css';
-import './tailwind.css'; // Stage 5: Tailwind v4 utilities (preflight OFF during migration)
+import './tailwind.css'; // THE stylesheet pipeline (Stage 5e): preflight + legacy theme layers + utilities
 import type { ReactNode } from 'react';
 import { Inter } from 'next/font/google';
 
