@@ -1,4 +1,5 @@
 import './globals.css';
+import './tailwind.css'; // Stage 5: Tailwind v4 utilities (preflight OFF during migration)
 import type { ReactNode } from 'react';
 import { Inter } from 'next/font/google';
 
