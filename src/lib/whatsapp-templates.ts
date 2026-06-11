@@ -199,15 +199,28 @@ export function verificationReminderParams(senderName: string, sessionToken: str
 // free-form via sendTemplateOrText until Meta approves them). Params: [name, message]. ──
 export type VerificationState = 'needed' | 'in_progress' | 'received' | 'verified' | 'failed';
 
+const VERIFICATION_STATUS_MESSAGES: Record<VerificationState, string> = {
+  needed: 'Please verify your identity to start sending money.',
+  in_progress: 'Your identity verification is in progress.',
+  received: 'Thanks — we received your verification and are reviewing it. We’ll message you shortly.',
+  verified: 'You’re verified! You can now send money.',
+  failed: 'We couldn’t verify your identity. Please tap below to try again.',
+};
+
 export function verificationStatusParams(name: string, state: VerificationState): string[] {
-  const msg: Record<VerificationState, string> = {
-    needed: 'Please verify your identity to start sending money.',
-    in_progress: 'Your identity verification is in progress.',
-    received: 'Thanks — we received your verification and are reviewing it. We’ll message you shortly.',
-    verified: 'You’re verified! You can now send money.',
-    failed: 'We couldn’t verify your identity. Please tap below to try again.',
-  };
-  return [name || 'there', msg[state]];
+  return [name || 'there', VERIFICATION_STATUS_MESSAGES[state]];
+}
+
+// Free-form fallback when no template is configured. The template params above
+// are a Meta contract ({{1}}=name, {{2}}=message) and read fine inside the
+// approved body copy; concatenating them raw produced "there, Your identity…".
+export function verificationStatusFallbackText(
+  name: string | undefined,
+  state: VerificationState,
+): string {
+  const msg = VERIFICATION_STATUS_MESSAGES[state];
+  const trimmed = name?.trim();
+  return trimmed ? `Hi ${trimmed} — ${msg}` : msg;
 }
 
 /**

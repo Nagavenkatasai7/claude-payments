@@ -271,7 +271,9 @@ export function createAgent(deps: AgentDeps) {
           // (the verify-before-send gate + the cap hand-offs). sanitizeReply strips
           // every model-emitted URL, so the real, code-generated link must be
           // appended by us — otherwise a verify message arrives as a 👉 with no link.
-          if (typeof (result as Record<string, unknown>).kyc_url === 'string') {
+          // Gate-off partners never hand off to verification — defense-in-depth on
+          // top of the tool-level gating, so no stray kyc_url can reach the customer.
+          if (gateActive && typeof (result as Record<string, unknown>).kyc_url === 'string') {
             paymentLinks.push((result as Record<string, unknown>).kyc_url as string);
           }
           history.push({

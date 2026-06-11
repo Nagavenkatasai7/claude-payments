@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { verificationStatusParams, type VerificationState } from '@/lib/whatsapp-templates';
+import {
+  verificationStatusParams,
+  verificationStatusFallbackText,
+  type VerificationState,
+} from '@/lib/whatsapp-templates';
+
+const STATES: VerificationState[] = ['needed', 'in_progress', 'received', 'verified', 'failed'];
 
 describe('verificationStatusParams', () => {
   it('builds [name, message] for each state', () => {
@@ -19,5 +25,34 @@ describe('verificationStatusParams', () => {
 
   it('falls back to "there" when the name is empty', () => {
     expect(verificationStatusParams('', 'needed')[0]).toBe('there');
+  });
+});
+
+describe('verificationStatusFallbackText (free-form, no template configured)', () => {
+  it('greets by name for every state', () => {
+    for (const s of STATES) {
+      const msg = verificationStatusParams('Anand', s)[1];
+      expect(verificationStatusFallbackText('Anand', s)).toBe(`Hi Anand — ${msg}`);
+    }
+  });
+
+  it('omits the greeting entirely when the name is missing — never "there,"', () => {
+    for (const s of STATES) {
+      const msg = verificationStatusParams('x', s)[1];
+      for (const name of [undefined, '', '   ']) {
+        const text = verificationStatusFallbackText(name, s);
+        expect(text).toBe(msg);
+        expect(text.startsWith('there')).toBe(false);
+      }
+    }
+  });
+
+  it('regression: the in_progress text reads naturally in both forms', () => {
+    expect(verificationStatusFallbackText('Anand', 'in_progress')).toBe(
+      'Hi Anand — Your identity verification is in progress.',
+    );
+    expect(verificationStatusFallbackText(undefined, 'in_progress')).toBe(
+      'Your identity verification is in progress.',
+    );
   });
 });

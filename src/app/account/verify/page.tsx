@@ -1,4 +1,6 @@
 import { requireCustomer } from '@/lib/customer-auth';
+import { sendGateActive } from '@/lib/kyc-gate';
+import { getPartnerStore } from '@/lib/partner-store';
 import { startVerificationAction } from './actions';
 
 export const dynamic = 'force-dynamic';
@@ -6,13 +8,22 @@ export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Verify your identity · SmartRemit' };
 
 /**
- * Customer-facing KYC entry (Phase 2). Logged-in only (requireCustomer). The
- * "Start" button posts startVerificationAction, which creates a real Persona
- * inquiry and redirects to the hosted flow. Once submitted, shows the in-review
- * state instead of re-offering the button.
+ * Customer-facing KYC entry (Phase 2). Logged-in only (requireCustomer). KYC is
+ * partner OPT-IN: when the customer's partner doesn't gate sends on KYC
+ * (sendGateActive false) this page shows a "no verification needed" note instead
+ * of the flow. Otherwise the "Start" button posts startVerificationAction, which
+ * creates a real Persona inquiry and redirects to the hosted flow. Once
+ * submitted, shows the in-review state instead of re-offering the button.
  */
 export default async function VerifyPage() {
   const customer = await requireCustomer();
+  // KYC is partner OPT-IN (sendGateActive) — when the customer's partner doesn't
+  // gate sends on KYC there is nothing to verify, so show a friendly note instead
+  // of the start-verification UI (the server action enforces the same gate).
+  const partner =
+    (await getPartnerStore().getPartner(customer.partnerId)) ??
+    (await getPartnerStore().ensureDefaultPartner());
+  const gateOn = sendGateActive(partner);
   const done = customer.kycStatus === 'verified';
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
@@ -23,7 +34,11 @@ export default async function VerifyPage() {
         <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
         <h1 className="mb-5 text-lg font-semibold leading-normal">Verify your identity</h1>
 
-        {done ? (
+        {!gateOn ? (
+          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
+            No verification needed — your account can send money without identity verification.
+          </p>
+        ) : done ? (
           <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">✓ You&rsquo;re verified. You can send money in WhatsApp.</p>
         ) : inReview ? (
           <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
