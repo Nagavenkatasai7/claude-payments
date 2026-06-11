@@ -41,6 +41,22 @@ export interface CreateTransferInput {
   senderName?: string;          // sender legal name for sanctions screening (from customer.fullName)
   senderKycStatus: KycStatus;   // NEW (Phase 3) — the chokepoint backstop refuses unless 'verified'
   requiresKyc?: boolean;        // NEW (WL1) — absent ⇒ true (default/'ours'). 'delegated' partners pass false to skip OUR verify gate. Sanctions still run regardless.
+  // U7 (audit): a COMPLETE quote override — the figures the customer actually
+  // approved (the draft's stored quote, as shown on the approval card and the
+  // pay page). When present, the re-quote (transferCount + live FX) is skipped
+  // and these values are written to the ledger verbatim. Sanctions screening,
+  // EDD, and the monthly accrual all read their USD-equivalent from it.
+  // Absent ⇒ behavior unchanged (quote from current state).
+  quote?: {
+    amountUsd: number;
+    feeUsd: number;
+    totalChargeUsd: number;
+    fxRate: number;
+    amountInr: number;
+    amountSource: number;
+    feeSource: number;
+    totalChargeSource: number;
+  };
 }
 
 export async function createTransfer(
@@ -61,15 +77,25 @@ export async function createTransfer(
   if (requiresKyc && input.senderKycStatus !== 'verified') {
     throw new Error('kyc_required');
   }
-  const transferCount = await store.getTransferCount(input.phone);
-  const rates = await getFxRates(input.sourceCurrency);
   // Resolve destination — default to IN/INR for full back-compat (all existing tests unchanged).
   const destinationCountry = input.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY;
   const destinationCurrency = input.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY;
-  // Fetch dest rates for the cross-rate. For INR this returns {toInr:1,toUsd:0.0118}
-  // and quote() takes the INR branch (rates.toInr) — identical to the pre-any-to-any behavior.
-  const destRates = await getFxRates(destinationCurrency);
-  const q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates.toUsd);
+  // U7 (audit): when the caller supplies the quote the customer approved (the
+  // draft's stored quote), honor it verbatim — NO re-quote. Otherwise quote from
+  // current state exactly as before. Everything downstream reads from `q`:
+  // sanctions + EDD use q.amountUsd, the Transfer row takes all eight figures,
+  // and the monthly accrual uses q.amountUsd (via transfer.amountUsd).
+  let q: NonNullable<CreateTransferInput['quote']>;
+  if (input.quote) {
+    q = input.quote;
+  } else {
+    const transferCount = await store.getTransferCount(input.phone);
+    const rates = await getFxRates(input.sourceCurrency);
+    // Fetch dest rates for the cross-rate. For INR this returns {toInr:1,toUsd:0.0118}
+    // and quote() takes the INR branch (rates.toInr) — identical to the pre-any-to-any behavior.
+    const destRates = await getFxRates(destinationCurrency);
+    q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates.toUsd);
+  }
   const transfersToday = await store.getTodayTransferCount(input.phone);
 
   const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol

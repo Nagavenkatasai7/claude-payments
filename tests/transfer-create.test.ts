@@ -301,6 +301,103 @@ describe('createTransfer any-to-any corridors', () => {
   });
 });
 
+// ── U7 (audit): optional complete quote override ─────────────────────────────
+// The pay-time finalizer passes the DRAFT's stored quote so the ledger records
+// exactly what the approval card / pay page showed — no re-quote from current
+// transferCount + live FX. Absent ⇒ byte-identical to today (whole suite above).
+describe('createTransfer U7: draft-quote override', () => {
+  const override = {
+    amountUsd: 200,
+    feeUsd: 0,
+    totalChargeUsd: 200,
+    fxRate: 85,
+    amountInr: 17_000,
+    amountSource: 200,
+    feeSource: 0,
+    totalChargeSource: 200,
+  };
+
+  it('honors a complete override VERBATIM into the Transfer row (no count re-read, no FX fetch)', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    // A prior transfer exists — a re-quote would charge the $1.99 repeat fee…
+    await createTransfer(store, partnerStore, mvs, base);
+    // …and live FX now differs from the override's rate (90 vs 85).
+    resetRateCacheForTests();
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 90 } }) });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, quote: override });
+    expect(t.amountUsd).toBe(200);
+    expect(t.feeUsd).toBe(0);             // the card's first-transfer-free promise…
+    expect(t.totalChargeUsd).toBe(200);   // …not the re-quoted 201.99
+    expect(t.fxRate).toBe(85);
+    expect(t.amountInr).toBe(17_000);
+    expect(t.amountSource).toBe(200);
+    expect(t.feeSource).toBe(0);
+    expect(t.totalChargeSource).toBe(200);
+    // The override skips the re-quote block entirely — no FX dial-out.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('absent override: a repeat transfer still re-quotes (fee 1.99) — behavior unchanged', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    await createTransfer(store, partnerStore, mvs, base);          // first: free
+    const t = await createTransfer(store, partnerStore, mvs, base); // second: re-quote
+    expect(t.feeUsd).toBe(1.99);
+    expect(t.totalChargeUsd).toBe(201.99);
+  });
+
+  it('sanctions still run on the override path: a watchlisted recipient is blocked', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      recipientName: 'John Doe', // on WATCHLIST
+      quote: override,
+    });
+    expect(t.complianceStatus).toBe('blocked');
+    expect(t.status).toBe('blocked');
+  });
+
+  it('EDD threshold reads the OVERRIDE amountUsd, not a re-quote of amountSource', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    await partnerStore.ensureDefaultPartner();
+    await mvs.addCents('15559990001', 250_000); // $2,500 used this month
+    // amountSource 600 would re-quote to $600 (cumulative $3,100 → EDD flag);
+    // the override pins the USD-equivalent at $100 (cumulative $2,600 → no flag).
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      phone: '15559990001',
+      amountSource: 600,
+      quote: {
+        amountUsd: 100, feeUsd: 0, totalChargeUsd: 100, fxRate: 85,
+        amountInr: 8_500, amountSource: 600, feeSource: 0, totalChargeSource: 600,
+      },
+    });
+    expect(t.complianceReasons).not.toContain('edd_required');
+    expect(t.eddRequired).toBeFalsy();
+    // The monthly accrual also uses the override's USD-equivalent.
+    expect(await mvs.getMonthCents('15559990001')).toBe(250_000 + 10_000);
+  });
+
+  it('EDD still flags when the override amountUsd crosses the cumulative threshold', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    await partnerStore.ensureDefaultPartner();
+    await mvs.addCents('15559990002', 250_000);
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      phone: '15559990002',
+      amountSource: 600,
+      quote: {
+        amountUsd: 600, feeUsd: 0, totalChargeUsd: 600, fxRate: 85,
+        amountInr: 51_000, amountSource: 600, feeSource: 0, totalChargeSource: 600,
+      },
+    });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(t.complianceReasons).toContain('edd_required');
+    expect(t.eddRequired).toBe(true);
+  });
+});
+
 describe('recordBlockedAttempt', () => {
   const blockedInput = {
     phone: '15551234567',
