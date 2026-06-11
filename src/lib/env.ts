@@ -102,7 +102,11 @@ export const env = {
   },
   get whatsappAuthTemplate(): string {
     // Name of the approved Meta AUTHENTICATION template used for OTP delivery.
-    return process.env.WHATSAPP_AUTH_TEMPLATE ?? 'verification_code';
+    // TEMPLATES ARE OPT-IN: '' (unset) ⇒ sendOtpCode skips the template call
+    // entirely and delivers the code as regular free-form text — the right mode
+    // for the testing business until templates are approved in WhatsApp
+    // Manager. Set this to the approved template name to switch over.
+    return process.env.WHATSAPP_AUTH_TEMPLATE ?? '';
   },
   // ── Customer onboarding Phase 2 — Persona KYC ──
   // All optional (`?? ''`): an unprovisioned env keeps MockKycProvider selected and
@@ -127,18 +131,20 @@ export const env = {
   get personaApiBase(): string {
     return process.env.PERSONA_API_BASE ?? 'https://api.withpersona.com/api/v1';
   },
-  // KYC status templates (degrade to free-form via sendTemplateOrText until Meta-approved).
+  // KYC status templates — OPT-IN like the auth template: '' (unset) ⇒
+  // sendVerificationStatus sends the free-form fallback text directly, no
+  // template attempt. Set to the approved names to switch over.
   get whatsappVerificationNeededTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE ?? 'verification_needed';
+    return process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE ?? '';
   },
   get whatsappVerificationInProgressTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE ?? 'verification_in_progress';
+    return process.env.WHATSAPP_VERIFICATION_IN_PROGRESS_TEMPLATE ?? '';
   },
   get whatsappVerificationVerifiedTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE ?? 'verification_verified';
+    return process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE ?? '';
   },
   get whatsappVerificationFailedTemplate(): string {
-    return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? 'verification_failed';
+    return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? '';
   },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.

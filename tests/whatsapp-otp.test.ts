@@ -175,3 +175,21 @@ describe('sendOtpCode — live mode', () => {
     expect(String((caught as Error).message)).not.toContain('246802');
   });
 });
+
+describe('sendOtpCode — templates are OPT-IN (testing-business mode)', () => {
+  it('with NO template configured, sends the code as regular free-form text — never a template call', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    delete process.env.WHATSAPP_AUTH_TEMPLATE;
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendOtpCode('15551234567', '246802');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // exactly one send, no doomed template attempt
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.type).toBe('text');
+    expect(body.to).toBe('15551234567');
+    expect(body.text.body).toContain('246802'); // the inbuilt free-form message carries the code
+  });
+});

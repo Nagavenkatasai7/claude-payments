@@ -372,6 +372,14 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
     console.log(`[otp] dev-mode: code ready for ${maskPhone(phone)}`);
     return;
   }
+  // Templates are OPT-IN: no configured template ⇒ regular free-form message
+  // immediately (the "inbuilt template" — otpMessage()), no doomed Graph call.
+  // Free-form only delivers inside Meta's 24h customer-service window — the
+  // testing-business mode until templates are approved in WhatsApp Manager.
+  if (!env.whatsappAuthTemplate) {
+    await sendText(phone, otpMessage(code));
+    return;
+  }
   try {
     await sendAuthTemplate(
       phone,
@@ -551,10 +559,25 @@ export async function sendVerificationStatus(
     verified: env.whatsappVerificationVerifiedTemplate,
     failed: env.whatsappVerificationFailedTemplate,
   }[state];
+  const fallbackText = `${params[0]}, ${params[1]}`;
+  // Templates are OPT-IN: unconfigured ⇒ the free-form "inbuilt template"
+  // directly (no doomed Graph call). sendTemplateOrText still guards the
+  // configured path so a paused/rejected template degrades the same way.
+  if (!templateName) {
+    try {
+      await sendText(phone, fallbackText);
+    } catch (err) {
+      console.warn(
+        'sendVerificationStatus free-form send failed (out of 24h window?):',
+        err instanceof Error ? err.message : 'unknown error',
+      );
+    }
+    return;
+  }
   await sendTemplateOrText(
     phone,
     () => sendTemplate(phone, templateName, TEMPLATE_LANG, params),
-    `${params[0]}, ${params[1]}`,
+    fallbackText,
   );
 }
 
