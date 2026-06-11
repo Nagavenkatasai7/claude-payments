@@ -22,7 +22,10 @@ import type { Db } from '@/db/client';
 // (4) the default partner is byte-for-byte unchanged.
 
 const PHONE = '15551234567';
-const now = '2026-06-08T00:00:00Z';
+// RELATIVE, not hardcoded: deriveTier suspends an unverified customer once the
+// 3-day T0 observation window (anchored on firstSeenAt) passes — a fixed date
+// here detonated exactly 3 days after it was written and zeroed the send cap.
+const now = new Date().toISOString();
 
 function toolCall(id: string, name: string, args: object): ChatMessage {
   return {
