@@ -9,7 +9,8 @@ import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
-import { pokeWorker } from '@/lib/outbox';
+import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
+import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError } from '@/lib/log';
 import { beginSettlement } from '@/lib/settlement';
@@ -21,6 +22,11 @@ import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-forma
 import type { CountryCode, Transfer } from '@/lib/types';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
+
+// The delayed best-effort poke below sleeps DELIVERY_DELAY_MS + 10s after the
+// response is sent — declare a budget that explicitly fits it (Fluid Compute
+// keeps the instance alive for after() work up to maxDuration).
+export const maxDuration = 300;
 
 /**
  * Process payment for a resolved transfer, branching on complianceStatus:
@@ -60,11 +66,19 @@ async function processTransferPayment(
   // cleared: the atomic settlement transaction (status flip + stage-1 message +
   // rail effect commit together; every effect dedupe-keyed; worker delivers).
   const result = await beginSettlement(getDb(), transfer, integrations, waCreds);
-  pokeWorker(); // fast-path drain
+  pokeWorker(); // fast-path drain (stage-1 "payment received" is READY now)
   if (result.kind === 'already') {
     // Double submit / replay — the first settlement won; report current truth.
     const current = await store.getTransfer(transfer.id);
     return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
+  }
+  if (!result.webhookDriven) {
+    // Mock rail: the delivered confirmation is a DELAYED outbox row
+    // (DELIVERY_DELAY_MS) that the immediate poke above can't see — schedule a
+    // best-effort second poke for just after the delay elapses so the customer
+    // isn't waiting on the 5-minute heartbeat. Real rails are webhook-driven
+    // (the callback pokes); replays ('already') changed nothing to drain.
+    pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);
   }
   return NextResponse.json({ ok: true, status: result.webhookDriven ? 'processing' : 'paid' });
 }
