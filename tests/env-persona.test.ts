@@ -23,10 +23,19 @@ describe('Persona + verification-template env getters', () => {
     expect(env.personaWebhookSecret).toBe('');
   });
 
-  it('defaults the four verification-status template names', () => {
-    expect(env.whatsappVerificationNeededTemplate).toBe('verification_needed');
-    expect(env.whatsappVerificationInProgressTemplate).toBe('verification_in_progress');
-    expect(env.whatsappVerificationVerifiedTemplate).toBe('verification_verified');
-    expect(env.whatsappVerificationFailedTemplate).toBe('verification_failed');
+  it('verification-status templates are OPT-IN: unset ⇒ empty (free-form mode)', () => {
+    expect(env.whatsappVerificationNeededTemplate).toBe('');
+    expect(env.whatsappVerificationInProgressTemplate).toBe('');
+    expect(env.whatsappVerificationVerifiedTemplate).toBe('');
+    expect(env.whatsappVerificationFailedTemplate).toBe('');
+  });
+
+  it('configured names switch the templates on', () => {
+    process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE = 'verification_needed';
+    try {
+      expect(env.whatsappVerificationNeededTemplate).toBe('verification_needed');
+    } finally {
+      delete process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE;
+    }
   });
 });
