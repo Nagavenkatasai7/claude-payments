@@ -58,7 +58,7 @@ export default function TiltCard({ children, className = '', max = 6 }: Props) {
   return (
     <div
       ref={ref}
-      className={`lp-tilt ${className}`.trim()}
+      className={`[transition:transform_.25s_ease] ${className}`.trim()}
       onPointerMove={onMove}
       onPointerLeave={reset}
     >

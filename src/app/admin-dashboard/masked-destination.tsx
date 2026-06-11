@@ -30,7 +30,7 @@ export function MaskedDestination({
 
   if (!canReveal) {
     return (
-      <div className="sh-recipient-sub">
+      <div className="mt-0.5 text-xs text-muted-foreground">
         {method} · {payoutDestination}
       </div>
     );
@@ -38,7 +38,7 @@ export function MaskedDestination({
 
   return (
     <details
-      className="sh-reveal sh-recipient-sub"
+      className="group mt-0.5 text-xs text-muted-foreground"
       onToggle={async (e) => {
         if (!(e.currentTarget as HTMLDetailsElement).open || full || failed) return;
         const result = await revealDestinationAction(transferId);
@@ -46,10 +46,12 @@ export function MaskedDestination({
         else setFailed(true);
       }}
     >
-      <summary>
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden after:font-semibold after:text-primary after:content-['_·_reveal'] group-open:after:content-['_·_hide']">
         {method} · {payoutDestination}
       </summary>
-      <span className="sh-reveal-full">{failed ? 'Reveal failed' : (full ?? '…')}</span>
+      <span className="mt-0.5 block tabular-nums text-foreground">
+        {failed ? 'Reveal failed' : (full ?? '…')}
+      </span>
     </details>
   );
 }

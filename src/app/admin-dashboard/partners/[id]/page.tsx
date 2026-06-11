@@ -13,6 +13,11 @@ import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import {
   setPartnerStatusAction,
   updatePartnerAction,
@@ -22,7 +27,7 @@ import {
   savePaymentConfigAction,
   revokeApiKeyAction,
 } from '../actions';
-import type { CountryCode, Partner } from '@/lib/types';
+import type { CountryCode } from '@/lib/types';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -32,9 +37,9 @@ import type { CountryCode, Partner } from '@/lib/types';
 
 function configuredBadge(set: boolean) {
   return set ? (
-    <span className="sh-pill sh-pill-success"><span className="sh-pill-dot"></span>configured</span>
+    <Badge variant="outline" className="border-success/50 text-success">configured</Badge>
   ) : (
-    <span className="sh-pill sh-pill-neutral"><span className="sh-pill-dot"></span>not set</span>
+    <Badge variant="outline" className="text-muted-foreground">not set</Badge>
   );
 }
 
@@ -56,11 +61,13 @@ const STAFF_COLUMNS: ExpandableColumn[] = [
   { label: 'Actions' },
 ];
 
-function statusBadge(p: Partner): string {
-  return p.status === 'active'
-    ? 'sh-tag sh-tag-partner-active'
-    : 'sh-tag sh-tag-partner-suspended';
-}
+const DL_CLASS =
+  'grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-sm [&_dt]:text-muted-foreground [&_dd]:min-w-0 [&_dd]:break-words';
+
+const SELECT_CLASS = 'h-9 w-full rounded-md border border-input bg-card px-3 text-sm';
+
+const PRE_CLASS =
+  'rounded-lg border border-border bg-[#1c2024] p-3 text-xs text-[#e6e8ec] overflow-x-auto';
 
 export default async function PartnerDetailPage({
   params,
@@ -97,23 +104,25 @@ export default async function PartnerDetailPage({
             <div className="sh-page-title">{partner.name}</div>
             <div className="sh-page-sub">
               Partner · {partner.id} · created {new Date(partner.createdAt).toLocaleDateString()} ·{' '}
-              <span className={statusBadge(partner)}>{partner.status}</span>
+              <Badge variant={partner.status === 'active' ? 'secondary' : 'destructive'}>
+                {partner.status}
+              </Badge>
             </div>
           </div>
           {isPlatformAdmin && partner.id !== 'default' && (
-            <form action={setPartnerStatusAction} className="sh-inline-form">
+            <form action={setPartnerStatusAction}>
               <input type="hidden" name="id" value={partner.id} />
               <input
                 type="hidden"
                 name="status"
                 value={partner.status === 'active' ? 'suspended' : 'active'}
               />
-              <button
+              <Button
                 type="submit"
-                className={partner.status === 'active' ? 'sh-btn-secondary' : 'sh-btn-primary'}
+                variant={partner.status === 'active' ? 'outline' : 'default'}
               >
                 {partner.status === 'active' ? 'Suspend' : 'Reactivate'}
-              </button>
+              </Button>
             </form>
           )}
         </div>
@@ -131,32 +140,28 @@ export default async function PartnerDetailPage({
 
           {/* ── Overview ─────────────────────────────────────────────────── */}
           <TabsContent value="overview">
-            <section className="sh-card">
-              <div className="sh-card-head">
-                <div>
-                  <div className="sh-card-title">Activity</div>
-                  <div className="sh-card-sub">Lifetime totals for this partner</div>
-                </div>
-              </div>
-              <div className="sh-card-body">
-                <dl className="sh-dl">
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle>Activity</CardTitle>
+                <CardDescription>Lifetime totals for this partner</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <dl className={DL_CLASS}>
                   <dt>Transfers</dt><dd>{summary.total}</dd>
                   <dt>Lifetime volume</dt><dd>${summary.volumeAllTime.toFixed(2)}</dd>
                   <dt>Commission (paid/delivered)</dt><dd>${summary.commissionAllTime.toFixed(2)}</dd>
                   <dt>Needs attention</dt><dd>{summary.needsAttention}</dd>
                 </dl>
-              </div>
-            </section>
+              </CardContent>
+            </Card>
 
-            <section className="sh-card">
-              <div className="sh-card-head">
-                <div>
-                  <div className="sh-card-title">Identity</div>
-                  <div className="sh-card-sub">Partner record &amp; white-label branding</div>
-                </div>
-              </div>
-              <div className="sh-card-body">
-                <dl className="sh-dl">
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle>Identity</CardTitle>
+                <CardDescription>Partner record &amp; white-label branding</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <dl className={DL_CLASS}>
                   <dt>ID</dt><dd>{partner.id}</dd>
                   <dt>Name</dt><dd>{partner.name}</dd>
                   <dt>Display name</dt><dd>{partner.displayName ?? '—'}</dd>
@@ -166,12 +171,10 @@ export default async function PartnerDetailPage({
                   <dt>Primary color</dt>
                   <dd>
                     {partner.primaryColor ? (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span className="inline-flex items-center gap-1.5">
                         <span
-                          style={{
-                            display: 'inline-block', width: 12, height: 12, borderRadius: 3,
-                            background: partner.primaryColor, border: '1px solid var(--sh-border)',
-                          }}
+                          className="inline-block h-3 w-3 rounded-sm border border-border"
+                          style={{ background: partner.primaryColor }}
                         />
                         {partner.primaryColor}
                       </span>
@@ -180,195 +183,187 @@ export default async function PartnerDetailPage({
                   <dt>Support contact</dt><dd>{partner.supportContact ?? '—'}</dd>
                   <dt>Updated</dt><dd>{new Date(partner.updatedAt).toLocaleString()}</dd>
                 </dl>
-              </div>
-            </section>
+              </CardContent>
+            </Card>
 
-            <section className="sh-card">
-              <div className="sh-card-head">
-                <div>
-                  <div className="sh-card-title">Recent transfers</div>
-                  <div className="sh-card-sub">Latest {recents.length} (of {summary.total})</div>
-                </div>
-              </div>
-              <ExpandableTable
-                columns={TRANSFER_COLUMNS}
-                empty={<>No transfers yet.</>}
-                rows={recents.map((t) => ({
-                  key: t.id,
-                  label: t.id,
-                  cells: [
-                    t.id,
-                    `+${t.phone}`,
-                    <div key="amount" className="sh-amount">${t.amountUsd.toFixed(2)}</div>,
-                    t.status,
-                    new Date(t.createdAt).toLocaleString(),
-                  ],
-                }))}
-              />
-            </section>
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle>Recent transfers</CardTitle>
+                <CardDescription>Latest {recents.length} (of {summary.total})</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ExpandableTable
+                  columns={TRANSFER_COLUMNS}
+                  empty={<>No transfers yet.</>}
+                  rows={recents.map((t) => ({
+                    key: t.id,
+                    label: t.id,
+                    cells: [
+                      t.id,
+                      `+${t.phone}`,
+                      <div key="amount" className="font-medium tabular-nums">${t.amountUsd.toFixed(2)}</div>,
+                      t.status,
+                      new Date(t.createdAt).toLocaleString(),
+                    ],
+                  }))}
+                />
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {/* ── Settings (identity + branding + KYC — one form, one action) ── */}
           {isAdmin && (
             <TabsContent value="settings">
-              <section className="sh-card">
-                <div className="sh-card-head">
-                  <div>
-                    <div className="sh-card-title">Settings</div>
-                    <div className="sh-card-sub">Identity, branding, and KYC posture</div>
-                  </div>
-                </div>
-                <div className="sh-card-body">
-                  <form action={updatePartnerAction} className="sh-acct-form">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Settings</CardTitle>
+                  <CardDescription>Identity, branding, and KYC posture</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <form action={updatePartnerAction} className="space-y-4">
                     <input type="hidden" name="id" value={partner.id} />
-                    <input className="sh-input" name="name" defaultValue={partner.name} placeholder="Partner name" required />
-                    <fieldset className="sh-fieldset">
-                      <legend>Operating countries</legend>
-                      <div className="sh-perm-row">
+                    <Input name="name" defaultValue={partner.name} placeholder="Partner name" required />
+                    <fieldset className="rounded-lg border border-border p-4">
+                      <legend className="px-1 text-sm font-medium">Operating countries</legend>
+                      <div className="flex flex-wrap gap-x-5 gap-y-2">
                         {ALL_COUNTRIES.map((c) => (
-                          <label className="sh-perm" key={c}>
+                          <label className="flex items-center gap-1.5 text-sm" key={c}>
                             <input type="checkbox" name="countries" value={c} defaultChecked={partner.countries.includes(c)} /> {c}
                           </label>
                         ))}
                       </div>
                     </fieldset>
-                    <input className="sh-input" name="brandName" defaultValue={partner.brandName ?? ''} placeholder="Brand name (internal, optional)" />
-                    <input className="sh-input" name="displayName" defaultValue={partner.displayName ?? ''} placeholder="Display name — the brand customers see (e.g. Acme Pay)" />
-                    <input className="sh-input" name="supportContact" defaultValue={partner.supportContact ?? ''} placeholder="Support contact (e.g. support@acme.com)" />
-                    <input className="sh-input" name="botPersona" defaultValue={partner.botPersona ?? ''} placeholder="Bot persona / tone (optional, e.g. warm and concise)" />
-                    <input className="sh-input" name="primaryColor" type="color" defaultValue={partner.primaryColor ?? '#1a73e8'} />
-                    <input className="sh-input" name="logoUrl" defaultValue={partner.logoUrl ?? ''} placeholder="Logo URL (optional)" />
-                    <fieldset className="sh-fieldset">
-                      <legend>KYC handling</legend>
-                      <div className="sh-field">
-                        <label className="sh-field-label" htmlFor="p-kycmode">Who runs identity verification?</label>
-                        <select id="p-kycmode" className="sh-select" name="kycMode" defaultValue={partner.kycMode ?? 'ours'}>
+                    <Input name="brandName" defaultValue={partner.brandName ?? ''} placeholder="Brand name (internal, optional)" />
+                    <Input name="displayName" defaultValue={partner.displayName ?? ''} placeholder="Display name — the brand customers see (e.g. Acme Pay)" />
+                    <Input name="supportContact" defaultValue={partner.supportContact ?? ''} placeholder="Support contact (e.g. support@acme.com)" />
+                    <Input name="botPersona" defaultValue={partner.botPersona ?? ''} placeholder="Bot persona / tone (optional, e.g. warm and concise)" />
+                    <Input name="primaryColor" type="color" className="h-10 w-20 p-1" defaultValue={partner.primaryColor ?? '#1a73e8'} />
+                    <Input name="logoUrl" defaultValue={partner.logoUrl ?? ''} placeholder="Logo URL (optional)" />
+                    <fieldset className="rounded-lg border border-border p-4">
+                      <legend className="px-1 text-sm font-medium">KYC handling</legend>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="p-kycmode">Who runs identity verification?</Label>
+                        <select id="p-kycmode" className={SELECT_CLASS} name="kycMode" defaultValue={partner.kycMode ?? 'ours'}>
                           <option value="ours">SmartRemit runs KYC (default)</option>
                           <option value="delegated">Partner runs KYC (delegated)</option>
                         </select>
                       </div>
-                      <label className="sh-perm" style={{ marginTop: 8 }}>
+                      <label className="mt-3 flex items-center gap-1.5 text-sm">
                         <input type="checkbox" name="requireKycBeforeSend" defaultChecked={partner.requireKycBeforeSend === true} />{' '}
                         Still block sends until verified (only applies when delegated)
                       </label>
-                      <p className="sh-recipient-sub" style={{ marginTop: 6 }}>
+                      <p className="mt-2 text-xs text-muted-foreground">
                         Sanctions screening always runs, in both modes.
                       </p>
                     </fieldset>
-                    <input className="sh-input" name="adminNote" defaultValue={partner.adminNote ?? ''} placeholder="Admin note (internal, optional)" />
-                    <button type="submit" className="sh-btn-primary">Save changes</button>
+                    <Input name="adminNote" defaultValue={partner.adminNote ?? ''} placeholder="Admin note (internal, optional)" />
+                    <Button type="submit">Save changes</Button>
                   </form>
-                </div>
-              </section>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 
           {/* ── WhatsApp channel ─────────────────────────────────────────── */}
           {isAdmin && (
             <TabsContent value="whatsapp">
-              <section className="sh-card">
-                <div className="sh-card-head">
-                  <div>
-                    <div className="sh-card-title">WhatsApp channel</div>
-                    <div className="sh-card-sub">
-                      Bring your own Meta WhatsApp Business number. Secrets are write-only —
-                      leave a field blank to keep the stored value.
-                    </div>
-                  </div>
-                </div>
-                <div className="sh-card-body">
-                  <dl className="sh-dl">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>WhatsApp channel</CardTitle>
+                  <CardDescription>
+                    Bring your own Meta WhatsApp Business number. Secrets are write-only —
+                    leave a field blank to keep the stored value.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className={DL_CLASS}>
                     <dt>Access token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.token))}</dd>
                     <dt>Verify token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.verifyToken))}</dd>
                     <dt>App secret</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.appSecret))}</dd>
                   </dl>
-                  <form action={saveWhatsappConfigAction} className="sh-acct-form" style={{ marginTop: 12 }}>
+                  <form action={saveWhatsappConfigAction} className="mt-4 space-y-4">
                     <input type="hidden" name="id" value={partner.id} />
-                    <input className="sh-input" name="phoneNumberId" defaultValue={integrations.whatsapp.phoneNumberId ?? ''} placeholder="Phone number ID (from Meta — routes inbound messages)" />
-                    <input className="sh-input" name="token" type="password" autoComplete="off" placeholder="Access token (leave blank to keep)" />
-                    <input className="sh-input" name="verifyToken" type="password" autoComplete="off" placeholder="Webhook verify token (leave blank to keep)" />
-                    <input className="sh-input" name="appSecret" type="password" autoComplete="off" placeholder="App secret (leave blank to keep)" />
-                    <button type="submit" className="sh-btn-primary">Save WhatsApp config</button>
+                    <Input name="phoneNumberId" defaultValue={integrations.whatsapp.phoneNumberId ?? ''} placeholder="Phone number ID (from Meta — routes inbound messages)" />
+                    <Input name="token" type="password" autoComplete="off" placeholder="Access token (leave blank to keep)" />
+                    <Input name="verifyToken" type="password" autoComplete="off" placeholder="Webhook verify token (leave blank to keep)" />
+                    <Input name="appSecret" type="password" autoComplete="off" placeholder="App secret (leave blank to keep)" />
+                    <Button type="submit">Save WhatsApp config</Button>
                   </form>
-                  <div style={{ marginTop: 16 }}>
+                  <div className="mt-4">
                     <CopyField label="Webhook callback URL (paste into Meta → WhatsApp → Configuration)" value={`${env.appBaseUrl}/api/whatsapp/${partner.id}`} />
                   </div>
-                </div>
-              </section>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 
           {/* ── Settlement rail ──────────────────────────────────────────── */}
           {isAdmin && (
             <TabsContent value="settlement">
-              <section className="sh-card">
-                <div className="sh-card-head">
-                  <div>
-                    <div className="sh-card-title">Settlement rail</div>
-                    <div className="sh-card-sub">
-                      You settle funds; we relay the signed instruction and mirror your status callback.
-                      SmartRemit never holds funds.
-                    </div>
-                  </div>
-                </div>
-                <div className="sh-card-body">
-                  <dl className="sh-dl">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Settlement rail</CardTitle>
+                  <CardDescription>
+                    You settle funds; we relay the signed instruction and mirror your status callback.
+                    SmartRemit never holds funds.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className={DL_CLASS}>
                     <dt>Provider</dt><dd>{integrations.payment.providerType ?? 'mock (default)'}</dd>
                     <dt>Settlement endpoint</dt><dd>{configuredBadge(Boolean(integrations.payment.credentials?.settlementUrl))}</dd>
                     <dt>Signing secret</dt><dd>{configuredBadge(Boolean(integrations.payment.credentials?.signingSecret))}</dd>
                     <dt>Webhook secret</dt><dd>{configuredBadge(Boolean(integrations.payment.webhookSecret))}</dd>
                   </dl>
-                  <form action={savePaymentConfigAction} className="sh-acct-form" style={{ marginTop: 12 }}>
+                  <form action={savePaymentConfigAction} className="mt-4 space-y-4">
                     <input type="hidden" name="id" value={partner.id} />
-                    <div className="sh-field">
-                      <label className="sh-field-label" htmlFor="p-provider">Settlement provider</label>
-                      <select id="p-provider" className="sh-select" name="providerType" defaultValue={integrations.payment.providerType ?? 'mock'}>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="p-provider">Settlement provider</Label>
+                      <select id="p-provider" className={SELECT_CLASS} name="providerType" defaultValue={integrations.payment.providerType ?? 'mock'}>
                         <option value="mock">Mock (auto-deliver, for testing)</option>
                         <option value="simulator">Simulator (real webhook loop, demo)</option>
                         <option value="http">HTTP rail (your live settlement endpoint)</option>
                       </select>
                     </div>
-                    <input className="sh-input" name="settlementUrl" type="url" autoComplete="off" defaultValue={integrations.payment.credentials?.settlementUrl ?? ''} placeholder="Settlement endpoint URL — we POST signed instructions here (auto-filled for Simulator)" />
-                    <input className="sh-input" name="signingSecret" type="password" autoComplete="off" placeholder="Outbound signing secret (leave blank to keep)" />
-                    <input className="sh-input" name="webhookSecret" type="password" autoComplete="off" placeholder="Inbound webhook secret (leave blank to keep)" />
-                    <button type="submit" className="sh-btn-primary">Save settlement config</button>
+                    <Input name="settlementUrl" type="url" autoComplete="off" defaultValue={integrations.payment.credentials?.settlementUrl ?? ''} placeholder="Settlement endpoint URL — we POST signed instructions here (auto-filled for Simulator)" />
+                    <Input name="signingSecret" type="password" autoComplete="off" placeholder="Outbound signing secret (leave blank to keep)" />
+                    <Input name="webhookSecret" type="password" autoComplete="off" placeholder="Inbound webhook secret (leave blank to keep)" />
+                    <Button type="submit">Save settlement config</Button>
                   </form>
-                </div>
-              </section>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 
           {/* ── API keys ─────────────────────────────────────────────────── */}
           {isAdmin && (
             <TabsContent value="api-keys">
-              <section className="sh-card">
-                <div className="sh-card-head">
-                  <div>
-                    <div className="sh-card-title">API keys</div>
-                    <div className="sh-card-sub">
-                      Connect your systems to the Partner API. Keys are shown once at issue and stored hashed.
-                    </div>
-                  </div>
-                </div>
-                <div className="sh-card-body">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>API keys</CardTitle>
+                  <CardDescription>
+                    Connect your systems to the Partner API. Keys are shown once at issue and stored hashed.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
                   {apiKeys.length === 0 ? (
-                    <p className="sh-recipient-sub">No keys yet — issue one below to connect your systems.</p>
+                    <p className="text-sm text-muted-foreground">No keys yet — issue one below to connect your systems.</p>
                   ) : (
-                    <dl className="sh-dl">
+                    <dl className={DL_CLASS}>
                       {apiKeys.map((k) => (
-                        <div key={k.keyId} style={{ display: 'contents' }}>
+                        <div key={k.keyId} className="contents">
                           <dt><code>sr_live_…{k.last4}</code></dt>
-                          <dd style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <dd className="flex flex-wrap items-center gap-2.5">
                             {k.revokedAt ? (
-                              <span className="sh-pill sh-pill-danger"><span className="sh-pill-dot"></span>revoked</span>
+                              <Badge variant="outline" className="text-muted-foreground">revoked</Badge>
                             ) : (
-                              <span className="sh-pill sh-pill-success"><span className="sh-pill-dot"></span>active</span>
+                              <Badge variant="secondary">active</Badge>
                             )}
-                            <span className="sh-recipient-sub">issued {new Date(k.createdAt).toLocaleDateString()}</span>
+                            <span className="text-xs text-muted-foreground">issued {new Date(k.createdAt).toLocaleDateString()}</span>
                             {!k.revokedAt && (
                               <form action={revokeApiKeyAction.bind(null, partner.id)}>
                                 <input type="hidden" name="keyId" value={k.keyId} />
-                                <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Revoke</button>
+                                <Button type="submit" size="sm" variant="outline" className="text-destructive">Revoke</Button>
                               </form>
                             )}
                           </dd>
@@ -377,83 +372,81 @@ export default async function PartnerDetailPage({
                     </dl>
                   )}
                   <IssueKeyButton partnerId={partner.id} />
-                </div>
-              </section>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 
           {/* ── Staff ────────────────────────────────────────────────────── */}
           <TabsContent value="staff">
-            <section className="sh-card">
-              <div className="sh-card-head">
-                <div>
-                  <div className="sh-card-title">Staff for this partner</div>
-                  <div className="sh-card-sub">
-                    {partnerStaff.length} {partnerStaff.length === 1 ? 'member' : 'members'}
-                  </div>
-                </div>
-              </div>
-              <ExpandableTable
-                columns={STAFF_COLUMNS}
-                empty={<>No staff yet.</>}
-                rows={partnerStaff.map((s) => ({
-                  key: s.username,
-                  label: s.name,
-                  cells: [
-                    s.name,
-                    s.username,
-                    <span key="role" className={`sh-pill ${s.role === 'admin' ? 'sh-pill-info' : 'sh-pill-neutral'}`}>
-                      <span className="sh-pill-dot"></span>{s.role}
-                    </span>,
-                    new Date(s.createdAt).toLocaleDateString(),
-                    isAdmin ? (
-                      <form key="actions" action={removePartnerStaffAction}>
-                        <input type="hidden" name="username" value={s.username} />
-                        <button type="submit" className="sh-mini-btn sh-mini-btn-danger">Remove</button>
-                      </form>
-                    ) : null,
-                  ],
-                }))}
-              />
-              {isAdmin && (
-                <form action={createPartnerStaffAction.bind(null, partner.id)} className="sh-acct-form">
-                  <input className="sh-input" name="username" placeholder="Username" required />
-                  <input className="sh-input" name="name" placeholder="Full name" required />
-                  <input className="sh-input" name="password" type="password" placeholder="Password" required />
-                  <select className="sh-input" name="role" defaultValue="agent">
-                    <option value="agent">Agent</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                  <button type="submit" className="sh-btn-primary">Invite staff</button>
-                </form>
-              )}
-            </section>
+            <Card className="mb-6">
+              <CardHeader>
+                <CardTitle>Staff for this partner</CardTitle>
+                <CardDescription>
+                  {partnerStaff.length} {partnerStaff.length === 1 ? 'member' : 'members'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ExpandableTable
+                  columns={STAFF_COLUMNS}
+                  empty={<>No staff yet.</>}
+                  rows={partnerStaff.map((s) => ({
+                    key: s.username,
+                    label: s.name,
+                    cells: [
+                      s.name,
+                      s.username,
+                      <Badge key="role" variant={s.role === 'admin' ? 'default' : 'secondary'}>
+                        {s.role}
+                      </Badge>,
+                      new Date(s.createdAt).toLocaleDateString(),
+                      isAdmin ? (
+                        <form key="actions" action={removePartnerStaffAction}>
+                          <input type="hidden" name="username" value={s.username} />
+                          <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
+                        </form>
+                      ) : null,
+                    ],
+                  }))}
+                />
+                {isAdmin && (
+                  <form action={createPartnerStaffAction.bind(null, partner.id)} className="mt-4 space-y-4">
+                    <Input name="username" placeholder="Username" required />
+                    <Input name="name" placeholder="Full name" required />
+                    <Input name="password" type="password" placeholder="Password" required />
+                    <select className={SELECT_CLASS} name="role" defaultValue="agent">
+                      <option value="agent">Agent</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                    <Button type="submit">Invite staff</Button>
+                  </form>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {/* ── Integration guide ────────────────────────────────────────── */}
           {isAdmin && (
             <TabsContent value="integration">
-              <section className="sh-card">
-                <div className="sh-card-head">
-                  <div>
-                    <div className="sh-card-title">Integration guide</div>
-                    <div className="sh-card-sub">
-                      Everything your engineers need to connect — webhook URLs, signatures, and API examples.
-                      All signatures are HMAC-SHA256 (hex) over the exact raw request body, sent in a header.
-                    </div>
-                  </div>
-                </div>
-                <div className="sh-card-body">
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>1 · WhatsApp (your Meta app → us)</div>
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Integration guide</CardTitle>
+                  <CardDescription>
+                    Everything your engineers need to connect — webhook URLs, signatures, and API examples.
+                    All signatures are HMAC-SHA256 (hex) over the exact raw request body, sent in a header.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="mb-2 text-sm font-semibold">1 · WhatsApp (your Meta app → us)</div>
                   <CopyField label="Webhook callback URL (paste into Meta → WhatsApp → Configuration)" value={`${env.appBaseUrl}/api/whatsapp/${partner.id}`} />
-                  <p className="sh-recipient-sub" style={{ marginBottom: 16 }}>
+                  <p className="mb-4 text-xs text-muted-foreground">
                     Use the <strong>verify token</strong> you saved on the WhatsApp tab. Inbound
                     events are verified against your <strong>app secret</strong> (x-hub-signature-256) — this
                     endpoint rejects anything unsigned.
                   </p>
 
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>2 · Settlement instructions (us → your rail)</div>
-                  <pre style={{ background: 'var(--sh-surface-2, #f6f8fa)', border: '1px solid var(--sh-border)', borderRadius: 6, padding: 10, fontSize: 12, overflowX: 'auto', marginBottom: 16 }}>
+                  <div className="mb-2 text-sm font-semibold">2 · Settlement instructions (us → your rail)</div>
+                  <pre className={`${PRE_CLASS} mb-4`}>
 {`POST <your settlement endpoint>   x-signature: HMAC-SHA256(body)
 { "reference": "<transfer id>", "partner_id": "${partner.id}",
   "corridor": {"source": "US", "destination": "IN"},
@@ -464,17 +457,17 @@ export default async function PartnerDetailPage({
 → 200 { "providerRef": "<your settlement id>" }`}
                   </pre>
 
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>3 · Status callbacks (your rail → us)</div>
+                  <div className="mb-2 text-sm font-semibold">3 · Status callbacks (your rail → us)</div>
                   <CopyField label="Status callback URL (POST lifecycle events here)" value={`${env.appBaseUrl}/api/payment-webhook/${integrations.payment.providerType === 'simulator' ? 'simulator' : 'http'}`} />
-                  <pre style={{ background: 'var(--sh-surface-2, #f6f8fa)', border: '1px solid var(--sh-border)', borderRadius: 6, padding: 10, fontSize: 12, overflowX: 'auto', marginBottom: 16 }}>
+                  <pre className={`${PRE_CLASS} mb-4`}>
 {`POST ...   x-signature: HMAC-SHA256(body) with your INBOUND webhook secret
 { "reference": "<transfer id>", "status": "created | funded | paid_out" }
 Delivery fires on "paid_out". Duplicates and out-of-order events are ignored.`}
                   </pre>
 
-                  <div style={{ fontWeight: 600, marginBottom: 8 }}>4 · Partner API (your systems → us)</div>
+                  <div className="mb-2 text-sm font-semibold">4 · Partner API (your systems → us)</div>
                   <CopyField label="API base URL" value={`${env.appBaseUrl}/api/partner/v1`} />
-                  <pre style={{ background: 'var(--sh-surface-2, #f6f8fa)', border: '1px solid var(--sh-border)', borderRadius: 6, padding: 10, fontSize: 12, overflowX: 'auto' }}>
+                  <pre className={PRE_CLASS}>
 {`# Quote
 curl -X POST ${env.appBaseUrl}/api/partner/v1/quote \\
   -H "Authorization: Bearer sr_live_..." -H "Content-Type: application/json" \\
@@ -498,8 +491,8 @@ curl "${env.appBaseUrl}/api/partner/v1/transactions?limit=25" \\
 # Also: GET /corridors · POST /beneficiaries · POST /beneficiaries/validate
 # Rate limit: 120 req/min per partner. Errors: 401 bad key · 404 not yours · 429 slow down.`}
                   </pre>
-                </div>
-              </section>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
         </Tabs>

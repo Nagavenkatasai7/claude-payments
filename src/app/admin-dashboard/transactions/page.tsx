@@ -16,6 +16,8 @@ import {
   assignTransferAction,
   resendPaymentLinkAction,
 } from '../actions';
+import { Card } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import type { Partner, Tier } from '@/lib/types';
 
 // Stage 5b: SERVER keyset pagination — the page loads ONE window of the
@@ -88,7 +90,7 @@ export default async function TransactionsPage({
             </div>
           </div>
         </div>
-        <section className="sh-card">
+        <Card className="overflow-hidden py-0">
           <TransactionsExplorer
             transfers={transfers}
             staff={allStaff}
@@ -113,18 +115,18 @@ export default async function TransactionsPage({
             </span>
             <div className="flex gap-2">
               {cursor && (
-                <Link href={newestHref} className="sh-btn-secondary">
-                  ← Newest
-                </Link>
+                <Button asChild variant="outline" size="sm">
+                  <Link href={newestHref}>← Newest</Link>
+                </Button>
               )}
               {olderHref && (
-                <Link href={olderHref} className="sh-btn-secondary">
-                  Older →
-                </Link>
+                <Button asChild variant="outline" size="sm">
+                  <Link href={olderHref}>Older →</Link>
+                </Button>
               )}
             </div>
           </div>
-        </section>
+        </Card>
       </main>
     </>
   );

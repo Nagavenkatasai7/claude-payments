@@ -16,7 +16,7 @@ function maskPhone(phone: string): string {
  * when there's no live session. The real portal (verification, sending) lands in
  * later phases — Phase 1 only establishes the account + verified phone.
  */
-/** Map the KYC state to a CTA label + sublabel for the account-home card. */
+/** Map the KYC state to a CTA label + sublabel for the account-home screen. */
 function kycCta(customer: { kycStatus: string; kycReviewState?: string }): { label: string; note: string; done: boolean } {
   if (customer.kycStatus === 'verified') {
     return { label: 'Identity verified', note: 'You can send money in WhatsApp.', done: true };
@@ -37,22 +37,22 @@ export default async function AccountHomePage() {
   const cta = kycCta(customer);
 
   return (
-    <main className="payapp">
-      <div className="card">
-        <div className="brand">SmartRemit</div>
-        <h1>Your account</h1>
-        <p className="acct-signed-in">
-          You&rsquo;re signed in as <strong>{maskPhone(customer.senderPhone)}</strong>.
+    <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
+      <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
+        <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
+        <h1 className="mb-5 text-lg font-semibold leading-normal">Your account</h1>
+        <p className="mb-5 text-[15px] leading-[1.6] text-[#e9edef]">
+          You&rsquo;re signed in as <strong className="text-[#25d366]">{maskPhone(customer.senderPhone)}</strong>.
         </p>
-        <div className="acct-kyc-card">
-          <p className="acct-kyc-status">{cta.done ? '✓ ' : ''}{cta.label}</p>
-          <p className="acct-sub">{cta.note}</p>
-          {cta.done ? null : <a className="acct-cta" href="/account/verify">{cta.label}</a>}
+        <div>
+          <p>{cta.done ? '✓ ' : ''}{cta.label}</p>
+          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">{cta.note}</p>
+          {cta.done ? null : <a href="/account/verify">{cta.label}</a>}
         </div>
-        <div className="acct-kyc-card">
-          <p className="acct-kyc-status">Transfer history</p>
-          <p className="acct-sub">Every transfer you&rsquo;ve sent, with receipts.</p>
-          <a className="acct-cta" href="/account/history">View history</a>
+        <div>
+          <p>Transfer history</p>
+          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">Every transfer you&rsquo;ve sent, with receipts.</p>
+          <a href="/account/history">View history</a>
         </div>
         <LogoutButton />
       </div>

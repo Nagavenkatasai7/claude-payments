@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useTransition } from 'react';
+import { Button } from '@/components/ui/button';
 import { issueApiKeyAction } from './actions';
 
 // One-time API-key reveal. The plaintext is returned by the server action and
@@ -24,54 +25,36 @@ export function IssueKeyButton({ partnerId }: { partnerId: string }) {
   }
 
   return (
-    <div style={{ marginTop: 12 }}>
+    <div className="mt-3">
       {issued && (
-        <div
-          style={{
-            border: '1px solid var(--sh-border)',
-            borderRadius: 8,
-            padding: 12,
-            marginBottom: 12,
-            background: 'var(--sh-surface-2, #f6f8fa)',
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        <div className="mb-3 rounded-lg border border-border bg-muted/50 p-3">
+          <div className="mb-1.5 text-sm font-semibold">
             Copy this key now — it will never be shown again.
           </div>
-          <code
-            style={{
-              display: 'block',
-              wordBreak: 'break-all',
-              padding: '8px 10px',
-              background: 'var(--sh-surface, #fff)',
-              border: '1px solid var(--sh-border)',
-              borderRadius: 6,
-              fontSize: 13,
-            }}
-          >
+          <code className="block break-all rounded-md border border-border bg-card px-2.5 py-2 text-[13px]">
             {issued}
           </code>
-          <button
+          <Button
             type="button"
-            className="sh-mini-btn"
-            style={{ marginTop: 8 }}
+            size="sm"
+            variant="outline"
+            className="mt-2"
             onClick={() => setIssued(null)}
           >
             I&apos;ve copied it
-          </button>
+          </Button>
         </div>
       )}
       {error && (
-        <p style={{ color: 'var(--sh-danger, #c0392b)', marginBottom: 8 }}>{error}</p>
+        <p className="mb-2 text-sm text-destructive">{error}</p>
       )}
-      <button
+      <Button
         type="button"
-        className="sh-btn-primary"
         onClick={onIssue}
         disabled={pending}
       >
         {pending ? 'Issuing…' : 'Issue new API key'}
-      </button>
+      </Button>
     </div>
   );
 }

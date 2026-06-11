@@ -1,14 +1,15 @@
+import { Badge } from '@/components/ui/badge';
 import type { Customer } from '@/lib/types';
 
 /** The minimal customer fields the KYC column needs (works server- + client-side). */
 export type KycInfo = Pick<Customer, 'kycStatus' | 'kycReviewState' | 'watchlistHit' | 'pepHit'>;
 
 const STATUS: Record<string, { cls: string; label: string }> = {
-  verified: { cls: 'sh-pill-success', label: 'Verified' },
-  grandfathered: { cls: 'sh-pill-success', label: 'Grandfathered' },
-  rejected: { cls: 'sh-pill-danger', label: 'Rejected' },
-  pending: { cls: 'sh-pill-neutral', label: 'Pending' },
-  not_started: { cls: 'sh-pill-neutral', label: 'Not started' },
+  verified: { cls: 'border-success/50 text-success', label: 'Verified' },
+  grandfathered: { cls: 'border-success/50 text-success', label: 'Grandfathered' },
+  rejected: { cls: 'border-destructive/50 text-destructive', label: 'Rejected' },
+  pending: { cls: 'text-muted-foreground', label: 'Pending' },
+  not_started: { cls: 'text-muted-foreground', label: 'Not started' },
 };
 
 /**
@@ -21,36 +22,30 @@ const STATUS: Record<string, { cls: string; label: string }> = {
 export function KycBadge({ kyc }: { kyc: KycInfo | undefined }) {
   if (!kyc) {
     return (
-      <span className="sh-pill sh-pill-neutral">
-        <span className="sh-pill-dot" />—
-      </span>
+      <Badge variant="outline" className="text-muted-foreground">—</Badge>
     );
   }
-  const s = STATUS[kyc.kycStatus] ?? { cls: 'sh-pill-neutral', label: kyc.kycStatus };
+  const s = STATUS[kyc.kycStatus] ?? { cls: 'text-muted-foreground', label: kyc.kycStatus };
   const inReview = kyc.kycReviewState === 'pending_review' || kyc.kycReviewState === 'needs_review';
   return (
-    <div className="sh-kyc-cell">
-      <span className={`sh-pill ${s.cls}`}>
-        <span className="sh-pill-dot" />
+    <div className="flex flex-wrap items-center gap-1">
+      <Badge variant="outline" className={s.cls}>
         {s.label}
-      </span>
+      </Badge>
       {inReview && (
-        <span className="sh-pill sh-pill-info">
-          <span className="sh-pill-dot" />
+        <Badge variant="outline" className="border-primary/50 text-primary">
           In review
-        </span>
+        </Badge>
       )}
       {kyc.watchlistHit && (
-        <span className="sh-pill sh-pill-danger">
-          <span className="sh-pill-dot" />
+        <Badge variant="destructive">
           Watchlist
-        </span>
+        </Badge>
       )}
       {kyc.pepHit && (
-        <span className="sh-pill sh-pill-warning">
-          <span className="sh-pill-dot" />
+        <Badge variant="outline" className="border-warning/50 text-warning">
           PEP
-        </span>
+        </Badge>
       )}
     </div>
   );

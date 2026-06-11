@@ -21,6 +21,8 @@ const STATUS_LABEL: Record<string, string> = {
   blocked: 'On hold',
 };
 
+const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';
+
 function money(amount: number, currency: string): string {
   try {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
@@ -34,17 +36,17 @@ export default async function AccountHistoryPage() {
   const transfers = await getStore().listTransfersByPhone(customer.senderPhone, 50);
 
   return (
-    <main className="payapp">
-      <div className="card">
-        <div className="brand">SmartRemit</div>
-        <h1>Transfer history</h1>
+    <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
+      <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
+        <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
+        <h1 className="mb-5 text-lg font-semibold leading-normal">Transfer history</h1>
         {transfers.length === 0 ? (
-          <p className="acct-sub">
+          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
             No transfers yet — message us on WhatsApp to send your first one.
           </p>
         ) : (
           <>
-            <p className="acct-sub" style={{ marginBottom: 14 }}>
+            <p className="-mt-2 mb-3.5 text-sm leading-normal text-[#8696a0]">
               Your latest {transfers.length} {transfers.length === 1 ? 'transfer' : 'transfers'},
               newest first. Tap one for the receipt.
             </p>
@@ -52,27 +54,26 @@ export default async function AccountHistoryPage() {
               <Link
                 key={t.id}
                 href={`/account/receipt/${t.id}`}
-                className="summary"
-                style={{ display: 'block', textDecoration: 'none', color: 'inherit' }}
+                className="mb-5 block rounded-xl bg-[#202c33] p-3.5 text-inherit no-underline"
               >
-                <div className="row">
-                  <span style={{ fontWeight: 600 }}>{t.recipientName}</span>
+                <div className={rowCls}>
+                  <span className="font-semibold text-[#8696a0]">{t.recipientName}</span>
                   <span>{money(t.amountSource ?? t.amountUsd, t.sourceCurrency ?? 'USD')}</span>
                 </div>
-                <div className="row" style={{ opacity: 0.75 }}>
-                  <span>{new Date(t.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                <div className={`${rowCls} opacity-75`}>
+                  <span className="text-[#8696a0]">{new Date(t.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
                   <span>{STATUS_LABEL[t.status] ?? t.status}</span>
                 </div>
-                <div className="row" style={{ opacity: 0.6, fontSize: 12 }}>
-                  <span>→ {formatDestAmount(t.amountInr, t.destinationCurrency ?? 'INR')}</span>
+                <div className="flex justify-between py-1.5 text-[12px] leading-normal opacity-60">
+                  <span className="text-[#8696a0]">→ {formatDestAmount(t.amountInr, t.destinationCurrency ?? 'INR')}</span>
                   <span>Receipt →</span>
                 </div>
               </Link>
             ))}
           </>
         )}
-        <p style={{ marginTop: 16 }}>
-          <Link href="/account" className="acct-sub" style={{ textDecoration: 'underline' }}>
+        <p className="mt-4">
+          <Link href="/account" className="text-sm text-[#8696a0] underline">
             ← Back to your account
           </Link>
         </p>

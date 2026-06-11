@@ -46,11 +46,11 @@ const NEXT_DUE_COLUMNS: ExpandableColumn[] = [
 ];
 
 function statusPillClass(status: Transfer['status']): string {
-  if (status === 'delivered') return 'sh-pill-success';
-  if (status === 'paid') return 'sh-pill-info';
-  if (status === 'awaiting_payment') return 'sh-pill-neutral';
-  if (status === 'cancelled') return 'sh-pill-warning';
-  return 'sh-pill-danger';
+  if (status === 'delivered') return 'border-success/50 text-success';
+  if (status === 'paid') return 'border-primary/50 text-primary';
+  if (status === 'awaiting_payment') return 'border-border text-muted-foreground';
+  if (status === 'cancelled') return 'border-warning/50 text-warning';
+  return 'border-destructive/50 text-destructive';
 }
 
 export default async function DashboardPage() {
@@ -148,19 +148,21 @@ export default async function DashboardPage() {
               key: t.id,
               label: t.recipientName,
               cells: [
-                <div className="sh-recipient" key="r">{t.recipientName}</div>,
+                <div className="font-semibold" key="r">{t.recipientName}</div>,
                 <div key="a">
-                  <div className="sh-amount">{money(t.amountSource, t.sourceCurrency)}</div>
+                  <div className="font-semibold tabular-nums">{money(t.amountSource, t.sourceCurrency)}</div>
                   {t.sourceCurrency !== 'USD' && (
-                    <div className="sh-recipient-sub">≈ {money(t.amountUsd, 'USD')}</div>
+                    <div className="text-xs text-muted-foreground">≈ {money(t.amountUsd, 'USD')}</div>
                   )}
-                  <div className="sh-recipient-sub">
+                  <div className="text-xs text-muted-foreground">
                     → {money(t.amountInr, t.destinationCurrency ?? 'INR')}
                   </div>
                 </div>,
                 humanizeFunding(t.fundingMethod),
-                <span className={`sh-pill ${statusPillClass(t.status)}`} key="s">
-                  <span className="sh-pill-dot"></span>
+                <span
+                  key="s"
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11.5px] font-semibold whitespace-nowrap ${statusPillClass(t.status)}`}
+                >
                   {t.status.replace('_', ' ')}
                 </span>,
               ],
@@ -185,8 +187,8 @@ export default async function DashboardPage() {
               key: s.id,
               label: s.recipientName,
               cells: [
-                <div className="sh-recipient" key="r">{s.recipientName}</div>,
-                <span className="sh-amount" key="a">{money(s.amountSource, s.sourceCurrency)}</span>,
+                <div className="font-semibold" key="r">{s.recipientName}</div>,
+                <span className="font-semibold tabular-nums" key="a">{money(s.amountSource, s.sourceCurrency)}</span>,
                 scheduleWhen(s),
               ],
             }))}

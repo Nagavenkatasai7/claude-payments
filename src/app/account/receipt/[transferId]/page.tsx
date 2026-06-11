@@ -30,6 +30,11 @@ const STATUS_LABEL: Record<string, string> = {
   blocked: 'On hold',
 };
 
+const summaryCls = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
+const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';
+const rowLabelCls = 'text-[#8696a0]';
+const monoCls = 'text-[13px] [font-family:monospace]';
+
 function fmtWhen(iso?: string): string {
   return iso
     ? new Date(iso).toLocaleString('en-US', {
@@ -51,54 +56,54 @@ export default async function ReceiptPage({
   const srcCurrency = t.sourceCurrency ?? 'USD';
 
   return (
-    <main className="payapp">
-      <div className="card">
-        <div className="brand">SmartRemit</div>
-        <h1>Transfer receipt</h1>
+    <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
+      <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
+        <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
+        <h1 className="mb-5 text-lg font-semibold leading-normal">Transfer receipt</h1>
 
-        <div className="summary">
-          <div className="row">
-            <span>Status</span>
-            <span style={{ fontWeight: 600 }}>{STATUS_LABEL[t.status] ?? t.status}</span>
+        <div className={summaryCls}>
+          <div className={rowCls}>
+            <span className={rowLabelCls}>Status</span>
+            <span className="font-semibold">{STATUS_LABEL[t.status] ?? t.status}</span>
           </div>
-          <div className="row"><span>Transfer ID</span><span style={{ fontFamily: 'monospace', fontSize: 13 }}>{t.id}</span></div>
-          <div className="row"><span>Created</span><span>{fmtWhen(t.createdAt)}</span></div>
-          {t.paidAt && <div className="row"><span>Paid</span><span>{fmtWhen(t.paidAt)}</span></div>}
-          {t.deliveredAt && <div className="row"><span>Delivered</span><span>{fmtWhen(t.deliveredAt)}</span></div>}
+          <div className={rowCls}><span className={rowLabelCls}>Transfer ID</span><span className={monoCls}>{t.id}</span></div>
+          <div className={rowCls}><span className={rowLabelCls}>Created</span><span>{fmtWhen(t.createdAt)}</span></div>
+          {t.paidAt && <div className={rowCls}><span className={rowLabelCls}>Paid</span><span>{fmtWhen(t.paidAt)}</span></div>}
+          {t.deliveredAt && <div className={rowCls}><span className={rowLabelCls}>Delivered</span><span>{fmtWhen(t.deliveredAt)}</span></div>}
         </div>
 
-        <div className="summary">
-          <div className="row"><span>To</span><span style={{ fontWeight: 600 }}>{t.recipientName}</span></div>
-          <div className="row">
-            <span>Account</span>
-            <span style={{ fontFamily: 'monospace', fontSize: 13 }}>
+        <div className={summaryCls}>
+          <div className={rowCls}><span className={rowLabelCls}>To</span><span className="font-semibold">{t.recipientName}</span></div>
+          <div className={rowCls}>
+            <span className={rowLabelCls}>Account</span>
+            <span className={monoCls}>
               {t.payoutMethod.toUpperCase()} · {t.payoutDestination || '—'}
             </span>
           </div>
-          <div className="row">
-            <span>They receive</span>
-            <span style={{ fontWeight: 600 }}>{formatDestAmount(t.amountInr, t.destinationCurrency ?? 'INR')}</span>
+          <div className={rowCls}>
+            <span className={rowLabelCls}>They receive</span>
+            <span className="font-semibold">{formatDestAmount(t.amountInr, t.destinationCurrency ?? 'INR')}</span>
           </div>
         </div>
 
-        <div className="summary">
-          <div className="row"><span>You send</span><span>{money(t.amountSource ?? t.amountUsd, srcCurrency)}</span></div>
-          <div className="row"><span>Fee</span><span>{money(t.feeSource ?? t.feeUsd, srcCurrency)}</span></div>
-          <div className="row" style={{ fontWeight: 600 }}>
-            <span>Total charged</span>
+        <div className={summaryCls}>
+          <div className={rowCls}><span className={rowLabelCls}>You send</span><span>{money(t.amountSource ?? t.amountUsd, srcCurrency)}</span></div>
+          <div className={rowCls}><span className={rowLabelCls}>Fee</span><span>{money(t.feeSource ?? t.feeUsd, srcCurrency)}</span></div>
+          <div className={`${rowCls} font-semibold`}>
+            <span className={rowLabelCls}>Total charged</span>
             <span>{money(t.totalChargeSource ?? t.totalChargeUsd, srcCurrency)}</span>
           </div>
-          <div className="row" style={{ opacity: 0.75 }}>
-            <span>Exchange rate</span>
+          <div className={`${rowCls} opacity-75`}>
+            <span className={rowLabelCls}>Exchange rate</span>
             <span>1 {srcCurrency} = {t.fxRate} {t.destinationCurrency ?? 'INR'}</span>
           </div>
         </div>
 
-        <p className="acct-sub" style={{ fontSize: 12 }}>
+        <p className="-mt-2 mb-5 text-[12px] leading-normal text-[#8696a0]">
           Rate locked when you confirmed. Questions? Reply to us on WhatsApp with this transfer ID.
         </p>
-        <p style={{ marginTop: 12 }}>
-          <Link href="/account/history" className="acct-sub" style={{ textDecoration: 'underline' }}>
+        <p className="mt-3">
+          <Link href="/account/history" className="text-sm text-[#8696a0] underline">
             ← All transfers
           </Link>
         </p>
