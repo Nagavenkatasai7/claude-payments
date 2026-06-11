@@ -4,12 +4,16 @@ import { freshDb, seedPartner } from './helpers-db';
 import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
 import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
 import { createStore } from '@/lib/store';
-import type { Customer } from '@/lib/types';
+import type { Customer, Partner } from '@/lib/types';
 
 // pg-backed stores rebuilt per test (freshDb truncates); the hoisted mock
 // factories must NOT construct them — the getters close over the lets lazily.
 let cs: CustomerStore;
 let kcs: KycCaseStore;
+// The partner the action resolves for the notify gate (sendGateActive). Suite
+// default is gate ON (requireKycBeforeSend: true) — the legacy behavior the
+// existing notify assertions pin; the gate-off test flips it per-test.
+let partner: Partner;
 const notify = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@/lib/auth', () => ({ requireAdmin: async () => ({ username: 'admin', name: 'Main Admin', role: 'admin' }), requireScope: async () => ({}) }));
@@ -17,6 +21,9 @@ vi.mock('@/lib/staff-scope', () => ({ scopeOf: () => 'platform', canSee: (_s: un
 vi.mock('@/lib/store', async (orig) => ({ ...(await orig() as object), getStore: () => ({}) }));
 vi.mock('@/lib/customer-store', async (o) => ({ ...(await o() as object), getCustomerStore: () => cs }));
 vi.mock('@/lib/kyc-case-store', async (o) => ({ ...(await o() as object), getKycCaseStore: () => kcs }));
+vi.mock('@/lib/partner-store', () => ({
+  getPartnerStore: () => ({ getPartner: async () => partner, ensureDefaultPartner: async () => partner }),
+}));
 vi.mock('@/lib/whatsapp', () => ({ sendVerificationStatus: notify }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
@@ -38,6 +45,7 @@ beforeEach(async () => {
   await seedPartner(db, 'other'); // customers FK partners — needed for the out-of-scope test
   cs = createCustomerStore(db, createStore(fakeRedis(), db));
   kcs = createKycCaseStore(fakeRedis(), cs);
+  partner = { id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active', requireKycBeforeSend: true, createdAt: ISO, updatedAt: ISO };
   notify.mockClear();
 });
 
@@ -60,6 +68,17 @@ describe('reviewKycAction', () => {
     expect(c?.kycStatus).toBe('rejected');
     expect(c?.kycRejectedReason).toBe('watchlist confirmed');
     expect(notify).toHaveBeenCalledWith(PHONE, 'failed', undefined);
+  });
+
+  it('gate OFF ⇒ decision + audit stand but the customer is NOT messaged', async () => {
+    partner = { id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active', createdAt: ISO, updatedAt: ISO }; // no requireKycBeforeSend ⇒ gate off
+    await seed();
+    await reviewKycAction(form({ phone: PHONE, decision: 'approve', reason: 'docs clean' }));
+    const c = await cs.getCustomer(PHONE);
+    expect(c?.kycStatus).toBe('verified'); // the review outcome is unchanged
+    expect(c?.kycReviewState).toBe('approved');
+    expect((await kcs.getAudit(PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it('requires a reason', async () => {

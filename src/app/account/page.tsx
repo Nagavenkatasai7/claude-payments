@@ -1,4 +1,6 @@
 import { requireCustomer } from '@/lib/customer-auth';
+import { sendGateActive } from '@/lib/kyc-gate';
+import { getPartnerStore } from '@/lib/partner-store';
 import { LogoutButton } from './logout-button';
 
 export const dynamic = 'force-dynamic';
@@ -34,7 +36,13 @@ function kycCta(customer: { kycStatus: string; kycReviewState?: string }): { lab
 
 export default async function AccountHomePage() {
   const customer = await requireCustomer();
-  const cta = kycCta(customer);
+  // KYC is partner OPT-IN (sendGateActive) — the customer's partner ROW decides
+  // whether the verification card exists at all. Gate off ⇒ no card; the verify
+  // page + its server action enforce the same gate.
+  const partner =
+    (await getPartnerStore().getPartner(customer.partnerId)) ??
+    (await getPartnerStore().ensureDefaultPartner());
+  const cta = sendGateActive(partner) ? kycCta(customer) : null;
 
   return (
     <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
@@ -44,11 +52,13 @@ export default async function AccountHomePage() {
         <p className="mb-5 text-[15px] leading-[1.6] text-[#e9edef]">
           You&rsquo;re signed in as <strong className="text-[#25d366]">{maskPhone(customer.senderPhone)}</strong>.
         </p>
-        <div>
-          <p>{cta.done ? '✓ ' : ''}{cta.label}</p>
-          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">{cta.note}</p>
-          {cta.done ? null : <a href="/account/verify">{cta.label}</a>}
-        </div>
+        {cta ? (
+          <div>
+            <p>{cta.done ? '✓ ' : ''}{cta.label}</p>
+            <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">{cta.note}</p>
+            {cta.done ? null : <a href="/account/verify">{cta.label}</a>}
+          </div>
+        ) : null}
         <div>
           <p>Transfer history</p>
           <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">Every transfer you&rsquo;ve sent, with receipts.</p>
