@@ -289,6 +289,92 @@ describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
   });
 });
 
+describe('SYSTEM_PROMPT — live-audit fixes: daily-cap framing + T0→T1 timeline + status questions', () => {
+  // Both kycGateActive variants must carry the new guidance.
+  const variants = [
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+  ];
+
+  it('cap refusals are framed as a DAILY limit (daily_cap_usd + today_remaining_usd) in BOTH variants', () => {
+    for (const p of variants) {
+      expect(p).toContain('the limit is a DAILY cap, not a per-transfer one');
+      expect(p).toContain('Your daily limit right now is $X; you have $Y left today — want to send $Y?');
+      expect(p).toContain('use daily_cap_usd as $X and today_remaining_usd as $Y');
+      expect(p).toContain('as the actionable next step');
+    }
+  });
+
+  it('the old per-transfer refusal script is gone from BOTH variants', () => {
+    for (const p of variants) {
+      expect(p).not.toContain('per transfer right now');
+      expect(p).toContain('NEVER phrase the limit as "per transfer"');
+    }
+  });
+
+  it('T0 refusals add the 3-day timeline via day_of_window and the rise to $2,999/day', () => {
+    for (const p of variants) {
+      expect(p).toContain('day_of_window');
+      expect(p).toContain('of your first 3 days');
+      expect(p).toContain('your daily limit rises to $2,999/day');
+    }
+  });
+
+  it('the get_quote cap-guard offers the remaining daily amount, never the per-transfer field', () => {
+    for (const p of variants) {
+      expect(p).toContain('offer the max (today_remaining_usd, framed as their daily limit)');
+      expect(p).not.toContain('(today_remaining_usd / per_transfer_cap_usd)');
+    }
+  });
+
+  it('STATUS QUESTIONS: each [RECENT TRANSFERS] line has its OWN status — never merged', () => {
+    for (const p of variants) {
+      expect(p).toContain('STATUS QUESTIONS');
+      expect(p).toContain('[RECENT TRANSFERS] note carries its OWN status');
+      expect(p).toContain('NEVER merge two transfers');
+    }
+  });
+
+  it('STATUS QUESTIONS: ambiguous transfer → ask which one (recipient/amount/date), never guess', () => {
+    for (const p of variants) {
+      expect(p).toContain('ask which one');
+      expect(p).toContain('recipient, amount, and date');
+      expect(p).toContain('Do NOT guess');
+    }
+  });
+
+  it('STATUS QUESTIONS: check_payment_status needs a transfer_id the note lacks — never invent one', () => {
+    for (const p of variants) {
+      expect(p).toContain('check_payment_status requires a transfer_id');
+      expect(p).toContain('does NOT include transfer ids');
+      expect(p).toContain('NEVER invent or guess a transfer_id');
+    }
+  });
+
+  it('STATUS QUESTIONS: latest transfer answered from its line, named explicitly', () => {
+    for (const p of variants) {
+      expect(p).toContain('answer from that line');
+      expect(p).toContain('recipient + amount + date');
+    }
+  });
+
+  it('"awaiting payment" is framed as the customer\'s pending payment, never a delivery problem', () => {
+    for (const p of variants) {
+      expect(p).toContain('your payment link is still waiting to be completed');
+      expect(p).toContain('never as a delivery problem');
+    }
+  });
+
+  it('the no-KYC variant still never mentions verification', () => {
+    const gateOff = variants[1];
+    // the gate-off variant has no kyc_url / verify-identity language outside the
+    // explicit "never mention" instructions it already carried
+    expect(gateOff).toContain('NEVER ask them to verify their identity');
+    expect(gateOff).not.toContain('VERIFY-BEFORE-SEND GATE');
+    expect(gateOff).not.toContain('kyc_url');
+  });
+});
+
 describe('buildSystemPrompt (WL1 white-label factory)', () => {
   it('the default export is byte-for-byte the SmartRemit-branded prompt', () => {
     expect(SYSTEM_PROMPT).toBe(buildSystemPrompt({ brand: 'SmartRemit' }));
