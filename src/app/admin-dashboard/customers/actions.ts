@@ -7,6 +7,7 @@ import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
+import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
@@ -67,9 +68,17 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   const reviewer =
     staff.name && staff.name !== staff.username ? `${staff.name} (${staff.username})` : staff.username;
   await getKycCaseStore(getStore()).review(phone, decision, reviewer, reason);
-  await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName).catch(
-    () => {},
-  );
+  // KYC is partner OPT-IN: the decision + audit above stand regardless, but the
+  // customer-facing WhatsApp notify only fires when the partner's
+  // verify-before-send gate is ON. Fail-soft — a notify hiccup never voids the review.
+  const partner =
+    (await getPartnerStore().getPartner(customer.partnerId)) ??
+    (await getPartnerStore().ensureDefaultPartner());
+  if (sendGateActive(partner)) {
+    await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName).catch(
+      () => {},
+    );
+  }
 
   revalidatePath('/admin-dashboard/compliance');
   revalidatePath('/admin-dashboard/customers');
