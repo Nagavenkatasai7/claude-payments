@@ -446,7 +446,7 @@ describe('sanitizeReply', () => {
   });
 
   it('appends the canonical payment link when one is provided', () => {
-    const link = 'https://claude-payments.vercel.app/pay/abc123';
+    const link = 'https://smartremit.ai/pay/abc123';
     const result = sanitizeReply('Your payment link is ready.', [link]);
     expect(result).toContain(link);
     expect(result.endsWith(link)).toBe(true);
@@ -454,7 +454,7 @@ describe('sanitizeReply', () => {
 
   it('strips a model-written URL and appends the canonical link', () => {
     const typo = 'https://claude-payments.verce.app/pay/abc123';
-    const canonical = 'https://claude-payments.vercel.app/pay/abc123';
+    const canonical = 'https://smartremit.ai/pay/abc123';
     const result = sanitizeReply(`Use this link: ${typo}`, [canonical]);
     expect(result).not.toContain(typo);
     expect(result).toContain(canonical);
@@ -472,7 +472,7 @@ describe('sanitizeReply', () => {
   });
 
   it('returns the link even when the reply text is empty', () => {
-    const link = 'https://claude-payments.vercel.app/pay/abc123';
+    const link = 'https://smartremit.ai/pay/abc123';
     // Caller applies the fallback before sanitizeReply, but test the function directly
     // with empty stripped text to confirm the link is not lost
     const result = sanitizeReply('', [link]);
@@ -480,8 +480,8 @@ describe('sanitizeReply', () => {
   });
 
   it('uses the last link in the array when multiple are provided', () => {
-    const first = 'https://claude-payments.vercel.app/pay/first';
-    const last = 'https://claude-payments.vercel.app/pay/last';
+    const first = 'https://smartremit.ai/pay/first';
+    const last = 'https://smartremit.ai/pay/last';
     const result = sanitizeReply('Done.', [first, last]);
     expect(result).toContain(last);
   });

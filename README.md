@@ -20,7 +20,7 @@ turning this into a live service would require.
   then to *delivered* ~2 minutes later via Vercel `after()` background work.
 - Real WhatsApp delivery confirmation to the recipient via the approved
   `transfer_delivered` Utility template.
-- Admin dashboard at `claude-payments.vercel.app/dashboard` with per-page
+- Admin dashboard at `smartremit.ai/dashboard` with per-page
   views for Transactions, Schedules, Compliance, Analytics, and Team — all
   refreshing live every 5 seconds.
 - Multi-user staff auth (scrypt + Redis sessions, role = admin/operator/viewer).
@@ -92,7 +92,7 @@ The deploy pipeline is GitHub-driven:
    posts a preview URL.
 3. Once `ci / ci` is green, merge (squash). `main` is protected — direct
    pushes are rejected.
-4. The merge auto-deploys to `claude-payments.vercel.app`. A Playwright
+4. The merge auto-deploys to `smartremit.ai`. A Playwright
    smoke test then logs into the live dashboard; failure shows up on the
    commit's status check.
 

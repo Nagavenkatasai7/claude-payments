@@ -23,14 +23,14 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Smoke test
-        # Target the canonical production alias, not target_url. The
+        # Target the canonical production domain, not target_url. The
         # per-deployment URL (claude-payments-<hash>-<team>.vercel.app) is
         # behind Vercel deployment protection by default, so Playwright would
-        # land on an SSO page instead of /login. The alias is the unprotected
-        # public URL we actually want to verify.
+        # land on an SSO page instead of /login. smartremit.ai is the
+        # unprotected public URL we actually want to verify.
         env:
           CI: 'true'
-          BASE_URL: https://claude-payments.vercel.app
+          BASE_URL: https://smartremit.ai
           E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           # The partner fixture is SELF-PROVISIONED by the spec via the admin

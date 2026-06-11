@@ -2,7 +2,7 @@
 
 > The single end-to-end reference for how SmartRemit works: every component, every API,
 > every webhook, every configuration surface. Written 2026-06-11, after the
-> total-platform program (PRs #53–#77). Production: **https://smartremit.com**
+> total-platform program (PRs #53–#77). Production: **https://smartremit.ai**
 > (Vercel alias `claude-payments.vercel.app` retained for old links).
 
 ---
@@ -148,7 +148,7 @@ A tool-calling loop (max rounds) against Kimi K2.6:
 
 Each partner can bring their own Meta number: they save `phoneNumberId`, access
 token, verify token, and app secret on their dashboard WhatsApp tab; Meta's webhook
-is pointed at `https://smartremit.com/api/whatsapp/{partnerId}`. Inbound routing
+is pointed at `https://smartremit.ai/api/whatsapp/{partnerId}`. Inbound routing
 resolves the partner from the integrations row (`partnerForPhoneNumberId`); every
 outbound reply, OTP, and notification leaves from the number the customer messaged.
 Unconfigured partners share the platform number.
@@ -161,7 +161,7 @@ Unconfigured partners share the platform number.
 1. Customer: "send $200 to mom"           (WhatsApp)
 2. Agent: cap check → live quote → Approve & Pay card
 3. Approve → DRAFT created in Redis (30-min TTL) → secure pay link sent
-4. Pay page (https://smartremit.com/pay/{id}, WhatsApp-dark theme):
+4. Pay page (https://smartremit.ai/pay/{id}, WhatsApp-dark theme):
      a. collect bank details (validated per destination country)
      b. per-transaction OTP — code sent in the WhatsApp chat, verified server-side
      c. POST /api/pay/{id}
@@ -390,7 +390,7 @@ Vercel cron → `/api/cron` (daily schedules).
 | `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` / `OLLAMA_MODEL` | The agent LLM |
 | `PERSONA_API_KEY` / `PERSONA_WEBHOOK_SECRET` / template + env ids | Hosted KYC |
 | `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` | First staff admin (seeds only when staff list empty) |
-| `APP_BASE_URL` | Public base URL (set to `https://smartremit.com`; self-derives on Vercel otherwise) |
+| `APP_BASE_URL` | Public base URL (set to `https://smartremit.ai`; self-derives on Vercel otherwise) |
 | `PAYMENT_WEBHOOK_SECRET_<PROVIDER>` | Global per-provider webhook fallback secrets |
 | `OTP_DEV_MODE` | Local/CI only — logs "code ready", never sends |
 

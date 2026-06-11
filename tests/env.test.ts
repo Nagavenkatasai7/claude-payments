@@ -33,25 +33,23 @@ describe('env', () => {
 
     it('uses VERCEL_PROJECT_PRODUCTION_URL when APP_BASE_URL is empty', () => {
       process.env.APP_BASE_URL = '';
-      process.env.VERCEL_PROJECT_PRODUCTION_URL = 'claude-payments.vercel.app';
+      process.env.VERCEL_PROJECT_PRODUCTION_URL = 'example-project.vercel.app';
       expect(() => env.appBaseUrl).not.toThrow();
-      expect(env.appBaseUrl).toBe('https://claude-payments.vercel.app');
+      expect(env.appBaseUrl).toBe('https://example-project.vercel.app');
     });
 
     it('uses VERCEL_PROJECT_PRODUCTION_URL when APP_BASE_URL is unset', () => {
       delete process.env.APP_BASE_URL;
-      process.env.VERCEL_PROJECT_PRODUCTION_URL = 'claude-payments.vercel.app';
+      process.env.VERCEL_PROJECT_PRODUCTION_URL = 'example-project.vercel.app';
       expect(() => env.appBaseUrl).not.toThrow();
-      expect(env.appBaseUrl).toBe('https://claude-payments.vercel.app');
+      expect(env.appBaseUrl).toBe('https://example-project.vercel.app');
     });
 
-    it('falls back to hardcoded vercel.app URL when both vars are absent', () => {
+    it('falls back to the canonical production domain when both vars are absent', () => {
       process.env.APP_BASE_URL = '';
       delete process.env.VERCEL_PROJECT_PRODUCTION_URL;
       expect(() => env.appBaseUrl).not.toThrow();
-      const result = env.appBaseUrl;
-      expect(result).toMatch(/^https:\/\/.*vercel\.app$/);
-      expect(result).toBe('https://claude-payments.vercel.app');
+      expect(env.appBaseUrl).toBe('https://smartremit.ai');
     });
 
     it('trims trailing slashes from explicit APP_BASE_URL', () => {
