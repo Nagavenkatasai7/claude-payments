@@ -51,7 +51,7 @@ export const env = {
     if (vercelDomain && vercelDomain.trim()) {
       return `https://${vercelDomain.trim()}`;
     }
-    return 'https://claude-payments.vercel.app';
+    return 'https://smartremit.ai';
   },
   get kvUrl() {
     return required('KV_REST_API_URL');

@@ -72,7 +72,7 @@ We have a **convincing prototype of the conversation, dashboard, and notificatio
 
 | Sub-feature | Status | Reality |
 |---|---|---|
-| External admin website with webhooks | ✅ built | Dashboard at `claude-payments.vercel.app`; Meta webhook `/api/whatsapp`. |
+| External admin website with webhooks | ✅ built | Dashboard at `smartremit.ai`; Meta webhook `/api/whatsapp`. |
 | All traffic monitored on dashboard | ✅ built | Every transfer logged; live 5-sec refresh on every dashboard page. |
 | Multi-channel WhatsApp monitoring | ❌ not built | Single phone-number-id hardcoded. |
 | Scalable as users grow | ⚠️ prototype-scale | Fine at hundreds of transfers. In-memory aggregation would not survive ten-thousands without pre-aggregated counters or a real DB. |

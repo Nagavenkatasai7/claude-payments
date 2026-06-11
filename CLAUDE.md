@@ -6,7 +6,7 @@ Project context for any Claude session working in this repo. Keep concise; updat
 
 **SmartRemit** (smartremit.ai) — white-label, non-custodial remittance **infrastructure**. Customers chat with an AI agent in WhatsApp to send money US→India (multi-corridor capable); **partners** (the licensed money transmitters) get a branded bot, a hosted pay page, signed settlement webhooks, a REST API, and a self-service dashboard. SmartRemit orchestrates — conversation, quoting, compliance screening, KYC flows, instructions — and **never holds funds**. Real money movement is mocked or partner-settled; the simulator rail runs the exact signed instruction→callback loop a production rail would.
 
-Live at **https://claude-payments.vercel.app** (admin credentials in Vercel env `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values).
+Live at **https://smartremit.ai** — the canonical production domain (the `claude-payments.vercel.app` alias still resolves for old links). Admin credentials in Vercel env `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values.
 
 ## Stack
 

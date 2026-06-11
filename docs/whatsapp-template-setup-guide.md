@@ -21,7 +21,7 @@
    adjacent (`{{1}} {{2}}` with nothing between is rejected). All bodies below
    already respect this — paste them verbatim.
 4. **Dynamic URL buttons allow exactly ONE variable, only at the END of the URL**
-   (`https://smartremit.com/pay/{{1}}` ✅ — `https://{{1}}.smartremit.com` ❌).
+   (`https://smartremit.ai/pay/{{1}}` ✅ — `https://{{1}}.smartremit.ai` ❌).
    The sample for a URL variable is just the suffix (e.g. `draft_abc123`).
 5. **Submission order matters (the 7-day category lock).** If Meta decides a
    "Utility" template is actually Marketing, it re-categorizes it without notice
@@ -75,7 +75,7 @@ meanwhile. Create this as a new template; the code switch happens after approval
 | Language | **English** |
 | Header | None (leave off) |
 | Body | `Hi {{1}}, good news — you've received {{2}} from {{3}} via SmartRemit. It's been deposited to your bank account ending {{4}}.` |
-| Footer | `SmartRemit · smartremit.com` |
+| Footer | `SmartRemit · smartremit.ai` |
 | Buttons | None |
 
 **Samples** (the panel under the body):
@@ -107,7 +107,7 @@ by these exact names (it falls back to plain text until they're approved). Creat
 | Names (one template each) | `verification_needed` · `verification_in_progress` · `verification_verified` · `verification_failed` |
 | Language | **English** |
 | Body (same for all four) | `Hi {{1}}, an update on your SmartRemit account: {{2}} Reply here if you have any questions.` |
-| Footer | `SmartRemit · smartremit.com` |
+| Footer | `SmartRemit · smartremit.ai` |
 | Buttons | None |
 
 **Samples** — `{{1}}` = `Anand` for all four; `{{2}}` per template:
@@ -140,11 +140,11 @@ calls this exact name.
 | Name | `scheduled_payment_ready` |
 | Language | **English** |
 | Body | `Hi {{1}}, your scheduled transfer of {{2}} to {{3}} is ready for approval. Review and confirm using the button below.` |
-| Footer | `SmartRemit · smartremit.com` |
+| Footer | `SmartRemit · smartremit.ai` |
 | Buttons | **Add button → Call to action → Visit website** |
 | — Button text | `Review & Pay` |
 | — URL type | **Dynamic** |
-| — URL | `https://smartremit.com/pay/{{1}}` |
+| — URL | `https://smartremit.ai/pay/{{1}}` |
 
 **Samples:**
 
@@ -162,7 +162,7 @@ calls this exact name.
 
 ## 5. Batch 3 — recommended fallbacks (same UI steps; submit after 1–4 approve)
 
-All: Category **Utility**, Language **English**, Footer `SmartRemit · smartremit.com`, no header.
+All: Category **Utility**, Language **English**, Footer `SmartRemit · smartremit.ai`, no header.
 
 ### 5.1 `transfer_delivered_sender`
 - Body: `Your SmartRemit transfer of {{1}} to {{2}} has been delivered. Reference: {{3}}.`
@@ -182,7 +182,7 @@ All: Category **Utility**, Language **English**, Footer `SmartRemit · smartremi
 
 ### 5.5 `payment_reminder` — SUBMIT LAST (highest re-categorization risk)
 - Body: `Hi {{1}}, your transfer of {{2}} to {{3}} is still pending. You can complete it using the button below.`
-- Button: Call to action → Visit website → text `Complete Payment` → URL type **Dynamic** → `https://smartremit.com/pay/{{1}}`
+- Button: Call to action → Visit website → text `Complete Payment` → URL type **Dynamic** → `https://smartremit.ai/pay/{{1}}`
 - Samples: body `Anand` · `$50.00` · `Priya`; button `draft_abc123`
 
 ---

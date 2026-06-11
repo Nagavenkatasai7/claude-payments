@@ -72,7 +72,7 @@ export default function DocsPage() {
         <section id="api" className="space-y-4">
           <h2 className="text-xl font-semibold">1 · The Partner API</h2>
           <p className="text-sm text-muted-foreground">
-            Base URL <code>https://claude-payments.vercel.app/api/partner/v1</code>. Authenticate every
+            Base URL <code>https://smartremit.ai/api/partner/v1</code>. Authenticate every
             request with your API key (issued in the dashboard, shown once):
           </p>
           <Code>{`Authorization: Bearer <your-api-key>`}</Code>

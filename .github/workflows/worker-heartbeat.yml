@@ -20,5 +20,5 @@ jobs:
         run: |
           curl -sS --max-time 90 \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "https://claude-payments.vercel.app/api/worker" \
+            "https://smartremit.ai/api/worker" \
             -o /dev/null -w "worker drain HTTP %{http_code}\n"
