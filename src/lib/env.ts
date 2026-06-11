@@ -82,12 +82,6 @@ export const env = {
     // Default + only supported value in v1 — a forward hook, not a live switch.
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';
   },
-  get whatsappFlowsEnabled(): boolean {
-    // Strict 'true' literal (mirrors paymentProviderMode). Default-false: the
-    // test WABA is not Meta-Business-verified, so a live list/flow send may
-    // fail — the send_recipient_picker call site falls back to buttons.
-    return process.env.WHATSAPP_FLOWS_ENABLED === 'true';
-  },
   // ── Customer onboarding Phase 1 ──
   get fieldEncryptionKey(): string {
     // 32-byte (hex/base64) master key for field-level envelope encryption.

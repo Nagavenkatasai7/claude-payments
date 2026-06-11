@@ -4,86 +4,74 @@ Project context for any Claude session working in this repo. Keep concise; updat
 
 ## What this is
 
-**SmartRemit** (smartremit.ai) — a working prototype of a WhatsApp-based US→India remittance service, inspired by Felix Pago. Customers chat with an AI agent in WhatsApp to send money; staff manage everything through a Stripe-style admin dashboard. **All real money movement is mocked** — no actual Plaid, FedNow, or UPI integration. Every transfer is realistic on screen but doesn't move a cent.
+**SmartRemit** (smartremit.ai) — white-label, non-custodial remittance **infrastructure**. Customers chat with an AI agent in WhatsApp to send money US→India (multi-corridor capable); **partners** (the licensed money transmitters) get a branded bot, a hosted pay page, signed settlement webhooks, a REST API, and a self-service dashboard. SmartRemit orchestrates — conversation, quoting, compliance screening, KYC flows, instructions — and **never holds funds**. Real money movement is mocked or partner-settled; the simulator rail runs the exact signed instruction→callback loop a production rail would.
 
-Live at **https://claude-payments.vercel.app** (admin credentials live in Vercel env vars `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values).
+Live at **https://claude-payments.vercel.app** (admin credentials in Vercel env `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values).
 
 ## Stack
 
-- **Next.js 16** (App Router) on **Vercel** — serverless
-- **TypeScript** + **Vitest** (29 test files, ~209 tests at time of writing)
-- **Upstash Redis** — primary store (transfers, schedules, conversations, staff, sessions, velocity counters)
-- **Ollama Cloud** running **Kimi K2.6** — the conversational agent
-- **Meta WhatsApp Cloud API** — chat I/O (test number, see memory `sendhome-meta-state`)
-- **Recharts** — dashboard analytics charts
-- **Frankfurter API** — live USD→INR FX rate (no key)
+- **Next.js 16** (App Router) on **Vercel** — serverless, Fluid Compute
+- **TypeScript** + **Vitest** (~120 test files / ~1,270 tests; **PGlite** for real in-process Postgres + `fakeRedis` for Redis-side)
+- **Neon Postgres** via **Drizzle ORM** (`drizzle-orm/neon-serverless` WebSocket Pool — money paths need interactive transactions + `FOR UPDATE SKIP LOCKED`) — THE ledger
+- **Upstash Redis** — hot/ephemeral only: sessions, conversations (30d TTL), drafts, OTPs, throttles, msg dedup, rate limits, velocity counters, FX L2 cache
+- **Tailwind v4 + shadcn/ui** — ONE stylesheet pipeline (`src/app/tailwind.css`); legacy CSS deleted
+- **Ollama Cloud / Kimi K2.6** — the conversational agent; **Meta WhatsApp Cloud API** — chat I/O (per-partner BYO numbers supported)
+- **Recharts** (analytics) · **Frankfurter** (live FX, no key)
 
-## Repo layout
+## Architecture spine (do not regress these)
+
+- **Durability**: every external effect (WhatsApp sends, settlement instructions, rail callbacks, agent turns, ops alerts) is an **outbox row** written transactionally with the state change implying it. `/api/worker` drains (SKIP LOCKED, 2^n backoff, dead at 8 → deduped ops alert); a GitHub Actions 5-min heartbeat is the delivery guarantee; `pokeWorker()` is the fast path. The worker also runs `reconcileSweep()` (stuck paid >15m → re-instruct once + alert; stale reviews >24h → alert).
+- **Money paths are transactional**: `beginSettlement()` (src/lib/settlement.ts) commits the paid flip + stage-1 message + rail effect in ONE transaction. Minting is **claim-first**: the transfer id is bound to the idempotency key (PK `(partner_id, key)`) BEFORE the insert — crash-replays re-mint the same row; the pay-link draft is consumed AFTER the mint.
+- **Tenant isolation is app-level**: partner-facing repo queries take `partnerId` in the WHERE; `getOwnedTransfer` is 404-never-403; partner-scoped staff are PINNED to their tenant regardless of filter args (test-pinned).
+- **Encryption at rest** (`field-crypto.ts` envelope AES-256-GCM): payout destinations, recipient legal names, customer PII, integration secrets. Default ledger reads are MASKED (`****last4`); decrypted reads are explicit (`getTransferDecrypted`) and staff reveals are AUDITED (`pii.reveal` in `audit_events`).
+- **Sanctions screening always runs** — structurally untoggleable, in both KYC modes. KYC may be delegated to the partner; sanctions may not.
+- **Security pack**: instrumentation boot assert (prod refuses to start with missing secrets — the assert's contract MUST mirror the accepting code, see the FIELD_ENCRYPTION_KEY incident), security headers + **enforced CSP**, `/account` + `/admin-dashboard` middleware gates, per-IP rate limits (fail-open) on pay/rail/webhooks, PII-scrubbing logger (`src/lib/log.ts`) in money paths.
+
+## Repo layout (orientation, not exhaustive)
 
 ```
 src/
+  db/            schema.ts (13 tables) · client.ts (getDb Pool singleton) · repos/* (transfer, partner,
+                 integrations, api-key, customer, schedule, outbox, aux: idempotency/audit/beneficiaries)
+  lib/           agent/tools/prompt (chat) · settlement.ts · pay-finalize.ts · outbox-worker.ts ·
+                 reconcile.ts · transfer-create.ts · compliance.ts · partner-api-service.ts ·
+                 *-store.ts (thin wrappers; getRedis() in redis.ts is THE shared client) ·
+                 ip-rate-limit.ts · log.ts · boot-assert.ts · field-crypto.ts
   app/
-    api/whatsapp/route.ts         - Meta webhook (GET verify, POST receive)
-    api/pay/[transferId]/route.ts - Mock card / bank-link payment + stage 1/2 delivery
-    api/cron/route.ts             - Daily cron: fires due recurring schedules
-    pay/[transferId]/             - Customer-facing pay page (WhatsApp-dark theme, scoped under .payapp)
-    login/                        - Staff login (sh-* Stripe-style theme)
-    dashboard/                    - Admin dashboard (multi-page, Stripe-style)
-      page.tsx                    -   Overview (slim)
-      transactions/page.tsx       -   Full ledger with search + date filter + tabs
-      schedules/page.tsx          -   Recurring schedules
-      compliance/page.tsx         -   Flagged + blocked + watchlist + velocity
-      analytics/page.tsx          -   Recharts charts with 7d/30d/90d toggle
-      team/page.tsx               -   Staff + permissions (admin only)
-      layout.tsx, top-bar.tsx, sidebar.tsx, live-refresh.tsx (5s polling)
-  lib/                            - All non-UI logic — most files single-responsibility
-    agent.ts, ollama.ts, prompt.ts, tools.ts   - Chat agent + tools
-    store.ts                      - Redis access (transfers, conversations, velocity)
-    auth-store.ts                 - Redis access (staff, sessions)
-    schedule-store.ts             - Redis access (recurring schedules)
-    payment.ts                    - Two-stage delivery logic
-    transfer-create.ts            - Shared createTransfer() — agent tool + cron both use it
-    compliance.ts                 - Mock screening engine (watchlist + amount + velocity)
-    fx.ts, rate.ts                - Quote math + live FX
-    dashboard.ts, analytics.ts    - Pure aggregator helpers
-    permissions.ts, auth.ts, seed.ts, password.ts, session-cookie.ts - Staff auth
-    whatsapp.ts                   - Meta Cloud API client (sendText, sendTemplate)
-    phone.ts, dates.ts, id.ts, types.ts, env.ts - Utilities
-  middleware.ts                   - Gates /dashboard (auth)
-tests/                            - Vitest specs (one per lib module)
-docs/
-  superpowers/specs/              - Design specs (one per batch)
-  superpowers/plans/              - Implementation plans (one per batch)
-  ROADMAP.md                      - Feature status + path to production
+    api/         whatsapp[/partnerId] (HMAC fail-closed) · pay/[id] · partner/v1/* (Bearer key) ·
+                 payment-webhook/[provider] (signed) · partner-rail (hosted reference rail) ·
+                 worker · cron · dashboard/summary (stamp polling)
+    admin-dashboard/  shadcn pages: overview · ops · transactions (keyset paged) · schedules · customers ·
+                      compliance · kyc · analytics · partners (wizard at /new, tabs at /[id]) · corridors
+                      (platform-only) · team · api-keys
+    account/     customer portal (WhatsApp-dark Tailwind): auth + history + receipt/[id]
+    pay/[id]/    hosted pay page (WhatsApp-dark Tailwind)
+    page.tsx     dual-audience landing · docs/ (partner integration hub)
+    tailwind.css THE stylesheet pipeline (theme tokens, preflight, scaffold classes, keyframes)
+  middleware.ts  gates /admin-dashboard (staff cookie) + /account (customer __Host- cookie)
+tests/           one spec per lib module + PGlite repo/tx suites + e2e/ (Playwright smoke, self-provisioning)
+drizzle/         checked-in SQL migrations (0001 seeds the 'default' partner)
 ```
 
-## Working conventions
+## Conventions & gotchas
 
-- **Server actions** in `src/app/dashboard/actions.ts` etc. are imported by client components — server actions can cross the server→client boundary, **plain functions cannot** (we've been bitten by this; design accordingly).
-- **Server-action security checklist (mandatory).** Every server action is a public POST endpoint; page-level gating does NOT protect it (a partner-admin can `curl` it directly). P3 caught three holes of this exact shape at review. Each server action MUST: (1) call its own `require*` auth gate (`requirePlatformAdmin` / `requireScope`), never trusting the calling page; (2) verify the target entity exists and is in scope before mutating; (3) check for collisions before any create (`saveX` is an unconditional SET — guard against silent overwrite/hijack); (4) treat URL/path params as authoritative over form fields for ownership (`partnerId` from the route, not the body).
-- **Pure helpers** (`fx.ts`, `compliance.ts`, `dashboard.ts`, `analytics.ts`, `transfer-create.ts`, etc.) are TDD'd; UI pages are not unit-tested.
-- **Live updates** on every dashboard page via `<LiveRefresh>` in the layout's TopBar; pages are `export const dynamic = 'force-dynamic'`; sidebar uses `next/link` for soft navigation so the polling timer stays continuous.
-- **CSS** lives entirely in `src/app/globals.css` with two scopes: the `sh-*` Stripe-style theme (login + dashboard) and a legacy `.payapp`-scoped WhatsApp-dark theme (preserved for the pay page).
-- **Deploys** are GitHub-driven: merge a PR into `main` → Vercel auto-deploys → Playwright smoke test runs against prod. No more manual `vercel --prod`. CI workflow in `.github/workflows/ci.yml`; smoke workflow in `.github/workflows/smoke.yml`. Branch protection on `main` requires the `ci / ci` status check; direct pushes are rejected.
-- **Branches:** `main` is the deploy target on GitHub (`Nagavenkatasai7/claude-payments`); old `master` is preserved on the remote as `archive/initial-scaffold`.
+- **Server actions are public POST endpoints**: every action self-gates (`require*`), validates target existence + scope before mutating, treats route params as authoritative over body fields, and guards creates against silent overwrite.
+- **Pure helpers are TDD'd; UI pages are not unit-tested** — the post-deploy Playwright smoke (`tests/e2e/`, self-provisioning fixtures) is the UI verifier. **Check the `smoke.yml` run on main after every merge.**
+- **e2e hooks**: `.sh-page-title`, `aside.sh-sidebar`, the four scaffold classes (`sh-main`/`sh-page-head`/`sh-page-title`/`sh-page-sub` in tailwind.css) — keep them stable or update the smoke in the same PR.
+- **Test fixtures**: never hardcode dates that interact with time windows (the 3-day T0 observation window has detonated a suite before — use relative dates). Tests stub global `fetch` (Frankfurter); the FX Redis L2 is VITEST-skipped for that reason.
+- **PGlite + fake timers**: `freshDb()` BEFORE `vi.useFakeTimers()`. Occasional parallel-run flakes pass in isolation.
+- **`Duplicate identifier` in `.next/types/* 2.ts`** = iCloud duplicate file, not a regression: delete the ` 2` file, `rm -rf .next`.
+- **Upstash**: `automaticDeserialization: false` everywhere (via the single `getRedis()`); hgetall returns flat arrays otherwise.
+- **Vercel CLI v54**: piped `vercel env add` stores EMPTY values (use `--value`); prod vars are sensitive-by-default so `env pull` returns `''` — verify secrets at RUNTIME.
+- **Set-once, never rotate**: `FIELD_ENCRYPTION_KEY` (hex64 OR base64-32 — both valid) and `PASSWORD_PEPPER`.
 
-## Key external configuration
+## Key env vars (see `.env.example`)
 
-Env vars (see `.env.example`):
-
-- `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, `OLLAMA_MODEL` — Ollama Cloud / Kimi K2.6
-- `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN` — Meta Cloud API (see memory `sendhome-meta-state`)
-- `KV_REST_API_URL`, `KV_REST_API_TOKEN` — Upstash Redis (provisioned via Vercel Marketplace)
-- `SEED_ADMIN_USERNAME`, `SEED_ADMIN_PASSWORD` — first admin account; only seeds when the staff list is empty (rotation = delete `staff:<username>` in Upstash, change env var, redeploy)
-- `APP_BASE_URL` — currently empty in prod; the code self-derives from `VERCEL_PROJECT_PRODUCTION_URL` (auto-injected by Vercel)
-- `CRON_SECRET` (optional) — gates `/api/cron`
-
-## Project state
-
-See `docs/ROADMAP.md` for the realistic feature inventory (what's built, what's mocked, what needs real partnerships/licenses) and the proposed forward path.
+`DATABASE_URL` (Neon) · `KV_REST_API_URL/TOKEN` (Upstash) · `FIELD_ENCRYPTION_KEY` · `PASSWORD_PEPPER` · `CRON_SECRET` (worker/cron auth) · `META_APP_SECRET` + `WHATSAPP_*` (Meta) · `OPS_ALERT_PHONE` (stuck-money WhatsApp alerts) · `OLLAMA_*` · `SEED_ADMIN_*` · `APP_BASE_URL` (self-derives on Vercel). Production refuses to boot if the money-grade ones are missing (`src/lib/boot-assert.ts`).
 
 ## Workflow rules
 
-- **Plan first, get approval, then build.** Use `superpowers:brainstorming` → `superpowers:writing-plans` → `superpowers:subagent-driven-development` for any meaningful change.
-- **No direct pushes to `main`.** Open a PR; the `ci / ci` status check must pass. Vercel auto-deploys on merge. The old "type 'deploy'" rule is moot for code changes; it still applies if anyone reaches for `vercel --prod` directly.
-- This is also captured in the `sendhome-user-workflow` memory.
+- **Plan first, get approval, then build** (`superpowers:brainstorming` → `writing-plans` → `subagent-driven-development` for meaningful changes).
+- **No direct pushes to `main`.** PR + the `ci / ci` check; merge auto-deploys prod; then **verify the post-deploy `smoke.yml` run went green**.
+- Branches: `main` deploys (GitHub `Nagavenkatasai7/claude-payments`); old `master` archived as `archive/initial-scaffold`.
+- See `docs/ROADMAP.md` for feature inventory and the path to production; memory file `sendhome-total-platform-program` tracks the staged program history.

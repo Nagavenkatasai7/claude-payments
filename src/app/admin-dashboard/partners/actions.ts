@@ -30,35 +30,6 @@ async function gatePartnerConfig(id: string): Promise<void> {
   if (!partner || !canSee(scopeOf(staff), id)) throw new Error('Partner not found.');
 }
 
-export async function createPartnerAction(formData: FormData): Promise<void> {
-  // M5: creating a tenant is platform governance — partner-admins must not reach it.
-  await requirePlatformAdmin();
-  const name = String(formData.get('name') ?? '').trim();
-  if (!name) throw new Error('Partner name is required.');
-
-  const countries = formData.getAll('countries').map(String) as Partner['countries'];
-  if (countries.length === 0) throw new Error('At least one country is required.');
-
-  const id = newTransferId();
-  const now = new Date().toISOString();
-  const partner: Partner = {
-    id,
-    name,
-    countries,
-    status: 'active',
-    brandName: String(formData.get('brandName') ?? '').trim() || undefined,
-    displayName: String(formData.get('displayName') ?? '').trim() || undefined,
-    primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
-    logoUrl: String(formData.get('logoUrl') ?? '').trim() || undefined,
-    adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
-    createdAt: now,
-    updatedAt: now,
-  };
-  await getPartnerStore().savePartner(partner);
-  revalidatePath('/admin-dashboard/partners');
-  redirect(`/admin-dashboard/partners/${id}`);
-}
-
 export async function updatePartnerAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '').trim();

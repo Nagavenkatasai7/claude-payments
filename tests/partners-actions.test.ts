@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
+import { EnvKeyProvider } from '@/lib/field-crypto';
 
 vi.mock('@/lib/auth', () => ({
   requireAdmin: async () => ({ username: 'admin', role: 'admin' }),
@@ -19,6 +20,17 @@ vi.mock('@/lib/partner-store', async () => {
     ...actual,
     getPartnerStore: () => ps,
   };
+});
+
+// The wizard commit also writes integrations + issues the first API key —
+// both Postgres-backed, rebuilt from the same PGlite per test.
+vi.mock('@/lib/partner-integrations-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/partner-integrations-store')>('@/lib/partner-integrations-store');
+  return { ...actual, getPartnerIntegrationsStore: () => actual.createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))) };
+});
+vi.mock('@/lib/partner-api-key', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/partner-api-key')>('@/lib/partner-api-key');
+  return { ...actual, getPartnerApiKeyStore: () => actual.createPartnerApiKeyStore(db) };
 });
 
 // Auth store (staff/sessions) is STILL Redis.
@@ -43,38 +55,45 @@ beforeEach(async () => {
 afterEach(() => vi.clearAllMocks());
 
 import {
-  createPartnerAction,
+  wizardCreatePartnerAction,
   updatePartnerAction,
   setPartnerStatusAction,
 } from '@/app/admin-dashboard/partners/actions';
 import { createPartnerStore } from '@/lib/partner-store';
 
-describe('createPartnerAction', () => {
-  it('creates a Partner with status active and a fresh id', async () => {
-    const fd = new FormData();
-    fd.set('name', 'Acme Remit');
-    fd.append('countries', 'CA');
-    await createPartnerAction(fd);
-    // freshDb seeds the 'default' partner; ignore it here.
+describe('wizardCreatePartnerAction (the setup wizard commit)', () => {
+  it('creates an active Partner, saves integrations, and issues a show-once API key', async () => {
+    const r = await wizardCreatePartnerAction({
+      name: 'Acme Remit',
+      countries: ['CA'],
+      kycMode: 'delegated',
+      requireKycBeforeSend: true,
+      payment: { providerType: 'simulator' },
+    });
     const all = (await ps.listPartners()).filter((p) => p.id !== 'default');
     expect(all).toHaveLength(1);
     expect(all[0].name).toBe('Acme Remit');
     expect(all[0].countries).toEqual(['CA']);
     expect(all[0].status).toBe('active');
-    expect(all[0].id).toMatch(/^[A-Za-z0-9]{8}$/);
+    expect(all[0].kycMode).toBe('delegated');
+    expect(r.id).toBe(all[0].id);
+    // Show-once key: plaintext only in the return value, last4 matches.
+    expect(r.apiKey.endsWith(r.apiKeyLast4)).toBe(true);
+    // Simulator rail auto-provisioned ⇒ settlement configured.
+    expect(r.settlementConfigured).toBe(true);
+    expect(r.whatsappCallbackUrl).toContain(`/api/whatsapp/${r.id}`);
   });
 
   it('throws when name is empty', async () => {
-    const fd = new FormData();
-    fd.set('name', '');
-    fd.append('countries', 'CA');
-    await expect(createPartnerAction(fd)).rejects.toThrow(/name/i);
+    await expect(
+      wizardCreatePartnerAction({ name: '', countries: ['CA'] }),
+    ).rejects.toThrow(/name/i);
   });
 
-  it('throws when no countries selected', async () => {
-    const fd = new FormData();
-    fd.set('name', 'X');
-    await expect(createPartnerAction(fd)).rejects.toThrow(/country/i);
+  it('throws when no valid countries are given (hostile values filtered)', async () => {
+    await expect(
+      wizardCreatePartnerAction({ name: 'X', countries: ['ZZ'] }),
+    ).rejects.toThrow(/country/i);
   });
 });
 
