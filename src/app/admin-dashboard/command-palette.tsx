@@ -28,6 +28,11 @@ import type { CommandItem } from './command-items';
  * (`router.push`) — no server calls in v1.
  */
 
+/** Keyboard-hint chip (⌘K, ↵, esc). Display is set per call site (the trigger's
+ *  chip hides at ≤1024px), so this recipe deliberately omits it. */
+const KBD =
+  'flex-none items-center gap-px rounded-sm border border-border bg-card px-[5px] py-px text-[11px] leading-normal font-semibold text-muted-foreground [&_svg]:block [&_svg]:h-3 [&_svg]:w-3';
+
 function matches(item: CommandItem, q: string): boolean {
   if (!q) return true;
   const hay = `${item.label} ${item.group} ${item.keywords ?? ''}`.toLowerCase();
@@ -149,7 +154,11 @@ export function CommandPalette({ items }: { items: CommandItem[] }) {
     if (item.group !== lastGroup) {
       lastGroup = item.group;
       rendered.push(
-        <li key={`grp-${item.group}`} role="presentation" className="sh-cmdk-group-label">
+        <li
+          key={`grp-${item.group}`}
+          role="presentation"
+          className="px-2.5 pt-2 pb-1 text-[10.5px] font-semibold tracking-[0.5px] text-muted-foreground uppercase"
+        >
           {item.group}
         </li>,
       );
@@ -160,16 +169,16 @@ export function CommandPalette({ items }: { items: CommandItem[] }) {
         id={`sh-cmdk-opt-${i}`}
         role="option"
         aria-selected={i === activeIndex}
-        className="sh-cmdk-option"
+        className="group flex cursor-pointer scroll-m-2 items-center gap-[11px] rounded-md px-2.5 py-[9px] text-[13.5px] text-foreground aria-selected:bg-accent aria-selected:text-accent-foreground"
         onMouseMove={() => setActive(i)}
         onClick={() => go(item)}
       >
-        <span className="sh-cmdk-option-icon">
+        <span className="inline-flex h-[18px] w-[18px] flex-none items-center justify-center text-muted-foreground group-aria-selected:text-primary [&_svg]:block [&_svg]:h-[17px] [&_svg]:w-[17px]">
           <Icon name={item.icon} />
         </span>
-        <span className="sh-cmdk-option-label">{item.label}</span>
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
         {item.keywords?.includes('action') ? (
-          <span className="sh-cmdk-option-hint">Action</span>
+          <span className="flex-none text-[11px] text-muted-foreground">Action</span>
         ) : null}
       </li>,
     );
@@ -177,26 +186,28 @@ export function CommandPalette({ items }: { items: CommandItem[] }) {
 
   return (
     <>
+      {/* Top-bar trigger: a full "search field" on desktop, collapses to a
+          40px icon button at ≤1024px (Cmd-K stays reachable on touch). */}
       <button
         ref={triggerRef}
         type="button"
-        className="sh-search"
+        className="ml-0.5 flex h-9 w-10 flex-none cursor-text items-center justify-center gap-2 rounded-lg border border-border bg-background text-left text-[13px] text-muted-foreground transition-colors hover:border-input hover:bg-card min-[1025px]:mr-auto min-[1025px]:ml-2 min-[1025px]:w-auto min-[1025px]:max-w-[420px] min-[1025px]:flex-auto min-[1025px]:justify-start min-[1025px]:pr-2.5 min-[1025px]:pl-3"
         aria-label="Search and commands"
         aria-keyshortcuts="Meta+K Control+K"
         onClick={openPalette}
       >
-        <span className="sh-cmdk-search-icon" aria-hidden="true" style={{ display: 'inline-flex' }}>
+        <span className="inline-flex [&_svg]:block [&_svg]:h-[17px] [&_svg]:w-[17px]" aria-hidden="true">
           <Icon name="search" />
         </span>
-        <span className="sh-search-label">Search or jump to…</span>
-        <span className="sh-kbd" aria-hidden="true">
+        <span className="hidden min-w-0 flex-1 truncate min-[1025px]:block">Search or jump to…</span>
+        <span className={`hidden min-[1025px]:inline-flex ${KBD}`} aria-hidden="true">
           <Icon name="command" />K
         </span>
       </button>
 
       <dialog
         ref={dialogRef}
-        className="sh-cmdk"
+        className="mx-auto mt-[12vh] mb-auto w-[min(92vw,560px)] max-w-[560px] overflow-hidden rounded-xl border-none bg-popover p-0 text-foreground shadow-[0_0_0_1px_rgba(16,24,40,0.04),0_24px_48px_-12px_rgba(16,24,40,0.18)] backdrop:bg-[rgba(16,24,40,0.45)] backdrop:backdrop-blur-[1px]"
         aria-label="Command palette"
         onClose={() => {
           setOpen(false);
@@ -207,13 +218,13 @@ export function CommandPalette({ items }: { items: CommandItem[] }) {
           if (e.target === dialogRef.current) closePalette();
         }}
       >
-        <div className="sh-cmdk-input-row">
-          <span className="sh-cmdk-search-icon" aria-hidden="true">
+        <div className="flex items-center gap-2.5 border-b border-border px-4 py-3.5">
+          <span className="inline-flex flex-none text-muted-foreground [&_svg]:block [&_svg]:h-[18px] [&_svg]:w-[18px]" aria-hidden="true">
             <Icon name="search" />
           </span>
           <input
             autoFocus
-            className="sh-cmdk-input"
+            className="flex-1 border-none bg-transparent py-0.5 text-base text-foreground outline-none placeholder:text-muted-foreground"
             role="combobox"
             aria-expanded="true"
             aria-controls="sh-cmdk-list"
@@ -229,24 +240,33 @@ export function CommandPalette({ items }: { items: CommandItem[] }) {
             onKeyDown={onInputKeyDown}
           />
         </div>
-        <ul ref={listRef} id="sh-cmdk-list" role="listbox" aria-label="Commands" className="sh-cmdk-list">
+        <ul
+          ref={listRef}
+          id="sh-cmdk-list"
+          role="listbox"
+          aria-label="Commands"
+          className="m-0 max-h-[52vh] list-none overflow-y-auto p-1.5"
+        >
           {filtered.length === 0 ? (
-            <li role="presentation" className="sh-cmdk-empty">
+            <li role="presentation" className="px-4 py-7 text-center text-[13px] text-muted-foreground">
               No matches for “{query}”
             </li>
           ) : (
             rendered
           )}
         </ul>
-        <div className="sh-cmdk-footer" aria-hidden="true">
-          <span className="sh-cmdk-footer-hint">
-            <span className="sh-kbd"><Icon name="enter" /></span> open
+        <div
+          className="flex items-center gap-3.5 border-t border-border bg-background px-4 py-[9px] text-[11px] text-muted-foreground"
+          aria-hidden="true"
+        >
+          <span className="inline-flex items-center gap-[5px]">
+            <span className={`inline-flex ${KBD}`}><Icon name="enter" /></span> open
           </span>
-          <span className="sh-cmdk-footer-hint">
-            <span className="sh-kbd">esc</span> close
+          <span className="inline-flex items-center gap-[5px]">
+            <span className={`inline-flex ${KBD}`}>esc</span> close
           </span>
         </div>
-        <div aria-live="polite" className="sh-visually-hidden">
+        <div aria-live="polite" className="sr-only">
           {liveMsg}
         </div>
       </dialog>

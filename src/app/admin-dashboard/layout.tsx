@@ -12,9 +12,14 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   return (
     <DrawerProvider>
-      <div className="sh-app">
+      <div className="grid min-h-svh grid-rows-[56px_1fr] bg-background text-foreground">
         <TopBar />
-        <div className="sh-body">{children}</div>
+        {/* Sidebar + page column. Pages render `<Sidebar …/><main className="sh-main">…`
+            as the two grid children; ≤1024px collapses to a single column and the
+            off-canvas drawer (below) takes over from the static sidebar. */}
+        <div className="grid min-h-0 grid-cols-1 min-[1025px]:grid-cols-[240px_minmax(0,1fr)]">
+          {children}
+        </div>
       </div>
       <MobileNavDrawer items={navItems} />
     </DrawerProvider>

@@ -13,8 +13,64 @@
 
 @import 'tailwindcss/theme.css' layer(theme);
 @import 'tailwindcss/preflight.css' layer(base);
-@import './legacy-themes.css' layer(components);
 @import 'tailwindcss/utilities.css' layer(utilities);
+
+/*
+ * Page scaffold (Stage 5e) — the ONLY surviving legacy class names, kept
+ * because ~20 dashboard pages share this exact frame and `.sh-page-title` is
+ * a Playwright hook. Values match the original sh-* scaffold; everything else
+ * from the legacy themes was converted to utilities/shadcn and deleted.
+ */
+@layer components {
+  .sh-main {
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 28px 28px 48px;
+    background: var(--background);
+    overflow-x: auto;
+  }
+  .sh-page-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+  }
+  .sh-page-title {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--foreground);
+    letter-spacing: -0.6px;
+    line-height: 1.2;
+  }
+  .sh-page-sub {
+    font-size: 13px;
+    color: var(--muted-foreground);
+    margin-top: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  @media (max-width: 768px) {
+    .sh-main { padding: 16px 14px; }
+    .sh-page-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+  }
+}
+
+/* Landing animation keyframes (referenced by arbitrary animation-name
+ * utilities on the converted landing page). */
+@keyframes lp-aurora {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  50%  { transform: translate3d(2%, -3%, 0) scale(1.08); }
+  100% { transform: translate3d(-2%, 2%, 0) scale(1.04); }
+}
+@keyframes lp-rise {
+  from { opacity: 0; transform: translateY(28px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 /* shadcn/ui token contract, mapped from the proven --sh-* palette (Radix
  * Slate neutrals + the Stripe-class indigo accent) so rebuilt pages keep the

@@ -9,17 +9,26 @@ import { PayForm } from './pay-form';
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
 // with no color/logo override — byte-for-byte today.
+// Tailwind conversion of the legacy WhatsApp-dark theme (legacy-themes.css) — exact
+// visual identity. `leading-normal` pins line-height to the inherited 1.5 the
+// legacy CSS relied on (named text-* utilities would otherwise change it).
+const pageClasses =
+  "flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 font-[-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif] text-[#e9edef]";
+const sheetClasses = 'w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7';
+const headingClasses = 'mb-5 text-lg leading-normal font-semibold';
+const brandClasses = 'mb-1 text-xl leading-normal font-extrabold text-[#25d366]';
+
 function Brand({ branding }: { branding: ResolvedBranding }) {
   if (branding.logoUrl) {
     return (
-      <div className="brand">
+      <div className={brandClasses}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={branding.logoUrl} alt={branding.brand} style={{ maxHeight: 28, verticalAlign: 'middle' }} />
       </div>
     );
   }
   return (
-    <div className="brand" style={branding.primaryColor ? { color: branding.primaryColor } : undefined}>
+    <div className={brandClasses} style={branding.primaryColor ? { color: branding.primaryColor } : undefined}>
       {branding.brand}
     </div>
   );
@@ -40,8 +49,8 @@ function Row({
   bold?: boolean;
 }) {
   return (
-    <div className="row" style={bold ? { fontWeight: 700 } : undefined}>
-      <span>{label}</span>
+    <div className="flex justify-between py-1.5 text-sm leading-normal" style={bold ? { fontWeight: 700 } : undefined}>
+      <span className="text-[#8696a0]">{label}</span>
       <span>{value}</span>
     </div>
   );
@@ -161,10 +170,10 @@ export default async function PayPage({
 
   if (!view) {
     return (
-      <main className="payapp">
-        <div className="card">
+      <main className={pageClasses}>
+        <div className={sheetClasses}>
           <Brand branding={branding} />
-          <h1>This link is no longer active</h1>
+          <h1 className={headingClasses}>This link is no longer active</h1>
         </div>
       </main>
     );
@@ -176,11 +185,11 @@ export default async function PayPage({
       : formatMoney(view.sourceFee, view.sourceCurrency);
 
   return (
-    <main className="payapp">
-      <div className="card">
+    <main className={pageClasses}>
+      <div className={sheetClasses}>
         <Brand branding={branding} />
-        <h1>Secure payment</h1>
-        <div className="summary">
+        <h1 className={headingClasses}>Secure payment</h1>
+        <div className="mb-5 rounded-xl bg-[#202c33] p-3.5">
           <Row label="Recipient" value={view.recipientName} />
           <Row
             label="They receive"
@@ -214,10 +223,11 @@ export default async function PayPage({
             }}
           />
         ) : (
-          <p className="done">
+          <p className="flex items-center justify-center gap-2 font-semibold text-[#25d366]">
             {/* Inline SVG check (not the ✅ emoji) so the success state renders
                 identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
             <svg
+              className="shrink-0"
               width="20"
               height="20"
               viewBox="0 0 24 24"

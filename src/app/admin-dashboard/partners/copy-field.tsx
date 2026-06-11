@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Button } from '@/components/ui/button';
 
 // A labeled, read-only value with one-click copy — used by the Integration card
 // so a partner can grab their webhook URLs / endpoints without typos.
@@ -18,27 +19,15 @@ export function CopyField({ label, value }: { label: string; value: string }) {
   }
 
   return (
-    <div style={{ marginBottom: 10 }}>
-      <div className="sh-field-label" style={{ marginBottom: 4 }}>{label}</div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <code
-          style={{
-            flex: 1,
-            display: 'block',
-            padding: '8px 10px',
-            background: 'var(--sh-surface-2, #f6f8fa)',
-            border: '1px solid var(--sh-border)',
-            borderRadius: 6,
-            fontSize: 12.5,
-            wordBreak: 'break-all',
-            userSelect: 'all',
-          }}
-        >
+    <div className="mb-2.5">
+      <div className="mb-1 text-sm font-medium">{label}</div>
+      <div className="flex items-center gap-2">
+        <code className="block flex-1 select-all break-all rounded-md border border-border bg-muted/50 px-2.5 py-2 text-xs">
           {value}
         </code>
-        <button type="button" className="sh-mini-btn" onClick={copy} aria-label={`Copy ${label}`}>
+        <Button type="button" size="sm" variant="outline" onClick={copy} aria-label={`Copy ${label}`}>
           {copied ? 'Copied ✓' : 'Copy'}
-        </button>
+        </Button>
       </div>
     </div>
   );

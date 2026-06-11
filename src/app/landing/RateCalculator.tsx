@@ -20,6 +20,13 @@ function formatUsd(n: number): string {
   return '$' + n.toLocaleString('en-US');
 }
 
+// Tailwind recipes (Stage 5e — values lifted verbatim from the legacy .lp
+// rules; the landing root re-declares the --lp-* palette these consume).
+const tier2Card =
+  'rounded-[18px] border border-white/[.12] bg-white/[.06] backdrop-blur-[10px] [box-shadow:0_18px_40px_-22px_rgba(8,12,30,.7),inset_0_1px_0_rgba(255,255,255,.15)]';
+const btnWaBlock =
+  'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border-0 bg-[var(--lp-wa)] px-[22px] py-[13px] min-h-12 text-base leading-normal font-bold text-[#04231A] [box-shadow:0_10px_26px_-10px_rgba(37,211,102,.6)] [transition:background_.18s_ease,transform_.18s_ease,box-shadow_.18s_ease] hover:bg-[var(--lp-wa-deep)] hover:text-[#F5F8FF] hover:-translate-y-px';
+
 /**
  * Live rate calculator. Progressive enhancement: the SSR baseline (this same
  * component) renders a real <a> with the default prefill, so it works before
@@ -47,14 +54,14 @@ export default function RateCalculator({ liveRate }: Props) {
     : 'Send money on WhatsApp';
 
   return (
-    <div className="lp-calc lp-tier2">
-      <div className="lp-calc-row">
-        <label className="lp-calc-field">
-          <span className="lp-calc-label">You send</span>
-          <span className="lp-calc-input-wrap">
-            <span className="lp-calc-prefix">$</span>
+    <div className={`${tier2Card} p-[22px]`}>
+      <div className="flex items-end gap-3.5">
+        <label className="flex flex-1 flex-col gap-1.5">
+          <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">You send</span>
+          <span className="flex items-center rounded-xl border border-[var(--lp-border)] bg-[var(--lp-bg-900)] px-3">
+            <span className="text-lg leading-normal text-[var(--lp-text-300)]">$</span>
             <input
-              className="lp-calc-input"
+              className="min-w-0 flex-1 border-none bg-transparent py-[9px] pl-1.5 text-lg leading-normal font-bold text-[var(--lp-text-100)] focus:outline-none"
               type="number"
               inputMode="decimal"
               min={10}
@@ -67,31 +74,28 @@ export default function RateCalculator({ liveRate }: Props) {
           </span>
         </label>
 
-        <span className="lp-calc-arrow" aria-hidden="true">
+        <span className="pb-3 text-[22px] leading-normal text-[var(--lp-text-300)]" aria-hidden="true">
           &rarr;
         </span>
 
-        <div className="lp-calc-field">
-          <span className="lp-calc-label">They get</span>
-          <span className="lp-calc-output" aria-live="polite">
+        <div className="flex flex-1 flex-col gap-1.5">
+          <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">They get</span>
+          <span className="py-[9px] text-[22px] leading-normal font-extrabold text-[var(--lp-wa)]" aria-live="polite">
             {hasAmount ? formatInr(theyGet) : '₹0'}
           </span>
         </div>
       </div>
 
-      <p className="lp-calc-fee">Fee: $0 on your first transfer, then $1.99.</p>
+      <p className="mt-3.5 mb-4 text-[13.5px] leading-normal text-[var(--lp-text-300)]">
+        Fee: $0 on your first transfer, then $1.99.
+      </p>
 
-      <a
-        className="lp-btn-wa lp-btn-wa--block"
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
+      <a className={btnWaBlock} href={href} target="_blank" rel="noopener noreferrer">
         <WhatsAppIcon />
         <span>{label}</span>
       </a>
 
-      <p className="lp-calc-disclaimer">
+      <p className="mt-3 text-xs leading-[1.5] text-[var(--lp-text-300)]">
         Live rate from our FX provider, updated hourly. Final rate is locked when
         you confirm in chat.
       </p>

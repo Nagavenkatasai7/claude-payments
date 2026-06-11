@@ -34,6 +34,29 @@ function formatMoney(amount: number, currency: string): string {
   }
 }
 
+// ── Tailwind conversion of the legacy WhatsApp-dark theme (legacy-themes.css) ─
+// Exact visual identity. `leading-normal` pins line-height to the inherited
+// 1.5 the legacy CSS relied on (named text-* utilities would otherwise set
+// their own). Input font-size is 16px (NOT 15) so iOS Safari does not
+// auto-zoom the viewport on focus — Safari zooms whenever a focused input's
+// font-size is < 16px.
+const inputClasses =
+  'mt-1 w-full rounded-lg border border-[#2a3942] bg-[#2a3942] p-2.5 text-[16px] text-[#e9edef]';
+// Single 6-digit code box: centered, wide tracking, 22px digits.
+const otpInputClasses =
+  'mt-1 w-full rounded-lg border border-[#2a3942] bg-[#2a3942] p-2.5 text-center text-[22px] tracking-[0.5em] text-[#e9edef] tabular-nums';
+const labelClasses = 'mb-3 block text-[13px] text-[#8696a0]';
+const primaryBtnClasses =
+  'w-full cursor-pointer rounded-3xl bg-[#25d366] p-3 text-[15px] font-bold text-[#0b141a] disabled:cursor-default disabled:opacity-60';
+const secondaryBtnClasses =
+  'mt-2.5 w-full cursor-pointer rounded-3xl border border-[#2a3942] bg-transparent p-3 text-[15px] font-bold text-[#8696a0] disabled:cursor-default disabled:opacity-60';
+const stepLabelClasses = 'mb-3.5 text-xs leading-normal uppercase tracking-[0.04em] text-[#8696a0]';
+const fieldErrorClasses = 'mt-1 block text-xs leading-normal text-[#f15c6d]';
+const formErrorClasses = 'mt-2 text-[13px] text-[#f15c6d]';
+const successClasses = 'flex items-center justify-center gap-2 font-semibold text-[#25d366]';
+const panelClasses = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
+const lineClasses = 'flex justify-between py-1.5 text-sm leading-normal';
+
 export function PayForm({
   transferId,
   fundingMethod,
@@ -105,16 +128,17 @@ function OtpFields({
 
   if (!sent) {
     return (
-      <button type="button" className="pay-secondary" onClick={requestCode} disabled={requesting}>
+      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
         {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
       </button>
     );
   }
   return (
-    <div className="otp-fields">
-      <label>
+    <div>
+      <label className={labelClasses}>
         Confirmation code
         <input
+          className={otpInputClasses}
           inputMode="numeric"
           maxLength={6}
           pattern="\d{6}"
@@ -125,8 +149,8 @@ function OtpFields({
           aria-label="6-digit confirmation code"
         />
       </label>
-      {otpError && <span className="field-err">{otpError}</span>}
-      <button type="button" className="pay-secondary" onClick={requestCode} disabled={requesting}>
+      {otpError && <span className={fieldErrorClasses}>{otpError}</span>}
+      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
         {requesting ? 'Sending…' : 'Resend code'}
       </button>
     </div>
@@ -175,10 +199,11 @@ function SimplePayForm({
 
   if (status === 'done') {
     return (
-      <p className="done">
+      <p className={successClasses}>
         {/* Inline SVG check (not the ✅ emoji) so the success state renders
             identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
         <svg
+          className="shrink-0"
           width="20"
           height="20"
           viewBox="0 0 24 24"
@@ -202,11 +227,11 @@ function SimplePayForm({
     <form onSubmit={handleSubmit}>
       {fundingMethod === 'bank_transfer' ? <BankForm /> : <CardForm />}
       <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
-      <button type="submit" disabled={status === 'paying' || !sent || code.length !== 6}>
+      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
       {status === 'error' && !otpError && (
-        <p className="err">Something went wrong. Please try again.</p>
+        <p className={formErrorClasses}>Something went wrong. Please try again.</p>
       )}
     </form>
   );
@@ -292,10 +317,11 @@ function BankDetailsPayForm({
 
   if (status === 'done') {
     return (
-      <p className="done">
+      <p className={successClasses}>
         {/* Inline SVG check (not the ✅ emoji) so the success state renders
             identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
         <svg
+          className="shrink-0"
           width="20"
           height="20"
           viewBox="0 0 24 24"
@@ -318,33 +344,33 @@ function BankDetailsPayForm({
   if (step === 'review') {
     const masked = maskAccountDisplay(composePayoutDestination(destinationCountry, values));
     return (
-      <div className="pay-step">
-        <div className="pay-step-label">Step 2 of 2 · Review &amp; pay</div>
-        <div className="summary">
-          <div className="row">
-            <span>To</span>
+      <div>
+        <div className={stepLabelClasses}>Step 2 of 2 · Review &amp; pay</div>
+        <div className={panelClasses}>
+          <div className={lineClasses}>
+            <span className="text-[#8696a0]">To</span>
             <span>{recipientName}</span>
           </div>
-          <div className="row">
-            <span>They receive</span>
+          <div className={lineClasses}>
+            <span className="text-[#8696a0]">They receive</span>
             <span>{formatMoney(summary.destAmount, summary.destCurrency)}</span>
           </div>
-          <div className="row">
-            <span>Bank account</span>
+          <div className={lineClasses}>
+            <span className="text-[#8696a0]">Bank account</span>
             <span>{masked}</span>
           </div>
-          <div className="row" style={{ fontWeight: 700 }}>
-            <span>Total charge</span>
+          <div className={lineClasses} style={{ fontWeight: 700 }}>
+            <span className="text-[#8696a0]">Total charge</span>
             <span>{formatMoney(summary.sourceTotalCharge, summary.sourceCurrency)}</span>
           </div>
         </div>
         <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
-        <button type="button" onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6}>
+        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
         </button>
         <button
           type="button"
-          className="pay-secondary"
+          className={secondaryBtnClasses}
           onClick={() => {
             setStatus('idle');
             setStep('details');
@@ -354,7 +380,7 @@ function BankDetailsPayForm({
           Edit bank details
         </button>
         {status === 'error' && !otpError && (
-          <p className="err">Something went wrong. Please try again.</p>
+          <p className={formErrorClasses}>Something went wrong. Please try again.</p>
         )}
       </div>
     );
@@ -362,14 +388,15 @@ function BankDetailsPayForm({
 
   // Step 1: per-country recipient bank-details form.
   return (
-    <form onSubmit={handleContinue} className="pay-step">
-      <div className="pay-step-label">Step 1 of 2 · Recipient bank details</div>
+    <form onSubmit={handleContinue}>
+      <div className={stepLabelClasses}>Step 1 of 2 · Recipient bank details</div>
       {defs.map((def) => {
         const digitOnly = typeof def.digits === 'number';
         return (
-          <label key={def.key}>
+          <label key={def.key} className={labelClasses}>
             {def.label}
             <input
+              className={inputClasses}
               name={def.key}
               required
               value={values[def.key] ?? ''}
@@ -378,11 +405,11 @@ function BankDetailsPayForm({
               maxLength={digitOnly ? def.digits : undefined}
               autoComplete="off"
             />
-            {errors[def.key] && <span className="field-err">{errors[def.key]}</span>}
+            {errors[def.key] && <span className={fieldErrorClasses}>{errors[def.key]}</span>}
           </label>
         );
       })}
-      <button type="submit">Continue</button>
+      <button type="submit" className={primaryBtnClasses}>Continue</button>
     </form>
   );
 }
@@ -390,23 +417,23 @@ function BankDetailsPayForm({
 function CardForm() {
   return (
     <>
-      <label>
+      <label className={labelClasses}>
         Card number
-        <input required placeholder="4242 4242 4242 4242" inputMode="numeric" />
+        <input className={inputClasses} required placeholder="4242 4242 4242 4242" inputMode="numeric" />
       </label>
-      <div className="pair">
-        <label>
+      <div className="flex gap-3">
+        <label className={`${labelClasses} flex-1`}>
           Expiry
-          <input required placeholder="MM/YY" />
+          <input className={inputClasses} required placeholder="MM/YY" />
         </label>
-        <label>
+        <label className={`${labelClasses} flex-1`}>
           CVC
-          <input required placeholder="123" inputMode="numeric" />
+          <input className={inputClasses} required placeholder="123" inputMode="numeric" />
         </label>
       </div>
-      <label>
+      <label className={labelClasses}>
         Name on card
-        <input required placeholder="Your name" />
+        <input className={inputClasses} required placeholder="Your name" />
       </label>
     </>
   );
@@ -415,17 +442,17 @@ function CardForm() {
 function BankForm() {
   return (
     <>
-      <label>
+      <label className={labelClasses}>
         Account holder name
-        <input required placeholder="Your full name" />
+        <input className={inputClasses} required placeholder="Your full name" />
       </label>
-      <label>
+      <label className={labelClasses}>
         Account number
-        <input required placeholder="000123456789" inputMode="numeric" />
+        <input className={inputClasses} required placeholder="000123456789" inputMode="numeric" />
       </label>
-      <label>
+      <label className={labelClasses}>
         Routing number
-        <input required placeholder="021000021" inputMode="numeric" />
+        <input className={inputClasses} required placeholder="021000021" inputMode="numeric" />
       </label>
     </>
   );

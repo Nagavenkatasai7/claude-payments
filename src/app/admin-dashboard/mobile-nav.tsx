@@ -36,6 +36,14 @@ interface DrawerCtx {
 
 const Ctx = createContext<DrawerCtx | null>(null);
 
+// Shared nav-item recipe — duplicated from sidebar.tsx (a server module this
+// client component cannot import).
+const navItemBase =
+  'relative mb-px flex min-h-11 items-center gap-2.5 rounded-md px-[11px] py-2 text-[13px] font-medium transition-colors';
+const navItemIdle = 'text-muted-foreground hover:bg-secondary hover:text-foreground';
+const navItemActive =
+  "bg-sidebar-accent font-semibold text-sidebar-accent-foreground before:absolute before:-left-3 before:top-1/2 before:h-[18px] before:w-[3px] before:-translate-y-1/2 before:rounded-r-[3px] before:bg-primary before:content-['']";
+
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const toggle = useCallback(() => setOpen((o) => !o), []);
@@ -54,16 +62,16 @@ export function MobileMenuButton() {
   return (
     <button
       type="button"
-      className="sh-hamburger"
+      className="mr-1.5 inline-flex h-10 w-10 flex-none cursor-pointer items-center justify-center rounded-md border border-border bg-transparent text-foreground min-[1025px]:hidden"
       aria-label="Open navigation menu"
       aria-expanded={open}
       aria-controls="sh-mobile-drawer"
       onClick={toggle}
     >
-      <span className="sh-hamburger-bars" aria-hidden="true">
-        <span />
-        <span />
-        <span />
+      <span className="inline-flex w-[18px] flex-col gap-1" aria-hidden="true">
+        <span className="block h-0.5 rounded-[2px] bg-current" />
+        <span className="block h-0.5 rounded-[2px] bg-current" />
+        <span className="block h-0.5 rounded-[2px] bg-current" />
       </span>
     </button>
   );
@@ -130,30 +138,37 @@ export function MobileNavDrawer({ items }: { items: ResolvedNavItem[] }) {
   return (
     <>
       <div
-        className={`sh-drawer-backdrop ${open ? 'is-open' : ''}`}
+        className={`fixed inset-0 z-[999] bg-[rgba(10,37,64,0.45)] motion-safe:transition-opacity motion-safe:duration-[250ms] motion-safe:ease-in-out min-[1025px]:hidden ${open ? 'is-open pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'}`}
         onClick={close}
         aria-hidden="true"
       />
       <div
         ref={drawerRef}
         id="sh-mobile-drawer"
-        className={`sh-drawer ${open ? 'is-open' : ''}`}
+        className={`fixed inset-y-0 left-0 z-[1000] flex w-[84%] max-w-[300px] flex-col overflow-y-auto bg-card text-foreground shadow-[2px_0_18px_rgba(10,37,64,0.18)] min-[1025px]:hidden ${
+          open
+            ? 'is-open visible translate-x-0 motion-safe:[transition:transform_.25s_ease]'
+            : 'invisible -translate-x-full motion-safe:[transition:transform_.25s_ease,visibility_0s_linear_.25s]'
+        }`}
         role="dialog"
         aria-modal="true"
         aria-label="Navigation"
       >
-        <div className="sh-drawer-head">
-          <span className="sh-drawer-title">Menu</span>
+        <div className="flex items-center justify-between border-b border-border pr-4 pb-3.5 pt-[max(14px,env(safe-area-inset-top))] pl-[max(16px,env(safe-area-inset-left))]">
+          <span className="text-sm font-bold text-foreground">Menu</span>
           <button
             type="button"
-            className="sh-drawer-close"
+            className="inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-md border border-border bg-transparent text-[15px] text-muted-foreground [&_svg]:block [&_svg]:h-4 [&_svg]:w-4"
             aria-label="Close navigation menu"
             onClick={close}
           >
             <Icon name="close" />
           </button>
         </div>
-        <nav className="sh-drawer-nav" aria-label="Dashboard">
+        <nav
+          className="flex flex-col gap-0.5 pt-2.5 pr-2.5 pb-[max(10px,calc(10px+env(safe-area-inset-bottom)))] pl-[max(10px,env(safe-area-inset-left))]"
+          aria-label="Dashboard"
+        >
           {items.map((it) => {
             const active =
               it.href === '/admin-dashboard'
@@ -164,10 +179,10 @@ export function MobileNavDrawer({ items }: { items: ResolvedNavItem[] }) {
                 key={it.key}
                 href={it.href}
                 onClick={close}
-                className={`sh-nav-item ${active ? 'active' : ''}`}
+                className={`${navItemBase} ${active ? navItemActive : navItemIdle}`}
                 aria-current={active ? 'page' : undefined}
               >
-                <span className="sh-nav-icon"><Icon name={it.icon} /></span> {it.label}
+                <span className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center opacity-90 [&_svg]:block [&_svg]:h-[17px] [&_svg]:w-[17px]"><Icon name={it.icon} /></span> {it.label}
               </Link>
             );
           })}
