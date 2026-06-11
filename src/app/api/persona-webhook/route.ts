@@ -3,9 +3,11 @@ import { env } from '@/lib/env';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
+import { getPartnerStore } from '@/lib/partner-store';
 import { verifyPersonaSignature } from '@/lib/providers/persona-signature';
 import { parsePersonaEvent } from '@/lib/providers/persona-webhook-parse';
 import { applyKycEvent } from '@/lib/kyc-state-machine';
+import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
 
 /**
@@ -57,14 +59,26 @@ export async function POST(req: NextRequest) {
     nextState = updated?.kycReviewState ?? nextState;
   }
 
+  // KYC is partner OPT-IN: resolve the owning partner so the after() nudge can
+  // be suppressed when the verify-before-send gate is OFF. State application
+  // above stays UNCONDITIONAL — Persona is the KYC source of truth either way —
+  // and is deliberately FIRST: the event is already marked seen, so a partner
+  // read hiccup must only ever cost the fail-soft notify, never the state.
+  const partner =
+    (await getPartnerStore().getPartner(customer.partnerId)) ??
+    (await getPartnerStore().ensureDefaultPartner());
+
   // Notify the customer of the transition, fail-soft (free-form until templates approved).
   // needs_review ⇒ no customer message (staff handle it); approved/rejected ⇒ the review action notifies.
+  // Gated on sendGateActive: a gate-OFF partner's customers never hear about KYC.
   after(async () => {
     try {
-      if (nextState === 'inquiry_started') {
-        await sendVerificationStatus(phone, 'in_progress', customer.fullName);
-      } else if (nextState === 'pending_review') {
-        await sendVerificationStatus(phone, 'received', customer.fullName);
+      if (sendGateActive(partner)) {
+        if (nextState === 'inquiry_started') {
+          await sendVerificationStatus(phone, 'in_progress', customer.fullName);
+        } else if (nextState === 'pending_review') {
+          await sendVerificationStatus(phone, 'received', customer.fullName);
+        }
       }
     } catch (err) {
       console.error('persona-webhook notify failed:', err);
