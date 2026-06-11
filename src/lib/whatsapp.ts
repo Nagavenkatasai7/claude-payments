@@ -479,61 +479,6 @@ export async function sendInteractive(
   throw new Error(`WhatsApp interactive send failed (${res.status}): ${body}`);
 }
 
-export interface ListRow {
-  id: string;
-  title: string;
-}
-
-/**
- * Send an interactive LIST message (WhatsApp Flows scaffolding). Same Graph API
- * envelope as sendInteractive; same HTTP-470 → sendText fallback. On any other
- * non-OK status it THROWS so the caller can fall back to buttons. Row ids carry
- * the existing recipient:<phone> / recipient:new grammar, so parseIncoming's
- * list_reply branch and parseButtonId need no changes. Gated behind
- * env.whatsappFlowsEnabled at the call site — flag off ⇒ this is never reached.
- */
-export async function sendList(
-  to: string,
-  bodyText: string,
-  buttonText: string,
-  rows: ListRow[],
-  creds?: WaCreds,
-): Promise<void> {
-  if (rows.length === 0 || rows.length > 10) {
-    throw new Error(`sendList: WhatsApp accepts 1-10 list rows (got ${rows.length}).`);
-  }
-  const numbered = rows.map((r, i) => `${i + 1}. ${r.title}`).join('\n');
-  const fullBody = `${bodyText}\n\n${numbered}`;
-
-  const res = await fetch(
-    GRAPH_MESSAGES_URL(creds),
-    authedJsonInit({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'list',
-        body: { text: bodyText },
-        action: {
-          button: buttonText,
-          sections: [{ rows: rows.map((r) => ({ id: r.id, title: r.title })) }],
-        },
-      },
-    }, creds),
-  );
-
-  if (res.ok) return;
-
-  if (res.status === 470) {
-    console.warn('sendList hit 24h-window error; falling back to sendText');
-    await sendText(to, fullBody, creds);
-    return;
-  }
-
-  const body = await res.text();
-  throw new Error(`WhatsApp list send failed (${res.status}): ${body}`);
-}
-
 export interface CtaButton {
   displayText: string;
   url: string;
@@ -541,7 +486,7 @@ export interface CtaButton {
 
 /**
  * Interactive CTA-URL button. Opens the URL on tap (NO webhook callback).
- * Same HTTP-470 → sendText fallback and non-OK throw pattern as sendInteractive/sendList.
+ * Same HTTP-470 → sendText fallback and non-OK throw pattern as sendInteractive.
  */
 export async function sendCtaUrl(
   to: string,
