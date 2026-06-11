@@ -78,6 +78,9 @@ describe('createAgent', () => {
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
       senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    // Gate is partner OPT-IN now — the verify hand-off (and the appended
+    // kyc_url) only exists when it's ON. Gate-off suppression has its own test.
+    await deps.partnerStore.savePartner({ ...(await deps.partnerStore.ensureDefaultPartner()), requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     const responses: ChatMessage[] = [
       {
         role: 'assistant', content: '',
@@ -96,6 +99,38 @@ describe('createAgent', () => {
     const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
     expect(reply).not.toContain('model-made-up.example'); // model's invented URL stripped
     expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical kyc_url appended
+  });
+
+  it('gate OFF: no verify link is ever appended, even when the model writes a verify-style reply', async () => {
+    // QA audit regression: the default partner has NOT opted into
+    // verify-before-send, so neither the tools nor the agent may surface a
+    // kyc_url — the reply must carry no link at all.
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'check_send_limit', arguments: JSON.stringify({ amount_usd: 5000 }) } }],
+      },
+      { role: 'assistant', content: 'That is over your limit — verify here: 👉 https://model-made-up.example/foo' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...deps,
+      chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send $5000 to Mom');
+    expect(reply).not.toContain('model-made-up.example');
+    expect(reply).not.toContain('admin-dashboard/customers'); // no canonical kyc_url either
+    expect(reply).not.toContain('https://'); // no link of any kind
   });
 
   it('DETERMINISTIC backstop: delivers the verify link on "resend" even when the model calls NO tool', async () => {

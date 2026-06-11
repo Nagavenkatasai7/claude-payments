@@ -656,8 +656,11 @@ async function getQuoteTool(
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
       const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner));
       if (!ev.withinCap) {
+        // kyc_url (and the Persona inquiry behind it) only exists when the
+        // partner's verify-before-send gate is ON — gate-off customers get the
+        // cap refusal with no verification handoff.
         let kycUrl: string | undefined;
-        if (ev.tier === 'T0' || ev.tier === 'Suspended') {
+        if (sendGateActive(partner) && (ev.tier === 'T0' || ev.tier === 'Suspended')) {
           const start = await ctx.kycProvider.startVerification({
             customerId: ctx.phone,
             senderPhone: ctx.phone,
@@ -1446,9 +1449,12 @@ async function checkSendLimitTool(
   const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)
   const eddFieldsPresent = Boolean(customer.sourceOfFunds && customer.occupation); // NEW (KYC)
 
-  // Surface a KYC URL for T0 or Suspended (the agent uses this in the message).
+  // Surface a KYC URL for T0 or Suspended (the agent uses this in the message)
+  // — but ONLY when the partner's verify-before-send gate is on. Gate-off
+  // customers must never receive a verification handoff, and startVerification
+  // creates a real Persona inquiry, so it must not run as a side effect.
   let kycUrl: string | undefined;
-  if (evalResult.tier === 'T0' || evalResult.tier === 'Suspended') {
+  if (sendGateActive(partner) && (evalResult.tier === 'T0' || evalResult.tier === 'Suspended')) {
     const start = await ctx.kycProvider.startVerification({
       customerId: ctx.phone,
       senderPhone: ctx.phone,
