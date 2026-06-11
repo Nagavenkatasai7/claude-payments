@@ -8,6 +8,10 @@ import { getPendingAuthStore } from '@/lib/pending-auth-store';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
 import { isPwnedPassword } from '@/lib/pwned';
 import { sendOtpCode } from '@/lib/whatsapp';
+import { logWarn } from '@/lib/log';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { getDb } from '@/db/client';
+import { pokeWorker } from '@/lib/outbox';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 
@@ -63,16 +67,41 @@ async function clientIp(): Promise<string> {
  */
 async function issueAndSend(phone: string, purpose: OtpPurpose, ip: string): Promise<void> {
   const auth = getCustomerAuthStore();
-  if (await auth.isOtpIpLocked(ip)) return; // silent — don't reveal the throttle
+  if (await auth.isOtpIpLocked(ip)) {
+    // Silent to the CALLER (enumeration safety) but never to ops — a locked IP
+    // during legitimate testing looks exactly like "the code never arrives".
+    logWarn('otp.issue', 'per-IP send cap hit — no code sent', { purpose });
+    return;
+  }
   const result = await getOtpStore().issueOtp(phone, purpose);
-  if (result.ok) {
+  if (!result.ok) {
+    logWarn('otp.issue', `refused: ${result.reason}`, { purpose, phone });
+    return;
+  }
+  try {
+    await sendOtpCode(phone, result.code);
+    await auth.recordOtpIp(ip);
+  } catch (err) {
+    // Delivery failure must NOT 500 the portal and the UI stays generic, but
+    // it must be LOUD for ops: this is the "verification code never arrives"
+    // symptom. Scrubbed log + one deduped WhatsApp ops alert per hour. The
+    // root cause is usually one of: no approved AUTHENTICATION template
+    // (WHATSAPP_AUTH_TEMPLATE) AND the customer is outside the free-form 24h
+    // window. Never log the code.
+    logWarn('otp.deliver', err, { purpose, phone });
     try {
-      await sendOtpCode(phone, result.code);
-      await auth.recordOtpIp(ip);
+      await createOutboxRepo(getDb()).enqueue(
+        'ops.alert',
+        {
+          message:
+            '⚠️ SmartRemit ops: portal OTP delivery is FAILING (template + free-form both rejected). ' +
+            'Check WHATSAPP_AUTH_TEMPLATE approval in WhatsApp Manager.',
+        },
+        { dedupeKey: `otpfail:${new Date().toISOString().slice(0, 13)}` }, // 1/hour
+      );
+      pokeWorker();
     } catch {
-      // Delivery failure (e.g. the Meta AUTHENTICATION template isn't approved in
-      // this environment yet) must NOT 500 the portal — the code is still issued;
-      // the user can resend once delivery is configured. Never log the code.
+      /* alerting is best-effort */
     }
   }
 }
