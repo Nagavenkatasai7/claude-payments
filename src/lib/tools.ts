@@ -654,7 +654,7 @@ async function getQuoteTool(
     const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
     if (Number.isFinite(amountUsd)) {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
-      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100));
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner));
       if (!ev.withinCap) {
         let kycUrl: string | undefined;
         if (ev.tier === 'T0' || ev.tier === 'Suspended') {
@@ -747,7 +747,7 @@ async function createTransferTool(
     {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
-      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
       if (!ev.withinCap) {
         return {
           error: 'That quote would exceed your current sending cap. Please request a fresh quote.',
@@ -822,7 +822,7 @@ async function createTransferTool(
   {
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
-    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents);
+    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents, sendGateActive(legacyPartner));
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -1167,7 +1167,7 @@ async function sendApprovePickerTool(
   {
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
-    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -1440,7 +1440,7 @@ async function checkSendLimitTool(
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   const requestedCents = Math.round(amountUsd * 100);
   const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
-  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents);
+  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
 
   const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.phone);   // NEW (KYC)
   const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)

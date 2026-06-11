@@ -5,6 +5,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { evaluateCap } from '@/lib/tier-rules';
+import { sendGateActive } from '@/lib/kyc-gate';
 import { maskLast4 } from '@/lib/mask';
 import { getStore } from '@/lib/store';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
@@ -56,7 +57,7 @@ export default async function CustomerDetailPage({
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
   const now = new Date();
-  const capEval = evaluateCap(customer, now, todayUsedCents, 0);
+  const capEval = evaluateCap(customer, now, todayUsedCents, 0, sendGateActive(partner));
 
   return (
     <>

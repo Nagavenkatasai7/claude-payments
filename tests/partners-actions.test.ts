@@ -138,7 +138,7 @@ describe('updatePartnerAction', () => {
     expect(got?.requireKycBeforeSend).toBe(true);
   });
 
-  it("WL: kycMode defaults to 'ours' and clears requireKycBeforeSend when not delegated", async () => {
+  it("WL: requireKycBeforeSend is an OPT-IN persisted in EITHER mode (and off when unchecked)", async () => {
     await ps.savePartner({
       id: 'p3', name: 'Bee', countries: ['US'], status: 'active',
       kycMode: 'delegated', requireKycBeforeSend: true,
@@ -149,11 +149,21 @@ describe('updatePartnerAction', () => {
     fd.set('name', 'Bee');
     fd.append('countries', 'US');
     fd.set('kycMode', 'ours');
-    fd.set('requireKycBeforeSend', 'on'); // ignored under 'ours'
+    fd.set('requireKycBeforeSend', 'on'); // honored in ANY mode now
     await updatePartnerAction(fd);
-    const got = await ps.getPartner('p3');
+    let got = await ps.getPartner('p3');
     expect(got?.kycMode).toBe('ours');
-    expect(got?.requireKycBeforeSend).toBeUndefined();
+    expect(got?.requireKycBeforeSend).toBe(true);
+
+    // Unchecking turns the gate off.
+    const fd2 = new FormData();
+    fd2.set('id', 'p3');
+    fd2.set('name', 'Bee');
+    fd2.append('countries', 'US');
+    fd2.set('kycMode', 'ours');
+    await updatePartnerAction(fd2);
+    got = await ps.getPartner('p3');
+    expect(got?.requireKycBeforeSend).toBe(false);
   });
 });
 

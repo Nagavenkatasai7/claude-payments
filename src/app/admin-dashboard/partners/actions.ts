@@ -59,7 +59,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     logoUrl: String(formData.get('logoUrl') ?? '').trim() || undefined,
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
     kycMode,
-    requireKycBeforeSend: kycMode === 'delegated' ? formData.get('requireKycBeforeSend') === 'on' : undefined,
+    requireKycBeforeSend: formData.get('requireKycBeforeSend') === 'on', // OPT-IN gate, either mode
     updatedAt: new Date().toISOString(),
   };
   await ps.savePartner(updated);
@@ -294,7 +294,7 @@ export async function wizardCreatePartnerAction(
     primaryColor: clean(input.primaryColor),
     logoUrl: clean(input.logoUrl),
     kycMode,
-    requireKycBeforeSend: kycMode === 'delegated' ? input.requireKycBeforeSend === true : undefined,
+    requireKycBeforeSend: input.requireKycBeforeSend === true, // OPT-IN gate, either mode
     createdAt: now,
     updatedAt: now,
   };

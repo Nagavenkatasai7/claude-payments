@@ -44,14 +44,16 @@ describe('isSendVerified', () => {
 });
 
 describe('sendGateActive (WL1 per-partner gate)', () => {
-  it('default / null / undefined partner ⇒ gate ON (unchanged)', () => {
-    expect(sendGateActive(null)).toBe(true);
-    expect(sendGateActive(undefined)).toBe(true);
-    expect(sendGateActive(partner({ id: 'default' }))).toBe(true);
+  it('default / null / undefined partner ⇒ gate OFF (verification is partner OPT-IN)', () => {
+    expect(sendGateActive(null)).toBe(false);
+    expect(sendGateActive(undefined)).toBe(false);
+    expect(sendGateActive(partner({ id: 'default' }))).toBe(false);
   });
 
-  it("'ours' can NEVER skip the gate — stays ON even with requireKycBeforeSend:false", () => {
-    expect(sendGateActive(partner({ kycMode: 'ours', requireKycBeforeSend: false }))).toBe(true);
+  it("the gate is ON only when explicitly configured — in EITHER mode", () => {
+    expect(sendGateActive(partner({ kycMode: 'ours', requireKycBeforeSend: true }))).toBe(true);
+    expect(sendGateActive(partner({ kycMode: 'delegated', requireKycBeforeSend: true }))).toBe(true);
+    expect(sendGateActive(partner({ kycMode: 'ours', requireKycBeforeSend: false }))).toBe(false);
   });
 
   it("'delegated' ⇒ gate OFF (partner runs KYC); opting back in flips it ON", () => {

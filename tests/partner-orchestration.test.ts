@@ -168,11 +168,37 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
   });
 });
 
-describe('WL1 default partner is byte-for-byte unchanged', () => {
-  it('brands as SmartRemit, injects [UNVERIFIED SENDER], and the gate blocks an unverified sender', async () => {
+describe('WL1 default partner (no KYC gate configured)', () => {
+  it('brands as SmartRemit and lets an UNVERIFIED sender proceed — verification is partner OPT-IN', async () => {
     const redis = fakeRedis();
     const h = buildHarness(redis);
-    // Default partner (seeded) + an UNVERIFIED customer under 'default'.
+    // Default partner (seeded, NO requireKycBeforeSend) + an UNVERIFIED customer.
+    await h.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',
+      senderCountry: 'US', partnerId: 'default', createdAt: now, updatedAt: now,
+    });
+
+    h.setScript([
+      toolCall('c1', 'send_approve_picker', {
+        amount_usd: 200, funding_method: 'bank_transfer',
+        recipient_name: 'Anita', recipient_phone: '919876543210',
+        payout_method: 'bank', payout_destination: '1234567890', destination_country: 'IN',
+      }),
+      { role: 'assistant', content: 'Tap Approve to send.' },
+    ]);
+    await h.agent.runAgentTurn(PHONE, 'send $200 to Anita, bank 1234567890, 919876543210');
+
+    // prompt is SmartRemit-branded, NO verify note, and the send proceeds.
+    expect(h.systemSnapshots[0]).toContain('You are the assistant for SmartRemit');
+    expect(h.systemSnapshots[0]).not.toContain('[UNVERIFIED SENDER]');
+    expect([...redis.dump.keys()].some((k) => k.startsWith('recipient_draft:'))).toBe(true);
+  });
+
+  it('a partner that OPTS IN to the gate still blocks an unverified sender', async () => {
+    const redis = fakeRedis();
+    const h = buildHarness(redis);
+    const dflt = await h.partnerStore.ensureDefaultPartner();
+    await h.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: now });
     await h.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',
       senderCountry: 'US', partnerId: 'default', createdAt: now, updatedAt: now,
@@ -188,10 +214,7 @@ describe('WL1 default partner is byte-for-byte unchanged', () => {
     ]);
     await h.agent.runAgentTurn(PHONE, 'send $200 to Anita, bank 1234567890, 919876543210');
 
-    // prompt is SmartRemit-branded and the verify note IS injected
-    expect(h.systemSnapshots[0]).toContain('You are the assistant for SmartRemit');
     expect(h.systemSnapshots[0]).toContain('[UNVERIFIED SENDER]');
-    // the gate blocked the send → NO draft (still Redis), NO transfer minted (Postgres)
     expect([...redis.dump.keys()].some((k) => k.startsWith('recipient_draft:'))).toBe(false);
     expect(await h.store.listTransfers()).toHaveLength(0);
   });

@@ -1583,9 +1583,13 @@ describe('any-to-any corridors — destination_country threading', () => {
 describe('Phase 3 verify-before-send gate (bot tools)', () => {
   const UNVERIFIED = '15557770000';
 
-  // Seed an unverified (grandfathered) customer, overwriting buildCtx's verified seed.
+  // Seed an unverified (grandfathered) customer under a partner that has
+  // OPTED IN to verify-before-send (the gate is partner-configured now —
+  // an unconfigured partner never gates).
   async function seedUnverified(ctx: Awaited<ReturnType<typeof buildCtx>>) {
     const nowIso = new Date().toISOString();
+    const dflt = await ctx.partnerStore.ensureDefaultPartner();
+    await ctx.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: nowIso });
     await ctx.customerStore.saveCustomer({
       senderPhone: ctx.phone, firstSeenAt: nowIso, kycStatus: 'grandfathered',
       senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
