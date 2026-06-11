@@ -18,7 +18,7 @@ const STATUS_LABEL: Record<string, string> = {
   delivered: 'Delivered ✓',
   cancelled: 'Cancelled',
   in_review: 'Under review',
-  blocked: 'On hold',
+  blocked: 'Could not be completed',
 };
 
 const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';

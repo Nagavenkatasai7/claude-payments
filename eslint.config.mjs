@@ -2,7 +2,8 @@ import nextCoreWebVitals from 'eslint-config-next/core-web-vitals';
 
 // Next.js shared config (flat).
 const config = [
-  { ignores: ['.next/**', 'node_modules/**', 'coverage/**', '.vercel/**', '.superpowers/**'] },
+  // .claude/** holds agent worktrees (full repo copies incl. their .next builds).
+  { ignores: ['.next/**', 'node_modules/**', 'coverage/**', '.vercel/**', '.superpowers/**', '.claude/**'] },
   ...nextCoreWebVitals,
   {
     // `react-hooks/purity` flags Date.now() and other impure calls during

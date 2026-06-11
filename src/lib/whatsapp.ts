@@ -3,6 +3,7 @@ import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
   verificationStatusParams,
+  verificationStatusFallbackText,
   transactionOtpMessage,
   otpMessage,
   type VerificationState,
@@ -559,7 +560,7 @@ export async function sendVerificationStatus(
     verified: env.whatsappVerificationVerifiedTemplate,
     failed: env.whatsappVerificationFailedTemplate,
   }[state];
-  const fallbackText = `${params[0]}, ${params[1]}`;
+  const fallbackText = verificationStatusFallbackText(name, state);
   // Templates are OPT-IN: unconfigured ⇒ the free-form "inbuilt template"
   // directly (no doomed Graph call). sendTemplateOrText still guards the
   // configured path so a paused/rejected template degrades the same way.

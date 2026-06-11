@@ -576,7 +576,9 @@ describe('check_send_limit', () => {
     expect(r.daily_cap_usd).toBe(500);
     expect(r.today_remaining_usd).toBe(500);
     expect(r.day_of_window).toBe(1);
-    expect(r.kyc_url).toBe('https://example.com/admin-dashboard/customers/15550001111');
+    // The default partner has NOT opted into verify-before-send → no kyc_url
+    // even for T0 (the gate-ON variant is covered in its own suite below).
+    expect(r.kyc_url).toBeUndefined();
   });
 
   it('T0 customer over the per-transfer cap returns reason=over_per_transfer_cap', async () => {
@@ -602,7 +604,7 @@ describe('check_send_limit', () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
     const r = await executeTool('check_send_limit', { amount_usd: 0 }, ctx);
     expect(r.within_cap).toBe(true);
-    expect(r.kyc_url).toBeDefined();
+    expect(r.kyc_url).toBeUndefined(); // gate-off default partner ⇒ no verify handoff
   });
 
   it('check_send_limit: dormant path returns edd_required:false with all today\'s fields intact', async () => {
@@ -1363,7 +1365,7 @@ describe('get_quote cap guard (Bundle D)', () => {
     expect(r.reason).toBe('over_per_transfer_cap');
     expect(r.fee_usd).toBeUndefined();        // NO quote presented
     expect(r.amount_inr).toBeUndefined();
-    expect(typeof r.kyc_url).toBe('string');  // T0 → kyc_url surfaced
+    expect(r.kyc_url).toBeUndefined();        // gate-off partner ⇒ no verify handoff
     expect(r.per_transfer_cap_usd).toBe(500);
   });
 
@@ -1640,5 +1642,48 @@ describe('Phase 3 verify-before-send gate (bot tools)', () => {
     expect(r.kyc_required).toBe(true);
     expect(r.sent).toBeUndefined();
     expect(r.draft_id).toBeUndefined();
+  });
+});
+
+describe('KYC gate OFF — cap refusals never surface verification (QA audit fix)', () => {
+  // The default seeded partner has requireKycBeforeSend unset ⇒ gate OFF.
+  // A T0 customer over their cap must get the plain cap refusal: no kyc_url,
+  // and — critically — NO kycProvider.startVerification side effect (it creates
+  // a real Persona inquiry in production).
+
+  it('check_send_limit over-cap: refusal fields intact, no kyc_url, no startVerification', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550002222');
+    const startSpy = vi.spyOn(ctx.kycProvider, 'startVerification');
+    const r = await executeTool('check_send_limit', { amount_usd: 5000 }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.reason).toBe('over_per_transfer_cap');
+    expect(r.tier).toBe('T0');
+    expect(r.daily_cap_usd).toBe(500);
+    expect(r.today_remaining_usd).toBe(500);
+    expect(r.kyc_url).toBeUndefined();
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it('get_quote over-cap: refusal fields intact, no kyc_url, no startVerification', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550002222');
+    const startSpy = vi.spyOn(ctx.kycProvider, 'startVerification');
+    const r = await executeTool('get_quote', { amount_usd: 5000, funding_method: 'bank_transfer' }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(r.tier).toBe('T0');
+    expect(r.kyc_url).toBeUndefined();
+    expect(r.amount_inr).toBeUndefined(); // still no quote built
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it('gate ON: the same T0 over-cap refusal still hands off a kyc_url', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550002222');
+    const nowIso = new Date().toISOString();
+    const dflt = await ctx.partnerStore.ensureDefaultPartner();
+    await ctx.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: nowIso });
+    const startSpy = vi.spyOn(ctx.kycProvider, 'startVerification');
+    const r = await executeTool('check_send_limit', { amount_usd: 5000 }, ctx);
+    expect(r.within_cap).toBe(false);
+    expect(typeof r.kyc_url).toBe('string');
+    expect(startSpy).toHaveBeenCalled();
   });
 });

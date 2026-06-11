@@ -27,7 +27,7 @@ const STATUS_LABEL: Record<string, string> = {
   delivered: 'Delivered',
   cancelled: 'Cancelled',
   in_review: 'Under review',
-  blocked: 'On hold',
+  blocked: 'Could not be completed',
 };
 
 const summaryCls = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
@@ -70,6 +70,11 @@ export default async function ReceiptPage({
           <div className={rowCls}><span className={rowLabelCls}>Created</span><span>{fmtWhen(t.createdAt)}</span></div>
           {t.paidAt && <div className={rowCls}><span className={rowLabelCls}>Paid</span><span>{fmtWhen(t.paidAt)}</span></div>}
           {t.deliveredAt && <div className={rowCls}><span className={rowLabelCls}>Delivered</span><span>{fmtWhen(t.deliveredAt)}</span></div>}
+          {t.status === 'blocked' && (
+            <p className="mt-1.5 mb-0 text-[12px] leading-normal text-[#8696a0]">
+              This transfer could not be completed and you were not charged.
+            </p>
+          )}
         </div>
 
         <div className={summaryCls}>
