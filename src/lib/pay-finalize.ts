@@ -90,7 +90,7 @@ export async function finalizeDraftPayment(
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
   const todayUsedCents = await dailyVolumeStore.getTodayCents(draft.senderPhone);
-  const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100));
+  const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100), sendGateActive(partner));
   if (!ev.withinCap) return { ok: false, error: 'cap' };
 
   // CLAIM-FIRST: bind `draft:<draftId>` to a pre-generated id before minting.

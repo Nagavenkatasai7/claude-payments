@@ -89,7 +89,9 @@ describe('finalizeDraftPayment', () => {
   it('Phase 3: an unverified owner → { ok:false, error:"kyc_required" }, draft NOT consumed, no transfer', async () => {
     const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
-    // Override the (verified) seed from makeDraft with an unverified status.
+    // Gate is partner OPT-IN now — configure it, then make the owner unverified.
+    const dflt = await stores.partnerStore.ensureDefaultPartner();
+    await stores.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     const c = await stores.customerStore.getCustomer(PHONE);
     await stores.customerStore.saveCustomer({ ...c!, kycStatus: 'grandfathered' });
 

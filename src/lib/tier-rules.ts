@@ -4,13 +4,21 @@ export const T0_DAILY_CAP_CENTS = 50_000;   // $500.00
 export const T1_DAILY_CAP_CENTS = 299_900;  // $2,999.00
 export const OBSERVATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
-export function deriveTier(customer: Customer, now: Date): Tier {
+/**
+ * @param kycGateActive whether the owning partner enforces verify-before-send
+ * (resolveKycMode). When the gate is OFF, an unverified customer past the
+ * 3-day window graduates to T1 instead of being suspended — suspension for
+ * "never verified" only makes sense where verification is required at all.
+ * A REJECTED verification stays Suspended in both cases (it's a compliance
+ * outcome, not a missing step).
+ */
+export function deriveTier(customer: Customer, now: Date, kycGateActive = true): Tier {
   if (customer.kycStatus === 'rejected') return 'Suspended';
   const ageMs = now.getTime() - new Date(customer.firstSeenAt).getTime();
   const inWindow = ageMs < OBSERVATION_WINDOW_MS;
   if (inWindow) return 'T0';
   if (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered') return 'T1';
-  return 'Suspended';
+  return kycGateActive ? 'Suspended' : 'T1';
 }
 
 export function evaluateCap(
@@ -18,8 +26,9 @@ export function evaluateCap(
   now: Date,
   todayUsedCents: number,
   requestedCents: number,
+  kycGateActive = true,
 ): CapEvaluation {
-  const tier = deriveTier(customer, now);
+  const tier = deriveTier(customer, now, kycGateActive);
   const dailyCapCents =
     tier === 'T0' ? T0_DAILY_CAP_CENTS :
     tier === 'T1' ? T1_DAILY_CAP_CENTS :

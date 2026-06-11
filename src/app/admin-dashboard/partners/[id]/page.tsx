@@ -250,10 +250,10 @@ export default async function PartnerDetailPage({
                       </div>
                       <label className="mt-3 flex items-center gap-1.5 text-sm">
                         <input type="checkbox" name="requireKycBeforeSend" defaultChecked={partner.requireKycBeforeSend === true} />{' '}
-                        Still block sends until verified (only applies when delegated)
+                        Require identity verification before sending (off ⇒ customers send immediately)
                       </label>
                       <p className="mt-2 text-xs text-muted-foreground">
-                        Sanctions screening always runs, in both modes.
+                        Off by default. Sanctions screening always runs, in both modes, regardless of this setting.
                       </p>
                     </fieldset>
                     <Input name="adminNote" defaultValue={partner.adminNote ?? ''} placeholder="Admin note (internal, optional)" />

@@ -68,6 +68,7 @@ vi.mock('@/lib/partner-store', () => ({
     getPartner: async () => null,
     ensureDefaultPartner: async () => ({
       id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
+      requireKycBeforeSend: true, // gate OPT-IN: this suite pins the 403 path
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     }),
   }),

@@ -225,6 +225,9 @@ describe('runDueSchedules', () => {
 
   it('Phase 3: SKIPS a due schedule whose owner is unverified — no transfer, lastRunAt untouched, sendScheduledSkipped called once', async () => {
     const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    // The gate is partner OPT-IN now — configure it so the skip path applies.
+    const dflt = await partnerStore.ensureDefaultPartner();
+    await partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     await scheduleStore.saveSchedule(sched('unverified', 21));
     await customerStore.saveCustomer({
       senderPhone: '15551234567', firstSeenAt: '2026-01-01T00:00:00Z',

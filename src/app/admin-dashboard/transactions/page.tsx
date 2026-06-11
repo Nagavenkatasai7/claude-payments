@@ -8,6 +8,7 @@ import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { hasPermission } from '@/lib/permissions';
 import { deriveTier } from '@/lib/tier-rules';
+import { sendGateActive } from '@/lib/kyc-gate';
 import { Sidebar } from '../sidebar';
 import { TransactionsExplorer } from '../transactions-explorer';
 import type { KycInfo } from '../kyc-badge';
@@ -47,7 +48,12 @@ export default async function TransactionsPage({
   ]);
   const transfers = page.items;
 
-  // Badge maps for ONLY the phones on this page (indexed PK reads).
+  const partnerById: Record<string, Partner> = {};
+  for (const p of partners) partnerById[p.id] = p;
+
+  // Badge maps for ONLY the phones on this page (indexed PK reads). Tier
+  // display is gate-aware: where the owning partner doesn't require KYC, an
+  // unverified customer is T1, not Suspended (matches enforcement).
   const customerStore = getCustomerStore(getStore());
   const phones = [...new Set(transfers.map((t) => t.phone))];
   const customers = (
@@ -57,7 +63,7 @@ export default async function TransactionsPage({
   const tierByPhone: Record<string, Tier> = {};
   const kycByPhone: Record<string, KycInfo> = {};
   for (const c of customers) {
-    tierByPhone[c.senderPhone] = deriveTier(c, now);
+    tierByPhone[c.senderPhone] = deriveTier(c, now, sendGateActive(partnerById[c.partnerId]));
     kycByPhone[c.senderPhone] = {
       kycStatus: c.kycStatus,
       kycReviewState: c.kycReviewState,
@@ -65,9 +71,6 @@ export default async function TransactionsPage({
       pepHit: c.pepHit,
     };
   }
-
-  const partnerById: Record<string, Partner> = {};
-  for (const p of partners) partnerById[p.id] = p;
 
   // Pager hrefs preserve the partner filter (search/phone are window-local).
   const olderHref = page.nextCursor

@@ -232,18 +232,17 @@ export function PartnerSetupWizard() {
                 <option value="delegated">Partner runs KYC (delegated)</option>
               </select>
             </Field>
-            {draft.kycMode === 'delegated' && (
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={draft.requireKycBeforeSend === true}
-                  onChange={(e) => set({ requireKycBeforeSend: e.target.checked })}
-                />
-                Still block sends until the partner attests verification
-              </label>
-            )}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={draft.requireKycBeforeSend === true}
+                onChange={(e) => set({ requireKycBeforeSend: e.target.checked })}
+              />
+              Require identity verification before sending
+            </label>
             <p className="text-xs text-muted-foreground">
-              Sanctions screening runs on every transfer in BOTH modes — structurally untoggleable.
+              Off by default — customers can quote and send immediately. Sanctions screening runs
+              on every transfer in BOTH modes regardless — structurally untoggleable.
             </p>
           </>
         )}

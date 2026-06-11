@@ -152,11 +152,19 @@ describe('partner-api-service: createTransaction', () => {
     expect(t.status).toBe('blocked');
   });
 
-  it("an 'ours' partner rejects an UNVERIFIED sender with 422 (KYC required)", async () => {
+  it('a partner that REQUIRES KYC rejects an UNVERIFIED sender with 422', async () => {
+    const { deps } = await harness();
+    const gated = { ...OURS, requireKycBeforeSend: true };
+    await deps.partnerStore.savePartner(gated);
+    const r = await createTransaction(deps, gated, 'pk_1', 'idem-2', txBody());
+    expect(r).toMatchObject({ ok: false, status: 422 });
+  });
+
+  it("an UNCONFIGURED 'ours' partner does NOT gate — unverified sender mints (sanctions still ran)", async () => {
     const { deps } = await harness();
     await deps.partnerStore.savePartner(OURS);
-    const r = await createTransaction(deps, OURS, 'pk_1', 'idem-2', txBody());
-    expect(r).toMatchObject({ ok: false, status: 422 });
+    const r = await createTransaction(deps, OURS, 'pk_1', 'idem-2b', txBody());
+    expect(r).toMatchObject({ ok: true, status: 201 });
   });
 
   it('resolves a stored beneficiary by id (partner-scoped)', async () => {

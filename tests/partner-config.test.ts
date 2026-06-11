@@ -55,13 +55,15 @@ describe('resolvePartnerBranding', () => {
 });
 
 describe('resolveKycMode', () => {
-  it('null/undefined ⇒ ours, gate ON (today\'s behavior)', () => {
-    expect(resolveKycMode(null)).toEqual({ mode: 'ours', requireKyc: true });
-    expect(resolveKycMode(undefined)).toEqual({ mode: 'ours', requireKyc: true });
+  it('null/undefined ⇒ ours, gate OFF (verification is partner OPT-IN)', () => {
+    expect(resolveKycMode(null)).toEqual({ mode: 'ours', requireKyc: false });
+    expect(resolveKycMode(undefined)).toEqual({ mode: 'ours', requireKyc: false });
   });
 
-  it('INVARIANT: ours can NEVER skip KYC, even if requireKycBeforeSend=false', () => {
-    expect(resolveKycMode(partner({ kycMode: 'ours', requireKycBeforeSend: false }))).toEqual({ mode: 'ours', requireKyc: true });
+  it('requireKycBeforeSend:true turns the gate ON in EITHER mode', () => {
+    expect(resolveKycMode(partner({ kycMode: 'ours', requireKycBeforeSend: true }))).toEqual({ mode: 'ours', requireKyc: true });
+    expect(resolveKycMode(partner({ kycMode: 'delegated', requireKycBeforeSend: true }))).toEqual({ mode: 'delegated', requireKyc: true });
+    expect(resolveKycMode(partner({ kycMode: 'ours', requireKycBeforeSend: false }))).toEqual({ mode: 'ours', requireKyc: false });
   });
 
   it('delegated ⇒ gate OFF by default', () => {

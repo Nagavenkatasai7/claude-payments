@@ -141,7 +141,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona }) },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive }) },
       ];
       if (turn.isNewConversation && round === 0) {
         messages.push({

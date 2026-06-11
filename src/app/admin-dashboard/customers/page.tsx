@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { deriveTier } from '@/lib/tier-rules';
+import { sendGateActive } from '@/lib/kyc-gate';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { KycBadge } from '../kyc-badge';
@@ -71,7 +72,7 @@ export default async function CustomersPage({
       return bAt.localeCompare(aAt);
     });
 
-  const t0Count = customers.filter((c) => deriveTier(c, now) === 'T0').length;
+  const t0Count = customers.filter((c) => deriveTier(c, now, sendGateActive(partnerById[c.partnerId])) === 'T0').length;
   const isAdmin = staff.role === 'admin';
   const isPlatform = scoped.scope.kind === 'platform';
 
@@ -127,7 +128,7 @@ export default async function CustomersPage({
               columns={columns}
               empty={<>No customers yet.</>}
               rows={rows.map(({ c, life }) => {
-                const tier = deriveTier(c, now);
+                const tier = deriveTier(c, now, sendGateActive(partnerById[c.partnerId]));
                 return {
                   key: c.senderPhone,
                   label: `+${c.senderPhone}`,

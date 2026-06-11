@@ -109,6 +109,8 @@ describe('createAgent', () => {
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
       senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    // Gate is partner OPT-IN now — these verify-flow paths need it ON.
+    await deps.partnerStore.savePartner({ ...(await deps.partnerStore.ensureDefaultPartner()), requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     const agent = createAgent({
       store,
       scheduleStore: freshScheduleStore(redis),
@@ -194,6 +196,8 @@ describe('createAgent', () => {
       senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
       senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    // Gate is partner OPT-IN now — these verify-flow paths need it ON.
+    await deps.partnerStore.savePartner({ ...(await deps.partnerStore.ensureDefaultPartner()), requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     let captured: ChatMessage[] = [];
     const agent = createAgent({
       store,
@@ -852,6 +856,8 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
 
   it('prepends [NEW CUSTOMER] when turn.isNewCustomer is true', async () => {
     const b = build();
+    // Gate is partner OPT-IN now — these verify-flow paths need it ON.
+    await b.partnerStore.savePartner({ ...(await b.partnerStore.ensureDefaultPartner()), requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store: b.store,
@@ -871,6 +877,8 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
 
   it('prepends [TIER_REMINDER day 2/3] when turn.tierReminderDayOfWindow is 2', async () => {
     const b = build();
+    // Gate is partner OPT-IN now — these verify-flow paths need it ON.
+    await b.partnerStore.savePartner({ ...(await b.partnerStore.ensureDefaultPartner()), requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store: b.store,

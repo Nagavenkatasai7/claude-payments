@@ -44,17 +44,22 @@ export interface ResolvedKyc {
 }
 
 /**
- * Resolve a partner's KYC posture. INVARIANT: 'ours' ALWAYS requires KYC — a
- * partner can never be 'ours' and skip the gate. Only an explicitly 'delegated'
- * partner short-circuits, and even then sanctions screening is untouched
- * (it has no toggle here — see screenTransfer).
+ * Resolve a partner's KYC posture. The verify-before-send gate is OPT-IN:
+ * active ONLY when the partner explicitly configured
+ * `requireKycBeforeSend: true` — in EITHER mode. `kycMode` decides WHO runs
+ * verification when it happens ('ours' = SmartRemit's flow, 'delegated' = the
+ * partner attests); `requireKycBeforeSend` decides WHETHER sends are blocked
+ * until verified. The default/unconfigured partner has NO gate — customers
+ * can quote and send immediately.
+ *
+ * INVARIANT UNCHANGED: sanctions screening is untouched by any of this — it
+ * has no toggle anywhere and runs on every transfer (see screenTransfer).
  */
 export function resolveKycMode(
   partner: Partner | null | undefined,
 ): ResolvedKyc {
   const mode: KycMode = partner?.kycMode ?? 'ours';
-  if (mode === 'ours') return { mode: 'ours', requireKyc: true };
-  return { mode: 'delegated', requireKyc: partner?.requireKycBeforeSend ?? false };
+  return { mode, requireKyc: partner?.requireKycBeforeSend === true };
 }
 
 /**
