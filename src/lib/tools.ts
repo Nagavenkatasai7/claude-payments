@@ -19,6 +19,8 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { sendInteractive, sendCtaUrl, type InteractiveButton, type WaCreds } from './whatsapp';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { getDb } from '@/db/client';
 import {
   recipientButtonId,
   someoneNewButtonId,
@@ -241,6 +243,19 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'check_payment_status',
       description: 'Check the current status of a transfer.',
+      parameters: {
+        type: 'object',
+        properties: { transfer_id: { type: 'string' } },
+        required: ['transfer_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'request_refund',
+      description:
+        "Request a refund for a transfer the customer has PAID for but that has NOT been delivered yet. Call this ONLY when the customer asks for their money back on a specific transfer. It flags the transfer for our team to review — it never moves money itself, and approval is not guaranteed. Delivered transfers are final and can never be refunded.",
       parameters: {
         type: 'object',
         properties: { transfer_id: { type: 'string' } },
@@ -527,6 +542,10 @@ export interface ToolContext {
     destinationCurrency: CurrencyCode,
     mid: number,
   ) => Promise<SettlementRoute>;
+  // Refund seam: the guarded refund-lifecycle writer (transfer-repo
+  // updateRefund). Absent ⇒ a repo over the shared Pool (getDb()) is created
+  // lazily on the request_refund success path; tests inject one bound to PGlite.
+  transferRepo?: Pick<ReturnType<typeof createTransferRepo>, 'updateRefund'>;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -641,6 +660,8 @@ export async function executeTool(
       return generatePaymentLinkTool(args, ctx);
     case 'check_payment_status':
       return checkPaymentStatusTool(args, ctx);
+    case 'request_refund':
+      return requestRefundTool(args, ctx);
     case 'update_recipient_phone':
       return updateRecipientPhoneTool(args, ctx);
     case 'create_schedule':
@@ -1018,6 +1039,115 @@ async function checkPaymentStatusTool(
   const transfer = await ctx.store.getTransfer(String(args.transfer_id));
   if (!transfer) return { error: 'Transfer not found.' };
   return { transfer_id: transfer.id, status: transfer.status };
+}
+
+/**
+ * request_refund — the customer-facing refund REQUEST (paid-not-delivered
+ * only). The bot NEVER moves money: a successful call flips refundStatus
+ * none→requested (the guarded transfer-repo transition), which only flags the
+ * transfer for ops review — a human approves before any money returns.
+ *
+ * Every return shape is customer-safe by construction: only
+ * error / error_code+message / requested+reply_hint ever leave this function.
+ * No refundStatus tokens, no settlementPartnerId, no compliance detail.
+ */
+async function requestRefundTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const transfer = await ctx.store.getTransfer(String(args.transfer_id));
+  // STRICT ownership, 404-never-403: a transfer that isn't this customer's own
+  // is indistinguishable from one that doesn't exist.
+  if (!transfer || transfer.phone !== ctx.phone) {
+    return { error: 'Transfer not found.' };
+  }
+
+  const refundStatus = transfer.refundStatus ?? 'none'; // lazy-fill: absent ⇒ 'none'
+
+  // A refund already in motion (on ANY status, incl. cancelled) — explain the
+  // current state in customer terms. 'failed' is ops-internal: the customer
+  // hears the team is on it, never that a refund attempt failed.
+  if (refundStatus === 'completed') {
+    return {
+      error_code: 'already_refunded',
+      message:
+        'This transfer has already been refunded to the original payment method.',
+    };
+  }
+  if (refundStatus === 'pending') {
+    return {
+      error_code: 'refund_in_progress',
+      message:
+        'A refund for this transfer has been approved and is on its way — it arrives in 3-5 business days from approval.',
+    };
+  }
+  if (refundStatus === 'requested' || refundStatus === 'failed') {
+    return {
+      error_code: 'refund_already_requested',
+      message:
+        'A refund for this transfer is already being reviewed by our team — no need to ask again. They will confirm once it is approved.',
+    };
+  }
+
+  // refundStatus is 'none' — eligibility now turns on the transfer status.
+  if (transfer.status === 'delivered') {
+    return {
+      error_code: 'delivered_final',
+      message:
+        'This transfer has already been delivered to the recipient, so it can no longer be refunded — delivered transfers are final.',
+    };
+  }
+  if (transfer.status === 'awaiting_payment') {
+    return {
+      error_code: 'not_paid_yet',
+      message:
+        "No money has been taken for this transfer yet, so there's nothing to refund — simply don't complete the payment, or reply cancel to cancel it.",
+    };
+  }
+  if (transfer.status === 'cancelled') {
+    return {
+      error_code: 'cancelled',
+      message:
+        "This transfer was already cancelled. If you believe you were charged for it, reply 'help' and our team will take a look.",
+    };
+  }
+  if (transfer.status === 'blocked') {
+    // Matches the receipt's wording — never charged ⇒ nothing to refund.
+    // No screening/compliance detail beyond that.
+    return {
+      error_code: 'never_charged',
+      message:
+        'This transfer could not be completed and you were not charged, so there is nothing to refund.',
+    };
+  }
+  if (transfer.status !== 'paid') {
+    // in_review (and any future non-paid state): the transfer is not settled
+    // customer-side yet — "under review" is the established customer-facing
+    // wording; no compliance detail beyond that.
+    return {
+      error_code: 'not_refundable_yet',
+      message:
+        'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+    };
+  }
+
+  // status 'paid' + refundStatus 'none' — the one eligible state. The guarded
+  // none→requested transition makes concurrent requests harmless: the loser
+  // gets null and we answer as if the request already exists (it does).
+  const repo = ctx.transferRepo ?? createTransferRepo(getDb());
+  const updated = await repo.updateRefund(transfer.id, { refundStatus: 'requested' });
+  if (!updated) {
+    return {
+      error_code: 'refund_already_requested',
+      message:
+        'A refund for this transfer is already being reviewed by our team — no need to ask again. They will confirm once it is approved.',
+    };
+  }
+  return {
+    requested: true,
+    reply_hint:
+      'our team will review and confirm — refunds arrive in 3-5 business days once approved',
+  };
 }
 
 async function updateRecipientPhoneTool(

@@ -30,6 +30,19 @@ const STATUS_LABEL: Record<string, string> = {
   blocked: 'Could not be completed',
 };
 
+// Refund-aware overlay: an active or settled refund replaces the base label.
+// 'failed' deliberately falls through to the base status — a failed refund
+// attempt is ops-internal; the customer keeps seeing the prior state.
+const REFUND_LABEL: Record<string, string> = {
+  requested: 'Refund requested',
+  pending: 'Refund on the way',
+  completed: 'Refunded',
+};
+
+function statusLabel(t: { status: string; refundStatus?: string }): string {
+  return REFUND_LABEL[t.refundStatus ?? ''] ?? STATUS_LABEL[t.status] ?? t.status;
+}
+
 const summaryCls = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
 const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';
 const rowLabelCls = 'text-[#8696a0]';
@@ -64,7 +77,7 @@ export default async function ReceiptPage({
         <div className={summaryCls}>
           <div className={rowCls}>
             <span className={rowLabelCls}>Status</span>
-            <span className="font-semibold">{STATUS_LABEL[t.status] ?? t.status}</span>
+            <span className="font-semibold">{statusLabel(t)}</span>
           </div>
           <div className={rowCls}><span className={rowLabelCls}>Transfer ID</span><span className={monoCls}>{t.id}</span></div>
           <div className={rowCls}><span className={rowLabelCls}>Created</span><span>{fmtWhen(t.createdAt)}</span></div>
@@ -73,6 +86,11 @@ export default async function ReceiptPage({
           {t.status === 'blocked' && (
             <p className="mt-1.5 mb-0 text-[12px] leading-normal text-[#8696a0]">
               This transfer could not be completed and you were not charged.
+            </p>
+          )}
+          {t.refundStatus === 'completed' && (
+            <p className="mt-1.5 mb-0 text-[12px] leading-normal text-[#8696a0]">
+              Refunded to your original payment method{t.refundedAt ? ` on ${fmtWhen(t.refundedAt)}` : ''}.
             </p>
           )}
         </div>

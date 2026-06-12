@@ -403,3 +403,66 @@ describe('buildSystemPrompt (WL1 white-label factory)', () => {
     expect(withPersona).toContain('crisp and formal');
   });
 });
+
+describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC variants)', () => {
+  const variants = [
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+  ];
+
+  it('carries the REFUNDS & CANCELLATIONS section with the request_refund tool in BOTH variants', () => {
+    for (const p of variants) {
+      expect(p).toContain('REFUNDS & CANCELLATIONS');
+      expect(p).toContain('request_refund');
+    }
+  });
+
+  it('paid-not-delivered → call request_refund and relay; the bot never moves or promises money', () => {
+    for (const p of variants) {
+      expect(p).toContain('call request_refund with that transfer_id and relay its outcome');
+      expect(p).toContain('only flags the transfer for our team to review');
+      expect(p).toContain('never say the refund is done, approved, or guaranteed');
+    }
+  });
+
+  it('DELIVERED transfers are FINAL — explain kindly, never promise a reversal', () => {
+    for (const p of variants) {
+      expect(p).toContain('DELIVERED transfers are FINAL');
+      expect(p).toContain('delivered_final');
+      expect(p).toContain('never promise a reversal, a chargeback, or an exception');
+    }
+  });
+
+  it('timing is never promised beyond "3-5 business days once approved"', () => {
+    for (const p of variants) {
+      expect(p).toContain('3-5 business days once approved');
+      expect(p).toContain('NEVER promise any timing beyond');
+    }
+  });
+
+  it('an awaiting_payment transfer needs NO refund — just do not pay, or cancel', () => {
+    for (const p of variants) {
+      expect(p).toContain('An awaiting_payment transfer needs NO refund');
+      expect(p).toContain('simply not complete the payment');
+    }
+  });
+
+  it('never invent a transfer_id for request_refund — ask for the receipt id instead', () => {
+    for (const p of variants) {
+      expect(p).toContain('request_refund needs a transfer_id');
+      expect(p).toContain('transfer ID shown on their receipt');
+    }
+  });
+
+  it('internal refund states are never surfaced to the customer', () => {
+    for (const p of variants) {
+      expect(p).toContain('Never mention internal refund states');
+    }
+  });
+
+  it('survives a white-label rebrand', () => {
+    const p = buildSystemPrompt({ brand: 'Acme Pay' });
+    expect(p).toContain('REFUNDS & CANCELLATIONS');
+    expect(p).toContain('request_refund');
+  });
+});

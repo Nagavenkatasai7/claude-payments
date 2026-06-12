@@ -14,6 +14,7 @@ import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
@@ -53,6 +54,9 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     monthlyVolumeStore,
     kycProvider,
     partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
+    // Refund seam: the guarded refund-lifecycle writer, bound to the PGlite db
+    // (the prod fallback would build one over getDb()'s Neon Pool).
+    transferRepo: createTransferRepo(db),
   };
 }
 
@@ -77,7 +81,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all seventeen tools', () => {
+  it('exposes all eighteen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -92,12 +96,20 @@ describe('toolSchemas', () => {
       'list_saved_recipients',
       'list_schedules',
       'repeat_transfer',
+      'request_refund',
       'resolve_recipient',
       'send_approve_picker',
       'send_recipient_picker',
       'update_recipient_phone',
       'validate_phone',
     ]);
+  });
+
+  it('request_refund schema requires only transfer_id', () => {
+    const rr = toolSchemas.find((t) => t.function.name === 'request_refund')!;
+    expect(rr.function.parameters.required).toEqual(['transfer_id']);
+    const props = rr.function.parameters.properties as Record<string, unknown>;
+    expect(Object.keys(props)).toEqual(['transfer_id']);
   });
 
   it('get_quote schema has amount_usd and funding_method (no payout_method)', () => {
@@ -1921,5 +1933,189 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     expect(t?.partnerId).toBe('default');                  // ownership unchanged
     // Tool result (fed to the LLM) leaks nothing about the routing partner.
     expect(JSON.stringify(r)).not.toContain('rail-partner-x');
+  });
+});
+
+describe('request_refund (customer-facing refund request — suggest-only, ops approves)', () => {
+  type Ctx = Awaited<ReturnType<typeof buildCtx>>;
+
+  // Mint an awaiting_payment transfer owned by ctx.phone via the real tool path.
+  async function mintTransfer(ctx: Ctx): Promise<string> {
+    const created = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 500,
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
+      },
+      ctx,
+    );
+    expect(created.error).toBeUndefined();
+    return created.transfer_id as string;
+  }
+
+  async function mintPaid(ctx: Ctx): Promise<string> {
+    const id = await mintTransfer(ctx);
+    expect(await ctx.store.updateTransferFromWebhook(id, 'paid')).not.toBeNull();
+    return id;
+  }
+
+  // Force a status the webhook machine can't reach (cancelled/blocked/in_review).
+  async function forceStatus(ctx: Ctx, id: string, status: 'cancelled' | 'blocked' | 'in_review') {
+    const t = (await ctx.store.getTransfer(id))!;
+    await ctx.store.saveTransfer({ ...t, status });
+  }
+
+  // The tool's entire customer-safe surface: ONLY these keys may ever leave it,
+  // and no internal token may ride along in any value.
+  function expectCustomerSafe(result: Record<string, unknown>) {
+    const allowed = new Set(['error', 'error_code', 'message', 'requested', 'reply_hint']);
+    for (const k of Object.keys(result)) {
+      expect(allowed.has(k), `unexpected key leaked from request_refund: ${k}`).toBe(true);
+    }
+    const json = JSON.stringify(result).toLowerCase();
+    expect(json).not.toContain('settlementpartner');
+    expect(json).not.toContain('compliance');
+    expect(json).not.toContain('refundstatus');
+  }
+
+  it('STRICT ownership: an unknown transfer id reads as not found', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('request_refund', { transfer_id: 'tr_nope' }, ctx);
+    expect(r).toEqual({ error: 'Transfer not found.' });
+    expectCustomerSafe(r);
+  });
+
+  it("STRICT ownership: another customer's PAID transfer is indistinguishable from a missing one (404-never-403)", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mintPaid(owner);
+    const stranger = await buildCtx(redis, '15559990000');
+    const r = await executeTool('request_refund', { transfer_id: id }, stranger);
+    expect(r).toEqual({ error: 'Transfer not found.' });
+    expectCustomerSafe(r);
+    // And the ledger was not touched.
+    expect((await owner.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('awaiting_payment: nothing to refund — just do not pay / cancel; no flag is set', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('not_paid_yet');
+    expect(String(r.message).toLowerCase()).toContain('cancel');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('delivered is FINAL — delivered_final, never a refund flag', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await ctx.store.updateTransferFromWebhook(id, 'delivered');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('delivered_final');
+    expect(String(r.message).toLowerCase()).toContain('final');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('paid + no refund: SUCCESS — flips refundStatus to requested (guarded repo transition) and hints 3-5 business days', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.requested).toBe(true);
+    expect(String(r.reply_hint)).toContain('3-5 business days once approved');
+    expectCustomerSafe(r);
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.refundStatus).toBe('requested');
+    expect(after?.status).toBe('paid'); // the forward-only status machine is untouched
+  });
+
+  it('a second request is a no-op: "already being reviewed", state unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    await executeTool('request_refund', { transfer_id: id }, ctx);
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.requested).toBeUndefined();
+    expect(r.error_code).toBe('refund_already_requested');
+    expect(String(r.message).toLowerCase()).toContain('already being reviewed');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus).toBe('requested');
+  });
+
+  it('refund pending (ops approved): explains it is on the way — 3-5 business days', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    await ctx.transferRepo.updateRefund(id, { refundStatus: 'pending' });
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('refund_in_progress');
+    expect(String(r.message)).toContain('3-5 business days');
+    expectCustomerSafe(r);
+  });
+
+  it('refund completed: already refunded to the original payment method', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    await ctx.transferRepo.updateRefund(id, { refundStatus: 'pending' });
+    await ctx.transferRepo.updateRefund(id, { refundStatus: 'completed' });
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('already_refunded');
+    expect(String(r.message).toLowerCase()).toContain('original payment method');
+    expectCustomerSafe(r);
+  });
+
+  it("refund failed is OPS-INTERNAL: the customer hears 'being reviewed', never the word failed", async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    await ctx.transferRepo.updateRefund(id, { refundStatus: 'pending' });
+    await ctx.transferRepo.updateRefund(id, { refundStatus: 'failed' });
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('refund_already_requested');
+    expect(JSON.stringify(r).toLowerCase()).not.toContain('fail');
+    expectCustomerSafe(r);
+  });
+
+  it('cancelled with a refund already moving: explains the current refund state', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    await ctx.transferRepo.updateRefund(id, { refundStatus: 'pending' });
+    await forceStatus(ctx, id, 'cancelled');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('refund_in_progress');
+    expectCustomerSafe(r);
+  });
+
+  it('cancelled with no refund in motion: points to help, sets no flag', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await forceStatus(ctx, id, 'cancelled');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('cancelled');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('blocked: never charged ⇒ nothing to refund (no screening detail beyond the receipt wording)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await forceStatus(ctx, id, 'blocked');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('never_charged');
+    expect(String(r.message).toLowerCase()).toContain('not charged');
+    expect(JSON.stringify(r).toLowerCase()).not.toContain('blocked');
+    expectCustomerSafe(r);
+  });
+
+  it('in_review: not refundable yet — the established "under review" wording only', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await forceStatus(ctx, id, 'in_review');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('not_refundable_yet');
+    expect(String(r.message).toLowerCase()).toContain('under review');
+    expectCustomerSafe(r);
   });
 });

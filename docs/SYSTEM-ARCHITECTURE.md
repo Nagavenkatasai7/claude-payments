@@ -250,6 +250,60 @@ surfaces: the per-partner **Pricing tab** (that partner's rate sheet + margin)
 and the platform-only **`/admin-dashboard/rates`** page (every partner's rates,
 freshness, and corridor coverage in one view).
 
+### 5.2 Funds capture & refunds
+
+**The FundingProvider seam** (`src/lib/providers/funding-provider.ts`) is the
+sender-side charge — distinct from `payment-provider.ts`, the recipient-side
+settlement rail. SmartRemit stays non-custodial: a real implementation is a
+PSP/sponsor-bank integration (Plaid + processor, Stripe, …) that charges the
+sender; we never hold funds. `MockFundingProvider` plays the same role the
+simulator rail plays for settlement — the full charge→settle→refund
+orchestration is exercisable end-to-end with zero external dependencies, and a
+**real PSP lands as a provider swap** (`getFundingProvider`), never a call-site
+rewrite.
+
+**Capture ordering** (the pay route at `https://smartremit.ai/pay/{id}` owns
+it): OTP verification → payout-details validation → compliance screening →
+`capture()` → `setFundingRef` → `beginSettlement()`. `capture()` is
+**idempotent by transfer id** (a crash-retry returns the same charge, never a
+second one) and runs *outside* any DB transaction; `transfers.funding_ref` is
+**write-once** (`setFundingRef` only fills a NULL). A crash between capture and
+settle therefore leaves an `awaiting_payment` row WITH a `fundingRef` — the
+**crash-resume sweep** (`listAwaitingWithFunding`, run by the worker's
+reconcile pass) picks those up past a cutoff and resumes settlement: a charged
+customer's transfer is never lost.
+
+**Refund lifecycle** rides beside the forward-only `status` machine in
+`transfers.refund_status`, with every transition guarded in the repo
+(`updateRefund` — an illegal move is a no-op returning null, so concurrent ops
+clicks and webhook replays are harmless):
+
+```
+none → requested   customer asks via the bot (request_refund tool) — paid,
+                   not-delivered transfers only; this only FLAGS for review
+requested → none   ops dismisses the request
+none|requested|failed → pending   ops approves / initiates (failed = retry)
+pending → completed | failed      funding provider outcome (webhook/sweep)
+```
+
+Who can trigger what: the **bot can only ever create the request**
+(none→requested) — it never moves money. **Ops approve/dismiss** drives
+requested→pending|none from the dashboard. The **provider outcome** settles
+pending→completed|failed. **Delivered transfers are final** — the bot refuses
+with `delivered_final`, and ops has no delivered→refund path. Once approved,
+money returns to the **original payment method in 3-5 business days**.
+Customer surfaces (bot status notes, `/account/history`, the receipt) render
+refund-aware labels — "Refund requested" / "Refund on the way" / "Refunded";
+a `failed` refund attempt is ops-internal and customers keep seeing the prior
+state.
+
+**The funding webhook** (`/api/funding-webhook/[provider]`) receives the PSP's
+async callbacks (captures/refunds confirm asynchronously with real providers):
+the route verifies the provider HMAC **fail-closed** before
+`handleWebhook()` parses the event (`captured` / `refunded` /
+`refund_failed`), which then applies the same guarded transitions — replays
+no-op exactly like ops double-clicks do.
+
 ---
 
 ## 6. API surface (every route)
