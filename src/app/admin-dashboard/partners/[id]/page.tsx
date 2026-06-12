@@ -128,6 +128,9 @@ export default async function PartnerDetailPage({
   const nowMs = Date.now();
   const recents = recentPage.items;
   const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
+  // Support tab: the absent-config default (portal ON) interpreted ONCE for
+  // both the badge and the checkbox.
+  const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
 
   return (
     <>
@@ -464,7 +467,7 @@ export default async function PartnerDetailPage({
                   <dl className={DL_CLASS}>
                     <dt>Customer support portal</dt>
                     <dd>
-                      {partner.supportConfig?.enableSupportPortal !== false ? (
+                      {portalEnabled ? (
                         <Badge variant="outline" className="border-success/50 text-success">enabled</Badge>
                       ) : (
                         <Badge variant="outline" className="text-muted-foreground">disabled</Badge>
@@ -479,7 +482,7 @@ export default async function PartnerDetailPage({
                       <input
                         type="checkbox"
                         name="enableSupportPortal"
-                        defaultChecked={partner.supportConfig?.enableSupportPortal !== false}
+                        defaultChecked={portalEnabled}
                       />{' '}
                       Enable the customer support portal (on by default)
                     </label>

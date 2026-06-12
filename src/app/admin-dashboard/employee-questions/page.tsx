@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { askQuestionAction } from './actions';
 import { listEmployeeQuestions } from './queries';
-import { QuestionStatusBadge, STATUS_LABEL } from './status-badge';
+import { QuestionStatusBadge, STATUS_LABEL, TEXTAREA_CLASS } from './status-badge';
 
 // Employee questions — ONE page, two modes (gate: requireSupportOrAdmin):
 //   • support staff: an "Ask the admins" form + a list of THEIR OWN questions;
@@ -18,7 +18,8 @@ import { QuestionStatusBadge, STATUS_LABEL } from './status-badge';
 //     admins pinned to theirs) with a status filter.
 // All scoping decisions live in ./queries — this page only renders.
 
-const STATUSES: TicketStatus[] = ['open', 'pending', 'waiting_admin', 'resolved', 'closed'];
+// Derived from the exhaustive label map so the filter row tracks TicketStatus.
+const STATUSES = Object.keys(STATUS_LABEL) as TicketStatus[];
 
 const ADMIN_COLUMNS: ExpandableColumn[] = [
   { label: 'Subject', primary: true },
@@ -33,9 +34,6 @@ const MINE_COLUMNS: ExpandableColumn[] = [
   { label: 'Status', primary: true },
   { label: 'Updated', primary: true },
 ];
-
-const TEXTAREA_CLASS =
-  'min-h-24 w-full rounded-md border border-input bg-card px-3 py-2 text-sm';
 
 function subjectLink(t: Ticket) {
   return (

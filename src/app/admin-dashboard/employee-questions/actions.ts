@@ -7,7 +7,7 @@ import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { newTransferId } from '@/lib/id';
-import { getEmployeeQuestion } from './queries';
+import { getScopedQuestionTicket } from './queries';
 
 /**
  * Employee questions — the internal-ticket flow: support staff ASK the admins;
@@ -58,19 +58,19 @@ export async function replyQuestionAction(formData: FormData): Promise<void> {
   const body = String(formData.get('body') ?? '').trim();
   if (!body) throw new Error('Reply text is required.');
 
-  const found = await getEmployeeQuestion(staff, ticketId);
+  const ticket = await getScopedQuestionTicket(staff, ticketId);
   // Reply is opener-only regardless of role — admins answer via the audited
   // action below (an admin replying to their own question still passes here).
-  if (!found || found.ticket.openedBy !== staff.username) throw new Error(NOT_FOUND);
-  if (found.ticket.status === 'closed') throw new Error('This question is closed.');
+  if (!ticket || ticket.openedBy !== staff.username) throw new Error(NOT_FOUND);
+  if (ticket.status === 'closed') throw new Error('This question is closed.');
 
   await createTicketRepo(getDb()).appendMessage({
-    ticketId: found.ticket.id,
+    ticketId: ticket.id,
     actorType: 'staff',
     actorId: staff.username,
     body,
   });
-  refresh(found.ticket.id);
+  refresh(ticket.id);
 }
 
 /** An admin answers a question in their scope (audited). */
@@ -81,25 +81,25 @@ export async function answerQuestionAction(formData: FormData): Promise<void> {
   const body = String(formData.get('body') ?? '').trim();
   if (!body) throw new Error('Answer text is required.');
 
-  const found = await getEmployeeQuestion(staff, ticketId);
-  if (!found) throw new Error(NOT_FOUND);
-  if (found.ticket.status === 'closed') throw new Error('This question is closed.');
+  const ticket = await getScopedQuestionTicket(staff, ticketId);
+  if (!ticket) throw new Error(NOT_FOUND);
+  if (ticket.status === 'closed') throw new Error('This question is closed.');
 
   const db = getDb();
   await createTicketRepo(db).appendMessage({
-    ticketId: found.ticket.id,
+    ticketId: ticket.id,
     actorType: 'staff',
     actorId: staff.username,
     body,
   });
   await createAuditRepo(db).record({
-    partnerId: found.ticket.partnerId,
+    partnerId: ticket.partnerId,
     actor: staff.username,
     actorType: 'staff',
     action: 'employee_question.answer',
-    subjectId: found.ticket.id,
+    subjectId: ticket.id,
   });
-  refresh(found.ticket.id);
+  refresh(ticket.id);
 }
 
 /** An admin resolves or closes a question (audited; closed is terminal). */
@@ -112,21 +112,21 @@ export async function setQuestionStatusAction(formData: FormData): Promise<void>
     throw new Error('Status must be resolved or closed.');
   }
 
-  const found = await getEmployeeQuestion(staff, ticketId);
-  if (!found) throw new Error(NOT_FOUND);
+  const ticket = await getScopedQuestionTicket(staff, ticketId);
+  if (!ticket) throw new Error(NOT_FOUND);
 
   // Repo guard: closed is terminal; same-state moves refuse. Null ⇒ refused.
   const db = getDb();
-  const updated = await createTicketRepo(db).updateStatus(found.ticket.id, status);
+  const updated = await createTicketRepo(db).updateStatus(ticket.id, status);
   if (!updated) throw new Error('That status change is not allowed.');
 
   await createAuditRepo(db).record({
-    partnerId: found.ticket.partnerId,
+    partnerId: ticket.partnerId,
     actor: staff.username,
     actorType: 'staff',
     action: 'employee_question.status',
-    subjectId: found.ticket.id,
+    subjectId: ticket.id,
     meta: { status },
   });
-  refresh(found.ticket.id);
+  refresh(ticket.id);
 }

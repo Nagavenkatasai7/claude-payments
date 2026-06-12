@@ -13,15 +13,12 @@ import {
   setQuestionStatusAction,
 } from '../actions';
 import { getEmployeeQuestion } from '../queries';
-import { QuestionStatusBadge } from '../status-badge';
+import { QuestionStatusBadge, TEXTAREA_CLASS } from '../status-badge';
 
 // One employee question — the internal thread. Access rules live in
 // getEmployeeQuestion (internal-only, admin scope OR opener); a miss is a
 // straight 404. Threads here are internal-only people, so the read includes
 // internal notes by design.
-
-const TEXTAREA_CLASS =
-  'min-h-24 w-full rounded-md border border-input bg-card px-3 py-2 text-sm';
 
 export default async function EmployeeQuestionThreadPage({
   params,
