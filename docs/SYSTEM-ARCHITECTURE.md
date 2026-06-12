@@ -45,19 +45,19 @@ Two invariants are structurally untoggleable:
 | Charts | **Recharts** | Analytics dashboard |
 | FX | **Frankfurter API** | Live USD/GBP/CAD/AED/SGD/AUD/NZD→INR rates, no key |
 | KYC vendor | **Persona** (hosted flow + webhook) | When SmartRemit runs verification |
-| Tests | **Vitest** (~119 files / ~1,260 tests) + **PGlite** (real in-process Postgres) + `fakeRedis` + **Playwright** (post-deploy smoke) | UNIQUE/SKIP LOCKED/transactions are tested against real Postgres semantics |
+| Tests | **Vitest** (~122 files / ~1,315 tests) + **PGlite** (real in-process Postgres) + `fakeRedis` + **Playwright** (post-deploy smoke) | UNIQUE/SKIP LOCKED/transactions are tested against real Postgres semantics |
 | CI/CD | GitHub Actions (`ci.yml` gate on PRs, `smoke.yml` post-deploy, `worker-heartbeat.yml` every 5 min) | Branch protection: no direct pushes to `main` |
 
 ---
 
 ## 3. Data layer
 
-### 3.1 Postgres — the ledger (13 tables, `src/db/schema.ts`, migrations in `drizzle/`)
+### 3.1 Postgres — the ledger (14 tables, `src/db/schema.ts`, migrations in `drizzle/`)
 
 | Table | Purpose | Notable engineering |
 |---|---|---|
 | `partners` | Tenant records: name, countries, status, branding (displayName/color/logo/persona/supportContact), KYC posture (`kyc_mode`, `require_kyc_before_send`) | Migration 0001 seeds the `default` partner |
-| `transfers` | THE money ledger | Status CHECK constraint; indexes `(partner_id, created_at)`, `(phone, created_at)`, `(status, paid_at)`; `payout_destination_enc` + `_last4`, `recipient_legal_name_enc` (encrypted at rest) |
+| `transfers` | THE money ledger | Status CHECK constraint; indexes `(partner_id, created_at)`, `(phone, created_at)`, `(status, paid_at)`; `payout_destination_enc` + `_last4`, `recipient_legal_name_enc` (encrypted at rest); `settlement_partner_id` (nullable routing carrier, §5.1) |
 | `customers` | Sender records: phone (routing key, plaintext), tier anchors, KYC status, encrypted PII (`full_name/dob/address/gov_id` + last4 siblings) | `upsertOnFirstInbound` routes new customers to the partner owning the receiving number |
 | `partner_integrations` | Per-partner technical config: WhatsApp creds, settlement rail selection + credentials, KYC vendor creds | All secrets envelope-encrypted; non-secret selectors (phoneNumberId, providerType) in the clear |
 | `api_keys` | Partner API credentials | Only SHA-256(+pepper) hash at rest, UNIQUE index = O(1) auth; plaintext shown once at issue |
@@ -68,6 +68,7 @@ Two invariants are structurally untoggleable:
 | `idempotency_keys` | **PK `(partner_id, key)`** — the duplicate-window killer | Claim-first minting (see §6.3) |
 | `kyc_cases` | KYC case records (state lives on `customers`; reserved) | |
 | `corridor_requests` | Unsupported-corridor demand capture from chat | Platform-only lead list |
+| `partner_rates` | Per-partner conversion pricing per corridor (best-rate selection, §5.1) | UNIQUE `(partner_id, source_currency, destination_currency)`; pair index for selection; plain numerics — rates are not PII (migration `drizzle/0002_partner_rates.sql`) |
 | `outbox` | **The durability backbone** — every external effect | `dedupe_key` UNIQUE (where not null); drain partial index; see §7 |
 
 ### 3.2 Redis — hot/ephemeral keyspace (single shared client, `src/lib/redis.ts`)
@@ -184,6 +185,71 @@ Compliance outcomes branch at step 5/6: a watchlist hit records a `blocked` row
 (never charged, auditable); a `flagged` transfer charges but holds as `in_review`
 for staff release/reject.
 
+### 5.1 Partner best-rate selection (settlement routing)
+
+When a default-tenant customer asks for a quote, partners **compete on the FX
+rate**: the corridor goes to whichever eligible partner offers the customer
+strictly more destination units per source unit than the platform mid-market
+rate — and that partner's rail settles the transfer. Zero competitors means
+today's behavior byte-for-byte: mid-market rate, settled via the customer's own
+partner. Files: `src/lib/partner-rates.ts` (selection service),
+`src/db/repos/partner-rate-repo.ts` (repo), `drizzle/0002_partner_rates.sql`
+(schema).
+
+**Hybrid rate source.** A partner prices a corridor either way, or both:
+- **Pushed rate with TTL** — `PUT /api/partner/v1/rates` writes
+  `effective_rate` + `expires_at` + `pushed_at`; the rate competes only while
+  fresh (`expiresAt` in the future).
+- **Standing margin** — staff set a signed `margin_bps` on the partner's
+  Pricing tab; the effective rate is `mid × (1 + marginBps/10 000)` (positive ⇒
+  better for the customer).
+
+The upsert has merge semantics (`upsertRate`): a push updates only the pushed
+fields, a margin save updates only `margin_bps` — the two sources never clobber
+each other. A fresh push takes precedence; an expired push falls back to the
+margin, if any.
+
+**Eligibility** (all required, judged at quote time by `selectSettlementRoute`):
+- partner row **active** (enforced in the repo's candidate join),
+- **not the `default` partner** — it *is* the platform baseline,
+- a fresh pushed rate **or** a standing margin,
+- a **usable rail**: `payment.providerType` is `http` or `simulator` **and**
+  `credentials.settlementUrl` is non-empty — anything else would dead-letter
+  money in `paid`, so it is filtered out before winning.
+
+**The platform mid-market rate is always the baseline competitor**, and the
+winner must be **strictly better** than mid — ties go to the platform.
+Contenders are ranked best-rate-first; integrations are checked only for
+provisional winners, so the hot quote path is one indexed query plus at most a
+couple of integrations reads. Selection is an optimization, never a blocker: a
+rates-query failure falls back to the platform rate rather than taking quoting
+down.
+
+**Routing carrier.** The winner is stamped on the ledger as
+`transfers.settlement_partner_id` (`null` = settle via the owning partner). The
+split is strict:
+- **Rail side** follows `settlementPartnerId ?? partnerId` — settlement
+  instruction target, signing/webhook secrets, provider type.
+- **Brand side** always follows `partnerId` — WhatsApp number, branding,
+  receipts, the customer relationship.
+
+**Scope rules:**
+- **Only default-tenant customers compete.** White-label customers are pinned
+  to their partner — that partner is the transmitter of record, and routing
+  their volume elsewhere would break the regulatory premise. Callers gate on
+  the tenant *before* calling the selector.
+- **Customers never see the routing** — they see a rate and a quote, nothing
+  about which rail settles.
+- **Scheduled/cron sends intentionally don't route** — recurring transfers
+  stay on the owning partner's rail for predictability.
+
+**Operations.** The worker's staleness sweep (`listExpired`) flags pushed rates
+whose TTL has lapsed and alerts ops — a partner that stops pushing silently
+drops out of competition rather than competing on a stale price. Admin
+surfaces: the per-partner **Pricing tab** (that partner's rate sheet + margin)
+and the platform-only **`/admin-dashboard/rates`** page (every partner's rates,
+freshness, and corridor coverage in one view).
+
 ---
 
 ## 6. API surface (every route)
@@ -206,6 +272,8 @@ Rate limit 120 req/min/partner. All responses JSON; errors `{error}`.
 | Endpoint | Purpose |
 |---|---|
 | `GET /corridors` | Partner's enabled send corridors + brand |
+| `GET /rates` | The partner's own rate sheet (pushed rates + margins, freshness) |
+| `PUT /rates` | Push corridor rates with a TTL — the partner's bid in best-rate selection (§5.1) |
 | `POST /quote` | Price a transfer |
 | `POST /beneficiaries/validate` | Stateless payout-field validation per country |
 | `POST /beneficiaries` | Store a beneficiary (destination encrypted) |
