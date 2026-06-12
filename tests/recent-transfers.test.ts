@@ -150,3 +150,41 @@ describe('getRecentTransfersNote — token budget', () => {
     expect(note.length).toBeLessThan(600);
   });
 });
+
+describe('getRecentTransfersNote — refund-aware labels', () => {
+  it("refundStatus 'requested' replaces the base label with 'refund requested'", async () => {
+    const store = await storeWith(mk({ recipientName: 'Mom', status: 'paid', refundStatus: 'requested' }));
+    const note = await getRecentTransfersNote('+15551230000', store);
+    expect(note).toContain('refund requested');
+    expect(note).not.toMatch(/· paid/);
+  });
+
+  it("refundStatus 'pending' renders 'refund on the way'", async () => {
+    const store = await storeWith(mk({ status: 'paid', refundStatus: 'pending' }));
+    const note = await getRecentTransfersNote('+15551230000', store);
+    expect(note).toContain('refund on the way');
+    expect(note).not.toMatch(/· paid/);
+  });
+
+  it("refundStatus 'completed' renders 'refunded' — even over a cancelled base status", async () => {
+    const store = await storeWith(mk({ status: 'cancelled', refundStatus: 'completed' }));
+    const note = await getRecentTransfersNote('+15551230000', store);
+    expect(note).toContain('refunded');
+    expect(note).not.toContain('cancelled');
+  });
+
+  it("refundStatus 'failed' is ops-internal — the customer keeps seeing the prior state", async () => {
+    const store = await storeWith(mk({ status: 'paid', refundStatus: 'failed' }));
+    const note = await getRecentTransfersNote('+15551230000', store);
+    expect(note).toMatch(/· paid/);
+    expect(note.toLowerCase()).not.toContain('refund');
+    expect(note.toLowerCase()).not.toContain('failed');
+  });
+
+  it("an absent refundStatus behaves as 'none' — base labels untouched", async () => {
+    const store = stubStore(mk({ status: 'delivered', refundStatus: undefined }));
+    const note = await getRecentTransfersNote('+15551230000', store);
+    expect(note).toContain('delivered');
+    expect(note.toLowerCase()).not.toContain('refund');
+  });
+});

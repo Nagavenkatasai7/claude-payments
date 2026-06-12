@@ -21,6 +21,19 @@ const STATUS_LABEL: Record<string, string> = {
   blocked: 'Could not be completed',
 };
 
+// Refund-aware overlay: an active or settled refund replaces the base label.
+// 'failed' deliberately falls through to the base status — a failed refund
+// attempt is ops-internal; the customer keeps seeing the prior state.
+const REFUND_LABEL: Record<string, string> = {
+  requested: 'Refund requested',
+  pending: 'Refund on the way',
+  completed: 'Refunded',
+};
+
+function statusLabel(t: { status: string; refundStatus?: string }): string {
+  return REFUND_LABEL[t.refundStatus ?? ''] ?? STATUS_LABEL[t.status] ?? t.status;
+}
+
 const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';
 
 function money(amount: number, currency: string): string {
@@ -62,7 +75,7 @@ export default async function AccountHistoryPage() {
                 </div>
                 <div className={`${rowCls} opacity-75`}>
                   <span className="text-[#8696a0]">{new Date(t.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-                  <span>{STATUS_LABEL[t.status] ?? t.status}</span>
+                  <span>{statusLabel(t)}</span>
                 </div>
                 <div className="flex justify-between py-1.5 text-[12px] leading-normal opacity-60">
                   <span className="text-[#8696a0]">→ {formatDestAmount(t.amountInr, t.destinationCurrency ?? 'INR')}</span>

@@ -9,6 +9,8 @@ import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
 import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { getFundingProvider } from '@/lib/providers/funding-provider';
 import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
@@ -29,11 +31,29 @@ import type { CountryCode, Transfer } from '@/lib/types';
 export const maxDuration = 300;
 
 /**
+ * Charge the sender via the funding provider, then persist the charge ref
+ * write-once. THE ORDER IS THE INVARIANT (funding-provider.ts contract):
+ * OTP → payout validation → compliance → capture → setFundingRef →
+ * stage-1 message / beginSettlement. Capture is idempotent by transfer id
+ * (a replay re-presents the same charge, never a second one) and runs
+ * OUTSIDE any DB transaction; the durable fundingRef is what makes the
+ * capture→settle gap crash-safe (reconcile sweep resumes charged-but-
+ * unsettled rows). A throw here means NO charge was recorded — the caller
+ * returns a clean 402 and the customer retries the same link.
+ */
+async function captureFunding(transfer: Transfer): Promise<void> {
+  const { fundingRef } = await getFundingProvider().capture(transfer);
+  await createTransferRepo(getDb()).setFundingRef(transfer.id, fundingRef);
+}
+
+/**
  * Process payment for a resolved transfer, branching on complianceStatus:
  *  - blocked  → hard stop (no charge)
  *  - flagged  → charge via stage 1 (held message), set status in_review, no delivery
  *  - cleared  → beginSettlement: ONE transaction flips paid + enqueues the
  *               stage-1 message and the rail effect (Stage 2c — atomic).
+ * Both charging branches capture funds FIRST — nothing messages "payment
+ * received" or flips status before the charge succeeds.
  */
 async function processTransferPayment(
   store: ReturnType<typeof getStore>,
@@ -81,8 +101,21 @@ async function processTransferPayment(
     }
   }
 
+  // ── FUNDS CAPTURE — after every refusal gate, before any effect ──────────
+  // The blocked 400 and the routed-rail fail-closed 400 above both return
+  // BEFORE this point (those transfers are never charged). A capture failure
+  // mutates nothing: no status change, no charge recorded, no message — a
+  // clean 402 and the link stays retryable. Idempotent capture + write-once
+  // setFundingRef make a replay POST (the 'already' branch below) harmless.
+  try {
+    await captureFunding(transfer);
+  } catch (err) {
+    logError('pay.capture', err, { transferId: transfer.id });
+    return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
+  }
+
   if (transfer.complianceStatus === 'flagged') {
-    // Charge the card but do NOT deliver — hold for manual review.
+    // Funds captured above; hold for manual review — do NOT deliver.
     const { transfer: paid, senderMessages } = await completePaymentStage1(
       store, transfer.id, { held: true },
     );

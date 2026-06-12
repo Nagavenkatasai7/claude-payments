@@ -15,6 +15,15 @@ const STATUS_LABEL: Record<TransferStatus, string> = {
   blocked: 'on hold',
 };
 
+// Refund-aware overlay: an active or settled refund replaces the base status
+// label. 'none' and 'failed' deliberately fall through — a FAILED refund
+// attempt is ops-internal; the customer keeps seeing the prior state.
+const REFUND_LABEL: Partial<Record<NonNullable<Transfer['refundStatus']>, string>> = {
+  requested: 'refund requested',
+  pending: 'refund on the way',
+  completed: 'refunded',
+};
+
 function formatAmount(transfer: Transfer): string {
   // Mirrors the dashboard money() helper (transactions-tabs.tsx) — source
   // currency, customer-visible. amountSource ?? amountUsd defends pre-P4 records
@@ -32,7 +41,10 @@ function formatLine(transfer: Transfer): string {
   const when = transfer.createdAt ? easternDate(Date.parse(transfer.createdAt)) : 'recently';
   const who = (transfer.recipientName ?? '').trim() || 'a recipient';
   const amount = formatAmount(transfer);
-  const status = STATUS_LABEL[transfer.status] ?? 'in progress';
+  const status =
+    REFUND_LABEL[transfer.refundStatus ?? 'none'] ??
+    STATUS_LABEL[transfer.status] ??
+    'in progress';
   return `${when} · ${who} · ${amount} · ${status}`;
 }
 
