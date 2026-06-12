@@ -377,9 +377,25 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
   // immediately (the "inbuilt template" — otpMessage()), no doomed Graph call.
   // Free-form only delivers inside Meta's 24h customer-service window — the
   // testing-business mode until templates are approved in WhatsApp Manager.
+  //
+  // TRANSIENT RETRY (live incident 2026-06-12): Meta intermittently 500s
+  // ("OAuthException code 2, is_transient: true") on single sends while
+  // adjacent calls succeed. A one-shot send eats the code and strands the
+  // customer at the OTP screen — give Meta up to 3 attempts, 2s apart. Only
+  // worth it for retryable failures (5xx/transient); a window/permission
+  // rejection won't change on retry, but two extra attempts are harmless.
   if (!env.whatsappAuthTemplate) {
-    await sendText(phone, otpMessage(code));
-    return;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await sendText(phone, otpMessage(code));
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
+    }
+    throw lastErr;
   }
   try {
     await sendAuthTemplate(
