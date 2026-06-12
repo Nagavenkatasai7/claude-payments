@@ -10,6 +10,9 @@ import {
   resendPaymentLink,
   releaseTransfer,
   rejectTransfer,
+  approveRefund,
+  dismissRefund,
+  retryRefund,
 } from '@/lib/dashboard-ops';
 import { requireStaff, requireAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
@@ -109,14 +112,56 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
 }
 
 /**
- * Reject a held (in_review) transfer — cancels it (mock refund, adminNote set).
- * Requires admin role + partner scope (see releaseTransferAction).
+ * Reject a held (in_review) transfer — cancels it with an adminNote, and
+ * AUTO-refunds the captured charge when the sender was charged (fundingRef
+ * set): refund pending + a durable funding.refund effect, drained by the
+ * worker. Requires admin role + partner scope (see releaseTransferAction).
  */
 export async function rejectTransferAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
-  await rejectTransfer(store, id);
+  await rejectTransfer(store, getDb(), id);
+  revalidatePath('/admin-dashboard', 'layout');
+}
+
+/**
+ * Approve a CUSTOMER-REQUESTED refund (requested → pending + funding.refund
+ * effect + worker poke). Admin role + partner scope, like release/reject;
+ * approveRefund re-verifies refundStatus === 'requested' inside the
+ * transaction, so replays and double-clicks throw instead of double-enqueuing.
+ */
+export async function approveRefundAction(formData: FormData): Promise<void> {
+  const staff = await requireAdmin();
+  const id = String(formData.get('id') ?? '');
+  await getScopedTransfer(staff, id);
+  await approveRefund(getDb(), id);
+  revalidatePath('/admin-dashboard', 'layout');
+}
+
+/**
+ * Dismiss a CUSTOMER-REQUESTED refund (requested → none, adminNote trail).
+ * Admin role + partner scope; the guarded transition (legal only from
+ * 'requested') makes wrong-state calls throw without mutating.
+ */
+export async function dismissRefundAction(formData: FormData): Promise<void> {
+  const staff = await requireAdmin();
+  const id = String(formData.get('id') ?? '');
+  await getScopedTransfer(staff, id);
+  await dismissRefund(getDb(), id);
+  revalidatePath('/admin-dashboard', 'layout');
+}
+
+/**
+ * Retry a FAILED refund (failed → pending + a FRESH-keyed funding.refund
+ * effect — the original dedupe key is spent — + worker poke). Admin role +
+ * partner scope; retryRefund re-verifies refundStatus === 'failed'.
+ */
+export async function retryRefundAction(formData: FormData): Promise<void> {
+  const staff = await requireAdmin();
+  const id = String(formData.get('id') ?? '');
+  await getScopedTransfer(staff, id);
+  await retryRefund(getDb(), id);
   revalidatePath('/admin-dashboard', 'layout');
 }
 

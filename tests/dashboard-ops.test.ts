@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
-import { cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer } from '@/lib/dashboard-ops';
+import {
+  cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
+  approveRefund, dismissRefund, retryRefund,
+} from '@/lib/dashboard-ops';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -10,6 +14,11 @@ let db: Db;
 beforeEach(async () => {
   db = await freshDb();
 });
+
+async function outboxRows(): Promise<Array<{ kind: string; dedupe_key: string | null }>> {
+  const r = await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
+  return (r as unknown as { rows: Array<{ kind: string; dedupe_key: string | null }> }).rows;
+}
 
 function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -146,29 +155,139 @@ describe('releaseTransfer', () => {
 });
 
 describe('rejectTransfer', () => {
-  it('cancels an in_review transfer with an adminNote', async () => {
+  it('cancels an UNCHARGED in_review transfer with an adminNote — and NO refund', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rej1', status: 'in_review' }));
-    await rejectTransfer(store, 'rej1');
+    await rejectTransfer(store, db, 'rej1');
     const loaded = await store.getTransfer('rej1');
     expect(loaded?.status).toBe('cancelled');
     expect(loaded?.adminNote).toContain('rejected in review');
+    // Legacy/uncharged rows (no fundingRef) get no refund machinery.
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('AUTO-refunds a CHARGED in_review transfer: cancelled + refund pending + funding.refund row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(
+      makeTransfer({ id: 'rej_chg', status: 'in_review', fundingRef: 'mockfund-rej_chg' }),
+    );
+    await rejectTransfer(store, db, 'rej_chg');
+    const loaded = await store.getTransfer('rej_chg');
+    expect(loaded?.status).toBe('cancelled');
+    expect(loaded?.adminNote).toContain('rejected in review');
+    expect(loaded?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([
+      { kind: 'funding.refund', dedupe_key: 'refund:rej_chg' },
+    ]);
   });
 
   it('throws when transfer is not found', async () => {
     const store = createStore(fakeRedis(), db);
-    await expect(rejectTransfer(store, 'missing')).rejects.toThrow(/not found/i);
+    await expect(rejectTransfer(store, db, 'missing')).rejects.toThrow(/not found/i);
   });
 
   it('throws when transfer is not in_review', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rej2', status: 'awaiting_payment' }));
-    await expect(rejectTransfer(store, 'rej2')).rejects.toThrow(/not in_review/i);
+    await expect(rejectTransfer(store, db, 'rej2')).rejects.toThrow(/not in_review/i);
   });
 
-  it('throws when transfer is already cancelled', async () => {
+  it('throws when transfer is already cancelled (double-reject can never double-enqueue)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rej3', status: 'cancelled' }));
-    await expect(rejectTransfer(store, 'rej3')).rejects.toThrow(/not in_review/i);
+    await expect(rejectTransfer(store, db, 'rej3')).rejects.toThrow(/not in_review/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('approveRefund (customer-requested → in flight)', () => {
+  it('moves requested → pending and enqueues exactly one funding.refund', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'apr1', status: 'cancelled', fundingRef: 'mockfund-apr1', refundStatus: 'requested',
+    }));
+    await approveRefund(db, 'apr1');
+    expect((await store.getTransfer('apr1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([
+      { kind: 'funding.refund', dedupe_key: 'refund:apr1' },
+    ]);
+  });
+
+  it('a double-approve throws on the second click and never enqueues twice', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'apr2', status: 'cancelled', fundingRef: 'mockfund-apr2', refundStatus: 'requested',
+    }));
+    await approveRefund(db, 'apr2');
+    await expect(approveRefund(db, 'apr2')).rejects.toThrow(/not awaiting approval/i);
+    expect(await outboxRows()).toHaveLength(1);
+  });
+
+  it('refuses a transfer whose refund was never requested (no refund minted from thin air)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'apr3', status: 'cancelled', fundingRef: 'f' }));
+    await expect(approveRefund(db, 'apr3')).rejects.toThrow(/not awaiting approval/i);
+    expect((await store.getTransfer('apr3'))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('throws for a missing transfer', async () => {
+    await expect(approveRefund(db, 'missing')).rejects.toThrow(/not awaiting approval/i);
+  });
+});
+
+describe('dismissRefund (customer-requested → declined)', () => {
+  it('moves requested → none and records an adminNote', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'dis1', status: 'cancelled', fundingRef: 'mockfund-dis1', refundStatus: 'requested',
+    }));
+    await dismissRefund(db, 'dis1');
+    const loaded = await store.getTransfer('dis1');
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect(loaded?.adminNote).toContain('refund request dismissed');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('refuses any state but requested (in-flight refunds cannot be dismissed)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'dis2', status: 'cancelled', fundingRef: 'f', refundStatus: 'pending',
+    }));
+    await expect(dismissRefund(db, 'dis2')).rejects.toThrow(/not awaiting approval/i);
+    expect((await store.getTransfer('dis2'))?.refundStatus).toBe('pending');
+  });
+});
+
+describe('retryRefund (failed → back in flight)', () => {
+  it('moves failed → pending and enqueues with a FRESH dedupe key (the original is spent)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'rty1', status: 'cancelled', fundingRef: 'mockfund-rty1', refundStatus: 'failed',
+    }));
+    // The original (spent) row from the first attempt is still in the outbox.
+    await db.execute(sql`
+      INSERT INTO outbox (kind, payload, status, dedupe_key)
+      VALUES ('funding.refund', '{"transferId":"rty1"}'::jsonb, 'done', 'refund:rty1')
+    `);
+    await retryRefund(db, 'rty1');
+    expect((await store.getTransfer('rty1'))?.refundStatus).toBe('pending');
+    const rows = await outboxRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].kind).toBe('funding.refund');
+    expect(rows[1].dedupe_key).toMatch(/^refund:rty1:retry:\d+$/);
+  });
+
+  it('refuses any state but failed (a pending refund cannot be re-enqueued)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'rty2', status: 'cancelled', fundingRef: 'f', refundStatus: 'pending',
+    }));
+    await expect(retryRefund(db, 'rty2')).rejects.toThrow(/not in a failed state/i);
+    expect(await outboxRows()).toHaveLength(0);
+
+    await store.saveTransfer(makeTransfer({ id: 'rty3', status: 'cancelled', fundingRef: 'f' }));
+    await expect(retryRefund(db, 'rty3')).rejects.toThrow(/not in a failed state/i);
   });
 });

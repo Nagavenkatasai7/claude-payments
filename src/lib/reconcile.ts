@@ -1,7 +1,10 @@
+import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { beginSettlement } from '@/lib/settlement';
+import { waCredsFrom } from '@/lib/whatsapp-creds';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every /api/worker
@@ -10,17 +13,26 @@ import type { Transfer } from '@/lib/types';
 // still strand:
 //   • a webhook-driven transfer stuck in 'paid' too long (the partner's rail
 //     never called back, or the instruction died) → re-instruct ONCE + alert,
-//   • a compliance hold ('in_review') nobody has touched in 24h → alert.
+//   • a compliance hold ('in_review') nobody has touched in 24h → alert,
+//   • a CHARGED transfer still awaiting_payment (fundingRef set; the process
+//     died between capture and beginSettlement) → resume settlement + alert,
+//   • a refund in flight for over an hour → alert (ops decides; no auto-retry).
 // Every enqueue is dedupe-keyed per transfer, so the sweep firing every minute
 // can never spam: one re-instruction and one alert per stuck transfer, ever.
 
 export const STUCK_PAID_MINUTES = 15;
 export const STALE_REVIEW_HOURS = 24;
+export const FUNDING_RESUME_MINUTES = 10;
+export const STUCK_REFUND_MINUTES = 60;
 
 export interface SweepResult {
   stuckPaid: number;
   reinstructed: number;
   staleReviews: number;
+  // Optional ONLY so pre-existing zero-literals (the worker route's fallback)
+  // stay assignable; reconcileSweep itself always returns both.
+  fundingResumed?: number;
+  stuckRefunds?: number;
 }
 
 export async function reconcileSweep(db: Db): Promise<SweepResult> {
@@ -84,7 +96,73 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     );
   }
 
-  return { stuckPaid: stuck.length, reinstructed, staleReviews: stale.length };
+  // CRASH-RESUME: the customer was CHARGED (fundingRef is write-once, set
+  // before beginSettlement) but the process died before settlement started —
+  // the one state the funds-capture seam can strand. Resume it: beginSettlement
+  // is the same atomic claim the pay route uses (markPaidIfAwaiting), so the
+  // sweep firing every minute settles each victim EXACTLY once, and a victim
+  // racing its own resurrected pay request is still a clean no-op.
+  const victims = await transfers.listAwaitingWithFunding(FUNDING_RESUME_MINUTES * 60_000);
+  let fundingResumed = 0;
+  for (const t of victims) {
+    // Rail-side config is the SETTLEMENT partner's when routed (same rule as
+    // the re-instruct above); the customer-facing stage-1 message rides the
+    // OWNING partner's WhatsApp number (brand-side).
+    const railIntegrations = await integrationsRepo.getIntegrations(
+      t.settlementPartnerId ?? t.partnerId,
+    );
+    const brandIntegrations = t.settlementPartnerId
+      ? await integrationsRepo.getIntegrations(t.partnerId)
+      : railIntegrations;
+    const result = await beginSettlement(db, t, railIntegrations, waCredsFrom(brandIntegrations));
+    if (result.kind === 'started') fundingResumed++;
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged ` +
+          `(${t.fundingRef}) but never settled — resumed settlement from the sweep.`,
+      },
+      { dedupeKey: `fundresume:${t.id}` },
+    );
+  }
+
+  // STUCK REFUND: in flight (refundStatus 'pending') for over an hour. The
+  // pending flip and the funding.refund effect commit together, so the OLDEST
+  // funding.refund row's age IS the time the refund has been in flight (there
+  // is no refund-pending timestamp on the ledger row). A pending refund with
+  // NO effect row is a lost effect — equally stuck. Alert only, deduped: no
+  // auto-retry, ops decides (the provider may be mid-incident).
+  const pendingRefunds = await transfers.listByRefundStatus('pending', 50);
+  let stuckRefunds = 0;
+  for (const t of pendingRefunds) {
+    const res = await db.execute(sql`
+      SELECT count(*)::int AS recent FROM outbox
+      WHERE kind = 'funding.refund'
+        AND payload->>'transferId' = ${t.id}
+        AND created_at > now() - make_interval(mins => ${STUCK_REFUND_MINUTES})
+    `);
+    const recent = Number((res as unknown as { rows: Array<{ recent: number }> }).rows[0]?.recent ?? 0);
+    if (recent > 0) continue; // a fresh effect row exists — give it time
+    stuckRefunds++;
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: refund for transfer ${t.id} (partner ${t.partnerId}) has been ` +
+          `pending for >${STUCK_REFUND_MINUTES}min — check the funding provider and the outbox.`,
+      },
+      { dedupeKey: `refundstuck:${t.id}` },
+    );
+  }
+
+  return {
+    stuckPaid: stuck.length,
+    reinstructed,
+    staleReviews: stale.length,
+    fundingResumed,
+    stuckRefunds,
+  };
 }
 
 // ── Ops data (consumed by the Stage-5 /admin-dashboard/ops page) ─────────────
@@ -94,6 +172,10 @@ export interface OpsSnapshot {
   deadLetters: OutboxRow[];
   stuckPaid: Transfer[];
   staleReviews: Transfer[];
+  /** Refund queues (masked reads): customer-requested / in flight / failed. */
+  refundsRequested: Transfer[];
+  refundsPending: Transfer[];
+  refundsFailed: Transfer[];
 }
 
 export async function getOpsSnapshot(db: Db): Promise<OpsSnapshot> {
@@ -104,5 +186,8 @@ export async function getOpsSnapshot(db: Db): Promise<OpsSnapshot> {
     deadLetters: await outbox.listDead(),
     stuckPaid: await transfers.findStuckPaid(STUCK_PAID_MINUTES),
     staleReviews: await transfers.findInReviewOlderThan(STALE_REVIEW_HOURS),
+    refundsRequested: await transfers.listByRefundStatus('requested'),
+    refundsPending: await transfers.listByRefundStatus('pending'),
+    refundsFailed: await transfers.listByRefundStatus('failed'),
   };
 }

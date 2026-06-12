@@ -58,6 +58,24 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
     : `✅ Payment received — ${sourceCharge} charged. ${transfer.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
 }
 
+/**
+ * The customer-facing refund confirmation — pure, enqueued by the worker's
+ * funding.refund handler in the same transaction as the refund-completed flip.
+ * The amount is the FULL source-side charge (what the funding provider
+ * captured). NEVER mentions why: compliance reasons stay internal.
+ */
+export function buildRefundMessage(transfer: Transfer): string {
+  const sourceCharge = formatSourceCharge(
+    transfer.totalChargeSource ?? transfer.totalChargeUsd,
+    transfer.sourceCurrency ?? 'USD',
+  );
+  return (
+    `Your transfer ${transfer.id} could not be completed. We've refunded ` +
+    `${sourceCharge} to your original payment method — it typically arrives ` +
+    `in 3-5 business days.`
+  );
+}
+
 export async function completePaymentStage1(
   store: Store,
   transferId: string,
