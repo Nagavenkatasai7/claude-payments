@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { finalizeDraftPayment } from '@/lib/pay-finalize';
+import { createTransfer } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -245,6 +246,118 @@ describe('finalizeDraftPayment', () => {
     if (second.ok) throw new Error('unexpected');
     expect(second.error).toBe('blocked');
     expect(second.transferId).toBe(first.transferId);
+  });
+
+  // ── U7 (audit): honor the DRAFT's quote at pay time ────────────────────────
+  // The approval card and the pay page both render from draft.quote; the mint
+  // must record those exact figures, not a re-quote from current state.
+
+  it('U7: "first transfer free" survives an interleaved mint — finalized transfer keeps feeUsd 0', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200); // card showed quote.feeUsd 0 (first-transfer-free)
+
+    // An unrelated transfer lands for the same phone between card and pay —
+    // the old re-quote (transferCount now 1) would charge the $1.99 repeat fee.
+    await createTransfer(stores.store, stores.partnerStore, stores.monthlyVolumeStore, {
+      phone: PHONE,
+      recipientName: 'Uncle',
+      recipientPhone: '919876500000',
+      payoutMethod: 'upi',
+      payoutDestination: 'uncle@upi',
+      fundingMethod: 'bank_transfer',
+      amountSource: 50,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
+      senderKycStatus: 'verified',
+    });
+    expect(await stores.store.getTransferCount(PHONE)).toBe(1);
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.feeUsd).toBe(0);                  // the card's promise…
+    expect(saved?.amountUsd).toBe(200);
+    expect(saved?.totalChargeUsd).toBe(200);        // …not the re-quoted 201.99
+    expect(saved?.totalChargeUsd).toBe(saved?.amountUsd);
+  });
+
+  it('U7: FX drift between card and pay — the minted row carries the DRAFT fxRate and amountInr', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200); // card quoted fxRate 85 → ₹17,000
+
+    // Live FX moved to 90 after the card was shown; the draft's rate must win.
+    resetRateCacheForTests();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 90 } }) }),
+    );
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.fxRate).toBe(85);
+    expect(saved?.amountInr).toBe(17_000);
+  });
+
+  it('U7: sanctions still block a watchlisted recipient WITH the draft-quote override', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200, 'John Doe');
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unexpected');
+    expect(result.error).toBe('blocked');
+    expect(typeof result.transferId).toBe('string');
+    // The blocked row records the draft's quoted figures — proof the override
+    // path ran AND screening still blocked on it.
+    const saved = await stores.store.getTransfer(result.transferId!);
+    expect(saved?.status).toBe('blocked');
+    expect(saved?.fxRate).toBe(85);
+    expect(saved?.feeUsd).toBe(0);
+  });
+
+  it('U7: a legacy non-USD draft missing feeSource/totalChargeSource falls back to the re-quote and mints', async () => {
+    const stores = await buildStores();
+    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+
+    // Live GBP rates differ from the draft's stored quote — the re-quote must win
+    // (never mix the draft's USD figures with a live source-side recomputation).
+    resetRateCacheForTests();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.27, INR: 110 } }) }),
+    );
+
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE,
+      recipient: {
+        name: 'Mom',
+        recipientPhone: '919876543210',
+        payoutMethod: 'upi',
+        payoutDestination: 'mom@upi',
+      },
+      amountUsd: 254, // USD-equivalent of £200 (cap re-check)
+      amountSource: 200,
+      sourceCurrency: 'GBP',
+      fundingMethod: 'bank_transfer',
+      // Legacy in-flight draft (30-min TTL drain): no feeSource/totalChargeSource.
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 },
+    });
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.sourceCurrency).toBe('GBP');
+    expect(saved?.amountSource).toBe(200);
+    // Re-quoted from LIVE rates (110), not the draft's stale 108 — the fallback
+    // took today's re-quote path end to end.
+    expect(saved?.fxRate).toBe(110);
+    expect(saved?.amountInr).toBe(22_000);
+    expect(saved?.amountUsd).toBe(254); // 200 × 1.27
   });
 
   it('crash BETWEEN claim and mint: the replay completes the original attempt with the claimed id', async () => {
