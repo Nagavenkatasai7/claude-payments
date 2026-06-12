@@ -15,6 +15,7 @@ export async function TopBar() {
   const commandItems = buildCommandItems(navItems, {
     isPlatformAdmin: staff.role === 'admin' && !staff.partnerId,
     isAdmin: staff.role === 'admin',
+    isSupport: staff.role === 'support',
   });
 
   return (

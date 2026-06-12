@@ -32,6 +32,8 @@ const ALL_TABLES = [
   'idempotency_keys',
   'audit_events',
   'partner_rates',
+  'ticket_messages',
+  'tickets',
   'transfers',
   'schedules',
   'beneficiaries',

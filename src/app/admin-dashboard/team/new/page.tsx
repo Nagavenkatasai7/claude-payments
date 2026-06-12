@@ -68,6 +68,7 @@ export default async function NewTeammatePage() {
                   >
                     <option value="agent">Agent — scoped permissions</option>
                     <option value="admin">Admin — full access</option>
+                    <option value="support">Support — tickets only</option>
                   </select>
                 </div>
               </div>

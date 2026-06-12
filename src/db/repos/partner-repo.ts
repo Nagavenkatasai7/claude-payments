@@ -1,7 +1,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { partners } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import type { CorridorComplianceRule, CountryCode, KycMode, Partner, PartnerId, PartnerStatus } from '@/lib/types';
+import type { CorridorComplianceRule, CountryCode, KycMode, Partner, PartnerId, PartnerStatus, PartnerSupportConfig } from '@/lib/types';
 
 // partner-repo — mirrors partner-store's surface (getPartner / savePartner /
 // listPartners / ensureDefaultPartner) so the cutover is a drop-in swap.
@@ -31,6 +31,7 @@ function rowToPartner(row: PartnerRow): Partner {
   if (row.corridorCompliance) {
     p.corridorCompliance = row.corridorCompliance as Partial<Record<CountryCode, CorridorComplianceRule>>;
   }
+  if (row.supportConfig) p.supportConfig = row.supportConfig as PartnerSupportConfig;
   return p;
 }
 
@@ -50,6 +51,7 @@ function partnerToRow(p: Partner): typeof partners.$inferInsert {
     kycMode: p.kycMode ?? 'ours',
     requireKycBeforeSend: p.requireKycBeforeSend ?? null,
     corridorCompliance: p.corridorCompliance ?? null,
+    supportConfig: p.supportConfig ?? null,
     createdAt: new Date(p.createdAt),
     updatedAt: new Date(p.updatedAt),
   };

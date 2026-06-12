@@ -7,7 +7,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getAuditLogStore, type StaffAuditAction } from '@/lib/audit-log-store';
 import { requirePlatformAdmin } from '@/lib/auth';
 import { hashPassword } from '@/lib/password';
-import type { Staff, StaffRole } from '@/lib/types';
+import { SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffRole } from '@/lib/types';
 
 /**
  * Team management — platform-admin only. Every action is a public POST endpoint,
@@ -75,7 +75,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
   if (password.length < 8) {
     throw new Error('Password must be at least 8 characters.');
   }
-  if (role !== 'admin' && role !== 'agent') throw new Error('Invalid role.');
+  if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
 
   // Partner scope: empty ⇒ platform; otherwise the partner must exist.
   let partnerId: string | undefined;
@@ -94,7 +94,8 @@ export async function createStaffAction(formData: FormData): Promise<void> {
     username,
     name,
     role,
-    permissions: readPermissions(formData),
+    // Support staff never get money permissions, whatever the form sent.
+    permissions: role === 'support' ? { ...SUPPORT_DEFAULT_PERMISSIONS } : readPermissions(formData),
     passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     status: 'active',
@@ -112,7 +113,7 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
   const username = String(formData.get('username') ?? '').trim();
   const role = String(formData.get('role') ?? 'agent') as StaffRole;
   const partnerField = String(formData.get('partnerId') ?? '').trim();
-  if (role !== 'admin' && role !== 'agent') throw new Error('Invalid role.');
+  if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
 
   const store = getAuthStore();
   const target = await store.getStaff(username);
@@ -137,7 +138,8 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
   const updated: Staff = {
     ...target,
     role,
-    permissions: readPermissions(formData),
+    // Support staff never get money permissions, whatever the form sent.
+    permissions: role === 'support' ? { ...SUPPORT_DEFAULT_PERMISSIONS } : readPermissions(formData),
     partnerId, // undefined ⇒ platform
   };
   await store.saveStaff(updated);

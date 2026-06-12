@@ -54,13 +54,15 @@ describe('visibleNavItems', () => {
 });
 
 describe('visibleNavGroups (Stage 5b IA)', () => {
-  it('platform groups: top(overview+ops) · Money · People · Insights · Platform', async () => {
+  it('platform groups: top(overview+ops) · Money · People · Support · Insights · Platform', async () => {
     const { visibleNavGroups } = await import('@/app/admin-dashboard/nav');
     const groups = visibleNavGroups(staff('admin', undefined));
     expect(groups[0].items).toEqual(['overview', 'ops']);
-    expect(groups.map((g) => g.label)).toEqual([undefined, 'Money', 'People', 'Insights', 'Platform']);
+    expect(groups.map((g) => g.label)).toEqual([undefined, 'Money', 'People', 'Support', 'Insights', 'Platform']);
     const platform = groups.find((g) => g.label === 'Platform')!;
     expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'team', 'api-keys']);
+    const supportGroup = groups.find((g) => g.label === 'Support')!;
+    expect(supportGroup.items).toEqual(['tickets', 'my-queue', 'employee-questions']);
   });
 
   it('platform agent: no team, no api-keys in the Platform group', async () => {

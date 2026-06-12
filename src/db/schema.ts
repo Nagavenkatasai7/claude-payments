@@ -44,6 +44,7 @@ export const partners = pgTable('partners', {
   kycMode: text('kyc_mode').notNull().default('ours'),
   requireKycBeforeSend: boolean('require_kyc_before_send'),
   corridorCompliance: jsonb('corridor_compliance'),
+  supportConfig: jsonb('support_config'), // PartnerSupportConfig (absent ⇒ defaults)
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -200,6 +201,57 @@ export const partnerRates = pgTable(
     uniqueIndex('partner_rates_corridor').on(t.partnerId, t.sourceCurrency, t.destinationCurrency),
     index('partner_rates_pair').on(t.sourceCurrency, t.destinationCurrency),
   ],
+);
+
+// Support tickets — customer queries ('customer') + employee questions to the
+// admins ('internal'), one table discriminated by kind. partner_id NOT NULL is
+// the tenant boundary as everywhere; bodies are plaintext (AI triage/copilot
+// and queue search need them; create-forms warn against posting account
+// numbers, and every transfer join stays masked).
+export const tickets = pgTable(
+  'tickets',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    kind: text('kind').notNull().default('customer'),
+    customerPhone: text('customer_phone').notNull().default(''), // '' for internal
+    openedBy: text('opened_by'), // staff username (internal tickets)
+    transferId: text('transfer_id').references(() => transfers.id),
+    subject: text('subject').notNull(),
+    status: text('status').notNull().default('open'),
+    priority: text('priority').notNull().default('normal'),
+    category: text('category'),
+    assignedTo: text('assigned_to'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+  },
+  (t) => [
+    check('tickets_kind_check', sql`${t.kind} IN ('customer','internal')`),
+    check(
+      'tickets_status_check',
+      sql`${t.status} IN ('open','pending','waiting_admin','resolved','closed')`,
+    ),
+    check('tickets_priority_check', sql`${t.priority} IN ('low','normal','urgent')`),
+    index('tickets_partner_status').on(t.partnerId, t.status),
+    index('tickets_assigned_updated').on(t.assignedTo, t.updatedAt.desc()),
+    index('tickets_customer_partner').on(t.customerPhone, t.partnerId),
+    index('tickets_kind_status').on(t.kind, t.status),
+  ],
+);
+
+export const ticketMessages = pgTable(
+  'ticket_messages',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    ticketId: text('ticket_id').notNull().references(() => tickets.id),
+    actorType: text('actor_type').notNull(), // 'customer' | 'staff' | 'system'
+    actorId: text('actor_id').notNull(),
+    body: text('body').notNull(),
+    internal: boolean('internal').notNull().default(false), // staff-only note
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('ticket_messages_ticket').on(t.ticketId, t.createdAt)],
 );
 
 export const apiKeys = pgTable(

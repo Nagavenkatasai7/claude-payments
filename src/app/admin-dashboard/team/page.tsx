@@ -95,6 +95,7 @@ function staffRow(s: Staff, opts: { isSelf: boolean; partners: Partner[]; partne
         >
           <option value="agent">agent</option>
           <option value="admin">admin</option>
+          <option value="support">support</option>
         </select>
         <select
           name="partnerId"

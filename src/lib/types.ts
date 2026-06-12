@@ -139,7 +139,10 @@ export interface Schedule {
   amountSource: number;           // NEW (P4)
 }
 
-export type StaffRole = 'admin' | 'agent';
+// 'support' (NEW): tickets-only staff — answers customer queries, escalates to
+// admins. ENFORCED at requireScope (every ops/money page bounces support to the
+// ticket queue); nav hiding alone is never the guard.
+export type StaffRole = 'admin' | 'agent' | 'support';
 
 // Reversible account state. Absent ⇒ 'active' (no migration; lazy default on read),
 // so existing staff records keep working. 'suspended' = access revoked but the record
@@ -151,6 +154,14 @@ export interface StaffPermissions {
   canResend: boolean;
   canAssign: boolean;
 }
+
+// Support staff get no money permissions — hasPermission() must resolve false
+// for every money action without special-casing the role at call sites.
+export const SUPPORT_DEFAULT_PERMISSIONS: StaffPermissions = {
+  canCancel: false,
+  canResend: false,
+  canAssign: false,
+};
 
 export interface Staff {
   username: string;
@@ -170,6 +181,56 @@ export interface Recipient {
   payoutMethod: PayoutMethod;
   payoutDestination: string;
   lastUsedAt: string; // ISO-8601
+}
+
+// ── Support tickets ─────────────────────────────────────────────────────────
+//
+// One system serves two flows, discriminated by `kind`:
+//  • 'customer' — a customer query (customer_phone set). Customers create/reply
+//    from /account/support; support staff + admins answer from the dashboard.
+//  • 'internal' — an employee question to the admins (opened_by = staff
+//    username, customer_phone ''). Answered from the admin queue.
+// Status flow: open → pending (waiting on customer) → resolved → closed
+// (terminal); waiting_admin = escalated to an admin. Customers never see
+// internal notes (TicketMessage.internal) and see waiting_admin as
+// "In progress" — compliance/internal detail never leaks.
+
+export type TicketKind = 'customer' | 'internal';
+export type TicketStatus = 'open' | 'pending' | 'waiting_admin' | 'resolved' | 'closed';
+export type TicketPriority = 'low' | 'normal' | 'urgent';
+
+export interface Ticket {
+  id: string;
+  partnerId: PartnerId;
+  kind: TicketKind;
+  customerPhone: string;       // '' for internal tickets
+  openedBy?: string;           // staff username (internal tickets)
+  transferId?: string;         // optional link to a transfer
+  subject: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  category?: string;           // AI-triage suggestion or staff-set
+  assignedTo?: string;         // staff username
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+}
+
+export interface TicketMessage {
+  id: number;
+  ticketId: string;
+  actorType: 'customer' | 'staff' | 'system';
+  actorId: string;             // customer phone or staff username or 'system'
+  body: string;
+  internal: boolean;           // staff-only note — NEVER returned to customers
+  createdAt: string;
+}
+
+// Admin-controlled support behavior, stored on the partner row (the same
+// opt-in pattern as requireKycBeforeSend). Absent ⇒ defaults.
+export interface PartnerSupportConfig {
+  enableSupportPortal?: boolean;        // default true — customer /account/support visibility
+  autoAssign?: 'none' | 'round_robin';  // default 'none'
 }
 
 export interface Draft {
@@ -400,6 +461,7 @@ export interface Partner {
   kycMode?: KycMode;
   requireKycBeforeSend?: boolean;     // only consulted when kycMode==='delegated' (absent ⇒ false = skip our gate)
   corridorCompliance?: Partial<Record<CountryCode, CorridorComplianceRule>>;  // NEW (P5) — optional override map (default partner never gets it)
+  supportConfig?: PartnerSupportConfig; // admin-controlled support behavior (absent ⇒ defaults)
   createdAt: string;
   updatedAt: string;
 }
