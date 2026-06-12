@@ -151,4 +151,10 @@ export const env = {
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).
     return process.env[`PAYMENT_WEBHOOK_SECRET_${provider.toUpperCase()}`] ?? '';
   },
+  fundingWebhookSecret(provider: string): string {
+    // Per-provider HMAC secret for the FUNDING (sender-charge) callback, e.g.
+    // FUNDING_WEBHOOK_SECRET_STRIPE. Same posture as paymentWebhookSecret:
+    // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).
+    return process.env[`FUNDING_WEBHOOK_SECRET_${provider.toUpperCase()}`] ?? '';
+  },
 };
