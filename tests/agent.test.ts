@@ -1109,3 +1109,176 @@ describe('best-rate routing wiring (B2)', () => {
     expect(result.fx_rate).toBe(85.2); // pinned to the partner at mid
   });
 });
+
+describe('web channel (B5) — schemas, dispatch, note, links', () => {
+  const seedVerifiedCustomer = async (deps: ReturnType<typeof extraDeps>) => {
+    const nowIso = new Date().toISOString();
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: nowIso, kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+  };
+
+  it("channel 'web': the model is shown ONLY allowlisted tool schemas", async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let seenTools: import('@/lib/types').ChatTool[] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      channel: 'web',
+      chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'hello');
+    const names = seenTools.map((t) => t.function.name);
+    expect(names).toContain('get_quote');
+    expect(names).toContain('request_refund');
+    expect(names).toContain('repeat_transfer');
+    expect(names).not.toContain('create_transfer');
+    expect(names).not.toContain('send_approve_picker');
+    expect(names).not.toContain('send_recipient_picker');
+    expect(names).not.toContain('create_schedule');
+    expect(names).toHaveLength(10);
+  });
+
+  it('default channel: the model still sees the full 18-tool set (call sites unchanged)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    let seenTools: import('@/lib/types').ChatTool[] = [];
+    const agent = createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'hello');
+    expect(seenTools).toHaveLength(18);
+    expect(seenTools.map((t) => t.function.name)).toContain('send_approve_picker');
+  });
+
+  it("channel 'web': injects the [WEB CHAT] note; default channel does not", async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const seen: ChatMessage[][] = [];
+    const mk = (channel?: 'web') => createAgent({
+      store,
+      scheduleStore: freshScheduleStore(redis),
+      draftStore: createDraftStore(redis),
+      ...extraDeps(redis, store),
+      ...(channel ? { channel } : {}),
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await mk('web').runAgentTurn(PHONE, 'hello');
+    const webSys = seen[0].filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    expect(webSys).toContain('[WEB CHAT]');
+
+    seen.length = 0;
+    await mk().runAgentTurn(PHONE, 'hello');
+    const waSys = seen[0].filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+    expect(waSys).not.toContain('[WEB CHAT]');
+  });
+
+  it('a scripted model calling a BLOCKED tool on web degrades gracefully and mints nothing', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerifiedCustomer(deps);
+    const draftStore = createDraftStore(redis);
+    const createDraft = vi.spyOn(draftStore, 'createDraft');
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{
+          id: 'c1', type: 'function',
+          function: {
+            name: 'send_approve_picker',
+            arguments: JSON.stringify({ amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210' }),
+          },
+        }],
+      },
+      { role: 'assistant', content: 'Sorry — I can\'t do that here. You can finish that in WhatsApp.' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore,
+      ...deps, channel: 'web', chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send $100 to Mom');
+    expect(reply).toContain("can't do that here");
+    // The blocked attempt fed the model a flat error and performed NO side effect.
+    const conv = await store.getConversation(PHONE);
+    const toolMsg = conv.find((m) => m.role === 'tool');
+    expect(toolMsg!.content).toContain('not available here');
+    expect(createDraft).not.toHaveBeenCalled();
+    expect(await store.listTransfers()).toHaveLength(0);
+  });
+
+  it('web repeat_transfer: the canonical pay link is appended; model URLs are stripped', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerifiedCustomer(deps);
+    // A past delivered send + the saved recipient (the repeat hydrates from these).
+    await store.saveTransfer({
+      id: 'tx-past-1', phone: PHONE, amountUsd: 200, feeUsd: 1.99, totalChargeUsd: 201.99,
+      fxRate: 85.2, amountInr: 17040, recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', fundingMethod: 'bank_transfer',
+      complianceStatus: 'cleared', complianceReasons: [], status: 'delivered',
+      createdAt: new Date().toISOString(), sourceCountry: 'US', sourceCurrency: 'USD',
+      destinationCountry: 'IN', destinationCurrency: 'INR', partnerId: 'default',
+      amountSource: 200, feeSource: 1.99, totalChargeSource: 201.99,
+    });
+    await store.upsertRecipient(PHONE, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi',
+      payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
+    });
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{
+          id: 'c1', type: 'function',
+          function: { name: 'repeat_transfer', arguments: JSON.stringify({ recipient_phone: '919876543210' }) },
+        }],
+      },
+      { role: 'assistant', content: 'All set — pay here: https://model-made-up.example/pay/x' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, channel: 'web', chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send Mom the usual');
+    expect(reply).not.toContain('model-made-up.example'); // model URL stripped
+    expect(reply).toMatch(/https:\/\/smartremit\.test\/pay\/\S+/); // canonical pay link appended
+  });
+
+  it('web channel: the kyc_url verify backstop keeps working (links render as links)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: new Date().toISOString(), kycStatus: 'not_started',
+      senderCountry: 'US', partnerId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+    await deps.partnerStore.savePartner({ ...(await deps.partnerStore.ensureDefaultPartner()), requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'check_send_limit', arguments: JSON.stringify({ amount_usd: 500 }) } }],
+      },
+      { role: 'assistant', content: 'Please verify your identity first: 👉 https://model-made-up.example/foo' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, channel: 'web', chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
+    expect(reply).not.toContain('model-made-up.example');
+    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`);
+  });
+});
