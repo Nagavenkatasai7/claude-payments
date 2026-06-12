@@ -33,15 +33,9 @@ jobs:
       # Fails when src/db/schema.ts has changes not covered by drizzle/
       # (drizzle-kit generate diffs schema.ts against the latest drizzle/meta
       # snapshot — no DB connection needed — and writes files only on drift).
-      #
-      # TODO(flip to blocking): drizzle/meta only has snapshots 0000-0001;
-      # migrations 0002-0004 were handwritten (SQL + journal entry, no
-      # snapshot), so generate re-emits their contents even on a clean main.
-      # Until a snapshot catch-up PR lands (run `npx drizzle-kit generate`,
-      # empty the duplicate SQL body, keep snapshot + journal), this step is
-      # annotate-only. Remove `continue-on-error` after the catch-up.
+      # BLOCKING since the 0005 snapshot catch-up: an unapplied schema change
+      # can no longer merge (the 2026-06-11 outage class is unmergeable).
       - name: Migration drift check (schema vs drizzle/)
-        continue-on-error: true
         run: |
           npx drizzle-kit generate --name ci_drift_check
           drift="$(git status --porcelain -- drizzle/)"
