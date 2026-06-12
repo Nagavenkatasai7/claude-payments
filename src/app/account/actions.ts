@@ -26,12 +26,13 @@ import { encryptField, defaultProvider } from '@/lib/field-crypto';
  *  - Input validated + normalized; raw input never reflected.
  *  - ENUMERATION-SAFE: login + reset collapse every failure to one generic
  *    message with an indistinguishable side-effect profile.
- *  - TWO-FACTOR BINDING: a session is minted ONLY by verifyOtpAction, and ONLY
- *    after consuming a single-use PENDING-AUTH token that was minted earlier —
- *    'login' (after the password check), 'register' (after account creation), or
- *    'reset' (reset request). The OTP step derives the phone FROM THE TOKEN, not
- *    the form, so a valid OTP alone can't authenticate, and a 'reset' code can't
- *    log anyone in (purpose mismatch + purpose-namespaced OTP).
+ *  - PHONE BINDING: login is password-only for accounts whose register OTP was
+ *    completed (phoneVerifiedAt set); a never-verified account must finish the
+ *    'register' OTP before any session exists (a planted registration can't
+ *    password-login into someone else's history). verifyOtpAction mints
+ *    sessions ONLY from single-use 'register' pending-auth tokens; the phone is
+ *    derived FROM THE TOKEN, never the form, and a 'reset' code can't log
+ *    anyone in (purpose mismatch + purpose-namespaced OTP).
  *  - BRUTE FORCE: per-phone/day + per-IP/hour login lockout; per-IP OTP-send cap;
  *    plus the OTP store's per-number caps + daily fail lock.
  *  - The `__Host-` cookie is HttpOnly + Secure + SameSite=Lax + Path=/.
@@ -189,9 +190,29 @@ export async function loginAction(
   }
   await auth.clearLoginFailures(phone);
 
-  const pendingToken = await getPendingAuthStore().create(phone, 'login');
-  await issueAndSend(phone, 'login', ip);
-  return { step: 'otp', phone, pendingToken, notice: GENERIC_OTP_NOTE };
+  // Password-only login (owner decision 2026-06-12): the OTP second factor was
+  // removed from LOGIN because free-form WhatsApp delivery fails outside
+  // Meta's 24h window and locked customers out. The lockout/throttle above
+  // stays. REGISTER and RESET keep their OTPs deliberately — those codes bind
+  // the account to the phone.
+  //
+  // BINDING GATE (adversarial review, 2026-06-12): registerCustomer persists
+  // the account (and its passwordHash) BEFORE the register OTP, so a password
+  // alone proves nothing about phone ownership for a never-verified account —
+  // an attacker could plant a registration on a bot-only customer's number,
+  // skip the code, and password-login into THEIR transfer history. A session
+  // is therefore minted directly ONLY when phoneVerifiedAt is set; otherwise
+  // the abandoned registration binding must be completed first (same OTP the
+  // register flow would have sent — a one-time event, not a login factor).
+  if (!customer.phoneVerifiedAt) {
+    const pendingToken = await getPendingAuthStore().create(phone, 'register');
+    await issueAndSend(phone, 'register', ip);
+    return { step: 'otp', phone, pendingToken, notice: GENERIC_OTP_NOTE };
+  }
+
+  const token = await auth.createSession(phone);
+  setSessionCookie(await cookies(), token);
+  redirect('/account');
 }
 
 /** Login/register step 2: consume the pending-auth token (proves the prior
@@ -205,8 +226,9 @@ export async function verifyOtpAction(
   const code = field(formData, 'code').replace(/\D/g, '');
 
   const pending = await getPendingAuthStore().peek(pendingToken);
-  // Only 'login'/'register' tokens may mint a session here; a 'reset' token can't.
-  if (!pending || (pending.purpose !== 'login' && pending.purpose !== 'register')) {
+  // Only 'register' tokens may mint a session here (login is password-only
+  // now and never creates a pending token; a 'reset' token can't either).
+  if (!pending || pending.purpose !== 'register') {
     return { step: 'login', error: SESSION_EXPIRED };
   }
   const phone = pending.phone;
