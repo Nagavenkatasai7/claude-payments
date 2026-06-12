@@ -44,9 +44,15 @@ jobs:
         continue-on-error: true
         run: |
           npx drizzle-kit generate --name ci_drift_check
-          if [ -n "$(git status --porcelain -- drizzle/)" ]; then
+          drift="$(git status --porcelain -- drizzle/)"
+          # ALWAYS restore drizzle/ before later steps: the vitest suites apply
+          # ./drizzle via PGlite migrate() (tests/helpers-db.ts), so a generated
+          # drift artifact left on disk would double-apply DDL and fail `npm test`.
+          git checkout -- drizzle/
+          git clean -fdq drizzle/
+          if [ -n "$drift" ]; then
             echo "::error::src/db/schema.ts has changes not covered by checked-in drizzle/ migrations. Run 'npx drizzle-kit generate', review the SQL, and commit it (drizzle selects explicit column lists — an unapplied schema change breaks every query on the altered table; see the 2026-06-11 outage)."
-            git status --porcelain -- drizzle/
+            echo "$drift"
             exit 1
           fi
           echo "schema.ts and drizzle/ migrations agree"

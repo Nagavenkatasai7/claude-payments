@@ -65,6 +65,9 @@ jobs:
 
       - run: npm ci
 
+      # Inline copy of .github/actions/setup-playwright (keep in sync): this
+      # job checks out github.event.deployment.sha, and PR heads branched
+      # before that action existed cannot resolve `uses: ./.github/actions/...`.
       - name: Get Playwright version
         id: playwright-version
         run: echo "version=$(node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"

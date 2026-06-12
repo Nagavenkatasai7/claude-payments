@@ -14,7 +14,10 @@ permissions: {}
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # Worst case: 90s attempt + 10s retry delay + 90s retry = 190s — keep the
+    # job timeout above that so a slow drain fails as a STEP failure, not a
+    # confusing job-timeout cancellation.
+    timeout-minutes: 4
     steps:
       # -f makes a non-2xx response FAIL this run — GitHub only notifies the
       # repo owner on workflow-run failure, so without it a broken drain (and
