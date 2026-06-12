@@ -229,6 +229,12 @@ export function Icon({ name, className }: { name: IconName; className?: string }
     <svg
       className={className}
       viewBox="0 0 24 24"
+      // Intrinsic fallback size: a bare <Icon> must never render at the
+      // browser's unsized-SVG default (it fills the container — the giant
+      // overview/schedules icons). Presentation attributes lose to ANY CSS,
+      // so the [&_svg]:h-[17px]-style wrappers keep their exact sizes.
+      width={16}
+      height={16}
       fill="none"
       stroke="currentColor"
       strokeWidth="1.8"
