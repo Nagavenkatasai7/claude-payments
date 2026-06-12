@@ -10,11 +10,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
+import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import type { Transfer } from '@/lib/types';
 
 // Unlike pay-route-bank-details (which no-ops after()), CAPTURE the
@@ -78,14 +79,19 @@ vi.mock('@/lib/partner-store', () => ({
 
 // Switchable PER TEST: {} ⇒ mock rail (delayed mock.settle row);
 // providerType 'simulator' ⇒ webhook-driven (no delayed poke expected).
-let integrations: {
+// `integrationsByPartner` overrides per partner id (settlement routing tests);
+// any partner without an entry falls back to the shared `integrations` object.
+type TestIntegrations = {
   kyc: Record<string, unknown>;
-  payment: { providerType?: string };
+  payment: { providerType?: string; credentials?: Record<string, string> };
   whatsapp: Record<string, unknown>;
 };
+let integrations: TestIntegrations;
+let integrationsByPartner: Record<string, TestIntegrations>;
 vi.mock('@/lib/partner-integrations-store', () => ({
   getPartnerIntegrationsStore: () => ({
-    getIntegrations: async () => integrations,
+    getIntegrations: async (partnerId: string) =>
+      integrationsByPartner[partnerId] ?? integrations,
   }),
 }));
 
@@ -135,6 +141,7 @@ beforeEach(async () => {
     createdAt: nowIso, updatedAt: nowIso,
   });
   integrations = { kyc: {}, payment: {}, whatsapp: {} }; // default: mock rail
+  integrationsByPartner = {};
   captured.afterCallbacks.length = 0;
   fetchMock.mockReset();
   fetchMock.mockResolvedValue({ ok: true });
@@ -202,6 +209,77 @@ describe('pay route — delayed best-effort poke for the delivered message', () 
     await vi.advanceTimersByTimeAsync(DELIVERY_DELAY_MS + 60_000);
     await settled;
     expect(workerCalls()).toBe(1);
+  });
+
+  it("ROUTED transfer: the RAIL is the settlement partner's; stage-1 creds stay the OWNER's", async () => {
+    // Owner ('default') is a mock-rail partner with its own WhatsApp number;
+    // the route says settle via 'railp', whose rail is webhook-driven.
+    integrationsByPartner['default'] = {
+      kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_owner', token: 'tok_owner' },
+    };
+    integrationsByPartner['railp'] = {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 's' },
+      },
+      whatsapp: { phoneNumberId: 'pn_rail', token: 'tok_rail' },
+    };
+    await seedPartner(db, 'railp');
+    await store.saveTransfer(makeTransfer({ id: 'd5', settlementPartnerId: 'railp' }));
+
+    const res = await post('d5');
+    expect(res.status).toBe(200);
+    // Webhook-driven (railp's rail) → 'processing', and NO delayed mock poke.
+    expect(await res.json()).toMatchObject({ ok: true, status: 'processing' });
+    expect(captured.afterCallbacks).toHaveLength(1);
+
+    const rows = (await db.execute(
+      sql`SELECT kind, payload FROM outbox ORDER BY id`,
+    )) as unknown as { rows: Array<{ kind: string; payload: { creds?: { phoneNumberId?: string } } }> };
+    expect(rows.rows.map((r) => r.kind)).toEqual(['whatsapp.text', 'settlement.instruct']);
+    // Brand-side: the stage-1 "payment received" goes from the OWNER's number.
+    expect(rows.rows[0].payload.creds).toMatchObject({ phoneNumberId: 'pn_owner' });
+  });
+
+  it('ROUTED transfer whose settlement partner has NO webhook-driven rail → 400 fail-closed, nothing charged', async () => {
+    // railp has no integrations entry ⇒ resolves to the mock default. A routed
+    // transfer must NEVER silently fall into the mock branch (fake delivery) —
+    // refuse before any charge or outbox effect.
+    await seedPartner(db, 'railp');
+    await store.saveTransfer(makeTransfer({ id: 'd6', settlementPartnerId: 'railp' }));
+
+    const res = await post('d6');
+    expect(res.status).toBe(400);
+    expect((await store.getTransfer('d6'))?.status).toBe('awaiting_payment'); // unflipped
+    const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as {
+      rows: Array<{ n: number }>;
+    };
+    expect(rows.rows[0].n).toBe(0); // no stage-1 message, no rail effect
+  });
+
+  it('ROUTED transfer whose settlement partner lost its settlementUrl → 400 fail-closed before charge', async () => {
+    // providerType survives but the endpoint is gone — charging would only
+    // feed an instruct that dead-letters. Same quote-time pair, both checked.
+    integrationsByPartner['railp'] = { kyc: {}, payment: { providerType: 'simulator' }, whatsapp: {} };
+    await seedPartner(db, 'railp');
+    await store.saveTransfer(makeTransfer({ id: 'd7', settlementPartnerId: 'railp' }));
+
+    const res = await post('d7');
+    expect(res.status).toBe(400);
+    expect((await store.getTransfer('d7'))?.status).toBe('awaiting_payment');
+  });
+
+  it("ROUTED replay on an already-paid transfer still reports current truth (not the guard's 400)", async () => {
+    // The fail-closed guard only protects money that can still be charged —
+    // a double submit after the rail config drifted must keep the designed
+    // 'already' replay contract.
+    await seedPartner(db, 'railp'); // railp resolves to mock default (drifted)
+    await store.saveTransfer(makeTransfer({ id: 'd8', settlementPartnerId: 'railp', status: 'paid' }));
+
+    const res = await post('d8');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: 'paid' });
   });
 
   it('a rejecting worker fetch is swallowed — no unhandled rejection', async () => {

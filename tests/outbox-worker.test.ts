@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -86,6 +87,8 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
     expect(url).toBe('https://rail.example/settle');
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     expect(body.reference).toBe('wk_t1');
+    // Unrouted: the instruction's partner_id is the OWNING partner's.
+    expect(body.partner_id).toBe('acme');
     // The instruction carries the REAL account (decrypted read), not the mask.
     expect(JSON.stringify(body)).toContain('123456789012');
     expect((init.headers as Record<string, string>)['x-signature']).toMatch(/^[0-9a-f]{64}$/);
@@ -120,6 +123,53 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
     // Re-dying the same row can never alert twice (dedupe key).
     const again = await outbox.enqueue('ops.alert', { message: 'dup' }, { dedupeKey: `dead:${(await outbox.listDead())[0].id}` });
     expect(again).toBe(false);
+  });
+});
+
+describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', () => {
+  beforeEach(async () => {
+    // Owner 'acme' has its OWN rail config — which must NOT be used when routed.
+    await seedPartner(db, 'railp');
+    await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    const repo = createIntegrationsRepo(db, provider);
+    await repo.saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://owner.example/settle', signingSecret: 'owner_sgn' },
+        webhookSecret: 'owner_whk',
+      },
+      whatsapp: {},
+    });
+    await repo.saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
+        webhookSecret: 'railp_whk',
+      },
+      whatsapp: {},
+    });
+  });
+
+  it("POSTs to the SETTLEMENT partner's URL, signed with THEIR secret, carrying THEIR partner_id", async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'railp-ref' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://railp.example/settle'); // NOT the owner's rail
+    const raw = String(init.body);
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    // The simulator rail verifies with the partner_id IN the instruction — when
+    // routed it must be the settlement partner's id, signed with THEIR secret.
+    expect(body.partner_id).toBe('railp');
+    expect(body.reference).toBe('wk_t1');
+    const expectedSig = createHmac('sha256', 'railp_sgn').update(raw).digest('hex');
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(expectedSig);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('railp-ref');
   });
 });
 
