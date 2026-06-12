@@ -28,6 +28,7 @@ import {
   saveWhatsappConfigAction,
   savePaymentConfigAction,
   savePricingAction,
+  saveSupportConfigAction,
   revokeApiKeyAction,
 } from '../actions';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
@@ -127,6 +128,9 @@ export default async function PartnerDetailPage({
   const nowMs = Date.now();
   const recents = recentPage.items;
   const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
+  // Support tab: the absent-config default (portal ON) interpreted ONCE for
+  // both the badge and the checkbox.
+  const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
 
   return (
     <>
@@ -167,6 +171,7 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>}
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
+            {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
             <TabsTrigger value="staff">Staff</TabsTrigger>
             {isAdmin && <TabsTrigger value="integration">Integration</TabsTrigger>}
@@ -447,6 +452,59 @@ export default async function PartnerDetailPage({
             </TabsContent>
           )}
 
+          {/* ── Support (admin-controlled support behavior) ──────────────── */}
+          {isAdmin && (
+            <TabsContent value="support">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Support</CardTitle>
+                  <CardDescription>
+                    How this partner&apos;s customer support behaves. Internal-only — nothing
+                    here is shown to customers.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className={DL_CLASS}>
+                    <dt>Customer support portal</dt>
+                    <dd>
+                      {portalEnabled ? (
+                        <Badge variant="outline" className="border-success/50 text-success">enabled</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-muted-foreground">disabled</Badge>
+                      )}
+                    </dd>
+                    <dt>Ticket auto-assignment</dt>
+                    <dd>{partner.supportConfig?.autoAssign === 'round_robin' ? 'round-robin' : 'none (manual)'}</dd>
+                  </dl>
+                  <form action={saveSupportConfigAction} className="mt-4 space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <label className="flex items-center gap-1.5 text-sm">
+                      <input
+                        type="checkbox"
+                        name="enableSupportPortal"
+                        defaultChecked={portalEnabled}
+                      />{' '}
+                      Enable the customer support portal (on by default)
+                    </label>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="p-autoassign">Auto-assign new tickets</Label>
+                      <select
+                        id="p-autoassign"
+                        className={SELECT_CLASS}
+                        name="autoAssign"
+                        defaultValue={partner.supportConfig?.autoAssign ?? 'none'}
+                      >
+                        <option value="none">None — staff pick from the queue</option>
+                        <option value="round_robin">Round-robin across support staff</option>
+                      </select>
+                    </div>
+                    <Button type="submit">Save support config</Button>
+                  </form>
+                </CardContent>
+              </Card>
+            </TabsContent>
+          )}
+
           {/* ── API keys ─────────────────────────────────────────────────── */}
           {isAdmin && (
             <TabsContent value="api-keys">
@@ -528,6 +586,7 @@ export default async function PartnerDetailPage({
                     <Input name="password" type="password" placeholder="Password" required />
                     <select className={SELECT_CLASS} name="role" defaultValue="agent">
                       <option value="agent">Agent</option>
+                      <option value="support">Support</option>
                       <option value="admin">Admin</option>
                     </select>
                     <Button type="submit">Invite staff</Button>
