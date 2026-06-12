@@ -1,0 +1,82 @@
+# Nightly health run: catches drift that per-PR CI cannot — newly published
+# advisories, prod regressions between merges, and flake accumulation (the
+# full vitest run still gets the CI-only retry from vitest.config.ts, but a
+# persistent nightly failure means a real problem, not a parallel flake).
+# 04:43 UTC — odd minute on purpose; GitHub delays/drops on-the-hour crons.
+name: Nightly
+
+on:
+  schedule:
+    - cron: '43 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  full-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Full test suite
+        run: npx vitest run
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Full tree (dev deps included), unlike ci.yml's prod-only audit.
+      # Blocking at high: verified 2026-06-12 the current tree exits 0 here.
+      - name: Audit all dependencies
+        run: npm audit --audit-level=high
+
+  prod-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Setup Playwright (cached)
+        uses: ./.github/actions/setup-playwright
+
+      - name: Live prod smoke
+        env:
+          CI: 'true'
+          BASE_URL: https://smartremit.ai
+          E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          E2E_PARTNER_PASSWORD: ${{ secrets.E2E_PARTNER_PASSWORD }}
+        run: npx playwright test tests/e2e/dashboard-smoke.spec.ts
+
+      - name: Upload trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-playwright-trace
+          path: test-results/
+          retention-days: 7

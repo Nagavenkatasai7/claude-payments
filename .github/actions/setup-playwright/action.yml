@@ -1,0 +1,37 @@
+# Shared Playwright Chromium setup with browser-binary caching (~60s saved on
+# a cache hit). Assumes the repo is checked out and `npm ci` has already run.
+# Keyed on the exact installed @playwright/test version (lockfile-v3-safe read
+# from the installed package) so a Playwright bump = a fresh cache key.
+#
+# Used by smoke.yml and nightly.yml. preview-smoke.yml intentionally keeps an
+# inline copy: it checks out github.event.deployment.sha, and PR heads branched
+# before this action existed would fail to resolve `uses: ./.github/actions/...`.
+name: Setup Playwright (cached)
+description: Install Playwright Chromium with browser-binary caching
+
+runs:
+  using: composite
+  steps:
+    - name: Get Playwright version
+      id: playwright-version
+      shell: bash
+      run: echo "version=$(node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Playwright browsers
+      id: playwright-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+    - name: Install Playwright browsers
+      if: steps.playwright-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: npx playwright install --with-deps chromium
+
+    # OS packages are not inside ~/.cache/ms-playwright, so they must be
+    # installed even on a cache hit.
+    - name: Install Playwright OS deps (cache hit)
+      if: steps.playwright-cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: npx playwright install-deps chromium

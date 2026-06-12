@@ -9,6 +9,11 @@ export default defineConfig({
     // .claude/worktrees holds agent worktrees (full repo copies) — their stale
     // test copies must never run against this checkout's src.
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
+    // CI-only: PGlite suites occasionally flake 1-3 tests under parallel runs
+    // (they pass in isolation — see CLAUDE.md gotchas). One retry keeps known
+    // flakes from evicting good PRs from the merge queue; locally retries stay
+    // off so real failures (and flakes) remain loud.
+    retry: process.env.CI ? 1 : 0,
   },
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
