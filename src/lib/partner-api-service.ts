@@ -21,6 +21,8 @@ import {
   type BeneficiaryRecord,
 } from '@/db/repos/aux-repos';
 import { beginSettlement } from './settlement';
+import { pokeWorker, pokeWorkerDelayed } from './outbox';
+import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
 import { newTransferId } from './id';
 
@@ -306,7 +308,14 @@ export async function confirmTransaction(
     // + rail effect (signed instruct / delayed mock settle) commit together,
     // with the partner's WhatsApp creds on the customer message.
     const integrations = await deps.integrationsStore.getIntegrations(partner.id);
-    await beginSettlement(deps.db as Db, tr, integrations, waCredsFrom(integrations));
+    const result = await beginSettlement(deps.db as Db, tr, integrations, waCredsFrom(integrations));
+    // Fast-path drains, mirroring the pay route: the stage-1 message is READY
+    // now; the mock rail's delivered message only becomes ready after its
+    // simulated DELIVERY_DELAY_MS. The 5-min heartbeat stays the guarantee.
+    pokeWorker();
+    if (result.kind === 'started' && !result.webhookDriven) {
+      pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);
+    }
   });
   await initiate(t);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);
