@@ -222,13 +222,47 @@ describe('loginAction', () => {
     expect(sentCodes).toHaveLength(0);
   });
 
-  it('valid credentials → OTP step + pending token, no session yet', async () => {
+  it('VERIFIED account + valid credentials → session minted directly, NO OTP', async () => {
+    const reg = await register();
+    // Complete the registration binding (the one-time phone-ownership OTP).
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    cookieJar.clear();
+    sentCodes.length = 0;
+    cookieSet.mockClear();
+    await expect(
+      loginAction(null, form({ phone: PHONE, password: PASSWORD })),
+    ).rejects.toThrow('REDIRECT:/account');
+    expect(cookieSet).toHaveBeenCalled(); // session cookie set immediately
+    expect(sentCodes).toHaveLength(0);    // no code is ever sent for login
+  });
+
+  it('NEVER-VERIFIED account (planted registration) cannot password-login — gets the register OTP step', async () => {
+    // Attack: register a bot-only victim's phone with the attacker's password,
+    // abandon the OTP, then try to password-login. The binding gate must
+    // refuse to mint a session and demand the (victim-delivered) code.
     await register();
     sentCodes.length = 0;
     cookieSet.mockClear();
     const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
-    expect(s.step).toBe('otp');
-    expect(s.pendingToken).toBeTruthy();
+    expect(s.step).toBe('otp');           // binding required, no session
+    expect(cookieSet).not.toHaveBeenCalled();
+    // No sent-code assertion: register just issued one, so the per-phone
+    // resend throttle may (correctly) swallow this immediate re-issue. What
+    // matters is that any code that IS sent goes to the phone's WhatsApp and
+    // no session exists without it.
+  });
+
+  it('a stale login-purpose pending token can NEVER mint a session via verifyOtp', async () => {
+    // Login no longer creates pending tokens; if one existed (old deploy,
+    // crafted), verifyOtpAction must refuse — only 'register' tokens mint here.
+    await register();
+    const { getPendingAuthStore } = await import('@/lib/pending-auth-store');
+    const stale = await getPendingAuthStore().create(PHONE, 'login');
+    cookieSet.mockClear();
+    const s = await verifyOtpAction(null, form({ pendingToken: stale, code: '123456' }));
+    expect(s.step).toBe('login');
     expect(cookieSet).not.toHaveBeenCalled();
   });
 

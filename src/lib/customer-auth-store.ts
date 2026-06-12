@@ -21,9 +21,11 @@ import {
  * (`customer:<normalizedPhone>`); they are NOT staff and use a different cookie
  * (`__Host-sr_session`) and a different Redis namespace (`sr_*`).
  *
- * Sessions are AAL2 (NIST 800-63B): 256-bit opaque token, the Redis KEY is the
- * sha256 of the token so a DB dump leaks nothing usable; **30-min idle /
- * 12-h absolute** lifetimes enforced in code off an injectable `now()` seam.
+ * Sessions: 256-bit opaque token (password-only login for phone-verified
+ * accounts since 2026-06-12; the register OTP remains the phone binding), the
+ * Redis KEY is the sha256 of the token so a DB dump leaks nothing usable;
+ * **30-min idle / 12-h absolute** lifetimes enforced in code off an
+ * injectable `now()` seam.
  * A per-phone reverse-index set enables revoke-all on password reset/change.
  */
 

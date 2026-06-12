@@ -132,7 +132,10 @@ export function LoginForm() {
     loginAction,
     null,
   );
-
+  // Login is password-only for VERIFIED accounts (server-redirects to
+  // /account). The OTP step below renders only for an account that never
+  // completed its registration code — finishing the phone binding, not a
+  // login factor (see loginAction's binding gate).
   if (state?.step === 'otp' && state.phone) {
     return <OtpForm phone={state.phone} pendingToken={state.pendingToken} notice={state.notice} />;
   }
@@ -159,10 +162,10 @@ export function LoginForm() {
         <input name="password" type="password" autoComplete="current-password" required className={inputCls} />
       </label>
       <p className={trustCls}>
-        For your security we&rsquo;ll send a 6-digit code to your WhatsApp before signing you in.
+        Sign in with your phone number and password.
       </p>
       <button type="submit" disabled={pending} className={buttonCls}>
-        {pending ? 'Checking…' : 'Continue'}
+        {pending ? 'Signing in…' : 'Sign in'}
       </button>
       <p className={altCls}>
         New here? <a href="/account/register" className={altLinkCls}>Create an account</a>
@@ -174,7 +177,7 @@ export function LoginForm() {
   );
 }
 
-// ── OTP step (shared by register + login) ───────────────────────────────────
+// ── OTP step (register + reset confirm — login is password-only) ───────────
 function OtpForm({
   phone,
   pendingToken,
