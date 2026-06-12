@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { executeTool, toolSchemas, buildApproveSummary, maskAccount } from '@/lib/tools';
+import {
+  executeTool,
+  toolSchemas,
+  toolSchemasForChannel,
+  WEB_TOOL_ALLOWLIST,
+  buildApproveSummary,
+  maskAccount,
+} from '@/lib/tools';
 import type { CurrencyCode, Quote } from '@/lib/types';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
@@ -2117,5 +2124,261 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expect(r.error_code).toBe('not_refundable_yet');
     expect(String(r.message).toLowerCase()).toContain('under review');
     expectCustomerSafe(r);
+  });
+});
+
+// ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
+
+describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
+  it('the allowlist is exactly the ten read-only/refund/pay-link tools', () => {
+    expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
+      'check_payment_status',
+      'check_send_limit',
+      'generate_payment_link',
+      'get_quote',
+      'list_saved_recipients',
+      'list_schedules',
+      'repeat_transfer',
+      'request_refund',
+      'resolve_recipient',
+      'validate_phone',
+    ]);
+  });
+
+  it("toolSchemasForChannel('web') exposes ONLY allowlisted tools", () => {
+    const names = toolSchemasForChannel('web').map((t) => t.function.name);
+    expect(names.sort()).toEqual([...WEB_TOOL_ALLOWLIST].sort());
+    expect(names).not.toContain('create_transfer');
+    expect(names).not.toContain('send_approve_picker');
+    expect(names).not.toContain('send_recipient_picker');
+    expect(names).not.toContain('create_schedule');
+  });
+
+  it("toolSchemasForChannel('whatsapp') is the full, unfiltered tool set", () => {
+    expect(toolSchemasForChannel('whatsapp')).toBe(toolSchemas);
+    expect(toolSchemasForChannel('whatsapp')).toHaveLength(18);
+  });
+});
+
+describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
+  const BLOCKED = [
+    'create_transfer',
+    'create_schedule',
+    'cancel_schedule',
+    'cancel_draft',
+    'update_recipient_phone',
+    'capture_corridor_request',
+    'send_recipient_picker',
+    'send_approve_picker',
+  ];
+
+  it.each(BLOCKED)('%s on web returns { error: "not available here" }', async (name) => {
+    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
+    const r = await executeTool(name, {}, ctx);
+    expect(r).toEqual({ error: 'not available here' });
+  });
+
+  it('a blocked send_approve_picker performs NO side effect — no draft, no send', async () => {
+    const base = await buildCtx(fakeRedis());
+    const ctx = { ...base, channel: 'web' as const };
+    const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockClear();
+    const r = await executeTool(
+      'send_approve_picker',
+      { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210' },
+      ctx,
+    );
+    expect(r).toEqual({ error: 'not available here' });
+    expect(createDraft).not.toHaveBeenCalled();
+    // No WhatsApp interactive left the building.
+    const waCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes('graph.facebook.com'));
+    expect(waCalls).toHaveLength(0);
+  });
+
+  it('a blocked create_transfer mints NOTHING', async () => {
+    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
+    const r = await executeTool(
+      'create_transfer',
+      { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+      ctx,
+    );
+    expect(r).toEqual({ error: 'not available here' });
+    expect(await ctx.store.listTransfers()).toHaveLength(0);
+  });
+
+  it('a blocked create_schedule saves NOTHING', async () => {
+    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
+    const r = await executeTool(
+      'create_schedule',
+      { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer', frequency: 'monthly', day_of_month: 5 },
+      ctx,
+    );
+    expect(r).toEqual({ error: 'not available here' });
+    expect(await ctx.scheduleStore.listActiveSchedules()).toHaveLength(0);
+  });
+
+  it('allowlisted tools still execute on web (validate_phone, check_payment_status)', async () => {
+    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
+    const v = await executeTool('validate_phone', { phone: '+91 98765 43210' }, ctx);
+    expect(v.valid).toBe(true);
+
+    const created = await executeTool(
+      'create_transfer',
+      { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+      { ...ctx, channel: 'whatsapp' as const }, // mint via the WhatsApp channel
+    );
+    const status = await executeTool('check_payment_status', { transfer_id: created.transfer_id }, ctx);
+    expect(status.status).toBe('awaiting_payment');
+  });
+
+  it('the default channel (absent) is whatsapp — dispatch unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool(
+      'create_transfer',
+      { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+      ctx,
+    );
+    expect(r.error).toBeUndefined();
+    expect(typeof r.transfer_id).toBe('string');
+  });
+
+  it('request_refund on web keeps its ownership + paid-only guards', async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const created = await executeTool(
+      'create_transfer',
+      { amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+      owner,
+    );
+    const id = created.transfer_id as string;
+
+    // Not paid yet ⇒ nothing to refund, even on web.
+    const notPaid = await executeTool('request_refund', { transfer_id: id }, { ...owner, channel: 'web' as const });
+    expect(notPaid.error_code).toBe('not_paid_yet');
+
+    // A stranger on web reads it as not found (404-never-403).
+    const stranger = { ...(await buildCtx(redis, '15559990000')), channel: 'web' as const };
+    const theft = await executeTool('request_refund', { transfer_id: id }, stranger);
+    expect(theft).toEqual({ error: 'Transfer not found.' });
+
+    // Paid + owned ⇒ the one eligible state — works identically on web.
+    await owner.store.updateTransferFromWebhook(id, 'paid');
+    const ok = await executeTool('request_refund', { transfer_id: id }, { ...owner, channel: 'web' as const });
+    expect(ok.requested).toBe(true);
+  });
+});
+
+describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
+  const seedPast = async (ctx: Awaited<ReturnType<typeof buildCtx>>) => {
+    await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 200,
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@okhdfc',
+        funding_method: 'bank_transfer',
+      },
+      ctx, // whatsapp channel — the past send happened in the bot
+    );
+  };
+
+  it('returns the summary + canonical pay_url instead of sending a WhatsApp card', async () => {
+    const base = await buildCtx(fakeRedis());
+    await seedPast(base);
+    const ctx = { ...base, channel: 'web' as const };
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockClear();
+
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect(r.error).toBeUndefined();
+    expect(r.sent).toBeUndefined(); // never claims an interactive was sent
+    expect(typeof r.draft_id).toBe('string');
+    expect(String(r.pay_url)).toBe(`https://smartremit.test/pay/${r.draft_id}`);
+    expect(String(r.summary)).toContain('Mom');
+
+    // The draft is REAL (same path the pay page consumes) with the real account.
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.recipient.payoutDestination).toBe('mom@okhdfc');
+    expect(draft?.amountSource).toBe(200);
+
+    // …and no WhatsApp send happened.
+    const waCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes('graph.facebook.com'));
+    expect(waCalls).toHaveLength(0);
+  });
+
+  it('EDD-required repeats degrade to a WhatsApp hand-off (no half-collected answers)', async () => {
+    const base = await buildCtx(fakeRedis());
+    await seedPast(base);
+    await base.monthlyVolumeStore.addCents(base.phone, 300000); // over the $3k month threshold
+    const ctx = { ...base, channel: 'web' as const };
+    const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100 }, ctx);
+    expect(r.needs_edd).toBe(true);
+    expect(String(r.error).toLowerCase()).toContain('whatsapp');
+    expect(r.sent).toBeUndefined();
+    expect(r.pay_url).toBeUndefined();
+    expect(r.payout_destination).toBeUndefined(); // the WhatsApp-shaped hydration payload stays home
+    expect(createDraft).not.toHaveBeenCalled();
+  });
+
+  it('on WhatsApp the same repeat still sends the approve card (unchanged)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedPast(ctx);
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect(r.sent).toBe(true);
+    expect(r.pay_url).toBeUndefined(); // the link rides the CTA card, never the result
+  });
+});
+
+describe('transfer-id tools — strict ownership (404-never-403, both channels)', () => {
+  async function mintFor(ctx: Awaited<ReturnType<typeof buildCtx>>): Promise<string> {
+    const created = await executeTool(
+      'create_transfer',
+      { amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+      ctx,
+    );
+    expect(created.error).toBeUndefined();
+    return created.transfer_id as string;
+  }
+
+  it("check_payment_status: another customer's id reads as not found", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mintFor(owner);
+    const stranger = await buildCtx(redis, '15559990000');
+    for (const channel of ['whatsapp', 'web'] as const) {
+      const r = await executeTool('check_payment_status', { transfer_id: id }, { ...stranger, channel });
+      expect(r).toEqual({ error: 'Transfer not found.' });
+    }
+    // The owner still reads their own.
+    const mine = await executeTool('check_payment_status', { transfer_id: id }, owner);
+    expect(mine.status).toBe('awaiting_payment');
+  });
+
+  it("generate_payment_link: never mints a pay link for another customer's transfer", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mintFor(owner);
+    const stranger = await buildCtx(redis, '15559990000');
+    for (const channel of ['whatsapp', 'web'] as const) {
+      const r = await executeTool('generate_payment_link', { transfer_id: id }, { ...stranger, channel });
+      expect(r).toEqual({ error: 'Transfer not found.' });
+    }
+    const mine = await executeTool('generate_payment_link', { transfer_id: id }, owner);
+    expect(mine.url).toBe(`https://smartremit.test/pay/${id}`);
+  });
+
+  it("update_recipient_phone: never mutates another customer's transfer", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mintFor(owner);
+    const stranger = await buildCtx(redis, '15559990000');
+    const r = await executeTool('update_recipient_phone', { transfer_id: id, recipient_phone: '919999999999' }, stranger);
+    expect(r).toEqual({ error: 'Transfer not found.' });
+    expect((await owner.store.getTransfer(id))?.recipientPhone).toBe('919876543210'); // untouched
   });
 });
