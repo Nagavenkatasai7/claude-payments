@@ -66,6 +66,7 @@ export function transferToRow(
   return {
     id: t.id,
     partnerId: t.partnerId,
+    settlementPartnerId: t.settlementPartnerId ?? null,
     phone: t.phone,
     status: t.status,
     complianceStatus: t.complianceStatus,
@@ -150,6 +151,7 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   const deliveredAt = isoOpt(row.deliveredAt);
   if (deliveredAt) t.deliveredAt = deliveredAt;
   if (row.paymentProviderRef) t.paymentProviderRef = row.paymentProviderRef;
+  if (row.settlementPartnerId) t.settlementPartnerId = row.settlementPartnerId;
   if (opts.decrypt) {
     const legal = openOptional(row.recipientLegalNameEnc, provider);
     if (legal) t.recipientLegalName = legal;

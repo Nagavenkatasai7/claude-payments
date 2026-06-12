@@ -53,6 +53,10 @@ export interface Transfer {
   destinationCountry: CountryCode;
   destinationCurrency: CurrencyCode;
   partnerId: PartnerId;         // NEW (P2) — required; multi-tenant boundary
+  // Best-rate routing (internal-only, NEVER customer/partner-API visible):
+  // when set, the settlement RAIL is this partner's; branding/WhatsApp/
+  // compliance stay partnerId. undefined ⇒ settle via partnerId (default).
+  settlementPartnerId?: PartnerId;
   amountSource: number;         // NEW (P4)
   feeSource: number;            // NEW (P4)
   totalChargeSource: number;    // NEW (P4)
@@ -189,6 +193,10 @@ export interface Draft {
     totalChargeUsd?: number;
     destinationCurrency?: CurrencyCode; // NEW (any-to-any)
   };
+  // Best-rate routing: the partner whose rail settles this draft's transfer
+  // when its rate won the corridor at quote time (default-tenant only).
+  // Internal — never shown to the customer. Absent ⇒ platform default.
+  settlementPartnerId?: PartnerId;
   createdAt: string; // ISO-8601
 }
 
@@ -382,6 +390,32 @@ export interface Partner {
   corridorCompliance?: Partial<Record<CountryCode, CorridorComplianceRule>>;  // NEW (P5) — optional override map (default partner never gets it)
   createdAt: string;
   updatedAt: string;
+}
+
+// ── Partner best-rate selection (internal pricing) ─────────────────────────
+//
+// One record per (partner, source→dest currency) corridor. A partner competes
+// when it has a FRESH pushed rate (effectiveRate with a future expiresAt) or a
+// standing marginBps. Rates are destination units per 1 source unit; marginBps
+// is a signed adjustment off mid-market (positive ⇒ better for the customer).
+export interface PartnerRate {
+  id: string;
+  partnerId: PartnerId;
+  sourceCurrency: CurrencyCode;
+  destinationCurrency: CurrencyCode;
+  effectiveRate?: number;  // pushed via PUT /api/partner/v1/rates
+  expiresAt?: string;      // ISO-8601; a pushed rate without freshness never competes
+  pushedAt?: string;
+  marginBps?: number;      // admin-configured fallback when no fresh push
+  updatedAt: string;
+}
+
+// The outcome of best-rate selection for one quote. source 'platform' ⇒
+// today's exact behavior (mid-market, settle via the customer's own partner).
+export interface SettlementRoute {
+  fxRate: number;                    // destination units per 1 source unit
+  source: 'platform' | 'partner';
+  settlementPartnerId?: PartnerId;   // set only when source==='partner'
 }
 
 // ── Per-corridor compliance (P5) ──────────────────────────────────────
