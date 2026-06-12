@@ -14,6 +14,10 @@ import { getDb } from '@/db/client';
 import { pokeWorker } from '@/lib/outbox';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
+import { requireCustomer } from '@/lib/customer-auth';
+import { getStore } from '@/lib/store';
+import { getCustomerStore } from '@/lib/customer-store';
+import { encryptField, defaultProvider } from '@/lib/field-crypto';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -313,4 +317,97 @@ export async function resetAction(
 
   await getPendingAuthStore().consume(pendingToken); // single-use
   return { step: 'login', notice: 'Password reset. Please sign in with your new password.' };
+}
+
+// ── Settings (customer dashboard B1) ────────────────────────────────────────
+//
+// Both actions self-gate with requireCustomer() (server actions are PUBLIC
+// POST endpoints) and derive the target account FROM THE SESSION — no phone
+// ever comes from the form. Results travel as FIXED query-param codes that the
+// settings page maps to fixed copy, so no dynamic text (and no internal error
+// detail) is ever reflected into the page.
+
+const SETTINGS_PATH = '/account/settings';
+
+/** Update the account email (re-encrypted at rest, same as registration). */
+export async function updateEmailAction(formData: FormData): Promise<void> {
+  const customer = await requireCustomer();
+  const email = field(formData, 'email').trim();
+  if (!email || !email.includes('@') || email.length > 254) {
+    redirect(`${SETTINGS_PATH}?err=email`);
+  }
+
+  let dest = `${SETTINGS_PATH}?ok=email`;
+  try {
+    // Re-read inside the action so a concurrent KYC/consent write between the
+    // page render and this POST is never clobbered by a stale session copy.
+    const customers = getCustomerStore(getStore());
+    const fresh = await customers.getCustomer(customer.senderPhone);
+    if (!fresh) {
+      dest = `${SETTINGS_PATH}?err=email_save`;
+    } else {
+      const nowIso = new Date().toISOString();
+      await customers.saveCustomer({
+        ...fresh,
+        email: encryptField(email, defaultProvider()),
+        updatedAt: nowIso,
+      });
+    }
+  } catch (err) {
+    // Crypto/env/DB failures are internal — never reflected (logger scrubs).
+    logWarn('settings.email', err);
+    dest = `${SETTINGS_PATH}?err=email_save`;
+  }
+  redirect(dest);
+}
+
+/**
+ * Change the password: verify the CURRENT password first (under the same
+ * brute-force lock as login — this is the same guessing surface, just behind a
+ * session), then set the new one. setPassword revokes EVERY live session, so
+ * on success this device's session is re-minted in place.
+ */
+export async function changePasswordAction(formData: FormData): Promise<void> {
+  const customer = await requireCustomer();
+  const phone = customer.senderPhone;
+  const current = field(formData, 'currentPassword');
+  const next = field(formData, 'newPassword');
+  const ip = await clientIp();
+  const auth = getCustomerAuthStore();
+
+  if (current.length === 0 || next.length === 0) {
+    redirect(`${SETTINGS_PATH}?err=pw_current`);
+  }
+  if (await auth.isLoginLocked(phone, ip)) {
+    redirect(`${SETTINGS_PATH}?err=pw_throttle`);
+  }
+  const verified = await auth.verifyCustomerPassword(phone, current);
+  if (!verified) {
+    await auth.recordLoginFailure(phone, ip);
+    redirect(`${SETTINGS_PATH}?err=pw_current`);
+  }
+  await auth.clearLoginFailures(phone);
+
+  let dest = `${SETTINGS_PATH}?ok=password`;
+  try {
+    const updated = await auth.setPassword(phone, next, { pwnedCheck: isPwnedPassword });
+    if (!updated) {
+      dest = `${SETTINGS_PATH}?err=pw_save`;
+    } else {
+      // setPassword revoked all sessions (every device) — re-mint THIS one so a
+      // password change doesn't read as being logged out.
+      const token = await auth.createSession(phone);
+      setSessionCookie(await cookies(), token);
+    }
+  } catch (err) {
+    if (err instanceof CustomerInputError) {
+      // Policy refusal (length / breach) → one fixed code; the page shows the
+      // combined policy copy rather than reflecting dynamic text.
+      dest = `${SETTINGS_PATH}?err=pw_policy`;
+    } else {
+      logWarn('settings.password', err);
+      dest = `${SETTINGS_PATH}?err=pw_save`;
+    }
+  }
+  redirect(dest);
 }
