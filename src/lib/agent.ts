@@ -17,6 +17,9 @@ import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
+import { selectSettlementRoute } from './partner-rates'; // best-rate routing
+import { getPartnerIntegrationsStore } from './partner-integrations-store';
+import { getDb } from '@/db/client';
 
 const MAX_TOOL_ROUNDS = 6;
 const FALLBACK_REPLY =
@@ -253,6 +256,11 @@ export function createAgent(deps: AgentDeps) {
               partnerStore: deps.partnerStore, // NEW (P4)
               waCreds: deps.waCreds, // WL2 — partner's outbound creds for interactive sends
               turn,
+              // Best-rate routing: the LIVE selection service (partner_rates +
+              // integrations over the shared Pool). The tools gate by tenant
+              // (default only) and fail open to mid — this only supplies it.
+              routeSelector: (s, d, m) =>
+                selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
             });
           } catch (err) {
             console.error(`tool ${call.function.name} threw:`, err);

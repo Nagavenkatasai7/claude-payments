@@ -4,12 +4,12 @@ import { resolveSendCurrency } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { createTransfer, recordBlockedAttempt } from './transfer-create';
+import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
 import { isSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, CountryCode, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PayoutMethod, Schedule, SourceOfFunds, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
@@ -519,6 +519,14 @@ export interface ToolContext {
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
   waCreds?: WaCreds; // WL2 — partner's outbound WhatsApp creds (absent ⇒ shared env number)
+  // Best-rate routing seam: given a corridor + the mid cross-rate, return the
+  // settlement route (selectSettlementRoute in production; the agent wires it).
+  // Absent ⇒ no routing — today's behavior byte-for-byte.
+  routeSelector?: (
+    sourceCurrency: CurrencyCode,
+    destinationCurrency: CurrencyCode,
+    mid: number,
+  ) => Promise<SettlementRoute>;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -568,6 +576,55 @@ async function resolveCurrencyAndRates(
   const destRates = await getFxRates(destinationCurrency);
 
   return { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd: destRates.toUsd };
+}
+
+// Mirrors fx.ts's private round2 (used for the receive-first back-solve).
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
+// ── Best-rate routing (internal) ─────────────────────────────────────────────
+// Consult the ctx-provided route selector for a strictly-better partner rate.
+// Gated HERE by tenant: only the DEFAULT tenant ever routes — a white-label
+// customer is pinned to their partner, the transmitter of record. An absent
+// selector means no routing (today's behavior byte-for-byte), and routing is
+// an optimization, never a blocker: any selector failure quotes at mid. The
+// returned route's settlementPartnerId is INTERNAL — it must never surface in
+// a tool result, the approve card, or any other customer-facing text.
+async function selectRouteForQuote(
+  ctx: ToolContext,
+  partner: Partner,
+  sourceCurrency: CurrencyCode,
+  destinationCurrency: CurrencyCode,
+  mid: number,
+): Promise<SettlementRoute | null> {
+  if (!ctx.routeSelector || partner.id !== DEFAULT_PARTNER_ID) return null;
+  try {
+    const route = await ctx.routeSelector(sourceCurrency, destinationCurrency, mid);
+    // Re-checked at the seam (selectSettlementRoute already guarantees both,
+    // but routeSelector is an injectable function type): a partner route must
+    // be STRICTLY better than mid — never quote a customer worse than the
+    // platform — and must carry its rail, so a partner rate can never pair
+    // with a platform settle.
+    if (
+      route.source === 'partner' &&
+      Number.isFinite(route.fxRate) &&
+      route.fxRate > mid &&
+      route.settlementPartnerId
+    ) {
+      return route;
+    }
+  } catch (err) {
+    console.warn('routeSelector failed — quoting at mid:', err);
+  }
+  return null;
+}
+
+// Apply a winning route to a mid-market quote: override ONLY the
+// rate-dependent fields. amountInr mirrors quote()'s forward rounding
+// (Math.round(amountSource * crossRate), fx.ts); fees and the USD-equivalent
+// (the cap basis) are rate-independent and untouched. The single shared
+// transform keeps get_quote and the approve card pricing identically.
+function applyRouteToQuote(q: Quote, route: SettlementRoute): Quote {
+  return { ...q, fxRate: route.fxRate, amountInr: Math.round(q.amountSource * route.fxRate) };
 }
 
 export async function executeTool(
@@ -641,10 +698,10 @@ async function getQuoteTool(
     // and the fee is added on top (today's model). amount_inr wins over
     // amount_usd. Otherwise this is byte-for-byte today's send-first path.
     const targetInr = Number(args.amount_inr);
-    const amountSource =
-      Number.isFinite(targetInr) && targetInr > 0
-        ? sourceForInr(targetInr, rates)
-        : Number(args.amount_usd);
+    const receiveFirst = Number.isFinite(targetInr) && targetInr > 0;
+    const amountSource = receiveFirst
+      ? sourceForInr(targetInr, rates)
+      : Number(args.amount_usd);
 
     // Cap/tier guard (Bundle D) — refuse BEFORE quoting so the bot never presents
     // an unfulfillable quote. Mirrors check_send_limit's cap result (caps-only; EDD
@@ -684,7 +741,7 @@ async function getQuoteTool(
     // G: default funding_method to bank_transfer when absent
     const fundingMethod = (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer';
 
-    const q = quote(
+    let q = quote(
       amountSource,
       sourceCurrency,
       rates,
@@ -693,6 +750,44 @@ async function getQuoteTool(
       destinationCurrency,
       destToUsd,
     );
+    // Best-rate routing (default tenant only): when a competing partner beat
+    // the mid-market rate, re-price ONLY the rate-dependent fields. Fees and
+    // the USD-equivalent (cap checks) are rate-independent and stay put.
+    const route = await selectRouteForQuote(ctx, partner, sourceCurrency, destinationCurrency, q.fxRate);
+    if (route) {
+      if (receiveFirst) {
+        // Receive-first: back-solve the send amount with the WINNING rate so
+        // the recipient still gets the exact target (the smaller amountSource
+        // re-prices the fee). Two fail-opens keep routing a pure optimization,
+        // never a blocker:
+        //  • the smaller back-solve can dip under quote()'s MIN_USD floor
+        //    where the mid back-solve passed — QuoteError ⇒ keep the mid quote;
+        //  • the routed amount must stay within what evaluateCap already
+        //    approved above. sourceForInr back-solves with the INR rate, so on
+        //    a non-INR corridor the routed back-solve could EXCEED the
+        //    cap-checked figure — never present an amount that was not
+        //    cap-checked ⇒ keep the mid quote.
+        try {
+          const routedQ = quote(
+            round2(targetInr / route.fxRate),
+            sourceCurrency,
+            rates,
+            fundingMethod,
+            transferCount,
+            destinationCurrency,
+            destToUsd,
+          );
+          if (routedQ.amountUsd <= q.amountUsd) {
+            q = applyRouteToQuote(routedQ, route);
+          }
+        } catch (err) {
+          if (!(err instanceof QuoteError)) throw err;
+          // Fall through with the (valid) mid quote.
+        }
+      } else {
+        q = applyRouteToQuote(q, route);
+      }
+    }
     return {
       source_currency: q.sourceCurrency,
       amount_source: q.amountSource,
@@ -758,6 +853,12 @@ async function createTransferTool(
         };
       }
     }
+    // U7 parity with pay-finalize: mint with the DRAFT's stored quote — the
+    // exact figures the approval card showed — not a re-quote at the current
+    // transferCount + live FX. The route (settlementPartnerId) is honored only
+    // WITH that quote: a legacy draft that falls back to a re-quote at mid
+    // drops both (never a partner-routed transfer at a platform rate).
+    const quoteOverride = quoteOverrideFromDraft(draft);
     try {
       const transfer = await createTransfer(ctx.store, ctx.partnerStore, ctx.monthlyVolumeStore, {
         phone: ctx.phone,
@@ -780,6 +881,8 @@ async function createTransferTool(
         senderName: customer.fullName,
         senderKycStatus: customer.kycStatus,
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
+        quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
+        settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
@@ -1189,7 +1292,18 @@ async function sendApprovePickerTool(
   const transfersToday = await ctx.store.getTodayTransferCount(ctx.phone);
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.phone);
-    const q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
+    let q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
+
+    // Best-rate routing (default tenant only): the card, the draft, and the
+    // eventual mint all carry the WINNING rate. The route's settlement partner
+    // rides the draft internally — it never appears in the card text or the
+    // tool result. Fees and amountUsd (the cap basis) are rate-independent.
+    let settlementPartnerId: PartnerId | undefined;
+    const route = await selectRouteForQuote(ctx, partner, sourceCurrency, destinationCurrency, q.fxRate);
+    if (route) {
+      q = applyRouteToQuote(q, route);
+      settlementPartnerId = route.settlementPartnerId;
+    }
 
     const screen = await screenTransfer({
       amountUsd,
@@ -1256,13 +1370,16 @@ async function sendApprovePickerTool(
       occupation: asEnum(OCCUPATIONS, args.occupation),
       quote: {
         feeUsd: q.feeUsd,
-        fxRate: q.fxRate,
+        fxRate: q.fxRate,           // the winning rate when a route applied
         amountInr: q.amountInr,
         feeSource: q.feeSource,
         totalChargeSource: q.totalChargeSource,
         totalChargeUsd: q.totalChargeUsd,
         destinationCurrency: q.destinationCurrency,
       },
+      // Best-rate routing: which partner's rail settles this draft's transfer
+      // (internal — the customer only ever sees the better fxRate above).
+      settlementPartnerId,
     });
     const summary = buildApproveSummary(
       q,

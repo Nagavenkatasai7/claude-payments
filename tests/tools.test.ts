@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { executeTool, toolSchemas, buildApproveSummary, maskAccount } from '@/lib/tools';
-import type { Quote } from '@/lib/types';
+import type { CurrencyCode, Quote } from '@/lib/types';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -12,6 +12,10 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
+import { selectSettlementRoute } from '@/lib/partner-rates';
+import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
 
 const PHONE = '15551234567';
@@ -1685,5 +1689,237 @@ describe('KYC gate OFF — cap refusals never surface verification (QA audit fix
     expect(r.within_cap).toBe(false);
     expect(typeof r.kyc_url).toBe('string');
     expect(startSpy).toHaveBeenCalled();
+  });
+});
+
+describe('best-rate routing (B2) — quote → draft → mint', () => {
+  // Stub integrations + routable-rail shape, mirroring tests/partner-rates.test.ts.
+  const ROUTABLE = {
+    providerType: 'simulator',
+    credentials: { settlementUrl: 'https://rail.test/x', signingSecret: 's' },
+  };
+  function stubIntegrations(byPartner: Record<string, PartnerIntegrations['payment']>): PartnerIntegrationsStore {
+    return {
+      getIntegrations: async (partnerId: string) => ({
+        kyc: {}, whatsapp: {}, payment: byPartner[partnerId] ?? {},
+      }),
+    } as unknown as PartnerIntegrationsStore;
+  }
+  // The REAL selection service over the test PGlite, shaped as ToolContext.routeSelector.
+  function realSelector(byPartner: Record<string, PartnerIntegrations['payment']>) {
+    return (s: CurrencyCode, d: CurrencyCode, m: number) =>
+      selectSettlementRoute(db, stubIntegrations(byPartner), s, d, m);
+  }
+  // A canned winning route (unit seam) — id chosen so no random transfer id can contain it.
+  const WIN = { fxRate: 86, source: 'partner' as const, settlementPartnerId: 'rail-partner-x' };
+
+  const inOneHour = () => new Date(Date.now() + 3_600_000).toISOString();
+
+  it('get_quote (default tenant): the REAL selector wins the corridor — fxRate + amountInr override, fees/USD-equivalent unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedPartner(db, 'rail-partner-x');
+    await createPartnerRateRepo(db).upsertRate({
+      id: 'r1', partnerId: 'rail-partner-x', sourceCurrency: 'USD', destinationCurrency: 'INR',
+      effectiveRate: 86, expiresAt: inOneHour(),
+    });
+    const r = await executeTool(
+      'get_quote',
+      { amount_usd: 400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: realSelector({ 'rail-partner-x': ROUTABLE }) },
+    );
+    expect(r.fx_rate).toBe(86);                       // the winning rate, not mid (85)
+    expect(r.amount_inr).toBe(Math.round(400 * 86));  // 34,400 — quote()'s exact rounding
+    expect(r.amount_dest).toBe(r.amount_inr);
+    expect(r.fee_usd).toBe(0);                        // fees are rate-independent
+    expect(r.amount_usd).toBe(400);                   // USD-equivalent (caps) unchanged
+    // Customer invisibility: the routing partner never appears in the result.
+    expect(JSON.stringify(r)).not.toContain('rail-partner-x');
+  });
+
+  it('get_quote: a platform route (no winner) leaves the result byte-identical to the no-selector quote', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const baseline = await executeTool('get_quote', { amount_usd: 400, funding_method: 'bank_transfer' }, ctx);
+    const routed = await executeTool(
+      'get_quote',
+      { amount_usd: 400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: async (_s, _d, m) => ({ fxRate: m, source: 'platform' as const }) },
+    );
+    expect(routed).toEqual(baseline);
+  });
+
+  it('get_quote: the selector receives the mid cross-rate; a throwing selector fail-opens to mid (never a blocker)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const spy = vi.fn(async () => { throw new Error('rates outage'); });
+    const r = await executeTool(
+      'get_quote',
+      { amount_usd: 400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: spy },
+    );
+    expect(spy).toHaveBeenCalledWith('USD', 'INR', MOCK_RATE); // mid in, fail-open out
+    expect(r.error).toBeUndefined();
+    expect(r.fx_rate).toBe(MOCK_RATE);
+    expect(r.amount_inr).toBe(Math.round(400 * MOCK_RATE));
+  });
+
+  it('get_quote receive-first (amount_inr): back-solves with the WINNING rate so the recipient gets the exact target', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    // 34,400 / 86 = 400 exactly; at mid (85) the back-solve would be 404.71.
+    const r = await executeTool(
+      'get_quote',
+      { amount_inr: 34_400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: async () => WIN },
+    );
+    expect(r.fx_rate).toBe(86);
+    expect(r.amount_source).toBe(400);     // winning-rate back-solve, NOT 404.71
+    expect(r.amount_inr).toBe(34_400);     // the exact target lands
+    expect(r.fee_usd).toBe(0);
+  });
+
+  it('receive-first: a winning back-solve that dips under MIN_USD falls back to the mid quote (never a blocker)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    // 855/85 = $10.06 (≥ MIN_USD) at mid, but 855/86 = $9.94 (< MIN_USD) at
+    // the winning rate — the better rate must NOT turn a valid quote into a refusal.
+    const r = await executeTool(
+      'get_quote',
+      { amount_inr: 855, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: async () => WIN },
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.fx_rate).toBe(MOCK_RATE);            // mid quote preserved
+    expect(r.amount_source).toBeCloseTo(10.06, 2);
+  });
+
+  it('receive-first on a non-INR corridor: a routed back-solve EXCEEDING the cap-checked amount is not presented (mid quote kept)', async () => {
+    // sourceForInr back-solves with the INR rate, so the cap guard ran on
+    // ~$11.76 (1000/85); the winning AED cross-rate back-solve would be
+    // ~$263 — an amount evaluateCap never saw. The route must be skipped.
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('from=AED')) {
+        return { ok: true, json: async () => ({ rates: { INR: 23.1, USD: 0.27 } }) };
+      }
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+    const ctx = await buildCtx(fakeRedis());
+    const mid = 1 / 0.27; // USD→AED cross-rate ≈ 3.7037
+    const r = await executeTool(
+      'get_quote',
+      { amount_inr: 1000, funding_method: 'bank_transfer', destination_country: 'AE' },
+      { ...ctx, routeSelector: async () => ({ fxRate: 3.8, source: 'partner' as const, settlementPartnerId: 'rail-partner-x' }) },
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.fx_rate as number).toBeCloseTo(mid, 4);  // mid quote, NOT the 3.8 route
+    expect(r.amount_source).toBeCloseTo(11.76, 2);    // the cap-checked figure, NOT ~263
+  });
+
+  it('a worse-than-mid "partner" route is rejected at the seam — the customer never quotes below mid', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool(
+      'get_quote',
+      { amount_usd: 400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: async () => ({ fxRate: 84, source: 'partner' as const, settlementPartnerId: 'rail-partner-x' }) },
+    );
+    expect(r.fx_rate).toBe(MOCK_RATE);
+    expect(r.amount_inr).toBe(Math.round(400 * MOCK_RATE));
+  });
+
+  it('a "partner" route missing settlementPartnerId is rejected — a partner rate can never pair with a platform settle', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool(
+      'get_quote',
+      { amount_usd: 400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: async () => ({ fxRate: 86, source: 'partner' as const }) },
+    );
+    expect(r.fx_rate).toBe(MOCK_RATE); // no rail ⇒ no route ⇒ mid
+  });
+
+  it('white-label tenant: the selector is NEVER called — the customer is pinned to their partner at mid', async () => {
+    const redis = fakeRedis();
+    const ctx = await buildCtx(redis, '15558887777');
+    await seedPartner(db, 'acme');
+    const nowIso = new Date().toISOString();
+    await ctx.customerStore.saveCustomer({
+      senderPhone: '15558887777', firstSeenAt: nowIso, kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'acme', optInAt: nowIso,
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+    const spy = vi.fn(async () => WIN);
+    const quoted = await executeTool(
+      'get_quote',
+      { amount_usd: 400, funding_method: 'bank_transfer' },
+      { ...ctx, routeSelector: spy },
+    );
+    expect(spy).not.toHaveBeenCalled();
+    expect(quoted.fx_rate).toBe(MOCK_RATE);
+
+    // send_approve_picker is pinned the same way.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    const picker = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer',
+      recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi',
+    }, { ...ctx, routeSelector: spy });
+    expect(spy).not.toHaveBeenCalled();
+    expect(picker.sent).toBe(true);
+    const draft = await ctx.draftStore.consumeDraft(picker.draft_id as string);
+    expect(draft?.quote.fxRate).toBe(MOCK_RATE);
+    expect(draft?.settlementPartnerId).toBeUndefined();
+  });
+
+  it('send_approve_picker stores the winning route on the draft; the card shows ONLY the better rate', async () => {
+    const redis = fakeRedis();
+    const ctx0 = await buildCtx(redis, '15550007777');
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx0); // prime FX cache
+    let ctaText = '';
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : null;
+      const cta = (body?.interactive as Record<string, unknown>)?.body as Record<string, unknown> | undefined;
+      if (cta && typeof cta.text === 'string') ctaText = cta.text;
+      return { ok: true, text: async () => '' };
+    }));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer',
+      recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi',
+    }, { ...ctx0, routeSelector: async () => WIN });
+    expect(r.sent).toBe(true);
+    // The draft carries the route — rate-dependent quote fields + the rail partner.
+    const draft = await ctx0.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.settlementPartnerId).toBe('rail-partner-x');
+    expect(draft?.quote.fxRate).toBe(86);
+    expect(draft?.quote.amountInr).toBe(Math.round(200 * 86)); // 17,200
+    expect(draft?.amountUsd).toBe(200); // USD-equivalent for caps — rate-independent
+    // The customer sees only the better rate; never the routing partner.
+    expect(ctaText).toContain('₹86');
+    expect(ctaText).toContain('₹17,200');
+    expect(ctaText).not.toContain('rail-partner-x');
+    expect(JSON.stringify(r)).not.toContain('rail-partner-x');
+  });
+
+  it('approve-tap mint: the draft route + draft quote mint VERBATIM (settlementPartnerId + winning fxRate)', async () => {
+    const redis = fakeRedis();
+    const base = await buildCtx(redis, '15550008888');
+    await seedPartner(db, 'rail-partner-x');
+    const draftId = await base.draftStore.createDraft({
+      senderPhone: base.phone,
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200,
+      amountSource: 200,
+      sourceCurrency: 'USD',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 86, amountInr: 17_200, feeSource: 0, totalChargeSource: 200, totalChargeUsd: 200 },
+      settlementPartnerId: 'rail-partner-x',
+    });
+    const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
+    const r = await executeTool('create_transfer', {}, ctx);
+    expect(r.error).toBeUndefined();
+    const t = await ctx.store.getTransfer(r.transfer_id as string);
+    expect(t?.settlementPartnerId).toBe('rail-partner-x'); // the winning rail
+    expect(t?.fxRate).toBe(86);                            // the draft's (winning) rate, not a re-quote at 85
+    expect(t?.amountInr).toBe(17_200);
+    expect(t?.feeUsd).toBe(0);
+    expect(t?.partnerId).toBe('default');                  // ownership unchanged
+    // Tool result (fed to the LLM) leaks nothing about the routing partner.
+    expect(JSON.stringify(r)).not.toContain('rail-partner-x');
   });
 });

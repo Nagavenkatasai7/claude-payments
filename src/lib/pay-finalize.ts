@@ -1,4 +1,4 @@
-import { createTransfer, type CreateTransferInput } from './transfer-create';
+import { createTransfer, quoteOverrideFromDraft } from './transfer-create';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
@@ -130,38 +130,9 @@ export async function finalizeDraftPayment(
   // approval card and the pay page showed. Re-quoting at pay time (current
   // transferCount + live FX) could flip "first transfer free" into a $1.99
   // charge if another transfer landed in between, or drift the FX rate between
-  // card and payment. USD drafts: source-side fields equal the USD fields by
-  // definition. Legacy non-USD drafts (still draining their 30-min TTL) that
-  // predate feeSource/totalChargeSource get NO override — they fall back to
-  // today's re-quote rather than mixing the draft's USD figures with a live
-  // source-side recomputation.
-  const dq = draft.quote;
-  const totalChargeUsd =
-    dq.totalChargeUsd ?? Math.round((draft.amountUsd + dq.feeUsd) * 100) / 100;
-  let quoteOverride: CreateTransferInput['quote'];
-  if (draft.sourceCurrency === 'USD') {
-    quoteOverride = {
-      amountUsd: draft.amountUsd,
-      feeUsd: dq.feeUsd,
-      totalChargeUsd,
-      fxRate: dq.fxRate,
-      amountInr: dq.amountInr,
-      amountSource: draft.amountUsd,
-      feeSource: dq.feeUsd,
-      totalChargeSource: totalChargeUsd,
-    };
-  } else if (dq.feeSource !== undefined && dq.totalChargeSource !== undefined) {
-    quoteOverride = {
-      amountUsd: draft.amountUsd,
-      feeUsd: dq.feeUsd,
-      totalChargeUsd,
-      fxRate: dq.fxRate,
-      amountInr: dq.amountInr,
-      amountSource: draft.amountSource,
-      feeSource: dq.feeSource,
-      totalChargeSource: dq.totalChargeSource,
-    };
-  }
+  // card and payment. quoteOverrideFromDraft owns the USD / non-USD / legacy
+  // rules (legacy non-USD drafts get NO override and fall back to a re-quote).
+  const quoteOverride = quoteOverrideFromDraft(draft);
 
   const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
     id: reservedId, // the claimed id — crash-replay re-mints the SAME row
@@ -185,6 +156,11 @@ export async function finalizeDraftPayment(
     senderKycStatus: customer.kycStatus,
     requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
     quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
+    // Best-rate routing: the winning partner's rail settles this transfer —
+    // but ONLY at the rate it offered (the draft's quote). The legacy fallback
+    // above re-quotes at mid, so it must drop the route too (never a
+    // partner-routed transfer at a platform rate).
+    settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
   });
 
   // Consume AFTER the mint: the transfer now exists, so losing the draft here
