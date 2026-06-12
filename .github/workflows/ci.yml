@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Merge queue support: without this trigger, queue-created merge groups never
+  # get the required `ci` check and every queued merge fails. Inert until the
+  # queue is enabled in repo settings.
+  merge_group:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,6 +29,32 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      # Fails when src/db/schema.ts has changes not covered by drizzle/
+      # (drizzle-kit generate diffs schema.ts against the latest drizzle/meta
+      # snapshot — no DB connection needed — and writes files only on drift).
+      #
+      # TODO(flip to blocking): drizzle/meta only has snapshots 0000-0001;
+      # migrations 0002-0004 were handwritten (SQL + journal entry, no
+      # snapshot), so generate re-emits their contents even on a clean main.
+      # Until a snapshot catch-up PR lands (run `npx drizzle-kit generate`,
+      # empty the duplicate SQL body, keep snapshot + journal), this step is
+      # annotate-only. Remove `continue-on-error` after the catch-up.
+      - name: Migration drift check (schema vs drizzle/)
+        continue-on-error: true
+        run: |
+          npx drizzle-kit generate --name ci_drift_check
+          if [ -n "$(git status --porcelain -- drizzle/)" ]; then
+            echo "::error::src/db/schema.ts has changes not covered by checked-in drizzle/ migrations. Run 'npx drizzle-kit generate', review the SQL, and commit it (drizzle selects explicit column lists — an unapplied schema change breaks every query on the altered table; see the 2026-06-11 outage)."
+            git status --porcelain -- drizzle/
+            exit 1
+          fi
+          echo "schema.ts and drizzle/ migrations agree"
+
+      # Blocking at high: verified 2026-06-12 that the current tree exits 0
+      # here (only 2 moderate findings, below the threshold).
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Typecheck
         run: npm run typecheck

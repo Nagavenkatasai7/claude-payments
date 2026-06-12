@@ -1,0 +1,105 @@
+# Pre-merge smoke against the Vercel PREVIEW deployment of a PR — catches the
+# class of failure that has reached prod twice (incl. the 2026-06-11 outage)
+# because the only smoke ran post-deploy.
+#
+# Why deployment_status and not a job in ci.yml: ci.yml fires on pull_request
+# BEFORE the Vercel preview exists (testing it there would need racy polling);
+# deployment_status fires exactly when Vercel reports the deployment ready and
+# carries its URL in github.event.deployment_status.target_url. Same proven
+# mechanism as smoke.yml (Production).
+#
+# Preview deployments sit behind Vercel Deployment Protection, so Playwright
+# sends the "Protection Bypass for Automation" header (see playwright.config.ts)
+# using the VERCEL_AUTOMATION_BYPASS_SECRET repo secret. Until that secret is
+# minted (coordinator task), the smoke job SKIPS cleanly via the gate job —
+# secrets are not readable in job-level `if:` (actions/runner#520), so a tiny
+# gate job exports presence as an output instead.
+#
+# NOT a required check — the coordinator decides that after the secret exists.
+name: Preview Smoke
+
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Preview'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      run-smoke: ${{ steps.check.outputs.has-secret }}
+    steps:
+      - name: Check bypass secret presence
+        id: check
+        env:
+          BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          if [ -n "$BYPASS_SECRET" ]; then
+            echo "has-secret=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-secret=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VERCEL_AUTOMATION_BYPASS_SECRET is not configured - skipping preview smoke"
+          fi
+
+  preview-smoke:
+    needs: gate
+    if: needs.gate.outputs.run-smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Run the spec version that matches the deployed code (the workflow
+          # file itself still comes from the default branch). The sha comes
+          # from Vercel's deployment object (write-scoped integration).
+          ref: ${{ github.event.deployment.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright OS deps (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Smoke test the preview deployment
+        env:
+          CI: 'true'
+          # The per-deployment preview URL; protection is bypassed via the
+          # header playwright.config.ts adds when the secret is present.
+          BASE_URL: ${{ github.event.deployment_status.target_url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          E2E_PARTNER_PASSWORD: ${{ secrets.E2E_PARTNER_PASSWORD }}
+        run: npm run e2e
+
+      - name: Upload trace on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-playwright-trace
+          path: test-results/
+          retention-days: 7
