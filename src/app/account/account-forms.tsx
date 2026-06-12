@@ -235,6 +235,16 @@ function OtpForm({
           {resendPending ? 'Sending…' : 'Resend code'}
         </button>
       </form>
+      {/* Shown UNCONDITIONALLY (enumeration-safe — reveals nothing about the
+          account): until the Meta AUTHENTICATION template is approved, codes
+          are free-form WhatsApp texts, which Meta only delivers within 24h of
+          the customer's last message to the bot. The self-service fix is to
+          message the bot first, then resend. */}
+      <p className="mt-4 text-[12px] leading-normal text-[#8696a0]">
+        Didn&rsquo;t get a code? WhatsApp only lets us message you within 24 hours
+        of your last chat with us. Send <strong>hi</strong> to our WhatsApp
+        number first, then tap <strong>Resend code</strong>.
+      </p>
     </div>
   );
 }
