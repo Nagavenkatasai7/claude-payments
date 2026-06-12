@@ -11,6 +11,7 @@ import type {
   CurrencyCode,
   FundingMethod,
   PayoutMethod,
+  RefundStatus,
   SenderRecipientRelationship,
   Transfer,
   TransferPurpose,
@@ -90,6 +91,10 @@ export function transferToRow(
     payoutDestinationLast4: last4(t.payoutDestination ?? ''),
     fundingMethod: t.fundingMethod,
     paymentProviderRef: t.paymentProviderRef ?? null,
+    fundingRef: t.fundingRef ?? null,
+    refundRef: t.refundRef ?? null,
+    refundStatus: t.refundStatus ?? 'none',
+    refundedAt: t.refundedAt ? new Date(t.refundedAt) : null,
     recipientLegalNameEnc: sealOptional(t.recipientLegalName, provider) ?? null,
     relationship: t.relationship ?? null,
     purpose: t.purpose ?? null,
@@ -152,6 +157,11 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (deliveredAt) t.deliveredAt = deliveredAt;
   if (row.paymentProviderRef) t.paymentProviderRef = row.paymentProviderRef;
   if (row.settlementPartnerId) t.settlementPartnerId = row.settlementPartnerId;
+  if (row.fundingRef) t.fundingRef = row.fundingRef;
+  if (row.refundRef) t.refundRef = row.refundRef;
+  t.refundStatus = (row.refundStatus as RefundStatus) ?? 'none';
+  const refundedAt = isoOpt(row.refundedAt);
+  if (refundedAt) t.refundedAt = refundedAt;
   if (opts.decrypt) {
     const legal = openOptional(row.recipientLegalNameEnc, provider);
     if (legal) t.recipientLegalName = legal;

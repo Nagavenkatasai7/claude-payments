@@ -26,6 +26,8 @@ export interface Quote {
   destinationCurrency?: CurrencyCode;  // NEW (any-to-any) — currency amountInr/fxRate are in (absent ⇒ INR)
 }
 
+export type RefundStatus = 'none' | 'requested' | 'pending' | 'completed' | 'failed';
+
 export interface Transfer {
   id: string;
   phone: string;
@@ -62,6 +64,16 @@ export interface Transfer {
   totalChargeSource: number;    // NEW (P4)
   // ── Payment-provider seam (pay-seam) — optional (dormant) ──
   paymentProviderRef?: string;   // partner's settlement id; the mock sets `mock-<transfer.id>`
+  // ── Funds-capture seam + refunds ──
+  // fundingRef: the funding provider's charge reference, written BEFORE
+  // settlement (crash between capture and settle ⇒ reconcile resumes it).
+  // Refund lifecycle lives beside the forward-only status machine:
+  // none → requested (customer asked via bot) → pending (ops approved /
+  // auto on reject-in-review) → completed | failed (failed → pending on retry).
+  fundingRef?: string;
+  refundRef?: string;            // funding provider's refund transaction id
+  refundStatus?: RefundStatus;   // optional (lazy-fill convention): absent ⇒ 'none'
+  refundedAt?: string;
   // ── KYC Tier 2 Travel-Rule (per-send) — all optional (dormant) ──
   recipientLegalName?: string;            // legal name distinct from display recipientName
   relationship?: SenderRecipientRelationship;

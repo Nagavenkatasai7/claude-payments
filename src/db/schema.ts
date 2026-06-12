@@ -80,6 +80,14 @@ export const transfers = pgTable(
     payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
     fundingMethod: text('funding_method').notNull(),
     paymentProviderRef: text('payment_provider_ref'),
+    // Funds-capture seam: the funding provider's charge reference (write-once,
+    // set BEFORE settlement so a crash between capture and settle is
+    // recoverable by the reconcile sweep). Refunds live in their own columns —
+    // the forward-only `status` machine is untouched.
+    fundingRef: text('funding_ref'),
+    refundRef: text('refund_ref'),
+    refundStatus: text('refund_status').notNull().default('none'),
+    refundedAt: timestamp('refunded_at', { withTimezone: true }),
     recipientLegalNameEnc: text('recipient_legal_name_enc'), // ENCRYPTED
     relationship: text('relationship'),
     purpose: text('purpose'),
@@ -95,10 +103,16 @@ export const transfers = pgTable(
       'transfers_status_check',
       sql`${t.status} IN ('awaiting_payment','paid','in_review','delivered','cancelled','blocked')`,
     ),
+    check(
+      'transfers_refund_status_check',
+      sql`${t.refundStatus} IN ('none','requested','pending','completed','failed')`,
+    ),
     index('transfers_partner_created').on(t.partnerId, t.createdAt.desc()),
     index('transfers_phone_created').on(t.phone, t.createdAt.desc()),
     index('transfers_status_paid').on(t.status, t.paidAt), // reconciliation sweep
     index('transfers_provider_ref').on(t.paymentProviderRef),
+    // Refund queues (ops page + sweeps) — partial: 'none' is ~every row.
+    index('transfers_refund_status').on(t.refundStatus).where(sql`${t.refundStatus} <> 'none'`),
   ],
 );
 

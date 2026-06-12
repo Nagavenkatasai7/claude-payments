@@ -31,7 +31,7 @@ Live at **https://smartremit.ai** — the canonical production domain (the `clau
 
 ```
 src/
-  db/            schema.ts (13 tables) · client.ts (getDb Pool singleton) · repos/* (transfer, partner,
+  db/            schema.ts (14 tables) · client.ts (getDb Pool singleton) · repos/* (transfer, partner,
                  integrations, api-key, customer, schedule, outbox, aux: idempotency/audit/beneficiaries)
   lib/           agent/tools/prompt (chat) · settlement.ts · pay-finalize.ts · outbox-worker.ts ·
                  reconcile.ts · transfer-create.ts · compliance.ts · partner-api-service.ts ·
@@ -62,6 +62,7 @@ drizzle/         checked-in SQL migrations (0001 seeds the 'default' partner)
 - **PGlite + fake timers**: `freshDb()` BEFORE `vi.useFakeTimers()`. Occasional parallel-run flakes pass in isolation.
 - **`Duplicate identifier` in `.next/types/* 2.ts`** = iCloud duplicate file, not a regression: delete the ` 2` file, `rm -rf .next`.
 - **Upstash**: `automaticDeserialization: false` everywhere (via the single `getRedis()`); hgetall returns flat arrays otherwise.
+- **Migrations are MANUAL**: nothing in CI/Vercel applies drizzle migrations to prod Neon. After merging ANY PR with a new `drizzle/` file, run `set -a; source .env.local; set +a; npx drizzle-kit migrate` immediately — drizzle selects explicit column lists, so an unapplied migration breaks EVERY query on the altered table (2026-06-11 dashboard outage).
 - **Vercel CLI v54**: piped `vercel env add` stores EMPTY values (use `--value`); prod vars are sensitive-by-default so `env pull` returns `''` — verify secrets at RUNTIME.
 - **Set-once, never rotate**: `FIELD_ENCRYPTION_KEY` (hex64 OR base64-32 — both valid) and `PASSWORD_PEPPER`.
 

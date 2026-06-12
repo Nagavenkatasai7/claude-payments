@@ -3,7 +3,7 @@ import { transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { rowToTransfer, transferToRow, type TransferRow } from './mappers';
-import type { PartnerId, Transfer, TransferStatus } from '@/lib/types';
+import type { PartnerId, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
 
 // transfer-repo — the Postgres ledger for transfers. Mirrors the function
 // surface call sites already use (getTransfer/saveTransfer/
@@ -156,6 +156,83 @@ export function createTransferRepo(
         .update(transfers)
         .set({ paymentProviderRef: ref })
         .where(and(eq(transfers.id, id), isNull(transfers.paymentProviderRef)));
+    },
+
+    /**
+     * Persist the funding provider's charge reference exactly once, BEFORE
+     * settlement begins — a crash between capture and settle leaves an
+     * awaiting_payment row WITH a fundingRef, which the reconcile sweep
+     * resumes (the customer was charged; the transfer must never be lost).
+     */
+    async setFundingRef(id: string, ref: string): Promise<void> {
+      await db
+        .update(transfers)
+        .set({ fundingRef: ref })
+        .where(and(eq(transfers.id, id), isNull(transfers.fundingRef)));
+    },
+
+    /**
+     * Guarded refund-lifecycle transition. Legal moves: none→requested
+     * (customer asked via bot), requested→none (ops dismissed),
+     * none/requested/failed→pending (ops or auto initiated; failed retries),
+     * pending→completed|failed. Returns null when the stored state isn't a
+     * legal predecessor — concurrent ops clicks and webhook replays become
+     * harmless no-ops. The forward-only `status` machine is untouched.
+     */
+    async updateRefund(
+      id: string,
+      next: { refundStatus: RefundStatus; refundRef?: string; refundedAt?: string },
+    ): Promise<Transfer | null> {
+      const legalFrom: Record<RefundStatus, RefundStatus[]> = {
+        requested: ['none'],
+        none: ['requested'],
+        pending: ['none', 'requested', 'failed'],
+        completed: ['pending'],
+        failed: ['pending'],
+      };
+      const rows = await db
+        .update(transfers)
+        .set({
+          refundStatus: next.refundStatus,
+          ...(next.refundRef !== undefined ? { refundRef: next.refundRef } : {}),
+          ...(next.refundedAt !== undefined ? { refundedAt: new Date(next.refundedAt) } : {}),
+        })
+        .where(and(
+          eq(transfers.id, id),
+          sql`${transfers.refundStatus} IN (${sql.join(legalFrom[next.refundStatus].map((s) => sql`${s}`), sql`, `)})`,
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Refund queues for the ops page + sweeps (masked reads). */
+    async listByRefundStatus(refundStatus: RefundStatus, limit = 50): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(eq(transfers.refundStatus, refundStatus))
+        .orderBy(desc(transfers.createdAt))
+        .limit(limit);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
+     * Crash-resume sweep query: charged (fundingRef set) but still
+     * awaiting_payment after `olderThanMs` — the process died between capture
+     * and beginSettlement. These must be resumed, never abandoned.
+     */
+    async listAwaitingWithFunding(olderThanMs: number, now: Date = new Date()): Promise<Transfer[]> {
+      const cutoff = new Date(now.getTime() - olderThanMs);
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          eq(transfers.status, 'awaiting_payment'),
+          sql`${transfers.fundingRef} IS NOT NULL`,
+          lt(transfers.createdAt, cutoff),
+        ))
+        .limit(50);
+      return rows.map((r) => toDomain(r));
     },
 
     /**

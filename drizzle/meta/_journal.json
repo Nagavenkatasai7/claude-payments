@@ -22,6 +22,13 @@
       "when": 1781223264151,
       "tag": "0002_partner_rates",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781240367783,
+      "tag": "0003_funding_refunds",
+      "breakpoints": true
     }
   ]
 }
