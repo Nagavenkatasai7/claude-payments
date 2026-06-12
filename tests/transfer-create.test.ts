@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createTransfer, recordBlockedAttempt } from '@/lib/transfer-create';
+import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 
 beforeEach(() => {
@@ -22,6 +22,7 @@ async function makeStores() {
   const redis = fakeRedis();
   const db = await freshDb();
   return {
+    db,
     store: createStore(redis, db),
     partnerStore: createPartnerStore(db),
     mvs: createMonthlyVolumeStore(redis),
@@ -395,6 +396,103 @@ describe('createTransfer U7: draft-quote override', () => {
     expect(t.complianceStatus).toBe('flagged');
     expect(t.complianceReasons).toContain('edd_required');
     expect(t.eddRequired).toBe(true);
+  });
+});
+
+describe('createTransfer best-rate routing: settlementPartnerId', () => {
+  const override = {
+    amountUsd: 200,
+    feeUsd: 0,
+    totalChargeUsd: 200,
+    fxRate: 86,        // a winning partner rate, NOT the live mid (85)
+    amountInr: 17_200,
+    amountSource: 200,
+    feeSource: 0,
+    totalChargeSource: 200,
+  };
+
+  it('persists settlementPartnerId when supplied WITH the quote override (route + its rate travel together)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'rail-partner-x'); // settlement_partner_id carries a REAL FK to partners
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      quote: override,
+      settlementPartnerId: 'rail-partner-x',
+    });
+    expect(t.settlementPartnerId).toBe('rail-partner-x');
+    expect(t.fxRate).toBe(86);
+    expect(t.amountInr).toBe(17_200);
+    // Round-trips through the ledger (mapper carries it).
+    const saved = await store.getTransfer(t.id);
+    expect(saved?.settlementPartnerId).toBe('rail-partner-x');
+    // Branding/compliance ownership is untouched — partnerId stays the customer's.
+    expect(saved?.partnerId).toBe('default');
+  });
+
+  it('DROPS settlementPartnerId when no quote override is given — a re-quote at mid must settle via the platform', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'rail-partner-x');
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      settlementPartnerId: 'rail-partner-x', // NO quote ⇒ live re-quote ⇒ route dropped
+    });
+    expect(t.settlementPartnerId).toBeUndefined();
+    expect(t.fxRate).toBe(85); // re-quoted at the live mid
+    const saved = await store.getTransfer(t.id);
+    expect(saved?.settlementPartnerId).toBeUndefined();
+  });
+});
+
+describe('quoteOverrideFromDraft (pure)', () => {
+  it('USD draft: source-side fields equal the USD fields by definition', () => {
+    const o = quoteOverrideFromDraft({
+      amountUsd: 200,
+      amountSource: 200,
+      sourceCurrency: 'USD',
+      quote: { feeUsd: 1.99, fxRate: 86, amountInr: 17_200 }, // no totalChargeUsd: derived
+    });
+    expect(o).toEqual({
+      amountUsd: 200,
+      feeUsd: 1.99,
+      totalChargeUsd: 201.99,
+      fxRate: 86,
+      amountInr: 17_200,
+      amountSource: 200,
+      feeSource: 1.99,
+      totalChargeSource: 201.99,
+    });
+  });
+
+  it('non-USD draft WITH stored source-side figures: uses them verbatim', () => {
+    const o = quoteOverrideFromDraft({
+      amountUsd: 254,
+      amountSource: 200,
+      sourceCurrency: 'GBP',
+      quote: {
+        feeUsd: 1.99, fxRate: 108, amountInr: 21_600,
+        feeSource: 1.57, totalChargeSource: 201.57, totalChargeUsd: 255.99,
+      },
+    });
+    expect(o).toEqual({
+      amountUsd: 254,
+      feeUsd: 1.99,
+      totalChargeUsd: 255.99,
+      fxRate: 108,
+      amountInr: 21_600,
+      amountSource: 200,
+      feeSource: 1.57,
+      totalChargeSource: 201.57,
+    });
+  });
+
+  it('legacy non-USD draft missing feeSource/totalChargeSource ⇒ undefined (mint falls back to a re-quote)', () => {
+    const o = quoteOverrideFromDraft({
+      amountUsd: 254,
+      amountSource: 200,
+      sourceCurrency: 'GBP',
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 },
+    });
+    expect(o).toBeUndefined();
   });
 });
 

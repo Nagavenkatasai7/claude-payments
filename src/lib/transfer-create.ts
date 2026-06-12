@@ -10,7 +10,7 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type {
-  CountryCode, CurrencyCode, FundingMethod, PartnerId, PayoutMethod, Transfer,
+  CountryCode, CurrencyCode, Draft, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
   KycStatus,                                                                 // NEW (Phase 3 gate)
 } from './types';
@@ -57,6 +57,54 @@ export interface CreateTransferInput {
     feeSource: number;
     totalChargeSource: number;
   };
+  // Best-rate routing (internal — never customer/partner-API visible): the
+  // partner whose RAIL settles this transfer because its rate won the corridor
+  // at quote time. Honored ONLY together with `quote` (the figures that rate
+  // produced) — see the guard in createTransfer. Absent ⇒ settle via partnerId.
+  settlementPartnerId?: PartnerId;
+}
+
+/**
+ * Build the COMPLETE quote override (CreateTransferInput['quote']) from a
+ * draft's stored quote — the exact figures the approval card and the pay page
+ * showed (U7 audit). USD drafts: source-side fields equal the USD fields by
+ * definition. Non-USD drafts need their stored source-side figures; legacy
+ * in-flight drafts that predate feeSource/totalChargeSource return undefined,
+ * so the mint falls back to a live re-quote rather than mixing the draft's
+ * USD figures with a live source-side recomputation. Shared by BOTH draft
+ * mint paths (pay-page finalize + approve-button tap) so they price the same.
+ */
+export function quoteOverrideFromDraft(
+  draft: Pick<Draft, 'amountUsd' | 'amountSource' | 'sourceCurrency' | 'quote'>,
+): CreateTransferInput['quote'] {
+  const dq = draft.quote;
+  const totalChargeUsd =
+    dq.totalChargeUsd ?? Math.round((draft.amountUsd + dq.feeUsd) * 100) / 100;
+  if (draft.sourceCurrency === 'USD') {
+    return {
+      amountUsd: draft.amountUsd,
+      feeUsd: dq.feeUsd,
+      totalChargeUsd,
+      fxRate: dq.fxRate,
+      amountInr: dq.amountInr,
+      amountSource: draft.amountUsd,
+      feeSource: dq.feeUsd,
+      totalChargeSource: totalChargeUsd,
+    };
+  }
+  if (dq.feeSource !== undefined && dq.totalChargeSource !== undefined) {
+    return {
+      amountUsd: draft.amountUsd,
+      feeUsd: dq.feeUsd,
+      totalChargeUsd,
+      fxRate: dq.fxRate,
+      amountInr: dq.amountInr,
+      amountSource: draft.amountSource,
+      feeSource: dq.feeSource,
+      totalChargeSource: dq.totalChargeSource,
+    };
+  }
+  return undefined;
 }
 
 export async function createTransfer(
@@ -124,6 +172,12 @@ export async function createTransfer(
     complianceStatus = 'flagged';
     complianceReasons = [...complianceReasons, eddCheck.flagReason];
   }
+  // Best-rate routing: a route is only ever honored together with the quote it
+  // priced. If the quote override is absent we re-quoted at the CURRENT mid
+  // above — settling that through the winning partner's rail would pay out at
+  // a rate that partner never offered, so the route is dropped with the stale
+  // rate (platform settle via the customer's own partnerId).
+  const settlementPartnerId = input.quote ? input.settlementPartnerId : undefined;
   const transfer: Transfer = {
     id: input.id ?? newTransferId(),
     phone: input.phone,
@@ -146,6 +200,7 @@ export async function createTransfer(
     destinationCountry,
     destinationCurrency,
     partnerId: input.partnerId,
+    settlementPartnerId,                             // best-rate routing (internal)
     amountSource: q.amountSource,
     feeSource: q.feeSource,
     totalChargeSource: q.totalChargeSource,

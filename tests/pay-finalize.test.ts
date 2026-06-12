@@ -9,7 +9,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 
 const PHONE = '15551234567';
 
@@ -358,6 +358,84 @@ describe('finalizeDraftPayment', () => {
     expect(saved?.fxRate).toBe(110);
     expect(saved?.amountInr).toBe(22_000);
     expect(saved?.amountUsd).toBe(254); // 200 × 1.27
+  });
+
+  // ── Best-rate routing (B2): the draft's route mints with the draft's rate ──
+
+  it('routing: mints with the draft settlementPartnerId + the WINNING fxRate/amountInr — never surfaced beyond the row', async () => {
+    const stores = await buildStores();
+    await seedPartner(stores.db, 'rail-partner-x');
+    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE,
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200,
+      amountSource: 200,
+      sourceCurrency: 'USD',
+      fundingMethod: 'bank_transfer',
+      // The card quoted the WINNING rate 86 (live mid is 85 via the fetch stub).
+      quote: { feeUsd: 0, fxRate: 86, amountInr: 17_200 },
+      settlementPartnerId: 'rail-partner-x',
+    });
+
+    // An unrelated transfer lands between card and pay — the draft must STILL
+    // win on fee AND rate AND route (the intervening-transfer U7 case).
+    await createTransfer(stores.store, stores.partnerStore, stores.monthlyVolumeStore, {
+      phone: PHONE,
+      recipientName: 'Uncle',
+      recipientPhone: '919876500000',
+      payoutMethod: 'upi',
+      payoutDestination: 'uncle@upi',
+      fundingMethod: 'bank_transfer',
+      amountSource: 50,
+      sourceCurrency: 'USD',
+      partnerId: 'default',
+      senderKycStatus: 'verified',
+    });
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.settlementPartnerId).toBe('rail-partner-x'); // the winning rail
+    expect(saved?.fxRate).toBe(86);                            // at the rate it offered
+    expect(saved?.amountInr).toBe(17_200);
+    expect(saved?.feeUsd).toBe(0);                             // first-transfer-free promise honored
+    expect(saved?.partnerId).toBe('default');                  // ownership unchanged
+  });
+
+  it('routing: the legacy non-USD fallback (re-quote at mid) drops BOTH the override AND the route', async () => {
+    const stores = await buildStores();
+    await seedPartner(stores.db, 'rail-partner-x');
+    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+
+    resetRateCacheForTests();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.27, INR: 110 } }) }),
+    );
+
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE,
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 254,
+      amountSource: 200,
+      sourceCurrency: 'GBP',
+      fundingMethod: 'bank_transfer',
+      // Legacy in-flight draft: no feeSource/totalChargeSource ⇒ no override —
+      // and a routed draft must NEVER mint partner-routed at a platform rate.
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 },
+      settlementPartnerId: 'rail-partner-x',
+    });
+
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.fxRate).toBe(110);                       // live re-quote won…
+    expect(saved?.settlementPartnerId).toBeUndefined();    // …so the route is dropped with the stale rate
   });
 
   it('crash BETWEEN claim and mint: the replay completes the original attempt with the claimed id', async () => {
