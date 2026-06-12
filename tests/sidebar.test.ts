@@ -33,7 +33,7 @@ describe('visibleNavItems', () => {
     expect(items).not.toContain('my-partner');
   });
 
-  it('partner admin sees base + my-partner; never partners or team', () => {
+  it('partner admin sees base + my-partner; never partners, team, or rates', () => {
     const items = visibleNavItems(staff('admin', 'acme'));
     expect(items).toContain('overview');
     expect(items).toContain('transactions');
@@ -41,6 +41,7 @@ describe('visibleNavItems', () => {
     expect(items).toContain('my-partner');
     expect(items).not.toContain('partners');
     expect(items).not.toContain('team');
+    expect(items).not.toContain('rates'); // cross-tenant pricing — platform-only
   });
 
   it('partner agent matches partner admin (no team toggle inside partner scope)', () => {
@@ -48,6 +49,7 @@ describe('visibleNavItems', () => {
     expect(items).toContain('my-partner');
     expect(items).not.toContain('partners');
     expect(items).not.toContain('team');
+    expect(items).not.toContain('rates');
   });
 });
 
@@ -58,13 +60,13 @@ describe('visibleNavGroups (Stage 5b IA)', () => {
     expect(groups[0].items).toEqual(['overview', 'ops']);
     expect(groups.map((g) => g.label)).toEqual([undefined, 'Money', 'People', 'Insights', 'Platform']);
     const platform = groups.find((g) => g.label === 'Platform')!;
-    expect(platform.items).toEqual(['partners', 'corridors', 'team', 'api-keys']);
+    expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'team', 'api-keys']);
   });
 
   it('platform agent: no team, no api-keys in the Platform group', async () => {
     const { visibleNavGroups } = await import('@/app/admin-dashboard/nav');
     const platform = visibleNavGroups(staff('agent', undefined)).find((g) => g.label === 'Platform')!;
-    expect(platform.items).toEqual(['partners', 'corridors']);
+    expect(platform.items).toEqual(['partners', 'corridors', 'rates']);
   });
 
   it('partner-scoped staff: no ops, Partner group with my-partner', async () => {
