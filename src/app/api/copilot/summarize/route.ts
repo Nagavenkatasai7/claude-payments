@@ -63,16 +63,14 @@ export async function POST(req: NextRequest) {
   const messages = await repo.listMessages(ticket.id, { includeInternal: true });
 
   try {
-    const summary = await summarizeCase(ticket, messages);
-    // Triage is best-effort garnish on the summary: its failure must not
-    // take the summary down with it.
-    let triage: TriageSuggestion | null = null;
-    try {
-      const first = messages.find((m) => !m.internal);
-      triage = await triageSuggest(ticket.subject, first?.body ?? '');
-    } catch {
-      /* summary still ships */
-    }
+    // Two independent one-shot model calls — run them in parallel. Triage is
+    // best-effort garnish on the summary: its failure must not take the
+    // summary down with it (a failed summary still 502s the whole response).
+    const first = messages.find((m) => !m.internal);
+    const [summary, triage] = await Promise.all([
+      summarizeCase(ticket, messages),
+      triageSuggest(ticket.subject, first?.body ?? '').catch((): TriageSuggestion | null => null),
+    ]);
     await createAuditRepo(getDb()).record({
       partnerId: ticket.partnerId,
       actor: staff.username,

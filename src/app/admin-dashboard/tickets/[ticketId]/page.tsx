@@ -74,27 +74,31 @@ export default async function TicketDetailPage({
   // Out-of-scope, missing, or internal-kind ids all collapse to the same 404.
   if (!ticket || ticket.kind !== 'customer') notFound();
 
-  const messages = await repo.listMessages(ticket.id, { includeInternal: true });
+  // The four reads below are independent once the ticket is in hand — fetch in parallel.
+  const [messages, linkedTransfer, allStaff, partner] = await Promise.all([
+    repo.listMessages(ticket.id, { includeInternal: true }),
+    ticket.transferId
+      ? createTransferRepo(getDb()).getTransfer(ticket.transferId)
+      : Promise.resolve(null),
+    getAuthStore().listStaff(),
+    scope.kind === 'platform'
+      ? getPartnerStore().getPartner(ticket.partnerId)
+      : Promise.resolve(null),
+  ]);
 
   // Linked transfer summary — MASKED default read, double-scoped (the ticket
   // is already in scope; the transfer must be too before we show anything).
-  let transfer: Transfer | null = null;
-  if (ticket.transferId) {
-    const t = await createTransferRepo(getDb()).getTransfer(ticket.transferId);
-    if (t && canSee(scope, t.partnerId)) transfer = t;
-  }
+  const transfer: Transfer | null =
+    linkedTransfer && canSee(scope, linkedTransfer.partnerId) ? linkedTransfer : null;
 
   // Assign dropdown: active support/admin accounts whose scope can see this
   // ticket's tenant (filtered in memory, same rule the action re-validates).
-  const assignable = (await getAuthStore().listStaff()).filter(
+  const assignable = allStaff.filter(
     (s) =>
       (s.role === 'support' || s.role === 'admin') &&
       s.status !== 'suspended' &&
       canSee(scopeOf(s), ticket.partnerId),
   );
-
-  const partner =
-    scope.kind === 'platform' ? await getPartnerStore().getPartner(ticket.partnerId) : null;
   const closed = ticket.status === 'closed';
 
   return (

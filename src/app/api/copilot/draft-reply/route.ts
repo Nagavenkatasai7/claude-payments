@@ -59,19 +59,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false }, { status: 404 });
   }
 
-  const messages = await repo.listMessages(ticket.id, { includeInternal: true });
-
-  // Customer context: the linked transfer's MASKED summary (default ledger
-  // read — the model never sees a full payout destination).
+  // Customer-facing draft: fetch ONLY the customer-visible thread (draftReply
+  // re-filters internal notes as defense-in-depth, but the raw notes never
+  // even enter this handler). The linked-transfer context is the MASKED
+  // default ledger read — the model never sees a full payout destination.
+  const [messages, linkedTransfer] = await Promise.all([
+    repo.listMessages(ticket.id, { includeInternal: false }),
+    ticket.transferId
+      ? createTransferRepo(getDb()).getTransfer(ticket.transferId)
+      : Promise.resolve(null),
+  ]);
   let customerContext = '';
-  if (ticket.transferId) {
-    const t = await createTransferRepo(getDb()).getTransfer(ticket.transferId);
-    if (t && canSee(scope, t.partnerId)) {
-      customerContext =
-        `Linked transfer ${t.id}: status ${t.status}, ` +
-        `${t.amountSource} ${t.sourceCurrency} to ${t.recipientName} (${t.payoutDestination}), ` +
-        `created ${t.createdAt}`;
-    }
+  if (linkedTransfer && canSee(scope, linkedTransfer.partnerId)) {
+    customerContext =
+      `Linked transfer ${linkedTransfer.id}: status ${linkedTransfer.status}, ` +
+      `${linkedTransfer.amountSource} ${linkedTransfer.sourceCurrency} to ` +
+      `${linkedTransfer.recipientName} (${linkedTransfer.payoutDestination}), ` +
+      `created ${linkedTransfer.createdAt}`;
   }
 
   try {

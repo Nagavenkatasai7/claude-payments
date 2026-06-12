@@ -65,13 +65,18 @@ export async function TicketQueueView({
 }) {
   const isPlatform = scope.kind === 'platform';
   const repo = createTicketRepo(getDb());
-  // One scoped fetch; status/priority/assignee narrowing happens in memory so
-  // the filter chips can show accurate counts from the same window.
-  const all = await repo.listTickets({
-    ...(scope.kind === 'partner' ? { partnerId: scope.partnerId } : {}),
-    kind: 'customer',
-    limit: 500,
-  });
+  // One scoped fetch (tenant pinning + kind in the repo WHERE); status/
+  // priority/assignee narrowing happens in memory so the filter chips can
+  // show accurate counts from the same window. The partner-name map (platform
+  // staff's Partner column) is independent — fetched in parallel.
+  const [all, partners] = await Promise.all([
+    repo.listTickets({
+      ...(scope.kind === 'partner' ? { partnerId: scope.partnerId } : {}),
+      kind: 'customer',
+      limit: 500,
+    }),
+    isPlatform ? getPartnerStore().listPartners() : Promise.resolve([]),
+  ]);
 
   const statusFilter = (STATUSES as readonly string[]).includes(params.status ?? '')
     ? (params.status as TicketStatus)
@@ -93,9 +98,7 @@ export async function TicketQueueView({
   );
 
   const partnerName: Record<string, string> = {};
-  if (isPlatform) {
-    for (const p of await getPartnerStore().listPartners()) partnerName[p.id] = p.name;
-  }
+  for (const p of partners) partnerName[p.id] = p.name;
 
   const columns: ExpandableColumn[] = [
     { label: 'Subject', primary: true },

@@ -21,7 +21,11 @@ export async function GET() {
 
   const scope = scopeOf(staff);
   const partnerId = scope.kind === 'partner' ? scope.partnerId : undefined;
-  const summary = await getStore().transfersSummary(partnerId);
+  // Two independent aggregates — run in parallel (this is the 5s polling hot path).
+  const [summary, ticketStamp] = await Promise.all([
+    getStore().transfersSummary(partnerId),
+    createTicketRepo(getDb()).ticketStamp(partnerId),
+  ]);
   // Any visible change moves at least one of these numbers/timestamps.
   // `tk` (B3) folds ticket churn into the same opaque stamp — LiveRefresh only
   // ever compares the string, so appending a field is upstream-safe.
@@ -30,7 +34,7 @@ export async function GET() {
     s: summary.byStatus,
     n: summary.needsAttention,
     l: summary.latest,
-    tk: await createTicketRepo(getDb()).ticketStamp(partnerId),
+    tk: ticketStamp,
   });
   return NextResponse.json({ ok: true, stamp, summary });
 }
