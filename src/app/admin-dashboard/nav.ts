@@ -19,6 +19,7 @@ export type SidebarActive =
   | 'kyc'
   | 'analytics'
   | 'corridors'
+  | 'rates'
   | 'team'
   | 'api-keys'
   | 'my-partner';
@@ -44,6 +45,7 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
         items: [
           'partners',
           'corridors',
+          'rates', // platform-wide cross-tenant pricing — never shown to partner-scoped staff
           ...(staff.role === 'admin' ? (['team', 'api-keys'] as NavItem[]) : []),
         ],
       },
@@ -83,6 +85,7 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   kyc:          { label: 'KYC',          icon: 'kyc',          hrefFor: () => '/admin-dashboard/kyc' },
   analytics:    { label: 'Analytics',    icon: 'analytics',    hrefFor: () => '/admin-dashboard/analytics' },
   corridors:    { label: 'Corridors',    icon: 'corridors',    hrefFor: () => '/admin-dashboard/corridors' },
+  rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
   'my-partner': { label: 'My partner',   icon: 'partners',     hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
 };

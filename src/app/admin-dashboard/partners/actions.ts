@@ -4,6 +4,8 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
+import { getDb } from '@/db/client';
+import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
@@ -12,7 +14,8 @@ import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
-import type { Partner, PartnerStatus, PartnerId, StaffRole, KycMode } from '@/lib/types';
+import type { Partner, PartnerStatus, PartnerId, StaffRole, KycMode, CurrencyCode } from '@/lib/types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
 // unchanged" (secrets are never rendered back, so blank ≠ delete).
@@ -202,6 +205,54 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
       credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
       webhookSecret,
     },
+  });
+  revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+// ── Pricing: admin-set corridor margin (best-rate selection) ─────────────────
+// The admin owns ONLY marginBps. The pushed fields (effectiveRate / expiresAt /
+// pushedAt) belong to the partner's rate push — this action passes them as
+// undefined so the repo's merge semantics NEVER clobber a pushed rate. An empty
+// margin field is an explicit null ⇒ clears the stored margin.
+
+const SUPPORTED_CURRENCIES: ReadonlySet<string> = new Set(
+  Object.values(DEFAULT_CURRENCY_FOR_COUNTRY),
+);
+
+function parseCurrency(v: unknown): CurrencyCode {
+  const s = String(v ?? '').trim().toUpperCase();
+  if (!SUPPORTED_CURRENCIES.has(s)) throw new Error(`Unsupported currency: ${s || '(empty)'}.`);
+  return s as CurrencyCode;
+}
+
+export async function savePricingAction(formData: FormData): Promise<void> {
+  const id = String(formData.get('id') ?? '').trim();
+  await gatePartnerConfig(id);
+
+  const sourceCurrency = parseCurrency(formData.get('sourceCurrency'));
+  const destinationCurrency = parseCurrency(formData.get('destinationCurrency'));
+  if (sourceCurrency === destinationCurrency) {
+    throw new Error('Source and destination currencies must differ.');
+  }
+
+  const raw = String(formData.get('marginBps') ?? '').trim();
+  let marginBps: number | null = null; // empty input ⇒ explicit null ⇒ clear
+  if (raw !== '') {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || Math.abs(n) > 10_000) {
+      throw new Error('Margin must be an integer between -10000 and 10000 basis points.');
+    }
+    marginBps = n;
+  }
+
+  await createPartnerRateRepo(getDb()).upsertRate({
+    id: newTransferId(),
+    partnerId: id, // route-bound id is authoritative (gated above)
+    sourceCurrency,
+    destinationCurrency,
+    marginBps,
+    // effectiveRate / expiresAt / pushedAt deliberately omitted (undefined ⇒
+    // keep) so a partner's pushed rate survives an admin margin save.
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }

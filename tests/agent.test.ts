@@ -9,10 +9,24 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
+import { selectSettlementRoute } from '@/lib/partner-rates';
 import type { ChatMessage, TurnContext } from '@/lib/types';
 import type { Db } from '@/db/client';
+
+// Best-rate routing (B2): the agent wires the LIVE route selector into the
+// tool ctx — `selectSettlementRoute(getDb(), …)`. getDb() dials the dud test
+// DATABASE_URL, so the module is mocked file-wide; the default impl returns
+// the platform route (mid), which is byte-identical to no routing for every
+// pre-existing test. The wiring suite overrides per-test.
+vi.mock('@/lib/partner-rates', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/partner-rates')>()),
+  selectSettlementRoute: vi.fn(
+    async (_db: unknown, _integrations: unknown, _s: unknown, _d: unknown, mid: number) =>
+      ({ fxRate: mid, source: 'platform' as const }),
+  ),
+}));
 
 // Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
@@ -1016,5 +1030,82 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
     });
     const reply = await agent.runAgentTurn(PHONE, 'send money');
     expect(reply).toBe(''); // the picker card IS the message; trailing text suppressed
+  });
+});
+
+describe('best-rate routing wiring (B2)', () => {
+  // The agent must hand the tools a LIVE routeSelector that consults
+  // selectSettlementRoute (mocked file-wide; see the vi.mock at the top).
+
+  async function seedVerified(deps: ReturnType<typeof extraDeps>, phone: string, partnerId = 'default') {
+    const nowIso = new Date().toISOString();
+    await deps.customerStore.saveCustomer({
+      senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
+      senderCountry: 'US', partnerId, optInAt: nowIso,
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+  }
+
+  function quoteScript(): { responses: ChatMessage[]; next: () => ChatMessage } {
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'get_quote', arguments: JSON.stringify({ amount_usd: 100, funding_method: 'bank_transfer' }) } }],
+      },
+      { role: 'assistant', content: 'Here is your quote!' },
+    ];
+    let i = 0;
+    return { responses, next: () => responses[i++] };
+  }
+
+  it('default tenant: get_quote consults the wired selector with the mid rate and applies the winning route', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerified(deps, PHONE);
+    vi.mocked(selectSettlementRoute).mockClear();
+    vi.mocked(selectSettlementRoute).mockResolvedValueOnce({
+      fxRate: 86, source: 'partner', settlementPartnerId: 'rail-partner-x',
+    });
+    const script = quoteScript();
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, chat: async () => script.next(),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'how much to send $100?');
+    expect(reply).toBe('Here is your quote!');
+    // The LIVE selector was consulted with this corridor + the mid cross-rate.
+    expect(vi.mocked(selectSettlementRoute)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(selectSettlementRoute)).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), 'USD', 'INR', 85.2,
+    );
+    // The tool result the model saw quotes the WINNING rate — and leaks no partner id.
+    const history = await store.getConversation(PHONE);
+    const toolMsg = history.find((m) => m.role === 'tool');
+    expect(toolMsg).toBeDefined();
+    const result = JSON.parse(toolMsg!.content!) as Record<string, unknown>;
+    expect(result.fx_rate).toBe(86);
+    expect(result.amount_inr).toBe(Math.round(100 * 86));
+    expect(toolMsg!.content).not.toContain('rail-partner-x');
+  });
+
+  it('white-label tenant: the wired selector is NEVER consulted; the quote stays at mid', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedPartner(db, 'acme');
+    await seedVerified(deps, PHONE, 'acme');
+    vi.mocked(selectSettlementRoute).mockClear();
+    const script = quoteScript();
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, chat: async () => script.next(),
+    });
+    await agent.runAgentTurn(PHONE, 'how much to send $100?');
+    expect(vi.mocked(selectSettlementRoute)).not.toHaveBeenCalled();
+    const history = await store.getConversation(PHONE);
+    const toolMsg = history.find((m) => m.role === 'tool');
+    const result = JSON.parse(toolMsg!.content!) as Record<string, unknown>;
+    expect(result.fx_rate).toBe(85.2); // pinned to the partner at mid
   });
 });

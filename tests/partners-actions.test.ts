@@ -4,16 +4,24 @@ import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 
+// Mutable staff identity so individual tests can exercise the scope gates
+// (reset to a platform admin in beforeEach — the historical default).
+let currentStaff: { username: string; role: 'admin' | 'agent'; partnerId?: string };
 vi.mock('@/lib/auth', () => ({
-  requireAdmin: async () => ({ username: 'admin', role: 'admin' }),
-  requireStaff: async () => ({ username: 'admin', role: 'admin' }),
-  requirePlatformAdmin: async () => ({ username: 'admin', role: 'admin' }),
+  requireAdmin: async () => currentStaff,
+  requireStaff: async () => currentStaff,
+  requirePlatformAdmin: async () => currentStaff,
 }));
 
 // Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
 // The vi.mock factory closes over the let-variable (assigned in beforeEach).
 let db: Db;
 let ps: import('@/lib/partner-store').PartnerStore;
+// savePricingAction goes straight at the rate repo via getDb() — same PGlite.
+vi.mock('@/db/client', async (orig) => {
+  const real = await orig<typeof import('@/db/client')>();
+  return { ...real, getDb: () => db };
+});
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return {
@@ -48,6 +56,7 @@ vi.mock('next/navigation', () => ({
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
 beforeEach(async () => {
+  currentStaff = { username: 'admin', role: 'admin' }; // platform admin
   sharedRedis.dump.clear();
   db = await freshDb();
   ps = createPartnerStore(db);
@@ -58,8 +67,10 @@ import {
   wizardCreatePartnerAction,
   updatePartnerAction,
   setPartnerStatusAction,
+  savePricingAction,
 } from '@/app/admin-dashboard/partners/actions';
 import { createPartnerStore } from '@/lib/partner-store';
+import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 
 describe('wizardCreatePartnerAction (the setup wizard commit)', () => {
   it('creates an active Partner, saves integrations, and issues a show-once API key', async () => {
@@ -223,5 +234,90 @@ describe('setPartnerStatusAction session revocation', () => {
     await setPartnerStatusAction(fd);
 
     expect(await authStore.getSessionUser(token)).toBeNull();
+  });
+});
+
+describe('savePricingAction (admin corridor margin)', () => {
+  const inHours = (h: number) => new Date(Date.now() + h * 3_600_000).toISOString();
+
+  function marginForm(over: Record<string, string> = {}): FormData {
+    const fd = new FormData();
+    fd.set('id', 'p1');
+    fd.set('sourceCurrency', 'USD');
+    fd.set('destinationCurrency', 'INR');
+    fd.set('marginBps', '25');
+    for (const [k, v] of Object.entries(over)) fd.set(k, v);
+    return fd;
+  }
+
+  beforeEach(async () => {
+    await ps.savePartner({
+      id: 'p1', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('persists an integer margin (negative allowed) for a corridor', async () => {
+    await savePricingAction(marginForm());
+    let r = await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR');
+    expect(r?.marginBps).toBe(25);
+    expect(r?.effectiveRate).toBeUndefined();
+
+    await savePricingAction(marginForm({ marginBps: '-40' }));
+    r = await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR');
+    expect(r?.marginBps).toBe(-40);
+  });
+
+  it('NEVER clobbers a pushed rate; an empty margin field clears the margin only', async () => {
+    const repo = createPartnerRateRepo(db);
+    const expiresAt = inHours(2);
+    await repo.upsertRate({
+      id: 'pr_push', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR',
+      effectiveRate: 86.5, expiresAt, pushedAt: inHours(0),
+    });
+
+    await savePricingAction(marginForm());
+    let r = await repo.getRate('p1', 'USD', 'INR');
+    expect(r?.marginBps).toBe(25);
+    expect(r?.effectiveRate).toBe(86.5);       // pushed rate untouched
+    expect(r?.expiresAt).toBe(expiresAt);      // freshness untouched
+
+    // Empty margin ⇒ explicit clear — still leaves the push alone.
+    await savePricingAction(marginForm({ marginBps: '' }));
+    r = await repo.getRate('p1', 'USD', 'INR');
+    expect(r?.marginBps).toBeUndefined();
+    expect(r?.effectiveRate).toBe(86.5);
+  });
+
+  it('rejects invalid input: same corridor sides, unknown currency, non-integer margin', async () => {
+    await expect(
+      savePricingAction(marginForm({ destinationCurrency: 'USD' })),
+    ).rejects.toThrow(/differ/i);
+    await expect(
+      savePricingAction(marginForm({ sourceCurrency: 'ZZZ' })),
+    ).rejects.toThrow(/unsupported currency/i);
+    await expect(
+      savePricingAction(marginForm({ marginBps: '12.5' })),
+    ).rejects.toThrow(/integer/i);
+    await expect(
+      savePricingAction(marginForm({ marginBps: '99999' })),
+    ).rejects.toThrow(/integer/i);
+    expect(await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR')).toBeNull();
+  });
+
+  it("scope gate: a partner-admin can set their OWN margin but another tenant's is 'not found'", async () => {
+    await ps.savePartner({
+      id: 'rival', name: 'Rival', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    currentStaff = { username: 'p1admin', role: 'admin', partnerId: 'p1' };
+    await savePricingAction(marginForm()); // own partner — allowed
+    expect((await createPartnerRateRepo(db).getRate('p1', 'USD', 'INR'))?.marginBps).toBe(25);
+
+    await expect(
+      savePricingAction(marginForm({ id: 'rival' })),
+    ).rejects.toThrow(/not found/i); // generic — never discloses out-of-scope partners
+    expect(await createPartnerRateRepo(db).getRate('rival', 'USD', 'INR')).toBeNull();
   });
 });

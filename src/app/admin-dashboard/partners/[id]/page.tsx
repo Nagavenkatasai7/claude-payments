@@ -4,6 +4,8 @@ import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
+import { getDb } from '@/db/client';
+import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
@@ -25,9 +27,11 @@ import {
   removePartnerStaffAction,
   saveWhatsappConfigAction,
   savePaymentConfigAction,
+  savePricingAction,
   revokeApiKeyAction,
 } from '../actions';
-import type { CountryCode } from '@/lib/types';
+import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -44,6 +48,33 @@ function configuredBadge(set: boolean) {
 }
 
 const ALL_COUNTRIES: CountryCode[] = ['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
+
+// The supported corridor currencies — derived from the single source of truth.
+const ALL_CURRENCIES: CurrencyCode[] = [...new Set(Object.values(DEFAULT_CURRENCY_FOR_COUNTRY))];
+
+const RATE_COLUMNS: ExpandableColumn[] = [
+  { label: 'Corridor', primary: true },
+  { label: 'Pushed rate', primary: true },
+  { label: 'Freshness', primary: true },
+  { label: 'Expires' },
+  { label: 'Margin (bps)' },
+];
+
+// FRESH = a pushed rate the selector would actually use (mirrors
+// effectiveRateFor: rate > 0 AND expiresAt in the future); EXPIRED = pushed
+// but no longer competing; — = never pushed.
+function freshnessBadge(r: PartnerRate, nowMs: number) {
+  if (r.effectiveRate === undefined) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const fresh =
+    r.effectiveRate > 0 && r.expiresAt !== undefined && Date.parse(r.expiresAt) > nowMs;
+  return fresh ? (
+    <Badge variant="outline" className="border-success/50 text-success">FRESH</Badge>
+  ) : (
+    <Badge variant="outline" className="text-destructive">EXPIRED</Badge>
+  );
+}
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'ID' },
@@ -85,13 +116,15 @@ export default async function PartnerDetailPage({
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).
-  const [summary, recentPage, allStaff, integrations, apiKeys] = await Promise.all([
+  const [summary, recentPage, allStaff, integrations, apiKeys, rates] = await Promise.all([
     getStore().transfersSummary(partner.id), // partner.id is scope-checked above
     scoped.transfersPage({ limit: 50, partnerFilter: partner.id }),
     getAuthStore().listStaff(),
     getPartnerIntegrationsStore().getIntegrations(partner.id),
     getPartnerApiKeyStore().list(partner.id),
+    createPartnerRateRepo(getDb()).listRatesForPartner(partner.id), // scope-checked above
   ]);
+  const nowMs = Date.now();
   const recents = recentPage.items;
   const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
 
@@ -133,6 +166,7 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="settings">Settings</TabsTrigger>}
             {isAdmin && <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>}
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
+            {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
             <TabsTrigger value="staff">Staff</TabsTrigger>
             {isAdmin && <TabsTrigger value="integration">Integration</TabsTrigger>}
@@ -329,6 +363,84 @@ export default async function PartnerDetailPage({
                     <Input name="signingSecret" type="password" autoComplete="off" placeholder="Outbound signing secret (leave blank to keep)" />
                     <Input name="webhookSecret" type="password" autoComplete="off" placeholder="Inbound webhook secret (leave blank to keep)" />
                     <Button type="submit">Save settlement config</Button>
+                  </form>
+                </CardContent>
+              </Card>
+            </TabsContent>
+          )}
+
+          {/* ── Pricing (per-corridor rates + admin margin) ──────────────── */}
+          {isAdmin && (
+            <TabsContent value="pricing">
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Pricing</CardTitle>
+                  <CardDescription>
+                    Per-corridor pricing for best-rate selection. Pushed rates come from your
+                    rate API and expire; the margin is a standing adjustment off mid-market
+                    (positive ⇒ better for the customer) used when no fresh push exists.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ExpandableTable
+                    columns={RATE_COLUMNS}
+                    empty={<>No corridor pricing yet — set a margin below or push a rate via the API.</>}
+                    rows={rates.map((r) => ({
+                      key: `${r.sourceCurrency}-${r.destinationCurrency}`,
+                      label: `${r.sourceCurrency} → ${r.destinationCurrency}`,
+                      cells: [
+                        `${r.sourceCurrency} → ${r.destinationCurrency}`,
+                        r.effectiveRate !== undefined ? (
+                          <span key="pushed" className="tabular-nums">{r.effectiveRate}</span>
+                        ) : (
+                          <span key="pushed" className="text-xs text-muted-foreground">—</span>
+                        ),
+                        freshnessBadge(r, nowMs),
+                        r.expiresAt ? new Date(r.expiresAt).toLocaleString() : '—',
+                        r.marginBps !== undefined ? (
+                          <span key="margin" className="tabular-nums">{r.marginBps}</span>
+                        ) : (
+                          <span key="margin" className="text-xs text-muted-foreground">—</span>
+                        ),
+                      ],
+                    }))}
+                  />
+                  <form action={savePricingAction} className="mt-4 space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="p-rate-source">Source currency</Label>
+                        <select id="p-rate-source" className={SELECT_CLASS} name="sourceCurrency" defaultValue="USD">
+                          {ALL_CURRENCIES.map((c) => (
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="p-rate-dest">Destination currency</Label>
+                        <select id="p-rate-dest" className={SELECT_CLASS} name="destinationCurrency" defaultValue="INR">
+                          {ALL_CURRENCIES.map((c) => (
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="p-rate-margin">Margin (bps)</Label>
+                        <Input
+                          id="p-rate-margin"
+                          name="marginBps"
+                          type="number"
+                          step="1"
+                          min="-10000"
+                          max="10000"
+                          placeholder="e.g. 25 — empty clears"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Saving updates only the margin — a rate your systems pushed is never overwritten here.
+                    </p>
+                    <Button type="submit">Save margin</Button>
                   </form>
                 </CardContent>
               </Card>

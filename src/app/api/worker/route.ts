@@ -4,6 +4,7 @@ import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
+import { sweepStaleRates } from '@/lib/rate-staleness';
 import { logError } from '@/lib/log';
 import {
   sendText,
@@ -78,6 +79,15 @@ async function run(req: NextRequest): Promise<NextResponse> {
     logError('worker.sweep', err);
   }
 
+  // Pricing staleness sweep (same heartbeat): each expired pushed partner rate
+  // raises exactly one deduped ops alert. Failures never block the drain.
+  let staleRates = 0;
+  try {
+    staleRates = await sweepStaleRates(deps.db);
+  } catch (err) {
+    logError('worker.rate-sweep', err);
+  }
+
   const workerId = `w_${newTransferId()}`;
   const started = Date.now();
   let processed = 0;
@@ -93,7 +103,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     if (drainedNothing || Date.now() - started > TIME_BUDGET_MS) break;
   }
 
-  return NextResponse.json({ ok: true, processed, failed, dead, sweep });
+  return NextResponse.json({ ok: true, processed, failed, dead, sweep, staleRates });
 }
 
 export async function POST(req: NextRequest) {
