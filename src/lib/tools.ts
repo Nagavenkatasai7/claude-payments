@@ -28,6 +28,46 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
+import { logWarn } from './log';
+
+// ── Channel seam (B5) ────────────────────────────────────────────────────────
+// The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
+// customer web dashboard chat (read-only + refund requests). 'whatsapp' is the
+// default everywhere so every existing call site is byte-for-byte unchanged.
+export type AgentChannel = 'whatsapp' | 'web';
+
+/**
+ * The ONLY tools the web channel may see or execute. Everything else —
+ * interactive WhatsApp sends (send_recipient_picker, send_approve_picker),
+ * direct mutations (create_transfer, create_schedule, cancel_schedule,
+ * cancel_draft, update_recipient_phone, capture_corridor_request) — is
+ * excluded BOTH from the schemas the model sees AND from executeTool dispatch
+ * (defense-in-depth: schema hiding alone does not stop a model that names a
+ * tool from memory).
+ */
+export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+  'get_quote',
+  'check_payment_status',
+  'check_send_limit',
+  'list_saved_recipients',
+  'resolve_recipient',
+  'validate_phone',
+  'list_schedules',
+  'repeat_transfer',
+  'request_refund',
+  'generate_payment_link',
+]);
+
+/** The tool schemas the model is shown for a given channel. */
+export function toolSchemasForChannel(channel: AgentChannel): ChatTool[] {
+  if (channel !== 'web') return toolSchemas;
+  return toolSchemas.filter((t) => WEB_TOOL_ALLOWLIST.has(t.function.name));
+}
+
+/** The one place the ToolContext channel default is interpreted. */
+function isWebChannel(ctx: ToolContext): boolean {
+  return (ctx.channel ?? 'whatsapp') === 'web';
+}
 
 // ── Approve message helpers ──────────────────────────────────────────────────
 
@@ -528,6 +568,10 @@ export interface ToolContext {
   scheduleStore: ScheduleStore;
   draftStore: DraftStore;
   turn: TurnContext;
+  // Channel seam (B5): 'web' restricts dispatch to WEB_TOOL_ALLOWLIST and makes
+  // the approve-card path return a pay link instead of a WhatsApp interactive.
+  // Absent ⇒ 'whatsapp' — every existing call site is unchanged.
+  channel?: AgentChannel;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents
@@ -651,6 +695,16 @@ export async function executeTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // Web-channel dispatch gate (defense-in-depth on top of schema filtering):
+  // a model that names a non-allowlisted tool on web gets a flat error and
+  // NOTHING runs — no draft, no send, no write. The attempt is logged via the
+  // scrubbed logger (phone masked to last-4) so guardrail probes are visible.
+  if (isWebChannel(ctx) && !WEB_TOOL_ALLOWLIST.has(name)) {
+    logWarn('web-chat.tool-blocked', `blocked non-allowlisted tool on web channel: ${name}`, {
+      phone: ctx.phone,
+    });
+    return { error: 'not available here' };
+  }
   switch (name) {
     case 'get_quote':
       return getQuoteTool(args, ctx);
@@ -1023,7 +1077,10 @@ async function generatePaymentLinkTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const transfer = await ctx.store.getTransfer(String(args.transfer_id));
-  if (!transfer) return { error: 'Transfer not found.' };
+  // STRICT ownership, 404-never-403 (mirrors request_refund): another
+  // customer's transfer is indistinguishable from a missing one — this tool
+  // must never mint a pay link for a transfer the caller doesn't own.
+  if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
   if (transfer.status === 'blocked') {
     return {
       error: 'This transfer did not pass compliance and cannot be paid.',
@@ -1037,7 +1094,9 @@ async function checkPaymentStatusTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const transfer = await ctx.store.getTransfer(String(args.transfer_id));
-  if (!transfer) return { error: 'Transfer not found.' };
+  // STRICT ownership, 404-never-403 (mirrors request_refund): no status oracle
+  // over other customers' transfer ids.
+  if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
   return { transfer_id: transfer.id, status: transfer.status };
 }
 
@@ -1155,7 +1214,9 @@ async function updateRecipientPhoneTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const transfer = await ctx.store.getTransfer(String(args.transfer_id));
-  if (!transfer) return { error: 'Transfer not found.' };
+  // STRICT ownership, 404-never-403 (mirrors request_refund): this tool
+  // MUTATES the transfer, so it must never touch one the caller doesn't own.
+  if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
 
   const recipientPhone = normalizePhone(args.recipient_phone);
   if (!isValidPhone(recipientPhone)) {
@@ -1520,6 +1581,22 @@ async function sendApprovePickerTool(
       q.destinationCurrency ?? 'INR',
     );
     const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
+    // Web channel (B5): no WhatsApp interactive exists here — return the
+    // canonical, code-generated pay-page URL instead of sending a card. The
+    // agent appends pay_url verbatim after stripping every model-written URL,
+    // so the link the customer taps is always ours. All the guards above
+    // (verify gate, cap, screening, draft) ran identically; money still only
+    // ever moves through the secure pay page. Reached via repeat_transfer —
+    // direct send_approve_picker calls are blocked at dispatch on web.
+    if (isWebChannel(ctx)) {
+      return {
+        draft_id: draftId,
+        summary,
+        pay_url: payUrl,
+        reply_hint:
+          'show the summary and tell the customer to tap the secure payment link below your reply to review and pay — the rate is locked for about 10 minutes',
+      };
+    }
     await sendCtaUrl(
       ctx.phone,
       `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
@@ -1589,6 +1666,16 @@ async function repeatTransferTool(
     return { error: 'That repeat would exceed your current sending cap.', cap_eval: limit };
   }
   if (limit.edd_required === true) {
+    // Web channel (B5): the EDD follow-up requires send_approve_picker with the
+    // collected source-of-funds + occupation, which the web channel cannot call.
+    // Degrade safely — never half-collect answers the channel can't submit.
+    if (isWebChannel(ctx)) {
+      return {
+        needs_edd: true,
+        error:
+          'This send needs a couple of quick extra verification questions that can only be completed in the WhatsApp chat. Kindly ask the customer to message us on WhatsApp to finish this transfer.',
+      };
+    }
     return {
       needs_edd: true,
       edd_threshold_usd: limit.edd_threshold_usd,
