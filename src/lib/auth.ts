@@ -50,7 +50,27 @@ export async function requirePlatformAdmin(): Promise<Staff> {
 }
 
 // P3: convenience for pages — returns staff and pre-computed scope.
+// SUPPORT ENFORCEMENT: every ops/money/people/platform page resolves its data
+// through requireScope, so this single bounce IS the role guard for the
+// 'support' role (nav hiding alone is never a guard). Ticket pages use
+// requireSupportOrAdmin below instead.
 export async function requireScope(): Promise<{ staff: Staff; scope: Scope }> {
   const staff = await requireStaff();
+  if (staff.role === 'support') redirect('/admin-dashboard/tickets');
+  return { staff, scope: scopeOf(staff) };
+}
+
+// For the few pages that take raw requireStaff but must exclude support
+// (e.g. the partners list). Admin/agent pass through unchanged.
+export async function requireOpsStaff(): Promise<Staff> {
+  const staff = await requireStaff();
+  if (staff.role === 'support') redirect('/admin-dashboard/tickets');
+  return staff;
+}
+
+// Ticket surfaces: support staff + admins (agents/operators stay on money ops).
+export async function requireSupportOrAdmin(): Promise<{ staff: Staff; scope: Scope }> {
+  const staff = await requireStaff();
+  if (staff.role !== 'support' && staff.role !== 'admin') redirect('/admin-dashboard');
   return { staff, scope: scopeOf(staff) };
 }

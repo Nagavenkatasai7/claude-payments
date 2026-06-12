@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { requireStaff } from '@/lib/auth';
+import { requireOpsStaff } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -22,7 +22,7 @@ const PARTNER_COLUMNS: ExpandableColumn[] = [
 ];
 
 export default async function PartnersPage() {
-  const staff = await requireStaff();
+  const staff = await requireOpsStaff();
   if (staff.partnerId) {
     redirect(`/admin-dashboard/partners/${staff.partnerId}`);
   }

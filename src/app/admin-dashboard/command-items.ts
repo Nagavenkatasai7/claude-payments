@@ -24,6 +24,8 @@ export interface CommandCaps {
   isPlatformAdmin: boolean;
   /** role === 'admin' (platform OR partner admin). */
   isAdmin: boolean;
+  /** role === 'support' — tickets-only; money/compliance actions are hidden. */
+  isSupport?: boolean;
 }
 
 // Extra search terms for nav entries whose label alone undersells them. The
@@ -31,6 +33,9 @@ export interface CommandCaps {
 // staff reach for when they think "pricing" or "margin", not "rates".
 const NAV_KEYWORD_EXTRAS: Partial<Record<ResolvedNavItem['key'], string>> = {
   rates: 'pricing margin bps fx corridor partner best-rate',
+  tickets: 'support ticket queue customer query question help',
+  'my-queue': 'support my tickets assigned queue',
+  'employee-questions': 'internal ask admin escalate question help',
 };
 
 export function buildCommandItems(
@@ -77,15 +82,18 @@ export function buildCommandItems(
       },
     );
   }
-  // Everyone (scope-filtered server-side on arrival).
-  actions.push({
-    id: 'act-flagged',
-    label: 'Review flagged & blocked',
-    href: '/admin-dashboard/compliance',
-    icon: 'compliance',
-    group: 'Actions',
-    keywords: 'action compliance flagged blocked watchlist review hold',
-  });
+  // Everyone EXCEPT support (the compliance page bounces them server-side
+  // anyway — requireScope — but don't offer the dead-end).
+  if (!caps.isSupport) {
+    actions.push({
+      id: 'act-flagged',
+      label: 'Review flagged & blocked',
+      href: '/admin-dashboard/compliance',
+      icon: 'compliance',
+      group: 'Actions',
+      keywords: 'action compliance flagged blocked watchlist review hold',
+    });
+  }
 
   return [...navigate, ...actions];
 }

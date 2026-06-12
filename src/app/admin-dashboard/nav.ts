@@ -22,7 +22,10 @@ export type SidebarActive =
   | 'rates'
   | 'team'
   | 'api-keys'
-  | 'my-partner';
+  | 'my-partner'
+  | 'tickets'
+  | 'my-queue'
+  | 'employee-questions';
 
 export type NavItem = SidebarActive;
 
@@ -33,12 +36,30 @@ export interface NavGroup {
 }
 
 export function visibleNavGroups(staff: Staff): NavGroup[] {
+  // Support staff are tickets-only: their nav shows nothing else, and the
+  // requireScope bounce in src/lib/auth.ts ENFORCES it server-side (the nav
+  // is presentation, never the guard). Employee-questions is where support
+  // staff ASK admins; admins ANSWER from the same page.
+  if (staff.role === 'support') {
+    return [
+      { label: 'Support', items: ['tickets', 'my-queue'] },
+      { label: 'Help', items: ['employee-questions'] },
+    ];
+  }
   if (!staff.partnerId) {
     // Platform IA: Home/Operations · Money · People · Insights · Platform.
     return [
       { items: ['overview', 'ops'] },
       { label: 'Money', items: ['transactions', 'schedules'] },
       { label: 'People', items: ['customers', 'kyc', 'compliance'] },
+      {
+        label: 'Support',
+        items: [
+          'tickets',
+          'my-queue',
+          ...(staff.role === 'admin' ? (['employee-questions'] as NavItem[]) : []),
+        ],
+      },
       { label: 'Insights', items: ['analytics'] },
       {
         label: 'Platform',
@@ -57,6 +78,14 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
     { items: ['overview'] },
     { label: 'Money', items: ['transactions', 'schedules'] },
     { label: 'People', items: ['customers', 'kyc', 'compliance'] },
+    {
+      label: 'Support',
+      items: [
+        'tickets',
+        'my-queue',
+        ...(staff.role === 'admin' ? (['employee-questions'] as NavItem[]) : []),
+      ],
+    },
     { label: 'Insights', items: ['analytics'] },
     { label: 'Partner', items: ['my-partner'] },
   ];
@@ -88,6 +117,9 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
   'my-partner': { label: 'My partner',   icon: 'partners',     hrefFor: (s) => `/admin-dashboard/partners/${s.partnerId}` },
+  tickets:      { label: 'Tickets',      icon: 'tickets',      hrefFor: () => '/admin-dashboard/tickets' },
+  'my-queue':   { label: 'My queue',     icon: 'queue',        hrefFor: () => '/admin-dashboard/tickets/my-queue' },
+  'employee-questions': { label: 'Employee questions', icon: 'question', hrefFor: () => '/admin-dashboard/employee-questions' },
 };
 
 /** A nav entry resolved to plain serializable data — safe to pass to a client component. */
