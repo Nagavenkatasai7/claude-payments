@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { calculatorMessage, waLink, WA_MESSAGES } from './wa';
+import { inr as formatInr } from './format';
 import WhatsAppIcon from './WhatsAppIcon';
 
 interface Props {
@@ -11,19 +12,14 @@ interface Props {
 
 const DEFAULT_AMOUNT = 1000;
 
-function formatInr(n: number): string {
-  // en-IN grouping (lakh/crore) with no decimals — recipients see whole rupees.
-  return '₹' + Math.round(n).toLocaleString('en-IN');
-}
-
 function formatUsd(n: number): string {
   return '$' + n.toLocaleString('en-US');
 }
 
-// Tailwind recipes (Stage 5e — values lifted verbatim from the legacy .lp
-// rules; the landing root re-declares the --lp-* palette these consume).
+// Tailwind recipes (B7 rebuild — flat near-black card chrome to match the
+// new landing; the landing root re-declares the --lp-* palette these consume).
 const tier2Card =
-  'rounded-[18px] border border-white/[.12] bg-white/[.06] backdrop-blur-[10px] [box-shadow:0_18px_40px_-22px_rgba(8,12,30,.7),inset_0_1px_0_rgba(255,255,255,.15)]';
+  'rounded-2xl border border-white/10 bg-white/[.04] [box-shadow:0_24px_60px_-30px_rgba(0,0,0,.9)]';
 const btnWaBlock =
   'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border-0 bg-[var(--lp-wa)] px-[22px] py-[13px] min-h-12 text-base leading-normal font-bold text-[#04231A] [box-shadow:0_10px_26px_-10px_rgba(37,211,102,.6)] [transition:background_.18s_ease,transform_.18s_ease,box-shadow_.18s_ease] hover:bg-[var(--lp-wa-deep)] hover:text-[#F5F8FF] hover:-translate-y-px';
 

@@ -28,40 +28,39 @@ function Icon({ children }: { children: ReactNode }) {
   );
 }
 
-export function LockIcon() {
-  return (
-    <Icon>
-      <rect x="3" y="11" width="18" height="10" rx="2" />
-      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-    </Icon>
-  );
-}
-
-export function RateIcon() {
-  return (
-    <Icon>
-      <path d="M3 17l6-6 4 4 8-8" />
-      <path d="M21 7v5h-5" />
-    </Icon>
-  );
-}
-
-export function GlobeIcon() {
-  return (
-    <Icon>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18" />
-      <path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18" />
-    </Icon>
-  );
-}
-
 export function BankIcon() {
   return (
     <Icon>
       <path d="M3 10l9-6 9 6" />
       <path d="M5 10v8M9 10v8M15 10v8M19 10v8" />
       <path d="M3 21h18" />
+    </Icon>
+  );
+}
+
+export function ShieldIcon() {
+  return (
+    <Icon>
+      <path d="M12 3l8 3v6c0 4.5-3.2 7.7-8 9-4.8-1.3-8-4.5-8-9V6l8-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </Icon>
+  );
+}
+
+export function AuditIcon() {
+  return (
+    <Icon>
+      <path d="M8 4h10a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7l3-3z" />
+      <path d="M9 11h6M9 15h6" />
+    </Icon>
+  );
+}
+
+export function BadgeIcon() {
+  return (
+    <Icon>
+      <circle cx="12" cy="9" r="5" />
+      <path d="M8.5 13.5L7 21l5-2.5L17 21l-1.5-7.5" />
     </Icon>
   );
 }
