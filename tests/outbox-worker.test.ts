@@ -259,6 +259,138 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
   });
 });
 
+describe('drainOnce — funding.refund (the money-back leg)', () => {
+  function refundFixture(over: Partial<Transfer> = {}): Transfer {
+    return {
+      ...transferFixture(),
+      status: 'cancelled',
+      fundingRef: 'mockfund-wk_t1',
+      refundStatus: 'pending',
+      ...over,
+    } as Transfer;
+  }
+
+  it("completes the refund and queues the customer message with the OWNING partner's creds (never the settlement partner's)", async () => {
+    // Routed transfer: brand owner 'acme', settles via 'railp'. The refund
+    // message must ride the OWNER's WhatsApp number — that's who the customer
+    // has been talking to.
+    await seedPartner(db, 'railp');
+    const repo = createIntegrationsRepo(db, provider);
+    await repo.saveIntegrations('acme', {
+      kyc: {}, payment: { providerType: 'mock' },
+      whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+    await repo.saveIntegrations('railp', {
+      kyc: {}, payment: { providerType: 'mock' },
+      whatsapp: { phoneNumberId: 'pn_railp', token: 'tok_railp' },
+    });
+    await store.saveTransfer(refundFixture({ settlementPartnerId: 'railp' }));
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+
+    let r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+
+    const t = await store.getTransfer('wk_t1');
+    expect(t?.refundStatus).toBe('completed');
+    expect(t?.refundRef).toBe('mockrefund-wk_t1'); // the (real) mock provider's deterministic ref
+    expect(t?.refundedAt).toBeTruthy();
+
+    const rows = (await db.execute(
+      sql`SELECT kind, dedupe_key FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ kind: string; dedupe_key: string }> };
+    expect(rows.rows).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'refundmsg:wk_t1' }]);
+
+    // Second pass delivers the message — owner creds, refund copy, no reasons.
+    r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const [to, body, creds] = sendText.mock.calls[0] as [string, string, unknown];
+    expect(to).toBe('15551230000');
+    expect(body).toContain('refunded');
+    expect(body).toContain('wk_t1');
+    expect(body.toLowerCase()).not.toContain('compliance');
+    expect(creds).toEqual({ phoneNumberId: 'pn_acme', token: 'tok_acme' });
+  });
+
+  it('a replay after completion is a clean no-op: provider untouched, no second message', async () => {
+    const refund = vi.fn(async (t: Transfer) => ({ refundRef: `mockrefund-${t.id}` }));
+    const d: WorkerDeps = {
+      ...deps(),
+      fundingProvider: {
+        capture: async (t) => ({ fundingRef: `mockfund-${t.id}` }),
+        refund,
+        handleWebhook: async () => null,
+      },
+    };
+    await store.saveTransfer(refundFixture());
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    await drainOnce(d, 'w1'); // refund + message enqueue
+    await drainOnce(d, 'w1'); // message send
+    expect(refund).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+
+    // A second effect row (e.g. an ops retry after a presumed failure that
+    // actually succeeded) replays the handler against a completed refund.
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1:retry:1' });
+    const r = await drainOnce(d, 'w1');
+    expect(r.processed).toBe(1); // clean no-op, not an error
+    expect(refund).toHaveBeenCalledTimes(1); // provider NOT charged with a second refund
+    const msgs = (await db.execute(
+      sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ n: number }> };
+    expect(msgs.rows[0].n).toBe(1); // no second customer message
+  });
+
+  it('a provider failure retries with backoff (attempts increments; refund stays pending) and dead-letters at the cap', async () => {
+    const d: WorkerDeps = {
+      ...deps(),
+      fundingProvider: {
+        capture: async (t) => ({ fundingRef: `mockfund-${t.id}` }),
+        refund: async () => { throw new Error('PSP 503'); },
+        handleWebhook: async () => null,
+      },
+    };
+    await store.saveTransfer(refundFixture());
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+
+    let r = await drainOnce(d, 'w1');
+    expect(r.failed).toBe(1);
+    expect((await store.getTransfer('wk_t1'))?.refundStatus).toBe('pending'); // never falsely completed
+    let row = (await db.execute(
+      sql`SELECT attempts, status FROM outbox WHERE kind = 'funding.refund'`,
+    )) as unknown as { rows: Array<{ attempts: number; status: string }> };
+    expect(row.rows[0]).toEqual({ attempts: 1, status: 'failed' });
+
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'funding.refund'`);
+    r = await drainOnce(d, 'w1');
+    expect(r.failed).toBe(1);
+    row = (await db.execute(
+      sql`SELECT attempts, status FROM outbox WHERE kind = 'funding.refund'`,
+    )) as unknown as { rows: Array<{ attempts: number; status: string }> };
+    expect(row.rows[0]).toEqual({ attempts: 2, status: 'failed' });
+
+    // At MAX_ATTEMPTS the row dies and the EXISTING dead-letter alert flow fires.
+    await db.execute(sql`
+      UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now()
+      WHERE kind = 'funding.refund'
+    `);
+    r = await drainOnce(d, 'w1');
+    expect(r.dead).toBe(1);
+    const alerts = (await db.execute(
+      sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`,
+    )) as unknown as { rows: Array<{ dedupe_key: string }> };
+    expect(alerts.rows).toHaveLength(1);
+    expect(alerts.rows[0].dedupe_key).toMatch(/^dead:\d+$/);
+  });
+
+  it('a vanished transfer is an idempotent no-op', async () => {
+    await outbox.enqueue('funding.refund', { transferId: 'ghost' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+});
+
 describe('reconciliation query feed', () => {
   it('findStuckPaid sees a webhook-driven transfer stranded in paid', async () => {
     await store.saveTransfer({ ...transferFixture(), paidAt: '2026-06-09T00:00:00.000Z' });

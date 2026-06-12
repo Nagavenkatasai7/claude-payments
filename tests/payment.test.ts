@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  buildRefundMessage,
   completePaymentStage1,
   completePaymentStage2,
   recipientTemplateParams,
@@ -271,6 +272,49 @@ describe('completePaymentStage2', () => {
     await expect(completePaymentStage2(store, 'missing')).rejects.toThrow(
       /not found/i,
     );
+  });
+});
+
+describe('buildRefundMessage', () => {
+  it('refunds the SOURCE-currency charge and names the transfer id', () => {
+    const msg = buildRefundMessage(awaitingTransfer());
+    expect(msg).toContain('pay12345');
+    expect(msg).toContain('$500.00'); // totalChargeSource in USD
+    expect(msg).toContain('refunded');
+    expect(msg).toContain('original payment method');
+    expect(msg).toContain('3-5 business days');
+  });
+
+  it('falls back to totalChargeUsd when totalChargeSource is absent (legacy row)', () => {
+    const t = {
+      ...awaitingTransfer(),
+      totalChargeSource: undefined as unknown as number,
+    };
+    const msg = buildRefundMessage(t);
+    expect(msg).toContain('$500.00');
+  });
+
+  it('formats a non-USD source charge in the source currency', () => {
+    const t = {
+      ...awaitingTransfer(),
+      sourceCurrency: 'GBP' as import('@/lib/types').CurrencyCode,
+      totalChargeSource: 410.5,
+    };
+    const msg = buildRefundMessage(t);
+    expect(msg).toContain('£410.50');
+  });
+
+  it('NEVER mentions compliance or review reasons', () => {
+    const t = {
+      ...awaitingTransfer(),
+      complianceStatus: 'blocked' as const,
+      complianceReasons: ['Recipient name matches watchlist.'],
+    };
+    const msg = buildRefundMessage(t).toLowerCase();
+    expect(msg).not.toContain('compliance');
+    expect(msg).not.toContain('review');
+    expect(msg).not.toContain('watchlist');
+    expect(msg).not.toContain('sanction');
   });
 });
 

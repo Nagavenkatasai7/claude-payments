@@ -22,6 +22,7 @@ export type OutboxKind =
   | 'settlement.instruct'
   | 'rail.callback'
   | 'mock.settle'
+  | 'funding.refund'
   | 'agent.turn'
   | 'ops.alert';
 

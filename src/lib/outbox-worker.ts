@@ -7,7 +7,8 @@ import {
   buildSettlementInstruction,
   signBody,
 } from '@/lib/providers/http-payment-provider';
-import { completePaymentStage2, recipientTemplateParams } from '@/lib/payment';
+import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
+import { buildRefundMessage, completePaymentStage2, recipientTemplateParams } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
@@ -51,6 +52,12 @@ export interface WorkerDeps {
     turn: TurnContext,
     waCreds?: WaCreds,
   ) => Promise<string>;
+  /**
+   * The funds-capture seam for refunds (DI'd like the other effects; absent ⇒
+   * getFundingProvider(), so routes need no wiring while tests can inject a
+   * failing provider to exercise the retry/dead-letter machinery).
+   */
+  fundingProvider?: FundingProvider;
 }
 
 type Payload = Record<string, unknown>;
@@ -166,6 +173,42 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
         body: callbackBody,
       });
       if (!res.ok) throw new Error(`Rail status callback rejected (${res.status})`);
+      return;
+    }
+
+    // ── Return the sender's money (rejected / undeliverable transfers) ──────
+    case 'funding.refund': {
+      const transferId = str(p.transferId);
+      const transfer = await createTransferRepo(deps.db).getTransfer(transferId);
+      if (!transfer) return; // gone ⇒ nothing to refund (idempotent no-op)
+      // Replay after completion (retry of a row that actually succeeded, ops
+      // double-enqueue) is a clean no-op: the provider is never re-asked and
+      // the customer never hears about it twice.
+      if ((transfer.refundStatus ?? 'none') === 'completed') return;
+      // Idempotent by transfer id on the provider side; a throw here rethrows
+      // into the outbox machinery (backoff → dead-letter → existing ops alert).
+      // refundStatus stays 'pending' through retries/death — recovery is the
+      // ops dead-letter Retry (re-runs this handler) or the funding webhook's
+      // refund_failed (pending → failed, surfacing the ops Refunds queue).
+      const { refundRef } = await (deps.fundingProvider ?? getFundingProvider()).refund(transfer);
+      // The customer-facing message rides the OWNING partner's number — the
+      // brand the sender talks to — NEVER the settlement partner's.
+      const { waCreds } = await partnerContext(deps, transfer.partnerId);
+      await deps.db.transaction(async (tx) => {
+        const updated = await createTransferRepo(tx).updateRefund(transferId, {
+          refundStatus: 'completed',
+          refundRef,
+          refundedAt: new Date().toISOString(),
+        });
+        // Guarded transition refused (a concurrent drain already completed it)
+        // ⇒ that drain owns the message; enqueueing here would race it.
+        if (!updated) return;
+        await createOutboxRepo(tx).enqueue(
+          'whatsapp.text',
+          { to: transfer.phone, body: buildRefundMessage(transfer), creds: waCreds },
+          { dedupeKey: `refundmsg:${transferId}` },
+        );
+      });
       return;
     }
 

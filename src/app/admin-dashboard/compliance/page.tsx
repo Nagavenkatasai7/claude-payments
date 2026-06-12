@@ -127,7 +127,8 @@ export default async function CompliancePage() {
           <CardHeader>
             <CardTitle>Needs review</CardTitle>
             <CardDescription>
-              {inReview.length} {inReview.length === 1 ? 'transfer' : 'transfers'} — payment captured, pending staff decision
+              {inReview.length} {inReview.length === 1 ? 'transfer' : 'transfers'} — payment captured, pending staff decision.
+              Rejecting cancels the transfer and automatically refunds the captured charge to the sender&apos;s original payment method.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -146,7 +147,15 @@ export default async function CompliancePage() {
                     </form>
                     <form action={rejectTransferAction}>
                       <input type="hidden" name="id" value={t.id} />
-                      <Button type="submit" size="sm" variant="outline" className="text-destructive">Reject</Button>
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        className="text-destructive"
+                        title="Cancels the transfer and auto-refunds the captured charge to the sender"
+                      >
+                        Reject &amp; refund
+                      </Button>
                     </form>
                   </div>,
                 ],

@@ -14,6 +14,8 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { retryDeadAction, dismissDeadAction } from './actions';
+import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
+import type { Transfer } from '@/lib/types';
 
 // /admin-dashboard/ops — the money-state safety surface (Stage 5, fed by the
 // Stage-2d reconciliation data). Everything here is a state the automated
@@ -28,14 +30,24 @@ function age(iso: string | undefined | null): string {
   return `${Math.round(mins / (24 * 60))}d`;
 }
 
+/** The refundable amount is the FULL source-side charge the provider captured. */
+function refundAmount(t: Transfer): string {
+  return money(t.totalChargeSource ?? t.totalChargeUsd, t.sourceCurrency ?? 'USD');
+}
+
 export default async function OpsPage() {
   const { staff, scope } = await requireScope();
   if (scope.kind !== 'platform') redirect('/admin-dashboard');
   void staff;
 
   const snap = await getOpsSnapshot(getDb());
+  const refundsTotal =
+    snap.refundsRequested.length + snap.refundsPending.length + snap.refundsFailed.length;
   const healthy =
-    snap.deadLetters.length === 0 && snap.stuckPaid.length === 0 && snap.staleReviews.length === 0;
+    snap.deadLetters.length === 0 &&
+    snap.stuckPaid.length === 0 &&
+    snap.staleReviews.length === 0 &&
+    refundsTotal === 0;
 
   return (
     <>
@@ -181,6 +193,101 @@ export default async function OpsPage() {
                   ))}
                 </TableBody>
               </Table>
+            </CardContent>
+          </Card>
+        )}
+
+        {refundsTotal > 0 && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>Refunds</CardTitle>
+              <CardDescription>
+                Customer-requested refunds need a decision; failed refunds can be retried.
+                In-flight refunds complete automatically (the sweep alerts if one stalls).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {snap.refundsRequested.length > 0 && (
+                <div>
+                  <div className="mb-2 text-sm font-medium">
+                    Requested <Badge variant="secondary">{snap.refundsRequested.length}</Badge>
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Transfer</TableHead>
+                        <TableHead>Partner</TableHead>
+                        <TableHead>Refund</TableHead>
+                        <TableHead>Created</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {snap.refundsRequested.map((t) => (
+                        <TableRow key={t.id}>
+                          <TableCell>{t.id}</TableCell>
+                          <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
+                          <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
+                          <TableCell>{age(t.createdAt)} ago</TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex justify-end gap-2">
+                              <form action={approveRefundAction}>
+                                <input type="hidden" name="id" value={t.id} />
+                                <Button type="submit" size="sm" variant="default">Approve</Button>
+                              </form>
+                              <form action={dismissRefundAction}>
+                                <input type="hidden" name="id" value={t.id} />
+                                <Button type="submit" size="sm" variant="outline">Dismiss</Button>
+                              </form>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+              {snap.refundsPending.length > 0 && (
+                <div className="text-sm text-muted-foreground">
+                  <Badge variant="outline">{snap.refundsPending.length}</Badge>{' '}
+                  refund{snap.refundsPending.length === 1 ? '' : 's'} in flight — the worker is
+                  processing {snap.refundsPending.length === 1 ? 'it' : 'them'}.
+                </div>
+              )}
+              {snap.refundsFailed.length > 0 && (
+                <div>
+                  <div className="mb-2 text-sm font-medium">
+                    Failed <Badge variant="destructive">{snap.refundsFailed.length}</Badge>
+                  </div>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Transfer</TableHead>
+                        <TableHead>Partner</TableHead>
+                        <TableHead>Refund</TableHead>
+                        <TableHead>Created</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {snap.refundsFailed.map((t) => (
+                        <TableRow key={t.id}>
+                          <TableCell>{t.id}</TableCell>
+                          <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
+                          <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
+                          <TableCell>{age(t.createdAt)} ago</TableCell>
+                          <TableCell className="text-right">
+                            <form action={retryRefundAction}>
+                              <input type="hidden" name="id" value={t.id} />
+                              <Button type="submit" size="sm" variant="default">Retry</Button>
+                            </form>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
             </CardContent>
           </Card>
         )}

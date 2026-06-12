@@ -59,7 +59,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     await store.saveTransfer(fixture());
 
     const first = await reconcileSweep(db);
-    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0 });
+    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -75,7 +75,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {
     await store.saveTransfer(fixture({ paidAt: new Date().toISOString() }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
     expect(await outboxRows()).toHaveLength(0);
   });
 });
@@ -84,7 +84,7 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
   it('alerts but NEVER re-instructs (there is no rail to instruct)', async () => {
     await store.saveTransfer(fixture()); // 'acme' has no integrations row ⇒ mock
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'recon:rc_t1' }]);
   });
 });
@@ -106,7 +106,7 @@ describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () =>
     await store.saveTransfer(fixture({ settlementPartnerId: 'railp' }));
 
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -125,17 +125,170 @@ describe('reconcileSweep — stale compliance reviews', () => {
   it('alerts exactly once for an in_review transfer older than 24h', async () => {
     await store.saveTransfer(fixture({ id: 'rc_rev1', status: 'in_review' }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'review:rc_rev1' }]);
     await reconcileSweep(db);
     expect(await outboxRows()).toHaveLength(1);
   });
 });
 
+describe('reconcileSweep — crash-resume (charged but never settled)', () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+
+  function victim(over: Partial<Transfer> = {}): Transfer {
+    return fixture({
+      id: 'rc_fund1',
+      status: 'awaiting_payment',
+      fundingRef: 'mockfund-rc_fund1',
+      createdAt: minutesAgo(20),
+      paidAt: undefined,
+      ...over,
+    });
+  }
+
+  it('resumes settlement EXACTLY ONCE (atomic claim) + alerts once, deduped across sweeps', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(victim());
+
+    const first = await reconcileSweep(db);
+    expect(first.fundingResumed).toBe(1);
+    // beginSettlement committed the paid flip + stage-1 message + rail effect.
+    expect((await store.getTransfer('rc_fund1'))?.status).toBe('paid');
+    const keys = (await outboxRows()).map((r) => r.dedupe_key);
+    expect(keys).toContain('stage1:rc_fund1');
+    expect(keys).toContain('instruct:rc_fund1');
+    expect(keys).toContain('fundresume:rc_fund1');
+
+    // Re-running the sweep can never settle (or message) twice: the transfer is
+    // no longer awaiting_payment and the alert key is spent.
+    const second = await reconcileSweep(db);
+    expect(second.fundingResumed).toBe(0);
+    expect(await outboxRows()).toHaveLength(keys.length);
+  });
+
+  it("routed victim: rail config resolves via the SETTLEMENT partner; stage-1 creds via the OWNER", async () => {
+    await seedPartner(db, 'railp');
+    const repo = createIntegrationsRepo(db, provider);
+    // Owner 'acme' has NO rail of its own — only a BYO WhatsApp number.
+    await repo.saveIntegrations('acme', {
+      kyc: {}, payment: { providerType: 'mock' },
+      whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+    await repo.saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: { phoneNumberId: 'pn_railp', token: 'tok_railp' },
+    });
+    await store.saveTransfer(victim({ settlementPartnerId: 'railp' }));
+
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    // Rail-side: railp is webhook-driven ⇒ a settlement.instruct row exists.
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('instruct:rc_fund1');
+    // Brand-side: the stage-1 message rides the OWNER's number.
+    const stage1 = (await db.execute(sql`
+      SELECT payload->'creds'->>'phoneNumberId' AS pn FROM outbox
+      WHERE dedupe_key = 'stage1:rc_fund1'
+    `)) as unknown as { rows: Array<{ pn: string | null }> };
+    expect(stage1.rows[0].pn).toBe('pn_acme');
+  });
+
+  it('a FRESH charge still inside the grace window is left alone', async () => {
+    await store.saveTransfer(victim({ createdAt: minutesAgo(2) }));
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(0);
+    expect((await store.getTransfer('rc_fund1'))?.status).toBe('awaiting_payment');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('an old awaiting_payment row that was NEVER charged is not a victim', async () => {
+    await store.saveTransfer(victim({ fundingRef: undefined }));
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(0);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('reconcileSweep — stuck refunds', () => {
+  function pendingRefund(over: Partial<Transfer> = {}): Transfer {
+    return fixture({
+      id: 'rc_ref1',
+      status: 'cancelled',
+      fundingRef: 'mockfund-rc_ref1',
+      refundStatus: 'pending',
+      paidAt: undefined,
+      ...over,
+    });
+  }
+
+  it('alerts ONCE (deduped) when a refund has been in flight for over an hour', async () => {
+    await store.saveTransfer(pendingRefund());
+    const outbox = createOutboxRepo(db);
+    await outbox.enqueue('funding.refund', { transferId: 'rc_ref1' }, { dedupeKey: 'refund:rc_ref1' });
+    await db.execute(sql`
+      UPDATE outbox SET created_at = now() - interval '2 hours' WHERE kind = 'funding.refund'
+    `);
+
+    const first = await reconcileSweep(db);
+    expect(first.stuckRefunds).toBe(1);
+    const alerts = (await outboxRows()).filter((r) => r.dedupe_key === 'refundstuck:rc_ref1');
+    expect(alerts).toEqual([{ kind: 'ops.alert', dedupe_key: 'refundstuck:rc_ref1' }]);
+
+    // No auto-retry, and no alert spam: re-sweeping adds nothing.
+    const second = await reconcileSweep(db);
+    expect(second.stuckRefunds).toBe(1);
+    expect((await outboxRows()).filter((r) => r.kind === 'ops.alert')).toHaveLength(1);
+    expect((await outboxRows()).filter((r) => r.kind === 'funding.refund')).toHaveLength(1);
+  });
+
+  it('a refund that just went in flight is NOT stuck', async () => {
+    await store.saveTransfer(pendingRefund());
+    await createOutboxRepo(db).enqueue(
+      'funding.refund', { transferId: 'rc_ref1' }, { dedupeKey: 'refund:rc_ref1' },
+    );
+    const r = await reconcileSweep(db);
+    expect(r.stuckRefunds).toBe(0);
+    expect((await outboxRows()).filter((x) => x.kind === 'ops.alert')).toHaveLength(0);
+  });
+
+  it('a pending refund with NO effect row at all (lost effect) alerts immediately', async () => {
+    await store.saveTransfer(pendingRefund());
+    const r = await reconcileSweep(db);
+    expect(r.stuckRefunds).toBe(1);
+    expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'refundstuck:rc_ref1' }]);
+  });
+
+  it('completed and failed refunds are not swept (failed has its own ops queue)', async () => {
+    await store.saveTransfer(pendingRefund({ refundStatus: 'failed' }));
+    await store.saveTransfer(pendingRefund({ id: 'rc_ref2', refundStatus: 'completed' }));
+    const r = await reconcileSweep(db);
+    expect(r.stuckRefunds).toBe(0);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
 describe('getOpsSnapshot', () => {
-  it('returns the four ops surfaces (pending, dead, stuck, stale)', async () => {
+  it('returns the ops surfaces (pending, dead, stuck, stale, refund queues)', async () => {
     await store.saveTransfer(fixture());
     await store.saveTransfer(fixture({ id: 'rc_rev1', status: 'in_review' }));
+    await store.saveTransfer(fixture({
+      id: 'rc_req1', status: 'cancelled', fundingRef: 'f', refundStatus: 'requested',
+    }));
+    await store.saveTransfer(fixture({
+      id: 'rc_fail1', status: 'cancelled', fundingRef: 'f', refundStatus: 'failed',
+    }));
     const outbox = createOutboxRepo(db);
     await outbox.enqueue('whatsapp.text', { to: 'x', body: 'y' });
     await db.execute(sql`INSERT INTO outbox (kind, payload, status) VALUES ('whatsapp.text', '{}'::jsonb, 'dead')`);
@@ -145,5 +298,8 @@ describe('getOpsSnapshot', () => {
     expect(snap.deadLetters).toHaveLength(1);
     expect(snap.stuckPaid.map((t) => t.id)).toEqual(['rc_t1']);
     expect(snap.staleReviews.map((t) => t.id)).toEqual(['rc_rev1']);
+    expect(snap.refundsRequested.map((t) => t.id)).toEqual(['rc_req1']);
+    expect(snap.refundsPending).toEqual([]);
+    expect(snap.refundsFailed.map((t) => t.id)).toEqual(['rc_fail1']);
   });
 });
