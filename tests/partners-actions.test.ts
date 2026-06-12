@@ -68,6 +68,8 @@ import {
   updatePartnerAction,
   setPartnerStatusAction,
   savePricingAction,
+  saveSupportConfigAction,
+  createPartnerStaffAction,
 } from '@/app/admin-dashboard/partners/actions';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
@@ -319,5 +321,84 @@ describe('savePricingAction (admin corridor margin)', () => {
       savePricingAction(marginForm({ id: 'rival' })),
     ).rejects.toThrow(/not found/i); // generic — never discloses out-of-scope partners
     expect(await createPartnerRateRepo(db).getRate('rival', 'USD', 'INR')).toBeNull();
+  });
+});
+
+describe('saveSupportConfigAction (admin support controls)', () => {
+  function supportForm(over: Record<string, string> = {}): FormData {
+    const fd = new FormData();
+    fd.set('id', 'p1');
+    for (const [k, v] of Object.entries(over)) fd.set(k, v);
+    return fd;
+  }
+
+  beforeEach(async () => {
+    await ps.savePartner({
+      id: 'p1', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('persists supportConfig and round-trips both fields', async () => {
+    // Unchecked box + round_robin ⇒ explicit booleans persisted.
+    await saveSupportConfigAction(supportForm({ autoAssign: 'round_robin' }));
+    let got = await ps.getPartner('p1');
+    expect(got?.supportConfig).toEqual({ enableSupportPortal: false, autoAssign: 'round_robin' });
+    expect(got?.updatedAt).not.toBe('2026-01-01T00:00:00.000Z');
+
+    // Re-save flips back: checked + none. Unknown autoAssign falls back to 'none'.
+    await saveSupportConfigAction(supportForm({ enableSupportPortal: 'on', autoAssign: 'bogus' }));
+    got = await ps.getPartner('p1');
+    expect(got?.supportConfig).toEqual({ enableSupportPortal: true, autoAssign: 'none' });
+    expect(got?.name).toBe('Acme'); // sibling fields untouched
+  });
+
+  it("scope gate: a partner-admin saves their OWN config; another tenant's is 'not found'", async () => {
+    await ps.savePartner({
+      id: 'rival', name: 'Rival', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    currentStaff = { username: 'p1admin', role: 'admin', partnerId: 'p1' };
+    await saveSupportConfigAction(supportForm({ enableSupportPortal: 'on' }));
+    expect((await ps.getPartner('p1'))?.supportConfig?.enableSupportPortal).toBe(true);
+
+    await expect(
+      saveSupportConfigAction(supportForm({ id: 'rival', enableSupportPortal: 'on' })),
+    ).rejects.toThrow(/not found/i);
+    expect((await ps.getPartner('rival'))?.supportConfig).toBeUndefined();
+  });
+});
+
+describe('createPartnerStaffAction roles', () => {
+  function staffForm(role: string, username = 'newbie'): FormData {
+    const fd = new FormData();
+    fd.set('username', username);
+    fd.set('name', 'New Person');
+    fd.set('password', 'hunter2hunter2');
+    fd.set('role', role);
+    return fd;
+  }
+
+  beforeEach(async () => {
+    await ps.savePartner({
+      id: 'p1', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  it("accepts the 'support' role and never grants it money permissions", async () => {
+    await createPartnerStaffAction('p1', staffForm('support', 'p1sup'));
+    const { getAuthStore } = await import('@/lib/auth-store');
+    const got = await getAuthStore().getStaff('p1sup');
+    expect(got?.role).toBe('support');
+    expect(got?.partnerId).toBe('p1');
+    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false });
+  });
+
+  it('still rejects unknown roles', async () => {
+    await expect(createPartnerStaffAction('p1', staffForm('owner'))).rejects.toThrow(/invalid role/i);
+    const { getAuthStore } = await import('@/lib/auth-store');
+    expect(await getAuthStore().getStaff('newbie')).toBeNull();
   });
 });

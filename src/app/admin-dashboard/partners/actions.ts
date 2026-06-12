@@ -14,8 +14,16 @@ import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
-import type { Partner, PartnerStatus, PartnerId, StaffRole, KycMode, CurrencyCode } from '@/lib/types';
-import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
+import type {
+  Partner,
+  PartnerStatus,
+  PartnerId,
+  PartnerSupportConfig,
+  StaffRole,
+  KycMode,
+  CurrencyCode,
+} from '@/lib/types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY, SUPPORT_DEFAULT_PERMISSIONS } from '@/lib/types';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
 // unchanged" (secrets are never rendered back, so blank ≠ delete).
@@ -102,7 +110,7 @@ export async function createPartnerStaffAction(
   const name = String(formData.get('name') ?? '').trim();
   const password = String(formData.get('password') ?? '');
   const role = String(formData.get('role') ?? 'agent') as StaffRole;
-  if (role !== 'admin' && role !== 'agent') throw new Error('Invalid role.');
+  if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
   if (!username || !name || !password) throw new Error('username, name, and password are required.');
 
   // Validate partner exists — server actions are POST endpoints callable with
@@ -124,7 +132,12 @@ export async function createPartnerStaffAction(
     username,
     name,
     role,
-    permissions: { canCancel: false, canResend: false, canAssign: false },
+    // Partner staff start with no money permissions in ANY role; support staff
+    // structurally never get them (mirrors team/actions.ts).
+    permissions:
+      role === 'support'
+        ? { ...SUPPORT_DEFAULT_PERMISSIONS }
+        : { canCancel: false, canResend: false, canAssign: false },
     passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     partnerId,                  // taken from URL, not form
@@ -253,6 +266,33 @@ export async function savePricingAction(formData: FormData): Promise<void> {
     marginBps,
     // effectiveRate / expiresAt / pushedAt deliberately omitted (undefined ⇒
     // keep) so a partner's pushed rate survives an admin margin save.
+  });
+  revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+// ── Support: admin-controlled support behavior (PartnerSupportConfig) ───────
+// Stored on the partner row (same opt-in pattern as requireKycBeforeSend).
+// enableSupportPortal defaults to TRUE when absent, so the checkbox writes an
+// explicit boolean either way; autoAssign falls back to 'none' on any
+// unexpected value. Internal tickets/supportConfig never reach customer
+// surfaces — this is a dashboard-only knob.
+
+export async function saveSupportConfigAction(formData: FormData): Promise<void> {
+  const id = String(formData.get('id') ?? '').trim();
+  await gatePartnerConfig(id);
+
+  const ps = getPartnerStore();
+  const existing = await ps.getPartner(id);
+  if (!existing) throw new Error('Partner not found.'); // gate raced a delete
+
+  const supportConfig: PartnerSupportConfig = {
+    enableSupportPortal: formData.get('enableSupportPortal') === 'on',
+    autoAssign: formData.get('autoAssign') === 'round_robin' ? 'round_robin' : 'none',
+  };
+  await ps.savePartner({
+    ...existing,
+    supportConfig,
+    updatedAt: new Date().toISOString(),
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
