@@ -53,6 +53,10 @@ export const transfers = pgTable(
   {
     id: text('id').primaryKey(),
     partnerId: text('partner_id').notNull().references(() => partners.id),
+    // Best-rate routing (internal): when set, the settlement RAIL is this
+    // partner's; branding/WhatsApp/compliance stay partnerId. null ⇒ settle
+    // via partnerId (the only behavior before partner_rates existed).
+    settlementPartnerId: text('settlement_partner_id').references(() => partners.id),
     phone: text('phone').notNull(),
     status: text('status').notNull(),
     complianceStatus: text('compliance_status').notNull(),
@@ -157,6 +161,32 @@ export const partnerIntegrations = pgTable('partner_integrations', {
   waAppSecretEnc: text('wa_app_secret_enc'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Per-partner conversion pricing per corridor (best-rate selection). A partner
+// competes for a corridor when it has a FRESH pushed rate (effective_rate with
+// expires_at in the future) or a standing margin_bps off mid-market. Rates are
+// not PII — no encryption. One row per (partner, source→dest) corridor.
+export const partnerRates = pgTable(
+  'partner_rates',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    sourceCurrency: text('source_currency').notNull(),
+    destinationCurrency: text('destination_currency').notNull(),
+    // Pushed via PUT /api/partner/v1/rates — destination units per 1 source unit.
+    effectiveRate: numeric('effective_rate', { precision: 14, scale: 6 }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }), // pushed-rate TTL
+    pushedAt: timestamp('pushed_at', { withTimezone: true }),
+    // Admin-configured standing improvement over mid-market, in basis points
+    // (positive ⇒ better for the customer). Fallback when no fresh push exists.
+    marginBps: integer('margin_bps'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('partner_rates_corridor').on(t.partnerId, t.sourceCurrency, t.destinationCurrency),
+    index('partner_rates_pair').on(t.sourceCurrency, t.destinationCurrency),
+  ],
+);
 
 export const apiKeys = pgTable(
   'api_keys',

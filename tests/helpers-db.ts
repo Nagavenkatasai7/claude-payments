@@ -31,6 +31,7 @@ const ALL_TABLES = [
   'outbox',
   'idempotency_keys',
   'audit_events',
+  'partner_rates',
   'transfers',
   'schedules',
   'beneficiaries',
