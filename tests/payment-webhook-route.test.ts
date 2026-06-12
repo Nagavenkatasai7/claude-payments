@@ -26,16 +26,28 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
 
-// In-memory store double + a controllable handleWebhook. getTransfer → null so
-// the WL3 partner-secret resolution falls through to the env per-provider secret
-// (the legacy contract these tests pin).
+// In-memory store double + a controllable handleWebhook. The default fixture
+// state (no transfers, no integrations) keeps the legacy contract these tests
+// pin: getTransfer → null so the WL3 partner-secret resolution falls through to
+// the env per-provider secret. Routed tests set fixtures per test.
+const fixtures = vi.hoisted(() => ({
+  transfersById: {} as Record<string, unknown>,
+  integrationsByPartner: {} as Record<string, unknown>,
+  getPaymentProviderCalls: [] as unknown[][],
+}));
 const updateTransferFromWebhook = vi.fn();
 const handleWebhook = vi.fn();
 vi.mock('@/lib/store', () => ({
-  getStore: () => ({ updateTransferFromWebhook, getTransfer: async () => null }),
+  getStore: () => ({
+    updateTransferFromWebhook,
+    getTransfer: async (id: string) => fixtures.transfersById[id] ?? null,
+  }),
 }));
 vi.mock('@/lib/providers/payment-provider', () => ({
-  getPaymentProvider: () => ({ handleWebhook }),
+  getPaymentProvider: (...args: unknown[]) => {
+    fixtures.getPaymentProviderCalls.push(args);
+    return { handleWebhook };
+  },
 }));
 // WL3: the route resolves the owning partner for branding/creds; stub to defaults.
 vi.mock('@/lib/partner-store', () => ({
@@ -43,7 +55,8 @@ vi.mock('@/lib/partner-store', () => ({
 }));
 vi.mock('@/lib/partner-integrations-store', () => ({
   getPartnerIntegrationsStore: () => ({
-    getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }),
+    getIntegrations: async (partnerId: string) =>
+      fixtures.integrationsByPartner[partnerId] ?? { kyc: {}, payment: {}, whatsapp: {} },
   }),
 }));
 
@@ -76,6 +89,10 @@ function post(provider: string, raw: string, signature?: string) {
 beforeEach(() => {
   sendText.mockClear(); sendTemplate.mockClear();
   updateTransferFromWebhook.mockReset(); handleWebhook.mockReset();
+  fixtures.transfersById = {};
+  fixtures.integrationsByPartner = {};
+  fixtures.getPaymentProviderCalls.length = 0;
+  afterPending.length = 0; // never leak an unflushed after() into the next test
   process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER = SECRET;
 });
 
@@ -142,5 +159,78 @@ describe('POST /api/payment-webhook/[provider]', () => {
     const res = await post('mock', body); // no x-signature header
     expect(res.status).toBe(200);
     expect(handleWebhook).toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/payment-webhook — settlement routing (settlementPartnerId)', () => {
+  const ownerInteg = {
+    kyc: {},
+    payment: { providerType: 'simulator', webhookSecret: 'owner_whk' },
+    whatsapp: { phoneNumberId: 'pn_owner', token: 'tok_owner' },
+  };
+  const railInteg = {
+    kyc: {},
+    payment: { providerType: 'simulator', webhookSecret: 'rail_whk' },
+    whatsapp: { phoneNumberId: 'pn_rail', token: 'tok_rail' },
+  };
+
+  it("UNROUTED transfer: verifies with the OWNING partner's webhookSecret (pinned)", async () => {
+    fixtures.transfersById['wh_1'] = { ...deliveredTransfer, partnerId: 'owner' };
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue({ ...deliveredTransfer, partnerId: 'owner' });
+
+    expect((await post('simulator', body, sig(body, 'rail_whk'))).status).toBe(401);
+    const res = await post('simulator', body, sig(body, 'owner_whk'));
+    expect(res.status).toBe(200);
+    await flushAfter();
+    // Unrouted: ONE integrations object drives both sides — owner's creds.
+    expect((sendText.mock.calls[0] as unknown[])[2])
+      .toEqual({ phoneNumberId: 'pn_owner', token: 'tok_owner' });
+  });
+
+  it("unsigned POST to /mock can NOT bypass HMAC when the transfer's RAIL is webhook-driven", async () => {
+    // The URL segment is caller-chosen: 'mock' skips verification ONLY when the
+    // resolved rail is actually mock — a routed (webhook-driven) transfer must
+    // still demand a valid signature or an attacker could flip money state.
+    fixtures.transfersById['wh_1'] = {
+      ...deliveredTransfer, partnerId: 'owner', settlementPartnerId: 'railp',
+    };
+    fixtures.integrationsByPartner['railp'] = railInteg;
+    const res = await post('mock', body); // no x-signature
+    expect(res.status).toBe(401);
+    expect(handleWebhook).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+  });
+
+  it("ROUTED transfer: HMAC verifies with the SETTLEMENT partner's secret; notifications use the OWNER's creds", async () => {
+    fixtures.transfersById['wh_1'] = {
+      ...deliveredTransfer, partnerId: 'owner', settlementPartnerId: 'railp',
+    };
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    fixtures.integrationsByPartner['railp'] = railInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue({
+      ...deliveredTransfer, partnerId: 'owner', settlementPartnerId: 'railp',
+    });
+
+    // The callback comes from railp's rail — the OWNER's secret must NOT pass.
+    expect((await post('simulator', body, sig(body, 'owner_whk'))).status).toBe(401);
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+
+    const res = await post('simulator', body, sig(body, 'rail_whk'));
+    expect(res.status).toBe(200);
+    // Provider resolution is rail-side: getPaymentProvider got railp's payment config.
+    const lastCall = fixtures.getPaymentProviderCalls.at(-1)!;
+    expect(lastCall[2]).toEqual(railInteg.payment);
+
+    await flushAfter();
+    // Brand-side: the delivered messages go out from the OWNING partner's number.
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect((sendText.mock.calls[0] as unknown[])[2])
+      .toEqual({ phoneNumberId: 'pn_owner', token: 'tok_owner' });
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    expect((sendTemplate.mock.calls[0] as unknown[])[4])
+      .toEqual({ phoneNumberId: 'pn_owner', token: 'tok_owner' });
   });
 });

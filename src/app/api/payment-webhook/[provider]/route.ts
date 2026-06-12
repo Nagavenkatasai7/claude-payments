@@ -47,27 +47,42 @@ export async function POST(
     return NextResponse.json({ ok: false }, { status: 400 }); // malformed
   }
 
-  // Resolve the owning partner from the referenced transfer (when present) so
-  // verification uses the PARTNER's secret. An unknown/absent reference falls
-  // back to the global per-provider env secret — still fail-closed.
+  // Resolve the RAIL partner from the referenced transfer (when present) so
+  // verification uses THAT partner's secret. Best-rate routing: the callback
+  // comes from the SETTLEMENT rail — when the transfer is routed
+  // (settlementPartnerId set) the rail-side config (webhookSecret, provider
+  // resolution) is the settlement partner's; unrouted ⇒ the owning partner's,
+  // exactly as before. The transfer lookup itself is by id on the global
+  // ledger — partner-agnostic, so a routed callback still finds it. An
+  // unknown/absent reference falls back to the global per-provider env
+  // secret — still fail-closed.
   const refTransferId = railCallbackTransferId(body);
   const refTransfer = refTransferId ? await store.getTransfer(refTransferId) : null;
-  const integrations = refTransfer
-    ? await getPartnerIntegrationsStore().getIntegrations(refTransfer.partnerId)
+  const railPartnerId = refTransfer
+    ? (refTransfer.settlementPartnerId ?? refTransfer.partnerId)
+    : null;
+  const railIntegrations = railPartnerId
+    ? await getPartnerIntegrationsStore().getIntegrations(railPartnerId)
     : null;
 
-  // Mock skips verification (it never posts callbacks); every other provider MUST
-  // verify: the partner's webhookSecret first, else the env per-provider secret.
-  // '' ⇒ unconfigured ⇒ reject (fail-closed; never fail-open).
-  if (provider !== 'mock') {
-    const secret = integrations?.payment.webhookSecret || env.paymentWebhookSecret(provider);
+  // Mock skips verification (it never posts callbacks) — but ONLY when the
+  // resolved rail is actually mock. The URL segment is caller-chosen: if the
+  // transfer's rail partner is webhook-driven (http/simulator), an unsigned
+  // POST to /mock must NOT bypass the HMAC gate (it would resolve the http
+  // adapter below and flip real money state unauthenticated). Every other
+  // provider MUST verify: the rail partner's webhookSecret first, else the
+  // env per-provider secret. '' ⇒ unconfigured ⇒ reject (fail-closed).
+  const railProviderType = railIntegrations?.payment.providerType;
+  const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
+  if (provider !== 'mock' || railWebhookDriven) {
+    const secret = railIntegrations?.payment.webhookSecret || env.paymentWebhookSecret(provider);
     const signature = req.headers.get('x-signature') ?? '';
     if (!verifyWebhookSignature(raw, signature, secret)) {
       return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
     }
   }
 
-  const result = await getPaymentProvider(store, createOutboxRepo(getDb()), integrations?.payment).handleWebhook(body);
+  const result = await getPaymentProvider(store, createOutboxRepo(getDb()), railIntegrations?.payment).handleWebhook(body);
   if (!result) {
     return NextResponse.json({ ok: true, ignored: true });  // unparseable/irrelevant → 200, no mutation
   }
@@ -78,9 +93,15 @@ export async function POST(
     after(async () => {
       try {
         // Brand + send from the OWNING partner's identity (default ⇒ SmartRemit + env number).
+        // Routed transfers: the verified integrations above are the SETTLEMENT
+        // partner's — re-resolve the OWNER's for the customer-facing sends.
         const owningPartner = await getPartnerStore().getPartner(updated.partnerId);
         const brand = resolvePartnerBranding(owningPartner).brand;
-        const waCreds = waCredsFrom(integrations);
+        const brandIntegrations =
+          railPartnerId && railPartnerId !== updated.partnerId
+            ? await getPartnerIntegrationsStore().getIntegrations(updated.partnerId)
+            : railIntegrations;
+        const waCreds = waCredsFrom(brandIntegrations);
         await sendText(
           updated.phone,
           `🎉 ${formatDestAmount(updated.amountInr, updated.destinationCurrency ?? 'INR')} delivered to ${updated.recipientName}. Thanks for using ${brand}!`,

@@ -31,7 +31,14 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
   const stuck = await transfers.findStuckPaid(STUCK_PAID_MINUTES);
   let reinstructed = 0;
   for (const t of stuck) {
-    const integrations = await integrationsRepo.getIntegrations(t.partnerId);
+    // Best-rate routing: the rail that owes the callback is the SETTLEMENT
+    // partner's when routed — classify (webhook-driven vs mock) by THEIR
+    // config, or a routed stuck transfer reads the owner's (often mock)
+    // config and is never re-instructed. The instruct handler re-resolves
+    // the same routed id, so the re-instruction also goes to the right rail.
+    const integrations = await integrationsRepo.getIntegrations(
+      t.settlementPartnerId ?? t.partnerId,
+    );
     const providerType = integrations.payment.providerType;
     const webhookDriven = providerType === 'http' || providerType === 'simulator';
     if (webhookDriven) {
@@ -48,11 +55,15 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     }
     // Mock-rail transfers land here too if their delayed settle died — the
     // dead-letter alert already fired for that row; this is the money-state view.
+    // Routed transfers name the SETTLEMENT partner too — that's whose rail owes
+    // the callback; pointing ops at only the owner would chase the wrong tenant.
     await outbox.enqueue(
       'ops.alert',
       {
         message:
-          `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) has been ` +
+          `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}` +
+          (t.settlementPartnerId ? `, settles via ${t.settlementPartnerId}` : '') +
+          `) has been ` +
           `'paid' for >${STUCK_PAID_MINUTES}min with no delivery confirmation.` +
           (webhookDriven ? ' Re-instructed the partner rail once.' : ''),
       },

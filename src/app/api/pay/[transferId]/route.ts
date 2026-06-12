@@ -43,10 +43,43 @@ async function processTransferPayment(
     return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
   }
 
-  // WL2/WL3: the owning partner's outbound WhatsApp creds + settlement rail
-  // drive everything below. Default/unconfigured ⇒ env number + mock rail.
-  const integrations = await getPartnerIntegrationsStore().getIntegrations(transfer.partnerId);
-  const waCreds = waCredsFrom(integrations);
+  // WL2/WL3 + best-rate routing: RAIL-side config (settlement URL/secret/
+  // providerType) resolves via the ROUTED settlement partner when set; the
+  // customer-facing WhatsApp creds ALWAYS resolve via the OWNING partner.
+  // Unrouted (settlementPartnerId absent) ⇒ ONE fetch, exactly as before;
+  // routed ⇒ the two independent fetches run in parallel.
+  const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
+  const integrationsStore = getPartnerIntegrationsStore();
+  const railIntegrationsPromise = integrationsStore.getIntegrations(railPartnerId);
+  const [railIntegrations, brandIntegrations] = await Promise.all([
+    railIntegrationsPromise,
+    railPartnerId === transfer.partnerId
+      ? railIntegrationsPromise
+      : integrationsStore.getIntegrations(transfer.partnerId),
+  ]);
+  const waCreds = waCredsFrom(brandIntegrations);
+
+  // Fail-closed: a ROUTED transfer must settle on the settlement partner's
+  // webhook-driven rail. Routing eligibility was checked at quote time — if
+  // their config was removed or downgraded since (providerType OR the
+  // settlement endpoint: the same pair quote-time eligibility requires),
+  // refuse BEFORE any charge rather than silently falling into the mock
+  // branch (a fake delivery the owning partner never opted into) or charging
+  // into an instruct that can only dead-letter. Scoped to awaiting_payment so
+  // a replay POST for already-moved money still reports current truth via the
+  // 'already' branch below instead of a spurious 400.
+  if (transfer.settlementPartnerId && transfer.status === 'awaiting_payment') {
+    const railProviderType = railIntegrations.payment.providerType;
+    const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
+    if (!railWebhookDriven || !railIntegrations.payment.credentials?.settlementUrl) {
+      logError(
+        'pay.routed-rail-unavailable',
+        new Error('routed settlement partner has no usable webhook-driven rail'),
+        { transferId: transfer.id },
+      );
+      return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
+    }
+  }
 
   if (transfer.complianceStatus === 'flagged') {
     // Charge the card but do NOT deliver — hold for manual review.
@@ -65,7 +98,9 @@ async function processTransferPayment(
 
   // cleared: the atomic settlement transaction (status flip + stage-1 message +
   // rail effect commit together; every effect dedupe-keyed; worker delivers).
-  const result = await beginSettlement(getDb(), transfer, integrations, waCreds);
+  // beginSettlement decides the rail purely from the PASSED integrations —
+  // hand it the RAIL partner's config, message with the OWNER's creds.
+  const result = await beginSettlement(getDb(), transfer, railIntegrations, waCreds);
   pokeWorker(); // fast-path drain (stage-1 "payment received" is READY now)
   if (result.kind === 'already') {
     // Double submit / replay — the first settlement won; report current truth.

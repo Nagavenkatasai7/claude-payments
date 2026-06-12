@@ -113,11 +113,19 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
       const transferRepo = createTransferRepo(deps.db);
       const transfer = await transferRepo.getTransfer(transferId, { decrypt: true });
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
-      const { integrations } = await partnerContext(deps, transfer.partnerId);
+      // Best-rate routing: the RAIL is the settlement partner's when routed
+      // (settlementPartnerId set) — their endpoint, their signing secret, and
+      // their id in the instruction (the rail verifies with the partner_id it
+      // carries). Unrouted ⇒ the owning partner, exactly as before.
+      const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
+      const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
       const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
       if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
-      const rawBody = JSON.stringify(buildSettlementInstruction(transfer));
+      const rawBody = JSON.stringify({
+        ...buildSettlementInstruction(transfer),
+        partner_id: railPartnerId,
+      });
       const res = await deps.fetchFn(settlementUrl, {
         method: 'POST',
         headers: {

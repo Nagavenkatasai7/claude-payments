@@ -89,6 +89,38 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
   });
 });
 
+describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () => {
+  it("classifies + re-instructs via the SETTLEMENT partner's rail (owner is mock)", async () => {
+    // Owner 'acme' has NO integrations row ⇒ mock. The route is railp's rail —
+    // without routing this transfer is misclassified and never re-instructed.
+    await seedPartner(db, 'railp');
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(fixture({ settlementPartnerId: 'railp' }));
+
+    const r = await reconcileSweep(db);
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0 });
+    expect(await outboxRows()).toEqual([
+      { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
+      { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
+    ]);
+    // The alert points ops at the SETTLEMENT partner (whose rail owes the
+    // callback), not just the brand owner.
+    const alert = (await db.execute(
+      sql`SELECT payload->>'message' AS message FROM outbox WHERE kind = 'ops.alert'`,
+    )) as unknown as { rows: Array<{ message: string }> };
+    expect(alert.rows[0].message).toContain('settles via railp');
+    expect(alert.rows[0].message).toContain('Re-instructed the partner rail once.');
+  });
+});
+
 describe('reconcileSweep — stale compliance reviews', () => {
   it('alerts exactly once for an in_review transfer older than 24h', async () => {
     await store.saveTransfer(fixture({ id: 'rc_rev1', status: 'in_review' }));
