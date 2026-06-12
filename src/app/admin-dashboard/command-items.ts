@@ -26,6 +26,13 @@ export interface CommandCaps {
   isAdmin: boolean;
 }
 
+// Extra search terms for nav entries whose label alone undersells them. The
+// Rates page (platform-only; scope-filtered upstream via navItems) is what
+// staff reach for when they think "pricing" or "margin", not "rates".
+const NAV_KEYWORD_EXTRAS: Partial<Record<ResolvedNavItem['key'], string>> = {
+  rates: 'pricing margin bps fx corridor partner best-rate',
+};
+
 export function buildCommandItems(
   navItems: ResolvedNavItem[],
   caps: CommandCaps,
@@ -36,7 +43,7 @@ export function buildCommandItems(
     href: it.href,
     icon: it.icon,
     group: 'Navigate',
-    keywords: `go open ${it.key}`,
+    keywords: `go open ${it.key}${NAV_KEYWORD_EXTRAS[it.key] ? ` ${NAV_KEYWORD_EXTRAS[it.key]}` : ''}`,
   }));
 
   const actions: CommandItem[] = [];
