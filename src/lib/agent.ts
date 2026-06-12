@@ -1,5 +1,5 @@
 import { buildSystemPrompt } from './prompt';
-import { toolSchemas, executeTool } from './tools';
+import { toolSchemasForChannel, executeTool, type AgentChannel } from './tools';
 import type { ChatMessage, ChatTool, TurnContext } from './types';
 import type { Store } from './store';
 import type { ScheduleStore } from './schedule-store';
@@ -36,7 +36,18 @@ export interface AgentDeps {
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
   waCreds?: WaCreds; // WL2 — partner's outbound WhatsApp creds (absent ⇒ shared env number)
+  // Channel seam (B5): 'web' filters the tool schemas the model sees AND the
+  // executeTool dispatch to WEB_TOOL_ALLOWLIST, and injects the web-channel
+  // system note. Absent ⇒ 'whatsapp' — every existing call site is unchanged.
+  channel?: AgentChannel;
 }
+
+// Injected as a system message on EVERY round of a web-channel turn (not
+// persisted to history) so the model never reaches for WhatsApp-only tools
+// mid-turn. Exported for the web-content-guard test — this string is shown to
+// the model verbatim, so it must stay free of tenant/internal terminology.
+export const WEB_CHANNEL_NOTE =
+  "[WEB CHAT] This conversation happens in the customer's secure web account, not WhatsApp — interactive buttons and approval cards cannot be sent here, and some actions are unavailable. You CAN: answer questions, check a transfer's status, check sending limits, quote with get_quote, list saved recipients and schedules, validate numbers, request a refund with request_refund, and repeat a past send with repeat_transfer — when repeat_transfer returns a summary, relay it and tell the customer to tap the secure payment link below your reply to review and pay (the system appends it automatically). Handle ONE repeat per message — only the latest link is delivered, so if the customer asks to repeat several sends, do them one at a time. When a tool needs a transfer ID you don't have, the customer can find it on that transfer's receipt under Transfer history in this account — never invent one. You CANNOT start a brand-new transfer to a new recipient, create or cancel recurring schedules, cancel a pending payment, or change transfer details here — for those, kindly direct the customer to message us on WhatsApp. Money only ever moves through the secure payment page, never through this chat. NEVER write or guess URLs yourself — secure links are appended below your reply automatically.";
 
 /**
  * Strip every URL the model wrote and optionally append the canonical,
@@ -104,6 +115,10 @@ export function createAgent(deps: AgentDeps) {
     turn: TurnContext,
     history: ChatMessage[],
   ): Promise<string> {
+    // Channel seam (B5): resolve once per turn. 'web' narrows the schemas the
+    // model sees to WEB_TOOL_ALLOWLIST; executeTool re-checks at dispatch.
+    const channel: AgentChannel = deps.channel ?? 'whatsapp';
+    const channelTools = toolSchemasForChannel(channel);
     // Resolve the partner's allowed send currencies ONCE before the round loop.
     // Use distinct names (noteCustomer / notePartner) to avoid shadowing any
     // variables introduced by tool calls later in the same scope.
@@ -146,6 +161,11 @@ export function createAgent(deps: AgentDeps) {
       const messages: ChatMessage[] = [
         { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive }) },
       ];
+      // Web channel: injected EVERY round (not just round 0) so the model still
+      // knows the channel's limits after tool results arrive. Never persisted.
+      if (channel === 'web') {
+        messages.push({ role: 'system', content: WEB_CHANNEL_NOTE });
+      }
       if (turn.isNewConversation && round === 0) {
         messages.push({
           role: 'system',
@@ -228,7 +248,7 @@ export function createAgent(deps: AgentDeps) {
       }
       messages.push(...history);
 
-      const assistant = await chatWithRetry(messages, toolSchemas);
+      const assistant = await chatWithRetry(messages, channelTools);
       history.push(assistant);
 
       if (assistant.tool_calls && assistant.tool_calls.length > 0) {
@@ -255,6 +275,7 @@ export function createAgent(deps: AgentDeps) {
               kycProvider: deps.kycProvider,
               partnerStore: deps.partnerStore, // NEW (P4)
               waCreds: deps.waCreds, // WL2 — partner's outbound creds for interactive sends
+              channel, // B5 — 'web' blocks non-allowlisted tools at dispatch
               turn,
               // Best-rate routing: the LIVE selection service (partner_rates +
               // integrations over the shared Pool). The tools gate by tenant
@@ -274,6 +295,17 @@ export function createAgent(deps: AgentDeps) {
             typeof (result as Record<string, unknown>).url === 'string'
           ) {
             paymentLinks.push((result as Record<string, unknown>).url as string);
+          }
+          // pay_url is the web-channel approve path (B5): repeat_transfer's
+          // draft can't ride a WhatsApp card there, so the tool returns the
+          // canonical pay-page URL and we append it the same code-only way.
+          // Channel-gated so it is STRUCTURALLY dormant on WhatsApp (where the
+          // CTA card carries the link), not just dormant by convention.
+          if (
+            channel === 'web' &&
+            typeof (result as Record<string, unknown>).pay_url === 'string'
+          ) {
+            paymentLinks.push((result as Record<string, unknown>).pay_url as string);
           }
           // Collect the canonical VERIFY link from ANY tool that returns a kyc_url
           // (the verify-before-send gate + the cap hand-offs). sanitizeReply strips

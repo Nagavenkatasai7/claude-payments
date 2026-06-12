@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { getCurrentStaff } from '@/lib/auth';
 import { scopeOf } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
+import { getDb } from '@/db/client';
+import { createTicketRepo } from '@/db/repos/ticket-repo';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,15 +20,21 @@ export async function GET() {
   if (!staff) return NextResponse.json({ ok: false }, { status: 401 });
 
   const scope = scopeOf(staff);
-  const summary = await getStore().transfersSummary(
-    scope.kind === 'partner' ? scope.partnerId : undefined,
-  );
+  const partnerId = scope.kind === 'partner' ? scope.partnerId : undefined;
+  // Two independent aggregates — run in parallel (this is the 5s polling hot path).
+  const [summary, ticketStamp] = await Promise.all([
+    getStore().transfersSummary(partnerId),
+    createTicketRepo(getDb()).ticketStamp(partnerId),
+  ]);
   // Any visible change moves at least one of these numbers/timestamps.
+  // `tk` (B3) folds ticket churn into the same opaque stamp — LiveRefresh only
+  // ever compares the string, so appending a field is upstream-safe.
   const stamp = JSON.stringify({
     t: summary.total,
     s: summary.byStatus,
     n: summary.needsAttention,
     l: summary.latest,
+    tk: ticketStamp,
   });
   return NextResponse.json({ ok: true, stamp, summary });
 }
