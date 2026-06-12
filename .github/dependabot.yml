@@ -1,0 +1,17 @@
+# Dependabot VERSION updates (npm, weekly). Minor + patch bumps arrive as one
+# grouped PR to keep noise down; majors arrive individually so breaking
+# changes get their own review. Security updates are a separate repo-settings
+# toggle (coordinator), not configured here.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
