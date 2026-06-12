@@ -47,6 +47,7 @@ export default function DocsPage() {
           </Link>
           <nav className="flex items-center gap-4 text-sm">
             <a href="#api" className="text-muted-foreground hover:text-foreground">API</a>
+            <a href="#rates" className="text-muted-foreground hover:text-foreground">Rates</a>
             <a href="#settlement" className="text-muted-foreground hover:text-foreground">Settlement</a>
             <a href="#webhooks" className="text-muted-foreground hover:text-foreground">Webhooks</a>
             <a href="#whatsapp" className="text-muted-foreground hover:text-foreground">WhatsApp</a>
@@ -90,6 +91,8 @@ export default function DocsPage() {
               <Endpoint method="GET" path="/transactions" desc="List your transfers (keyset: ?limit=&cursor=)" />
               <Endpoint method="GET" path="/transactions/:id" desc="Fetch one transfer (404 outside your scope)" />
               <Endpoint method="POST" path="/transactions/:id/confirm" desc="Confirm funds captured → settlement begins" />
+              <Endpoint method="PUT" path="/rates" desc="Push one corridor's wholesale conversion rate" />
+              <Endpoint method="GET" path="/rates" desc="Your current rate sheet (freshness + margin)" />
             </CardContent>
           </Card>
           <Code>{`# Mint a transfer (idempotent — safe to retry with the same key)
@@ -112,8 +115,77 @@ curl -X POST $BASE/transactions \\
 
         <Separator />
 
+        <section id="rates" className="space-y-4">
+          <h2 className="text-xl font-semibold">2 · Rates (compete for routed flow)</h2>
+          <p className="text-sm text-muted-foreground">
+            Push the <strong className="text-foreground">wholesale conversion rate</strong> you
+            offer per corridor with <code>PUT /rates</code>. When your fresh rate beats the
+            platform mid-market rate (and your settlement rail is configured), SmartRemit routes
+            eligible platform transfers to you for settlement. Pushing a rate does{' '}
+            <strong className="text-foreground">not</strong> change the pricing of your own{' '}
+            <code>/quote</code> or <code>/transactions</code> — those stay at platform mid-market.
+          </p>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">PUT /rates — request fields</CardTitle>
+              <CardDescription>One corridor per call. Re-push before expiry to stay fresh.</CardDescription>
+            </CardHeader>
+            <CardContent className="text-sm">
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="border-b border-border text-muted-foreground">
+                    <th className="py-1.5 pr-4 font-medium">Field</th>
+                    <th className="py-1.5 pr-4 font-medium">Type</th>
+                    <th className="py-1.5 font-medium">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>source_currency</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5">Required. ISO 4217 send currency (e.g. <code>USD</code>).</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>destination_currency</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5">Required. ISO 4217 payout currency (e.g. <code>INR</code>); must differ from source.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>effective_rate</code></td>
+                    <td className="py-1.5 pr-4">number</td>
+                    <td className="py-1.5">Required. Destination units per 1 source unit; 0 &lt; rate &lt; 100000.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>ttl_seconds</code></td>
+                    <td className="py-1.5 pr-4">number</td>
+                    <td className="py-1.5">Optional. Freshness window — default 3600, clamped to [60, 86400]. An expired rate stops competing.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+          <Code>{`# Push your USD→INR rate (fresh for 30 minutes)
+curl -X PUT https://smartremit.ai/api/partner/v1/rates \\
+  -H "Authorization: Bearer $KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "source_currency": "USD", "destination_currency": "INR",
+        "effective_rate": 86.4, "ttl_seconds": 1800 }'
+
+# → 200
+{ "source_currency": "USD", "destination_currency": "INR",
+  "effective_rate": 86.4, "expires_at": "…", "pushed_at": "…" }`}</Code>
+          <p className="text-sm text-muted-foreground">
+            <code>GET /rates</code> returns your sheet:{' '}
+            <code>{`{ "rates": [ { source_currency, destination_currency, effective_rate, expires_at, fresh, margin_bps } ] }`}</code>{' '}
+            — <code>fresh</code> tells you whether the pushed rate is still competing;{' '}
+            <code>margin_bps</code> is your standing platform-configured fallback margin.
+          </p>
+        </section>
+
+        <Separator />
+
         <section id="settlement" className="space-y-4">
-          <h2 className="text-xl font-semibold">2 · Settlement instructions (us → you)</h2>
+          <h2 className="text-xl font-semibold">3 · Settlement instructions (us → you)</h2>
           <p className="text-sm text-muted-foreground">
             When a transfer is paid (pay page or <code>/confirm</code>), SmartRemit POSTs a{' '}
             <strong className="text-foreground">signed instruction</strong> to your configured
@@ -146,7 +218,7 @@ x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
         <Separator />
 
         <section id="webhooks" className="space-y-4">
-          <h2 className="text-xl font-semibold">3 · Status webhooks (you → us)</h2>
+          <h2 className="text-xl font-semibold">4 · Status webhooks (you → us)</h2>
           <p className="text-sm text-muted-foreground">
             Report lifecycle status to{' '}
             <code>POST /api/payment-webhook/&lt;provider&gt;</code>, signed the same way with your{' '}
@@ -183,7 +255,7 @@ x-signature: 9c44…   # HMAC-SHA256(rawBody, webhookSecret)
         <Separator />
 
         <section id="whatsapp" className="space-y-4">
-          <h2 className="text-xl font-semibold">4 · Your WhatsApp number & KYC mode</h2>
+          <h2 className="text-xl font-semibold">5 · Your WhatsApp number & KYC mode</h2>
           <p className="text-sm text-muted-foreground">
             Bring your own Meta WhatsApp Business number: configure the phone-number id, access
             token, verify token, and app secret in the dashboard, then point Meta&apos;s webhook at

@@ -4,6 +4,7 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type {
   CountryCode, CurrencyCode, KycStatus, Partner, PartnerId, PayoutMethod, Transfer,
 } from './types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { getFxRates } from './rate';
 import { quote, QuoteError } from './fx';
 import { validatePayoutFields } from './payout-format';
@@ -20,6 +21,7 @@ import {
   createAuditRepo,
   type BeneficiaryRecord,
 } from '@/db/repos/aux-repos';
+import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { beginSettlement } from './settlement';
 import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
@@ -321,6 +323,91 @@ export async function confirmTransaction(
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);
   const after = await deps.store.getTransfer(id);
   return ok(200, transferView(after ?? t));
+}
+
+// ── PUT /rates (push ONE corridor's wholesale rate) ───────────────────────
+//
+// The pushed rate is the WHOLESALE rate this partner offers to win routed
+// default-tenant flow (best-rate selection in partner-rates.ts) — it does NOT
+// reprice the partner's own /quote, which stays at platform mid-market.
+
+const SUPPORTED_CURRENCIES = new Set<string>(Object.values(DEFAULT_CURRENCY_FOR_COUNTRY));
+const SUPPORTED_CURRENCIES_LIST = [...SUPPORTED_CURRENCIES].join(', ');
+const RATE_TTL_DEFAULT_S = 3_600;
+const RATE_TTL_MIN_S = 60;
+const RATE_TTL_MAX_S = 86_400;
+const RATE_MAX = 100_000;
+
+export async function pushPartnerRate(
+  deps: PartnerApiDeps,
+  partner: Partner,
+  keyId: string,
+  body: Record<string, unknown>,
+): Promise<SvcResult<unknown>> {
+  const sourceCurrency = str(body.source_currency).toUpperCase();
+  const destinationCurrency = str(body.destination_currency).toUpperCase();
+  if (!SUPPORTED_CURRENCIES.has(sourceCurrency)) {
+    return err(400, `source_currency must be one of: ${SUPPORTED_CURRENCIES_LIST}.`);
+  }
+  if (!SUPPORTED_CURRENCIES.has(destinationCurrency)) {
+    return err(400, `destination_currency must be one of: ${SUPPORTED_CURRENCIES_LIST}.`);
+  }
+  if (sourceCurrency === destinationCurrency) {
+    return err(400, 'source_currency and destination_currency must differ.');
+  }
+  const rate = num(body.effective_rate);
+  if (rate === null || rate <= 0 || rate >= RATE_MAX) {
+    return err(400, `effective_rate must be a number greater than 0 and less than ${RATE_MAX}.`);
+  }
+  let ttl = RATE_TTL_DEFAULT_S;
+  if (body.ttl_seconds !== undefined) {
+    const requested = num(body.ttl_seconds);
+    if (requested === null) return err(400, 'ttl_seconds must be a number of seconds.');
+    ttl = Math.min(RATE_TTL_MAX_S, Math.max(RATE_TTL_MIN_S, Math.trunc(requested)));
+  }
+
+  const nowIso = (deps.now ?? (() => new Date().toISOString()))();
+  const expiresAt = new Date(Date.parse(nowIso) + ttl * 1000).toISOString();
+  // marginBps stays UNDEFINED — merge-upsert keeps any admin-configured margin.
+  const saved = await createPartnerRateRepo(deps.db).upsertRate({
+    id: `pr_${(deps.genId ?? newTransferId)()}`,
+    partnerId: partner.id, // authoritative: from the API key, never the body
+    sourceCurrency: sourceCurrency as CurrencyCode,
+    destinationCurrency: destinationCurrency as CurrencyCode,
+    effectiveRate: rate,
+    expiresAt,
+    pushedAt: nowIso,
+  });
+  await appendAudit(deps, partner.id, keyId, 'rates.push', saved.id);
+  return ok(200, {
+    source_currency: saved.sourceCurrency,
+    destination_currency: saved.destinationCurrency,
+    effective_rate: saved.effectiveRate,
+    expires_at: saved.expiresAt,
+    pushed_at: saved.pushedAt,
+  });
+}
+
+// ── GET /rates (the partner's own rate sheet) ──────────────────────────────
+export async function listPartnerRates(
+  deps: PartnerApiDeps,
+  partnerId: PartnerId,
+): Promise<SvcResult<unknown>> {
+  const rates = await createPartnerRateRepo(deps.db).listRatesForPartner(partnerId);
+  const nowMs = Date.parse((deps.now ?? (() => new Date().toISOString()))());
+  return ok(200, {
+    rates: rates.map((r) => ({
+      source_currency: r.sourceCurrency,
+      destination_currency: r.destinationCurrency,
+      effective_rate: r.effectiveRate ?? null,
+      expires_at: r.expiresAt ?? null,
+      // Mirrors effectiveRateFor's freshness rule: a pushed rate competes only
+      // while its expiry is in the future.
+      fresh: r.effectiveRate !== undefined && r.effectiveRate > 0
+        && r.expiresAt !== undefined && Date.parse(r.expiresAt) > nowMs,
+      margin_bps: r.marginBps ?? null,
+    })),
+  });
 }
 
 // ── Append-only per-partner API audit ─────────────────────────────────────
