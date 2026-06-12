@@ -27,14 +27,24 @@ test('public landing page renders at / without auth and links to WhatsApp', asyn
   expect(res?.status()).toBeLessThan(400);
   // Must stay on `/` (no auth bounce to /login or /admin-dashboard).
   await expect(page).toHaveURL(/\/$/);
-  // The single landing <h1>.
-  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  // The single landing <h1> — B7 rebuild headline.
+  const h1 = page.getByRole('heading', { level: 1 });
+  await expect(h1).toBeVisible();
+  await expect(h1).toContainText(/send money by chatting/i);
   // At least one WhatsApp CTA pointing at the bot number.
   const waCta = page
     .locator('a[href*="api.whatsapp.com/send/?phone=15556298293"]')
     .first();
   await expect(waCta).toBeVisible();
   await expect(waCta).toHaveAttribute('target', '_blank');
+  // Login routing (B7): the three destinations + create account must exist as
+  // real links. The footer renders all four visibly (the nav copy is a CSS
+  // hover menu), so pin the footer instances.
+  const footer = page.locator('footer');
+  await expect(footer.locator('a[href="/account/login"]').first()).toBeVisible();
+  await expect(footer.locator('a[href="/login"]').first()).toBeVisible();
+  await expect(footer.locator('a[href="/docs"]').first()).toBeVisible();
+  await expect(footer.locator('a[href="/account/register"]').first()).toBeVisible();
 });
 
 test('staff can log in and reach dashboard pages', async ({ page }) => {

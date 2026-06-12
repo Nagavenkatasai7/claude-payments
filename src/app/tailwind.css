@@ -72,6 +72,86 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/*
+ * B7 — landing hero pipeline (src/app/landing/HeroPipeline.tsx).
+ *
+ * The UN-animated base markup is FULLY LIT (every node green-bordered, every
+ * connector solid) — that IS the prefers-reduced-motion / no-support state.
+ * Under motion-safe, the cycle animations below take over: nodes start dim
+ * (fill-mode: backwards holds the 0% frame through the stagger delay), light
+ * up in sequence, and a pulse streak travels each connector. `--lp-delay`
+ * staggers the stages; it is set inline per node/connector from JSX.
+ */
+@keyframes lp-node-cycle {
+  0% {
+    opacity: 0.38;
+    border-color: rgba(255, 255, 255, 0.09);
+    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+  }
+  6%, 76% {
+    opacity: 1;
+    border-color: rgba(37, 211, 102, 0.5);
+    box-shadow: 0 0 28px -6px rgba(37, 211, 102, 0.4);
+  }
+  90%, 100% {
+    opacity: 0.38;
+    border-color: rgba(255, 255, 255, 0.09);
+    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+  }
+}
+@keyframes lp-dot-cycle {
+  0% {
+    background: rgba(255, 255, 255, 0.22);
+    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+  }
+  6%, 76% {
+    background: #25d366;
+    box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.18);
+  }
+  90%, 100% {
+    background: rgba(255, 255, 255, 0.22);
+    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+  }
+}
+@keyframes lp-link-x {
+  0%        { left: -20%; opacity: 0; }
+  1%        { opacity: 1; }
+  7%        { left: 102%; opacity: 1; }
+  8%, 100%  { left: 102%; opacity: 0; }
+}
+@keyframes lp-link-y {
+  0%        { top: -35%; opacity: 0; }
+  1%        { opacity: 1; }
+  7%        { top: 102%; opacity: 1; }
+  8%, 100%  { top: 102%; opacity: 0; }
+}
+
+@layer components {
+  /* Static fallback: the traveling streaks simply never appear. */
+  .lp-pulse-x,
+  .lp-pulse-y {
+    opacity: 0;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .lp-stage {
+      animation: lp-node-cycle 9s ease-in-out infinite backwards;
+      animation-delay: var(--lp-delay, 0s);
+    }
+    .lp-stage-dot {
+      animation: lp-dot-cycle 9s ease-in-out infinite backwards;
+      animation-delay: var(--lp-delay, 0s);
+    }
+    .lp-pulse-x {
+      animation: lp-link-x 9s linear infinite backwards;
+      animation-delay: var(--lp-delay, 0s);
+    }
+    .lp-pulse-y {
+      animation: lp-link-y 9s linear infinite backwards;
+      animation-delay: var(--lp-delay, 0s);
+    }
+  }
+}
+
 /* shadcn/ui token contract, mapped from the proven --sh-* palette (Radix
  * Slate neutrals + the Stripe-class indigo accent) so rebuilt pages keep the
  * exact same visual language as the legacy ones during the migration. */

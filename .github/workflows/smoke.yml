@@ -19,8 +19,8 @@ jobs:
 
       - run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+      - name: Setup Playwright (cached)
+        uses: ./.github/actions/setup-playwright
 
       - name: Smoke test
         # Target the canonical production domain, not target_url. The
