@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { fakeRedis } from './helpers';
 import {
   buildSummaryContext,
+  buildDeterministicSummary,
   createCustomerSummarizer,
   SUMMARY_SYSTEM_PROMPT,
   type CustomerSummarizerDeps,
@@ -139,6 +140,52 @@ describe('buildSummaryContext', () => {
     const six = Array.from({ length: 6 }, (_, i) => transfer({ id: `tr_${i}` }));
     const ctx = buildSummaryContext(customer(), six, 0, true);
     expect(ctx.recentTransfers).toHaveLength(5);
+  });
+});
+
+describe('buildDeterministicSummary', () => {
+  it('returns non-empty plain text from a populated context', () => {
+    const ctx = buildSummaryContext(
+      customer(),
+      [transfer({ id: 'tr_a', status: 'paid' })],
+      0,
+      true,
+    );
+    const out = buildDeterministicSummary(ctx);
+    expect(out.length).toBeGreaterThan(0);
+    expect(typeof out).toBe('string');
+    // Plain text only — no markdown bullets, no JSON braces leaking through.
+    expect(out).not.toContain('{');
+    expect(out).not.toMatch(/^[-*]/m);
+  });
+
+  it('never throws and is non-empty on a totally empty account', () => {
+    const ctx = buildSummaryContext(customer(), [], 0, true);
+    let out = '';
+    expect(() => {
+      out = buildDeterministicSummary(ctx);
+    }).not.toThrow();
+    expect(out.trim().length).toBeGreaterThan(0);
+  });
+
+  it('mentions pending refunds when there are any', () => {
+    const ctx = buildSummaryContext(
+      customer(),
+      [transfer({ id: 'r1', status: 'paid', refundStatus: 'requested' })],
+      0,
+      true,
+    );
+    const out = buildDeterministicSummary(ctx);
+    expect(out.toLowerCase()).toContain('refund');
+  });
+
+  it('never leaks routing / compliance / destination / phone facts', () => {
+    const ctx = buildSummaryContext(customer(), [transfer({ status: 'paid' })], 0, true);
+    const out = buildDeterministicSummary(ctx);
+    expect(out).not.toContain('rail-secret-partner');
+    expect(out).not.toContain('4242');
+    expect(out).not.toContain('543210');
+    expect(out).not.toContain(PHONE);
   });
 });
 

@@ -4,7 +4,13 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
-import { getCustomerSummary } from '@/lib/customer-summary';
+import { getCustomerStore } from '@/lib/customer-store';
+import { getDailyVolumeStore } from '@/lib/daily-volume-store';
+import {
+  getCustomerSummary,
+  buildSummaryContext,
+  buildDeterministicSummary,
+} from '@/lib/customer-summary';
 import { waLink, WA_MESSAGES } from '@/app/landing/wa';
 import { LogoutButton } from './logout-button';
 
@@ -67,19 +73,60 @@ const cardCls = 'mb-4 rounded-2xl bg-[#111b21] p-6';
 const cardHeadCls = 'text-[13px] font-semibold uppercase tracking-[0.06em] text-[#8696a0]';
 
 /**
- * AI smart-summary card — streamed in behind <Suspense> so a cold cache never
- * blocks the page shell. getCustomerSummary returns null on ANY model failure
- * and the card simply doesn't render.
+ * Smart-summary card — streamed in behind <Suspense> so a cold cache never
+ * blocks the page shell. The AI path (getCustomerSummary) returns null on ANY
+ * model/cache failure; rather than leave the slot silently empty we then fall
+ * back to a DETERMINISTIC digest built purely from the customer's own data
+ * (buildDeterministicSummary). The "AI-generated" disclaimer is shown ONLY on
+ * the real-AI path — the deterministic card never claims to be AI.
  */
 async function SmartSummaryCard({ phone }: { phone: string }) {
   const summary = await getCustomerSummary(phone);
-  if (!summary) return null;
+  if (summary) {
+    return (
+      <section className={cardCls}>
+        <h2 className={`${cardHeadCls} mb-2`}>Your summary</h2>
+        <p className="mb-3 text-[15px] leading-[1.6]">{summary}</p>
+        <p className="text-xs leading-normal text-[#667781]">
+          AI-generated — check your history for official status.
+        </p>
+      </section>
+    );
+  }
+
+  // AI path unavailable — build the same SummaryContext the model would have
+  // seen (the customer's OWN masked facts only) and render it deterministically.
+  // Any failure here too just drops the card, exactly as before.
+  let fallback: string | null = null;
+  try {
+    const store = getStore();
+    const [customer, transfers, todayUsedCents] = await Promise.all([
+      getCustomerStore(store).getCustomer(phone),
+      store.listTransfersByPhone(phone, 5),
+      getDailyVolumeStore().getTodayCents(phone),
+    ]);
+    if (customer) {
+      const partnerRow = await getPartnerStore().getPartner(customer.partnerId);
+      const partner = partnerRow ?? (await getPartnerStore().ensureDefaultPartner());
+      const context = buildSummaryContext(
+        customer,
+        transfers,
+        todayUsedCents,
+        sendGateActive(partner),
+      );
+      fallback = buildDeterministicSummary(context);
+    }
+  } catch {
+    fallback = null;
+  }
+  if (!fallback) return null;
+
   return (
     <section className={cardCls}>
       <h2 className={`${cardHeadCls} mb-2`}>Your summary</h2>
-      <p className="mb-3 text-[15px] leading-[1.6]">{summary}</p>
+      <p className="mb-3 text-[15px] leading-[1.6]">{fallback}</p>
       <p className="text-xs leading-normal text-[#667781]">
-        AI-generated — check your history for official status.
+        Based on your account activity — check your history for official status.
       </p>
     </section>
   );
@@ -126,10 +173,18 @@ export default async function AccountHomePage() {
             You&rsquo;re signed in as <strong className="text-[#25d366]">{maskPhone(customer.senderPhone)}</strong>.
           </p>
           {cta ? (
-            <div>
+            <div className="mb-5">
               <p>{cta.done ? '✓ ' : ''}{cta.label}</p>
-              <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">{cta.note}</p>
-              {cta.done ? null : <a href="/account/verify">{cta.label}</a>}
+              <p className="-mt-2 mb-3 text-sm leading-normal text-[#8696a0]">{cta.note}</p>
+              {cta.done ? null : (
+                <a
+                  href="/account/verify"
+                  className="block rounded-2xl bg-[#25d366] p-4 text-[#0b141a] no-underline"
+                >
+                  <div className="text-[15px] font-bold leading-normal">{cta.label}</div>
+                  <div className="mt-0.5 text-xs leading-normal text-[#04231a]/80">{cta.note}</div>
+                </a>
+              )}
             </div>
           ) : null}
           <LogoutButton />
