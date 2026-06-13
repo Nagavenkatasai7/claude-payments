@@ -108,6 +108,51 @@ export function buildSummaryContext(
   };
 }
 
+/**
+ * Deterministic fallback digest — a plain-text summary built PURELY from the
+ * same SummaryContext the model would have received, with NO Ollama call and NO
+ * cache. The dashboard renders this whenever getCustomerSummary returns null (a
+ * model/cache failure) so the summary card is never silently empty.
+ *
+ * Same guardrails as the AI path by construction: it only reads SummaryContext,
+ * which already excludes payout destinations, recipient phones, compliance
+ * reasons, and settlementPartnerId. No advice, no promises — just the
+ * customer's own facts restated. Always returns non-empty plain text.
+ */
+export function buildDeterministicSummary(context: SummaryContext): string {
+  const { recentTransfers, pendingRefunds, dailyRemainingUsd } = context;
+  const sentences: string[] = [];
+
+  if (recentTransfers.length === 0) {
+    sentences.push(
+      "You haven't made any transfers yet — message us on WhatsApp to send your first one.",
+    );
+  } else {
+    const count = recentTransfers.length;
+    const noun = count === 1 ? 'transfer' : 'transfers';
+    const last = recentTransfers[0];
+    sentences.push(
+      `Your ${count} most recent ${noun} are listed below — the latest, to ${last.recipient}, is ${last.status}.`,
+    );
+  }
+
+  if (pendingRefunds > 0) {
+    const noun = pendingRefunds === 1 ? 'refund' : 'refunds';
+    sentences.push(
+      `You have ${pendingRefunds} ${noun} being reviewed by our team — we'll confirm once it's approved.`,
+    );
+  }
+
+  // Headroom is a fact already in the context (the same cap composition the
+  // bot's check_send_limit uses); no advice, just the remaining number.
+  const remaining = Math.max(0, Math.round(dailyRemainingUsd));
+  sentences.push(
+    `You have about $${remaining} of your daily sending limit left today.`,
+  );
+
+  return sentences.join(' ');
+}
+
 const SUMMARY_TTL_SECONDS = 24 * 60 * 60; // 24h — the card is a digest, not live data
 const DEFAULT_TIMEOUT_MS = 12_000;
 
