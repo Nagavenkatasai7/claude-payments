@@ -197,16 +197,23 @@ export default async function OpsPage() {
           </Card>
         )}
 
-        {refundsTotal > 0 && (
-          <Card className="mb-6">
+        <Card className="mb-6">
             <CardHeader>
               <CardTitle>Refunds</CardTitle>
               <CardDescription>
                 Customer-requested refunds need a decision; failed refunds can be retried.
-                In-flight refunds complete automatically (the sweep alerts if one stalls).
+                In-flight refunds complete automatically (the sweep alerts if one stalls).{' '}
+                <Link href="/admin-dashboard/refunds" className="underline underline-offset-2">
+                  View the full refund ledger →
+                </Link>
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
+              {refundsTotal === 0 && !healthy && (
+                <div className="text-sm text-muted-foreground">
+                  No refunds need attention right now.
+                </div>
+              )}
               {snap.refundsRequested.length > 0 && (
                 <div>
                   <div className="mb-2 text-sm font-medium">
@@ -290,7 +297,6 @@ export default async function OpsPage() {
               )}
             </CardContent>
           </Card>
-        )}
 
         {snap.staleReviews.length > 0 && (
           <Card className="mb-6">

@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import {
   cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
-  approveRefund, dismissRefund, retryRefund,
+  issueRefund, approveRefund, dismissRefund, retryRefund,
 } from '@/lib/dashboard-ops';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -198,6 +198,71 @@ describe('rejectTransfer', () => {
     await store.saveTransfer(makeTransfer({ id: 'rej3', status: 'cancelled' }));
     await expect(rejectTransfer(store, db, 'rej3')).rejects.toThrow(/not in_review/i);
     expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+describe('issueRefund (admin-proactive, no prior request)', () => {
+  it('moves a PAID charged transfer none → pending and enqueues one funding.refund', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'iss1', status: 'paid', fundingRef: 'mockfund-iss1',
+    }));
+    await issueRefund(db, 'iss1');
+    expect((await store.getTransfer('iss1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([
+      { kind: 'funding.refund', dedupe_key: 'refund:iss1' },
+    ]);
+  });
+
+  it('allows refunding a DELIVERED charged transfer (a clawback)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'iss2', status: 'delivered', fundingRef: 'mockfund-iss2',
+    }));
+    await issueRefund(db, 'iss2');
+    expect((await store.getTransfer('iss2'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toHaveLength(1);
+  });
+
+  it('refuses an UNCHARGED transfer (nothing to return)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'iss3', status: 'paid' }));
+    await expect(issueRefund(db, 'iss3')).rejects.toThrow(/never charged/i);
+    expect((await store.getTransfer('iss3'))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('refuses a transfer that has not been paid (e.g. awaiting_payment)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'iss4', status: 'awaiting_payment', fundingRef: 'mockfund-iss4',
+    }));
+    await expect(issueRefund(db, 'iss4')).rejects.toThrow(/only paid or delivered/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('refuses when a refund is already in progress or complete', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'iss5', status: 'paid', fundingRef: 'f', refundStatus: 'requested',
+    }));
+    await expect(issueRefund(db, 'iss5')).rejects.toThrow(/already in progress or complete/i);
+    expect((await store.getTransfer('iss5'))?.refundStatus).toBe('requested');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('a double-issue throws on the second click and never enqueues twice', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'iss6', status: 'delivered', fundingRef: 'mockfund-iss6',
+    }));
+    await issueRefund(db, 'iss6');
+    await expect(issueRefund(db, 'iss6')).rejects.toThrow(/already in progress or complete/i);
+    expect(await outboxRows()).toHaveLength(1);
+  });
+
+  it('throws for a missing transfer', async () => {
+    await expect(issueRefund(db, 'missing')).rejects.toThrow(/not found/i);
   });
 });
 

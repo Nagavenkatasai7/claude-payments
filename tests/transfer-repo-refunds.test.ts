@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { createTransferRepo, type TransferRepo } from '@/db/repos/transfer-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -100,6 +100,44 @@ describe('refund queues + crash-resume query', () => {
     expect((await repo.listByRefundStatus('requested')).map((t) => t.id)).toEqual(['q1']);
     expect((await repo.listByRefundStatus('pending')).map((t) => t.id)).toEqual(['q2']);
     expect(await repo.listByRefundStatus('failed')).toEqual([]);
+  });
+
+  it('listActiveRefunds returns every non-none refund, newest first, and excludes none', async () => {
+    await repo.saveTransfer(fixture({ id: 'a1', createdAt: minsAgo(30) }));
+    await repo.saveTransfer(fixture({ id: 'a2', createdAt: minsAgo(20) }));
+    await repo.saveTransfer(fixture({ id: 'a3', createdAt: minsAgo(10) })); // stays none
+    await repo.updateRefund('a1', { refundStatus: 'requested' });
+    await repo.updateRefund('a2', { refundStatus: 'pending' });
+    await repo.updateRefund('a2', { refundStatus: 'completed', refundRef: 'r', refundedAt: NOW.toISOString() });
+    const all = await repo.listActiveRefunds();
+    expect(all.map((t) => t.id)).toEqual(['a2', 'a1']); // newest createdAt first; a3 (none) excluded
+    expect(all.map((t) => t.refundStatus)).toEqual(['completed', 'requested']);
+  });
+
+  it('listActiveRefunds scopes to a partner when partnerId is given', async () => {
+    await seedPartner(db, 'acme');
+    await repo.saveTransfer(fixture({ id: 'p1', partnerId: 'default' }));
+    await repo.saveTransfer(fixture({ id: 'p2', partnerId: 'acme' }));
+    await repo.updateRefund('p1', { refundStatus: 'requested' });
+    await repo.updateRefund('p2', { refundStatus: 'requested' });
+    expect((await repo.listActiveRefunds({ partnerId: 'acme' })).map((t) => t.id)).toEqual(['p2']);
+    expect((await repo.listActiveRefunds()).map((t) => t.id).sort()).toEqual(['p1', 'p2']);
+  });
+
+  it('findStuckPaid excludes paid transfers that are being refunded (money-safety: no re-instruct of a clawback)', async () => {
+    // A normal stuck-paid transfer (no refund) — still found, still re-instructed.
+    await repo.saveTransfer(fixture({ id: 'sp_none', status: 'paid', paidAt: minsAgo(30) }));
+    // A paid transfer with a refund in flight — must NOT be returned, or the sweep
+    // would re-deliver money that is being refunded (recipient paid AND sender refunded).
+    await repo.saveTransfer(fixture({ id: 'sp_ref', status: 'paid', paidAt: minsAgo(30) }));
+    await repo.updateRefund('sp_ref', { refundStatus: 'pending' });
+    // A paid transfer whose refund already completed — also excluded.
+    await repo.saveTransfer(fixture({ id: 'sp_done', status: 'paid', paidAt: minsAgo(30) }));
+    await repo.updateRefund('sp_done', { refundStatus: 'pending' });
+    await repo.updateRefund('sp_done', { refundStatus: 'completed', refundRef: 'r', refundedAt: NOW.toISOString() });
+
+    const stuck = await repo.findStuckPaid(15);
+    expect(stuck.map((t) => t.id)).toEqual(['sp_none']);
   });
 
   it('listAwaitingWithFunding finds charged-but-unsettled transfers past the cutoff only', async () => {

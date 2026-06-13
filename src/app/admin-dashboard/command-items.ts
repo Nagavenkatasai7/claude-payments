@@ -33,6 +33,7 @@ export interface CommandCaps {
 // staff reach for when they think "pricing" or "margin", not "rates".
 const NAV_KEYWORD_EXTRAS: Partial<Record<ResolvedNavItem['key'], string>> = {
   rates: 'pricing margin bps fx corridor partner best-rate',
+  refunds: 'refund reversal reverse chargeback return money back issue approve dismiss retry',
   tickets: 'support ticket queue customer query question help',
   'my-queue': 'support my tickets assigned queue',
   'employee-questions': 'internal ask admin escalate question help',

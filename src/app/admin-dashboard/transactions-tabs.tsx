@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
 import { money } from './format';
 import { MaskedDestination } from './masked-destination';
@@ -230,6 +231,9 @@ export function TransactionsTabs({
               ? staffByUsername[t.assignedTo] ?? t.assignedTo
               : <span key="assignee" className={SUB_TEXT}>—</span>,
             <div key="actions" className="flex flex-wrap gap-1.5">
+              <Link href={`/admin-dashboard/transactions/${t.id}`} className={MINI_BTN}>
+                Details
+              </Link>
               {t.status === 'awaiting_payment' && canResend && (
                 <form action={resendAction}>
                   <input type="hidden" name="id" value={t.id} />
