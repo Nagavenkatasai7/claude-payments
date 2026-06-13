@@ -217,6 +217,25 @@ export function createTransferRepo(
     },
 
     /**
+     * Every transfer with a refund in ANY non-'none' state (requested, pending,
+     * completed, failed) — the full-history feed for the /admin-dashboard/refunds
+     * page. Masked reads, newest first. `partnerId` scopes the feed to one tenant
+     * (partner-staff visibility); omitted ⇒ platform-wide.
+     */
+    async listActiveRefunds(opts: { partnerId?: string; limit?: number } = {}): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          sql`${transfers.refundStatus} <> 'none'`,
+          ...(opts.partnerId ? [eq(transfers.partnerId, opts.partnerId)] : []),
+        ))
+        .orderBy(desc(transfers.createdAt))
+        .limit(opts.limit ?? 200);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
      * Crash-resume sweep query: charged (fundingRef set) but still
      * awaiting_payment after `olderThanMs` — the process died between capture
      * and beginSettlement. These must be resumed, never abandoned.
@@ -438,6 +457,12 @@ export function createTransferRepo(
           and(
             eq(transfers.status, 'paid'),
             sql`${transfers.paidAt} < now() - make_interval(mins => ${olderThanMinutes})`,
+            // MONEY SAFETY: a 'paid' transfer that is being (or has been) refunded
+            // must NOT be re-instructed for delivery by the stuck-paid sweep — that
+            // would pay the recipient AND refund the sender (money moved twice).
+            // Once a refund is in flight or done, the transfer is no longer "stuck",
+            // it is being clawed back. refund_status defaults to 'none'.
+            eq(transfers.refundStatus, 'none'),
           ),
         )
         .orderBy(transfers.paidAt);

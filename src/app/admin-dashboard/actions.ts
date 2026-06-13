@@ -10,6 +10,7 @@ import {
   resendPaymentLink,
   releaseTransfer,
   rejectTransfer,
+  issueRefund,
   approveRefund,
   dismissRefund,
   retryRefund,
@@ -122,6 +123,21 @@ export async function rejectTransferAction(formData: FormData): Promise<void> {
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
   await rejectTransfer(store, getDb(), id);
+  revalidatePath('/admin-dashboard', 'layout');
+}
+
+/**
+ * PROACTIVELY issue a refund on a paid/delivered, charged transfer (none →
+ * pending + funding.refund effect + worker poke) — no prior customer request
+ * needed. Admin role + partner scope, like the other refund actions; issueRefund
+ * re-verifies status + fundingRef + refundStatus inside the transaction, so an
+ * ineligible transfer or a double-click throws instead of moving money twice.
+ */
+export async function issueRefundAction(formData: FormData): Promise<void> {
+  const staff = await requireAdmin();
+  const id = String(formData.get('id') ?? '');
+  await getScopedTransfer(staff, id);
+  await issueRefund(getDb(), id);
   revalidatePath('/admin-dashboard', 'layout');
 }
 

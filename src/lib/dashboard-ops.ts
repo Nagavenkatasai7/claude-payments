@@ -101,6 +101,50 @@ export async function rejectTransfer(store: Store, db: Db, id: string): Promise<
 }
 
 /**
+ * PROACTIVELY issue a refund on a PAID or DELIVERED transfer that was actually
+ * charged (fundingRef set) — admin-initiated, no prior customer request needed.
+ * none → pending + the durable funding.refund effect, one transaction, with the
+ * eligibility re-checked INSIDE it so a double-click or an ineligible transfer
+ * throws and enqueues nothing. Refunding a DELIVERED transfer is a clawback the
+ * operator settles out-of-band; the seam just returns the original charge.
+ *
+ * Defensive beyond its siblings: it asserts the funding.refund row is FRESH
+ * (enqueue returns false on dedupe-key conflict) and throws to roll back the
+ * pending flip if not — so a stale `refund:<id>` row can never leave a transfer
+ * flipped-to-pending with no effect to drain (a state no sweep would heal).
+ */
+export async function issueRefund(db: Db, id: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const repo = createTransferRepo(tx);
+    const transfer = await repo.getTransfer(id);
+    if (!transfer) {
+      throw new Error('Cannot refund: transfer not found.');
+    }
+    if (transfer.status !== 'paid' && transfer.status !== 'delivered') {
+      throw new Error(
+        `Cannot refund: transfer is ${transfer.status} — only paid or delivered transfers can be refunded.`,
+      );
+    }
+    if (!transfer.fundingRef) {
+      throw new Error('Cannot refund: transfer was never charged (no funding reference).');
+    }
+    if ((transfer.refundStatus ?? 'none') !== 'none') {
+      throw new Error('Cannot refund: a refund is already in progress or complete for this transfer.');
+    }
+    await repo.updateRefund(id, { refundStatus: 'pending' });
+    const fresh = await createOutboxRepo(tx).enqueue(
+      'funding.refund',
+      { transferId: id },
+      { dedupeKey: `refund:${id}` },
+    );
+    if (!fresh) {
+      throw new Error('Cannot refund: a refund effect already exists for this transfer.');
+    }
+  });
+  pokeWorker();
+}
+
+/**
  * Approve a CUSTOMER-REQUESTED refund: requested → pending + the durable
  * funding.refund effect, one transaction. The state is re-checked inside the
  * transaction, so a double-click (or a refund never requested) throws and

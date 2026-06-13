@@ -25,7 +25,8 @@ export type SidebarActive =
   | 'my-partner'
   | 'tickets'
   | 'my-queue'
-  | 'employee-questions';
+  | 'employee-questions'
+  | 'refunds';
 
 export type NavItem = SidebarActive;
 
@@ -50,7 +51,7 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
     // Platform IA: Home/Operations · Money · People · Insights · Platform.
     return [
       { items: ['overview', 'ops'] },
-      { label: 'Money', items: ['transactions', 'schedules'] },
+      { label: 'Money', items: ['transactions', 'schedules', 'refunds'] },
       { label: 'People', items: ['customers', 'kyc', 'compliance'] },
       {
         label: 'Support',
@@ -76,7 +77,7 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
   // of the platform section.
   return [
     { items: ['overview'] },
-    { label: 'Money', items: ['transactions', 'schedules'] },
+    { label: 'Money', items: ['transactions', 'schedules', 'refunds'] },
     { label: 'People', items: ['customers', 'kyc', 'compliance'] },
     {
       label: 'Support',
@@ -108,6 +109,7 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   'api-keys':   { label: 'API keys',     icon: 'keys',         hrefFor: () => '/admin-dashboard/api-keys' },
   transactions: { label: 'Transactions', icon: 'transactions', hrefFor: () => '/admin-dashboard/transactions' },
   schedules:    { label: 'Schedules',    icon: 'schedules',    hrefFor: () => '/admin-dashboard/schedules' },
+  refunds:      { label: 'Refunds',      icon: 'refunds',      hrefFor: () => '/admin-dashboard/refunds' },
   customers:    { label: 'Customers',    icon: 'customers',    hrefFor: () => '/admin-dashboard/customers' },
   partners:     { label: 'Partners',     icon: 'partners',     hrefFor: () => '/admin-dashboard/partners' },
   compliance:   { label: 'Compliance',   icon: 'compliance',   hrefFor: () => '/admin-dashboard/compliance' },
