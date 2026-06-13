@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation';
 import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
+import { requestRefundAction } from '../refund-actions';
 
 export const metadata = { title: 'Receipt · SmartRemit' };
 
@@ -68,6 +69,13 @@ export default async function ReceiptPage({
 
   const srcCurrency = t.sourceCurrency ?? 'USD';
 
+  // Customer-facing refund request — eligible ONLY when the transfer is paid
+  // (a paid transfer is by definition not yet delivered — status is one value)
+  // and no refund is in flight. The server action re-checks all of this (the
+  // page render is never authoritative); this just gates the CTA.
+  const refundStatus = t.refundStatus ?? 'none';
+  const canRequestRefund = t.status === 'paid' && refundStatus === 'none';
+
   return (
     <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
       <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
@@ -121,6 +129,21 @@ export default async function ReceiptPage({
             <span>1 {srcCurrency} = {t.fxRate} {t.destinationCurrency ?? 'INR'}</span>
           </div>
         </div>
+
+        {canRequestRefund && (
+          <form action={requestRefundAction} className="mb-5">
+            <input type="hidden" name="transferId" value={t.id} />
+            <button
+              type="submit"
+              className="block w-full rounded-2xl bg-[#202c33] p-4 text-center text-[15px] font-semibold text-[#e9edef] no-underline"
+            >
+              Request a refund
+            </button>
+            <p className="mt-2 mb-0 text-[12px] leading-normal text-[#8696a0]">
+              Our team reviews every refund request — refunds arrive in 3–5 business days once approved.
+            </p>
+          </form>
+        )}
 
         <p className="-mt-2 mb-5 text-[12px] leading-normal text-[#8696a0]">
           Rate locked when you confirmed. Questions? Reply to us on WhatsApp with this transfer ID.
