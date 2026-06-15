@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import type { CountryCode, FundingMethod } from '@/lib/types';
+import type { CountryCode } from '@/lib/types';
 import {
   BANK_FIELDS_BY_COUNTRY,
   composePayoutDestination,
@@ -59,14 +59,12 @@ const lineClasses = 'flex justify-between py-1.5 text-sm leading-normal';
 
 export function PayForm({
   transferId,
-  fundingMethod,
   destinationCountry,
   needsBankDetails,
   recipientName,
   summary,
 }: {
   transferId: string;
-  fundingMethod: FundingMethod;
   destinationCountry: CountryCode;
   needsBankDetails: boolean;
   recipientName: string;
@@ -75,7 +73,7 @@ export function PayForm({
   // Scheduled / re-opened / cron links already carry the recipient's bank
   // details — keep today's single-step, no-body POST exactly as before.
   if (!needsBankDetails) {
-    return <SimplePayForm transferId={transferId} fundingMethod={fundingMethod} />;
+    return <SimplePayForm transferId={transferId} />;
   }
   // Cold-start draft: the sender enters the recipient's bank details here.
   return (
@@ -161,10 +159,8 @@ function OtpFields({
 
 function SimplePayForm({
   transferId,
-  fundingMethod,
 }: {
   transferId: string;
-  fundingMethod: FundingMethod;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   const [code, setCode] = useState('');
@@ -225,7 +221,6 @@ function SimplePayForm({
 
   return (
     <form onSubmit={handleSubmit}>
-      {fundingMethod === 'bank_transfer' ? <BankForm /> : <CardForm />}
       <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
       <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
@@ -411,49 +406,5 @@ function BankDetailsPayForm({
       })}
       <button type="submit" className={primaryBtnClasses}>Continue</button>
     </form>
-  );
-}
-
-function CardForm() {
-  return (
-    <>
-      <label className={labelClasses}>
-        Card number
-        <input className={inputClasses} required placeholder="4242 4242 4242 4242" inputMode="numeric" />
-      </label>
-      <div className="flex gap-3">
-        <label className={`${labelClasses} flex-1`}>
-          Expiry
-          <input className={inputClasses} required placeholder="MM/YY" />
-        </label>
-        <label className={`${labelClasses} flex-1`}>
-          CVC
-          <input className={inputClasses} required placeholder="123" inputMode="numeric" />
-        </label>
-      </div>
-      <label className={labelClasses}>
-        Name on card
-        <input className={inputClasses} required placeholder="Your name" />
-      </label>
-    </>
-  );
-}
-
-function BankForm() {
-  return (
-    <>
-      <label className={labelClasses}>
-        Account holder name
-        <input className={inputClasses} required placeholder="Your full name" />
-      </label>
-      <label className={labelClasses}>
-        Account number
-        <input className={inputClasses} required placeholder="000123456789" inputMode="numeric" />
-      </label>
-      <label className={labelClasses}>
-        Routing number
-        <input className={inputClasses} required placeholder="021000021" inputMode="numeric" />
-      </label>
-    </>
   );
 }

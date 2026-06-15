@@ -210,7 +210,6 @@ export default async function PayPage({
         {view.awaitingPayment ? (
           <PayForm
             transferId={view.id}
-            fundingMethod={view.fundingMethod as import('@/lib/types').FundingMethod}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}
             recipientName={view.recipientName}
