@@ -27,6 +27,7 @@ import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
 import { newTransferId } from './id';
+import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -83,6 +84,20 @@ function transferView(t: Transfer) {
   };
 }
 
+// The supported destination set + its home currency — derived from the single
+// DEFAULT_CURRENCY_FOR_COUNTRY authority (US/CA/GB/AE/SG/AU/NZ/IN).
+const SUPPORTED_DESTINATIONS = (Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY) as [CountryCode, CurrencyCode][])
+  .map(([destination_country, destination_currency]) => ({ destination_country, destination_currency }));
+
+// Resolve a body-supplied destination_country → its home currency. Unknown or
+// absent ⇒ the legacy IN/INR default (back-compat; never 400s).
+function resolveDestination(requested: string): { country: CountryCode; currency: CurrencyCode } {
+  const country = requested.toUpperCase() as CountryCode;
+  const currency = DEFAULT_CURRENCY_FOR_COUNTRY[country];
+  if (currency) return { country, currency };
+  return { country: DEFAULT_DESTINATION_COUNTRY, currency: DEFAULT_DESTINATION_CURRENCY };
+}
+
 // ── GET /corridors ────────────────────────────────────────────────────────
 export function listCorridors(partner: Partner) {
   const currencies = allowedSendCurrencies(partner);
@@ -94,6 +109,9 @@ export function listCorridors(partner: Partner) {
       destination_country: 'IN' as CountryCode,
       destination_currency: 'INR' as CurrencyCode,
     })),
+    // Any-to-any (additive): the full supported destination set. The corridors[]
+    // shape above is UNCHANGED for back-compat.
+    destinations: SUPPORTED_DESTINATIONS,
   };
 }
 
@@ -106,7 +124,13 @@ export async function createQuote(
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
   const sourceCurrency = resolveSendCurrency(partner, str(body.source_currency) || undefined);
-  const destinationCurrency = (str(body.destination_currency) || 'INR') as CurrencyCode;
+  // Callers may pass either destination_country (resolved to its home currency)
+  // or destination_currency directly. destination_country takes precedence when
+  // it names a supported country; otherwise the legacy destination_currency path
+  // (default INR) is unchanged.
+  const destCountryReq = str(body.destination_country);
+  const destByCountry = destCountryReq ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryReq.toUpperCase() as CountryCode] : undefined;
+  const destinationCurrency = (destByCountry || str(body.destination_currency) || 'INR') as CurrencyCode;
   try {
     const rates = await getFxRates(sourceCurrency);
     const destRates = await getFxRates(destinationCurrency);
@@ -223,6 +247,10 @@ export async function createTransaction(
   }
 
   const sourceCurrency = resolveSendCurrency(partner, str(body.source_currency) || undefined);
+  // Any-to-any destination: an absent/unsupported destination_country defaults
+  // to IN/INR (back-compat). NOTE compliance is SOURCE-gated — the destination
+  // is never fed into screening.
+  const destination = resolveDestination(str(body.destination_country));
   const requiresKyc = sendGateActive(partner); // 'delegated' ⇒ false; sanctions still run
   const senderKycStatus = (str(sender.kyc_status) || 'not_started') as KycStatus;
 
@@ -242,8 +270,8 @@ export async function createTransaction(
       fundingMethod: 'bank_transfer',
       amountSource: amount,
       sourceCurrency,
-      destinationCountry: 'IN',
-      destinationCurrency: 'INR',
+      destinationCountry: destination.country,
+      destinationCurrency: destination.currency,
     });
   } catch (e) {
     if (e instanceof QuoteError) return err(400, e.message);
