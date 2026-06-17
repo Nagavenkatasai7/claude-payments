@@ -1625,14 +1625,34 @@ async function sendApprovePickerTool(
           'show the summary and tell the customer to tap the secure payment link below your reply to review and pay — the rate is locked for about 10 minutes',
       };
     }
-    await sendCtaUrl(
-      ctx.phone,
-      `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
-      { displayText: 'Approve & Pay', url: payUrl },
-      undefined,
-      undefined,
-      ctx.waCreds, // WL2 — approve card leaves from the partner's number
-    );
+    // Idempotency guard: the agent.turn outbox row is at-least-once, so a retry
+    // (e.g. the reply send to Meta threw a transient 5xx) re-runs this whole turn
+    // and would emit a SECOND card + a NEW pay link; the model can also call this
+    // tool twice in one turn. Dedupe the card SEND by sender+content within a
+    // short TTL — a duplicate is a silent no-op, a genuinely new send still goes
+    // through. The draft above is single-use/30-min TTL, so an unsent one is harmless.
+    // Content-keyed (NOT by draftId, which changes every call): two byte-identical
+    // sends inside the TTL intentionally collide — a true "same amount, same
+    // recipient, right now" duplicate is rare and worth suppressing.
+    const cardKey = `${ctx.phone}|${recipientPhone}|${amountSource}|${sourceCurrency}|${destinationCountry}`;
+    if (await ctx.store.markApproveCardSent(cardKey)) {
+      try {
+        await sendCtaUrl(
+          ctx.phone,
+          `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+          { displayText: 'Approve & Pay', url: payUrl },
+          undefined,
+          undefined,
+          ctx.waCreds, // WL2 — approve card leaves from the partner's number
+        );
+      } catch (sendErr) {
+        // The send itself failed AFTER we claimed the key — release it so the
+        // at-least-once retry can actually deliver the card. (A failure in a
+        // LATER step keeps the key, so that retry stays deduped.)
+        await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
+        throw sendErr;
+      }
+    }
     return { sent: true, draft_id: draftId };
   } catch (err) {
     if (err instanceof QuoteError) return { error: err.message };

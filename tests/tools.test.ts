@@ -1085,6 +1085,52 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     expect(String(params.url)).toMatch(/^https:\/\//);
   });
 
+  it('does NOT re-send the approve card on a duplicate call (at-least-once retry / double tool-call)', async () => {
+    const ctx = await buildClearedCtx();
+    let ctaSends = 0;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse((init.body as string) ?? 'null') : null;
+      if ((body?.interactive as Record<string, unknown>)?.type === 'cta_url') ctaSends++;
+      return { ok: true, text: async () => '' };
+    }));
+    const args = {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi',
+    };
+    const first = await executeTool('send_approve_picker', args, ctx);
+    const second = await executeTool('send_approve_picker', args, ctx); // the retry re-runs the turn
+    expect(first.sent).toBe(true);
+    expect(second.sent).toBe(true);   // still reports sent so the agent suppresses trailing text (no dup text either)
+    expect(ctaSends).toBe(1);         // the "Approve & Pay" card was sent EXACTLY once
+  });
+
+  it('releases the idempotency key when the card SEND fails, so the retry re-delivers', async () => {
+    const ctx = await buildClearedCtx();
+    let ctaAttempts = 0;
+    let failNext = true;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse((init.body as string) ?? 'null') : null;
+      if ((body?.interactive as Record<string, unknown>)?.type === 'cta_url') {
+        ctaAttempts++;
+        // Reject (network-level) only on the FIRST card send — sendCtaUrl rethrows
+        // (no res ⇒ no graceful sendText fallback), so the tool rethrows.
+        if (failNext) { failNext = false; throw new Error('network reset'); }
+      }
+      return { ok: true, text: async () => '' };
+    }));
+    const args = {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi',
+    };
+    // First attempt: the send throws → the turn fails (and would be retried).
+    await expect(executeTool('send_approve_picker', args, ctx)).rejects.toThrow(/network reset/);
+    // Retry: the failed send RELEASED the key, so the card actually goes out now
+    // (a stuck key would have suppressed it → customer gets NO link).
+    const retry = await executeTool('send_approve_picker', args, ctx);
+    expect(retry.sent).toBe(true);
+    expect(ctaAttempts).toBe(2);      // attempted on the failed send AND the successful retry
+  });
+
   it('cold-start (no payout details) → draft with empty payoutDestination, placeholder on the card', async () => {
     const ctx = await buildClearedCtx();
     let ctaText = '';
