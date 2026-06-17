@@ -352,11 +352,11 @@ describe('SYSTEM_PROMPT — live-audit fixes: daily-cap framing + T0→T1 timeli
     }
   });
 
-  it('STATUS QUESTIONS: check_payment_status needs a transfer_id the note lacks — never invent one', () => {
+  it('STATUS QUESTIONS: check_payment_status may use the note\'s short id — never invent one', () => {
     for (const p of variants) {
       expect(p).toContain('check_payment_status requires a transfer_id');
-      expect(p).toContain('does NOT include transfer ids');
-      expect(p).toContain('NEVER invent or guess a transfer_id');
+      expect(p).toContain('short id like #abc12345');
+      expect(p).toContain('never invent or guess one');
     }
   });
 
@@ -419,26 +419,35 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
     buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
   ];
 
-  it('carries the REFUNDS & CANCELLATIONS section with the request_refund tool in BOTH variants', () => {
+  it('carries the REFUNDS, RECALLS & CANCELLATIONS section with both refund tools in BOTH variants', () => {
     for (const p of variants) {
-      expect(p).toContain('REFUNDS & CANCELLATIONS');
+      expect(p).toContain('REFUNDS, RECALLS & CANCELLATIONS');
       expect(p).toContain('request_refund');
+      expect(p).toContain('open_recall_dispute');
     }
   });
 
-  it('paid-not-delivered → call request_refund and relay; the bot never moves or promises money', () => {
+  it('refund request → call request_refund and relay; the bot never moves or promises money', () => {
     for (const p of variants) {
-      expect(p).toContain('call request_refund with that transfer_id and relay its outcome');
-      expect(p).toContain('only flags the transfer for our team to review');
-      expect(p).toContain('never say the refund is done, approved, or guaranteed');
+      expect(p).toContain('call request_refund');
+      expect(p).toContain('transfer_id is OPTIONAL');
+      expect(p).toContain('never say a refund is done, approved, or guaranteed');
     }
   });
 
-  it('DELIVERED transfers are FINAL — explain kindly, never promise a reversal', () => {
+  it('use_recall → open a recall case but be honest recovery is NOT guaranteed', () => {
     for (const p of variants) {
-      expect(p).toContain('DELIVERED transfers are FINAL');
-      expect(p).toContain('delivered_final');
+      expect(p).toContain('use_recall');
+      expect(p).toContain('24-hour recall window');
+      expect(p).toContain('recovery is NOT guaranteed once funds are delivered');
       expect(p).toContain('never promise a reversal, a chargeback, or an exception');
+    }
+  });
+
+  it('recall_window_passed → delivered over 24h ago, apologize, never promise a reversal', () => {
+    for (const p of variants) {
+      expect(p).toContain('recall_window_passed');
+      expect(p).toContain('can no longer be recalled');
     }
   });
 
@@ -451,15 +460,8 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
 
   it('an awaiting_payment transfer needs NO refund — just do not pay, or cancel', () => {
     for (const p of variants) {
-      expect(p).toContain('An awaiting_payment transfer needs NO refund');
+      expect(p).toContain('not_paid_yet');
       expect(p).toContain('simply not complete the payment');
-    }
-  });
-
-  it('never invent a transfer_id for request_refund — ask for the receipt id instead', () => {
-    for (const p of variants) {
-      expect(p).toContain('request_refund needs a transfer_id');
-      expect(p).toContain('transfer ID shown on their receipt');
     }
   });
 
@@ -471,7 +473,7 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
 
   it('survives a white-label rebrand', () => {
     const p = buildSystemPrompt({ brand: 'Acme Pay' });
-    expect(p).toContain('REFUNDS & CANCELLATIONS');
+    expect(p).toContain('REFUNDS, RECALLS & CANCELLATIONS');
     expect(p).toContain('request_refund');
   });
 });

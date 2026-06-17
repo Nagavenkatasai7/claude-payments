@@ -1150,10 +1150,11 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).not.toContain('send_approve_picker');
     expect(names).not.toContain('send_recipient_picker');
     expect(names).not.toContain('create_schedule');
-    expect(names).toHaveLength(10);
+    expect(names).toContain('open_recall_dispute');
+    expect(names).toHaveLength(11);
   });
 
-  it('default channel: the model still sees the full 18-tool set (call sites unchanged)', async () => {
+  it('default channel: the model still sees the full 19-tool set (call sites unchanged)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     let seenTools: import('@/lib/types').ChatTool[] = [];
@@ -1165,7 +1166,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(18);
+    expect(seenTools).toHaveLength(19);
     expect(seenTools.map((t) => t.function.name)).toContain('send_approve_picker');
   });
 

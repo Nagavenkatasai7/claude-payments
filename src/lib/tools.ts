@@ -20,7 +20,9 @@ import type { KycProvider } from './providers/kyc-provider';
 import type { PartnerStore } from './partner-store';
 import { sendInteractive, sendCtaUrl, type InteractiveButton, type WaCreds } from './whatsapp';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { getDb } from '@/db/client';
+import { refundDisposition } from './refund-policy';
 import {
   recipientButtonId,
   someoneNewButtonId,
@@ -55,6 +57,7 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'list_schedules',
   'repeat_transfer',
   'request_refund',
+  'open_recall_dispute',
   'generate_payment_link',
 ]);
 
@@ -305,11 +308,41 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'request_refund',
       description:
-        "Request a refund for a transfer the customer has PAID for but that has NOT been delivered yet. Call this ONLY when the customer asks for their money back on a specific transfer. It flags the transfer for our team to review — it never moves money itself, and approval is not guaranteed. Delivered transfers are final and can never be refunded.",
+        "Request a refund when the customer asks for their money back. transfer_id is OPTIONAL — omit it and we resolve the customer's most recent refund-relevant transfer automatically. For a transfer the customer has PAID for but that has NOT been delivered yet, this flags it for our team to review (it never moves money itself, and approval is not guaranteed). If the money was ALREADY DELIVERED but within the last 24 hours, this returns error_code 'use_recall' — call open_recall_dispute instead to open a recall case.",
       parameters: {
         type: 'object',
-        properties: { transfer_id: { type: 'string' } },
-        required: ['transfer_id'],
+        properties: {
+          transfer_id: {
+            type: 'string',
+            description:
+              "Optional. The specific transfer the refund is for. Omit to use the customer's most recent refund-relevant transfer.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'open_recall_dispute',
+      description:
+        "Open a recall/dispute case for money that was ALREADY DELIVERED within the last 24 hours (wrong recipient, wrong amount, money not received, or an unauthorized transfer). transfer_id is OPTIONAL — omit it to use the customer's most recent delivered-within-the-window transfer. This opens a support case our team works; recovery is NOT guaranteed once funds are delivered. Do NOT use this for transfers that have not been delivered yet — use request_refund for those.",
+      parameters: {
+        type: 'object',
+        properties: {
+          transfer_id: {
+            type: 'string',
+            description:
+              "Optional. The specific delivered transfer to dispute. Omit to use the customer's most recent delivered-within-the-window transfer.",
+          },
+          reason: {
+            type: 'string',
+            enum: ['wrong_recipient', 'wrong_amount', 'not_received', 'unauthorized', 'other'],
+            description:
+              "Why the customer wants the money back: 'wrong_recipient', 'wrong_amount', 'not_received', 'unauthorized', or 'other'.",
+          },
+        },
+        required: ['reason'],
       },
     },
   },
@@ -603,6 +636,10 @@ export interface ToolContext {
   // updateRefund). Absent ⇒ a repo over the shared Pool (getDb()) is created
   // lazily on the request_refund success path; tests inject one bound to PGlite.
   transferRepo?: Pick<ReturnType<typeof createTransferRepo>, 'updateRefund'>;
+  // Recall-dispute seam: the support-ticket repo (createTicket + listByCustomer)
+  // open_recall_dispute writes to. Absent ⇒ a repo over the shared Pool (getDb())
+  // is created lazily; tests inject one bound to PGlite.
+  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer'>;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -729,6 +766,8 @@ export async function executeTool(
       return checkPaymentStatusTool(args, ctx);
     case 'request_refund':
       return requestRefundTool(args, ctx);
+    case 'open_recall_dispute':
+      return openRecallDisputeTool(args, ctx);
     case 'update_recipient_phone':
       return updateRecipientPhoneTool(args, ctx);
     case 'create_schedule':
@@ -1100,11 +1139,23 @@ async function persistEddProfile(
   }
 }
 
+/**
+ * Normalizes a model-supplied transfer_id before lookup. The [RECENT TRANSFERS]
+ * note renders each id with a leading '#' (e.g. "#abc12345") and the prompt
+ * tells the model it may use that exact token — so strip a leading '#' and
+ * surrounding whitespace, otherwise getTransfer's exact-match never matches.
+ * Returns '' for a missing/non-string value (reads as not-found, never throws).
+ */
+function normalizeTransferId(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw.trim().replace(/^#/, '').trim();
+}
+
 async function generatePaymentLinkTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const transfer = await ctx.store.getTransfer(String(args.transfer_id));
+  const transfer = await ctx.store.getTransfer(normalizeTransferId(args.transfer_id));
   // STRICT ownership, 404-never-403 (mirrors request_refund): another
   // customer's transfer is indistinguishable from a missing one — this tool
   // must never mint a pay link for a transfer the caller doesn't own.
@@ -1121,127 +1172,316 @@ async function checkPaymentStatusTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const transfer = await ctx.store.getTransfer(String(args.transfer_id));
+  const transfer = await ctx.store.getTransfer(normalizeTransferId(args.transfer_id));
   // STRICT ownership, 404-never-403 (mirrors request_refund): no status oracle
   // over other customers' transfer ids.
   if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
   return { transfer_id: transfer.id, status: transfer.status };
 }
 
+// How many of the customer's most-recent transfers we scan when resolving a
+// transfer for a refund/recall without an explicit id.
+const REFUND_LOOKBACK = 10;
+
 /**
- * request_refund — the customer-facing refund REQUEST (paid-not-delivered
- * only). The bot NEVER moves money: a successful call flips refundStatus
- * none→requested (the guarded transfer-repo transition), which only flags the
- * transfer for ops review — a human approves before any money returns.
+ * Resolves the transfer a refund/recall acts on, owning the 404-never-403
+ * ownership rule for BOTH paths:
+ *   • an explicit transfer_id that isn't the caller's reads as { notFound:true }
+ *     (indistinguishable from a missing one);
+ *   • absent transfer_id ⇒ scan the customer's own recent transfers (newest
+ *     first) and prefer the most recent one whose disposition matches `prefer`
+ *     (refundable for request_refund, recall_eligible for open_recall_dispute),
+ *     else fall back to the most recent overall so we can report its state.
+ * Returns { transfer: null } only when the customer has NO transfers at all.
+ */
+async function resolveRefundTarget(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+  prefer: 'refundable' | 'recall_eligible',
+  now: number,
+): Promise<{ transfer: import('./types').Transfer | null; notFound?: boolean }> {
+  const id = normalizeTransferId(args.transfer_id); // strips the note's '#' prefix
+  if (id !== '') {
+    const transfer = await ctx.store.getTransfer(id);
+    // STRICT ownership, 404-never-403: another customer's (or a missing)
+    // transfer is indistinguishable.
+    if (!transfer || transfer.phone !== ctx.phone) return { transfer: null, notFound: true };
+    return { transfer };
+  }
+
+  // No id supplied — resolve from the customer's OWN recent transfers (indexed
+  // own-phone query, newest first). Prefer the most recent that the customer
+  // can actually act on; otherwise the most recent overall so we can explain
+  // its current state.
+  const recent = await ctx.store.listTransfersByPhone(ctx.phone, REFUND_LOOKBACK);
+  if (recent.length === 0) return { transfer: null };
+  const match = recent.find((t) => refundDisposition(t, now).kind === prefer);
+  return { transfer: match ?? recent[0] };
+}
+
+/**
+ * request_refund — the customer-facing refund REQUEST. The bot NEVER moves
+ * money: for a paid, not-yet-delivered transfer a successful call flips
+ * refundStatus none→requested (the guarded transfer-repo transition), which
+ * only FLAGS the transfer for ops review — a human approves before any money
+ * returns. transfer_id is OPTIONAL: when absent we resolve the customer's most
+ * recent refund-relevant transfer (preferring a still-refundable one).
+ *
+ * Disposition (refund-policy.ts) is the single source of truth for which state
+ * the transfer is in; delivered-within-24h is routed to open_recall_dispute.
  *
  * Every return shape is customer-safe by construction: only
- * error / error_code+message / requested+reply_hint ever leave this function.
- * No refundStatus tokens, no settlementPartnerId, no compliance detail.
+ * error / error_code+message / requested+transfer_id+reply_hint ever leave this
+ * function. No refundStatus tokens, no settlementPartnerId, no compliance detail.
  */
 async function requestRefundTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const transfer = await ctx.store.getTransfer(String(args.transfer_id));
-  // STRICT ownership, 404-never-403: a transfer that isn't this customer's own
-  // is indistinguishable from one that doesn't exist.
-  if (!transfer || transfer.phone !== ctx.phone) {
-    return { error: 'Transfer not found.' };
-  }
-
-  const refundStatus = transfer.refundStatus ?? 'none'; // lazy-fill: absent ⇒ 'none'
-
-  // A refund already in motion (on ANY status, incl. cancelled) — explain the
-  // current state in customer terms. 'failed' is ops-internal: the customer
-  // hears the team is on it, never that a refund attempt failed.
-  if (refundStatus === 'completed') {
+  const now = Date.now();
+  const { transfer, notFound } = await resolveRefundTarget(args, ctx, 'refundable', now);
+  if (notFound) return { error: 'Transfer not found.' };
+  if (!transfer) {
+    // The customer has no transfers at all — nothing to refund.
     return {
-      error_code: 'already_refunded',
+      error_code: 'no_transfer_found',
       message:
-        'This transfer has already been refunded to the original payment method.',
-    };
-  }
-  if (refundStatus === 'pending') {
-    return {
-      error_code: 'refund_in_progress',
-      message:
-        'A refund for this transfer has been approved and is on its way — it arrives in 3-5 business days from approval.',
-    };
-  }
-  if (refundStatus === 'requested' || refundStatus === 'failed') {
-    return {
-      error_code: 'refund_already_requested',
-      message:
-        'A refund for this transfer is already being reviewed by our team — no need to ask again. They will confirm once it is approved.',
+        "We couldn't find a recent transfer to refund. If you have a transfer id, please share it.",
     };
   }
 
-  // refundStatus is 'none' — eligibility now turns on the transfer status.
-  if (transfer.status === 'delivered') {
-    return {
-      error_code: 'delivered_final',
-      message:
-        'This transfer has already been delivered to the recipient, so it can no longer be refunded — delivered transfers are final.',
-    };
-  }
-  if (transfer.status === 'awaiting_payment') {
-    return {
-      error_code: 'not_paid_yet',
-      message:
-        "No money has been taken for this transfer yet, so there's nothing to refund — simply don't complete the payment, or reply cancel to cancel it.",
-    };
-  }
-  if (transfer.status === 'cancelled') {
-    return {
-      error_code: 'cancelled',
-      message:
-        "This transfer was already cancelled. If you believe you were charged for it, reply 'help' and our team will take a look.",
-    };
-  }
-  if (transfer.status === 'blocked') {
-    // Matches the receipt's wording — never charged ⇒ nothing to refund.
-    // No screening/compliance detail beyond that.
-    return {
-      error_code: 'never_charged',
-      message:
-        'This transfer could not be completed and you were not charged, so there is nothing to refund.',
-    };
-  }
-  if (transfer.status !== 'paid') {
-    // in_review (and any future non-paid state): the transfer is not settled
-    // customer-side yet — "under review" is the established customer-facing
-    // wording; no compliance detail beyond that.
-    return {
-      error_code: 'not_refundable_yet',
-      message:
-        'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
-    };
+  const disp = refundDisposition(transfer, now);
+  switch (disp.kind) {
+    case 'recall_eligible':
+      return {
+        error_code: 'use_recall',
+        transfer_id: transfer.id,
+        reply_hint:
+          'the money was already delivered but is within the 24h recall window — call open_recall_dispute with the reason',
+      };
+    case 'recall_window_passed':
+      return {
+        error_code: 'recall_window_passed',
+        reply_hint:
+          'delivered over 24h ago — recovery is no longer possible; apologize kindly',
+      };
+    case 'awaiting_payment':
+      return {
+        error_code: 'not_paid_yet',
+        message:
+          "No money has been taken for this transfer yet, so there's nothing to refund — simply don't complete the payment, or reply cancel to cancel it.",
+      };
+    case 'under_review':
+      return {
+        error_code: 'under_review',
+        message:
+          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+      };
+    case 'already_requested':
+      return {
+        error_code: 'already_requested',
+        message:
+          'A refund for this transfer is already being reviewed by our team — no need to ask again. They will confirm once it is approved.',
+      };
+    case 'in_progress':
+      // Covers BOTH refundStatus 'pending' (approved, in flight) and 'failed'
+      // (an attempt that needs an ops retry) — 'failed' is ops-internal, so we
+      // keep neutral "being processed" wording that is accurate for either and
+      // never says "approved" for a refund that has not actually been sent.
+      return {
+        error_code: 'refund_in_progress',
+        message:
+          'A refund for this transfer is being processed by our team — it arrives in 3-5 business days once it completes.',
+      };
+    case 'completed':
+      return {
+        error_code: 'already_refunded',
+        message:
+          'This transfer has already been refunded to the original payment method.',
+      };
+    case 'blocked':
+      // Matches the receipt's wording — never charged ⇒ nothing to refund.
+      // No screening/compliance detail beyond that.
+      return {
+        error_code: 'never_charged',
+        message:
+          'This transfer could not be completed and you were not charged, so there is nothing to refund.',
+      };
+    case 'cancelled':
+      return {
+        error_code: 'cancelled',
+        message:
+          "This transfer was already cancelled. If you believe you were charged for it, reply 'help' and our team will take a look.",
+      };
+    case 'refundable':
+      break; // the one eligible state — handled below
+    default:
+      // Defensive: a future RefundDisposition kind must NEVER fall through to
+      // the flag-for-ops path below. Anything we don't explicitly handle is
+      // treated as not-yet-actionable rather than silently flagged for a refund.
+      return {
+        error_code: 'under_review',
+        message:
+          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+      };
   }
 
-  // status 'paid' + refundStatus 'none' — the one eligible state. The guarded
-  // none→requested transition makes concurrent requests harmless: the loser
-  // gets null and we answer as if the request already exists (it does).
+  // refundable: status 'paid' + refundStatus 'none'. The guarded none→requested
+  // transition makes concurrent requests harmless: the loser gets null and we
+  // answer as if the request already exists (it does).
   const repo = ctx.transferRepo ?? createTransferRepo(getDb());
   const updated = await repo.updateRefund(transfer.id, { refundStatus: 'requested' });
   if (!updated) {
     return {
-      error_code: 'refund_already_requested',
+      error_code: 'already_requested',
       message:
         'A refund for this transfer is already being reviewed by our team — no need to ask again. They will confirm once it is approved.',
     };
   }
   return {
     requested: true,
+    transfer_id: transfer.id,
     reply_hint:
       'our team will review and confirm — refunds arrive in 3-5 business days once approved',
   };
+}
+
+// Open-case cap mirrors /account/support/actions.ts — at most 5 concurrently
+// open customer cases; resolved/closed don't count.
+const MAX_OPEN_TICKETS = 5;
+const OPEN_STATUSES = new Set<string>(['open', 'pending', 'waiting_admin']);
+
+// Customer-facing reason phrasing for the recall case body (never leak the enum
+// token alone). Mirrors the reason enum in the open_recall_dispute schema.
+const RECALL_REASON_LABEL: Record<string, string> = {
+  wrong_recipient: 'sent to the wrong recipient',
+  wrong_amount: 'wrong amount sent',
+  not_received: 'recipient did not receive the money',
+  unauthorized: 'transfer was not authorized',
+  other: 'other issue with this transfer',
+};
+
+/**
+ * open_recall_dispute — opens a recall/dispute support case for money that was
+ * ALREADY DELIVERED within the 24h recall window (refund-policy.ts). It NEVER
+ * moves money: it creates a customer support ticket (kind 'customer', category
+ * 'refund') linked to the transfer for a human to work; recovery is not
+ * guaranteed once funds are delivered.
+ *
+ * transfer_id is OPTIONAL: when absent we resolve the customer's most recent
+ * delivered-within-the-window transfer. The disposition guard ensures we ONLY
+ * open a case when the transfer is recall_eligible; everything else returns the
+ * matching error_code (use_request_refund when it's still pre-delivery).
+ *
+ * Customer-safe surface: error / error_code+(message|reply_hint) /
+ * opened+case_id+reply_hint.
+ */
+async function openRecallDisputeTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const reason = asEnum(
+    ['wrong_recipient', 'wrong_amount', 'not_received', 'unauthorized', 'other'] as const,
+    args.reason,
+  ) ?? 'other'; // fail-safe to 'other' rather than refusing — the team still triages
+
+  const now = Date.now();
+  const { transfer, notFound } = await resolveRefundTarget(args, ctx, 'recall_eligible', now);
+  if (notFound) return { error: 'Transfer not found.' };
+  if (!transfer) {
+    return {
+      error_code: 'no_transfer_found',
+      message:
+        "We couldn't find a recent delivered transfer to dispute. If you have a transfer id, please share it.",
+    };
+  }
+
+  const disp = refundDisposition(transfer, now);
+  if (disp.kind !== 'recall_eligible') {
+    // Not in the recall window — route the customer to the right path or
+    // explain the state, never opening a case we can't justify.
+    switch (disp.kind) {
+      case 'refundable':
+        return {
+          error_code: 'use_request_refund',
+          transfer_id: transfer.id,
+          reply_hint:
+            'this transfer has not been delivered yet — call request_refund to flag it for our team instead',
+        };
+      case 'recall_window_passed':
+        return {
+          error_code: 'recall_window_passed',
+          reply_hint:
+            'delivered over 24h ago — recovery is no longer possible; apologize kindly',
+        };
+      case 'awaiting_payment':
+        return {
+          error_code: 'not_paid_yet',
+          reply_hint:
+            "no money has been taken for this transfer yet — there's nothing to recall; they can just not pay or cancel",
+        };
+      default:
+        // already_requested / in_progress / completed / under_review / blocked /
+        // cancelled — a recall case adds nothing; explain via request_refund's
+        // wording path instead of opening a duplicate.
+        return {
+          error_code: 'not_recall_eligible',
+          reply_hint:
+            'this transfer is not within the recall window — explain its current state and offer to check in with our team',
+        };
+    }
+  }
+
+  // recall_eligible — open the case. Respect the per-customer open-case cap.
+  const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
+  const mine = await repo.listByCustomer(ctx.phone);
+  if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
+    return {
+      error_code: 'too_many_open_cases',
+      reply_hint:
+        'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
+    };
+  }
+
+  const amount = formatRecallAmount(transfer);
+  const who = (transfer.recipientName ?? '').trim() || 'the recipient';
+  const reasonLabel = RECALL_REASON_LABEL[reason];
+  const ticket = await repo.createTicket({
+    id: `tk_${newTransferId()}`,
+    partnerId: transfer.partnerId,
+    kind: 'customer',
+    customerPhone: ctx.phone,
+    transferId: transfer.id,
+    subject: `Recall request: ${reason}`,
+    body: `Customer requests a recall of ${amount} sent to ${who} (transfer ${transfer.id}). Reason: ${reasonLabel}.`,
+    category: 'refund',
+  });
+
+  return {
+    opened: true,
+    case_id: ticket.id,
+    reply_hint:
+      'a recall case is open and our team will look into it — recovery is not guaranteed once funds are delivered; we will follow up',
+  };
+}
+
+// Source-currency amount for the recall case body (mirrors recent-transfers'
+// formatAmount). Never throws on an unknown currency code.
+function formatRecallAmount(transfer: import('./types').Transfer): string {
+  const currency = transfer.sourceCurrency ?? 'USD';
+  const amount = transfer.amountSource ?? transfer.amountUsd ?? 0;
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+  } catch {
+    return `${amount} ${currency}`;
+  }
 }
 
 async function updateRecipientPhoneTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const transfer = await ctx.store.getTransfer(String(args.transfer_id));
+  const transfer = await ctx.store.getTransfer(normalizeTransferId(args.transfer_id));
   // STRICT ownership, 404-never-403 (mirrors request_refund): this tool
   // MUTATES the transfer, so it must never touch one the caller doesn't own.
   if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
