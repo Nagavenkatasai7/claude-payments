@@ -90,12 +90,13 @@ describe('getRecentTransfersNote — caps at the newest 5', () => {
 });
 
 describe('getRecentTransfersNote — per-line content', () => {
-  it('renders date (easternDate) · recipientName · source-currency amount · status label', async () => {
+  it('renders short id · date (easternDate) · recipientName · source-currency amount · status label', async () => {
     const store = await storeWith(
-      mk({ recipientName: 'Mom', amountSource: 500, sourceCurrency: 'USD', status: 'delivered',
+      mk({ id: 'abc123', recipientName: 'Mom', amountSource: 500, sourceCurrency: 'USD', status: 'delivered',
            createdAt: '2026-05-28T12:00:00.000Z' }),
     );
     const note = await getRecentTransfersNote('+15551230000', store);
+    expect(note).toContain('#abc123');   // short transfer ref so the bot can name a specific send
     expect(note).toContain('5/28/2026'); // easternDate(Date.parse(createdAt)) in ET
     expect(note).toContain('Mom');
     expect(note).toContain('$500.00');   // Intl.NumberFormat en-US USD

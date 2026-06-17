@@ -22,6 +22,7 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createTicketRepo } from '@/db/repos/ticket-repo';
 import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
@@ -64,6 +65,8 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     // Refund seam: the guarded refund-lifecycle writer, bound to the PGlite db
     // (the prod fallback would build one over getDb()'s Neon Pool).
     transferRepo: createTransferRepo(db),
+    // Recall-dispute seam: the support-ticket repo, bound to the PGlite db.
+    ticketRepo: createTicketRepo(db),
   };
 }
 
@@ -88,7 +91,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all eighteen tools', () => {
+  it('exposes all nineteen tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -102,6 +105,7 @@ describe('toolSchemas', () => {
       'get_quote',
       'list_saved_recipients',
       'list_schedules',
+      'open_recall_dispute',
       'repeat_transfer',
       'request_refund',
       'resolve_recipient',
@@ -112,11 +116,21 @@ describe('toolSchemas', () => {
     ]);
   });
 
-  it('request_refund schema requires only transfer_id', () => {
+  it('request_refund schema makes transfer_id OPTIONAL', () => {
     const rr = toolSchemas.find((t) => t.function.name === 'request_refund')!;
-    expect(rr.function.parameters.required).toEqual(['transfer_id']);
+    // transfer_id is no longer required — the tool resolves the latest
+    // refund-relevant transfer when it is omitted.
+    expect(rr.function.parameters.required ?? []).not.toContain('transfer_id');
     const props = rr.function.parameters.properties as Record<string, unknown>;
     expect(Object.keys(props)).toEqual(['transfer_id']);
+  });
+
+  it('open_recall_dispute schema requires reason and makes transfer_id optional', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'open_recall_dispute')!;
+    expect(tool.function.parameters.required).toEqual(['reason']);
+    const props = tool.function.parameters.properties as Record<string, { enum?: string[] }>;
+    expect(Object.keys(props).sort()).toEqual(['reason', 'transfer_id']);
+    expect(props.reason.enum).toEqual(['wrong_recipient', 'wrong_amount', 'not_received', 'unauthorized', 'other']);
   });
 
   it('get_quote schema has amount_usd and funding_method (no payout_method)', () => {
@@ -2114,7 +2128,12 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
   // The tool's entire customer-safe surface: ONLY these keys may ever leave it,
   // and no internal token may ride along in any value.
   function expectCustomerSafe(result: Record<string, unknown>) {
-    const allowed = new Set(['error', 'error_code', 'message', 'requested', 'reply_hint']);
+    // transfer_id is the customer's OWN id (no PII) — safe to surface so the bot
+    // can name the specific transfer. opened/case_id belong to open_recall_dispute.
+    const allowed = new Set([
+      'error', 'error_code', 'message', 'requested', 'reply_hint',
+      'transfer_id', 'opened', 'case_id',
+    ]);
     for (const k of Object.keys(result)) {
       expect(allowed.has(k), `unexpected key leaked from request_refund: ${k}`).toBe(true);
     }
@@ -2153,13 +2172,31 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
 
-  it('delivered is FINAL — delivered_final, never a refund flag', async () => {
+  it('delivered within 24h ⇒ use_recall (route to open_recall_dispute), never a refund flag', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    // updateTransferFromWebhook stamps deliveredAt = now() ⇒ inside the 24h window.
+    await ctx.store.updateTransferFromWebhook(id, 'delivered');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('use_recall');
+    expect(r.transfer_id).toBe(id);
+    expect(String(r.reply_hint).toLowerCase()).toContain('recall');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('delivered over 24h ago ⇒ recall_window_passed, never a refund flag', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintTransfer(ctx);
     await ctx.store.updateTransferFromWebhook(id, 'delivered');
+    // Backdate deliveredAt past the 24h recall window.
+    const t = (await ctx.store.getTransfer(id))!;
+    await ctx.store.saveTransfer({
+      ...t,
+      deliveredAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+    });
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
-    expect(r.error_code).toBe('delivered_final');
-    expect(String(r.message).toLowerCase()).toContain('final');
+    expect(r.error_code).toBe('recall_window_passed');
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
@@ -2169,6 +2206,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     const id = await mintPaid(ctx);
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
     expect(r.requested).toBe(true);
+    expect(r.transfer_id).toBe(id);
     expect(String(r.reply_hint)).toContain('3-5 business days once approved');
     expectCustomerSafe(r);
     const after = await ctx.store.getTransfer(id);
@@ -2182,7 +2220,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     await executeTool('request_refund', { transfer_id: id }, ctx);
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
     expect(r.requested).toBeUndefined();
-    expect(r.error_code).toBe('refund_already_requested');
+    expect(r.error_code).toBe('already_requested');
     expect(String(r.message).toLowerCase()).toContain('already being reviewed');
     expectCustomerSafe(r);
     expect((await ctx.store.getTransfer(id))?.refundStatus).toBe('requested');
@@ -2215,7 +2253,9 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     await ctx.transferRepo.updateRefund(id, { refundStatus: 'pending' });
     await ctx.transferRepo.updateRefund(id, { refundStatus: 'failed' });
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
-    expect(r.error_code).toBe('refund_already_requested');
+    // 'failed' maps to the in_progress disposition — the customer hears the team
+    // is on it, never the word failed.
+    expect(r.error_code).toBe('refund_in_progress');
     expect(JSON.stringify(r).toLowerCase()).not.toContain('fail');
     expectCustomerSafe(r);
   });
@@ -2256,16 +2296,212 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     const id = await mintTransfer(ctx);
     await forceStatus(ctx, id, 'in_review');
     const r = await executeTool('request_refund', { transfer_id: id }, ctx);
-    expect(r.error_code).toBe('not_refundable_yet');
+    expect(r.error_code).toBe('under_review');
     expect(String(r.message).toLowerCase()).toContain('under review');
     expectCustomerSafe(r);
+  });
+
+  // ── transfer_id OMITTED: resolve from the customer's own recent transfers ──
+
+  // Mint a small ($100) transfer so two fit inside the T0 daily cap ($500/day).
+  async function mintSmall(ctx: Ctx): Promise<string> {
+    const created = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 100,
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
+      },
+      ctx,
+    );
+    expect(created.error).toBeUndefined();
+    return created.transfer_id as string;
+  }
+
+  it('no transfer_id: resolves the latest REFUNDABLE (paid) transfer and flags it', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    // An older delivered (window-passed) transfer + a newer paid one. With no id,
+    // request_refund must prefer the refundable (paid) one even though it is not
+    // the absolute newest by createdAt. ($100 each keeps both within the cap.)
+    const deliveredId = await mintSmall(ctx);
+    await ctx.store.updateTransferFromWebhook(deliveredId, 'delivered');
+    const t = (await ctx.store.getTransfer(deliveredId))!;
+    await ctx.store.saveTransfer({
+      ...t,
+      deliveredAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), // window passed
+    });
+    const paidId = await mintSmall(ctx);
+    expect(await ctx.store.updateTransferFromWebhook(paidId, 'paid')).not.toBeNull();
+
+    const r = await executeTool('request_refund', {}, ctx);
+    expect(r.requested).toBe(true);
+    expect(r.transfer_id).toBe(paidId);
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(paidId))?.refundStatus).toBe('requested');
+    // The window-passed delivered one was untouched.
+    expect((await ctx.store.getTransfer(deliveredId))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it("a '#'-prefixed id (as rendered in the [RECENT TRANSFERS] note) still resolves", async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    // The note renders ids as "#<id>"; the model may copy that verbatim.
+    const r = await executeTool('request_refund', { transfer_id: `#${id}` }, ctx);
+    expect(r.requested).toBe(true);
+    expect(r.transfer_id).toBe(id); // resolved despite the leading '#'
+    expect((await ctx.store.getTransfer(id))?.refundStatus).toBe('requested');
+  });
+
+  it('no transfer_id and no transfers at all ⇒ no_transfer_found (nothing flagged)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('request_refund', {}, ctx);
+    expect(r.error_code).toBe('no_transfer_found');
+    expectCustomerSafe(r);
+  });
+
+  it('no transfer_id: latest is delivered-within-window ⇒ use_recall', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await ctx.store.updateTransferFromWebhook(id, 'delivered'); // deliveredAt = now()
+    const r = await executeTool('request_refund', {}, ctx);
+    expect(r.error_code).toBe('use_recall');
+    expect(r.transfer_id).toBe(id);
+    expectCustomerSafe(r);
+  });
+});
+
+describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () => {
+  type Ctx = Awaited<ReturnType<typeof buildCtx>>;
+
+  async function mintDelivered(ctx: Ctx): Promise<string> {
+    const created = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 500,
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
+      },
+      ctx,
+    );
+    const id = created.transfer_id as string;
+    await ctx.store.updateTransferFromWebhook(id, 'paid');
+    await ctx.store.updateTransferFromWebhook(id, 'delivered'); // deliveredAt = now()
+    return id;
+  }
+
+  it('delivered within 24h ⇒ opens a customer ticket (category refund) and returns opened:true', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'wrong_recipient' }, ctx);
+    expect(r.opened).toBe(true);
+    expect(typeof r.case_id).toBe('string');
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    expect(String(r.reply_hint).toLowerCase()).toContain('recovery is not guaranteed');
+
+    // Assert the ticket landed via the repo: customer-scoped, linked + categorized.
+    const repo = createTicketRepo(db);
+    const mine = await repo.listByCustomer(ctx.phone);
+    const ticket = mine.find((t) => t.id === r.case_id)!;
+    expect(ticket).toBeTruthy();
+    expect(ticket.kind).toBe('customer');
+    expect(ticket.transferId).toBe(id);
+    expect(ticket.category).toBe('refund');
+    expect(ticket.subject.toLowerCase()).toContain('recall');
+  });
+
+  it('no transfer_id: resolves the latest delivered-within-window transfer', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    const r = await executeTool('open_recall_dispute', { reason: 'not_received' }, ctx);
+    expect(r.opened).toBe(true);
+    const repo = createTicketRepo(db);
+    const ticket = (await repo.listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
+    expect(ticket.transferId).toBe(id);
+  });
+
+  it("a '#'-prefixed id (from the note) resolves and opens the case", async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    const r = await executeTool('open_recall_dispute', { transfer_id: `#${id}`, reason: 'wrong_amount' }, ctx);
+    expect(r.opened).toBe(true);
+    const repo = createTicketRepo(db);
+    const ticket = (await repo.listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
+    expect(ticket.transferId).toBe(id);
+  });
+
+  it('delivered over 24h ago ⇒ recall_window_passed, NO ticket opened', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintDelivered(ctx);
+    const t = (await ctx.store.getTransfer(id))!;
+    await ctx.store.saveTransfer({
+      ...t,
+      deliveredAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+    });
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'wrong_amount' }, ctx);
+    expect(r.error_code).toBe('recall_window_passed');
+    expect(r.opened).toBeUndefined();
+    const repo = createTicketRepo(db);
+    expect(await repo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('a still-refundable (paid, not delivered) transfer ⇒ use_request_refund, no ticket', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const created = await executeTool(
+      'create_transfer',
+      { amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
+      ctx,
+    );
+    const id = created.transfer_id as string;
+    await ctx.store.updateTransferFromWebhook(id, 'paid');
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
+    expect(r.error_code).toBe('use_request_refund');
+    expect(r.transfer_id).toBe(id);
+    const repo = createTicketRepo(db);
+    expect(await repo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it("STRICT ownership: another customer's delivered transfer reads as not found", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mintDelivered(owner);
+    const stranger = await buildCtx(redis, '15559990000');
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'unauthorized' }, stranger);
+    expect(r).toEqual({ error: 'Transfer not found.' });
+  });
+
+  it('respects the open-case cap (5) — a 6th recall is refused, no ticket', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const repo = createTicketRepo(db);
+    // Pre-fill the cap with 5 open customer tickets.
+    for (let i = 0; i < 5; i++) {
+      await repo.createTicket({
+        id: `tk_pre${i}`,
+        partnerId: 'default',
+        kind: 'customer',
+        customerPhone: ctx.phone,
+        subject: `existing ${i}`,
+        body: 'open case',
+      });
+    }
+    const id = await mintDelivered(ctx);
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
+    expect(r.error_code).toBe('too_many_open_cases');
+    expect(r.opened).toBeUndefined();
+    // Still exactly 5 — nothing new opened.
+    expect((await repo.listByCustomer(ctx.phone)).length).toBe(5);
   });
 });
 
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the ten read-only/refund/pay-link tools', () => {
+  it('the allowlist is exactly the eleven read-only/refund/recall/pay-link tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
@@ -2273,6 +2509,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
       'get_quote',
       'list_saved_recipients',
       'list_schedules',
+      'open_recall_dispute',
       'repeat_transfer',
       'request_refund',
       'resolve_recipient',
@@ -2291,7 +2528,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
 
   it("toolSchemasForChannel('whatsapp') is the full, unfiltered tool set", () => {
     expect(toolSchemasForChannel('whatsapp')).toBe(toolSchemas);
-    expect(toolSchemasForChannel('whatsapp')).toHaveLength(18);
+    expect(toolSchemasForChannel('whatsapp')).toHaveLength(19);
   });
 });
 
