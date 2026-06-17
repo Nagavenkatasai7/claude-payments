@@ -149,11 +149,20 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
     expect(SYSTEM_PROMPT.toLowerCase()).toContain('catch a wrong name');
   });
 
-  it('Fix #6: phone-country vs destination mismatch warning is present', () => {
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain('country code matches the destination country');
-    expect(SYSTEM_PROMPT).toContain('+91');
-    // Must not block, just confirm
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain("don't block it, just confirm");
+  it('Fix #6: phone-country vs destination mismatch warning is present (destination-agnostic)', () => {
+    const p = SYSTEM_PROMPT.toLowerCase();
+    // Any-to-any: the warning must NOT hardcode an India/+91 example. It flags a
+    // mismatch between the recipient number's country and a named destination,
+    // and confirms rather than blocking.
+    expect(p).toContain('mismatch');
+    expect(p).toContain("don't block it");
+  });
+
+  it('Fix #6b: destination is auto-detected from the recipient number, not assumed', () => {
+    const p = SYSTEM_PROMPT.toLowerCase();
+    expect(p).toContain('detected_destination_country');
+    // Source currency is auto-detected from the sender's number, never assumed USD.
+    expect(p).toContain('never assume usd');
   });
 });
 

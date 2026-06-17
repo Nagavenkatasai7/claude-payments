@@ -402,14 +402,15 @@ export interface CapEvaluation {
 // concerns, two different fields. Routing code never reads `country`.
 
 // ISO 3166-1 alpha-2. Note: UAE = 'AE' (not 'UAE').
+// Any-to-any: every code below is valid as BOTH a source and a destination
+// (e.g. INR→USD or USD→INR). Don't re-introduce a send-only / payout-only split.
 export type CountryCode =
-  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ'  // send-side (Phase 1)
-  | 'IN';                                              // payout-side (v1 only)
+  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN';
 
-// ISO 4217 currency codes corresponding to the supported countries.
+// ISO 4217 currency codes corresponding to the supported countries (any-to-any:
+// each is usable as source or destination).
 export type CurrencyCode =
-  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD'  // send-side
-  | 'INR';                                                    // payout-side
+  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR';
 
 // Single source of truth for "what's the home currency of country X?"
 // Consumed by the migration + bot defaults.

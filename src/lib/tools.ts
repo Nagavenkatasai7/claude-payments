@@ -1,6 +1,6 @@
 import { quote, QuoteError, sourceForInr, wouldBeFeeUsd } from './fx';
 import { getFxRates, type FxRates } from './rate';
-import { resolveSendCurrency } from './partner-currency';
+import { resolveSendCurrency, destinationCountryForRecipientPhone } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -1737,7 +1737,13 @@ function validatePhoneTool(args: Record<string, unknown>): ToolResult {
         "That doesn't look like a valid WhatsApp number — please send it with country code, e.g. 919876543210.",
     };
   }
-  return { valid: true, normalized };
+  // Any-to-any: surface the destination country inferred from the recipient's
+  // number (e.g. +1 → US) so the agent can default the payout country instead of
+  // asking. Omitted when the calling code is unknown ⇒ the agent asks (prompt.ts).
+  const detected = destinationCountryForRecipientPhone(normalized);
+  return detected
+    ? { valid: true, normalized, detected_destination_country: detected }
+    : { valid: true, normalized };
 }
 
 async function captureCorridorRequestTool(

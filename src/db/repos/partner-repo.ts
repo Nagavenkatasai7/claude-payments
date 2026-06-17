@@ -2,6 +2,7 @@ import { asc, eq } from 'drizzle-orm';
 import { partners } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import type { CorridorComplianceRule, CountryCode, KycMode, Partner, PartnerId, PartnerStatus, PartnerSupportConfig } from '@/lib/types';
+import { DEFAULT_PARTNER_COUNTRIES } from '@/lib/defaults';
 
 // partner-repo — mirrors partner-store's surface (getPartner / savePartner /
 // listPartners / ensureDefaultPartner) so the cutover is a drop-in swap.
@@ -81,7 +82,10 @@ export function createPartnerRepo(db: DbOrTx) {
       const fresh: Partner = {
         id: 'default',
         name: 'SmartRemit Default',
-        countries: ['US'],
+        // Any-to-any: the default tenant serves senders from every supported
+        // source country, so resolveSendCurrency auto-detects the sender's
+        // currency from their number instead of collapsing to USD.
+        countries: DEFAULT_PARTNER_COUNTRIES,
         status: 'active',
         createdAt: now,
         updatedAt: now,

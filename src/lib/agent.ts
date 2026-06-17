@@ -10,7 +10,7 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { WaCreds } from './whatsapp';
 import type { PartnerStore } from './partner-store';
-import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
+import { allowedSendCurrencies, currencyForPhone, destinationCountryForRecipientPhone } from './partner-currency';
 import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
 import { normalizePhone } from './phone';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
@@ -182,12 +182,17 @@ export function createAgent(deps: AgentDeps) {
             (r) => normalizePhone(r.recipientPhone) === norm,
           );
           if (found) {
+            // Any-to-any: infer the payout COUNTRY from the recipient's number
+            // (a recipient-tap bypasses validate_phone, so surface it here too).
+            const destCC = destinationCountryForRecipientPhone(norm);
             messages.push({
               role: 'system',
               content:
                 `[RECIPIENT SELECTED] name=${found.name}, recipient_phone=${found.recipientPhone}, ` +
-                `payout_method=${found.payoutMethod}, payout_destination=${found.payoutDestination}. ` +
+                `payout_method=${found.payoutMethod}, payout_destination=${found.payoutDestination}` +
+                (destCC ? `, detected_destination_country=${destCC}` : '') + '. ' +
                 'You already have the recipient — do NOT call send_recipient_picker or ask who again. ' +
+                (destCC ? `Send to ${destCC} unless they say otherwise. ` : '') +
                 'Just collect the amount and funding method, then send_approve_picker.',
             });
           }
