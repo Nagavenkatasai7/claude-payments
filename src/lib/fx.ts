@@ -13,6 +13,33 @@ export class QuoteError extends Error {
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
+/** Format a whole amount in the given ISO-4217 currency ($, ₹, £, AED, …). */
+function fmtAmount(amount: number, currency: CurrencyCode): string {
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency', currency, minimumFractionDigits: 0, maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `${amount} ${currency}`;
+  }
+}
+
+/**
+ * The MIN/MAX band is enforced on the USD-equivalent, but the refusal is stated
+ * in the SENDER's currency so a non-USD sender sees a figure they understand
+ * (any-to-any: e.g. an INR sender gets "between ₹X and ₹Y", not "$10 and $2,999").
+ * USD source keeps the exact legacy string (byte-for-byte). The source bound is
+ * rounded so the stated range never admits a value that then fails the USD check.
+ */
+function limitMessage(sourceCurrency: CurrencyCode, rates: FxRates): string {
+  if (sourceCurrency === 'USD' || !Number.isFinite(rates.toUsd) || rates.toUsd <= 0) {
+    return `Transfers must be between $${MIN_USD} and $${MAX_USD}.`;
+  }
+  const minSrc = Math.ceil(MIN_USD / rates.toUsd);
+  const maxSrc = Math.floor(MAX_USD / rates.toUsd);
+  return `Transfers must be between ${fmtAmount(minSrc, sourceCurrency)} and ${fmtAmount(maxSrc, sourceCurrency)}.`;
+}
+
 export function quote(
   amountSource: number,
   sourceCurrency: CurrencyCode,
@@ -31,7 +58,7 @@ export function quote(
     throw new QuoteError('Invalid exchange rate; please try again.');
   }
   if (amountUsd < MIN_USD || amountUsd > MAX_USD) {
-    throw new QuoteError(`Transfers must be between $${MIN_USD} and $${MAX_USD}.`);
+    throw new QuoteError(limitMessage(sourceCurrency, rates));
   }
 
   let feeUsd: number;
@@ -103,18 +130,40 @@ export function wouldBeFeeUsd(amountUsd: number, fundingMethod: FundingMethod): 
 
 /**
  * Back-solve the send amount (in the sender's source currency) from a target
- * rupee amount the recipient should receive — the exact inverse of the forward
- * line `amountInr = Math.round(amountSource * rates.toInr)` in quote(). The
- * caller feeds the result straight into quote(), which enforces MIN_USD/MAX_USD
- * on the USD-equivalent and adds the fee on TOP (the recipient still gets the
- * exact target INR). Receive-first quoting (Win A) is the only caller.
+ * amount the recipient should receive IN THE DESTINATION CURRENCY — the exact
+ * inverse of the forward cross-rate in quote() (the USD-pivot crossRate). For an
+ * INR destination (or no dest rate) this is `amountDest / rates.toInr`, byte-for-
+ * byte the old sourceForInr; otherwise it inverts `src.toUsd / dest.toUsd`, so a
+ * non-INR destination receive target (any-to-any, e.g. "they should get $500")
+ * back-solves correctly on ANY source corridor. quote() then enforces
+ * MIN_USD/MAX_USD on the USD-equivalent and adds the fee on top.
+ */
+export function sourceForDest(
+  amountDest: number,
+  rates: FxRates,
+  destinationCurrency: CurrencyCode = 'INR',
+  destToUsd?: number,
+): number {
+  if (!Number.isFinite(amountDest) || amountDest <= 0) {
+    throw new QuoteError('Please give a valid amount.');
+  }
+  const crossRate =
+    destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
+      ? rates.toInr
+      : rates.toUsd / destToUsd;
+  if (!Number.isFinite(crossRate) || crossRate <= 0) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
+  return round2(amountDest / crossRate);
+}
+
+/**
+ * Back-compat wrapper: receive-first to an INR destination (the original
+ * caller). Identical results to the pre-any-to-any implementation.
  */
 export function sourceForInr(amountInr: number, rates: FxRates): number {
   if (!Number.isFinite(amountInr) || amountInr <= 0) {
     throw new QuoteError('Please give a valid rupee amount.');
   }
-  if (!Number.isFinite(rates.toInr) || rates.toInr <= 0) {
-    throw new QuoteError('Invalid exchange rate; please try again.');
-  }
-  return round2(amountInr / rates.toInr);
+  return sourceForDest(amountInr, rates, 'INR', undefined);
 }

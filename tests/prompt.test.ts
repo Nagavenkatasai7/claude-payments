@@ -118,14 +118,14 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
   });
 
   it('Fix #3: send-amount lock rule is present', () => {
-    expect(SYSTEM_PROMPT).toContain('amount_usd to every later get_quote call');
+    expect(SYSTEM_PROMPT).toContain('amount_source to every later get_quote call');
     expect(SYSTEM_PROMPT).toContain('confirm with the user first');
     // Must not silently switch to receive-first
     expect(SYSTEM_PROMPT).toContain('must NOT silently change the send amount');
     // QA batch 3: hardened lock — explicit confirm BEFORE any re-quote
     expect(SYSTEM_PROMPT).toContain('SEND AMOUNT LOCK');
     expect(SYSTEM_PROMPT).toContain('that send amount is LOCKED');
-    expect(SYSTEM_PROMPT).toContain('You MUST NOT call get_quote with amount_inr');
+    expect(SYSTEM_PROMPT).toContain('You MUST NOT call get_quote with amount_dest');
     expect(SYSTEM_PROMPT).toContain('Re-quoting and then showing the new numbers is NEVER itself the confirmation');
   });
 

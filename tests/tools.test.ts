@@ -239,6 +239,67 @@ describe('executeTool', () => {
     expect(result.error).toMatch(/between/i);
   });
 
+  // Regression for the 2026-06-16 prod bug: an Indian (+91) sender → US recipient
+  // (₹→$). Stub Frankfurter so from=INR returns a live USD rate (toInr identity 1).
+  function stubInrToUsd() {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('from=INR')) return { ok: true, json: async () => ({ rates: { USD: 0.0118 } }) };
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+  }
+
+  it('any-to-any: INR sender → US recipient, send ₹20,000 succeeds (the 6/16 bug, fixed)', async () => {
+    stubInrToUsd();
+    const ctx = await buildCtx(fakeRedis(), '919876543210'); // Indian sender ⇒ INR source
+    const r = await executeTool(
+      'get_quote',
+      { amount_source: 20000, funding_method: 'bank_transfer', destination_country: 'US' },
+      ctx,
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.source_currency).toBe('INR');
+    expect(r.destination_currency).toBe('USD');
+    expect(r.amount_source).toBe(20000);
+    expect(r.amount_dest as number).toBeCloseTo(236, 0); // ₹20,000 × 0.0118 ≈ $236 received
+  });
+
+  it('any-to-any: a sub-minimum INR amount is refused IN RUPEES, never "$10" (the exact failure value)', async () => {
+    stubInrToUsd();
+    const ctx = await buildCtx(fakeRedis(), '919876543210');
+    // ₹210 ≈ $2.48 — the value the bot wrongly passed after pre-converting. Now a clear ₹ message.
+    const r = await executeTool(
+      'get_quote',
+      { amount_source: 210, funding_method: 'bank_transfer', destination_country: 'US' },
+      ctx,
+    );
+    expect(typeof r.error).toBe('string');
+    expect(r.error as string).toContain('₹');
+    expect(r.error as string).not.toContain('$10');
+  });
+
+  it('any-to-any: receive-first — INR sender, "Dad gets $250" back-solves correctly', async () => {
+    stubInrToUsd();
+    const ctx = await buildCtx(fakeRedis(), '919876543210');
+    const r = await executeTool(
+      'get_quote',
+      { amount_dest: 250, funding_method: 'bank_transfer', destination_country: 'US' },
+      ctx,
+    );
+    expect(r.error).toBeUndefined();
+    expect(r.destination_currency).toBe('USD');
+    expect(r.amount_dest as number).toBeCloseTo(250, 0);          // recipient gets $250
+    expect(r.amount_source as number).toBeCloseTo(250 / 0.0118, 0); // ≈ ₹21,186 send
+  });
+
+  it('any-to-any: amount_usd / amount_inr still work as back-compat aliases', async () => {
+    stubInrToUsd();
+    const ctx = await buildCtx(fakeRedis(), '919876543210');
+    const a = await executeTool('get_quote', { amount_usd: 20000, funding_method: 'bank_transfer', destination_country: 'US' }, ctx);
+    expect(a.error).toBeUndefined();
+    expect(a.amount_source).toBe(20000);
+    expect(a.amount_dest as number).toBeCloseTo(236, 0);
+  });
+
   it('validate_phone surfaces the detected destination country for a known calling code', async () => {
     const ctx = await buildCtx(fakeRedis());
     const us = await executeTool('validate_phone', { phone: '+1 555 123 4567' }, ctx);
@@ -852,22 +913,28 @@ describe('multi-currency dormancy invariant', () => {
     expect(result.error).toBeUndefined();
   });
 
-  it('get_quote for a US-only partner ignores source_currency GBP request (dormant)', async () => {
+  it('get_quote for a single-country (US-only) partner ignores source_currency GBP request (dormant bypass)', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15559992222');
 
-    // Use the default partner (US only — ensureDefaultPartner gives countries: ['US'])
-    // No need to seed a partner; resolveCurrencyAndRates will call ensureDefaultPartner
+    // Single-country white-label partner — the single-currency bypass must hold:
+    // the LLM-supplied source_currency is IGNORED (untrusted) and stays USD.
+    const now = new Date().toISOString();
+    await ctx.partnerStore.savePartner({
+      id: 'us-only-test', name: 'US Only', countries: ['US'], status: 'active', createdAt: now, updatedAt: now,
+    });
+    await ctx.customerStore.saveCustomer({
+      senderPhone: '15559992222', firstSeenAt: now, kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'us-only-test', createdAt: now, updatedAt: now,
+    });
 
-    // Even though we pass source_currency: 'GBP', it should be ignored for a ['US'] partner
     const result = await executeTool(
       'get_quote',
       { amount_usd: 200, funding_method: 'bank_transfer', source_currency: 'GBP' },
       ctx,
     );
 
-    // Dormant: USD path, MOCK_RATE=85 (set in beforeEach stubFetch)
-    expect(result.source_currency).toBe('USD');
+    expect(result.source_currency).toBe('USD'); // GBP request ignored on a single-currency partner
     expect(result.amount_inr).toBe(Math.round(200 * MOCK_RATE));
     expect(result.error).toBeUndefined();
   });
@@ -1827,10 +1894,12 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     expect(r.amount_source).toBeCloseTo(10.06, 2);
   });
 
-  it('receive-first on a non-INR corridor: a routed back-solve EXCEEDING the cap-checked amount is not presented (mid quote kept)', async () => {
-    // sourceForInr back-solves with the INR rate, so the cap guard ran on
-    // ~$11.76 (1000/85); the winning AED cross-rate back-solve would be
-    // ~$263 — an amount evaluateCap never saw. The route must be skipped.
+  it('receive-first on a non-INR corridor back-solves via the cross-rate (recipient gets the target DEST amount, not rupees)', async () => {
+    // any-to-any fix: amount_inr=1000 with an AE destination means AED 1000 the
+    // RECIPIENT receives (the destination currency), NOT ₹1000. sourceForDest
+    // back-solves via the USD-pivot cross-rate (USD→AED ≈ 3.7037), so the mid
+    // send ≈ $270 and the recipient gets exactly AED 1000. A better route (3.8)
+    // yields a SMALLER send (≈ $263.16 ≤ the cap-checked $270), so it applies.
     resetRateCacheForTests();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (String(url).includes('from=AED')) {
@@ -1839,15 +1908,16 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
       return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
     }));
     const ctx = await buildCtx(fakeRedis());
-    const mid = 1 / 0.27; // USD→AED cross-rate ≈ 3.7037
     const r = await executeTool(
       'get_quote',
       { amount_inr: 1000, funding_method: 'bank_transfer', destination_country: 'AE' },
       { ...ctx, routeSelector: async () => ({ fxRate: 3.8, source: 'partner' as const, settlementPartnerId: 'rail-partner-x' }) },
     );
     expect(r.error).toBeUndefined();
-    expect(r.fx_rate as number).toBeCloseTo(mid, 4);  // mid quote, NOT the 3.8 route
-    expect(r.amount_source).toBeCloseTo(11.76, 2);    // the cap-checked figure, NOT ~263
+    expect(r.destination_currency).toBe('AED');
+    expect(r.amount_inr as number).toBeCloseTo(1000, 0);   // recipient gets AED 1000 (NOT ₹1000)
+    expect(r.fx_rate as number).toBeCloseTo(3.8, 4);       // the better route applies (smaller send)
+    expect(r.amount_source as number).toBeCloseTo(263.16, 1); // 1000/3.8, NOT ~11.76 (the old ÷toInr bug)
   });
 
   it('a worse-than-mid "partner" route is rejected at the seam — the customer never quotes below mid', async () => {
