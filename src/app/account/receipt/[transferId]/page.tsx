@@ -5,7 +5,9 @@ import { notFound } from 'next/navigation';
 import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
+import { isRecallEligible } from '@/lib/refund-policy';
 import { requestRefundAction } from '../refund-actions';
+import { requestRecallAction } from '../recall-actions';
 
 export const metadata = { title: 'Receipt · SmartRemit' };
 
@@ -44,6 +46,23 @@ function statusLabel(t: { status: string; refundStatus?: string }): string {
   return REFUND_LABEL[t.refundStatus ?? ''] ?? STATUS_LABEL[t.status] ?? t.status;
 }
 
+// Recall/dispute reasons offered on a delivered transfer (mirror the action's
+// enum). The server action re-validates the chosen value.
+const RECALL_REASONS: { value: string; label: string }[] = [
+  { value: 'not_received', label: 'The money never arrived' },
+  { value: 'wrong_recipient', label: 'Sent to the wrong recipient' },
+  { value: 'wrong_amount', label: 'Wrong amount sent' },
+  { value: 'unauthorized', label: "I didn't authorize this transfer" },
+  { value: 'other', label: 'Something else' },
+];
+
+// Friendly messages for the redirect-with-code refusals the recall action emits.
+const RECALL_ERROR_MSG: Record<string, string> = {
+  reason: 'Please choose what went wrong before reporting a problem.',
+  ineligible: 'This transfer can no longer be reported here — please message us on WhatsApp.',
+  cap: 'You already have 5 open requests. Reply on one of those, or wait for one to be resolved first.',
+};
+
 const summaryCls = 'mb-5 rounded-xl bg-[#202c33] p-3.5';
 const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';
 const rowLabelCls = 'text-[#8696a0]';
@@ -59,11 +78,14 @@ function fmtWhen(iso?: string): string {
 
 export default async function ReceiptPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ transferId: string }>;
+  searchParams: Promise<{ error?: string }>;
 }) {
   const customer = await requireCustomer();
   const { transferId } = await params;
+  const { error } = await searchParams;
   const t = await getStore().getTransfer(transferId);
   if (!t || t.phone !== customer.senderPhone) notFound();
 
@@ -75,6 +97,14 @@ export default async function ReceiptPage({
   // page render is never authoritative); this just gates the CTA.
   const refundStatus = t.refundStatus ?? 'none';
   const canRequestRefund = t.status === 'paid' && refundStatus === 'none';
+
+  // Customer-facing recall/dispute — once money is DELIVERED there's no refund
+  // path, but a delivered transfer inside the 24h recall window may open a
+  // support ticket. The server action re-checks eligibility (this only gates the
+  // CTA). refundDisposition already requires refundStatus 'none', so this never
+  // collides with the refund block above.
+  const canRecall = isRecallEligible(t, Date.now());
+  const recallErrorMsg = error ? RECALL_ERROR_MSG[error] : undefined;
 
   return (
     <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
@@ -141,6 +171,46 @@ export default async function ReceiptPage({
             </button>
             <p className="mt-2 mb-0 text-[12px] leading-normal text-[#8696a0]">
               Our team reviews every refund request — refunds arrive in 3–5 business days once approved.
+            </p>
+          </form>
+        )}
+
+        {canRecall && (
+          <form action={requestRecallAction} className="mb-5 rounded-xl bg-[#202c33] p-3.5">
+            <input type="hidden" name="transferId" value={t.id} />
+            <div className="mb-2 text-[15px] font-semibold leading-normal">Report a problem with this transfer</div>
+            {recallErrorMsg ? (
+              <p className="mt-0 mb-2.5 text-[13px] leading-[1.4] text-[#f15c6d]" role="alert">
+                {recallErrorMsg}
+              </p>
+            ) : null}
+            <label className="mb-3 block">
+              <span className="mb-1.5 block text-[13px] text-[#8696a0]">What went wrong?</span>
+              {/* 16px keeps iOS Safari from auto-zooming on focus. */}
+              <select
+                name="reason"
+                defaultValue=""
+                required
+                className="w-full rounded-lg border border-[#2a3942] bg-[#2a3942] p-2.5 text-[16px] text-[#e9edef]"
+              >
+                <option value="" disabled>
+                  Choose a reason…
+                </option>
+                {RECALL_REASONS.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="submit"
+              className="block w-full rounded-2xl bg-[#0b141a] p-4 text-center text-[15px] font-semibold text-[#e9edef] no-underline"
+            >
+              Report a problem
+            </button>
+            <p className="mt-2 mb-0 text-[12px] leading-normal text-[#8696a0]">
+              Once money is delivered we can&rsquo;t guarantee recovery, but our team will look into it.
             </p>
           </form>
         )}
