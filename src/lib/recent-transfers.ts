@@ -38,6 +38,10 @@ function formatAmount(transfer: Transfer): string {
 }
 
 function formatLine(transfer: Transfer): string {
+  // Short transfer ref so the bot can name a SPECIFIC transfer (e.g. when the
+  // customer asks for a refund) without echoing the full id. The id is the
+  // customer's own and carries no PII — leak-safe.
+  const ref = (transfer.id ?? '').trim() ? `#${transfer.id} · ` : '';
   const when = transfer.createdAt ? easternDate(Date.parse(transfer.createdAt)) : 'recently';
   const who = (transfer.recipientName ?? '').trim() || 'a recipient';
   const amount = formatAmount(transfer);
@@ -45,7 +49,7 @@ function formatLine(transfer: Transfer): string {
     REFUND_LABEL[transfer.refundStatus ?? 'none'] ??
     STATUS_LABEL[transfer.status] ??
     'in progress';
-  return `${when} · ${who} · ${amount} · ${status}`;
+  return `${ref}${when} · ${who} · ${amount} · ${status}`;
 }
 
 /**
