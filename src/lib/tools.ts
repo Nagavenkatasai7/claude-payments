@@ -1631,6 +1631,9 @@ async function sendApprovePickerTool(
     // tool twice in one turn. Dedupe the card SEND by sender+content within a
     // short TTL — a duplicate is a silent no-op, a genuinely new send still goes
     // through. The draft above is single-use/30-min TTL, so an unsent one is harmless.
+    // Content-keyed (NOT by draftId, which changes every call): two byte-identical
+    // sends inside the TTL intentionally collide — a true "same amount, same
+    // recipient, right now" duplicate is rare and worth suppressing.
     const cardKey = `${ctx.phone}|${recipientPhone}|${amountSource}|${sourceCurrency}|${destinationCountry}`;
     if (await ctx.store.markApproveCardSent(cardKey)) {
       try {

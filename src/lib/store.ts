@@ -144,8 +144,13 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     // is at-least-once, and the model can call send_approve_picker twice in one
     // turn — both would emit a SECOND card + a NEW pay link. Returns true the
     // FIRST time a given (sender+content) card is sent within the TTL, false on a
-    // duplicate. Short TTL (covers the retry/backoff window) so a genuinely new
-    // identical send a couple of minutes later still goes through.
+    // duplicate. The 120s TTL covers the realistic transient retry (the early
+    // backoff attempts land within seconds); it deliberately does NOT span the
+    // full 8-attempt window (~254s to the last retry) so that a genuinely new
+    // identical send a couple of minutes later still goes through — losing the
+    // dedupe on a turn that fails for >2min is far better than suppressing a
+    // legitimate re-send. Worst case past the TTL is ONE extra card, not the
+    // every-retry duplication this replaces.
     async markApproveCardSent(key: string): Promise<boolean> {
       const result = await redis.set(`approvecard:${key}`, '1', { ex: 120, nx: true });
       return result !== null;
