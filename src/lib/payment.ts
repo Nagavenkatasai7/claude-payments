@@ -153,3 +153,19 @@ export function recipientTemplateParams(transfer: Transfer): string[] {
   const sender = `+${transfer.phone}`;
   return [transfer.recipientName, destAmount, sender, 'bank account'];
 }
+
+// Free-form fallback for the recipient's "money delivered" notification. The
+// approved `transfer_delivered` TEMPLATE is what reaches a recipient OUTSIDE the
+// 24h window, but a bare template send fails silently if Meta rejects it (params,
+// approval, language) — leaving the recipient with nothing while the sender (a
+// free-form text in an open window) is notified. So we degrade to this text if
+// the template throws; it delivers whenever the recipient has an open window.
+export function recipientDeliveredFallbackText(transfer: Transfer, brand = 'SmartRemit'): string {
+  const destCurrency = transfer.destinationCurrency ?? 'INR';
+  const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
+  const sender = `+${transfer.phone}`;
+  return (
+    `💰 ${transfer.recipientName}, you've received ${destAmount} from ${sender} via ${brand}. ` +
+    `It's on the way to your bank account.`
+  );
+}

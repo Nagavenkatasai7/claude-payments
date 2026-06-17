@@ -8,7 +8,7 @@ import {
   signBody,
 } from '@/lib/providers/http-payment-provider';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
-import { buildRefundMessage, completePaymentStage2, recipientTemplateParams } from '@/lib/payment';
+import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
@@ -103,13 +103,25 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
         await deps.sendText(stage2.transfer.phone, msg, waCreds);
       }
       if (stage2.senderMessages.length > 0 && stage2.transfer.recipientPhone) {
-        await deps.sendTemplate(
-          stage2.transfer.recipientPhone,
-          deps.recipientTemplateName,
-          deps.recipientTemplateLang,
-          recipientTemplateParams(stage2.transfer),
-          waCreds,
-        );
+        const recipientPhone = stage2.transfer.recipientPhone;
+        // Template-first, but degrade to a free-form text if Meta rejects the
+        // template — otherwise the recipient silently gets nothing.
+        try {
+          await deps.sendTemplate(
+            recipientPhone,
+            deps.recipientTemplateName,
+            deps.recipientTemplateLang,
+            recipientTemplateParams(stage2.transfer),
+            waCreds,
+          );
+        } catch (err) {
+          console.warn('mock.settle: recipient template failed; falling back to text:', err);
+          await deps.sendText(
+            recipientPhone,
+            recipientDeliveredFallbackText(stage2.transfer, brand),
+            waCreds,
+          );
+        }
       }
       return;
     }

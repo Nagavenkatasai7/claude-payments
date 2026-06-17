@@ -14,6 +14,7 @@ import { Sidebar } from '../../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
+import { LogoUpload } from '../logo-upload';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -203,6 +204,17 @@ export default async function PartnerDetailPage({
                 <dl className={DL_CLASS}>
                   <dt>ID</dt><dd>{partner.id}</dd>
                   <dt>Name</dt><dd>{partner.name}</dd>
+                  <dt>Logo</dt>
+                  <dd>
+                    {partner.logoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={partner.logoUrl}
+                        alt={`${partner.name} logo`}
+                        className="h-9 max-w-[180px] rounded border border-border bg-white object-contain p-1"
+                      />
+                    ) : ('—')}
+                  </dd>
                   <dt>Display name</dt><dd>{partner.displayName ?? '—'}</dd>
                   <dt>Countries</dt><dd>{partner.countries.join(', ')}</dd>
                   <dt>KYC mode</dt>
@@ -277,7 +289,10 @@ export default async function PartnerDetailPage({
                     <Input name="supportContact" defaultValue={partner.supportContact ?? ''} placeholder="Support contact (e.g. support@acme.com)" />
                     <Input name="botPersona" defaultValue={partner.botPersona ?? ''} placeholder="Bot persona / tone (optional, e.g. warm and concise)" />
                     <Input name="primaryColor" type="color" className="h-10 w-20 p-1" defaultValue={partner.primaryColor ?? '#1a73e8'} />
-                    <Input name="logoUrl" defaultValue={partner.logoUrl ?? ''} placeholder="Logo URL (optional)" />
+                    <div className="space-y-1.5">
+                      <Label>Logo</Label>
+                      <LogoUpload name="logoUrl" defaultValue={partner.logoUrl ?? ''} />
+                    </div>
                     <fieldset className="rounded-lg border border-border p-4">
                       <legend className="px-1 text-sm font-medium">KYC handling</legend>
                       <div className="space-y-1.5">
