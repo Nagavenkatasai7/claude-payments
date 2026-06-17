@@ -257,6 +257,52 @@ describe('completePaymentStage2', () => {
     expect(result.senderMessages).toHaveLength(0);
   });
 
+  it('does NOT deliver a paid transfer with a refund pending — returns empty messages', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer({
+      ...awaitingTransfer(),
+      status: 'paid',
+      paidAt: '2026-05-21T01:00:00.000Z',
+      refundStatus: 'pending',
+    });
+
+    const result = await completePaymentStage2(store, 'pay12345');
+    // Stays paid — the recipient must never be paid while the sender is refunded.
+    expect(result.transfer.status).toBe('paid');
+    expect(result.transfer.deliveredAt).toBeUndefined();
+    expect(result.senderMessages).toHaveLength(0);
+  });
+
+  it('does NOT deliver a paid transfer with a refund requested — returns empty messages', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer({
+      ...awaitingTransfer(),
+      status: 'paid',
+      paidAt: '2026-05-21T01:00:00.000Z',
+      refundStatus: 'requested',
+    });
+
+    const result = await completePaymentStage2(store, 'pay12345');
+    expect(result.transfer.status).toBe('paid');
+    expect(result.transfer.deliveredAt).toBeUndefined();
+    expect(result.senderMessages).toHaveLength(0);
+  });
+
+  it('STILL delivers a normal paid transfer with refundStatus none (regression)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer({
+      ...awaitingTransfer(),
+      status: 'paid',
+      paidAt: '2026-05-21T01:00:00.000Z',
+      refundStatus: 'none',
+    });
+
+    const result = await completePaymentStage2(store, 'pay12345');
+    expect(result.transfer.status).toBe('delivered');
+    expect(result.transfer.deliveredAt).toBeTruthy();
+    expect(result.senderMessages).toHaveLength(1);
+  });
+
   it('sets paidAt if somehow unset when delivering', async () => {
     const store = createStore(fakeRedis(), db);
     // Transfer is awaiting_payment (no paidAt)

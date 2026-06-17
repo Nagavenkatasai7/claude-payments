@@ -144,6 +144,14 @@ export function createTransferRepo(
             sql`${transfers.status} NOT IN ('cancelled','blocked','in_review')`,
             sql`(CASE ${transfers.status} WHEN 'awaiting_payment' THEN 0 WHEN 'paid' THEN 1 ELSE 2 END)
               < (CASE ${status} WHEN 'paid' THEN 1 WHEN 'delivered' THEN 2 ELSE -1 END)`,
+            // MONEY SAFETY: never let a paid-out callback flip a transfer to
+            // 'delivered' while a refund is in progress — the money is being
+            // returned to the sender, so the recipient must not be paid too. A
+            // delivered-callback on a refunding transfer is a safe no-op (returns
+            // null), exactly like a duplicate callback. Non-delivered targets and
+            // non-refunding transfers are unaffected. refund_status defaults to
+            // 'none'.
+            sql`(${status} <> 'delivered' OR COALESCE(${transfers.refundStatus}, 'none') = 'none')`,
           ),
         )
         .returning();
