@@ -126,6 +126,20 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
     partnerId = (await openLink.getAttribute('href'))!.split('/').pop()!;
   }
 
+  // Self-heal: remove any stale smoke staff first. Its bound partner may have been
+  // deleted between runs (e.g. a demo cleanup), which would orphan its scope and
+  // break the isolation assertions below. It is recreated fresh, bound to the
+  // CURRENT partner, just after.
+  await page.goto('/admin-dashboard/team');
+  const removeBtn = page
+    .locator('form')
+    .filter({ has: page.locator(`input[name="username"][value="${SMOKE_USERNAME}"]`) })
+    .getByRole('button', { name: /^remove$/i });
+  if (await removeBtn.count()) {
+    await removeBtn.first().click();
+    await expect(page).toHaveURL(/\/admin-dashboard\/team\/?$/);
+  }
+
   // Find or create the partner-scoped agent bound to that partner.
   await page.goto('/admin-dashboard/team');
   const staffRow = page.locator(`input[name="username"][value="${SMOKE_USERNAME}"]`);

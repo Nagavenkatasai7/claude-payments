@@ -140,6 +140,24 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
       const result = await redis.set(`msg:${wamid}`, '1', { ex: 600, nx: true });
       return result !== null;
     },
+    // Idempotency for the inline "Approve & Pay" card. The agent.turn outbox row
+    // is at-least-once, and the model can call send_approve_picker twice in one
+    // turn — both would emit a SECOND card + a NEW pay link. Returns true the
+    // FIRST time a given (sender+content) card is sent within the TTL, false on a
+    // duplicate. Short TTL (covers the retry/backoff window) so a genuinely new
+    // identical send a couple of minutes later still goes through.
+    async markApproveCardSent(key: string): Promise<boolean> {
+      const result = await redis.set(`approvecard:${key}`, '1', { ex: 120, nx: true });
+      return result !== null;
+    },
+    // Release a claimed card key when the send itself FAILED, so the at-least-once
+    // retry can re-deliver. Without this, a thrown sendCtaUrl (network reject)
+    // would leave the key claimed and every retry would skip the card — the
+    // customer would get NO link. The common case (a LATER step in the turn
+    // throwing AFTER the card sent) keeps the key, so that retry stays deduped.
+    async clearApproveCardSent(key: string): Promise<void> {
+      await redis.del(`approvecard:${key}`);
+    },
     async getLastInboundAt(senderPhone: string): Promise<string | null> {
       return redis.get(`lastmsg:${senderPhone}`);
     },
