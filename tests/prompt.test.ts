@@ -426,18 +426,35 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
     }
   });
 
-  it('paid-not-delivered → call request_refund and relay; the bot never moves or promises money', () => {
+  it('the bot finds the transfer itself — no transaction-ID demand up front', () => {
     for (const p of variants) {
-      expect(p).toContain('call request_refund with that transfer_id and relay its outcome');
+      expect(p).toContain('FIND THE TRANSFER FOR THEM');
+      expect(p).toContain('do NOT demand a transaction ID up front');
+      expect(p).toContain('call request_refund with NO transfer_id');
+    }
+  });
+
+  it('paid-not-delivered → request_refund requested: true; the bot never moves or promises money', () => {
+    for (const p of variants) {
+      expect(p).toContain('when request_refund returns requested: true');
       expect(p).toContain('only flags the transfer for our team to review');
       expect(p).toContain('never say the refund is done, approved, or guaranteed');
     }
   });
 
-  it('DELIVERED transfers are FINAL — explain kindly, never promise a reversal', () => {
+  it('DELIVERED but recoverable → open_recall_dispute, honest that recovery is not guaranteed', () => {
     for (const p of variants) {
-      expect(p).toContain('DELIVERED transfers are FINAL');
-      expect(p).toContain('delivered_final');
+      expect(p).toContain('error_code: use_recall');
+      expect(p).toContain('call open_recall_dispute');
+      expect(p).toContain('wrong_recipient, wrong_amount, not_received, unauthorized, or other');
+      expect(p).toContain('recovery is NOT guaranteed');
+    }
+  });
+
+  it('DELIVERED past the 24h window → recall_window_passed, never promise a reversal', () => {
+    for (const p of variants) {
+      expect(p).toContain('error_code: recall_window_passed');
+      expect(p).toContain('more than 24 hours since the money was delivered');
       expect(p).toContain('never promise a reversal, a chargeback, or an exception');
     }
   });
@@ -451,15 +468,16 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
 
   it('an awaiting_payment transfer needs NO refund — just do not pay, or cancel', () => {
     for (const p of variants) {
-      expect(p).toContain('An awaiting_payment transfer needs NO refund');
+      expect(p).toContain('not_paid_yet');
+      expect(p).toContain('there is no refund to make because no money has been taken');
       expect(p).toContain('simply not complete the payment');
     }
   });
 
-  it('never invent a transfer_id for request_refund — ask for the receipt id instead', () => {
+  it('does not demand a receipt id — only asks the customer to identify if the result is ambiguous', () => {
     for (const p of variants) {
-      expect(p).toContain('request_refund needs a transfer_id');
-      expect(p).toContain('transfer ID shown on their receipt');
+      expect(p).toContain('Only ask the customer to identify the transfer');
+      expect(p).toContain('ambiguous or not found');
     }
   });
 
