@@ -73,12 +73,27 @@ describe('partner-api-service: read endpoints', () => {
     expect(r.corridors[0]).toMatchObject({ source_currency: 'USD', destination_country: 'IN', destination_currency: 'INR' });
   });
 
+  it('listCorridors ADDS a destinations[] of supported {country,currency} pairs (additive)', () => {
+    const r = listCorridors(DELEGATED);
+    expect(Array.isArray(r.destinations)).toBe(true);
+    expect(r.destinations).toContainEqual({ destination_country: 'US', destination_currency: 'USD' });
+    expect(r.destinations).toContainEqual({ destination_country: 'IN', destination_currency: 'INR' });
+    expect(r.destinations).toContainEqual({ destination_country: 'GB', destination_currency: 'GBP' });
+  });
+
   it('createQuote returns a quote; rejects a non-positive amount', async () => {
     const { deps } = await harness();
     const okq = await createQuote(deps, DELEGATED, { amount_source: 500 });
     expect(okq.ok).toBe(true);
     if (okq.ok) expect(okq.data).toMatchObject({ source_currency: 'USD', destination_currency: 'INR' });
     expect(await createQuote(deps, DELEGATED, { amount_source: 0 })).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it('createQuote derives destination currency from destination_country (GB → GBP)', async () => {
+    const { deps } = await harness();
+    const q = await createQuote(deps, DELEGATED, { amount_source: 500, destination_country: 'GB' });
+    expect(q.ok).toBe(true);
+    if (q.ok) expect(q.data).toMatchObject({ source_currency: 'USD', destination_currency: 'GBP' });
   });
 
   it('validateBeneficiary: valid IN fields pass, bad ones 422', () => {
@@ -175,6 +190,27 @@ describe('partner-api-service: createTransaction', () => {
     const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-3', { amount_source: 150, sender: { phone: '15551230000' }, beneficiary_id: benId });
     expect(r).toMatchObject({ ok: true, status: 201 });
     if (r.ok) expect((r.data as { recipient_name: string }).recipient_name).toBe('Anita');
+  });
+
+  it('honours destination_country (US → USD destination)', async () => {
+    const { deps } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-us', txBody({ destination_country: 'US' }));
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect(r.data).toMatchObject({ destination_country: 'US', destination_currency: 'USD' });
+  });
+
+  it('defaults to IN/INR when destination_country is absent (back-compat)', async () => {
+    const { deps } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-none', txBody());
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect(r.data).toMatchObject({ destination_country: 'IN', destination_currency: 'INR' });
+  });
+
+  it('defaults to IN/INR when destination_country is INVALID (no 400)', async () => {
+    const { deps } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'ZZ' }));
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect(r.data).toMatchObject({ destination_country: 'IN', destination_currency: 'INR' });
   });
 });
 
