@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getFxRate, resetRateCacheForTests, FALLBACK_FX_RATE } from '@/lib/rate';
+import { getFxRate, getFxRates, resetRateCacheForTests, FALLBACK_FX_RATE } from '@/lib/rate';
 
 beforeEach(() => {
   resetRateCacheForTests();
@@ -36,6 +36,25 @@ function mockFetchNonOk() {
     }),
   );
 }
+
+describe('getFxRates(INR) — any-to-any source (Frankfurter omits the base currency)', () => {
+  it('uses identity toInr=1 and the LIVE toUsd when the INR base is omitted from rates', async () => {
+    // from=INR&to=USD,INR → Frankfurter returns ONLY USD (no INR key for the base).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ rates: { USD: 0.0106 } }),
+    }));
+    const r = await getFxRates('INR');
+    expect(r.toInr).toBe(1);        // INR→INR identity (not the static 1, but derived)
+    expect(r.toUsd).toBe(0.0106);   // LIVE INR→USD — NOT the static 0.0118 fallback
+  });
+
+  it('falls back to the static INR rate only when the fetch fails', async () => {
+    mockFetchFailure();
+    const r = await getFxRates('INR');
+    expect(r.toUsd).toBe(0.0118); // static fallback
+  });
+});
 
 describe('getFxRate', () => {
   it('returns the parsed INR rate on successful fetch', async () => {

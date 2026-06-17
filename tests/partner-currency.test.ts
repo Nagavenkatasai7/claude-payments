@@ -5,8 +5,10 @@ import {
   countryForCurrency,
   currencyForPhone,
   countryForPhone,
+  destinationCountryForRecipientPhone,
 } from '@/lib/partner-currency';
 import { QuoteError } from '@/lib/fx';
+import { DEFAULT_PARTNER_COUNTRIES } from '@/lib/defaults';
 import type { Partner } from '@/lib/types';
 
 function partner(countries: Partner['countries']): Partner {
@@ -132,5 +134,40 @@ describe('resolveSendCurrency with senderPhone', () => {
   it('single-currency partner ignores senderPhone (regression: phone never overrides)', () => {
     // partner(['US']) → USD always; GB phone must not change this
     expect(resolveSendCurrency(partner(['US']), undefined, '447911123456')).toBe('USD');
+  });
+});
+
+describe('destinationCountryForRecipientPhone (any-to-any payout country)', () => {
+  it('US recipient → US', () => {
+    expect(destinationCountryForRecipientPhone('15551234567')).toBe('US');
+  });
+  it('IN recipient → IN', () => {
+    expect(destinationCountryForRecipientPhone('919876543210')).toBe('IN');
+  });
+  it('GB recipient → GB', () => {
+    expect(destinationCountryForRecipientPhone('447911123456')).toBe('GB');
+  });
+  it('bare local 10-digit (no country code) → undefined (⇒ the agent asks)', () => {
+    expect(destinationCountryForRecipientPhone('9876543210')).toBeUndefined();
+  });
+  it('unknown calling code → undefined', () => {
+    expect(destinationCountryForRecipientPhone('886123456')).toBeUndefined();
+  });
+});
+
+describe('any-to-any default partner (the source-detection fix)', () => {
+  const defaultPartner = partner(DEFAULT_PARTNER_COUNTRIES);
+
+  it('the default partner is multi-currency (no single-currency bypass)', () => {
+    expect(allowedSendCurrencies(defaultPartner).length).toBeGreaterThan(1);
+  });
+  it('+91 sender on the default partner → INR (was USD before the fix)', () => {
+    expect(resolveSendCurrency(defaultPartner, undefined, '919876543210')).toBe('INR');
+  });
+  it('+44 sender on the default partner → GBP', () => {
+    expect(resolveSendCurrency(defaultPartner, undefined, '447911123456')).toBe('GBP');
+  });
+  it('+1 sender on the default partner still → USD (regression)', () => {
+    expect(resolveSendCurrency(defaultPartner, undefined, '15551234567')).toBe('USD');
   });
 });

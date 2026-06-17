@@ -96,6 +96,31 @@ describe('partner-api-service: read endpoints', () => {
     if (q.ok) expect(q.data).toMatchObject({ source_currency: 'USD', destination_currency: 'GBP' });
   });
 
+  // any-to-any: the default tenant is now multi-currency, so omitting source_currency
+  // must NOT throw (previously a 500). The API never asks a human — it defaults.
+  const MULTI = partner({ id: 'globex', countries: ['US', 'GB', 'AE', 'IN'] });
+
+  it('createQuote on a multi-currency partner with NO source_currency defaults to the primary (no 500)', async () => {
+    const { deps } = await harness();
+    const q = await createQuote(deps, MULTI, { amount_source: 500 });
+    expect(q.ok).toBe(true); // before the fix this threw QuoteError → HTTP 500
+    if (q.ok) expect(q.data).toMatchObject({ source_currency: 'USD' });
+  });
+
+  it('createQuote on a multi-currency partner auto-detects the source from the sender phone (+91 → INR)', async () => {
+    const { deps } = await harness();
+    const q = await createQuote(deps, MULTI, { amount_source: 5000, destination_country: 'US', sender: { phone: '919876543210' } });
+    expect(q.ok).toBe(true);
+    if (q.ok) expect(q.data).toMatchObject({ source_currency: 'INR', destination_currency: 'USD' });
+  });
+
+  it('listCorridors excludes the degenerate INR→IN corridor for an India-source partner', () => {
+    const r = listCorridors(partner({ countries: ['US', 'IN'] }));
+    const sources = r.corridors.map((c) => c.source_currency);
+    expect(sources).toContain('USD');
+    expect(sources).not.toContain('INR'); // INR→IN (India to India) is degenerate
+  });
+
   it('validateBeneficiary: valid IN fields pass, bad ones 422', () => {
     expect(validateBeneficiary({ country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' } }))
       .toMatchObject({ ok: true });

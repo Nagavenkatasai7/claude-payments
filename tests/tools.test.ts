@@ -239,6 +239,25 @@ describe('executeTool', () => {
     expect(result.error).toMatch(/between/i);
   });
 
+  it('validate_phone surfaces the detected destination country for a known calling code', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const us = await executeTool('validate_phone', { phone: '+1 555 123 4567' }, ctx);
+    expect(us.valid).toBe(true);
+    expect(us.normalized).toBe('15551234567');
+    expect(us.detected_destination_country).toBe('US');
+
+    const inn = await executeTool('validate_phone', { phone: '+91 98765 43210' }, ctx);
+    expect(inn.detected_destination_country).toBe('IN');
+  });
+
+  it('validate_phone omits detected_destination_country for a bare local number (⇒ agent asks)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    // 9876543210 normalizes to a valid-length number with no recognizable calling code.
+    const r = await executeTool('validate_phone', { phone: '9876543210' }, ctx);
+    expect(r.valid).toBe(true);
+    expect(r.detected_destination_country).toBeUndefined();
+  });
+
   it('get_quote uses credit_card surcharge for repeat transfers', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis);
@@ -1188,11 +1207,11 @@ describe('validate_phone — read-only phone early-catch', () => {
   const call = (phone: unknown) =>
     executeTool('validate_phone', { phone }, {} as never); // ctx is never touched
 
-  it('a clean 919876543210 → { valid: true, normalized }', async () => {
-    expect(await call('919876543210')).toEqual({ valid: true, normalized: '919876543210' });
+  it('a clean 919876543210 → valid, normalized, + detected destination IN', async () => {
+    expect(await call('919876543210')).toEqual({ valid: true, normalized: '919876543210', detected_destination_country: 'IN' });
   });
-  it('a formatted "+91 98765 43210" → valid, normalized digits-only', async () => {
-    expect(await call('+91 98765 43210')).toEqual({ valid: true, normalized: '919876543210' });
+  it('a formatted "+91 98765 43210" → valid, normalized digits-only, detected IN', async () => {
+    expect(await call('+91 98765 43210')).toEqual({ valid: true, normalized: '919876543210', detected_destination_country: 'IN' });
   });
   it('too-short "12345" → valid:false with a re-ask error', async () => {
     const r = await call('12345') as { valid: boolean; error: string };

@@ -98,19 +98,34 @@ function resolveDestination(requested: string): { country: CountryCode; currency
   return { country: DEFAULT_DESTINATION_COUNTRY, currency: DEFAULT_DESTINATION_CURRENCY };
 }
 
+// The partner API is PROGRAMMATIC — it must never throw a "which currency?" prompt
+// (that is the chat path's job). Resolve explicit > sender-phone > the partner's
+// primary currency, never throwing. Now that the default partner is multi-currency,
+// a call that omits source_currency must still resolve (was a 500 otherwise).
+function apiSourceCurrency(partner: Partner, requested?: string, senderPhone?: string): CurrencyCode {
+  try {
+    return resolveSendCurrency(partner, requested, senderPhone);
+  } catch {
+    return allowedSendCurrencies(partner)[0];
+  }
+}
+
 // ── GET /corridors ────────────────────────────────────────────────────────
 export function listCorridors(partner: Partner) {
   const currencies = allowedSendCurrencies(partner);
   return {
     brand: resolvePartnerBranding(partner).brand,
-    corridors: currencies.map((c) => ({
-      source_country: countryForCurrency(c),
-      source_currency: c,
-      destination_country: 'IN' as CountryCode,
-      destination_currency: 'INR' as CurrencyCode,
-    })),
-    // Any-to-any (additive): the full supported destination set. The corridors[]
-    // shape above is UNCHANGED for back-compat.
+    // Legacy "send → India" corridors. A source whose own country IS the
+    // destination (INR → IN) is degenerate, so it is excluded.
+    corridors: currencies
+      .filter((c) => countryForCurrency(c) !== 'IN')
+      .map((c) => ({
+        source_country: countryForCurrency(c),
+        source_currency: c,
+        destination_country: 'IN' as CountryCode,
+        destination_currency: 'INR' as CurrencyCode,
+      })),
+    // Any-to-any (additive): the full supported destination set.
     destinations: SUPPORTED_DESTINATIONS,
   };
 }
@@ -123,7 +138,11 @@ export async function createQuote(
 ): Promise<SvcResult<unknown>> {
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
-  const sourceCurrency = resolveSendCurrency(partner, str(body.source_currency) || undefined);
+  const sourceCurrency = apiSourceCurrency(
+    partner,
+    str(body.source_currency) || undefined,
+    str((body.sender as Record<string, unknown> | undefined)?.phone) || undefined,
+  );
   // Callers may pass either destination_country (resolved to its home currency)
   // or destination_currency directly. destination_country takes precedence when
   // it names a supported country; otherwise the legacy destination_currency path
@@ -246,7 +265,9 @@ export async function createTransaction(
     payoutDestination = str(ben.payout_destination);
   }
 
-  const sourceCurrency = resolveSendCurrency(partner, str(body.source_currency) || undefined);
+  // senderPhone is required here (validated above), so an Indian sender with no
+  // source_currency auto-detects INR; the helper never throws (→ no 500).
+  const sourceCurrency = apiSourceCurrency(partner, str(body.source_currency) || undefined, senderPhone);
   // Any-to-any destination: an absent/unsupported destination_country defaults
   // to IN/INR (back-compat). NOTE compliance is SOURCE-gated — the destination
   // is never fed into screening.

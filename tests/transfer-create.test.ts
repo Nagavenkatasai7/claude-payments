@@ -300,6 +300,32 @@ describe('createTransfer any-to-any corridors', () => {
     expect(t.complianceStatus).toBe('cleared');
     expect(t.destinationCurrency).toBe('INR');
   });
+
+  it('any-to-any: an INR-source transfer to a US recipient is INR→USD', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    // from=INR → {USD:0.0118, INR:1}; from=USD (destination) → {INR:85} (toUsd identity 1)
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=INR')) {
+        return { ok: true, json: async () => ({ rates: { USD: 0.0118, INR: 1 } }) };
+      }
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base,
+      phone: '919876543210',        // Indian sender
+      recipientPhone: '15551234567', // US recipient
+      amountSource: 50000,           // ₹50,000 ≈ $590 (above the $10 floor)
+      sourceCurrency: 'INR',
+      destinationCountry: 'US',
+      destinationCurrency: 'USD',
+    });
+    expect(t.sourceCurrency).toBe('INR');
+    expect(t.destinationCountry).toBe('US');
+    expect(t.destinationCurrency).toBe('USD');
+    expect(t.amountUsd).toBeCloseTo(590, 0);        // USD-equivalent of ₹50,000
+    expect(t.amountInr).toBeCloseTo(590, 0);        // destination amount, in USD (back-compat field name)
+  });
 });
 
 // ── U7 (audit): optional complete quote override ─────────────────────────────

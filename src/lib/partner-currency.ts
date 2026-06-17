@@ -17,6 +17,13 @@ export function countryForPhone(normalizedPhone: string): CountryCode | undefine
   return undefined;
 }
 
+/** Best-effort DESTINATION CountryCode from a normalized (digits-only) RECIPIENT
+ *  phone (any-to-any: e.g. recipient '15551234567'→US, '919876543210'→IN). undefined
+ *  when the calling code is unknown/absent (a bare local number) ⇒ the agent asks. */
+export function destinationCountryForRecipientPhone(normalizedPhone: string): CountryCode | undefined {
+  return countryForPhone(normalizedPhone);
+}
+
 /** Best-effort send currency from a normalized (digits-only) sender phone.
  *  e.g. '15551234567'→USD, '971501234567'→AED, '447911123456'→GBP. undefined if unknown.
  *  '+1' is heuristically US (NANP ambiguity accepted). */

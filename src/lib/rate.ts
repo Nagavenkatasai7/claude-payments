@@ -17,7 +17,7 @@ export const FALLBACK_FX_RATES: Record<CurrencyCode, FxRates> = {
   SGD: { toInr: 63, toUsd: 0.74 },
   AUD: { toInr: 56, toUsd: 0.66 },
   NZD: { toInr: 51, toUsd: 0.6 },
-  INR: { toInr: 1, toUsd: 0.0118 }, // ≈ 1/85, consistent with FALLBACK_FX_RATE; never a source currency, present for type completeness
+  INR: { toInr: 1, toUsd: 0.0118 }, // ≈ 1/85; any-to-any offline fallback for an INR SOURCE (e.g. India → US)
 };
 
 // Stage 4: 5-minute freshness (was 1h) — quotes on a money product should
@@ -80,7 +80,11 @@ export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
     const res = await fetch(`https://api.frankfurter.app/latest?from=${source}&to=${to}`);
     if (!res.ok) return cached ? cached.rates : FALLBACK_FX_RATES[source];
     const data = (await res.json()) as { rates: { USD?: number; INR?: number } };
-    const inr = data.rates.INR;
+    // Frankfurter OMITS the base currency from `rates`, so an INR base never
+    // echoes an INR key — its source→INR rate is the identity 1 (any-to-any: INR
+    // is now a valid source). Without this, every INR-source quote silently fell
+    // back to the static rate instead of live FX.
+    const inr = source === 'INR' ? 1 : data.rates.INR;
     if (typeof inr !== 'number' || !Number.isFinite(inr)) {
       // Malformed 200 (missing INR) — treat as a failure; never cache NaN.
       return cached ? cached.rates : FALLBACK_FX_RATES[source];
