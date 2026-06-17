@@ -122,6 +122,14 @@ export async function completePaymentStage2(
     return { transfer, senderMessages: [] };
   }
 
+  // MONEY SAFETY: do not deliver a transfer with a refund in progress. Once a
+  // refund is requested/pending/completed/failed the money is being returned to
+  // the sender — paying the recipient as well would move the money twice (sender
+  // refunded AND recipient paid). refundStatus defaults to 'none'.
+  if ((transfer.refundStatus ?? 'none') !== 'none') {
+    return { transfer, senderMessages: [] };
+  }
+
   const now = new Date().toISOString();
   const updated: Transfer = {
     ...transfer,

@@ -120,6 +120,29 @@ describe('transfer-repo: atomic webhook transition (rank-guarded UPDATE)', () =>
     expect(await repo.updateTransferFromWebhook('tr_blocked', 'delivered')).toBeNull();
   });
 
+  it('MONEY SAFETY: a paid transfer with a refund in progress does NOT flip to delivered', async () => {
+    // A paid-out callback arriving while the transfer is being refunded must be a
+    // safe no-op — otherwise the recipient is paid AND the sender refunded.
+    for (const refundStatus of ['requested', 'pending', 'completed', 'failed'] as const) {
+      const id = `tr_refund_${refundStatus}`;
+      await repo.saveTransfer(
+        fixture({ id, status: 'paid', paidAt: '2026-06-09T00:00:00.000Z', refundStatus }),
+      );
+      const res = await repo.updateTransferFromWebhook(id, 'delivered');
+      expect(res).toBeNull(); // no transition, no recipient notification
+      expect((await repo.getTransfer(id))!.status).toBe('paid'); // still paid, not delivered
+    }
+  });
+
+  it('a normal paid transfer (refund none) still flips to delivered (regression)', async () => {
+    await repo.saveTransfer(
+      fixture({ id: 'tr_norefund', status: 'paid', paidAt: '2026-06-09T00:00:00.000Z', refundStatus: 'none' }),
+    );
+    const res = await repo.updateTransferFromWebhook('tr_norefund', 'delivered');
+    expect(res!.status).toBe('delivered');
+    expect((await repo.getTransfer('tr_norefund'))!.status).toBe('delivered');
+  });
+
   it('CONCURRENT funded + paid_out land consistently at delivered', async () => {
     await repo.saveTransfer(fixture());
     const [a, b] = await Promise.all([
