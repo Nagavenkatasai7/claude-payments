@@ -12,6 +12,7 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
+import { sanitizeLogoValue } from '@/lib/logo';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import type {
@@ -67,7 +68,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
     botPersona: String(formData.get('botPersona') ?? '').trim() || undefined,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
-    logoUrl: String(formData.get('logoUrl') ?? '').trim() || undefined,
+    logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
     kycMode,
     requireKycBeforeSend: formData.get('requireKycBeforeSend') === 'on', // OPT-IN gate, either mode
@@ -383,7 +384,7 @@ export async function wizardCreatePartnerAction(
     supportContact: clean(input.supportContact),
     botPersona: clean(input.botPersona),
     primaryColor: clean(input.primaryColor),
-    logoUrl: clean(input.logoUrl),
+    logoUrl: sanitizeLogoValue(input.logoUrl),
     kycMode,
     requireKycBeforeSend: input.requireKycBeforeSend === true, // OPT-IN gate, either mode
     createdAt: now,

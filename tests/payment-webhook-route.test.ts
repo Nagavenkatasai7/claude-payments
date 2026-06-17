@@ -22,6 +22,11 @@ const sendTemplate = vi.fn(async (..._a: unknown[]) => {});
 vi.mock('@/lib/whatsapp', () => ({
   sendText: (...a: unknown[]) => sendText(...a),
   sendTemplate: (...a: unknown[]) => sendTemplate(...a),
+  // Faithful to the real helper: run the template send, fall back to free-form
+  // text only if it throws (the recipient-delivery resilience under test).
+  sendTemplateOrText: async (to: string, send: () => Promise<void>, fallbackText: string, creds?: unknown) => {
+    try { await send(); } catch { await sendText(to, fallbackText, creds); }
+  },
   RECIPIENT_TEMPLATE_NAME: 'transfer_delivered',
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
@@ -115,6 +120,23 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect((sendText.mock.calls[0] as unknown[])[1]).toContain('delivered');
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     expect((sendTemplate.mock.calls[0] as unknown[])[1]).toBe('transfer_delivered');
+  });
+
+  it('recipient TEMPLATE rejected by Meta → falls back to a free-form text so the recipient is still notified', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+    // Meta rejects the template (bad params / not approved / wrong lang).
+    sendTemplate.mockRejectedValueOnce(new Error('WhatsApp template send failed (400)'));
+    const res = await post('uniteller', body, sig(body));
+    expect(res.status).toBe(200);
+    await flushAfter();
+    // Template was ATTEMPTED, then the recipient got a free-form text instead.
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(2); // [0] sender's "delivered", [1] recipient fallback
+    const recipientCall = sendText.mock.calls[1] as unknown[];
+    expect(recipientCall[0]).toBe('919876543210');       // the RECIPIENT's phone, not the sender's
+    expect(String(recipientCall[1])).toContain('Mom');   // recipient name in the fallback text
+    expect(String(recipientCall[1])).toMatch(/received/i);
   });
 
   it('delivered message uses the DESTINATION currency (GBP shows £, never ₹)', async () => {

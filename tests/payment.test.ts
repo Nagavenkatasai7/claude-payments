@@ -4,6 +4,7 @@ import {
   completePaymentStage1,
   completePaymentStage2,
   recipientTemplateParams,
+  recipientDeliveredFallbackText,
 } from '@/lib/payment';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -361,5 +362,26 @@ describe('recipientTemplateParams', () => {
     const params = recipientTemplateParams(transfer);
     // Should still render ₹ (INR default)
     expect(params[1]).toContain('₹');
+  });
+});
+
+describe('recipientDeliveredFallbackText', () => {
+  it('names the recipient, the dest amount, the sender, and the brand', () => {
+    const text = recipientDeliveredFallbackText(awaitingTransfer(), 'Acme Remit');
+    expect(text).toContain('Mom');            // recipient name
+    expect(text).toContain('₹');              // dest amount in INR
+    expect(text).toContain('42,600');
+    expect(text).toContain('+15551234567');   // sender phone
+    expect(text).toContain('Acme Remit');     // brand
+  });
+
+  it('defaults the brand to SmartRemit when omitted', () => {
+    expect(recipientDeliveredFallbackText(awaitingTransfer())).toContain('SmartRemit');
+  });
+
+  it('uses the destination currency (AED) for the amount', () => {
+    const text = recipientDeliveredFallbackText(awaitingAedTransfer());
+    expect(text).toContain('AED');
+    expect(text).toContain('Ali');
   });
 });

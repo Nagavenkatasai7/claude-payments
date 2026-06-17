@@ -8,6 +8,7 @@ import {
   type PartnerWizardResult,
 } from '../actions';
 import { CopyField } from '../copy-field';
+import { LogoUpload } from '../logo-upload';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -206,14 +207,12 @@ export function PartnerSetupWizard() {
             <Field label="Support contact">
               <Input value={draft.supportContact ?? ''} onChange={(e) => set({ supportContact: e.target.value })} placeholder="support@acme.com" />
             </Field>
-            <div className="grid grid-cols-2 gap-4">
-              <Field label="Primary color">
-                <Input type="color" className="h-10 w-20 p-1" value={draft.primaryColor ?? '#533afd'} onChange={(e) => set({ primaryColor: e.target.value })} />
-              </Field>
-              <Field label="Logo URL">
-                <Input value={draft.logoUrl ?? ''} onChange={(e) => set({ logoUrl: e.target.value })} placeholder="https://…/logo.png" />
-              </Field>
-            </div>
+            <Field label="Primary color">
+              <Input type="color" className="h-10 w-20 p-1" value={draft.primaryColor ?? '#533afd'} onChange={(e) => set({ primaryColor: e.target.value })} />
+            </Field>
+            <Field label="Logo">
+              <LogoUpload defaultValue={draft.logoUrl} onChange={(v) => set({ logoUrl: v })} />
+            </Field>
             <Field label="Bot persona" hint="Optional tone hint for the WhatsApp agent.">
               <Input value={draft.botPersona ?? ''} onChange={(e) => set({ botPersona: e.target.value })} placeholder="warm and concise" />
             </Field>

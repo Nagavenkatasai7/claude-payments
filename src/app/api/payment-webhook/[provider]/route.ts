@@ -10,11 +10,11 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
-import { recipientTemplateParams, formatDestAmount } from '@/lib/payment';
+import { recipientTemplateParams, recipientDeliveredFallbackText, formatDestAmount } from '@/lib/payment';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError } from '@/lib/log';
 import {
-  sendText, sendTemplate, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
+  sendText, sendTemplate, sendTemplateOrText, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
 
 // WL3: the settlement status callback. A partner's rail (or our hosted reference
@@ -108,9 +108,18 @@ export async function POST(
           waCreds,
         );
         if (updated.recipientPhone) {
-          await sendTemplate(
-            updated.recipientPhone, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
-            recipientTemplateParams(updated),
+          // Template-first (reaches a recipient outside the 24h window), but
+          // degrade to a free-form text if Meta rejects the template — otherwise
+          // the recipient silently gets nothing while the sender is notified.
+          const recipientPhone = updated.recipientPhone;
+          await sendTemplateOrText(
+            recipientPhone,
+            () => sendTemplate(
+              recipientPhone, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
+              recipientTemplateParams(updated),
+              waCreds,
+            ),
+            recipientDeliveredFallbackText(updated, brand),
             waCreds,
           );
         }
