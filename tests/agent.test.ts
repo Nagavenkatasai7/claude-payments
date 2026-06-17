@@ -759,8 +759,17 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
     const b = buildWithRedis();
     const seen: ChatMessage[][] = [];
 
-    // Default partner (countries: ['US']) — single currency, note must NOT appear.
-    await b.partnerStore.ensureDefaultPartner();
+    // Single-country partner (countries: ['US']) — single currency, note must NOT
+    // appear. (The DEFAULT tenant is now any-to-any/multi-currency, so seed an
+    // explicit US-only partner + customer to exercise the single-currency path.)
+    const now = new Date().toISOString();
+    await b.partnerStore.savePartner({
+      id: 'us-only', name: 'US Only', countries: ['US'], status: 'active', createdAt: now, updatedAt: now,
+    });
+    await b.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: now, kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'us-only', createdAt: now, updatedAt: now,
+    });
 
     const agent = createAgent({
       store: b.store,

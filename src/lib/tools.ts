@@ -1,4 +1,4 @@
-import { quote, QuoteError, sourceForInr, wouldBeFeeUsd } from './fx';
+import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { getFxRates, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone } from './partner-currency';
 import { newTransferId } from './id';
@@ -189,14 +189,23 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
+          amount_source: {
+            type: 'number',
+            description:
+              "The SEND amount, in the SENDER's own currency (e.g. for a sender in India this is rupees, for the US it is dollars). Pass the number the sender stated — NEVER convert it yourself; get_quote does the conversion.",
+          },
+          amount_dest: {
+            type: 'number',
+            description:
+              "Optional. The exact amount the RECIPIENT should receive, in the DESTINATION currency (e.g. USD for a US recipient, INR for India). Provide this INSTEAD of amount_source ONLY when no send amount has been set yet, or after the user has explicitly confirmed switching to a receive-first amount (see the SEND AMOUNT LOCK rule). We back-solve the send amount and add the fee on top. If both are given, the receive amount wins.",
+          },
           amount_usd: {
             type: 'number',
-            description: "Amount to send, in the sender's send currency (US dollars unless told otherwise).",
+            description: "Back-compat alias of amount_source (the SEND amount in the sender's currency, despite the name). Prefer amount_source.",
           },
           amount_inr: {
             type: 'number',
-            description:
-              "Optional. The exact rupee amount the RECIPIENT should receive. Provide this INSTEAD of amount_usd ONLY when no send amount has been set yet, or after the user has explicitly confirmed switching to a receive-first amount (see the SEND AMOUNT LOCK rule). If a send amount is already locked in this flow, do NOT pass amount_inr until the user has confirmed the change. We back-solve the send amount and add the fee on top. If both are given, amount_inr wins.",
+            description: "Back-compat alias of amount_dest (the RECIPIENT's receive amount in the destination currency, despite the name). Prefer amount_dest.",
           },
           funding_method: {
             type: 'string',
@@ -215,7 +224,7 @@ export const toolSchemas: ChatTool[] = [
               "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
           },
         },
-        required: ['amount_usd', 'funding_method'],
+        required: ['funding_method'],
       },
     },
   },
@@ -228,7 +237,8 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          amount_usd: { type: 'number', description: "Amount to send, in the sender's send currency (US dollars unless told otherwise)." },
+          amount_source: { type: 'number', description: "Send amount in the sender's OWN currency (rupees for India, dollars for the US, etc.). Do NOT convert it yourself." },
+          amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           recipient_name: { type: 'string' },
           payout_method: { type: 'string', enum: ['upi', 'bank'] },
           payout_destination: {
@@ -257,7 +267,7 @@ export const toolSchemas: ChatTool[] = [
           },
         },
         required: [
-          'amount_usd',
+          'amount_source',
           'recipient_name',
           'funding_method',
           'recipient_phone',
@@ -332,7 +342,8 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          amount_usd: { type: 'number', description: "Amount to send, in the sender's send currency (US dollars unless told otherwise)." },
+          amount_source: { type: 'number', description: "Send amount in the sender's OWN currency (rupees for India, dollars for the US, etc.). Do NOT convert it yourself." },
+          amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string', description: "Recipient's WhatsApp number with country code." },
           payout_method: { type: 'string', enum: ['upi', 'bank'] },
@@ -356,7 +367,7 @@ export const toolSchemas: ChatTool[] = [
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
-        required: ['amount_usd', 'recipient_name', 'recipient_phone', 'funding_method', 'frequency'],
+        required: ['amount_source', 'recipient_name', 'recipient_phone', 'funding_method', 'frequency'],
       },
     },
   },
@@ -424,7 +435,8 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          amount_usd: { type: 'number', description: "Amount to send, in the sender's send currency (US dollars unless told otherwise)." },
+          amount_source: { type: 'number', description: "Send amount in the sender's OWN currency (rupees for India, dollars for the US, etc.). Do NOT convert it yourself." },
+          amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string' },
@@ -444,7 +456,7 @@ export const toolSchemas: ChatTool[] = [
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
         required: [
-          'amount_usd',
+          'amount_source',
           'funding_method',
           'recipient_name',
           'recipient_phone',
@@ -527,7 +539,8 @@ export const toolSchemas: ChatTool[] = [
         type: 'object',
         properties: {
           recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210)." },
-          amount_usd: { type: 'number', description: 'Optional. New amount in the send currency; if omitted, reuse the last amount sent to this recipient.' },
+          amount_source: { type: 'number', description: "Optional. New send amount in the sender's own currency; if omitted, reuse the last amount sent to this recipient." },
+          amount_usd: { type: 'number', description: 'Back-compat alias of amount_source.' },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'], description: "Optional. Defaults to the sender's remembered method, then the last transfer's method." },
         },
         required: ['recipient_phone'],
@@ -768,15 +781,18 @@ async function getQuoteTool(
       return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
     }
 
-    // Receive-first (Win A): when a finite, positive target rupee amount is
-    // given, back-solve the send amount; the recipient gets exactly that INR
-    // and the fee is added on top (today's model). amount_inr wins over
-    // amount_usd. Otherwise this is byte-for-byte today's send-first path.
-    const targetInr = Number(args.amount_inr);
-    const receiveFirst = Number.isFinite(targetInr) && targetInr > 0;
+    // Receive-first (Win A → any-to-any): when a finite, positive target amount
+    // in the DESTINATION currency is given, back-solve the send amount via the
+    // source→dest cross-rate; the recipient gets exactly that and the fee is
+    // added on top. The receive target wins over the send amount. Corridor-
+    // neutral params (amount_dest / amount_source) are preferred; amount_inr /
+    // amount_usd are back-compat aliases. Otherwise this is byte-for-byte today's
+    // send-first path (USD→INR: destinationCurrency='INR' ⇒ sourceForDest ÷toInr).
+    const targetDest = Number(args.amount_dest ?? args.amount_inr);
+    const receiveFirst = Number.isFinite(targetDest) && targetDest > 0;
     const amountSource = receiveFirst
-      ? sourceForInr(targetInr, rates)
-      : Number(args.amount_usd);
+      ? sourceForDest(targetDest, rates, destinationCurrency, destToUsd)
+      : Number(args.amount_source ?? args.amount_usd);
 
     // Cap/tier guard (Bundle D) — refuse BEFORE quoting so the bot never presents
     // an unfulfillable quote. Mirrors check_send_limit's cap result (caps-only; EDD
@@ -838,13 +854,13 @@ async function getQuoteTool(
         //  • the smaller back-solve can dip under quote()'s MIN_USD floor
         //    where the mid back-solve passed — QuoteError ⇒ keep the mid quote;
         //  • the routed amount must stay within what evaluateCap already
-        //    approved above. sourceForInr back-solves with the INR rate, so on
-        //    a non-INR corridor the routed back-solve could EXCEED the
-        //    cap-checked figure — never present an amount that was not
-        //    cap-checked ⇒ keep the mid quote.
+        //    approved above. The routed back-solve divides the target by the
+        //    WINNING cross-rate (route.fxRate, source→dest), so a better rate
+        //    could yield a smaller-or-larger source than the cap-checked figure
+        //    — never present an amount that was not cap-checked ⇒ keep the mid.
         try {
           const routedQ = quote(
-            round2(targetInr / route.fxRate),
+            round2(targetDest / route.fxRate),
             sourceCurrency,
             rates,
             fundingMethod,
@@ -879,7 +895,19 @@ async function getQuoteTool(
       delivery_estimate: q.deliveryEstimate,
     };
   } catch (err) {
-    if (err instanceof QuoteError) return { error: err.message };
+    if (err instanceof QuoteError) {
+      // Observability: a QuoteError is returned to the model (not thrown), so it
+      // never reached a server log before — corridor/amount failures were
+      // invisible. Log it (PII-scrubbed) so future issues leave a trace.
+      logWarn('get_quote.rejected', err.message, {
+        // The RAW request values (what the model passed) — the resolved source
+        // currency may differ (auto-detected from the phone / ignored on a
+        // single-currency partner), so label these as the request.
+        requested_source_currency: String(args.source_currency ?? ''),
+        requested_destination_country: String(args.destination_country ?? ''),
+      });
+      return { error: err.message };
+    }
     throw err;
   }
 }
@@ -997,7 +1025,7 @@ async function createTransferTool(
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
-  const amountSource = Number(args.amount_usd);
+  const amountSource = Number(args.amount_source ?? args.amount_usd);
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap check on the legacy path (cron-fired or no-button cold-start)
   {
@@ -1261,7 +1289,7 @@ async function createScheduleTool(
   // Resolve currency and reuse customer for partnerId (P4 wiring).
   const { customer: owner, sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
   const partnerId = owner.partnerId ?? DEFAULT_PARTNER_ID;
-  const amountSource = Number(args.amount_usd);
+  const amountSource = Number(args.amount_source ?? args.amount_usd);
   // Validate optional end_date: must be a parseable ISO date string; ignore if not.
   let endDate: string | undefined;
   if (typeof args.end_date === 'string' && args.end_date.trim() !== '') {
@@ -1458,7 +1486,7 @@ async function sendApprovePickerTool(
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
-  const amountSource = Number(args.amount_usd);
+  const amountSource = Number(args.amount_source ?? args.amount_usd);
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
   {
@@ -1643,7 +1671,7 @@ async function repeatTransferTool(
     '';
 
   // Amount + funding fallback chain.
-  const overrideAmount = Number(args.amount_usd);
+  const overrideAmount = Number(args.amount_source ?? args.amount_usd);
   const amountSource =
     Number.isFinite(overrideAmount) && overrideAmount > 0
       ? overrideAmount
@@ -1778,7 +1806,7 @@ async function checkSendLimitTool(
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
   }
-  const amountSource = Number(args.amount_usd ?? 0);
+  const amountSource = Number(args.amount_source ?? args.amount_usd ?? 0);
   // Convert to USD-equivalent for the cap evaluation (for USD partners toUsd===1).
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   const requestedCents = Math.round(amountUsd * 100);
