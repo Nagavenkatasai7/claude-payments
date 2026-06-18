@@ -14,6 +14,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { retryDeadAction, dismissDeadAction } from './actions';
+import { DiagnosePanel } from './diagnose-panel';
 import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
 import type { Transfer } from '@/lib/types';
 
@@ -140,15 +141,18 @@ export default async function OpsPage() {
                       </TableCell>
                       <TableCell>{age(row.createdAt?.toISOString?.() ?? String(row.createdAt))}</TableCell>
                       <TableCell className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <form action={retryDeadAction}>
-                            <input type="hidden" name="id" value={row.id} />
-                            <Button type="submit" size="sm" variant="default">Retry</Button>
-                          </form>
-                          <form action={dismissDeadAction}>
-                            <input type="hidden" name="id" value={row.id} />
-                            <Button type="submit" size="sm" variant="outline">Dismiss</Button>
-                          </form>
+                        <div className="flex flex-col items-end gap-2">
+                          <div className="flex justify-end gap-2">
+                            <form action={retryDeadAction}>
+                              <input type="hidden" name="id" value={row.id} />
+                              <Button type="submit" size="sm" variant="default">Retry</Button>
+                            </form>
+                            <form action={dismissDeadAction}>
+                              <input type="hidden" name="id" value={row.id} />
+                              <Button type="submit" size="sm" variant="outline">Dismiss</Button>
+                            </form>
+                          </div>
+                          <DiagnosePanel subjectId={String(row.id)} />
                         </div>
                       </TableCell>
                     </TableRow>
@@ -176,6 +180,7 @@ export default async function OpsPage() {
                     <TableHead>Partner</TableHead>
                     <TableHead>Amount</TableHead>
                     <TableHead>Paid</TableHead>
+                    <TableHead className="text-right">Diagnose</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -189,6 +194,9 @@ export default async function OpsPage() {
                       <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
                       <TableCell>{age(t.paidAt)} ago</TableCell>
+                      <TableCell className="text-right">
+                        <DiagnosePanel subjectId={t.id} />
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
