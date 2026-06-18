@@ -3,6 +3,9 @@ import { createOutboxRepo, type OutboxRepo, type OutboxRow } from '@/db/repos/ou
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { triageSuggest } from '@/lib/ticket-ai';
 import {
   buildSettlementInstruction,
   signBody,
@@ -220,6 +223,35 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
           { to: transfer.phone, body: buildRefundMessage(transfer), creds: waCreds },
           { dedupeKey: `refundmsg:${transferId}` },
         );
+      });
+      return;
+    }
+
+    // ── AI auto-triage of a freshly-created CUSTOMER ticket (out-of-band) ────
+    // The copilot's one-shot triageSuggest runs HERE, never inline at ticket
+    // creation — a synchronous Ollama call must never block the customer-facing
+    // redirect. The model's output is CLAMPED to the closed lists inside
+    // triageSuggest, so setTriage always gets a safe shape. Idempotent: setTriage
+    // is a plain re-settable write, so an at-least-once redelivery just re-sets
+    // the same value. A model/Ollama outage throws and rides the worker's
+    // retry/backoff; a permanent failure dead-letters like any other kind,
+    // leaving the ticket un-triaged for staff to hand-sort (acceptable).
+    case 'ticket.triage': {
+      const ticketId = str(p.ticketId);
+      const repo = createTicketRepo(deps.db);
+      const ticket = await repo.getTicket(ticketId);
+      if (!ticket || ticket.kind !== 'customer') return; // gone / not a customer ticket ⇒ no-op
+      const messages = await repo.listMessages(ticketId, { includeInternal: false });
+      const firstMessage = messages.find((m) => !m.internal)?.body ?? '';
+      const { category, priority } = await triageSuggest(ticket.subject, firstMessage);
+      await repo.setTriage(ticketId, { category, priority });
+      await createAuditRepo(deps.db).record({
+        partnerId: ticket.partnerId,
+        actor: 'system',
+        actorType: 'system',
+        action: 'ticket.triage',
+        subjectId: ticket.id,
+        meta: { source: 'copilot', category, priority },
       });
       return;
     }

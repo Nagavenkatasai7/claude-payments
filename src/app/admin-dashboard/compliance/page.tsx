@@ -12,6 +12,7 @@ import {
   rejectTransferAction,
 } from '../actions';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
+import { ReviewCopilot } from './review-copilot';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -140,23 +141,29 @@ export default async function CompliancePage() {
                 label: t.recipientName,
                 cells: [
                   ...transferCells(t),
-                  <div key="actions" className="flex flex-wrap gap-2">
-                    <form action={releaseTransferAction}>
-                      <input type="hidden" name="id" value={t.id} />
-                      <Button type="submit" size="sm">Release</Button>
-                    </form>
-                    <form action={rejectTransferAction}>
-                      <input type="hidden" name="id" value={t.id} />
-                      <Button
-                        type="submit"
-                        size="sm"
-                        variant="outline"
-                        className="text-destructive"
-                        title="Cancels the transfer and auto-refunds the captured charge to the sender"
-                      >
-                        Reject &amp; refund
-                      </Button>
-                    </form>
+                  <div key="actions">
+                    <div className="flex flex-wrap gap-2">
+                      <form action={releaseTransferAction}>
+                        <input type="hidden" name="id" value={t.id} />
+                        <Button type="submit" size="sm">Release</Button>
+                      </form>
+                      <form action={rejectTransferAction}>
+                        <input type="hidden" name="id" value={t.id} />
+                        <Button
+                          type="submit"
+                          size="sm"
+                          variant="outline"
+                          className="text-destructive"
+                          title="Cancels the transfer and auto-refunds the captured charge to the sender"
+                        >
+                          Reject &amp; refund
+                        </Button>
+                      </form>
+                    </div>
+                    {/* Rung-1 copilot: suggests a disposition narrative; the
+                        Release / Reject actions above stay the deterministic,
+                        audited decision — the AI never executes. */}
+                    <ReviewCopilot transferId={t.id} />
                   </div>,
                 ],
               }))}

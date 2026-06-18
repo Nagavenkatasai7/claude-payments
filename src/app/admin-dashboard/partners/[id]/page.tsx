@@ -34,6 +34,8 @@ import {
 } from '../actions';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
+import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
+import { narratePartnerHealth } from '@/lib/partner-health-ai';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -75,6 +77,22 @@ function freshnessBadge(r: PartnerRate, nowMs: number) {
     <Badge variant="outline" className="border-success/50 text-success">FRESH</Badge>
   ) : (
     <Badge variant="outline" className="text-destructive">EXPIRED</Badge>
+  );
+}
+
+// Partner-health band → a labelled, colour-coded badge. Deterministic (the
+// scorer decides the band); this is presentation only.
+const HEALTH_BADGE: Record<HealthBand, { label: string; className: string }> = {
+  healthy: { label: 'Healthy', className: 'border-success/50 text-success' },
+  watch: { label: 'Watch', className: 'border-amber-500/50 text-amber-500' },
+  at_risk: { label: 'At risk', className: 'border-destructive/60 text-destructive' },
+  stalled: { label: 'Stalled', className: 'border-destructive text-destructive' },
+};
+
+function healthBadge(band: HealthBand) {
+  const b = HEALTH_BADGE[band];
+  return (
+    <Badge variant="outline" className={b.className}>{b.label}</Badge>
   );
 }
 
@@ -133,6 +151,24 @@ export default async function PartnerDetailPage({
   // both the badge and the checkbox.
   const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
 
+  // Partner health (U4): a deterministic struggling/stalled scorer over the data
+  // already loaded above — surfaces a partner before they churn. The AI
+  // narration ("why + outreach") is best-effort: a model outage just omits it,
+  // the band + signals always render. The 'default' platform partner is not a
+  // reseller, so its health is meaningless — skip it.
+  const showHealth = partner.id !== 'default';
+  const health = showHealth
+    ? scorePartnerHealth({ summary, apiKeys, rates, now: nowMs })
+    : null;
+  let healthNarration: string | null = null;
+  if (health && health.band !== 'healthy') {
+    try {
+      healthNarration = await narratePartnerHealth(health.band, health.signals);
+    } catch {
+      healthNarration = null; // model unavailable — deterministic signals stand alone
+    }
+  }
+
   return (
     <>
       <Sidebar active="partners" />
@@ -180,6 +216,40 @@ export default async function PartnerDetailPage({
 
           {/* ── Overview ─────────────────────────────────────────────────── */}
           <TabsContent value="overview">
+            {health && (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2.5">
+                    Integration health {healthBadge(health.band)}
+                  </CardTitle>
+                  <CardDescription>
+                    Deterministic churn-risk read from this partner&apos;s activity, rate feed, and queue.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {health.signals.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      No risk signals — recent activity and nothing needing attention.
+                    </p>
+                  ) : (
+                    <ul className="list-disc space-y-1 pl-5 text-sm">
+                      {health.signals.map((s) => (
+                        <li key={s}>{s}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {healthNarration && (
+                    <div className="mt-4 rounded-lg border border-border bg-muted/40 p-3">
+                      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Suggested outreach (AI)
+                      </div>
+                      <p className="whitespace-pre-line text-sm">{healthNarration}</p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             <Card className="mb-6">
               <CardHeader>
                 <CardTitle>Activity</CardTitle>

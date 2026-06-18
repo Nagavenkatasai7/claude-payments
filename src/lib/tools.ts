@@ -21,6 +21,8 @@ import type { PartnerStore } from './partner-store';
 import { sendInteractive, sendCtaUrl, type InteractiveButton, type WaCreds } from './whatsapp';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { getDb } from '@/db/client';
 import { refundDisposition } from './refund-policy';
 import {
@@ -640,6 +642,11 @@ export interface ToolContext {
   // open_recall_dispute writes to. Absent ⇒ a repo over the shared Pool (getDb())
   // is created lazily; tests inject one bound to PGlite.
   ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer'>;
+  // Triage-enqueue seam: the outbox repo the recall-dispute path enqueues the
+  // out-of-band 'ticket.triage' effect on. Absent ⇒ a repo over the shared Pool
+  // (getDb()) is created lazily; tests inject one bound to PGlite so the enqueue
+  // is asserted against the same engine as the ticket write.
+  outboxRepo?: Pick<ReturnType<typeof createOutboxRepo>, 'enqueue'>;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -1456,6 +1463,17 @@ async function openRecallDisputeTool(
     body: `Customer requests a recall of ${amount} sent to ${who} (transfer ${transfer.id}). Reason: ${reasonLabel}.`,
     category: 'refund',
   });
+
+  // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker
+  // drains (NEVER an inline Ollama call — this tool runs in the agent turn and
+  // must stay fast). Deduped on the ticket id; setTriage is idempotent, so
+  // re-confirming over the pre-filled 'refund' category is safe.
+  await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+    'ticket.triage',
+    { ticketId: ticket.id },
+    { dedupeKey: `triage:${ticket.id}` },
+  );
+  pokeWorker();
 
   return {
     opened: true,
