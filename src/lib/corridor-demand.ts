@@ -181,7 +181,7 @@ export async function rankCorridorDemand(
 
     let usd: number | null = null;
     if (r.approxAmount != null && r.approxCurrency) {
-      const rate = usdRateByCurrency.get(r.approxCurrency);
+      const rate = usdRateByCurrency.get(r.approxCurrency as CurrencyCode);
       if (rate != null) usd = r.approxAmount * rate;
     }
     acc.rows.push({ ts: Date.parse(r.capturedAt), sender: r.senderPhone, usd });
