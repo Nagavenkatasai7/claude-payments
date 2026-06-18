@@ -23,6 +23,7 @@ import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
@@ -67,6 +68,10 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     transferRepo: createTransferRepo(db),
     // Recall-dispute seam: the support-ticket repo, bound to the PGlite db.
     ticketRepo: createTicketRepo(db),
+    // Triage-enqueue seam: the outbox repo open_recall_dispute queues the
+    // out-of-band 'ticket.triage' effect on, bound to the PGlite db (the prod
+    // fallback would build one over getDb()'s Neon Pool).
+    outboxRepo: createOutboxRepo(db),
   };
 }
 
