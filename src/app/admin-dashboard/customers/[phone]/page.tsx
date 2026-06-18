@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { markCustomerVerifiedAction, markCustomerRejectedAction, reviewKycAction } from '../actions';
+import { KycCopilotPanel } from './kyc-copilot-panel';
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'ID' },
@@ -137,6 +138,7 @@ export default async function CustomerDetailPage({
                     <Button type="submit" name="decision" value="reject" variant="outline">Reject KYC</Button>
                   </div>
                 </form>
+                <KycCopilotPanel phone={customer.senderPhone} />
               </div>
             )}
 
