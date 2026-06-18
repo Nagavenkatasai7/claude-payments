@@ -112,6 +112,35 @@ export function createOutboxRepo(db: DbOrTx) {
       return db.select().from(outbox).where(eq(outbox.status, 'dead')).limit(limit);
     },
 
+    /** A single dead row by id (null if missing or not dead) — the ops copilot's subject resolve. */
+    async getDead(id: number): Promise<OutboxRow | null> {
+      const rows = await db
+        .select()
+        .from(outbox)
+        .where(sql`${outbox.id} = ${id} AND ${outbox.status} = 'dead'`)
+        .limit(1);
+      return rows[0] ?? null;
+    },
+
+    /**
+     * DETERMINISTIC sibling clustering for the ops copilot: how many OTHER dead
+     * rows share a last_error PREFIX. Case-insensitive prefix match on the
+     * already-normalized prefix the caller computed (errorPrefix in
+     * ops-diagnosis-ai); `excludeId` keeps the subject row out of its own count.
+     * Pure SQL — the model never counts.
+     */
+    async countDeadByErrorPrefix(prefix: string, excludeId: number): Promise<number> {
+      if (!prefix) return 0;
+      const like = `${prefix.replace(/[%_\\]/g, '\\$&')}%`;
+      const rows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(outbox)
+        .where(
+          sql`${outbox.status} = 'dead' AND ${outbox.id} <> ${excludeId} AND lower(${outbox.lastError}) LIKE ${like}`,
+        );
+      return rows[0]?.n ?? 0;
+    },
+
     /** Ops action: resurrect a dead row for another attempt cycle. */
     async retryDead(id: number): Promise<void> {
       await db
