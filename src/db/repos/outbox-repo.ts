@@ -24,6 +24,7 @@ export type OutboxKind =
   | 'mock.settle'
   | 'funding.refund'
   | 'agent.turn'
+  | 'ticket.triage'
   | 'ops.alert';
 
 export type OutboxRow = typeof outbox.$inferSelect;

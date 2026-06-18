@@ -5,6 +5,7 @@ import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { requireCustomer } from '@/lib/customer-auth';
 import { newTransferId } from '@/lib/id';
+import { enqueueTriage } from '@/lib/ticket-triage';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import { isRecallEligible } from '@/lib/refund-policy';
@@ -128,6 +129,12 @@ export async function requestRecallAction(formData: FormData): Promise<void> {
       `Recovery is not guaranteed — please review and follow up.`,
     category: 'refund',
   });
+
+  // Out-of-band AI triage (durable outbox, drained by the worker) — re-confirms
+  // category/priority off the actual case text. setTriage is idempotent, so a
+  // re-set over the pre-filled 'refund' category is safe. Never an inline
+  // Ollama call: it must not block this redirect.
+  await enqueueTriage(getDb(), ticket.id);
 
   redirect(`/account/support/${ticket.id}`);
 }

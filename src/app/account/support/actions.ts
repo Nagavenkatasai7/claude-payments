@@ -5,6 +5,7 @@ import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { requireCustomer } from '@/lib/customer-auth';
 import { newTransferId } from '@/lib/id';
+import { enqueueTriage } from '@/lib/ticket-triage';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import type { Customer, Partner } from '@/lib/types';
@@ -84,6 +85,11 @@ export async function createTicketAction(formData: FormData): Promise<void> {
     subject,
     body,
   });
+
+  // Out-of-band AI triage: a durable outbox row the worker drains (NEVER an
+  // inline Ollama call — that must never block this redirect). Only customer
+  // tickets are created here, so this is always in-scope.
+  await enqueueTriage(getDb(), ticket.id);
 
   redirect(`/account/support/${ticket.id}`);
 }
