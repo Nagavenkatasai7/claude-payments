@@ -12,6 +12,8 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
+import { SenderCell, FundingRefs } from '../sender-cell';
+import { resolveSenderNames } from '@/lib/sender-names';
 import type { RefundStatus, Transfer } from '@/lib/types';
 
 // /admin-dashboard/refunds — the always-on refund ledger. Unlike the Operations
@@ -48,6 +50,9 @@ export default async function RefundsPage() {
   const partnerId = scope.kind === 'partner' ? scope.partnerId : undefined;
 
   const all = await createTransferRepo(getDb()).listActiveRefunds({ partnerId });
+  // Batch-resolve decrypted sender names (one query) so each row can show WHO is
+  // being refunded; phones with no KYC name fall back to the phone in SenderCell.
+  const senderNames = await resolveSenderNames(getDb(), all.map((t) => t.phone));
 
   const counts = {
     requested: all.filter((t) => t.refundStatus === 'requested').length,
@@ -116,8 +121,10 @@ export default async function RefundsPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Transfer</TableHead>
+                    <TableHead>Sender</TableHead>
                     <TableHead>Partner</TableHead>
                     <TableHead>Amount</TableHead>
+                    <TableHead>Funding</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Reference</TableHead>
                     <TableHead>When</TableHead>
@@ -131,8 +138,10 @@ export default async function RefundsPage() {
                     return (
                       <TableRow key={t.id}>
                         <TableCell className="font-mono text-xs">{t.id}</TableCell>
+                        <TableCell><SenderCell name={senderNames.get(t.phone)} phone={t.phone} /></TableCell>
                         <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
                         <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
+                        <TableCell><FundingRefs fundingMethod={t.fundingMethod} fundingRef={t.fundingRef} refundRef={t.refundRef} /></TableCell>
                         <TableCell>{badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : rs}</TableCell>
                         <TableCell className="font-mono text-xs text-muted-foreground">
                           {t.refundRef ?? '—'}
