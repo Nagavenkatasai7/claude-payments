@@ -11,14 +11,19 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { issueRefundAction } from '../../actions';
 import { RefundConfirmButton } from '../refund-confirm-button';
+import { SenderCell, FundingRefs } from '../../sender-cell';
+import { resolveSenderNames } from '@/lib/sender-names';
+import { getDb } from '@/db/client';
 import type { RefundStatus } from '@/lib/types';
 
 // /admin-dashboard/transactions/[id] — read-only single-transfer detail. Surfaces
-// fields the list can't: which partner WON the best-rate routing and settled the
-// transfer (settlementPartnerId), the funding charge reference (fundingRef), and
-// the refund lifecycle. The ONLY mutation here is the admin "Issue refund"
-// action, scope- and role-guarded server-side. Masked reads only — the audited
-// reveal path is never invoked here.
+// fields the list can't: who SENT the transfer (SenderCell — decrypted name via
+// resolveSenderNames, linked to the customer profile), which account to refund
+// (FundingRefs — funding method + charge/refund refs; non-custodial, so no stored
+// sender account), which partner WON the best-rate routing and settled the
+// transfer (settlementPartnerId), and the refund lifecycle. The ONLY mutation
+// here is the admin "Issue refund" action, scope- and role-guarded server-side.
+// Masked reads only — the audited reveal path is never invoked here.
 
 const REFUND_BADGE: Record<Exclude<RefundStatus, 'none'>, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' }> = {
   requested: { label: 'Refund requested', variant: 'secondary' },
@@ -49,10 +54,12 @@ export default async function TransactionDetailPage({
   const t = await scoped.getTransfer(id);
   if (!t) notFound();
 
-  const [owningPartner, settlingPartner] = await Promise.all([
+  const [owningPartner, settlingPartner, senderNames] = await Promise.all([
     scoped.getPartner(t.partnerId),
     t.settlementPartnerId ? scoped.getPartner(t.settlementPartnerId) : Promise.resolve(null),
+    resolveSenderNames(getDb(), [t.phone]),
   ]);
+  const senderName = senderNames.get(t.phone);
   const routed = !!t.settlementPartnerId && t.settlementPartnerId !== t.partnerId;
   const charged = !!t.fundingRef;
   const refundStatus = (t.refundStatus ?? 'none') as RefundStatus;
@@ -99,6 +106,9 @@ export default async function TransactionDetailPage({
                   {money(t.amountInr, t.destinationCurrency ?? 'INR')}
                 </span>
               </Field>
+              <Field label="Sender">
+                <SenderCell name={senderName} phone={t.phone} />
+              </Field>
               <Field label="Recipient">{t.recipientName}</Field>
               <Field label="Payout destination">
                 <span className="font-mono text-xs">{t.payoutDestination}</span>
@@ -133,19 +143,27 @@ export default async function TransactionDetailPage({
                   <Badge variant="outline">Uncharged</Badge>
                 )}
               </Field>
-              <Field label="Charge reference">
-                <span className="font-mono text-xs text-muted-foreground">{t.fundingRef ?? '—'}</span>
-              </Field>
               <Field label="Refund">
                 {refundBadge ? (
-                  <span className="inline-flex items-center gap-1.5">
-                    <Badge variant={refundBadge.variant}>{refundBadge.label}</Badge>
-                    {t.refundRef && <span className="font-mono text-xs text-muted-foreground">{t.refundRef}</span>}
-                  </span>
+                  <Badge variant={refundBadge.variant}>{refundBadge.label}</Badge>
                 ) : (
                   <span className="text-muted-foreground">No refund</span>
                 )}
               </Field>
+              <div className="col-span-2 space-y-0.5">
+                <div className="text-xs text-muted-foreground">Which account to refund</div>
+                {charged ? (
+                  <FundingRefs
+                    fundingMethod={t.fundingMethod}
+                    fundingRef={t.fundingRef}
+                    refundRef={t.refundRef}
+                  />
+                ) : (
+                  <div className="text-xs text-muted-foreground">
+                    Never charged — no account to refund.
+                  </div>
+                )}
+              </div>
             </CardContent>
           </Card>
         </div>
