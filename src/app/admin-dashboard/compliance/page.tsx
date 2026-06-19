@@ -4,7 +4,10 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
+import { resolveSenderNames } from '@/lib/sender-names';
+import { getDb } from '@/db/client';
 import { Sidebar } from '../sidebar';
+import { SenderCell } from '../sender-cell';
 import { money } from '../format';
 import { MaskedDestination } from '../masked-destination';
 import {
@@ -56,7 +59,7 @@ function recipientGets(t: Transfer): string {
   return money(t.amountInr, t.destinationCurrency ?? 'INR');
 }
 
-function transferCells(t: Transfer) {
+function transferCells(t: Transfer, senderNames: Map<string, string>) {
   return [
     <div key="recipient">
       <div className="font-semibold">{t.recipientName}</div>
@@ -81,7 +84,7 @@ function transferCells(t: Transfer) {
       )}
     </span>,
     new Date(t.createdAt).toLocaleString(),
-    <span key="sender" className="text-xs text-muted-foreground">{t.phone}</span>,
+    <SenderCell key="sender" name={senderNames.get(t.phone)} phone={t.phone} />,
   ];
 }
 
@@ -92,6 +95,15 @@ export default async function CompliancePage() {
   // GROUP BY velocity), partner-scoped at the WHERE — no more loading the
   // whole ledger and filtering in JS per render.
   const { inReview, flagged, blocked, topVelocity: topVel } = await scoped.complianceViews();
+
+  // Resolve decrypted sender names for every transfer shown on the page in ONE
+  // batched query, so each Sender cell can show the KYC name (linked to the
+  // profile) instead of a bare phone — phones with no captured name fall back to
+  // the phone inside SenderCell.
+  const senderNames = await resolveSenderNames(
+    getDb(),
+    [...inReview, ...flagged, ...blocked].map((t) => t.phone),
+  );
 
   const partners = await scoped.listPartners();
   const corridorRows = partners.flatMap((p) =>
@@ -140,7 +152,7 @@ export default async function CompliancePage() {
                 key: t.id,
                 label: t.recipientName,
                 cells: [
-                  ...transferCells(t),
+                  ...transferCells(t, senderNames),
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
                       <form action={releaseTransferAction}>
@@ -185,7 +197,7 @@ export default async function CompliancePage() {
               rows={flagged.map((t) => ({
                 key: t.id,
                 label: t.recipientName,
-                cells: transferCells(t),
+                cells: transferCells(t, senderNames),
               }))}
             />
           </CardContent>
@@ -205,7 +217,7 @@ export default async function CompliancePage() {
               rows={blocked.map((t) => ({
                 key: t.id,
                 label: t.recipientName,
-                cells: transferCells(t),
+                cells: transferCells(t, senderNames),
               }))}
             />
           </CardContent>
