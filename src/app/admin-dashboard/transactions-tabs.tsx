@@ -8,9 +8,11 @@ import { MaskedDestination } from './masked-destination';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
 import { Icon } from './icons';
 import { KycBadge, type KycInfo } from './kyc-badge';
+import { SenderCell } from './sender-cell';
 
 const TRANSACTION_COLUMNS: ExpandableColumn[] = [
   { label: 'Recipient', primary: true },
+  { label: 'Sender' },
   { label: 'Country' },
   { label: 'Partner' },
   { label: 'Tier' },
@@ -125,6 +127,7 @@ export interface TransactionsTabsProps {
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
   kycByPhone: Record<string, KycInfo>;
+  senderNames: Record<string, string>;
   partnerById: Record<string, Partner>;
   canCancel: boolean;
   canResend: boolean;
@@ -146,6 +149,7 @@ export function TransactionsTabs({
   staffByUsername,
   tierByPhone,
   kycByPhone,
+  senderNames,
   partnerById,
   canCancel,
   canResend,
@@ -199,6 +203,7 @@ export function TransactionsTabs({
                 payoutDestination={t.payoutDestination}
               />
             </div>,
+            <SenderCell key="sender" name={senderNames[t.phone]} phone={t.phone} />,
             <span key="country">{t.sourceCountry} → {t.destinationCountry}</span>,
             partnerById[t.partnerId]?.name ?? t.partnerId,
             tierByPhone[t.phone] ? (
