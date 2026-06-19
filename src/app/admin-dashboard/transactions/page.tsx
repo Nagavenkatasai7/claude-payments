@@ -62,6 +62,11 @@ export default async function TransactionsPage({
   const now = new Date();
   const tierByPhone: Record<string, Tier> = {};
   const kycByPhone: Record<string, KycInfo> = {};
+  // Sender legal names for the list — the customer reads above already decrypt
+  // fullName (customer-repo defaults to decrypted PII), so we reuse them here
+  // instead of a second resolveSenderNames lookup. Absent name ⇒ omitted ⇒
+  // SenderCell falls back to the phone.
+  const senderNames: Record<string, string> = {};
   for (const c of customers) {
     tierByPhone[c.senderPhone] = deriveTier(c, now, sendGateActive(partnerById[c.partnerId]));
     kycByPhone[c.senderPhone] = {
@@ -70,6 +75,7 @@ export default async function TransactionsPage({
       watchlistHit: c.watchlistHit,
       pepHit: c.pepHit,
     };
+    if (c.fullName) senderNames[c.senderPhone] = c.fullName;
   }
 
   // Pager hrefs preserve the partner filter (search/phone are window-local).
@@ -102,6 +108,7 @@ export default async function TransactionsPage({
             )}
             tierByPhone={tierByPhone}
             kycByPhone={kycByPhone}
+            senderNames={senderNames}
             partnerById={partnerById}
             currentPartner={partnerFilter}
             canCancel={hasPermission(viewer, 'canCancel')}

@@ -22,6 +22,7 @@ export interface TransactionsExplorerProps {
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
   kycByPhone: Record<string, KycInfo>;
+  senderNames: Record<string, string>;
   partnerById: Record<string, Partner>;
   currentPartner: string;
   canCancel: boolean;
@@ -118,6 +119,7 @@ export function TransactionsExplorer(props: TransactionsExplorerProps) {
         staffByUsername={props.staffByUsername}
         tierByPhone={props.tierByPhone}
         kycByPhone={props.kycByPhone}
+        senderNames={props.senderNames}
         partnerById={props.partnerById}
         canCancel={props.canCancel}
         canResend={props.canResend}
