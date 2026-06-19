@@ -3,6 +3,7 @@ import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { createCustomerStore } from '@/lib/customer-store';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -42,7 +43,23 @@ async function harness() {
       if (cur) await store.saveTransfer({ ...cur, status: 'paid', paidAt: NOW });
     },
   };
-  return { redis, store, deps };
+  // Customer store shares the same default field-crypto key as resolveSenderNames
+  // (tests/setup.ts pins FIELD_ENCRYPTION_KEY to 32×0x07 = Buffer.alloc(32, 7)),
+  // so a name sealed here decrypts on the partner-API read.
+  const customerStore = createCustomerStore(db, store);
+  return { redis, store, deps, db, customerStore };
+}
+
+// Seed a KYC'd customer so the partner-API sender_name resolves to a real name.
+async function seedNamedCustomer(
+  customerStore: ReturnType<typeof createCustomerStore>,
+  senderPhone: string,
+  fullName: string,
+): Promise<void> {
+  await customerStore.saveCustomer({
+    senderPhone, fullName, firstSeenAt: NOW, kycStatus: 'verified',
+    senderCountry: 'US', partnerId: 'acme', createdAt: NOW, updatedAt: NOW,
+  } as Parameters<typeof customerStore.saveCustomer>[0]);
 }
 
 function partner(over: Partial<Partner>): Partner {
@@ -236,6 +253,66 @@ describe('partner-api-service: createTransaction', () => {
     const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'ZZ' }));
     expect(r).toMatchObject({ ok: true, status: 201 });
     if (r.ok) expect(r.data).toMatchObject({ destination_country: 'IN', destination_currency: 'INR' });
+  });
+});
+
+// U9 — the partner-API transfer view now exposes the end-customer SENDER identity
+// (sender_phone + decrypted sender_name) and the funding seam (funding_method,
+// funding_ref, refund_ref). This is a deliberate, user-approved privacy change:
+// the sender was previously hidden from partners on purpose.
+describe('partner-api-service: sender + funding fields on transferView', () => {
+  it('create/confirm response carries sender_phone, funding_method and (null) funding/refund refs', async () => {
+    const { deps } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-sf-1', txBody());
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('unexpected');
+    expect(r.data).toMatchObject({
+      sender_phone: '15551230000',
+      sender_name: null,           // sender has no KYC'd customer record ⇒ null
+      funding_method: 'bank_transfer',
+      funding_ref: null,
+      refund_ref: null,
+    });
+    expect(r.data).toHaveProperty('sender_name');
+  });
+
+  it('sender_name resolves to the DECRYPTED legal name when the sender is KYC\'d', async () => {
+    const { deps, customerStore } = await harness();
+    await seedNamedCustomer(customerStore, '15551230000', 'Maria Lopez');
+    const created = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-sf-2', txBody());
+    expect(created.ok).toBe(true);
+    if (created.ok) expect((created.data as { sender_name: string | null }).sender_name).toBe('Maria Lopez');
+
+    // The single GET view resolves the name too.
+    const id = created.ok ? (created.data as { id: string }).id : '';
+    const got = await getTransaction(deps, 'acme', id);
+    expect(got.ok).toBe(true);
+    if (got.ok) expect(got.data).toMatchObject({ sender_phone: '15551230000', sender_name: 'Maria Lopez' });
+  });
+
+  it('list response carries the sender + funding fields on every row (name resolved in ONE batch)', async () => {
+    const { deps, customerStore } = await harness();
+    await seedNamedCustomer(customerStore, '15551230000', 'Maria Lopez');
+    await createTransaction(deps, DELEGATED, 'pk_1', 'idem-sf-l0', txBody());
+    await createTransaction(deps, DELEGATED, 'pk_1', 'idem-sf-l1', txBody({ sender: { phone: '15559999999', name: 'X' } }));
+
+    const page = await listTransactions(deps, 'acme', { limit: '10', cursor: null });
+    expect(page.ok).toBe(true);
+    if (!page.ok) throw new Error('unexpected');
+    const rows = (page.data as { transactions: Array<Record<string, unknown>> }).transactions;
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row).toHaveProperty('sender_phone');
+      expect(row).toHaveProperty('sender_name');
+      expect(row).toHaveProperty('funding_method', 'bank_transfer');
+      expect(row).toHaveProperty('funding_ref', null);
+      expect(row).toHaveProperty('refund_ref', null);
+    }
+    // The KYC'd sender's row shows the name; the unknown sender's row is null.
+    const named = rows.find((t) => t.sender_phone === '15551230000');
+    const unknown = rows.find((t) => t.sender_phone === '15559999999');
+    expect(named?.sender_name).toBe('Maria Lopez');
+    expect(unknown?.sender_name).toBeNull();
   });
 });
 

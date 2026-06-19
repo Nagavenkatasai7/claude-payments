@@ -28,6 +28,7 @@ import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
 import { newTransferId } from './id';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
+import { resolveSenderNames } from './sender-names';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -64,8 +65,12 @@ const num = (v: unknown): number | null => {
 };
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 
-// Public transfer view — never leaks internal-only fields.
-function transferView(t: Transfer) {
+// Public transfer view — exposes the end-customer SENDER identity to the partner
+// (a deliberate, user-approved privacy change: previously the sender was hidden).
+// `senderName` is the customer's DECRYPTED legal name (only present after KYC);
+// pass it in pre-resolved (resolveSenderNames) so the list path stays one query,
+// not an N+1. Absent name ⇒ null (the partner falls back to sender_phone).
+function transferView(t: Transfer, senderName: string | null = null) {
   return {
     id: t.id,
     status: t.status,
@@ -78,10 +83,23 @@ function transferView(t: Transfer) {
     fee_source: t.feeSource ?? t.feeUsd,
     total_charge_source: t.totalChargeSource ?? t.totalChargeUsd,
     fx_rate: t.fxRate,
+    sender_phone: t.phone,
+    sender_name: senderName,
     recipient_name: t.recipientName,
+    funding_method: t.fundingMethod,
+    funding_ref: t.fundingRef ?? null,
+    refund_ref: t.refundRef ?? null,
     created_at: t.createdAt,
     partner_id: t.partnerId,
   };
+}
+
+// Single-transfer view: resolve the one sender name, then project. Kept async so
+// the create/confirm/get call sites await it (the list path resolves names in a
+// batch and calls transferView directly with the pre-resolved name).
+async function transferViewWithName(deps: PartnerApiDeps, t: Transfer) {
+  const names = await resolveSenderNames(deps.db, [t.phone]);
+  return transferView(t, names.get(t.phone) ?? null);
 }
 
 // The supported destination set + its home currency — derived from the single
@@ -238,7 +256,7 @@ export async function createTransaction(
     // The key was already bound — replay. (A bound-but-unminted id means a
     // prior attempt crashed mid-mint; fall through and mint THAT id.)
     const t = await deps.store.getTransfer(reservedId);
-    if (t && t.partnerId === partner.id) return ok(200, transferView(t));
+    if (t && t.partnerId === partner.id) return ok(200, await transferViewWithName(deps, t));
   }
 
   const amount = num(body.amount_source ?? body.amount);
@@ -307,7 +325,7 @@ export async function createTransaction(
   if (transfer.complianceStatus === 'blocked') {
     return err(422, 'This transfer was blocked by compliance screening.');
   }
-  return ok(201, transferView(transfer));
+  return ok(201, await transferViewWithName(deps, transfer));
 }
 
 // ── GET /transactions (keyset list, ownership-scoped) ─────────────────────
@@ -323,8 +341,10 @@ export async function listTransactions(
     cursor: query.cursor ?? undefined,
     partnerId, // authoritative: from the API key, never the query
   });
+  // Resolve ALL sender names in ONE query (not N+1 per row), then project.
+  const names = await resolveSenderNames(deps.db, page.items.map((t) => t.phone));
   return ok(200, {
-    transactions: page.items.map(transferView),
+    transactions: page.items.map((t) => transferView(t, names.get(t.phone) ?? null)),
     next_cursor: page.nextCursor ?? null,
   });
 }
@@ -338,7 +358,7 @@ export async function getTransaction(
   const t = await deps.store.getTransfer(id);
   // 404 (never 403) for a missing OR out-of-scope transfer — don't disclose existence.
   if (!t || t.partnerId !== partnerId) return err(404, 'Transaction not found.');
-  return ok(200, transferView(t));
+  return ok(200, await transferViewWithName(deps, t));
 }
 
 // ── POST /transactions/:id/confirm (ownership-scoped) ─────────────────────
@@ -351,7 +371,7 @@ export async function confirmTransaction(
   const t = await deps.store.getTransfer(id);
   if (!t || t.partnerId !== partner.id) return err(404, 'Transaction not found.');
   if (t.complianceStatus === 'blocked' || t.status === 'blocked') return err(422, 'This transfer was blocked by compliance screening.');
-  if (t.status === 'paid' || t.status === 'delivered') return ok(200, transferView(t)); // already confirmed
+  if (t.status === 'paid' || t.status === 'delivered') return ok(200, await transferViewWithName(deps, t)); // already confirmed
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
 
   const initiate = deps.initiatePayment ?? (async (tr: Transfer) => {
@@ -371,7 +391,7 @@ export async function confirmTransaction(
   await initiate(t);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);
   const after = await deps.store.getTransfer(id);
-  return ok(200, transferView(after ?? t));
+  return ok(200, await transferViewWithName(deps, after ?? t));
 }
 
 // ── PUT /rates (push ONE corridor's wholesale rate) ───────────────────────
