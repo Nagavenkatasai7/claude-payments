@@ -2,9 +2,10 @@ export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { requireSupportOrAdmin } from '@/lib/auth';
+import { requireTicketWorker } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { scopeOf, canSee } from '@/lib/staff-scope';
+import { isTestStaff } from '@/lib/ticket-balancer';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -63,16 +64,20 @@ export default async function TicketDetailPage({
 }: {
   params: Promise<{ ticketId: string }>;
 }) {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const { ticketId } = await params;
+  const isAgent = staff.role === 'agent';
 
   const repo = createTicketRepo(getDb());
   const ticket =
     scope.kind === 'partner'
       ? await repo.getOwnedTicket(scope.partnerId, ticketId)
       : await repo.getTicket(ticketId);
-  // Out-of-scope, missing, or internal-kind ids all collapse to the same 404.
+  // Out-of-scope, missing, or internal-kind ids all collapse to the same 404 —
+  // and an agent may only open a ticket assigned to THEM (assignee-scoped, same
+  // opaque 404 so it's no oracle over which tickets exist).
   if (!ticket || ticket.kind !== 'customer') notFound();
+  if (isAgent && ticket.assignedTo !== staff.username) notFound();
 
   // The four reads below are independent once the ticket is in hand — fetch in parallel.
   const [messages, linkedTransfer, allStaff, partner] = await Promise.all([
@@ -91,14 +96,18 @@ export default async function TicketDetailPage({
   const transfer: Transfer | null =
     linkedTransfer && canSee(scope, linkedTransfer.partnerId) ? linkedTransfer : null;
 
-  // Assign dropdown: active support/admin accounts whose scope can see this
-  // ticket's tenant (filtered in memory, same rule the action re-validates).
-  const assignable = allStaff.filter(
-    (s) =>
-      (s.role === 'support' || s.role === 'admin') &&
-      s.status !== 'suspended' &&
-      canSee(scopeOf(s), ticket.partnerId),
-  );
+  // Assign dropdown (support/admin only — agents can't reassign): active, real
+  // (non-test) staff of any ticket-capable role — support, admin, AND agents,
+  // who are now first-class ticket handlers — whose scope can see this ticket's
+  // tenant. Same rule the action re-validates. Skipped entirely for agents.
+  const assignable = isAgent
+    ? []
+    : allStaff.filter(
+        (s) =>
+          s.status !== 'suspended' &&
+          !isTestStaff(s) &&
+          canSee(scopeOf(s), ticket.partnerId),
+      );
   const closed = ticket.status === 'closed';
 
   return (
@@ -215,25 +224,34 @@ export default async function TicketDetailPage({
                   <CardTitle>Actions</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <form action={assignTicketAction} className="space-y-2">
-                    <input type="hidden" name="ticketId" value={ticket.id} />
-                    <label className="text-xs font-semibold text-muted-foreground uppercase">Assign to</label>
-                    <div className="flex gap-2">
-                      <select
-                        name="assignee"
-                        defaultValue={ticket.assignedTo ?? ''}
-                        className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
-                      >
-                        <option value="">Unassigned</option>
-                        {assignable.map((s) => (
-                          <option key={s.username} value={s.username}>
-                            {s.name} ({s.role})
-                          </option>
-                        ))}
-                      </select>
-                      <Button type="submit" size="sm" variant="outline">Assign</Button>
-                    </div>
-                  </form>
+                  {!isAgent && (
+                    <form action={assignTicketAction} className="space-y-2">
+                      <input type="hidden" name="ticketId" value={ticket.id} />
+                      <label className="text-xs font-semibold text-muted-foreground uppercase">Assign to</label>
+                      <div className="flex gap-2">
+                        <select
+                          name="assignee"
+                          defaultValue={ticket.assignedTo ?? ''}
+                          className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
+                        >
+                          <option value="">Unassigned</option>
+                          {/* Keep the current assignee selectable even if they
+                              fall out of the eligible list (e.g. later suspended),
+                              so submitting unchanged never silently unassigns. */}
+                          {ticket.assignedTo &&
+                            !assignable.some((s) => s.username === ticket.assignedTo) && (
+                              <option value={ticket.assignedTo}>{ticket.assignedTo} (current)</option>
+                            )}
+                          {assignable.map((s) => (
+                            <option key={s.username} value={s.username}>
+                              {s.name} ({s.role})
+                            </option>
+                          ))}
+                        </select>
+                        <Button type="submit" size="sm" variant="outline">Assign</Button>
+                      </div>
+                    </form>
+                  )}
 
                   <form action={escalateAction} className="space-y-2">
                     <input type="hidden" name="ticketId" value={ticket.id} />

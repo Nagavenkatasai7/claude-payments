@@ -1,18 +1,20 @@
 export const dynamic = 'force-dynamic';
 
-import { requireSupportOrAdmin } from '@/lib/auth';
+import { requireTicketWorker } from '@/lib/auth';
 import { Sidebar } from '../../sidebar';
 import { TicketQueueView, type QueueParams } from '../queue-view';
 
 // My queue — the same scoped customer-ticket list, pinned to
-// assignedTo = the signed-in staff member.
+// assignedTo = the signed-in staff member. Agents live HERE: it's the only
+// ticket surface they get (the global queue redirects them back), showing
+// exactly the tickets the load balancer assigned them.
 
 export default async function MyQueuePage({
   searchParams,
 }: {
   searchParams: Promise<QueueParams>;
 }) {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const params = await searchParams;
 
   return (

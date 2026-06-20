@@ -68,9 +68,23 @@ export async function requireOpsStaff(): Promise<Staff> {
   return staff;
 }
 
-// Ticket surfaces: support staff + admins (agents/operators stay on money ops).
+// Ticket QUEUE + reassignment surfaces: support staff + admins browse the whole
+// queue and (re)assign. Agents are bounced — they never see the global queue.
 export async function requireSupportOrAdmin(): Promise<{ staff: Staff; scope: Scope }> {
   const staff = await requireStaff();
   if (staff.role !== 'support' && staff.role !== 'admin') redirect('/admin-dashboard');
+  return { staff, scope: scopeOf(staff) };
+}
+
+// Ticket WORK surfaces (the ticket detail + my-queue + the per-ticket actions):
+// support + admin (full) PLUS agents, who are load-balanced tickets and may work
+// ONLY the ones assigned to them. The assignee gate is enforced per-ticket by
+// the caller (assertCanWork / a notFound on the detail page) — this guard just
+// admits the three ticket-capable roles. Any other role bounces to money ops.
+export async function requireTicketWorker(): Promise<{ staff: Staff; scope: Scope }> {
+  const staff = await requireStaff();
+  if (staff.role !== 'support' && staff.role !== 'admin' && staff.role !== 'agent') {
+    redirect('/admin-dashboard');
+  }
   return { staff, scope: scopeOf(staff) };
 }

@@ -18,6 +18,7 @@ let db: Db;
 
 vi.mock('@/lib/auth', () => ({
   requireSupportOrAdmin: async () => ({ staff: currentStaff, scope: scopeOf(currentStaff) }),
+  requireTicketWorker: async () => ({ staff: currentStaff, scope: scopeOf(currentStaff) }),
   requireStaff: async () => currentStaff,
   requireAdmin: async () => currentStaff,
   requireScope: vi.fn(),
@@ -283,7 +284,15 @@ describe('assignTicketAction', () => {
     expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBe('sup2');
   });
 
-  it('rejects unknown, suspended, money-role, and cross-partner assignees', async () => {
+  it('an AGENT is now a valid assignee (agents are first-class ticket handlers)', async () => {
+    const t = await makeTicket('p1');
+    currentStaff = staff({ partnerId: 'p1' });
+    await authStore.saveStaff(staff({ username: 'agentx', name: 'Venkat', role: 'agent', partnerId: 'p1' }));
+    await assignTicketAction(form({ ticketId: t.id, assignee: 'agentx' }));
+    expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBe('agentx');
+  });
+
+  it('rejects unknown, suspended, and cross-partner assignees', async () => {
     const t = await makeTicket('p1');
     currentStaff = staff({ partnerId: 'p1' });
     await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'ghost' }))).rejects.toThrow(
@@ -292,10 +301,6 @@ describe('assignTicketAction', () => {
     await authStore.saveStaff(staff({ username: 'frozen', partnerId: 'p1', status: 'suspended' }));
     await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'frozen' }))).rejects.toThrow(
       /inactive/i,
-    );
-    await authStore.saveStaff(staff({ username: 'agentx', role: 'agent', partnerId: 'p1' }));
-    await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'agentx' }))).rejects.toThrow(
-      /support staff and admins/i,
     );
     await authStore.saveStaff(staff({ username: 'other', partnerId: 'p2' }));
     await expect(assignTicketAction(form({ ticketId: t.id, assignee: 'other' }))).rejects.toThrow(
@@ -311,6 +316,37 @@ describe('assignTicketAction', () => {
     await assignTicketAction(form({ ticketId: t.id, assignee: 'sup2' }));
     await assignTicketAction(form({ ticketId: t.id, assignee: '' }));
     expect((await createTicketRepo(db).getTicket(t.id))?.assignedTo).toBeUndefined();
+  });
+});
+
+describe('agent assignee-scoping (agents work ONLY their assigned tickets)', () => {
+  it('an agent CANNOT work a ticket not assigned to them (404-never-403)', async () => {
+    const t = await makeTicket('p1'); // unassigned
+    currentStaff = staff({ username: 'venkat', role: 'agent', partnerId: 'p1' });
+    await expect(replyAction(form({ ticketId: t.id, body: 'hi' }))).rejects.toThrow(/not found/i);
+    await expect(resolveAction(form({ ticketId: t.id }))).rejects.toThrow(/not found/i);
+    await expect(closeAction(form({ ticketId: t.id }))).rejects.toThrow(/not found/i);
+    await expect(escalateAction(form({ ticketId: t.id, reason: 'r' }))).rejects.toThrow(/not found/i);
+    await expect(internalNoteAction(form({ ticketId: t.id, body: 'n' }))).rejects.toThrow(/not found/i);
+    const msgs = await createTicketRepo(db).listMessages(t.id, { includeInternal: true });
+    expect(msgs).toHaveLength(1); // untouched
+  });
+
+  it('an agent CAN work a ticket assigned to them', async () => {
+    const t = await makeTicket('p1');
+    await createTicketRepo(db).assign(t.id, 'venkat');
+    currentStaff = staff({ username: 'venkat', role: 'agent', partnerId: 'p1' });
+    await replyAction(form({ ticketId: t.id, body: 'on it' }));
+    expect(await createTicketRepo(db).listMessages(t.id, { includeInternal: true })).toHaveLength(2);
+    await resolveAction(form({ ticketId: t.id }));
+    expect((await createTicketRepo(db).getTicket(t.id))?.status).toBe('resolved');
+  });
+
+  it('support/admins are NOT assignee-restricted (work any in-scope ticket)', async () => {
+    const t = await makeTicket('p1'); // unassigned
+    currentStaff = staff({ partnerId: 'p1' }); // support
+    await replyAction(form({ ticketId: t.id, body: 'support reply' }));
+    expect(await createTicketRepo(db).listMessages(t.id, { includeInternal: true })).toHaveLength(2);
   });
 });
 

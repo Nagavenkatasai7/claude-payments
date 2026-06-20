@@ -1,7 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { requireSupportOrAdmin } from '@/lib/auth';
+import { requireSupportOrAdmin, requireTicketWorker } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
 import { scopeOf, canSee, type Scope } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
@@ -41,6 +41,18 @@ function requireOpen(ticket: Ticket): void {
   if (ticket.status === 'closed') throw new Error('Ticket is closed.');
 }
 
+/**
+ * Assignee-scoping for AGENTS: an agent may only work a ticket assigned to them.
+ * Support/admins are unrestricted (their queue is the whole tenant). Same opaque
+ * "not found" as the cross-tenant guard — 404-never-403, no oracle over which
+ * ticket ids exist or who they belong to.
+ */
+function assertCanWork(staff: Staff, ticket: Ticket): void {
+  if (staff.role === 'agent' && ticket.assignedTo !== staff.username) {
+    throw new Error('Ticket not found');
+  }
+}
+
 async function audit(
   staff: Staff,
   ticket: Ticket,
@@ -70,13 +82,14 @@ function supportUrl(ticketId: string): string {
  * commit in one transaction (the outbox-with-state-change invariant).
  */
 export async function replyAction(formData: FormData): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const body = String(formData.get('body') ?? '').trim().slice(0, 4000);
   const waiting = formData.get('waiting') === 'on';
   const copilot = String(formData.get('copilot') ?? '');
   if (!body) throw new Error('Reply cannot be empty.');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   requireOpen(ticket);
 
   const db = getDb();
@@ -118,11 +131,12 @@ export async function replyAction(formData: FormData): Promise<void> {
 
 /** Staff-only internal note — never visible to the customer, never nudges. */
 export async function internalNoteAction(formData: FormData): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const body = String(formData.get('body') ?? '').trim().slice(0, 4000);
   if (!body) throw new Error('Note cannot be empty.');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   requireOpen(ticket);
   await createTicketRepo(getDb()).appendMessage({
     ticketId: ticket.id,
@@ -136,9 +150,11 @@ export async function internalNoteAction(formData: FormData): Promise<void> {
 }
 
 /**
- * Assign (or unassign with an empty value). The assignee must be a real,
- * active support/admin account whose scope can see this ticket's tenant —
- * the same no-cross-partner-assignment rule as transfer assignment (M2).
+ * (Re)assign (or unassign with an empty value) — support/admins only (agents
+ * can't reassign; the load balancer + this dropdown own who works what). The
+ * assignee must be a real, active, in-scope, non-test staff member of any
+ * ticket-capable role (support, admin, OR agent) — agents are now first-class
+ * ticket handlers. Same no-cross-partner-assignment rule as transfers (M2).
  */
 export async function assignTicketAction(formData: FormData): Promise<void> {
   const { staff, scope } = await requireSupportOrAdmin();
@@ -148,9 +164,6 @@ export async function assignTicketAction(formData: FormData): Promise<void> {
   if (assignee) {
     const assigneeStaff = await getAuthStore().getStaff(assignee);
     if (!assigneeStaff) throw new Error('Cannot assign: unknown staff member.');
-    if (assigneeStaff.role !== 'support' && assigneeStaff.role !== 'admin') {
-      throw new Error('Cannot assign: only support staff and admins take tickets.');
-    }
     if (assigneeStaff.status === 'suspended') {
       throw new Error('Cannot assign: staff member is inactive.');
     }
@@ -166,11 +179,12 @@ export async function assignTicketAction(formData: FormData): Promise<void> {
 
 /** Escalate to the admins: waiting_admin + an internal system note with the reason. */
 export async function escalateAction(formData: FormData): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const reason = String(formData.get('reason') ?? '').trim().slice(0, 500);
   if (!reason) throw new Error('A reason is required to escalate.');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   await getDb().transaction(async (tx) => {
     const repo = createTicketRepo(tx);
     const updated = await repo.updateStatus(ticket.id, 'waiting_admin');
@@ -192,9 +206,10 @@ export async function escalateAction(formData: FormData): Promise<void> {
  * ticket id alone, so a reopen→re-resolve cycle never re-sends it.
  */
 export async function resolveAction(formData: FormData): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   const db = getDb();
   const waCreds = waCredsFrom(await createIntegrationsRepo(db).getIntegrations(ticket.partnerId));
   await db.transaction(async (tx) => {
@@ -219,9 +234,10 @@ export async function resolveAction(formData: FormData): Promise<void> {
 
 /** Close — terminal (the repo guard refuses every later transition). No nudge. */
 export async function closeAction(formData: FormData): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   const updated = await createTicketRepo(getDb()).updateStatus(ticket.id, 'closed');
   if (!updated) throw new Error('Ticket cannot be closed.');
   await audit(staff, ticket, 'ticket.close');
@@ -233,7 +249,7 @@ export async function closeAction(formData: FormData): Promise<void> {
  * against the closed lists server-side — the client's claim is never trusted.
  */
 export async function applyTriageAction(formData: FormData): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const category = String(formData.get('category') ?? '');
   const priority = String(formData.get('priority') ?? '');
@@ -244,6 +260,7 @@ export async function applyTriageAction(formData: FormData): Promise<void> {
     throw new Error('Invalid triage values.');
   }
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   requireOpen(ticket);
   await createTicketRepo(getDb()).setTriage(ticket.id, {
     category: category as TicketCategory,
@@ -255,7 +272,8 @@ export async function applyTriageAction(formData: FormData): Promise<void> {
 
 /** The staff member discarded an AI draft — audit-only (rung-1 telemetry). */
 export async function copilotRejectAction(ticketId: string): Promise<void> {
-  const { staff, scope } = await requireSupportOrAdmin();
+  const { staff, scope } = await requireTicketWorker();
   const ticket = await getScopedTicket(scope, ticketId);
+  assertCanWork(staff, ticket);
   await audit(staff, ticket, 'copilot.reject');
 }
