@@ -9,7 +9,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import type { Db } from '@/db/client';
-import type { Customer } from '@/lib/types';
+import type { Customer, Staff } from '@/lib/types';
 
 /**
  * U2 — out-of-band AI auto-triage of customer tickets via the durable outbox.
@@ -47,6 +47,11 @@ const sendTemplate = vi.fn(async (..._a: unknown[]) => {});
 const fetchFn = vi.fn();
 const runAgentTurn = vi.fn(async (..._a: unknown[]) => '');
 
+// The staff roster the load-balancer reads. Empty by default (the existing
+// triage tests have no agents ⇒ no auto-assignment); the auto-assign suite below
+// seeds it.
+let staffList: Staff[] = [];
+
 function deps(): WorkerDeps {
   return {
     db,
@@ -56,7 +61,19 @@ function deps(): WorkerDeps {
     fetchFn: fetchFn as unknown as typeof fetch,
     recipientTemplateName: 'transfer_delivered',
     recipientTemplateLang: 'en',
+    listStaff: async () => staffList,
     runAgentTurn: runAgentTurn as unknown as WorkerDeps['runAgentTurn'],
+  };
+}
+
+function agent(over: Partial<Staff> & { username: string }): Staff {
+  return {
+    name: over.username,
+    role: 'agent',
+    permissions: { canCancel: false, canResend: false, canAssign: false },
+    passwordHash: 'x',
+    createdAt: '2026-01-01T00:00:00Z',
+    ...over,
   };
 }
 
@@ -88,6 +105,7 @@ beforeEach(async () => {
   fetchFn.mockReset();
   runAgentTurn.mockReset();
   runAgentTurn.mockResolvedValue('');
+  staffList = [];
 });
 
 describe('outbox worker — ticket.triage handler', () => {
@@ -172,6 +190,82 @@ describe('outbox worker — ticket.triage handler', () => {
     // The ticket stays un-triaged for staff to hand-sort.
     const after = await repo.getTicket(ticket.id);
     expect(after!.category).toBeUndefined();
+  });
+});
+
+// ── AI-assisted load-balancer: the worker auto-assigns after triage ──────────
+
+describe('ticket.triage — AI load-balancer auto-assign', () => {
+  const goodTriage = () =>
+    chatMock.mockResolvedValue(chatReply('{"category":"refund","priority":"normal"}'));
+
+  async function triage(ticketId: string) {
+    await createOutboxRepo(db).enqueue('ticket.triage', { ticketId }, { dedupeKey: `triage:${ticketId}` });
+    await drainOnce(deps(), 'w1');
+  }
+
+  it('auto-assigns a freshly-triaged ticket to the only eligible agent (audited as system)', async () => {
+    staffList = [agent({ username: 'venkat' })];
+    goodTriage();
+    const t = await createCustomerTicket({ id: 'tk_a1' });
+    await triage(t.id);
+    expect((await repo.getTicket(t.id))!.assignedTo).toBe('venkat');
+    const a = (await createAuditRepo(db).listByPartner('p1')).find((x) => x.action === 'ticket.assign');
+    expect(a!.actorType).toBe('system');
+    expect(a!.meta).toMatchObject({ assignee: 'venkat', source: 'load-balancer' });
+  });
+
+  it('load-balances to the agent with the FEWEST open tickets', async () => {
+    staffList = [agent({ username: 'aaa' }), agent({ username: 'bbb' })];
+    const held = await createCustomerTicket({ id: 'tk_held' }); // aaa already holds one open ticket
+    await repo.assign(held.id, 'aaa');
+    goodTriage();
+    const t = await createCustomerTicket({ id: 'tk_b1' });
+    await triage(t.id);
+    expect((await repo.getTicket(t.id))!.assignedTo).toBe('bbb'); // the lighter one
+  });
+
+  it('leaves the ticket unassigned when there are no eligible agents', async () => {
+    staffList = []; // support/admin-only shop ⇒ nothing to balance across
+    goodTriage();
+    const t = await createCustomerTicket({ id: 'tk_c1' });
+    await triage(t.id);
+    expect((await repo.getTicket(t.id))!.assignedTo).toBeUndefined();
+  });
+
+  it('NEVER overrides a manual assignment (idempotent on replay)', async () => {
+    staffList = [agent({ username: 'venkat' })];
+    goodTriage();
+    const t = await createCustomerTicket({ id: 'tk_d1' });
+    await repo.assign(t.id, 'human-grabbed-it'); // a human took it before the worker ran
+    await triage(t.id);
+    expect((await repo.getTicket(t.id))!.assignedTo).toBe('human-grabbed-it');
+  });
+
+  it('excludes auto-provisioned test accounts (e2e-smoke-*) from the pool', async () => {
+    staffList = [agent({ username: 'e2e-smoke-partner' })]; // the only agent is a smoke acct
+    goodTriage();
+    const t = await createCustomerTicket({ id: 'tk_e1' });
+    await triage(t.id);
+    expect((await repo.getTicket(t.id))!.assignedTo).toBeUndefined();
+  });
+
+  it('still assigns when the model output was off-list (assignment is independent of triage quality)', async () => {
+    staffList = [agent({ username: 'venkat' })];
+    chatMock.mockResolvedValue(chatReply('{"category":"banana","priority":"nuclear"}')); // clamps to other/normal
+    const t = await createCustomerTicket({ id: 'tk_f1' });
+    await triage(t.id);
+    const after = await repo.getTicket(t.id);
+    expect(after!.category).toBe('other');
+    expect(after!.assignedTo).toBe('venkat'); // assigned regardless of triage quality
+  });
+
+  it('skips suspended agents', async () => {
+    staffList = [agent({ username: 'frozen', status: 'suspended' })];
+    goodTriage();
+    const t = await createCustomerTicket({ id: 'tk_g1' });
+    await triage(t.id);
+    expect((await repo.getTicket(t.id))!.assignedTo).toBeUndefined();
   });
 });
 

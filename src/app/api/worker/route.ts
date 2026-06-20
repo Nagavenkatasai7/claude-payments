@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
 import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
+import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import { sweepStaleRates } from '@/lib/rate-staleness';
@@ -51,6 +52,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     fetchFn: fetch,
     recipientTemplateName: RECIPIENT_TEMPLATE_NAME,
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
+    listStaff: () => getAuthStore().listStaff(),
     runAgentTurn: async (phone, message, turn, waCreds) => {
       const customerStore = getCustomerStore(store);
       const agent = createAgent({

@@ -22,7 +22,10 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   const staff = await getCurrentStaff();
   if (!staff) return NextResponse.json({ ok: false }, { status: 401 });
-  if (staff.role !== 'support' && staff.role !== 'admin') {
+  // Ticket-capable roles: support, admin, and agents (agents are load-balanced
+  // ticket handlers). The per-ticket assignee gate below restricts agents to
+  // their OWN assigned tickets.
+  if (staff.role !== 'support' && staff.role !== 'admin' && staff.role !== 'agent') {
     return NextResponse.json({ ok: false }, { status: 403 });
   }
   const scope = scopeOf(staff);
@@ -56,6 +59,11 @@ export async function POST(req: NextRequest) {
       ? await repo.getOwnedTicket(scope.partnerId, ticketId)
       : await repo.getTicket(ticketId);
   if (!ticket || ticket.kind !== 'customer') {
+    return NextResponse.json({ ok: false }, { status: 404 });
+  }
+  // Agents may copilot ONLY a ticket assigned to them (same assignee gate as the
+  // ticket actions) — opaque 404, no oracle over tickets they don't own.
+  if (staff.role === 'agent' && ticket.assignedTo !== staff.username) {
     return NextResponse.json({ ok: false }, { status: 404 });
   }
 

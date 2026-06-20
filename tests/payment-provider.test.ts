@@ -46,6 +46,7 @@ function workerDeps(): WorkerDeps {
     fetchFn: vi.fn() as unknown as typeof fetch,
     recipientTemplateName: 'transfer_delivered',
     recipientTemplateLang: 'en',
+    listStaff: async () => [],
     runAgentTurn: vi.fn(async () => '') as unknown as WorkerDeps['runAgentTurn'],
   };
 }

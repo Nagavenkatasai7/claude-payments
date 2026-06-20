@@ -184,6 +184,46 @@ export function createTicketRepo(db: DbOrTx) {
       return rows[0] ? rowToTicket(rows[0]) : null;
     },
 
+    /**
+     * Load-balancer assign: set assignee ONLY if the ticket is still unassigned
+     * and open. Returns whether it assigned. Idempotent on outbox replay and
+     * NEVER overrides a manual assignment that landed first (the conditional
+     * WHERE is the atomic guard). open = not resolved/closed.
+     */
+    async assignIfUnassigned(id: string, assignedTo: string): Promise<boolean> {
+      const rows = await db
+        .update(tickets)
+        .set({ assignedTo, updatedAt: new Date() })
+        .where(and(
+          eq(tickets.id, id),
+          sql`${tickets.assignedTo} IS NULL`,
+          sql`${tickets.status} NOT IN ('resolved', 'closed')`,
+        ))
+        .returning({ id: tickets.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Open-ticket count per assignee (the load signal for the balancer). Counts
+     * OPEN (not resolved/closed) tickets grouped by assigned_to. Global by
+     * default so a platform agent's TOTAL load across partners is counted;
+     * pass partnerId only when you want a single tenant's load.
+     */
+    async openTicketCountsByAssignee(partnerId?: PartnerId): Promise<Map<string, number>> {
+      const rows = await db
+        .select({ assignee: tickets.assignedTo, n: count() })
+        .from(tickets)
+        .where(and(
+          sql`${tickets.assignedTo} IS NOT NULL`,
+          sql`${tickets.status} NOT IN ('resolved', 'closed')`,
+          ...(partnerId ? [eq(tickets.partnerId, partnerId)] : []),
+        ))
+        .groupBy(tickets.assignedTo);
+      const m = new Map<string, number>();
+      for (const r of rows) if (r.assignee) m.set(r.assignee, Number(r.n));
+      return m;
+    },
+
     async setTriage(id: string, fields: { category?: string; priority?: TicketPriority }): Promise<void> {
       await db
         .update(tickets)

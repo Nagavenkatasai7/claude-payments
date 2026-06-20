@@ -6,6 +6,7 @@ import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { triageSuggest } from '@/lib/ticket-ai';
+import { eligibleAgents, pickLeastLoaded } from '@/lib/ticket-balancer';
 import {
   buildSettlementInstruction,
   signBody,
@@ -17,7 +18,7 @@ import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
-import type { TurnContext } from '@/lib/types';
+import type { Staff, TurnContext } from '@/lib/types';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
 // outbox row written transactionally with the state change that implies it;
@@ -61,6 +62,12 @@ export interface WorkerDeps {
    * failing provider to exercise the retry/dead-letter machinery).
    */
   fundingProvider?: FundingProvider;
+  /**
+   * The staff roster for the ticket load-balancer (ticket.triage auto-assign).
+   * DI'd so PGlite tests inject a roster without touching the Redis auth store;
+   * the worker route wires `() => getAuthStore().listStaff()`.
+   */
+  listStaff: () => Promise<Staff[]>;
 }
 
 type Payload = Record<string, unknown>;
@@ -253,6 +260,27 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
         subjectId: ticket.id,
         meta: { source: 'copilot', category, priority },
       });
+
+      // ── AI-assisted load-balancer: auto-assign to the least-loaded agent ────
+      // Runs AFTER triage but is INDEPENDENT of its outcome (deterministic — it
+      // still assigns if triageSuggest fell back to defaults). assignIfUnassigned
+      // is the atomic guard: idempotent on replay, and never overrides a manual
+      // assignment that landed first. No eligible agents ⇒ left unassigned for
+      // support/admin to pick up.
+      if (!ticket.assignedTo) {
+        const agents = eligibleAgents(await deps.listStaff(), ticket.partnerId);
+        const chosen = pickLeastLoaded(agents, await repo.openTicketCountsByAssignee());
+        if (chosen && (await repo.assignIfUnassigned(ticketId, chosen.username))) {
+          await createAuditRepo(deps.db).record({
+            partnerId: ticket.partnerId,
+            actor: 'system',
+            actorType: 'system',
+            action: 'ticket.assign',
+            subjectId: ticket.id,
+            meta: { assignee: chosen.username, source: 'load-balancer' },
+          });
+        }
+      }
       return;
     }
 

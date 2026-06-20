@@ -46,6 +46,7 @@ function deps(): WorkerDeps {
     fetchFn: fetchFn as unknown as typeof fetch,
     recipientTemplateName: 'transfer_delivered',
     recipientTemplateLang: 'en',
+    listStaff: async () => [],
     runAgentTurn: runAgentTurn as unknown as WorkerDeps['runAgentTurn'],
   };
 }

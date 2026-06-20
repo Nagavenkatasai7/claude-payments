@@ -56,7 +56,9 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
       {
         label: 'Support',
         items: [
-          'tickets',
+          // Agents are ticket handlers of their OWN assigned tickets only — they
+          // get My queue, never the global queue (the queue page redirects them).
+          ...(staff.role !== 'agent' ? (['tickets'] as NavItem[]) : []),
           'my-queue',
           ...(staff.role === 'admin' ? (['employee-questions'] as NavItem[]) : []),
         ],
