@@ -484,6 +484,75 @@ describe('createAgent', () => {
   });
 });
 
+describe('createAgent — web history link (list_recent_transfers)', () => {
+  const seedVerified = async (deps: ReturnType<typeof extraDeps>) => {
+    const now = new Date().toISOString();
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: now, kycStatus: 'verified', senderCountry: 'US',
+      partnerId: 'default', optInAt: now, createdAt: now, updatedAt: now,
+    } as Parameters<typeof deps.customerStore.saveCustomer>[0]);
+  };
+
+  it('appends the canonical history link when no pay/verify link was produced', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerified(deps);
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_recent_transfers', arguments: '{}' } }],
+      },
+      { role: 'assistant', content: 'Here are your recent sends. 👉 https://model-made-up.example/x' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, channel: 'web', chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'show my recent transactions');
+    expect(reply).not.toContain('model-made-up.example'); // model URL stripped
+    expect(reply).toContain('https://smartremit.test/account/history'); // code link appended
+  });
+
+  it('a pay link ALWAYS wins the single append slot over the history link', async () => {
+    // Regression: history_url must never displace a pay link, even when
+    // list_recent_transfers is the LATER tool call in the same turn (the order
+    // that would overwrite the pay link if both shared the append array).
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerified(deps);
+    const now = new Date().toISOString();
+    await store.saveTransfer({
+      id: 'pay123', phone: PHONE, amountUsd: 100, feeUsd: 2, totalChargeUsd: 102, fxRate: 85,
+      amountInr: 8500, recipientName: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi',
+      payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer', complianceStatus: 'cleared',
+      complianceReasons: [], status: 'awaiting_payment', createdAt: now, partnerId: 'default',
+      sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+      amountSource: 100, feeSource: 2, totalChargeSource: 102,
+    } as never);
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [
+          { id: 'c1', type: 'function', function: { name: 'generate_payment_link', arguments: JSON.stringify({ transfer_id: 'pay123' }) } },
+          { id: 'c2', type: 'function', function: { name: 'list_recent_transfers', arguments: '{}' } },
+        ],
+      },
+      { role: 'assistant', content: 'Your recent sends, and the payment link for that transfer.' },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, channel: 'web', chat: async () => responses[i++],
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'pay link for pay123 and show my recent sends');
+    expect(reply).toContain('https://smartremit.test/pay/pay123'); // pay link wins
+    expect(reply).not.toContain('/account/history'); // history link suppressed this turn
+  });
+});
+
 describe('sanitizeReply', () => {
   it('strips a URL the model wrote', () => {
     const result = sanitizeReply(
@@ -1151,7 +1220,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).not.toContain('send_recipient_picker');
     expect(names).not.toContain('create_schedule');
     expect(names).toContain('open_recall_dispute');
-    expect(names).toHaveLength(11);
+    expect(names).toContain('list_recent_transfers'); // web-only history lookup
+    expect(names).toHaveLength(12);
   });
 
   it('default channel: the model still sees the full 19-tool set (call sites unchanged)', async () => {
@@ -1167,7 +1237,9 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     });
     await agent.runAgentTurn(PHONE, 'hello');
     expect(seenTools).toHaveLength(19);
-    expect(seenTools.map((t) => t.function.name)).toContain('send_approve_picker');
+    const dn = seenTools.map((t) => t.function.name);
+    expect(dn).toContain('send_approve_picker');
+    expect(dn).not.toContain('list_recent_transfers'); // web-only — never on WhatsApp
   });
 
   it("channel 'web': injects the [WEB CHAT] note; default channel does not", async () => {

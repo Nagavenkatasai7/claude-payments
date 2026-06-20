@@ -47,7 +47,7 @@ export interface AgentDeps {
 // mid-turn. Exported for the web-content-guard test — this string is shown to
 // the model verbatim, so it must stay free of tenant/internal terminology.
 export const WEB_CHANNEL_NOTE =
-  "[WEB CHAT] This conversation happens in the customer's secure web account, not WhatsApp — interactive buttons and approval cards cannot be sent here, and some actions are unavailable. You CAN: answer questions, check a transfer's status, check sending limits, quote with get_quote, list saved recipients and schedules, validate numbers, request a refund with request_refund, and repeat a past send with repeat_transfer — when repeat_transfer returns a summary, relay it and tell the customer to tap the secure payment link below your reply to review and pay (the system appends it automatically). Handle ONE repeat per message — only the latest link is delivered, so if the customer asks to repeat several sends, do them one at a time. When a tool needs a transfer ID you don't have, the customer can find it on that transfer's receipt under Transfer history in this account — never invent one. You CANNOT start a brand-new transfer to a new recipient, create or cancel recurring schedules, cancel a pending payment, or change transfer details here — for those, kindly direct the customer to message us on WhatsApp. Money only ever moves through the secure payment page, never through this chat. NEVER write or guess URLs yourself — secure links are appended below your reply automatically.";
+  "[WEB CHAT] This conversation happens in the customer's secure web account, not WhatsApp — interactive buttons and approval cards cannot be sent here, and some actions are unavailable. You CAN: answer questions, look up the customer's recent transfers — optionally filtered to a recipient they name like 'Mom' — with list_recent_transfers, check a transfer's status, check sending limits, quote with get_quote, list saved recipients and schedules, validate numbers, request a refund with request_refund, and repeat a past send with repeat_transfer — when repeat_transfer returns a summary, relay it and tell the customer to tap the secure payment link below your reply to review and pay (the system appends it automatically). Handle ONE repeat per message — only the latest link is delivered, so if the customer asks to repeat several sends, do them one at a time. When the customer asks about their past transfers or history — including 'my recent transactions' or 'what did I send to Mom' — call list_recent_transfers (pass the recipient name to filter) and summarise what it returns: recipient, amount, date, and status for each. NEVER tell the customer you have no way to pull up their history — you do; their full history and receipts link is appended below your reply automatically. When a tool needs a transfer ID you don't have, the customer can find it on that transfer's receipt under Transfer history in this account — never invent one. You CANNOT start a brand-new transfer to a new recipient, create or cancel recurring schedules, cancel a pending payment, or change transfer details here — for those, kindly direct the customer to message us on WhatsApp. Money only ever moves through the secure payment page, never through this chat. NEVER write or guess URLs yourself — secure links are appended below your reply automatically.";
 
 /**
  * Strip every URL the model wrote and optionally append the canonical,
@@ -153,6 +153,10 @@ export function createAgent(deps: AgentDeps) {
     // text so the customer never gets a redundant second "here's your quote" message.
     let interactiveSent = false;
     const paymentLinks: string[] = [];
+    // The web history-page link is LOWEST priority — it must never displace a pay
+    // or verify link (sanitizeReply appends only the last paymentLink). Held aside
+    // and appended after the loop only if no higher-priority link was produced.
+    let historyLink: string | null = null;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // A one-off system note for new conversations. Not persisted to history
@@ -312,6 +316,19 @@ export function createAgent(deps: AgentDeps) {
           ) {
             paymentLinks.push((result as Record<string, unknown>).pay_url as string);
           }
+          // list_recent_transfers returns the canonical web history-page URL.
+          // sanitizeReply strips every model-emitted URL, so the code-generated
+          // one is appended the same way (web-only — the tool is web-only) to give
+          // the customer a tap-through to their full history + receipts. Held in
+          // historyLink (NOT paymentLinks) so it can never overwrite a pay/verify
+          // link if the same turn also produced one.
+          if (
+            channel === 'web' &&
+            call.function.name === 'list_recent_transfers' &&
+            typeof (result as Record<string, unknown>).history_url === 'string'
+          ) {
+            historyLink = (result as Record<string, unknown>).history_url as string;
+          }
           // Collect the canonical VERIFY link from ANY tool that returns a kyc_url
           // (the verify-before-send gate + the cap hand-offs). sanitizeReply strips
           // every model-emitted URL, so the real, code-generated link must be
@@ -354,6 +371,12 @@ export function createAgent(deps: AgentDeps) {
         customerStore: deps.customerStore,
       });
       if (url) paymentLinks.push(url);
+    }
+
+    // Lowest-priority append: the history-page link surfaces ONLY when no pay or
+    // verify link was produced this turn (those always win the single append slot).
+    if (historyLink && paymentLinks.length === 0) {
+      paymentLinks.push(historyLink);
     }
 
     // If a tool already sent an interactive message this turn, that card IS the

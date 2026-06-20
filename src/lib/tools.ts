@@ -32,6 +32,7 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
+import { transferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
@@ -54,6 +55,7 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'check_payment_status',
   'check_send_limit',
   'list_saved_recipients',
+  'list_recent_transfers',
   'resolve_recipient',
   'validate_phone',
   'list_schedules',
@@ -63,9 +65,21 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'generate_payment_link',
 ]);
 
+/**
+ * Tools that exist ONLY on the web channel — the mirror image of the allowlist.
+ * The web account is an authenticated, single-customer surface, so a richer
+ * self-service history read (list_recent_transfers) is safe there but is kept
+ * off WhatsApp (where a turn isn't always identity-bound the same way). Stripped
+ * from the WhatsApp schemas AND blocked at dispatch (defense-in-depth), exactly
+ * mirroring the web-channel gate.
+ */
+export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set([
+  'list_recent_transfers',
+]);
+
 /** The tool schemas the model is shown for a given channel. */
 export function toolSchemasForChannel(channel: AgentChannel): ChatTool[] {
-  if (channel !== 'web') return toolSchemas;
+  if (channel !== 'web') return toolSchemas.filter((t) => !WEB_ONLY_TOOLS.has(t.function.name));
   return toolSchemas.filter((t) => WEB_TOOL_ALLOWLIST.has(t.function.name));
 }
 
@@ -302,6 +316,28 @@ export const toolSchemas: ChatTool[] = [
         type: 'object',
         properties: { transfer_id: { type: 'string' } },
         required: ['transfer_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_recent_transfers',
+      description:
+        "List the customer's OWN recent sends (newest first), optionally filtered to a recipient they name. Use this whenever the customer asks about their past transfers or history — 'my recent transactions', 'what did I send to Mom', 'show my transfers to <name>', 'how much have I sent lately'. Returns { transfers: [{ transfer_id, date, recipient_name, amount, status }], count, history_url }. `count` is how many recent sends matched (it may exceed the number of rows returned — if so, mention there are more and that their full history is linked below). Summarise the results for the customer (each transfer's recipient, amount, date, and status); their full history and receipts link is appended below your reply automatically — do NOT write the URL yourself. Read-only.",
+      parameters: {
+        type: 'object',
+        properties: {
+          recipient: {
+            type: 'string',
+            description:
+              "Optional. A recipient name or number to filter to, e.g. 'Mom' or '919876543210'. Omit to list all recent sends.",
+          },
+          limit: {
+            type: 'number',
+            description: 'Optional. Max number of transfers to return (default 10, max 20).',
+          },
+        },
       },
     },
   },
@@ -762,6 +798,14 @@ export async function executeTool(
     });
     return { error: 'not available here' };
   }
+  // Symmetric gate: a web-only tool named OFF the web channel (e.g. a WhatsApp
+  // model reaching for list_recent_transfers) gets a flat error and runs nothing.
+  if (!isWebChannel(ctx) && WEB_ONLY_TOOLS.has(name)) {
+    logWarn('web-only.tool-blocked', `blocked web-only tool off web channel: ${name}`, {
+      phone: ctx.phone,
+    });
+    return { error: 'not available here' };
+  }
   switch (name) {
     case 'get_quote':
       return getQuoteTool(args, ctx);
@@ -771,6 +815,8 @@ export async function executeTool(
       return generatePaymentLinkTool(args, ctx);
     case 'check_payment_status':
       return checkPaymentStatusTool(args, ctx);
+    case 'list_recent_transfers':
+      return listRecentTransfersTool(args, ctx);
     case 'request_refund':
       return requestRefundTool(args, ctx);
     case 'open_recall_dispute':
@@ -1184,6 +1230,76 @@ async function checkPaymentStatusTool(
   // over other customers' transfer ids.
   if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
   return { transfer_id: transfer.id, status: transfer.status };
+}
+
+// list_recent_transfers tuning. We SCAN a generous window of the customer's own
+// transfers (indexed own-phone read, never a ledger scan) so an optional
+// recipient filter has history to match, then return at most `limit` of them.
+const RECENT_SCAN = 50;
+const RECENT_DEFAULT_LIMIT = 10;
+const RECENT_MAX_LIMIT = 20;
+
+function clampLimit(raw: unknown, def: number, max: number): number {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(1, Math.min(max, Math.floor(n)));
+}
+
+/**
+ * Lists the customer's OWN recent transfers (newest first), optionally filtered
+ * to a recipient they name (web-only — see WEB_ONLY_TOOLS). Ownership is implicit
+ * and unforgeable: listTransfersByPhone(ctx.phone) is an INDEXED own-phone query
+ * and the tool takes no transfer_id, so it can never surface another customer's
+ * data — there is nothing to 404 on. Each row is shaped by the shared
+ * customer-safe formatter (transferSummaryFields): recipient name + source-currency
+ * amount + status label + date only, never a payout account, compliance reason,
+ * or tenant field. Returns the canonical history_url (appended below the reply by
+ * the agent, like a pay link) so the customer can open their full list + receipts.
+ */
+async function listRecentTransfersTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const historyUrl = `${env.appBaseUrl}/account/history`;
+  let rows: import('./types').Transfer[];
+  try {
+    rows = await ctx.store.listTransfersByPhone(ctx.phone, RECENT_SCAN); // newest-first, indexed
+  } catch (err) {
+    console.warn('list_recent_transfers listTransfersByPhone failed:', err);
+    return { transfers: [], count: 0, history_url: historyUrl };
+  }
+
+  // Optional recipient filter: match the typed text against each transfer's
+  // recipientName (case/space-insensitive, either-direction substring — the same
+  // matching resolve_recipient uses) OR an exact recipient phone.
+  const raw = String(args.recipient ?? '').trim();
+  if (raw) {
+    const q = raw.toLowerCase();
+    const qPhone = normalizePhone(raw);
+    rows = rows.filter((t) => {
+      const n = (t.recipientName ?? '').trim().toLowerCase();
+      const byName = n !== '' && (n.includes(q) || q.includes(n));
+      const byPhone = qPhone !== '' && t.recipientPhone === qPhone;
+      return byName || byPhone;
+    });
+  }
+
+  // count = how many recent sends MATCHED (pre-slice), so the bot can answer
+  // "how many times have I sent to Mom" honestly even when `transfers` is a
+  // capped sample; >limit ⇒ point the customer to history_url for the rest.
+  const matchCount = rows.length;
+  const limit = clampLimit(args.limit, RECENT_DEFAULT_LIMIT, RECENT_MAX_LIMIT);
+  const transfers = rows.slice(0, limit).map((t) => {
+    const f = transferSummaryFields(t);
+    return {
+      transfer_id: f.id,
+      date: f.date,
+      recipient_name: f.recipientName,
+      amount: f.amount,
+      status: f.status,
+    };
+  });
+  return { transfers, count: matchCount, history_url: historyUrl };
 }
 
 // How many of the customer's most-recent transfers we scan when resolving a

@@ -1,0 +1,37 @@
+sequenceDiagram
+  autonumber
+  actor C as Customer
+  participant M as Meta WhatsApp
+  participant W as /api/whatsapp<br/>(HMAC verified)
+  participant OB as Outbox + Worker
+  participant A as AI agent<br/>(Kimi K2.6)
+  participant FX as FX + Best-Rate<br/>Selection
+  participant P as Pay page
+  participant MC as Money engine
+  participant PSP as Card / bank charger<br/>(mock today)
+  participant SW as /api/payment-webhook<br/>(HMAC verified)
+  participant R as Partner rail
+  participant D as Dashboards
+
+  C->>M: "Send $200 to Mom"
+  M->>W: webhook (signed)
+  W->>OB: enqueue agent.turn (wamid dedupe)
+  OB->>A: drain → run turn
+  A->>A: check_send_limit (tier caps, KYC gate)
+  A->>FX: get_quote
+  FX->>FX: live mid-market + partner rates<br/>strictly-better partner wins (rail checked)
+  A->>M: Approve & Pay card (locked quote, 30-min draft)
+  C->>P: tap → pay page
+  P->>P: txn OTP + bank details (validated)
+  P->>MC: finalize: claim-first idempotency →<br/>mint transfer (sanctions screened inside,<br/>draft quote honored)
+  MC->>PSP: capture funding (idempotent by transfer id,<br/>blocked transfers are never charged)
+  PSP-->>MC: captured
+  MC->>MC: beginSettlement — ONE transaction:<br/>paid + stage-1 msg + rail effect
+  MC->>OB: settlement.instruct (deduped)
+  OB->>R: signed instruction<br/>(rail = best-rate winner ?? owner)
+  R-->>SW: signed callback: paid_out
+  SW->>MC: rank-guarded flip → delivered
+  SW->>M: "Delivered ₹16,950" (owner branding) + recipient template<br/>— sent directly, best-effort (not outbox-queued)
+  M->>C: confirmations
+  MC->>D: live status via stamp polling:<br/>transactions, ops queues, compliance, tickets
+  Note over MC,D: If stuck >15min: reconcile sweep re-instructs once + ops alert.<br/>If rejected in review: AUTO-REFUND via FundingProvider.<br/>Customer can ask the bot to refund a paid-not-delivered transfer.

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SmartRemit — Microservices Readiness (Ground Truth)</title>
+<style>
+  :root{
+    --bg:#0b141a; --panel:#111b21; --panel2:#16242d; --line:#243640;
+    --ink:#e9edef; --mut:#8696a0; --green:#25d366; --amber:#f5b942; --red:#f15b5b;
+    --blue:#53bdeb; --chip:#202c33;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0b141a,#0e1a22);color:var(--ink);
+    font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:32px 20px 60px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{font-size:29px;margin:0 0 4px;letter-spacing:-.5px}
+  .sub{color:var(--mut);margin:0 0 18px;font-size:15px}
+  .gt{display:inline-block;background:rgba(83,189,235,.12);border:1px solid rgba(83,189,235,.4);
+    color:var(--blue);font-size:12px;font-weight:700;padding:3px 11px;border-radius:999px;letter-spacing:.4px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:1.4px;color:var(--mut);
+    margin:36px 0 14px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  code{background:#0e1a22;border:1px solid var(--line);border-radius:5px;padding:.5px 5px;font-size:12px;color:var(--blue)}
+  .verdict{display:flex;gap:22px;align-items:center;background:var(--panel);border:1px solid var(--line);
+    border-radius:16px;padding:22px 24px;margin-top:14px}
+  .gauge{flex:0 0 150px;text-align:center}
+  .ring{width:150px;height:150px;border-radius:50%;
+    background:conic-gradient(var(--amber) 0 58%, #243640 58% 100%);
+    display:grid;place-items:center;position:relative}
+  .ring::before{content:"";position:absolute;inset:14px;border-radius:50%;background:var(--panel)}
+  .ring b{position:relative;font-size:33px}
+  .ring span{position:relative;display:block;font-size:10.5px;color:var(--mut);margin-top:-4px;letter-spacing:1px}
+  .verdict p{margin:0 0 8px}
+  .verdict .big{font-size:18px;font-weight:700}
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px;margin:3px 6px 3px 0}
+  .pill.g{background:rgba(37,211,102,.15);color:var(--green);border:1px solid rgba(37,211,102,.4)}
+  .pill.a{background:rgba(245,185,66,.13);color:var(--amber);border:1px solid rgba(245,185,66,.4)}
+  .pill.r{background:rgba(241,91,91,.13);color:var(--red);border:1px solid rgba(241,91,91,.4)}
+  .correct{background:linear-gradient(180deg,#1a2230,#141d28);border:1px solid rgba(83,189,235,.35);
+    border-radius:14px;padding:16px 20px;margin-top:16px}
+  .correct h4{margin:0 0 8px;font-size:14px;color:var(--blue)}
+  .correct ul{margin:0;padding-left:18px;color:var(--ink);font-size:13.5px}
+  .correct li{margin:6px 0}
+  .correct b{color:var(--ink)}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:14px 0 4px;color:var(--mut);font-size:13px}
+  .legend b{color:var(--ink)}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.r{background:var(--red)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}.verdict{flex-direction:column}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px 17px;position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px}
+  .card.g::before{background:var(--green)}.card.a::before{background:var(--amber)}.card.r::before{background:var(--red)}
+  .score{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:8px}
+  .score b{font-size:15px}
+  .score .pct{font-size:13px;color:var(--mut);font-weight:700;white-space:nowrap}
+  .bar{height:7px;border-radius:6px;background:#243640;overflow:hidden;margin-bottom:9px}
+  .bar i{display:block;height:100%;border-radius:6px}
+  .bar i.g{background:var(--green)}.bar i.a{background:var(--amber)}.bar i.r{background:var(--red)}
+  .why{color:var(--mut);font-size:12.7px;margin:0}
+  .ev{margin-top:7px;font-size:11px;color:#6f8693;border-top:1px dashed var(--line);padding-top:6px}
+  .ev b{color:var(--mut)}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);text-transform:uppercase;font-size:11px;letter-spacing:.7px;background:var(--panel2)}
+  td b{color:var(--ink)} tr:last-child td{border-bottom:none}
+  .ok{color:var(--green);font-weight:700}.warn{color:var(--amber);font-weight:700}.bad{color:var(--red);font-weight:700}
+  .topo{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px}
+  .band{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--mut);text-align:center;margin:4px 0 12px}
+  .row4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  @media(max-width:760px){.row4{grid-template-columns:1fr 1fr}}
+  .svc{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px}
+  .svc small{display:block;color:var(--mut);font-size:11px;margin-top:2px}
+  .svc.g{border-color:rgba(37,211,102,.5)}.svc.a{border-color:rgba(245,185,66,.5)}
+  .core{margin:15px 0;background:linear-gradient(180deg,#2a1416,#1c1012);border:1.5px solid rgba(241,91,91,.55);
+    border-radius:12px;padding:15px 18px;text-align:center}
+  .core .lock{font-size:12px;color:var(--red);font-weight:700;letter-spacing:1px}
+  .core h3{margin:6px 0 4px;font-size:17px}
+  .core p{margin:0;color:var(--mut);font-size:12.7px}
+  .edge{text-align:center;color:var(--blue);font-size:12px;margin:9px 0;font-weight:600}
+  .partners{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .ext{background:#0e1a22;border:1px dashed rgba(37,211,102,.5);border-radius:10px;padding:8px 13px;font-size:12px;color:var(--green)}
+  .wave{display:flex;gap:14px;align-items:flex-start;margin:0 0 10px}
+  .wnum{flex:0 0 30px;height:30px;border-radius:50%;display:grid;place-items:center;font-weight:700;
+    background:var(--chip);border:1px solid var(--line);font-size:13px}
+  .wbody{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 16px;flex:1}
+  .wbody b{font-size:15px}.wbody .t{color:var(--mut);font-size:12.5px;margin-top:3px}
+  .tag{font-size:11px;color:var(--mut)}
+  .foot{color:var(--mut);font-size:12.5px;margin-top:30px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>SmartRemit — Microservices Readiness <span class="gt">GROUND TRUTH</span></h1>
+  <p class="sub">Rebuilt from a 5-agent code audit (transactions · import graph · provider seams · shared infra/fault-isolation · data model). Scores are evidence-backed; this version corrects the optimistic first pass.</p>
+
+  <div class="verdict">
+    <div class="gauge"><div class="ring"><b>58%</b><span>READY</span></div></div>
+    <div>
+      <p class="big">Verdict: <span style="color:var(--amber)">Feasible but bimodal — the edges are service-ready; the core, the agent, and the data are coupled.</span></p>
+      <p>The audit confirms a sharp split: <b>external provider boundaries and the stateless AI/analytics layer are genuinely extractable today</b>, but the <b>conversational agent, partner-API, and notifications reach straight into <code>getDb()</code>, the repos, and the transfer state machine</b>, and the <b>per-service-database split is the real hard part</b> (shared Postgres, <code>partner_id</code> on 13/16 tables, a <code>tickets→transfers</code> FK). The money core <i>must</i> stay one transactional unit — that's correct, not a flaw.</p>
+      <p style="margin-top:10px">
+        <span class="pill g">Provider seams 9/10 · AI &amp; analytics 9/10</span>
+        <span class="pill a">Agent 3.5 · Partner-API 6 · Notifications 5.5 · Data 6/10</span>
+        <span class="pill r">Ledger+Outbox+Idempotency = 1 transactional unit</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="correct">
+    <h4>↻ Ground-truth corrections to the first artifact</h4>
+    <ul>
+      <li><b>Conversational Agent: 90% → 35%.</b> <code>agent.ts</code>/<code>tools.ts</code> call <code>getDb()</code> at runtime and directly instantiate <code>createTransferRepo / createTicketRepo / createOutboxRepo</code> to mutate the ledger + outbox, plus inline sends. It is <i>not</i> a stateless front door today.</li>
+      <li><b>Notifications: 90% → 55%.</b> <code>whatsapp.ts</code> send functions are pure, but <i>when</i> to send is fused to the state machine, and several sends (flagged-transfer message, OTP, cron links) fire <b>inline, bypassing the outbox</b>.</li>
+      <li><b>Sanctions/KYC re-scoped UP at the boundary.</b> The provider <i>interfaces</i> are excellent (9/10, real factories) — they can be external services today; only the screening <i>gate</i> stays inline.</li>
+      <li><b>The data split is harder than implied.</b> Per-service DBs require breaking FKs; <code>partner_id</code> tenancy makes <b>Partners a shared reference service</b>, and <code>tickets.transfer_id</code> is a genuine cross-context FK.</li>
+    </ul>
+  </div>
+
+  <h2>Component readiness — evidence-backed</h2>
+  <div class="legend">
+    <span><span class="dot g"></span><b>Service-ready</b> — clean seam, evidenced</span>
+    <span><span class="dot a"></span><b>Coupled / needs refactor</b> before a clean cut</span>
+    <span><span class="dot r"></span><b>Keep as one transactional unit</b></span>
+  </div>
+
+  <div class="grid">
+    <div class="card g"><div class="score"><b>External provider interfaces</b><span class="pct">9/10 · 90%</span></div><div class="bar"><i class="g" style="width:90%"></i></div><p class="why">Payment / Funding / KYC / Sanctions are <b>real swappable interfaces with factories</b> — callers depend on the interface, not the impl. A real external service plugs in with <i>zero call-site change</i>. The strongest seam in the system.</p><div class="ev"><b>Evidence:</b> <code>providers/payment-provider.ts:49</code> + <code>getPaymentProvider()</code> :115; funding/kyc/sanctions same shape. Non-custodial HTTP rail already implements it.</div></div>
+
+    <div class="card g"><div class="score"><b>AI copilots (the 6 rung-1 features)</b><span class="pct">9/10 · 90%</span></div><div class="bar"><i class="g" style="width:90%"></i></div><p class="why"><b>Pure functions</b> — zero singleton imports. Prompt → <code>chat()</code> → parse. The API routes fetch state; the libs don't touch the DB. Lift to a package as-is.</p><div class="ev"><b>Evidence:</b> <code>ticket-ai.ts</code>, <code>kyc-review-ai.ts</code>, <code>ops-diagnosis-ai.ts</code>, <code>corridor-demand.ts</code> import only <code>chat</code> + <code>types</code>. No <code>getDb/getStore</code>.</div></div>
+
+    <div class="card g"><div class="score"><b>Analytics / reporting</b><span class="pct">9/10 · 90%</span></div><div class="bar"><i class="g" style="width:90%"></i></div><p class="why">Pure aggregators: <code>Transfer[]</code> → stats. No I/O, no state. Already library-shaped; the dashboard is a presentation layer, not a service.</p><div class="ev"><b>Evidence:</b> <code>analytics.ts</code> imports only <code>dates</code> + types; functions take arrays, return computed stats.</div></div>
+
+    <div class="card a"><div class="score"><b>Partner REST API</b><span class="pct">6/10 · 60%</span></div><div class="bar"><i class="a" style="width:60%"></i></div><p class="why">The <i>service layer is dependency-injected</i> (a <code>PartnerApiDeps</code> interface) — good. But the functions still drive Postgres repos directly and call <code>beginSettlement()</code>. Extract the logic as a library; routes stay until repos are HTTP-wrapped.</p><div class="ev"><b>Evidence:</b> <code>partner-api-service.ts</code> takes deps; guard <code>partner-api.ts:51-55</code> wires <code>getStore()/getDb()</code>; service uses <code>createBeneficiaryRepo/createIdempotencyRepo/createAuditRepo</code>.</div></div>
+
+    <div class="card a"><div class="score"><b>Notifications (WhatsApp)</b><span class="pct">5.5/10 · 55%</span></div><div class="bar"><i class="a" style="width:55%"></i></div><p class="why">Send functions are pure HTTP, BUT timing is fused to the state machine and <b>some sends bypass the outbox inline</b> (flagged-transfer msg, OTP, cron links). The pure functions extract; the orchestration doesn't.</p><div class="ev"><b>Evidence:</b> <code>whatsapp.ts</code> pure; inline leaks at <code>pay/[id]/route.ts:122</code> (flagged) &amp; <code>:210</code> (OTP), <code>cron/route.ts</code> scheduled links.</div></div>
+
+    <div class="card a"><div class="score"><b>Admin dashboard (BFF)</b><span class="pct">5.5/10 · 55%</span></div><div class="bar"><i class="a" style="width:55%"></i></div><p class="why">Mostly reads + server actions that call many repos. Could be a Backend-for-Frontend, but it touches a wide spread of the data layer.</p><div class="ev"><b>Evidence:</b> admin pages + <code>admin-dashboard/actions.ts</code> among the 52 <code>getDb()</code> importers.</div></div>
+
+    <div class="card r"><div class="score"><b>Conversational agent</b><span class="pct">3.5/10 · 35%</span></div><div class="bar"><i class="r" style="width:35%"></i></div><p class="why"><b>Far more coupled than it looks.</b> Calls <code>getDb()</code> at runtime, instantiates transfer/ticket/outbox repos and <i>mutates the ledger directly</i>, sends interactive cards inline, and reaches into ~15 helper modules. Needs real refactoring (defer DB writes behind an RPC/tool boundary) before extraction.</p><div class="ev"><b>Evidence:</b> <code>agent.ts:22</code> <code>getDb</code>; <code>tools.ts:21-26</code> <code>createTransferRepo/createTicketRepo/createOutboxRepo</code> + <code>pokeWorker</code>; inline <code>sendInteractive/sendCtaUrl</code>.</div></div>
+
+    <div class="card r"><div class="score"><b>Ledger + Settlement + Idempotency (the money)</b><span class="pct">Keep as 1</span></div><div class="bar"><i class="r" style="width:100%"></i></div><p class="why"><b>One ACID transaction</b> flips <code>transfers.status→paid</code> AND inserts the outbox rows together; minting is claim-first against <code>idempotency_keys</code>. Splitting these → distributed transactions / sagas → the one failure mode a remittance product can't afford. Correct by design.</p><div class="ev"><b>Evidence:</b> <code>settlement.ts:43-69</code> single <code>db.transaction()</code>; <code>pay-finalize.ts:96-114</code> claim-first; rank-guarded UPDATE <code>transfer-repo.ts:130-159</code>; <code>FOR UPDATE SKIP LOCKED</code> <code>outbox-repo.ts:59</code>.</div></div>
+
+    <div class="card a"><div class="score"><b>Outbox / worker (the event tissue)</b><span class="pct">8/10 · 80%</span></div><div class="bar"><i class="a" style="width:80%"></i></div><p class="why">Strong durable backbone — the 3 critical money transitions enqueue <i>transactionally</i> with the state change, dedupe-keyed, retried, dead-lettered. <b>But it's leaky</b>: a few external sends fire inline instead of through it. Becomes the message bus.</p><div class="ev"><b>Evidence:</b> 9 kinds <code>outbox-repo.ts:19</code>; transactional enqueue <code>settlement.ts:48-64</code>; leaks listed above; heartbeat = GitHub Actions /5 min.</div></div>
+
+    <div class="card a"><div class="score"><b>Data model → per-service databases</b><span class="pct">6/10 · 60%</span></div><div class="bar"><i class="a" style="width:60%"></i></div><p class="why"><code>partner_id</code> tenancy on 13/16 tables → <b>Partners must be a shared reference service</b>. The hard break is <code>tickets.transfer_id</code> (Support→Ledger FK). 3 tables (audit_events, kyc_cases, recipients) already couple only in code (no FK).</p><div class="ev"><b>Evidence:</b> <code>schema.ts</code> — <code>transfers.partner_id:56</code>, <code>tickets.transfer_id:219</code> (cross-context), missing FKs on <code>audit_events/kyc_cases/recipients</code>.</div></div>
+  </div>
+
+  <h2>Shared chokepoints — what any split must sever</h2>
+  <table>
+    <tr><th>Chokepoint</th><th>Reach</th><th>What it binds</th><th>Cost to cut</th></tr>
+    <tr><td><b><code>src/lib/types.ts</code></b></td><td class="warn">54 importers</td><td>Every domain type + enum (Transfer, Customer, Partner, …)</td><td>Low — publish as <code>@smartremit/types</code> (zero code change)</td></tr>
+    <tr><td><b><code>getDb()</code></b></td><td class="bad">52 importers</td><td>One Postgres Pool; all mutations across all domains</td><td>High — HTTP-wrap repos or accept one shared DB</td></tr>
+    <tr><td><b><code>getStore()</code></b></td><td class="bad">30 importers</td><td>Composite of Postgres repos <i>and</i> Redis (conversations, velocity)</td><td>High — fuses two engines; agent can't be cut without it</td></tr>
+    <tr><td><b>One Redis (sessions)</b></td><td class="bad">staff + customer</td><td>All sessions are Redis-only (<code>auth-store</code>, <code>customer-auth-store</code>)</td><td>High — Redis down = customer/staff lockout; revoke-on-reset spans services</td></tr>
+    <tr><td><b><code>FIELD_ENCRYPTION_KEY</code></b></td><td class="warn">auth + ledger</td><td>Encrypts emails (auth) AND payout destinations (ledger)</td><td>Medium — key governance couples two would-be services</td></tr>
+  </table>
+
+  <h2>Fault-isolation reality — "if one part fails, does the system break?"</h2>
+  <p class="sub" style="margin-top:-4px">You already have most of this. Here's what actually happens today (from the code), and how much a split would add.</p>
+  <table>
+    <tr><th>If this fails…</th><th>What happens today</th><th>Money safe?</th></tr>
+    <tr><td><b>Kimi / Ollama (the model)</b></td><td>Agent retries once, then a friendly fallback; conversation preserved. Copilots show "AI unavailable".</td><td class="ok">✓ graceful — money paths don't depend on the LLM</td></tr>
+    <tr><td><b>Redis — rate limiter / FX cache</b></td><td><b>Fail-open</b> — request proceeds; FX falls back to in-memory/static rates.</td><td class="ok">✓ degrades</td></tr>
+    <tr><td><b>Redis — sessions</b></td><td><b>Fail-hard</b> — sessions are Redis-only → customers/staff locked out.</td><td class="warn">⚠ the real shared SPOF (but low RPS)</td></tr>
+    <tr><td><b>Outbox worker stalls</b></td><td>Not self-healing; the 5-min heartbeat + reconcile sweep re-instruct once &amp; alert ops after 15 min.</td><td class="warn">⚠ observable, manual recovery</td></tr>
+    <tr><td><b>Partner settlement rail down</b></td><td>Retry/backoff → dead-letter after 8; reconcile re-instructs once + ops alert. Idempotent on replay.</td><td class="ok">✓ safe, not self-healing</td></tr>
+    <tr><td><b>Funding processor down</b></td><td>Customer sees "try again". Charged-but-crashed is auto-resumed by the reconcile sweep (&gt;10 min).</td><td class="ok">✓ crash-resume built in</td></tr>
+  </table>
+  <p class="sub" style="margin-top:10px">Net: the monolith already exhibits <b>~60% of the fault isolation</b> a clean split would have — at zero coordination cost. A split adds <b>~15–20% more</b> (independent process crashes, separate Redis budgets) at <b>~3× operational complexity</b> (dual heartbeats, distributed tracing, cross-service session revocation, key distribution).</p>
+
+  <h2>Target topology — what's genuinely service-ready vs. what stays</h2>
+  <div class="topo">
+    <div class="band">🟢 Extract now — stateless, evidenced</div>
+    <div class="row4">
+      <div class="svc g">AI Copilot service<small>pure fns · 9/10</small></div>
+      <div class="svc g">Analytics service<small>pure aggregators · 9/10</small></div>
+      <div class="svc a">Partner API<small>inject deps first · 6/10</small></div>
+      <div class="svc a">Agent service<small>needs refactor · 3.5/10</small></div>
+    </div>
+    <div class="edge">▼ everything below still shares ONE Postgres + ONE Redis today ▼</div>
+    <div class="core">
+      <div class="lock">🔒 KEEP MONOLITHIC · ACID</div>
+      <h3>Money Core — Transfers · Outbox · Idempotency (one DB)</h3>
+      <p>Status-flip + outbox + claim-first mint commit together. Splitting = sagas. Don't.</p>
+    </div>
+    <div class="band">Shared reference (every table is tenant-scoped by partner_id)</div>
+    <div class="row4">
+      <div class="svc a">Partners (shared ref)<small>13/16 tables FK here</small></div>
+      <div class="svc a">Identity / KYC<small>customers · kyc_cases</small></div>
+      <div class="svc a">Support<small>tickets→transfers FK ⚠</small></div>
+      <div class="svc a">Sessions / Auth<small>Redis-only · shared</small></div>
+    </div>
+    <div class="edge">✅ Already true microservice boundaries — signed HMAC over HTTP:</div>
+    <div class="partners">
+      <div class="ext">Partner rails</div><div class="ext">Meta WhatsApp</div><div class="ext">Kimi / Ollama</div><div class="ext">Persona</div><div class="ext">Frankfurter</div>
+    </div>
+  </div>
+
+  <h2>Honest extraction sequence (strangler-fig)</h2>
+  <div class="wave"><div class="wnum">1</div><div class="wbody"><b>Wave 1 — the real free wins (do now)</b><div class="t">Publish <code>@smartremit/types</code> (zero code change) → extract the <b>AI copilots</b> + <b>analytics</b> as a package. Genuinely 9/10 ready, no DB coupling. <span class="tag">Risk: ~nil.</span></div></div></div>
+  <div class="wave"><div class="wnum">2</div><div class="wbody"><b>Wave 2 — productize the provider seams</b><div class="t">The <b>Payment/Funding/KYC/Sanctions</b> interfaces already let real external services slot in with no call-site change. This is where "independent vendor + many-team" value is highest. <span class="tag">Trigger: a vendor swap or a compliance team.</span></div></div></div>
+  <div class="wave"><div class="wnum">3</div><div class="wbody"><b>Wave 3 — refactor before you cut</b><div class="t">Before extracting the <b>Agent</b> / <b>Partner-API</b> / <b>Notifications</b>: move their DB writes behind a tool/RPC boundary, route the inline sends through the outbox, and split <code>getStore()</code>. This is real work — don't skip it. <span class="tag">Trigger: agent-iteration speed or a scaling wall.</span></div></div></div>
+  <div class="wave"><div class="wnum">★</div><div class="wbody"><b>Always — keep Partners shared &amp; the Money Core one DB</b><div class="t">Per-service databases break FKs into eventual consistency; the <code>tickets→transfers</code> link and <code>partner_id</code> tenancy mean Partners stays a shared reference, and the ledger never splits.</div></div></div>
+
+  <p class="foot"><b>Bottom line (ground truth):</b> realistic readiness is ~58%, not 78% — and it's <b>bimodal</b>. The <b>edges are genuinely service-ready</b> (provider interfaces, AI, analytics — extract those and you get most of the "independent teams / scale" value cheaply). The <b>middle is coupled</b> (agent, partner-API, notifications all reach into <code>getDb()</code>/repos/the state machine and need refactoring first). The <b>core is deliberately one transactional unit</b>, and the <b>data layer is the true hard part</b> (shared Postgres + <code>partner_id</code> everywhere + the <code>tickets→transfers</code> FK). You already have ~60% of the fault isolation you're after; spend effort on the high-value edges and observability, not a wholesale rewrite. &nbsp;·&nbsp; Built from a 5-agent code audit.</p>
+
+</div>
+</body>
+</html>

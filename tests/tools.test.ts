@@ -4,6 +4,7 @@ import {
   toolSchemas,
   toolSchemasForChannel,
   WEB_TOOL_ALLOWLIST,
+  WEB_ONLY_TOOLS,
   buildApproveSummary,
   maskAccount,
 } from '@/lib/tools';
@@ -96,7 +97,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all nineteen tools', () => {
+  it('exposes all twenty tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -108,6 +109,7 @@ describe('toolSchemas', () => {
       'create_transfer',
       'generate_payment_link',
       'get_quote',
+      'list_recent_transfers',
       'list_saved_recipients',
       'list_schedules',
       'open_recall_dispute',
@@ -2506,12 +2508,13 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the eleven read-only/refund/recall/pay-link tools', () => {
+  it('the allowlist is exactly the twelve read-only/refund/recall/pay-link tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
       'generate_payment_link',
       'get_quote',
+      'list_recent_transfers',
       'list_saved_recipients',
       'list_schedules',
       'open_recall_dispute',
@@ -2525,15 +2528,19 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
   it("toolSchemasForChannel('web') exposes ONLY allowlisted tools", () => {
     const names = toolSchemasForChannel('web').map((t) => t.function.name);
     expect(names.sort()).toEqual([...WEB_TOOL_ALLOWLIST].sort());
+    expect(names).toContain('list_recent_transfers');
     expect(names).not.toContain('create_transfer');
     expect(names).not.toContain('send_approve_picker');
     expect(names).not.toContain('send_recipient_picker');
     expect(names).not.toContain('create_schedule');
   });
 
-  it("toolSchemasForChannel('whatsapp') is the full, unfiltered tool set", () => {
-    expect(toolSchemasForChannel('whatsapp')).toBe(toolSchemas);
-    expect(toolSchemasForChannel('whatsapp')).toHaveLength(19);
+  it("toolSchemasForChannel('whatsapp') is the full set MINUS web-only tools", () => {
+    const names = toolSchemasForChannel('whatsapp').map((t) => t.function.name);
+    // Every roster tool except the web-only ones (list_recent_transfers).
+    expect(names).not.toContain('list_recent_transfers');
+    expect(names).toContain('create_transfer'); // a WhatsApp-only tool is still present
+    expect(toolSchemasForChannel('whatsapp')).toHaveLength(toolSchemas.length - WEB_ONLY_TOOLS.size);
   });
 });
 
@@ -2643,6 +2650,106 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     await owner.store.updateTransferFromWebhook(id, 'paid');
     const ok = await executeTool('request_refund', { transfer_id: id }, { ...owner, channel: 'web' as const });
     expect(ok.requested).toBe(true);
+  });
+});
+
+describe('list_recent_transfers (web-only history lookup)', () => {
+  const HISTORY_URL = 'https://smartremit.test/account/history';
+
+  // Past sends happened in the bot ⇒ mint via the WhatsApp channel (create_transfer
+  // is blocked on web). Small amounts keep the T0 $500/day cap clear.
+  const send = (
+    ctx: Awaited<ReturnType<typeof buildCtx>>,
+    name: string,
+    phone: string,
+    amount: number,
+  ) =>
+    executeTool(
+      'create_transfer',
+      {
+        amount_usd: amount,
+        recipient_name: name,
+        recipient_phone: phone,
+        payout_method: 'upi',
+        payout_destination: `${name.toLowerCase()}@okhdfc`,
+        funding_method: 'bank_transfer',
+      },
+      ctx, // whatsapp channel
+    );
+
+  it('lists the customer OWN recent sends with a customer-safe shape + history_url', async () => {
+    const base = await buildCtx(fakeRedis());
+    await send(base, 'Mom', '919876543210', 30);
+    await send(base, 'Dad', '919811112222', 40);
+    const ctx = { ...base, channel: 'web' as const };
+
+    const r = await executeTool('list_recent_transfers', {}, ctx);
+    expect(r.history_url).toBe(HISTORY_URL);
+    expect(r.count).toBe(2);
+    const transfers = r.transfers as Array<Record<string, unknown>>;
+    expect(transfers).toHaveLength(2);
+    expect(transfers.map((t) => t.recipient_name).sort()).toEqual(['Dad', 'Mom']);
+    // customer-safe fields only — no payout account / compliance / tenant keys.
+    const dad = transfers.find((t) => t.recipient_name === 'Dad')!;
+    expect(Object.keys(dad).sort()).toEqual(['amount', 'date', 'recipient_name', 'status', 'transfer_id']);
+    expect(dad.status).toBe('awaiting payment');
+    expect(String(dad.amount)).toContain('40');
+    expect(typeof dad.transfer_id).toBe('string');
+  });
+
+  it("filters to the named recipient ('mom') case-insensitively", async () => {
+    const base = await buildCtx(fakeRedis());
+    await send(base, 'Mom', '919876543210', 30);
+    await send(base, 'Dad', '919811112222', 40);
+    await send(base, 'Mom', '919876543210', 25);
+    const ctx = { ...base, channel: 'web' as const };
+
+    const r = await executeTool('list_recent_transfers', { recipient: 'mom' }, ctx);
+    const transfers = r.transfers as Array<Record<string, unknown>>;
+    expect(transfers).toHaveLength(2);
+    expect(transfers.every((t) => t.recipient_name === 'Mom')).toBe(true);
+  });
+
+  it('honors a clamped limit but reports the TOTAL match count', async () => {
+    const base = await buildCtx(fakeRedis());
+    await send(base, 'Mom', '919876543210', 30);
+    await send(base, 'Dad', '919811112222', 40);
+    const ctx = { ...base, channel: 'web' as const };
+    const r = await executeTool('list_recent_transfers', { limit: 1 }, ctx);
+    expect((r.transfers as unknown[]).length).toBe(1); // returned list is capped
+    expect(r.count).toBe(2); // ...but count is the full number of matches
+  });
+
+  it('returns an empty list (still with history_url) when nothing matches', async () => {
+    const base = await buildCtx(fakeRedis());
+    await send(base, 'Mom', '919876543210', 30);
+    const ctx = { ...base, channel: 'web' as const };
+    const r = await executeTool('list_recent_transfers', { recipient: 'nobody' }, ctx);
+    expect(r).toEqual({ transfers: [], count: 0, history_url: HISTORY_URL });
+  });
+
+  it("NEVER returns another customer's transfers (own-phone scoping)", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    await send(owner, 'Mom', '919876543210', 30);
+    const stranger = await buildCtx(redis, '15559990000');
+    await send(stranger, 'Dad', '919811112222', 40);
+
+    const mine = await executeTool('list_recent_transfers', {}, { ...owner, channel: 'web' as const });
+    expect((mine.transfers as Array<Record<string, unknown>>).map((t) => t.recipient_name)).toEqual(['Mom']);
+    const theirs = await executeTool('list_recent_transfers', {}, { ...stranger, channel: 'web' as const });
+    expect((theirs.transfers as Array<Record<string, unknown>>).map((t) => t.recipient_name)).toEqual(['Dad']);
+  });
+
+  it('is BLOCKED off the web channel (web-only) — returns not available here', async () => {
+    const base = await buildCtx(fakeRedis());
+    await send(base, 'Mom', '919876543210', 30);
+    // default channel (absent ⇒ whatsapp)
+    expect(await executeTool('list_recent_transfers', {}, base)).toEqual({ error: 'not available here' });
+    // explicit whatsapp
+    expect(
+      await executeTool('list_recent_transfers', {}, { ...base, channel: 'whatsapp' as const }),
+    ).toEqual({ error: 'not available here' });
   });
 });
 
