@@ -5,6 +5,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getAuditLogStore } from '@/lib/audit-log-store';
 import { requirePlatformAdmin } from '@/lib/auth';
+import { isTestStaff } from '@/lib/ticket-balancer';
 import type { Partner, Staff } from '@/lib/types';
 import { Sidebar } from '../sidebar';
 import { Icon } from '../icons';
@@ -50,7 +51,7 @@ function PartnerOptions({ partners }: { partners: Partner[] }) {
   );
 }
 
-function staffRow(s: Staff, opts: { isSelf: boolean; partners: Partner[]; partnerName: (id?: string) => string }) {
+function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: Partner[]; partnerName: (id?: string) => string }) {
   const status = s.status === 'suspended' ? 'suspended' : 'active';
   const initial = s.name.charAt(0).toUpperCase();
 
@@ -70,6 +71,7 @@ function staffRow(s: Staff, opts: { isSelf: boolean; partners: Partner[]; partne
           <span className="flex items-center gap-1.5 text-sm font-medium">
             {s.name}
             {opts.isSelf ? <Badge variant="outline">You</Badge> : null}
+            {opts.isTest ? <Badge variant="outline" className="text-muted-foreground">test fixture</Badge> : null}
           </span>
           <span className="block text-xs text-muted-foreground">{s.username}</span>
         </span>
@@ -150,6 +152,13 @@ export default async function TeamPage() {
   const platformAdmins = allStaff.filter(
     (s) => s.role === 'admin' && !s.partnerId && s.status !== 'suspended',
   ).length;
+  // De-clutter: real staff first, then the auto-provisioned test/smoke fixtures
+  // (the post-deploy smoke + seed re-create these every deploy) sorted to the
+  // bottom and badged, so the real team is always at a glance up top. Kept in the
+  // list — the smoke self-provisions and locates them here by username.
+  const realStaff = allStaff.filter((s) => !isTestStaff(s));
+  const testStaff = allStaff.filter((s) => isTestStaff(s));
+  const orderedStaff = [...realStaff, ...testStaff];
 
   return (
     <>
@@ -185,14 +194,15 @@ export default async function TeamPage() {
           <CardHeader>
             <CardTitle>Members</CardTitle>
             <CardDescription>
-              {allStaff.length} member{allStaff.length === 1 ? '' : 's'} across platform and partners
+              {realStaff.length} member{realStaff.length === 1 ? '' : 's'} across platform and partners
+              {testStaff.length > 0 && ` · ${testStaff.length} test fixture${testStaff.length === 1 ? '' : 's'}`}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <ExpandableTable
               columns={STAFF_COLUMNS}
-              rows={allStaff.map((s) =>
-                staffRow(s, { isSelf: s.username === me.username, partners, partnerName }),
+              rows={orderedStaff.map((s) =>
+                staffRow(s, { isSelf: s.username === me.username, isTest: isTestStaff(s), partners, partnerName }),
               )}
               empty={<>No teammates yet — add your first.</>}
             />
