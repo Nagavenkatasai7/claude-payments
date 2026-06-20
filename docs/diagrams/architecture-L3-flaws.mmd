@@ -1,0 +1,85 @@
+---
+title: "Flaw overlay - container map with the 10 confirmed weaknesses pinned where they live"
+config:
+  theme: dark
+---
+flowchart LR
+    classDef people fill:#1d4ed8,stroke:#93c5fd,color:#ffffff
+    classDef core fill:#15803d,stroke:#86efac,color:#ffffff
+    classDef store fill:#a16207,stroke:#fde68a,color:#ffffff
+    classDef external fill:#374151,stroke:#9ca3af,color:#ffffff,stroke-dasharray: 5 5
+    classDef flaw fill:#7f1d1d,stroke:#ef4444,color:#ffffff
+
+    subgraph zpeople["People"]
+        customer["Customer (sender)"]:::people
+        partner["Partner (money transmitter)"]:::people
+    end
+
+    subgraph zplat["SmartRemit - ONE Next.js app on Vercel"]
+        agent["AI agent (chat, quotes)"]:::core
+        money["Money engine (creates, charges, settles)"]:::core
+        compliance["Compliance + KYC screening"]:::core
+        outbox["Outbox + worker (retry engine)"]:::core
+        admin["Admin dashboard + staff auth"]:::core
+    end
+
+    subgraph zstore["Storage"]
+        ledger["Ledger (Postgres)"]:::store
+        redis["Hot data (Redis)"]:::store
+    end
+
+    subgraph zout["Outside services"]
+        waext["WhatsApp (Meta)"]:::external
+        fxext["Live exchange rates (Frankfurter)"]:::external
+        pspext["Card / bank charger (mock today)"]:::external
+        railext["Partner payout rail"]:::external
+        ghext["GitHub Actions (CI/CD + 5-min heartbeat)"]:::external
+    end
+
+    customer -->|"chats + pays"| agent
+    agent -->|"pulls live rates"| fxext
+    agent -->|"approved quote becomes a transfer"| money
+    agent -->|"stores chats + drafts"| redis
+    partner -->|"REST API + runs the payout rail"| money
+    money -->|"screens names"| compliance
+    money -->|"charges the sender"| pspext
+    money -->|"records everything"| ledger
+    money -->|"one-time codes (sent directly, not queued)"| waext
+    outbox -.->|"signed payout instruction"| railext
+    railext -->|"payout confirmed (signed webhook)"| money
+    outbox -.->|"queued WhatsApp messages (replies, notices, alerts)"| waext
+    ghext -->|"5-minute wake-up = the delivery guarantee"| outbox
+    admin -->|"staff logins + sessions live here"| redis
+
+    f1["⚠ HIGH: Sanctions screening is mock exact-match"]:::flaw
+    f1 -.-> compliance
+    f2["⚠ HIGH: Sender charging is a mock PSP"]:::flaw
+    f2 -.-> pspext
+    f3["⚠ HIGH: Manual DB migrations (CI checks, never applies) - caused outage"]:::flaw
+    f3 -.-> ghext
+    f4["⚠ HIGH: Staff accounts live only in Redis"]:::flaw
+    f4 -.-> admin
+    f5["⚠ HIGH: One channel for OTPs and alerts"]:::flaw
+    f5 -.-> waext
+    f6["⚠ MEDIUM: Delivery guarantee is a GitHub cron"]:::flaw
+    f6 -.-> ghext
+    f7["⚠ MEDIUM: No database-level tenant isolation"]:::flaw
+    f7 -.-> ledger
+    f8["⚠ MEDIUM: Single FX source, stale fallback rates"]:::flaw
+    f8 -.-> fxext
+    f9["⚠ MEDIUM: No error tracker - alerting is WhatsApp to one phone"]:::flaw
+    f9 -.-> outbox
+    f10["⚠ MEDIUM: One app, one region, one DB pool"]:::flaw
+    f10 -.-> zplat
+
+    linkStyle 14,15,16,17,18,19,20,21,22,23 stroke:#ef4444,stroke-width:2px
+
+    subgraph legend["Legend"]
+        direction LR
+        lp["Person"]:::people
+        lc["SmartRemit part"]:::core
+        ld["Data store"]:::store
+        le["Outside service"]:::external
+        lf["⚠ Confirmed weakness - red dotted line points at the affected part"]:::flaw
+        lq["Grey dotted = queued in the outbox, retried until done"]:::core
+    end

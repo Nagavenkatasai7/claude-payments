@@ -37,19 +37,43 @@ function formatAmount(transfer: Transfer): string {
   }
 }
 
+/** The customer-safe summary fields for ONE transfer. */
+export interface TransferSummaryFields {
+  id: string; // the customer's own short id (no PII); '' when absent
+  date: string; // Eastern date, or 'recently' when missing
+  recipientName: string; // recipientName, or 'a recipient' when blank
+  amount: string; // source-currency, customer-visible
+  status: string; // customer-facing label (never the raw 'blocked' token)
+}
+
+/**
+ * The ONE customer-safe per-transfer shape, shared by the round-0 [RECENT
+ * TRANSFERS] note (formatLine) and the list_recent_transfers tool. Surfaces only
+ * fields the customer already owns — recipientName + source-currency amount +
+ * status label + date + their own short id — NEVER a payout account, an internal
+ * screening reason, or a tenant field. bot-content-guard scans this file, so a
+ * single formatter keeps both surfaces leak-safe and in lockstep.
+ */
+export function transferSummaryFields(transfer: Transfer): TransferSummaryFields {
+  return {
+    id: (transfer.id ?? '').trim(),
+    date: transfer.createdAt ? easternDate(Date.parse(transfer.createdAt)) : 'recently',
+    recipientName: (transfer.recipientName ?? '').trim() || 'a recipient',
+    amount: formatAmount(transfer),
+    status:
+      REFUND_LABEL[transfer.refundStatus ?? 'none'] ??
+      STATUS_LABEL[transfer.status] ??
+      'in progress',
+  };
+}
+
 function formatLine(transfer: Transfer): string {
   // Short transfer ref so the bot can name a SPECIFIC transfer (e.g. when the
   // customer asks for a refund) without echoing the full id. The id is the
   // customer's own and carries no PII — leak-safe.
-  const ref = (transfer.id ?? '').trim() ? `#${transfer.id} · ` : '';
-  const when = transfer.createdAt ? easternDate(Date.parse(transfer.createdAt)) : 'recently';
-  const who = (transfer.recipientName ?? '').trim() || 'a recipient';
-  const amount = formatAmount(transfer);
-  const status =
-    REFUND_LABEL[transfer.refundStatus ?? 'none'] ??
-    STATUS_LABEL[transfer.status] ??
-    'in progress';
-  return `${ref}${when} · ${who} · ${amount} · ${status}`;
+  const f = transferSummaryFields(transfer);
+  const ref = f.id ? `#${f.id} · ` : '';
+  return `${ref}${f.date} · ${f.recipientName} · ${f.amount} · ${f.status}`;
 }
 
 /**

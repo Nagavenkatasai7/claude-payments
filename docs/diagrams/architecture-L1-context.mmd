@@ -1,0 +1,45 @@
+---
+title: "Level 1 - System context: who and what does SmartRemit talk to?"
+config:
+  theme: dark
+---
+flowchart LR
+    classDef people fill:#1d4ed8,stroke:#93c5fd,color:#ffffff
+    classDef core fill:#15803d,stroke:#86efac,color:#ffffff
+    classDef external fill:#374151,stroke:#9ca3af,color:#ffffff,stroke-dasharray: 5 5
+
+    customer["Customer - person sending money US to India"]:::people
+    partner["Partner - licensed money transmitter who actually holds and moves funds"]:::people
+    staff["Platform staff - operates the system, reviews KYC and compliance holds"]:::people
+
+    smartremit["SmartRemit - chat-based remittance orchestrator, never holds funds"]:::core
+
+    waext["WhatsApp (Meta) - the chat channel"]:::external
+    aiext["AI model (Kimi via Ollama Cloud) - writes the bot replies"]:::external
+    fxext["Live exchange rates (Frankfurter)"]:::external
+    pspext["Card / bank charger (mock today)"]:::external
+    persona["Identity verification (Persona) - checks who the sender is"]:::external
+    railext["Partner payout rail - the system that pays the recipient"]:::external
+
+    recipient["Recipient - person in India receiving the money"]:::people
+
+    customer -->|"chats to send money"| waext
+    waext -->|"relays chat messages"| smartremit
+    customer -->|"pays on the hosted pay page"| smartremit
+    partner -->|"manages branded service, pushes wholesale rates"| smartremit
+    staff -->|"operates, reviews holds"| smartremit
+    smartremit -->|"asks for chat replies"| aiext
+    smartremit -->|"fetches live exchange rates"| fxext
+    smartremit -->|"asks it to charge the sender"| pspext
+    smartremit -->|"verifies sender identity"| persona
+    smartremit -->|"sends signed payout instruction"| railext
+    railext -->|"reports payout status back"| smartremit
+    railext -->|"deposits money"| recipient
+    waext -->|"notifies when money is delivered"| recipient
+
+    subgraph legend["Legend"]
+        direction LR
+        lp["Person"]:::people
+        lc["The system"]:::core
+        le["Outside service"]:::external
+    end

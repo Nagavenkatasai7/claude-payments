@@ -1,0 +1,88 @@
+---
+title: "Level 2 - Inside SmartRemit: the containers, and how one transfer flows (steps 1-12)"
+config:
+  theme: dark
+---
+flowchart LR
+    classDef people fill:#1d4ed8,stroke:#93c5fd,color:#ffffff
+    classDef surface fill:#0e7490,stroke:#67e8f9,color:#ffffff
+    classDef core fill:#15803d,stroke:#86efac,color:#ffffff
+    classDef store fill:#a16207,stroke:#fde68a,color:#ffffff
+    classDef external fill:#374151,stroke:#9ca3af,color:#ffffff,stroke-dasharray: 5 5
+
+    subgraph zpeople["People"]
+        customer["Customer (sender)"]:::people
+        partner["Partner (money transmitter)"]:::people
+        staff["Platform staff"]:::people
+    end
+
+    subgraph zways["Ways in"]
+        wahook["WhatsApp inbox (signature-checked webhook)"]:::surface
+        paypage["Hosted pay page (pay link + one-time code)"]:::surface
+        portal["Customer portal (history, receipts, web chat, support tickets)"]:::surface
+        papi["Partner REST API (key-protected)"]:::surface
+        stathook["Status webhooks (signed callbacks from rails, charger + KYC provider)"]:::surface
+        admin["Admin dashboard (staff console: ops, tickets, KYC review)"]:::surface
+    end
+
+    subgraph zbrain["The brain and the money engine"]
+        agent["AI agent (quotes, answers, builds pay links)"]:::core
+        bestrate["Best-rate selector (cheapest partner wins the payout)"]:::core
+        compliance["Compliance + KYC (sanctions always run; identity checks via Persona)"]:::core
+        money["Money engine (creates transfer, charges sender, starts payout)"]:::core
+        outbox["Outbox + worker (queues every outside action, retries until done)"]:::core
+    end
+
+    subgraph zstore["Storage"]
+        ledger["Ledger (Postgres) - every transfer, encrypted personal details"]:::store
+        redis["Hot data (Redis) - chats, drafts, codes, sessions"]:::store
+    end
+
+    subgraph zout["Outside services"]
+        aiext["AI model (Kimi via Ollama Cloud)"]:::external
+        fxext["Live exchange rates (Frankfurter)"]:::external
+        pspext["Card / bank charger (mock today)"]:::external
+        persona["Identity verification (Persona)"]:::external
+        railext["Partner payout rail"]:::external
+        waext["WhatsApp (Meta)"]:::external
+        ghext["Schedulers - GitHub Actions 5-min heartbeat + Vercel daily cron (recurring transfers)"]:::external
+    end
+
+    customer -->|"1. chats to send money (via WhatsApp)"| wahook
+    wahook -.->|"2. queues the chat turn"| outbox
+    outbox -->|"3. runs the chat turn"| agent
+    agent -->|"asks for replies"| aiext
+    agent -->|"pulls live rates"| fxext
+    agent -->|"picks the best payout deal"| bestrate
+    agent -->|"4. saves quote draft + pay link"| redis
+    customer -->|"5. opens pay link, enters one-time code"| paypage
+    paypage -->|"6. confirms and finalizes payment"| money
+    money -->|"7. screens sender + recipient names"| compliance
+    compliance -->|"starts identity check"| persona
+    persona -->|"identity result webhook"| stathook
+    money -->|"8. charges the sender"| pspext
+    money -->|"9. records paid + payout order in ONE transaction"| ledger
+    outbox -.->|"10. sends signed payout instruction"| railext
+    railext -->|"11. confirms money was paid out"| stathook
+    stathook -->|"12. flips status to delivered"| ledger
+    stathook -->|"sends delivery notices (best-effort, direct)"| waext
+    outbox -.->|"sends queued WhatsApp messages (replies, pay links, notices)"| waext
+    customer -->|"checks history and receipts"| portal
+    portal -->|"reads history + receipts"| ledger
+    partner -->|"creates + confirms transfers"| papi
+    papi -->|"mints and confirms transfers"| money
+    papi -->|"pushes wholesale rates"| bestrate
+    staff -->|"reviews holds, approves refunds"| admin
+    admin -->|"reads and updates the ledger"| ledger
+    admin -->|"staff logins + sessions"| redis
+    ghext -->|"wakes the worker every 5 minutes"| outbox
+
+    subgraph legend["Legend"]
+        direction LR
+        lp["Person"]:::people
+        ls["Way in"]:::surface
+        lc["Core engine"]:::core
+        ld["Data store"]:::store
+        le["Outside service"]:::external
+        lnote["Arrows: solid = direct call, dotted = queued in the outbox and retried until done"]
+    end
