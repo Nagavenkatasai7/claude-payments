@@ -5,6 +5,10 @@ import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { requireCustomer } from '@/lib/customer-auth';
 import { getPartnerStore } from '@/lib/partner-store';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { AccountShell, PageHeader } from '../shell';
 
 export const metadata = { title: 'Support · SmartRemit' };
 
@@ -22,7 +26,15 @@ const STATUS_LABEL: Record<string, string> = {
   closed: 'Closed',
 };
 
-const rowCls = 'flex justify-between py-1.5 text-sm leading-normal';
+type BadgeTone = 'default' | 'secondary' | 'destructive' | 'outline';
+
+const STATUS_TONE: Record<string, BadgeTone> = {
+  open: 'secondary',
+  waiting_admin: 'secondary',
+  pending: 'default', // "Waiting for you" — the customer's turn, draw the eye
+  resolved: 'outline',
+  closed: 'outline',
+};
 
 export default async function SupportListPage() {
   const customer = await requireCustomer();
@@ -34,73 +46,65 @@ export default async function SupportListPage() {
     (await getPartnerStore().ensureDefaultPartner());
   if (partner.supportConfig?.enableSupportPortal === false) {
     return (
-      <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
-        <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
-          <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
-          <h1 className="mb-5 text-lg font-semibold leading-normal">Support</h1>
-          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
+      <AccountShell active="support" customer={customer}>
+        <PageHeader title="Support" sub="Your requests" />
+        <Card>
+          <CardContent className="text-sm text-muted-foreground">
             Support is handled in WhatsApp — message us there.
-          </p>
-          <p className="mt-4">
-            <Link href="/account" className="text-sm text-[#8696a0] underline">
-              ← Back to your account
-            </Link>
-          </p>
-        </div>
-      </main>
+          </CardContent>
+        </Card>
+      </AccountShell>
     );
   }
 
   const tickets = await createTicketRepo(getDb()).listByCustomer(customer.senderPhone);
 
   return (
-    <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
-      <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
-        <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
-        <h1 className="mb-5 text-lg font-semibold leading-normal">Support</h1>
-        {tickets.length === 0 ? (
-          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
+    <AccountShell active="support" customer={customer}>
+      <PageHeader
+        title="Support"
+        sub="Your requests"
+        actions={
+          <Button asChild>
+            <Link href="/account/support/new">New request</Link>
+          </Button>
+        }
+      />
+
+      {tickets.length === 0 ? (
+        <Card>
+          <CardContent className="text-sm text-muted-foreground">
             No support requests yet. If something doesn&rsquo;t look right with a transfer or your
             account, start a request and we&rsquo;ll get back to you.
-          </p>
-        ) : (
-          <>
-            <p className="-mt-2 mb-3.5 text-sm leading-normal text-[#8696a0]">
-              Your support requests, most recent first. Tap one to read the conversation or reply.
-            </p>
-            {tickets.map((t) => (
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {tickets.map((t) => (
+            <Card key={t.id} className="py-0 transition-colors hover:bg-muted/40">
               <Link
-                key={t.id}
                 href={`/account/support/${t.id}`}
-                className="mb-5 block rounded-xl bg-[#202c33] p-3.5 text-inherit no-underline"
+                className="flex items-center justify-between gap-3 p-4"
               >
-                <div className={rowCls}>
-                  <span className="font-semibold">{t.subject}</span>
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-foreground">{t.subject}</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    Updated{' '}
+                    {new Date(t.updatedAt).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })}
+                  </div>
                 </div>
-                <div className={`${rowCls} opacity-75`}>
-                  <span className="text-[#8696a0]">
-                    {new Date(t.updatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                  </span>
-                  <span className={t.status === 'pending' ? 'text-[#25d366]' : ''}>
-                    {STATUS_LABEL[t.status] ?? 'In progress'}
-                  </span>
-                </div>
+                <Badge variant={STATUS_TONE[t.status] ?? 'secondary'}>
+                  {STATUS_LABEL[t.status] ?? 'In progress'}
+                </Badge>
               </Link>
-            ))}
-          </>
-        )}
-        <Link
-          href="/account/support/new"
-          className="block w-full rounded-3xl bg-[#25d366] p-3 text-center text-[15px] font-bold text-[#0b141a] no-underline"
-        >
-          New support request
-        </Link>
-        <p className="mt-4">
-          <Link href="/account" className="text-sm text-[#8696a0] underline">
-            ← Back to your account
-          </Link>
-        </p>
-      </div>
-    </main>
+            </Card>
+          ))}
+        </div>
+      )}
+    </AccountShell>
   );
 }
