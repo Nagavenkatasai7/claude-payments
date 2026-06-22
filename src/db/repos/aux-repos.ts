@@ -4,12 +4,13 @@ import {
   beneficiaries,
   corridorRequests,
   idempotencyKeys,
+  partnerRequests,
   recipients,
 } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, openOptional } from './mappers';
-import type { CorridorRequest, PartnerId, PayoutMethod, Recipient } from '@/lib/types';
+import type { CorridorRequest, PartnerId, PartnerRequest, PayoutMethod, Recipient } from '@/lib/types';
 
 // aux-repos — the smaller aggregates, one factory each, mirroring the surfaces
 // call sites already use. Payout destinations (full bank accounts) are
@@ -145,6 +146,40 @@ export function createCorridorRequestRepo(db: DbOrTx) {
   };
 }
 export type CorridorRequestRepo = ReturnType<typeof createCorridorRequestRepo>;
+
+// ── Partner-with-us leads (public landing form) ──────────────────────────────
+export function createPartnerRequestRepo(db: DbOrTx) {
+  return {
+    async savePartnerRequest(req: PartnerRequest): Promise<void> {
+      await db.insert(partnerRequests).values({
+        id: req.id,
+        companyName: req.companyName,
+        email: req.email,
+        phone: req.phone,
+        corridors: req.corridors,
+        comments: req.comments ?? null,
+        capturedAt: new Date(req.capturedAt),
+      });
+    },
+
+    async listPartnerRequests(): Promise<PartnerRequest[]> {
+      const rows = await db.select().from(partnerRequests).orderBy(desc(partnerRequests.capturedAt));
+      return rows.map((row) => {
+        const r: PartnerRequest = {
+          id: row.id,
+          companyName: row.companyName,
+          email: row.email,
+          phone: row.phone,
+          corridors: (row.corridors as string[]) ?? [],
+          capturedAt: row.capturedAt.toISOString(),
+        };
+        if (row.comments) r.comments = row.comments;
+        return r;
+      });
+    },
+  };
+}
+export type PartnerRequestRepo = ReturnType<typeof createPartnerRequestRepo>;
 
 // ── Idempotency keys (PK (partner_id, key) — the duplicate-window killer) ────
 export function createIdempotencyRepo(db: DbOrTx) {

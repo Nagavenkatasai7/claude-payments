@@ -12,6 +12,7 @@ import {
   signBody,
 } from '@/lib/providers/http-payment-provider';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
+import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
@@ -62,6 +63,12 @@ export interface WorkerDeps {
    * failing provider to exercise the retry/dead-letter machinery).
    */
   fundingProvider?: FundingProvider;
+  /**
+   * Email sender for the 'email.send' effect (partner-lead notifications).
+   * Optional — defaults to the real Resend sender (which itself no-ops when
+   * RESEND_API_KEY is unset); tests inject a mock to assert recipients.
+   */
+  sendEmail?: (msg: EmailMessage) => Promise<void>;
   /**
    * The staff roster for the ticket load-balancer (ticket.triage auto-assign).
    * DI'd so PGlite tests inject a roster without touching the Redis auth store;
@@ -289,6 +296,19 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)
       await deps.sendText(to, str(p.message));
+      return;
+    }
+
+    // ── Transactional email (partner-lead notifications) ────────────────────
+    // Durable: the real sender no-ops when RESEND_API_KEY is unset (no retry
+    // storm); with a key, a Resend error throws and rides the backoff/dead-letter.
+    case 'email.send': {
+      await (deps.sendEmail ?? sendEmailDefault)({
+        to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
+        subject: str(p.subject),
+        text: str(p.text),
+        ...(typeof p.html === 'string' ? { html: p.html } : {}),
+      });
       return;
     }
 

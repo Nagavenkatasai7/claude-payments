@@ -520,3 +520,14 @@ export interface CorridorRequest {
   approxCurrency?: string;
   capturedAt: string;           // ISO-8601
 }
+
+/** An inbound "Partner with us" lead from the public landing form. */
+export interface PartnerRequest {
+  id: string;
+  companyName: string;
+  email: string;
+  phone: string;
+  corridors: string[];          // country codes the partner is interested in
+  comments?: string;
+  capturedAt: string;           // ISO-8601
+}
