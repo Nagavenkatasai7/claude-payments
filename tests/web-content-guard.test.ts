@@ -72,7 +72,9 @@ describe('B5 hard rule: the web chat surface never leaks internal terminology', 
   });
 
   it('the chat UI carries the persistent disclaimer banner', () => {
-    const src = readFileSync(resolve(process.cwd(), 'src/app/account/chat/chat-client.tsx'), 'utf-8');
+    // The disclaimer renders from the server page wrapper (a subtle Alert above
+    // the ChatClient island) after the light-theme dashboard restyle.
+    const src = readFileSync(resolve(process.cwd(), 'src/app/account/chat/page.tsx'), 'utf-8');
     expect(src).toContain('AI assistant — answers can be wrong.');
     expect(src).toContain('Money only ever moves through your approved pay');
   });
