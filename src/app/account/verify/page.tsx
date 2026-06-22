@@ -1,6 +1,11 @@
+import { CheckCircle2, Clock, ShieldCheck } from 'lucide-react';
 import { requireCustomer } from '@/lib/customer-auth';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerStore } from '@/lib/partner-store';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { AccountShell, PageHeader } from '../shell';
 import { startVerificationAction } from './actions';
 
 export const dynamic = 'force-dynamic';
@@ -29,39 +34,62 @@ export default async function VerifyPage() {
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
 
   return (
-    <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
-      <div className="w-full max-w-[420px] rounded-2xl bg-[#111b21] p-7">
-        <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
-        <h1 className="mb-5 text-lg font-semibold leading-normal">Verify your identity</h1>
+    <AccountShell active="overview" customer={customer}>
+      <PageHeader title="Identity verification" />
 
+      <div className="mx-auto max-w-lg">
         {!gateOn ? (
-          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
-            No verification needed — your account can send money without identity verification.
-          </p>
+          <Card>
+            <CardContent className="flex flex-col items-center gap-3 py-4 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+                <CheckCircle2 className="size-6" />
+              </div>
+              <CardTitle className="text-lg">No verification needed</CardTitle>
+              <CardDescription>
+                Your account can send money without identity verification.
+              </CardDescription>
+            </CardContent>
+          </Card>
         ) : done ? (
-          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">✓ You&rsquo;re verified. You can send money in WhatsApp.</p>
+          <Alert className="border-primary/30 bg-primary/5 [&>svg]:text-primary">
+            <CheckCircle2 />
+            <AlertTitle className="text-primary">You&rsquo;re verified</AlertTitle>
+            <AlertDescription>
+              Your identity is confirmed. You can send money in WhatsApp.
+            </AlertDescription>
+          </Alert>
         ) : inReview ? (
-          <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
-            Thanks — we received your verification and are reviewing it. We&rsquo;ll message you on
-            WhatsApp shortly.
-          </p>
+          <Alert>
+            <Clock />
+            <AlertTitle>Thanks — we&rsquo;re reviewing</AlertTitle>
+            <AlertDescription>
+              We received your verification and are reviewing it. We&rsquo;ll message you on
+              WhatsApp shortly.
+            </AlertDescription>
+          </Alert>
         ) : (
-          <>
-            <p className="-mt-2 mb-5 text-sm leading-normal text-[#8696a0]">
-              To send money we need to verify your identity. It takes about 2 minutes on our secure
-              partner&rsquo;s page — have a government photo ID ready. Your details are encrypted and
-              never stored on our servers.
-            </p>
-            <form action={startVerificationAction}>
-              <button type="submit" className="w-full cursor-pointer rounded-3xl bg-[#25d366] p-3 text-[15px] font-bold text-[#0b141a] disabled:cursor-default disabled:opacity-60">Start verification</button>
-            </form>
-          </>
+          <Card>
+            <CardHeader>
+              <div className="mb-1 flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+                <ShieldCheck className="size-6" />
+              </div>
+              <CardTitle>Verify your identity</CardTitle>
+              <CardDescription>
+                To send money we need to confirm who you are. It takes about 2 minutes on our
+                secure partner&rsquo;s page — have a government photo ID ready. Your details are
+                encrypted and never stored on our servers.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form action={startVerificationAction}>
+                <Button type="submit" size="lg" className="w-full">
+                  Start verification
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
         )}
-
-        <p className="mt-[18px] text-center text-sm leading-normal text-[#8696a0]">
-          <a href="/account" className="font-semibold text-[#25d366] no-underline hover:underline">Back to your account</a>
-        </p>
       </div>
-    </main>
+    </AccountShell>
   );
 }
