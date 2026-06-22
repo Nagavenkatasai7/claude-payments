@@ -2,7 +2,7 @@ import { getRedis } from './redis';
 import { easternDate } from './dates';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { createRecipientRepo, createCorridorRequestRepo } from '@/db/repos/aux-repos';
+import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import type { ChatMessage, Transfer, TransferStatus } from './types';
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
@@ -52,6 +52,7 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
   const transfersRepo = createTransferRepo(db);
   const recipientsRepo = createRecipientRepo(db);
   const corridorRepo = createCorridorRequestRepo(db);
+  const partnerReqRepo = createPartnerRequestRepo(db);
 
   return {
     // ── Conversations (Redis — hot, trimmed, ephemeral) ──────────────────
@@ -190,6 +191,14 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     },
     async listCorridorRequests(): Promise<import('./types').CorridorRequest[]> {
       return corridorRepo.listCorridorRequests();
+    },
+
+    // ── Partner-with-us leads (Postgres) ──────────────────────────────────
+    async savePartnerRequest(req: import('./types').PartnerRequest): Promise<void> {
+      await partnerReqRepo.savePartnerRequest(req);
+    },
+    async listPartnerRequests(): Promise<import('./types').PartnerRequest[]> {
+      return partnerReqRepo.listPartnerRequests();
     },
   };
 }

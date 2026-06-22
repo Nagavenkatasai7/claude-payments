@@ -25,7 +25,8 @@ export type OutboxKind =
   | 'funding.refund'
   | 'agent.turn'
   | 'ticket.triage'
-  | 'ops.alert';
+  | 'ops.alert'
+  | 'email.send';
 
 export type OutboxRow = typeof outbox.$inferSelect;
 

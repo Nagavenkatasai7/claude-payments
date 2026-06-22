@@ -193,6 +193,23 @@ describe('drainOnce — rail.callback (the reference rail settle leg)', () => {
   });
 });
 
+describe('drainOnce — email.send (partner-lead notification)', () => {
+  it('calls the injected sendEmail with the recipients + subject and marks done', async () => {
+    const sent: { to: string[]; subject: string; text: string }[] = [];
+    const d: WorkerDeps = { ...deps(), sendEmail: async (m) => { sent.push(m); } };
+    await outbox.enqueue(
+      'email.send',
+      { to: ['venkat@smartremit.ai', 'rohan@smartremit.ai'], subject: 'New partner request: Acme Remit', text: 'Company: Acme Remit\nEmail: a@acme.com' },
+      { dedupeKey: 'preq:abc123' },
+    );
+    const r = await drainOnce(d, 'w1');
+    expect(r.processed).toBe(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toEqual(['venkat@smartremit.ai', 'rohan@smartremit.ai']);
+    expect(sent[0].subject).toContain('Acme Remit');
+  });
+});
+
 describe('drainOnce — plain sends', () => {
   it('whatsapp.text and whatsapp.template flow through with creds', async () => {
     await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', creds: { phoneNumberId: '111', token: 't' } });

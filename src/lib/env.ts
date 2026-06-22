@@ -19,6 +19,21 @@ export const env = {
   get opsAlertPhone(): string {
     return process.env.OPS_ALERT_PHONE ?? '';
   },
+  // Email (Resend) — used for "Partner with us" lead notifications. All OPTIONAL
+  // (NOT money-grade, so boot-assert never requires them): unset ⇒ the email
+  // effect no-ops and the lead still lands in the admin Partner-requests page.
+  get resendApiKey(): string {
+    return process.env.RESEND_API_KEY ?? '';
+  },
+  /** Recipients of partner-lead emails — comma-separated; extendable any time. */
+  get partnerLeadEmails(): string[] {
+    const raw = process.env.PARTNER_LEAD_EMAILS ?? 'venkat@smartremit.ai';
+    return raw.split(',').map((e) => e.trim()).filter(Boolean);
+  },
+  /** The From header for outbound email (needs a Resend-verified domain). */
+  get emailFrom(): string {
+    return process.env.EMAIL_FROM ?? 'SmartRemit Partners <partners@smartremit.ai>';
+  },
   get ollamaBaseUrl() {
     return required('OLLAMA_BASE_URL');
   },

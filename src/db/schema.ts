@@ -382,6 +382,19 @@ export const corridorRequests = pgTable('corridor_requests', {
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
 });
 
+// Inbound "Partner with us" leads from the public landing form. A durable record
+// (the email notification is a best-effort push on top); platform staff review
+// them on /admin-dashboard/partner-requests.
+export const partnerRequests = pgTable('partner_requests', {
+  id: text('id').primaryKey(),
+  companyName: text('company_name').notNull(),
+  email: text('email').notNull(),
+  phone: text('phone').notNull(),
+  corridors: jsonb('corridors').notNull().default([]), // string[] of country codes
+  comments: text('comments'),
+  capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
+});
+
 // The durability backbone (Stage 2): every external effect (WhatsApp send,
 // settlement instruction, rail callback, mock settle, agent turn, ops alert)
 // is written here IN THE SAME TRANSACTION as the state change that implies it,
