@@ -7,6 +7,7 @@ import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon } from './landing/TrustIcons
 import RateCalculator from './landing/RateCalculator';
 import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
+import { submitPartnerRequestAction } from './partners-action';
 
 // Self-hosted Inter, scoped to the landing tree only (applied on the landing
 // root div), so it never touches the sh-* dashboard or .payapp themes.
@@ -38,6 +39,21 @@ const COUNTRIES = [
   { name: 'Australia', short: 'Australia', code: 'au' },
   { name: 'New Zealand', short: 'New Zealand', code: 'nz' },
   { name: 'India', short: 'India', code: 'in' },
+];
+
+// Corridor checkbox options for the "Partner with us" form. Values are the
+// allow-listed codes the server action accepts (8 supported corridors + Other);
+// labels are the friendly names shown to prospects.
+const PARTNER_CORRIDORS = [
+  { value: 'US', label: 'United States' },
+  { value: 'CA', label: 'Canada' },
+  { value: 'GB', label: 'United Kingdom' },
+  { value: 'AE', label: 'UAE' },
+  { value: 'SG', label: 'Singapore' },
+  { value: 'AU', label: 'Australia' },
+  { value: 'NZ', label: 'New Zealand' },
+  { value: 'IN', label: 'India' },
+  { value: 'Other', label: 'Other' },
 ];
 
 // Scroll-reveal recipe (existing lp-rise keyframe; progressive — only engages
@@ -108,7 +124,13 @@ function LoginMenu() {
   );
 }
 
-export default async function LandingPage() {
+export default async function LandingPage({
+  searchParams,
+}: {
+  // Next.js 16: searchParams is a Promise. We read ?partner=ok|err|rate to show
+  // the post-submit note next to the "Partner with us" form.
+  searchParams?: Promise<{ partner?: string }>;
+}) {
   // getFxRate() never throws (internal try/catch → fallback), but wrap
   // defensively so the page can never error if FX is down.
   let liveRate = FALLBACK_FX_RATE;
@@ -118,6 +140,8 @@ export default async function LandingPage() {
   } catch {
     liveRate = FALLBACK_FX_RATE;
   }
+
+  const partnerStatus = (await searchParams)?.partner;
 
   const genericHref = waLink(WA_MESSAGES.generic);
 
@@ -153,6 +177,12 @@ export default async function LandingPage() {
               href="#calculator"
             >
               Calculator
+            </a>
+            <a
+              className="text-[14px] text-[#8b94a0] transition-colors hover:text-[#f5f7f8] max-[760px]:hidden"
+              href="#partner-with-us"
+            >
+              Partner with us
             </a>
             <LoginMenu />
             <a
@@ -445,6 +475,187 @@ export default async function LandingPage() {
             </p>
           </div>
         </section>
+
+        {/* ============ PARTNER WITH US — public lead form ============ */}
+        <section
+          id="partner-with-us"
+          className={`border-t border-white/[0.07] px-5 py-[clamp(64px,9vw,130px)] ${RISE}`}
+          aria-labelledby="partner-h"
+        >
+          <div className="mx-auto grid w-full max-w-[1080px] items-start gap-10 lg:grid-cols-2 lg:gap-20">
+            <div>
+              <p className={`${EYEBROW} text-[#22d3ee]`}>For partners</p>
+              <h2
+                id="partner-h"
+                className="text-[clamp(28px,4vw,46px)] font-semibold leading-[1.1] tracking-[-0.025em]"
+              >
+                Partner with us.
+              </h2>
+              <p className="mt-4 max-w-[46ch] text-[17px] leading-relaxed text-[#8b94a0]">
+                Licensed money transmitters: get a branded WhatsApp bot, a hosted pay page,
+                signed settlement webhooks, a REST API, and a self-service dashboard. You keep
+                the licence and the funds — we orchestrate the rest. Tell us your corridors and
+                we&rsquo;ll be in touch.
+              </p>
+            </div>
+
+            <form
+              action={submitPartnerRequestAction}
+              className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 sm:p-8"
+            >
+              {/* Post-submit notes — driven by ?partner=ok|err|rate. */}
+              {partnerStatus === 'ok' && (
+                <p
+                  role="status"
+                  className="mb-6 rounded-xl border border-[rgba(37,211,102,0.3)] bg-[rgba(37,211,102,0.08)] px-4 py-3 text-[14px] text-[#cdeede]"
+                >
+                  Thanks — we&rsquo;ll be in touch.
+                </p>
+              )}
+              {partnerStatus === 'err' && (
+                <p
+                  role="alert"
+                  className="mb-6 rounded-xl border border-[rgba(248,113,113,0.35)] bg-[rgba(248,113,113,0.08)] px-4 py-3 text-[14px] text-[#f4c7c7]"
+                >
+                  Please check the form — a company name, valid email, phone, and at least one
+                  corridor are required.
+                </p>
+              )}
+              {partnerStatus === 'rate' && (
+                <p
+                  role="alert"
+                  className="mb-6 rounded-xl border border-[rgba(248,113,113,0.35)] bg-[rgba(248,113,113,0.08)] px-4 py-3 text-[14px] text-[#f4c7c7]"
+                >
+                  Too many requests — please try again later.
+                </p>
+              )}
+
+              {/* Honeypot — visually hidden, off-screen, not announced. Bots fill
+                  it; humans don't. A non-empty value is silently dropped. */}
+              <div
+                aria-hidden="true"
+                className="absolute -left-[9999px] top-0 h-0 w-0 overflow-hidden"
+              >
+                <label htmlFor="website">Leave this field empty</label>
+                <input
+                  id="website"
+                  type="text"
+                  name="website"
+                  tabIndex={-1}
+                  autoComplete="off"
+                />
+              </div>
+
+              <div className="flex flex-col gap-5">
+                <div className="flex flex-col gap-2">
+                  <label
+                    htmlFor="company_name"
+                    className="text-[13px] font-semibold text-[#f5f7f8]"
+                  >
+                    Company name
+                  </label>
+                  <input
+                    id="company_name"
+                    type="text"
+                    name="company_name"
+                    required
+                    minLength={2}
+                    maxLength={200}
+                    autoComplete="organization"
+                    className="min-h-[46px] rounded-xl border border-white/10 bg-[#0b0e12] px-4 text-[15px] text-[#f5f7f8] placeholder:text-[#5b6470]"
+                    placeholder="Acme Remit Inc."
+                  />
+                </div>
+
+                <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+                  <div className="flex flex-1 flex-col gap-2">
+                    <label
+                      htmlFor="email"
+                      className="text-[13px] font-semibold text-[#f5f7f8]"
+                    >
+                      Work email
+                    </label>
+                    <input
+                      id="email"
+                      type="email"
+                      name="email"
+                      required
+                      maxLength={320}
+                      autoComplete="email"
+                      className="min-h-[46px] rounded-xl border border-white/10 bg-[#0b0e12] px-4 text-[15px] text-[#f5f7f8] placeholder:text-[#5b6470]"
+                      placeholder="you@company.com"
+                    />
+                  </div>
+                  <div className="flex flex-1 flex-col gap-2">
+                    <label
+                      htmlFor="phone"
+                      className="text-[13px] font-semibold text-[#f5f7f8]"
+                    >
+                      Phone
+                    </label>
+                    <input
+                      id="phone"
+                      type="tel"
+                      name="phone"
+                      required
+                      maxLength={40}
+                      autoComplete="tel"
+                      className="min-h-[46px] rounded-xl border border-white/10 bg-[#0b0e12] px-4 text-[15px] text-[#f5f7f8] placeholder:text-[#5b6470]"
+                      placeholder="+1 555 123 4567"
+                    />
+                  </div>
+                </div>
+
+                <fieldset className="flex flex-col gap-3">
+                  <legend className="mb-1 text-[13px] font-semibold text-[#f5f7f8]">
+                    Corridors of interest
+                  </legend>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-3">
+                    {PARTNER_CORRIDORS.map((c) => (
+                      <label
+                        key={c.value}
+                        className="inline-flex items-center gap-2.5 text-[14px] text-[#aeb6c0]"
+                      >
+                        <input
+                          type="checkbox"
+                          name="corridors"
+                          value={c.value}
+                          className="h-4 w-4 accent-[#25d366]"
+                        />
+                        {c.label}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+
+                <div className="flex flex-col gap-2">
+                  <label
+                    htmlFor="comments"
+                    className="text-[13px] font-semibold text-[#f5f7f8]"
+                  >
+                    Anything else?{' '}
+                    <span className="font-normal text-[#5b6470]">(optional)</span>
+                  </label>
+                  <textarea
+                    id="comments"
+                    name="comments"
+                    rows={4}
+                    maxLength={2000}
+                    className="resize-y rounded-xl border border-white/10 bg-[#0b0e12] px-4 py-3 text-[15px] text-[#f5f7f8] placeholder:text-[#5b6470]"
+                    placeholder="Volumes, target corridors, timeline…"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="mt-1 inline-flex min-h-[50px] items-center justify-center rounded-full bg-[#25d366] px-7 text-[15px] font-bold text-[#04231a] transition-[background-color,transform] duration-150 hover:bg-[#1fbd5d] hover:[transform:translateY(-1px)]"
+                >
+                  Submit request
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
       </main>
 
       {/* ============ FOOTER ============ */}
@@ -473,6 +684,11 @@ export default async function LandingPage() {
               <li>
                 <a className="hover:text-[#f5f7f8]" href="/docs">
                   Partner docs
+                </a>
+              </li>
+              <li>
+                <a className="hover:text-[#f5f7f8]" href="#partner-with-us">
+                  Partner with us
                 </a>
               </li>
             </ul>
