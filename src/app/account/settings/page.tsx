@@ -1,6 +1,13 @@
-import Link from 'next/link';
 import { requireCustomer } from '@/lib/customer-auth';
 import { decryptField } from '@/lib/field-crypto';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Separator } from '@/components/ui/separator';
+import { AccountShell, PageHeader } from '../shell';
+import { maskPhone } from '../format';
 import { updateEmailAction, changePasswordAction } from '../actions';
 
 export const dynamic = 'force-dynamic';
@@ -11,12 +18,6 @@ export const metadata = { title: 'Settings · SmartRemit' };
 // The page only RENDERS; both forms post to self-gating server actions that
 // derive the account from the session. Action results come back as FIXED query
 // codes mapped to fixed copy below — dynamic text from the URL is never shown.
-
-/** Mask a phone for display (•••2030) — never render the full number. */
-function maskPhone(phone: string): string {
-  const d = phone.replace(/\D/g, '');
-  return d.length <= 4 ? d : `••• ••• ${d.slice(-4)}`;
-}
 
 const OK_COPY: Record<string, string> = {
   email: 'Email updated.',
@@ -31,14 +32,6 @@ const ERR_COPY: Record<string, string> = {
   pw_throttle: 'Too many attempts — try again later.',
   pw_save: 'Could not change your password. Please try again.',
 };
-
-// Same field idiom as account-forms.tsx (16px inputs so iOS Safari never zooms).
-const fieldLabelCls = 'mb-1.5 block text-[13px] text-[#8696a0]';
-const inputCls =
-  'w-full rounded-lg border border-[#2a3942] bg-[#2a3942] p-2.5 text-[16px] text-[#e9edef]';
-const buttonCls =
-  'w-full cursor-pointer rounded-3xl bg-[#25d366] p-3 text-[15px] font-bold text-[#0b141a]';
-const cardHeadCls = 'mb-3 text-[13px] font-semibold uppercase tracking-[0.06em] text-[#8696a0]';
 
 export default async function AccountSettingsPage({
   searchParams,
@@ -62,103 +55,130 @@ export default async function AccountSettingsPage({
   }
 
   return (
-    <main className="flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 text-[#e9edef] [font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif]">
-      <div className="w-full max-w-[420px]">
-        <div className="mb-4 rounded-2xl bg-[#111b21] p-6">
-          <div className="mb-1 text-xl font-extrabold leading-normal text-[#25d366]">SmartRemit</div>
-          <h1 className="mb-2 text-lg font-semibold leading-normal">Settings</h1>
-          {notice ? (
-            <p className="mt-1 mb-1 text-[13px] leading-[1.4] text-[#25d366]" role="status">
-              {notice}
-            </p>
-          ) : null}
-          {error ? (
-            <p className="mt-1 mb-1 text-[13px] leading-[1.4] text-[#f15c6d]" role="alert">
-              {error}
-            </p>
-          ) : null}
-        </div>
+    <AccountShell active="settings" customer={customer}>
+      <PageHeader title="Settings" sub="Profile & security" />
 
+      {notice ? (
+        <Alert className="mb-6" role="status">
+          <AlertTitle>Saved</AlertTitle>
+          <AlertDescription>{notice}</AlertDescription>
+        </Alert>
+      ) : null}
+      {error ? (
+        <Alert variant="destructive" className="mb-6">
+          <AlertTitle>Something went wrong</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      <div className="grid gap-6">
         {/* Profile */}
-        <section className="mb-4 rounded-2xl bg-[#111b21] p-6">
-          <h2 className={cardHeadCls}>Profile</h2>
-          <div className="mb-4">
-            <span className={fieldLabelCls}>Phone (your sign-in)</span>
-            <p className="text-[15px] leading-normal">{maskPhone(customer.senderPhone)}</p>
-            <p className="mt-1 text-xs leading-normal text-[#667781]">
-              Your phone number can&rsquo;t be changed here — it&rsquo;s your WhatsApp identity.
-            </p>
-          </div>
-          {customer.fullName ? (
-            <div className="mb-4">
-              <span className={fieldLabelCls}>Name (from verification)</span>
-              <p className="text-[15px] leading-normal">{customer.fullName}</p>
+        <Card>
+          <CardHeader>
+            <CardTitle>Profile</CardTitle>
+            <CardDescription>Your sign-in identity.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <div>
+              <div className="text-sm font-medium text-foreground">Phone (your sign-in)</div>
+              <p className="mt-1 text-sm tabular-nums text-foreground">
+                {maskPhone(customer.senderPhone)}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Your phone number can&rsquo;t be changed here — it&rsquo;s your WhatsApp identity.
+              </p>
             </div>
-          ) : null}
-          <form action={updateEmailAction}>
-            <label className="mb-4 block">
-              <span className={fieldLabelCls}>Email</span>
-              <input
-                className={inputCls}
-                type="email"
-                name="email"
-                defaultValue={email}
-                autoComplete="email"
-                required
-              />
-            </label>
-            <button className={buttonCls} type="submit">Save email</button>
-          </form>
-        </section>
+            {customer.fullName ? (
+              <>
+                <Separator />
+                <div>
+                  <div className="text-sm font-medium text-foreground">Name (from verification)</div>
+                  <p className="mt-1 text-sm text-foreground">{customer.fullName}</p>
+                </div>
+              </>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        {/* Email */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Email</CardTitle>
+            <CardDescription>Where we send receipts and account notices.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form action={updateEmailAction} className="grid gap-4">
+              <div className="grid gap-1.5">
+                <Label htmlFor="email">Email</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  name="email"
+                  defaultValue={email}
+                  autoComplete="email"
+                  required
+                />
+              </div>
+              <div>
+                <Button type="submit">Save email</Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
 
         {/* Password */}
-        <section className="mb-4 rounded-2xl bg-[#111b21] p-6">
-          <h2 className={cardHeadCls}>Change password</h2>
-          <form action={changePasswordAction}>
-            <label className="mb-4 block">
-              <span className={fieldLabelCls}>Current password</span>
-              <input
-                className={inputCls}
-                type="password"
-                name="currentPassword"
-                autoComplete="current-password"
-                required
-              />
-            </label>
-            <label className="mb-4 block">
-              <span className={fieldLabelCls}>New password (8–64 characters)</span>
-              <input
-                className={inputCls}
-                type="password"
-                name="newPassword"
-                autoComplete="new-password"
-                minLength={8}
-                maxLength={64}
-                required
-              />
-            </label>
-            <button className={buttonCls} type="submit">Change password</button>
-          </form>
-          <p className="mt-3 text-xs leading-normal text-[#667781]">
-            Changing your password signs you out everywhere else.
-          </p>
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Password</CardTitle>
+            <CardDescription>
+              Changing your password signs you out everywhere else.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form action={changePasswordAction} className="grid gap-4">
+              <div className="grid gap-1.5">
+                <Label htmlFor="currentPassword">Current password</Label>
+                <Input
+                  id="currentPassword"
+                  type="password"
+                  name="currentPassword"
+                  autoComplete="current-password"
+                  required
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="newPassword">New password (8–64 characters)</Label>
+                <Input
+                  id="newPassword"
+                  type="password"
+                  name="newPassword"
+                  autoComplete="new-password"
+                  minLength={8}
+                  maxLength={64}
+                  required
+                />
+              </div>
+              <div>
+                <Button type="submit">Change password</Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
 
         {/* Notifications — transfer updates ride WhatsApp; reply STOP/START there. */}
-        <section className="mb-4 rounded-2xl bg-[#111b21] p-6">
-          <h2 className={cardHeadCls}>Notifications</h2>
-          <p className="text-sm leading-normal text-[#8696a0]">
-            Transfer updates arrive on WhatsApp automatically. Reply STOP in the chat to pause
-            them, or START to resume.
-          </p>
-        </section>
-
-        <p className="mt-4">
-          <Link href="/account" className="text-sm text-[#8696a0] underline">
-            ← Back to your account
-          </Link>
-        </p>
+        <Card>
+          <CardHeader>
+            <CardTitle>Notifications</CardTitle>
+            <CardDescription>How you hear about your transfers.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Transfer updates arrive on WhatsApp automatically. Reply STOP in the chat to pause
+              them, or START to resume.
+            </p>
+          </CardContent>
+        </Card>
       </div>
-    </main>
+    </AccountShell>
   );
 }
