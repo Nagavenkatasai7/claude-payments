@@ -1,6 +1,7 @@
 'use client';
 
 import { useActionState } from 'react';
+import { Button } from '@/components/ui/button';
 import { logoutAction } from './actions';
 
 export function LogoutButton() {
@@ -12,13 +13,9 @@ export function LogoutButton() {
   }, null);
   return (
     <form action={action}>
-      <button
-        type="submit"
-        className="mt-2.5 w-full cursor-pointer rounded-3xl border border-[#2a3942] bg-transparent p-3 text-[15px] font-bold text-[#8696a0] disabled:cursor-default disabled:opacity-60"
-        disabled={pending}
-      >
+      <Button type="submit" variant="outline" className="w-full" disabled={pending}>
         {pending ? 'Signing out…' : 'Sign out'}
-      </button>
+      </Button>
     </form>
   );
 }
