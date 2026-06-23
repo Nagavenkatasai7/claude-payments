@@ -32,6 +32,10 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // nodemailer is a Node CommonJS lib with dynamic/optional requires — keep it
+  // external so Turbopack doesn't bundle it into the server build (it's only ever
+  // imported server-side, in src/lib/email.ts → the /api/worker route).
+  serverExternalPackages: ['nodemailer'],
   async headers() {
     return [{ source: '/:path*', headers: securityHeaders }];
   },
