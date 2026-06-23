@@ -4,13 +4,23 @@ import {
   beneficiaries,
   corridorRequests,
   idempotencyKeys,
+  partnerApplications,
   partnerRequests,
   recipients,
 } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, openOptional } from './mappers';
-import type { CorridorRequest, PartnerId, PartnerRequest, PayoutMethod, Recipient } from '@/lib/types';
+import type {
+  CorridorRequest,
+  PartnerApplication,
+  PartnerApplicationDetails,
+  PartnerApplicationDocument,
+  PartnerId,
+  PartnerRequest,
+  PayoutMethod,
+  Recipient,
+} from '@/lib/types';
 
 // aux-repos — the smaller aggregates, one factory each, mirroring the surfaces
 // call sites already use. Payout destinations (full bank accounts) are
@@ -148,6 +158,22 @@ export function createCorridorRequestRepo(db: DbOrTx) {
 export type CorridorRequestRepo = ReturnType<typeof createCorridorRequestRepo>;
 
 // ── Partner-with-us leads (public landing form) ──────────────────────────────
+type PartnerRequestRow = typeof partnerRequests.$inferSelect;
+function rowToPartnerRequest(row: PartnerRequestRow): PartnerRequest {
+  const r: PartnerRequest = {
+    id: row.id,
+    companyName: row.companyName,
+    email: row.email,
+    phone: row.phone,
+    corridors: (row.corridors as string[]) ?? [],
+    capturedAt: row.capturedAt.toISOString(),
+    applicationStatus: row.applicationStatus,
+  };
+  if (row.comments) r.comments = row.comments;
+  if (row.tokenExpiresAt) r.tokenExpiresAt = row.tokenExpiresAt.toISOString();
+  return r;
+}
+
 export function createPartnerRequestRepo(db: DbOrTx) {
   return {
     async savePartnerRequest(req: PartnerRequest): Promise<void> {
@@ -164,22 +190,81 @@ export function createPartnerRequestRepo(db: DbOrTx) {
 
     async listPartnerRequests(): Promise<PartnerRequest[]> {
       const rows = await db.select().from(partnerRequests).orderBy(desc(partnerRequests.capturedAt));
-      return rows.map((row) => {
-        const r: PartnerRequest = {
-          id: row.id,
-          companyName: row.companyName,
-          email: row.email,
-          phone: row.phone,
-          corridors: (row.corridors as string[]) ?? [],
-          capturedAt: row.capturedAt.toISOString(),
-        };
-        if (row.comments) r.comments = row.comments;
-        return r;
-      });
+      return rows.map(rowToPartnerRequest);
+    },
+
+    async getPartnerRequest(id: string): Promise<PartnerRequest | null> {
+      const rows = await db.select().from(partnerRequests).where(eq(partnerRequests.id, id)).limit(1);
+      return rows[0] ? rowToPartnerRequest(rows[0]) : null;
+    },
+
+    /** Stage 2: store the application link's token HASH + expiry; status stays 'invited'. */
+    async setApplicationToken(id: string, tokenHash: string, expiresAt: string): Promise<void> {
+      await db
+        .update(partnerRequests)
+        .set({ applicationTokenHash: tokenHash, tokenExpiresAt: new Date(expiresAt) })
+        .where(eq(partnerRequests.id, id));
+    },
+
+    /** Resolve the partner_request a (hashed) application token points at, or null. */
+    async getByTokenHash(tokenHash: string): Promise<PartnerRequest | null> {
+      const rows = await db
+        .select()
+        .from(partnerRequests)
+        .where(eq(partnerRequests.applicationTokenHash, tokenHash))
+        .limit(1);
+      return rows[0] ? rowToPartnerRequest(rows[0]) : null;
+    },
+
+    /** Single-use: flip to 'completed' so the link is dead. Idempotent. */
+    async markApplicationCompleted(id: string): Promise<void> {
+      await db
+        .update(partnerRequests)
+        .set({ applicationStatus: 'completed' })
+        .where(eq(partnerRequests.id, id));
     },
   };
 }
 export type PartnerRequestRepo = ReturnType<typeof createPartnerRequestRepo>;
+
+// ── Partner applications (the detailed Stage-2 form submissions) ─────────────
+export function createPartnerApplicationRepo(db: DbOrTx) {
+  const toApp = (row: typeof partnerApplications.$inferSelect): PartnerApplication => ({
+    id: row.id,
+    partnerRequestId: row.partnerRequestId,
+    details: (row.details as PartnerApplicationDetails) ?? {},
+    documents: (row.documents as PartnerApplicationDocument[]) ?? [],
+    submittedAt: row.submittedAt.toISOString(),
+  });
+  return {
+    async saveApplication(app: PartnerApplication): Promise<void> {
+      await db.insert(partnerApplications).values({
+        id: app.id,
+        partnerRequestId: app.partnerRequestId,
+        details: app.details,
+        documents: app.documents,
+        submittedAt: new Date(app.submittedAt),
+      });
+    },
+    async getByRequestId(partnerRequestId: string): Promise<PartnerApplication | null> {
+      const rows = await db
+        .select()
+        .from(partnerApplications)
+        .where(eq(partnerApplications.partnerRequestId, partnerRequestId))
+        .orderBy(desc(partnerApplications.submittedAt))
+        .limit(1);
+      return rows[0] ? toApp(rows[0]) : null;
+    },
+    async listApplications(): Promise<PartnerApplication[]> {
+      const rows = await db
+        .select()
+        .from(partnerApplications)
+        .orderBy(desc(partnerApplications.submittedAt));
+      return rows.map(toApp);
+    },
+  };
+}
+export type PartnerApplicationRepo = ReturnType<typeof createPartnerApplicationRepo>;
 
 // ── Idempotency keys (PK (partner_id, key) — the duplicate-window killer) ────
 export function createIdempotencyRepo(db: DbOrTx) {

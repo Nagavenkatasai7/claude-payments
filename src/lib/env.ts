@@ -49,6 +49,12 @@ export const env = {
   get emailFrom(): string {
     return process.env.EMAIL_FROM ?? (this.smtpUser ? `SmartRemit <${this.smtpUser}>` : '');
   },
+  // Vercel Blob — document uploads for the detailed partner application. OPTIONAL
+  // (boot-assert never requires it): unset ⇒ uploads are gated with a friendly
+  // message and the text application still submits.
+  get blobReadWriteToken(): string {
+    return process.env.BLOB_READ_WRITE_TOKEN ?? '';
+  },
   get ollamaBaseUrl() {
     return required('OLLAMA_BASE_URL');
   },

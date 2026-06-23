@@ -2,7 +2,7 @@ import { getRedis } from './redis';
 import { easternDate } from './dates';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
+import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo } from '@/db/repos/aux-repos';
 import type { ChatMessage, Transfer, TransferStatus } from './types';
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
@@ -53,6 +53,7 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
   const recipientsRepo = createRecipientRepo(db);
   const corridorRepo = createCorridorRequestRepo(db);
   const partnerReqRepo = createPartnerRequestRepo(db);
+  const partnerAppRepo = createPartnerApplicationRepo(db);
 
   return {
     // ── Conversations (Redis — hot, trimmed, ephemeral) ──────────────────
@@ -199,6 +200,25 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     },
     async listPartnerRequests(): Promise<import('./types').PartnerRequest[]> {
       return partnerReqRepo.listPartnerRequests();
+    },
+    async getPartnerRequest(id: string): Promise<import('./types').PartnerRequest | null> {
+      return partnerReqRepo.getPartnerRequest(id);
+    },
+    async getPartnerRequestByTokenHash(hash: string): Promise<import('./types').PartnerRequest | null> {
+      return partnerReqRepo.getByTokenHash(hash);
+    },
+    async markPartnerApplicationCompleted(id: string): Promise<void> {
+      await partnerReqRepo.markApplicationCompleted(id);
+    },
+    // ── Partner applications (the detailed Stage-2 form) ──────────────────
+    async savePartnerApplication(app: import('./types').PartnerApplication): Promise<void> {
+      await partnerAppRepo.saveApplication(app);
+    },
+    async getPartnerApplicationByRequestId(id: string): Promise<import('./types').PartnerApplication | null> {
+      return partnerAppRepo.getByRequestId(id);
+    },
+    async listPartnerApplications(): Promise<import('./types').PartnerApplication[]> {
+      return partnerAppRepo.listApplications();
     },
   };
 }

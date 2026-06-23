@@ -530,4 +530,68 @@ export interface PartnerRequest {
   corridors: string[];          // country codes the partner is interested in
   comments?: string;
   capturedAt: string;           // ISO-8601
+  // Stage-2 detailed application (the emailed link → form).
+  applicationStatus?: string;   // 'invited' | 'completed'
+  tokenExpiresAt?: string;      // ISO-8601 — when the application link expires
+}
+
+/** A document uploaded with a partner application (a private Vercel Blob ref). */
+export interface PartnerApplicationDocument {
+  label: string;
+  url: string;
+  size: number;
+  contentType: string;
+}
+
+/**
+ * The detailed partner application's four sections. All fields optional strings —
+ * the public form enforces the required ones; values are stored verbatim (this is
+ * partner business data, not customer PII).
+ */
+export interface PartnerApplicationDetails {
+  // §1 Company & legal entity
+  legalName?: string;
+  tradingName?: string;
+  registrationNumber?: string;
+  countryOfIncorporation?: string;
+  registeredAddress?: string;
+  website?: string;
+  yearEstablished?: string;
+  ownership?: string;
+  // §2 Licensing, regulation & compliance
+  isLicensed?: string;
+  licenseTypes?: string;
+  primaryRegulator?: string;
+  otherJurisdictions?: string;
+  amlProgram?: string;
+  complianceOfficerName?: string;
+  complianceOfficerEmail?: string;
+  sanctionsApproach?: string;
+  lastAuditDate?: string;
+  // §3 Operations & settlement
+  corridors?: string;
+  expectedMonthlyVolumeUsd?: string;
+  avgTransferSize?: string;
+  currentMonthlyVolume?: string;
+  settlementBank?: string;
+  settlementCountry?: string;
+  settlementCurrencies?: string;
+  payoutMethods?: string;
+  // §4 Technical & contacts
+  integrationPreference?: string;
+  whatsappNumber?: string;
+  brandName?: string;
+  primaryContact?: string;
+  complianceContact?: string;
+  technicalContact?: string;
+  notes?: string;
+}
+
+/** A submitted detailed partner application, linked to its partner_request. */
+export interface PartnerApplication {
+  id: string;
+  partnerRequestId: string;
+  details: PartnerApplicationDetails;
+  documents: PartnerApplicationDocument[];
+  submittedAt: string;          // ISO-8601
 }
