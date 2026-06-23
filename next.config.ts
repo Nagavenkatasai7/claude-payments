@@ -22,6 +22,9 @@ const securityHeaders = [
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
+      // Video for the /about explainer: same-origin /public today; the Vercel Blob
+      // host is pre-allowed so a large file can move there with no CSP change.
+      "media-src 'self' https://*.public.blob.vercel-storage.com",
       "font-src 'self' data:",
       "connect-src 'self'",
       "frame-ancestors 'none'",
