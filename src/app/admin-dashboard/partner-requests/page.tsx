@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic';
 
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
@@ -19,6 +20,7 @@ const COLUMNS: ExpandableColumn[] = [
   { label: 'Email', primary: true },
   { label: 'Phone' },
   { label: 'Corridors' },
+  { label: 'Application', primary: true },
   { label: 'Comments' },
   { label: 'Submitted', primary: true },
 ];
@@ -53,11 +55,23 @@ export default async function PartnerRequestsPage() {
             <ExpandableTable
               columns={COLUMNS}
               empty={<>No partner requests yet.</>}
-              rows={requests.map((r) => ({
+              rows={requests.map((r) => {
+                const completed = r.applicationStatus === 'completed';
+                return {
                 key: r.id,
                 label: r.companyName,
                 cells: [
-                  <span key="company" className="font-medium">{r.companyName}</span>,
+                  completed ? (
+                    <Link
+                      key="company"
+                      href={`/admin-dashboard/partner-requests/${r.id}`}
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {r.companyName}
+                    </Link>
+                  ) : (
+                    <span key="company" className="font-medium">{r.companyName}</span>
+                  ),
                   <a key="email" href={`mailto:${r.email}`} className="text-primary hover:underline">
                     {r.email}
                   </a>,
@@ -71,6 +85,19 @@ export default async function PartnerRequestsPage() {
                   ) : (
                     <span key="corr" className="text-xs text-muted-foreground">—</span>
                   ),
+                  completed ? (
+                    <span key="app" className="flex items-center gap-2">
+                      <Badge variant="outline" className="border-success/50 text-success">Completed</Badge>
+                      <Link
+                        href={`/admin-dashboard/partner-requests/${r.id}`}
+                        className="text-xs text-primary hover:underline"
+                      >
+                        View application
+                      </Link>
+                    </span>
+                  ) : (
+                    <Badge key="app" variant="outline" className="text-muted-foreground">Invited</Badge>
+                  ),
                   r.comments ? (
                     <span key="comments" className="block max-w-xs break-words whitespace-pre-line text-muted-foreground">
                       {r.comments}
@@ -82,7 +109,8 @@ export default async function PartnerRequestsPage() {
                     {new Date(r.capturedAt).toLocaleString()}
                   </span>,
                 ],
-              }))}
+                };
+              })}
             />
           </CardContent>
         </Card>
