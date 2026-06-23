@@ -184,6 +184,12 @@ export default async function LandingPage({
             >
               Partner with us
             </a>
+            <a
+              className="text-[14px] text-[#8b94a0] transition-colors hover:text-[#f5f7f8] max-[760px]:hidden"
+              href="/about"
+            >
+              About
+            </a>
             <LoginMenu />
             <a
               className="inline-flex min-h-10 items-center rounded-full border border-white/15 px-4 text-[13.5px] font-semibold text-[#f5f7f8] transition-[border-color,background-color] duration-150 hover:border-white/40 hover:bg-white/[0.04] max-[920px]:hidden"
@@ -666,6 +672,11 @@ export default async function LandingPage({
               Product
             </span>
             <ul className={FOOT_LIST}>
+              <li>
+                <a className="hover:text-[#f5f7f8]" href="/about">
+                  About
+                </a>
+              </li>
               <li>
                 <a className="hover:text-[#f5f7f8]" href="#inside">
                   What&rsquo;s inside
