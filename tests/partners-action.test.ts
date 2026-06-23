@@ -51,20 +51,33 @@ function form(fields: Record<string, string | string[]>): FormData {
 }
 
 async function partnerRequestRows(): Promise<
-  { id: string; companyName: string; email: string; corridors: string[] }[]
+  {
+    id: string;
+    companyName: string;
+    email: string;
+    corridors: string[];
+    applicationTokenHash: string | null;
+  }[]
 > {
   const res = await db.execute(
-    sql`SELECT id, company_name, email, corridors FROM partner_requests ORDER BY captured_at`,
+    sql`SELECT id, company_name, email, corridors, application_token_hash FROM partner_requests ORDER BY captured_at`,
   );
   return (
     res as unknown as {
-      rows: { id: string; company_name: string; email: string; corridors: string[] }[];
+      rows: {
+        id: string;
+        company_name: string;
+        email: string;
+        corridors: string[];
+        application_token_hash: string | null;
+      }[];
     }
   ).rows.map((r) => ({
     id: r.id,
     companyName: r.company_name,
     email: r.email,
     corridors: r.corridors,
+    applicationTokenHash: r.application_token_hash,
   }));
 }
 
@@ -100,7 +113,7 @@ beforeEach(async () => {
 });
 
 describe('submitPartnerRequestAction', () => {
-  it('persists the lead + enqueues one deduped email.send, then redirects ok', async () => {
+  it('persists the lead (with an application token hash) + enqueues team + partner emails, then redirects ok', async () => {
     await expect(submitPartnerRequestAction(form(VALID))).rejects.toThrow(
       'REDIRECT:/?partner=ok#partner-with-us',
     );
@@ -111,13 +124,26 @@ describe('submitPartnerRequestAction', () => {
     expect(rows[0].email).toBe('partners@acme.com');
     expect(rows[0].corridors).toEqual(['US', 'IN']);
     expect(rows[0].id).toMatch(/^preq_/);
+    // The application-invite token's HASH is stored on the row (raw token only in
+    // the emailed link). 32-byte token → sha256 → 64 hex chars.
+    expect(rows[0].applicationTokenHash).toMatch(/^[0-9a-f]{64}$/);
 
     const emails = await emailOutboxRows();
-    expect(emails).toHaveLength(1);
-    expect(emails[0].dedupeKey).toBe(`preq:${rows[0].id}`);
-    expect(emails[0].payload.subject).toBe('New partner request: Acme Remit Inc.');
-    expect(emails[0].payload.to.length).toBeGreaterThan(0);
-    expect(emails[0].payload.text).toContain('Corridors: US, IN');
+    expect(emails).toHaveLength(2);
+
+    // (1) team notification — to the internal lead list.
+    const team = emails.find((e) => e.dedupeKey === `preq:${rows[0].id}`);
+    expect(team).toBeDefined();
+    expect(team!.payload.subject).toBe('New partner request: Acme Remit Inc.');
+    expect(team!.payload.to.length).toBeGreaterThan(0);
+    expect(team!.payload.text).toContain('Corridors: US, IN');
+
+    // (2) partner invite — to the partner's submitted email, with the apply link.
+    const invite = emails.find((e) => e.dedupeKey === `partner_app_invite:${rows[0].id}`);
+    expect(invite).toBeDefined();
+    expect(invite!.payload.subject).toBe('Complete your SmartRemit partner application');
+    expect(invite!.payload.to).toEqual(['partners@acme.com']);
+    expect(invite!.payload.text).toContain('/partners/apply/');
 
     expect(pokeWorkerMock).toHaveBeenCalledTimes(1);
   });
