@@ -9,6 +9,7 @@ import { env } from '@/lib/env';
 import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
+import { issueApplicationToken } from '@/lib/partner-application-token';
 import { getRedis } from '@/lib/redis';
 
 // submitPartnerRequestAction — the PUBLIC "Partner with us" landing form action.
@@ -72,7 +73,10 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
   // failure should surface (the user sees an error) rather than fake success.
   const id = `preq_${newTransferId()}`;
   await getDb().transaction(async (tx) => {
-    await createPartnerRequestRepo(tx).savePartnerRequest({
+    const requests = createPartnerRequestRepo(tx);
+    const outbox = createOutboxRepo(tx);
+
+    await requests.savePartnerRequest({
       id,
       companyName,
       email,
@@ -81,7 +85,15 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
       comments: comments || undefined,
       capturedAt: new Date().toISOString(),
     });
-    await createOutboxRepo(tx).enqueue(
+
+    // Mint a 30-day, single-use capability token for the detailed application
+    // form and persist only its HASH on the lead row. The raw token lives ONLY in
+    // the partner-facing email link below.
+    const { token, hash, expiresAt } = issueApplicationToken();
+    await requests.setApplicationToken(id, hash, expiresAt);
+
+    // Team notification — internal lead alert.
+    await outbox.enqueue(
       'email.send',
       {
         to: env.partnerLeadEmails,
@@ -96,6 +108,23 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
           `Review: ${env.appBaseUrl}/admin-dashboard/partner-requests`,
       },
       { dedupeKey: `preq:${id}` },
+    );
+
+    // Partner invite — the unique link to the detailed application form. Goes to
+    // the email the partner submitted (NOT the internal lead list).
+    await outbox.enqueue(
+      'email.send',
+      {
+        to: [email],
+        subject: 'Complete your SmartRemit partner application',
+        text:
+          `Hi,\n\n` +
+          `Thanks for your interest in partnering with SmartRemit. Please complete your detailed application here:\n\n` +
+          `${env.appBaseUrl}/partners/apply/${token}\n\n` +
+          `This secure link is unique to you and expires in 30 days.\n\n` +
+          `— The SmartRemit team`,
+      },
+      { dedupeKey: `partner_app_invite:${id}` },
     );
   });
 
