@@ -393,7 +393,29 @@ export const partnerRequests = pgTable('partner_requests', {
   corridors: jsonb('corridors').notNull().default([]), // string[] of country codes
   comments: text('comments'),
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
+  // Stage-2 detailed application: an emailed single-use, 30-day capability link.
+  // Only the SHA-256 HASH of the URL token is stored (a DB dump leaks nothing
+  // usable). status: 'invited' (link sent) → 'completed' (form submitted ⇒ link dead).
+  applicationTokenHash: text('application_token_hash'),
+  tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
+  applicationStatus: text('application_status').notNull().default('invited'),
 });
+
+// The detailed partner application (Stage 2) — one row per submitted application,
+// linked to its partner_request. The KYB/compliance/commercial answers live in a
+// typed `details` jsonb (the 4 sections); uploaded documents are a jsonb array of
+// {label,url,size,contentType} pointing at private Vercel Blob objects.
+export const partnerApplications = pgTable(
+  'partner_applications',
+  {
+    id: text('id').primaryKey(),
+    partnerRequestId: text('partner_request_id').notNull(),
+    details: jsonb('details').notNull().default({}),
+    documents: jsonb('documents').notNull().default([]),
+    submittedAt: timestamp('submitted_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('partner_applications_request').on(t.partnerRequestId)],
+);
 
 // The durability backbone (Stage 2): every external effect (WhatsApp send,
 // settlement instruction, rail callback, mock settle, agent turn, ops alert)
