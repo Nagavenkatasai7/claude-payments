@@ -1,8 +1,16 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { freshDb } from './helpers-db';
 import { createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import { sendEmail } from '@/lib/email';
 import type { Db } from '@/db/client';
+
+// Mock nodemailer so the SMTP no-op test can assert NO transport is ever built
+// when SMTP is unconfigured (the env vars are unset in the test runner).
+const { createTransportMock, sendMailMock } = vi.hoisted(() => {
+  const sendMailMock = vi.fn(async () => ({ messageId: 'x' }));
+  return { sendMailMock, createTransportMock: vi.fn(() => ({ sendMail: sendMailMock })) };
+});
+vi.mock('nodemailer', () => ({ default: { createTransport: createTransportMock } }));
 
 let db: Db;
 beforeEach(async () => {
@@ -38,14 +46,17 @@ describe('partner-request repo (PGlite)', () => {
   });
 });
 
-describe('sendEmail — no-op when unconfigured', () => {
-  afterEach(() => vi.restoreAllMocks());
+describe('sendEmail — no-op when SMTP unconfigured', () => {
+  beforeEach(() => {
+    createTransportMock.mockClear();
+    sendMailMock.mockClear();
+  });
 
-  it('does NOT call fetch and never throws when RESEND_API_KEY is unset', async () => {
-    // RESEND_API_KEY is unset in the test env ⇒ sendEmail must short-circuit so
-    // the outbox never dead-letters just because email isn't configured.
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  it('never builds a transport, never sends, and never throws when SMTP creds are unset', async () => {
+    // SMTP_HOST/USER/PASS are unset in the test env ⇒ sendEmail must short-circuit
+    // so the outbox never dead-letters just because email isn't configured.
     await expect(sendEmail({ to: ['x@y.com'], subject: 's', text: 't' })).resolves.toBeUndefined();
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(createTransportMock).not.toHaveBeenCalled();
+    expect(sendMailMock).not.toHaveBeenCalled();
   });
 });

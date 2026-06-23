@@ -19,20 +19,35 @@ export const env = {
   get opsAlertPhone(): string {
     return process.env.OPS_ALERT_PHONE ?? '';
   },
-  // Email (Resend) — used for "Partner with us" lead notifications. All OPTIONAL
-  // (NOT money-grade, so boot-assert never requires them): unset ⇒ the email
-  // effect no-ops and the lead still lands in the admin Partner-requests page.
-  get resendApiKey(): string {
-    return process.env.RESEND_API_KEY ?? '';
+  // Email (Hostinger SMTP, via nodemailer) — used for "Partner with us" lead
+  // notifications. All OPTIONAL (NOT money-grade, so boot-assert never requires
+  // them): unset ⇒ the email effect no-ops and the lead still lands in the admin
+  // Partner-requests page. SMTP_USER is the FULL mailbox address; SMTP_PASS is
+  // that mailbox's password (Hostinger has no separate SMTP key).
+  get smtpHost(): string {
+    return process.env.SMTP_HOST ?? '';
+  },
+  get smtpPort(): number {
+    return Number(process.env.SMTP_PORT ?? '465');
+  },
+  get smtpUser(): string {
+    return process.env.SMTP_USER ?? '';
+  },
+  get smtpPass(): string {
+    return process.env.SMTP_PASS ?? '';
   },
   /** Recipients of partner-lead emails — comma-separated; extendable any time. */
   get partnerLeadEmails(): string[] {
     const raw = process.env.PARTNER_LEAD_EMAILS ?? 'venkat@smartremit.ai';
     return raw.split(',').map((e) => e.trim()).filter(Boolean);
   },
-  /** The From header for outbound email (needs a Resend-verified domain). */
+  /**
+   * The From header. Hostinger binds the SMTP session to one mailbox, so the From
+   * ADDRESS must equal SMTP_USER (display-name aliasing is fine). Defaults to the
+   * authenticated mailbox so a mismatched From can never trigger a 550.
+   */
   get emailFrom(): string {
-    return process.env.EMAIL_FROM ?? 'SmartRemit Partners <partners@smartremit.ai>';
+    return process.env.EMAIL_FROM ?? (this.smtpUser ? `SmartRemit <${this.smtpUser}>` : '');
   },
   get ollamaBaseUrl() {
     return required('OLLAMA_BASE_URL');

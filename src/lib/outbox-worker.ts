@@ -65,8 +65,8 @@ export interface WorkerDeps {
   fundingProvider?: FundingProvider;
   /**
    * Email sender for the 'email.send' effect (partner-lead notifications).
-   * Optional — defaults to the real Resend sender (which itself no-ops when
-   * RESEND_API_KEY is unset); tests inject a mock to assert recipients.
+   * Optional — defaults to the real SMTP sender (which itself no-ops when SMTP
+   * creds are unset); tests inject a mock to assert recipients.
    */
   sendEmail?: (msg: EmailMessage) => Promise<void>;
   /**
@@ -300,8 +300,8 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
     }
 
     // ── Transactional email (partner-lead notifications) ────────────────────
-    // Durable: the real sender no-ops when RESEND_API_KEY is unset (no retry
-    // storm); with a key, a Resend error throws and rides the backoff/dead-letter.
+    // Durable: the real sender no-ops when SMTP is unconfigured (no retry storm);
+    // when configured, a send failure throws and rides the backoff/dead-letter.
     case 'email.send': {
       await (deps.sendEmail ?? sendEmailDefault)({
         to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
