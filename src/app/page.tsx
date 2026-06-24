@@ -767,15 +767,12 @@ export default async function LandingPage({
           </div>
         </div>
         <div className="mx-auto mt-10 w-full max-w-[1180px] border-t border-white/[0.07] px-5 pt-6">
-          {/* PLACEHOLDER: real licensing & regulatory disclosures go here. Do
-              NOT add fabricated regulatory badges or licence numbers. */}
           <p className="max-w-[90ch] text-[12.5px] leading-relaxed text-[#5b6470]">
-            SmartRemit is a demonstration money-transfer service. [PLACEHOLDER: licensing
-            &amp; regulatory disclosures]. Non-custodial by design: SmartRemit provides the
-            technology platform — conversation, quoting, compliance screening, and
-            orchestration. Partners are the licensed money transmitters and settle all funds
-            on their own rails; SmartRemit never holds, receives, or disburses customer
-            money. Exchange rates are indicative and locked when you confirm a transfer.
+            SmartRemit provides the technology platform — conversation, quoting,
+            compliance screening, and orchestration. Partners are the licensed money
+            transmitters and settle all funds on their own rails; SmartRemit never holds,
+            receives, or disburses customer money. Exchange rates are indicative and locked
+            when you confirm a transfer.
           </p>
           <p className="mt-5 text-[13.5px] text-[#8b94a0]">
             <span className="text-[16px] text-[#25d366]" aria-hidden="true">
