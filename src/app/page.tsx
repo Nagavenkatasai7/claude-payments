@@ -758,8 +758,11 @@ export default async function LandingPage({
                   WhatsApp: +1 555 629 8293
                 </a>
               </li>
-              {/* PLACEHOLDER: replace with a real support email address. */}
-              <li>Email: [PLACEHOLDER support email]</li>
+              <li>
+                <a className="hover:text-[#f5f7f8]" href="mailto:support@smartremit.ai">
+                  Email: support@smartremit.ai
+                </a>
+              </li>
             </ul>
           </div>
         </div>
