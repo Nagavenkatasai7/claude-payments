@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -6,7 +7,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { finalizeDraftPayment, type BankDetails } from '@/lib/pay-finalize';
-import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
+import { isB2bSendVerified, isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -54,6 +55,15 @@ async function captureFunding(transfer: Transfer): Promise<void> {
  *               stage-1 message and the rail effect (Stage 2c — atomic).
  * Both charging branches capture funds FIRST — nothing messages "payment
  * received" or flips status before the charge succeeds.
+ *
+ * NON-CUSTODIAL B2B ACH-pull (`fundingMethod === 'ach_pull'`): SmartRemit
+ * captures NO funds — the licensed partner ACH-debits the payer's business bank
+ * via the signed settlement instruction (which already carries the opaque
+ * `achTokenRef` mandate). The capture step is SKIPPED entirely; the compliance
+ * branching + beginSettlement are otherwise identical. The b2c card/bank_transfer
+ * path is unchanged. The skip is derived from the TRANSFER (`fundingMethod ===
+ * 'ach_pull'`), NOT a caller flag — so the non-custodial invariant holds no
+ * matter which call site (existing-transfer or finalized-draft) reaches here.
  */
 async function processTransferPayment(
   store: ReturnType<typeof getStore>,
@@ -107,11 +117,18 @@ async function processTransferPayment(
   // mutates nothing: no status change, no charge recorded, no message — a
   // clean 402 and the link stays retryable. Idempotent capture + write-once
   // setFundingRef make a replay POST (the 'already' branch below) harmless.
-  try {
-    await captureFunding(transfer);
-  } catch (err) {
-    logError('pay.capture', err, { transferId: transfer.id });
-    return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
+  //
+  // NON-CUSTODIAL B2B ACH-pull: SmartRemit captures NOTHING — the partner pulls
+  // via the signed instruction. Skip the funding provider entirely (derived from
+  // the transfer, so this holds for EVERY call site) and proceed straight to the
+  // compliance branch + beginSettlement.
+  if (transfer.fundingMethod !== 'ach_pull') {
+    try {
+      await captureFunding(transfer);
+    } catch (err) {
+      logError('pay.capture', err, { transferId: transfer.id });
+      return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
+    }
   }
 
   if (transfer.complianceStatus === 'flagged') {
@@ -155,6 +172,31 @@ const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
   'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
 ]);
 
+/**
+ * Validate the payer's ACH bank-debit fields (the US business bank we instruct
+ * the partner to debit) and derive an OPAQUE mandate token. NON-CUSTODIAL:
+ * SmartRemit never captures funds and the partner holds the real mandate, so we
+ * keep ONLY this opaque `ach_<random>` token on the ledger — the raw routing /
+ * account number are never persisted. (If a future flow ever needs to store the
+ * raw fields, encrypt them like payout destinations via field-crypto.)
+ */
+function validateAndTokenizeAch(
+  raw: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown } | undefined,
+): { ok: true; token: string } | { ok: false; fieldErrors: Record<string, string> } {
+  const fieldErrors: Record<string, string> = {};
+  const routing = String(raw?.routingNumber ?? '').replace(/\D/g, '');
+  const account = String(raw?.accountNumber ?? '').replace(/\D/g, '');
+  const accountType = String(raw?.accountType ?? '');
+  if (routing.length !== 9) fieldErrors.routingNumber = 'Enter the 9-digit routing number.';
+  if (account.length < 4) fieldErrors.accountNumber = 'Enter a valid account number.';
+  if (accountType !== 'checking' && accountType !== 'savings') {
+    fieldErrors.accountType = 'Select an account type.';
+  }
+  if (Object.keys(fieldErrors).length > 0) return { ok: false, fieldErrors };
+  // Opaque, non-reversible mandate reference — carries no bank digits.
+  return { ok: true, token: `ach_${randomBytes(24).toString('hex')}` };
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ transferId: string }> },
@@ -179,7 +221,13 @@ export async function POST(
     // truth); any 400 here happens BEFORE any charge. A bodyless POST (old
     // in-flight draft, or a re-opened link that already has a destination) skips
     // validation and falls back to the stored destination.
-    let body: { country?: unknown; fields?: unknown; action?: unknown; otp?: unknown } = {};
+    let body: {
+      country?: unknown;
+      fields?: unknown;
+      action?: unknown;
+      otp?: unknown;
+      ach?: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown };
+    } = {};
     try {
       body = (await req.json()) as typeof body;
     } catch {
@@ -265,6 +313,44 @@ export async function POST(
       const owningPartner =
         (await getPartnerStore().getPartner(transfer.partnerId)) ??
         (await getPartnerStore().ensureDefaultPartner());
+
+      // ── B2B ACH-pull (NON-CUSTODIAL) ─────────────────────────────────────
+      // The licensed partner ACH-debits the payer's business bank via the signed
+      // settlement instruction; SmartRemit captures NO funds. The B2B KYB gate
+      // (isB2bSendVerified) replaces the b2c send gate; the payer's ACH bank
+      // fields are validated + tokenized into an opaque achTokenRef (raw routing/
+      // account never stored), then settlement proceeds WITHOUT a funds capture.
+      if (transfer.fundingMethod === 'ach_pull') {
+        if (sendGateActive(owningPartner) && !isB2bSendVerified(owner)) {
+          return NextResponse.json(
+            { ok: false, error: 'Please verify your business before sending.', kyc_required: true },
+            { status: 403 },
+          );
+        }
+        const ach = validateAndTokenizeAch(body.ach);
+        if (!ach.ok) {
+          // 400 BEFORE settlement — nothing mutated, the payer can retry.
+          return NextResponse.json(
+            { ok: false, error: 'Please check your bank details.', fieldErrors: ach.fieldErrors },
+            { status: 400 },
+          );
+        }
+        // Bind the opaque mandate token. Idempotent: a replay POST whose transfer
+        // already carries an achTokenRef keeps the FIRST token (we only mint when
+        // absent), so a crash-then-retry re-settles with the same mandate. The
+        // transfer stays awaiting_payment until beginSettlement commits, so a
+        // crash in that narrow window is self-healed by the payer re-submitting
+        // (achTokenRef already bound ⇒ beginSettlement resumes cleanly).
+        const withToken: Transfer =
+          (transfer.achTokenRef ?? '').trim() !== ''
+            ? transfer
+            : { ...transfer, achTokenRef: ach.token };
+        if (withToken !== transfer) await store.saveTransfer(withToken);
+        // Capture is skipped structurally inside processTransferPayment (keyed on
+        // fundingMethod === 'ach_pull'); no caller flag needed.
+        return await processTransferPayment(store, withToken);
+      }
+
       if (sendGateActive(owningPartner) && !isSendVerified(owner)) {
         return NextResponse.json(
           { ok: false, error: 'Please verify your identity before sending.', kyc_required: true },
@@ -326,6 +412,25 @@ export async function POST(
     const created = await store.getTransfer(result.transferId);
     if (!created) {
       return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
+    }
+    // NON-CUSTODIAL B2B ACH-pull finalized from a draft: the ACH bank fields must
+    // be validated + tokenized into achTokenRef BEFORE settlement (the partner's
+    // instruction carries the mandate token). Capture is already skipped
+    // structurally inside processTransferPayment for ach_pull.
+    if (created.fundingMethod === 'ach_pull') {
+      const ach = validateAndTokenizeAch(body.ach);
+      if (!ach.ok) {
+        return NextResponse.json(
+          { ok: false, error: 'Please check your bank details.', fieldErrors: ach.fieldErrors },
+          { status: 400 },
+        );
+      }
+      const withToken: Transfer =
+        (created.achTokenRef ?? '').trim() !== ''
+          ? created
+          : { ...created, achTokenRef: ach.token };
+      if (withToken !== created) await store.saveTransfer(withToken);
+      return await processTransferPayment(store, withToken);
     }
     return await processTransferPayment(store, created);
   } catch (err) {
