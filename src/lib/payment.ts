@@ -42,9 +42,37 @@ function formatSourceCharge(amount: number, currency: CurrencyCode | string): st
 }
 
 /**
+ * Whether this transfer should use the B2B / ACH-pull wording. True when the
+ * transfer is explicitly B2B, OR it's funded by an ACH debit of a business bank
+ * account ('ach_pull'). Consumer (b2c card/bank) transfers fall through to the
+ * byte-identical consumer copy.
+ */
+function isBusinessFunded(transfer: Transfer): boolean {
+  return transfer.transferType === 'b2b' || transfer.fundingMethod === 'ach_pull';
+}
+
+/**
+ * The recipient label for the B2B charge/delivery line: prefer the recipient's
+ * business name when it's a business AND the name is fully present (not the
+ * masked `****last4` placeholder — never name the mask), else fall back to the
+ * display recipient name.
+ */
+function recipientLabel(transfer: Transfer): string {
+  const biz = transfer.recipientBusinessName;
+  if (transfer.recipientEntityType === 'business' && biz && !biz.startsWith('****')) {
+    return biz;
+  }
+  return transfer.recipientName;
+}
+
+/**
  * The customer-facing stage-1 ("payment received") message — pure, so the
  * transactional settlement path (Stage 2c) can enqueue the EXACT text that
  * completePaymentStage1 would have sent.
+ *
+ * B2B / ACH-pull (`transferType==='b2b'` or `fundingMethod==='ach_pull'`) gets
+ * "debited from your business account" wording; the consumer (b2c) shape is
+ * byte-identical to before. The raw bank account is NEVER named in either case.
  */
 export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }): string {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
@@ -53,6 +81,13 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
     transfer.totalChargeSource ?? transfer.totalChargeUsd,
     transfer.sourceCurrency ?? 'USD',
   );
+
+  if (isBusinessFunded(transfer)) {
+    return opts?.held
+      ? `✅ Payment received — ${sourceCharge} will be debited from your business account. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
+      : `✅ Payment received — ${sourceCharge} will be debited from your business account. ${recipientLabel(transfer)} will receive ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
+  }
+
   return opts?.held
     ? `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
     : `✅ Payment received — ${sourceCharge} charged. ${transfer.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;

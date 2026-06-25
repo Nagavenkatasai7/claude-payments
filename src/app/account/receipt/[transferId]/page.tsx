@@ -71,6 +71,17 @@ function Row({ label, value, strong }: { label: string; value: ReactNode; strong
   );
 }
 
+// Entity-type chip ("Business"/"Individual") shown next to the sender/recipient
+// on a B2B receipt. Absent entity type ⇒ 'individual' (the consumer default).
+function EntityBadge({ entityType }: { entityType?: 'individual' | 'business' }) {
+  const business = entityType === 'business';
+  return (
+    <Badge variant={business ? 'default' : 'secondary'} className="ml-2 align-middle text-[10px]">
+      {business ? 'Business' : 'Individual'}
+    </Badge>
+  );
+}
+
 export default async function ReceiptPage({
   params,
   searchParams,
@@ -81,11 +92,26 @@ export default async function ReceiptPage({
   const customer = await requireCustomer();
   const { transferId } = await params;
   const { error } = await searchParams;
-  const t = await getStore().getTransfer(transferId);
+  const store = getStore();
+  const t = await store.getTransfer(transferId);
   if (!t || t.phone !== customer.senderPhone) notFound();
 
   const srcCurrency = t.sourceCurrency ?? 'USD';
   const destCurrency = t.destinationCurrency ?? 'INR';
+
+  // B2B receipt: this is the owner viewing their OWN transfer (ownership already
+  // checked on the masked read above, 404-never-403). Use the explicit decrypt
+  // read (store.getTransferDecrypted, the same call the settlement-instruction
+  // builder uses) to reveal the full sender/recipient business names — the
+  // default masked read only ever yields the ****last4 placeholder. The payout
+  // destination keeps rendering from the masked `t`, so the raw bank account is
+  // NEVER read or shown here. Consumer (b2c) receipts skip this decrypt read
+  // entirely and stay byte-identical.
+  const isB2b = t.transferType === 'b2b';
+  const decrypted = isB2b ? await store.getTransferDecrypted(transferId) : null;
+  const senderBusinessName = decrypted?.senderBusinessName;
+  const recipientBusinessName = decrypted?.recipientBusinessName;
+  const achPull = t.fundingMethod === 'ach_pull';
 
   // Customer-facing refund request — eligible ONLY when the transfer is paid
   // (a paid transfer is by definition not yet delivered — status is one value)
@@ -165,7 +191,18 @@ export default async function ReceiptPage({
           </CardHeader>
           <CardContent>
             <dl>
-              <Row label="To" value={<span className="font-medium">{t.recipientName}</span>} />
+              <Row
+                label="To"
+                value={
+                  <span className="font-medium">
+                    {t.recipientName}
+                    {isB2b && <EntityBadge entityType={t.recipientEntityType} />}
+                  </span>
+                }
+              />
+              {isB2b && recipientBusinessName && (
+                <Row label="Business" value={<span className="font-medium">{recipientBusinessName}</span>} />
+              )}
               <Row
                 label="Account"
                 value={
@@ -181,6 +218,35 @@ export default async function ReceiptPage({
             </dl>
           </CardContent>
         </Card>
+
+        {/* Sender + funding — B2B only. Shows the payer's business identity and,
+            for an ACH pull, that the charge is debited from the business bank
+            account (NEVER the raw account number). Consumer receipts omit this
+            card entirely, so the b2c receipt is byte-identical. */}
+        {isB2b && (
+          <Card className="sm:col-span-2">
+            <CardHeader>
+              <CardTitle>Payment</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <dl>
+                <Row
+                  label="From"
+                  value={
+                    <span className="font-medium">
+                      {senderBusinessName || `+${t.phone}`}
+                      <EntityBadge entityType={t.senderEntityType} />
+                    </span>
+                  }
+                />
+                <Row
+                  label="Funding"
+                  value={achPull ? 'Debited from business account' : 'Card / bank'}
+                />
+              </dl>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Request a refund — only on a paid transfer with no refund in flight. */}
         {canRequestRefund && (

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   buildRefundMessage,
+  buildStage1Message,
   completePaymentStage1,
   completePaymentStage2,
   recipientTemplateParams,
@@ -169,6 +170,77 @@ describe('completePaymentStage1 — held=true (flagged transfer)', () => {
 
     expect(result.senderMessages[0]).toContain('within ~10 minutes');
     expect(result.senderMessages[0]).not.toContain('quick review');
+  });
+});
+
+describe('buildStage1Message — B2B / ACH-pull wording', () => {
+  // A B2B transfer: business sender debited via ACH pull, business recipient.
+  function b2bTransfer(): Transfer {
+    return {
+      ...awaitingTransfer(),
+      id: 'payb2b01',
+      transferType: 'b2b',
+      fundingMethod: 'ach_pull',
+      senderEntityType: 'business',
+      recipientEntityType: 'business',
+      senderBusinessName: 'Acme Imports LLC',
+      recipientBusinessName: 'Mumbai Textiles Pvt Ltd',
+    };
+  }
+
+  it('b2c wording is unchanged (byte-identical) — control', () => {
+    const msg = buildStage1Message(awaitingTransfer());
+    expect(msg).toBe(
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within ~10 minutes. Transfer ID: pay12345',
+    );
+  });
+
+  it('B2B uses "debited from your business account" instead of "charged"', () => {
+    const msg = buildStage1Message(b2bTransfer());
+    expect(msg).toContain('will be debited from your business account');
+    expect(msg).not.toContain(' charged.');
+    expect(msg).toContain('$500.00');
+    expect(msg).toContain('Transfer ID: payb2b01');
+  });
+
+  it('B2B names the recipient business and uses "will receive" + the dest amount', () => {
+    const msg = buildStage1Message(b2bTransfer());
+    expect(msg).toContain('Mumbai Textiles Pvt Ltd will receive ₹42,600');
+    expect(msg).toContain('within ~10 minutes');
+  });
+
+  it('B2B NEVER leaks the raw bank account / ACH token', () => {
+    const msg = buildStage1Message({
+      ...b2bTransfer(),
+      payoutDestination: 'AE12345678901234567890',
+      achTokenRef: 'ach-mandate-secret-xyz',
+    });
+    expect(msg).not.toContain('AE12345678901234567890');
+    expect(msg).not.toContain('ach-mandate-secret-xyz');
+  });
+
+  it('ach_pull alone (no explicit transferType) still triggers the B2B wording', () => {
+    const msg = buildStage1Message({
+      ...awaitingTransfer(),
+      fundingMethod: 'ach_pull',
+    });
+    expect(msg).toContain('will be debited from your business account');
+  });
+
+  it('falls back to the display recipient name when the business name is masked', () => {
+    const msg = buildStage1Message({
+      ...b2bTransfer(),
+      recipientBusinessName: '****Ltd', // masked ****last4 — must NOT be named
+    });
+    expect(msg).not.toContain('****Ltd');
+    expect(msg).toContain('Mom will receive');
+  });
+
+  it('held B2B keeps the review copy AND the business-debit wording', () => {
+    const msg = buildStage1Message(b2bTransfer(), { held: true });
+    expect(msg).toContain('will be debited from your business account');
+    expect(msg).toContain('quick review');
+    expect(msg).not.toContain('within ~10 minutes');
   });
 });
 
