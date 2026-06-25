@@ -138,6 +138,13 @@ export function PartnerApplicationForm({
   const formRef = useRef<HTMLFormElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // When an upload fails we HALT before the (irreversible) submit and require an
+  // explicit confirmation — otherwise the action's success redirect() erases any
+  // banner and the applicant lands on "thank you" believing their documents went
+  // through. Non-null ⇒ awaiting that confirmation; the refs from the first
+  // attempt are reused so the uploads that DID succeed aren't duplicated.
+  const [pendingDocFailures, setPendingDocFailures] = useState<string[] | null>(null);
+  const [pendingRefs, setPendingRefs] = useState<DocRef[]>([]);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -145,57 +152,73 @@ export function PartnerApplicationForm({
     setSubmitting(true);
     setUploadError(null);
 
-    // 1) Upload any selected files first; collect refs. Failures are non-fatal —
-    //    we surface a message but still submit the text application.
-    const refs: DocRef[] = [];
-    const failures: string[] = [];
-    for (const slot of DOC_SLOTS) {
-      const input = form.elements.namedItem(slot.id) as HTMLInputElement | null;
-      const file = input?.files?.[0];
-      if (!file) continue;
-      try {
-        const fd = new FormData();
-        fd.append('file', file);
-        fd.append('label', slot.label);
-        const res = await fetch(
-          `/api/partner-application/upload?token=${encodeURIComponent(token)}`,
-          { method: 'POST', body: fd },
-        );
-        const json = (await res.json().catch(() => ({}))) as {
-          ok?: boolean;
-          doc?: DocRef;
-          error?: string;
-        };
-        if (res.ok && json.ok && json.doc) {
-          refs.push(json.doc);
-        } else {
-          failures.push(`${slot.label}: ${json.error ?? 'upload failed'}`);
+    // 1) Gather document refs. First attempt: upload each selected file. Second
+    //    attempt (the applicant clicked "Submit without documents"): reuse the
+    //    refs from the first pass — re-uploading would duplicate the files that
+    //    DID succeed — and proceed regardless of the earlier failures.
+    let refs: DocRef[];
+    let failures: string[];
+    if (pendingDocFailures !== null) {
+      refs = pendingRefs;
+      failures = [];
+    } else {
+      refs = [];
+      failures = [];
+      for (const slot of DOC_SLOTS) {
+        const input = form.elements.namedItem(slot.id) as HTMLInputElement | null;
+        const file = input?.files?.[0];
+        if (!file) continue;
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('label', slot.label);
+          const res = await fetch(
+            `/api/partner-application/upload?token=${encodeURIComponent(token)}`,
+            { method: 'POST', body: fd },
+          );
+          const json = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            doc?: DocRef;
+            error?: string;
+          };
+          if (res.ok && json.ok && json.doc) {
+            refs.push(json.doc);
+          } else {
+            failures.push(`${slot.label}: ${json.error ?? 'upload failed'}`);
+          }
+        } catch {
+          failures.push(`${slot.label}: upload failed`);
         }
-      } catch {
-        failures.push(`${slot.label}: upload failed`);
       }
     }
 
-    if (failures.length > 0) {
+    // 2) HALT on the first attempt if any upload failed: the submit redirects to a
+    //    thank-you page on success, which would erase any banner — so require an
+    //    explicit "Submit without documents" confirmation instead of silently
+    //    dropping the files and telling the applicant everything went through.
+    if (failures.length > 0 && pendingDocFailures === null) {
+      setPendingDocFailures(failures);
+      setPendingRefs(refs);
       setUploadError(
-        `Some documents could not be uploaded (${failures.join('; ')}). ` +
-          'You can still submit your application — we will follow up for any missing documents.',
+        `These documents could NOT be uploaded and will NOT be saved with your application: ${failures.join('; ')}. ` +
+          'Re-select them and try again, or choose "Submit without documents" to continue (we will follow up for the missing files).',
       );
+      setSubmitting(false);
+      return;
     }
 
-    // 2) Hand the text fields + the uploaded refs to the server action.
+    // 3) Hand the text fields + whatever refs we have to the server action.
     const fd = new FormData(form);
-    // Strip the file inputs from the action payload (they are uploaded already).
     for (const slot of DOC_SLOTS) fd.delete(slot.id);
     fd.set('documents', JSON.stringify(refs));
     // On success the action redirect()s and Next drives the navigation, so we do
     // NOT re-enable the button here (it would invite a duplicate submit during the
-    // in-flight navigation). Only re-enable if the action itself rejected — the
-    // page then re-renders with ?error=… and the user can correct + retry.
+    // in-flight navigation). Only re-enable if the action itself rejected.
     try {
       await submitPartnerApplicationAction(fd);
     } catch {
       setSubmitting(false);
+      setPendingDocFailures(null);
     }
   }
 
@@ -430,8 +453,24 @@ export function PartnerApplicationForm({
           disabled={submitting}
           className="inline-flex min-h-[52px] items-center justify-center rounded-full bg-[#25d366] px-8 text-[16px] font-bold text-[#04231a] transition-[background-color,transform] duration-150 hover:bg-[#1fbd5d] hover:[transform:translateY(-1px)] disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {submitting ? 'Submitting…' : 'Submit application'}
+          {submitting
+            ? 'Submitting…'
+            : pendingDocFailures !== null
+              ? 'Submit without documents'
+              : 'Submit application'}
         </button>
+        {pendingDocFailures !== null && !submitting && (
+          <button
+            type="button"
+            onClick={() => {
+              setPendingDocFailures(null);
+              setUploadError(null);
+            }}
+            className="text-[14px] text-[#8b94a0] underline underline-offset-2 hover:text-[#f5f7f8]"
+          >
+            Cancel — let me re-select the documents
+          </button>
+        )}
         <p className="text-[13px] text-[#5b6470]">
           Legal entity name, country of incorporation, and primary contact are required.
         </p>
