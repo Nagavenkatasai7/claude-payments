@@ -8,7 +8,7 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getRedis } from '@/lib/redis';
 import { checkCopilotRateLimit } from '@/lib/ticket-ai';
-import { diagnoseOps, errorPrefix, type OpsDiagnosisBundle } from '@/lib/ops-diagnosis-ai';
+import { diagnoseOps, errorPrefix, isPermanentSendError, type OpsDiagnosisBundle } from '@/lib/ops-diagnosis-ai';
 import { money } from '@/app/admin-dashboard/format';
 
 export const dynamic = 'force-dynamic';
@@ -130,6 +130,12 @@ export async function POST(req: NextRequest) {
     };
   }
 
+  // DETERMINISTIC (not the AI): a dead-letter whose error is a known-permanent
+  // send rejection (e.g. 131030 recipient-not-allow-listed) can never be fixed by
+  // an in-app Retry — the panel uses this to disable Retry + steer to Dismiss.
+  const permanent =
+    bundle.subjectKind === 'dead_letter' && isPermanentSendError(bundle.deadLetter?.lastError);
+
   try {
     const diagnosis = await diagnoseOps(bundle);
     await createAuditRepo(db).record({
@@ -138,7 +144,7 @@ export async function POST(req: NextRequest) {
       action: 'copilot.ops_diagnose',
       subjectId,
     });
-    return NextResponse.json({ ok: true, diagnosis });
+    return NextResponse.json({ ok: true, diagnosis, kind: bundle.subjectKind, permanent });
   } catch {
     // Quiet degradation — the panel shows "AI unavailable"; manual ops continues.
     return NextResponse.json({ ok: false, error: 'AI unavailable' }, { status: 502 });
