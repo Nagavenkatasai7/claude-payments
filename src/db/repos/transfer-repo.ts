@@ -98,16 +98,28 @@ export function createTransferRepo(
      */
     async saveTransfer(t: Transfer): Promise<void> {
       const row = transferToRow(t, provider);
-      const masked = /^\*{4}/.test(t.payoutDestination ?? '');
+      // A read-back transfer masks payout + business names TOGETHER (one
+      // opts.decrypt), so any ****-prefixed field means "saved from a masked
+      // read" — strip ALL encrypted columns on conflict-update so the real
+      // ciphertext is never clobbered by a mask. (Payout can be empty on a B2B
+      // send, so also check the business names.)
+      const isMasked = (v: string | undefined) => /^\*{4}/.test(v ?? '');
+      const masked =
+        isMasked(t.payoutDestination) || isMasked(t.senderBusinessName) || isMasked(t.recipientBusinessName);
       let set: Partial<typeof row> = row;
       if (masked) {
         const {
           payoutDestinationEnc: _enc,
           payoutDestinationLast4: _l4,
           recipientLegalNameEnc: _legal,
+          senderBusinessNameEnc: _sbEnc,
+          senderBusinessNameLast4: _sbL4,
+          recipientBusinessNameEnc: _rbEnc,
+          recipientBusinessNameLast4: _rbL4,
           ...rest
         } = row;
         void _enc; void _l4; void _legal;
+        void _sbEnc; void _sbL4; void _rbEnc; void _rbL4;
         set = rest;
       }
       await db

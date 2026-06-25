@@ -8,6 +8,7 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { resolvePartnerBranding } from '@/lib/partner-config';
+import { logWarn } from '@/lib/log';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
 import { recipientTemplateParams, recipientDeliveredFallbackText, formatDestAmount } from '@/lib/payment';
@@ -90,6 +91,18 @@ export async function POST(
   const updated = await store.updateTransferFromWebhook(result.transferId, result.status);
   // Fire stage-2 notifications ONLY on a real terminal transition (non-null + delivered).
   if (updated && updated.status === 'delivered') {
+    // Phase 4 (B2B): "update accounting" — flip the linked mock invoice to paid.
+    // Idempotent; a failure here is non-critical (admin/reconcile can correct it).
+    if (updated.invoiceId) {
+      try {
+        await store.markB2bInvoicePaid(
+          updated.invoiceId,
+          updated.deliveredAt ?? new Date().toISOString(),
+        );
+      } catch (err) {
+        logWarn('b2b.invoice_mark_paid', err, { transferId: updated.id });
+      }
+    }
     after(async () => {
       try {
         // Brand + send from the OWNING partner's identity (default ⇒ SmartRemit + env number).

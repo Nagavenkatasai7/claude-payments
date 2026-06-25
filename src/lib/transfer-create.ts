@@ -13,6 +13,7 @@ import type {
   CountryCode, CurrencyCode, Draft, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
   KycStatus,                                                                 // NEW (Phase 3 gate)
+  EntityType,                                                                // NEW (B2B)
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
@@ -62,6 +63,18 @@ export interface CreateTransferInput {
   // at quote time. Honored ONLY together with `quote` (the figures that rate
   // produced) — see the guard in createTransfer. Absent ⇒ settle via partnerId.
   settlementPartnerId?: PartnerId;
+  // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape.
+  // SANCTIONS NOTE: the existing screen runs on senderName + recipientName, so
+  // for B2B the caller sets those to the business legal names (no screen change
+  // needed). These fields carry the entity discriminators + the encrypted
+  // business names + the partner's ACH-pull token + the linked mock invoice. ──
+  transferType?: 'b2c' | 'b2b';
+  senderEntityType?: EntityType;
+  recipientEntityType?: EntityType;
+  senderBusinessName?: string;
+  recipientBusinessName?: string;
+  achTokenRef?: string;
+  invoiceId?: string;
 }
 
 /**
@@ -208,6 +221,13 @@ export async function createTransfer(
     relationship: input.relationship,               // NEW (KYC)
     purpose: input.purpose,                          // NEW (KYC)
     eddRequired: eddCheck.eddRequired,               // NEW (KYC)
+    transferType: input.transferType ?? 'b2c',       // NEW (B2B)
+    senderEntityType: input.senderEntityType ?? 'individual',
+    recipientEntityType: input.recipientEntityType ?? 'individual',
+    senderBusinessName: input.senderBusinessName,
+    recipientBusinessName: input.recipientBusinessName,
+    achTokenRef: input.achTokenRef,
+    invoiceId: input.invoiceId,
   };
   await store.saveTransfer(transfer);
   // (transfer count is now DERIVED from the ledger — no counter to bump)

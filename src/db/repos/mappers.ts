@@ -9,6 +9,7 @@ import type {
   ComplianceStatus,
   CountryCode,
   CurrencyCode,
+  EntityType,
   FundingMethod,
   PayoutMethod,
   RefundStatus,
@@ -99,6 +100,18 @@ export function transferToRow(
     relationship: t.relationship ?? null,
     purpose: t.purpose ?? null,
     eddRequired: t.eddRequired ?? null,
+    // ── B2B — business names encrypted at rest + ****last4 sibling (like the
+    // recipient legal name); discriminators default to the consumer shape. ──
+    transferType: t.transferType ?? 'b2c',
+    senderEntityType: t.senderEntityType ?? 'individual',
+    recipientEntityType: t.recipientEntityType ?? 'individual',
+    senderBusinessNameEnc: sealOptional(t.senderBusinessName, provider) ?? null,
+    senderBusinessNameLast4: t.senderBusinessName ? last4(t.senderBusinessName) : null,
+    recipientBusinessNameEnc: sealOptional(t.recipientBusinessName, provider) ?? null,
+    recipientBusinessNameLast4: t.recipientBusinessName ? last4(t.recipientBusinessName) : null,
+    achTokenRef: t.achTokenRef ?? null,
+    invoiceId: t.invoiceId ?? null,
+    kybReviewNotes: t.kybReviewNotes ?? null,
     assignedTo: t.assignedTo ?? null,
     adminNote: t.adminNote ?? null,
     createdAt: new Date(t.createdAt),
@@ -171,5 +184,25 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (row.eddRequired !== null && row.eddRequired !== undefined) t.eddRequired = row.eddRequired;
   if (row.assignedTo) t.assignedTo = row.assignedTo;
   if (row.adminNote) t.adminNote = row.adminNote;
+  // ── B2B — discriminators always present; business names masked ****last4 by
+  // default, full only on an explicit decrypt read (receipt / admin detail). ──
+  t.transferType = (row.transferType as 'b2c' | 'b2b') ?? 'b2c';
+  t.senderEntityType = (row.senderEntityType as EntityType) ?? 'individual';
+  t.recipientEntityType = (row.recipientEntityType as EntityType) ?? 'individual';
+  const senderBiz = opts.decrypt
+    ? openOptional(row.senderBusinessNameEnc, provider)
+    : row.senderBusinessNameLast4
+      ? `****${row.senderBusinessNameLast4}`
+      : undefined;
+  if (senderBiz) t.senderBusinessName = senderBiz;
+  const recipientBiz = opts.decrypt
+    ? openOptional(row.recipientBusinessNameEnc, provider)
+    : row.recipientBusinessNameLast4
+      ? `****${row.recipientBusinessNameLast4}`
+      : undefined;
+  if (recipientBiz) t.recipientBusinessName = recipientBiz;
+  if (row.achTokenRef) t.achTokenRef = row.achTokenRef;
+  if (row.invoiceId) t.invoiceId = row.invoiceId;
+  if (row.kybReviewNotes) t.kybReviewNotes = row.kybReviewNotes;
   return t;
 }

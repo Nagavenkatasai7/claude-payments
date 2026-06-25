@@ -93,6 +93,21 @@ export const transfers = pgTable(
     relationship: text('relationship'),
     purpose: text('purpose'),
     eddRequired: boolean('edd_required'),
+    // ── B2B (business-to-business) — every column defaults to the consumer
+    // shape so the b2c path is byte-identical. `transfer_type` discriminates;
+    // business names are encrypted at rest (masked ****last4) like recipient
+    // legal names; `ach_token_ref` is the partner's opaque ACH-pull mandate
+    // (SmartRemit never holds funds); `invoice_id` links the mock invoice. ──
+    transferType: text('transfer_type').notNull().default('b2c'),
+    senderEntityType: text('sender_entity_type').notNull().default('individual'),
+    recipientEntityType: text('recipient_entity_type').notNull().default('individual'),
+    senderBusinessNameEnc: text('sender_business_name_enc'),
+    senderBusinessNameLast4: text('sender_business_name_last4'),
+    recipientBusinessNameEnc: text('recipient_business_name_enc'),
+    recipientBusinessNameLast4: text('recipient_business_name_last4'),
+    achTokenRef: text('ach_token_ref'),
+    invoiceId: text('invoice_id'),
+    kybReviewNotes: text('kyb_review_notes'),
     assignedTo: text('assigned_to'),
     adminNote: text('admin_note'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -114,6 +129,30 @@ export const transfers = pgTable(
     index('transfers_provider_ref').on(t.paymentProviderRef),
     // Refund queues (ops page + sweeps) — partial: 'none' is ~every row.
     index('transfers_refund_status').on(t.refundStatus).where(sql`${t.refundStatus} <> 'none'`),
+  ],
+);
+
+// B2B mock invoices — the "ERP" stand-in for the test case. The bot presents an
+// unpaid invoice (Phase 1); the transfer that pays it flips it to 'paid' on
+// delivery (Phase 4). Mock data only — no real accounting integration in the MVP.
+export const b2bInvoices = pgTable(
+  'b2b_invoices',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    businessName: text('business_name').notNull(), // the SELLER business issuing the invoice
+    buyerPhone: text('buyer_phone').notNull(), // the buyer's WhatsApp number
+    lineItems: jsonb('line_items').notNull().default([]), // {description, qty, unitAmountUsd}[]
+    amountUsd: numeric('amount_usd', { precision: 12, scale: 2 }).notNull(),
+    currency: text('currency').notNull().default('USD'),
+    status: text('status').notNull().default('unpaid'), // 'unpaid' | 'paid'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    paidAt: timestamp('paid_at', { withTimezone: true }),
+  },
+  (t) => [
+    check('b2b_invoices_status_check', sql`${t.status} IN ('unpaid','paid')`),
+    index('b2b_invoices_buyer').on(t.buyerPhone, t.status),
+    index('b2b_invoices_partner').on(t.partnerId, t.createdAt.desc()),
   ],
 );
 

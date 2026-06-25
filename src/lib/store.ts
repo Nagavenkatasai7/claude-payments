@@ -2,7 +2,7 @@ import { getRedis } from './redis';
 import { easternDate } from './dates';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo } from '@/db/repos/aux-repos';
+import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo } from '@/db/repos/aux-repos';
 import type { ChatMessage, Transfer, TransferStatus } from './types';
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
@@ -54,6 +54,7 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
   const corridorRepo = createCorridorRequestRepo(db);
   const partnerReqRepo = createPartnerRequestRepo(db);
   const partnerAppRepo = createPartnerApplicationRepo(db);
+  const b2bInvoiceRepo = createB2bInvoiceRepo(db);
 
   return {
     // ── Conversations (Redis — hot, trimmed, ephemeral) ──────────────────
@@ -219,6 +220,22 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     },
     async listPartnerApplications(): Promise<import('./types').PartnerApplication[]> {
       return partnerAppRepo.listApplications();
+    },
+    // ── B2B mock invoices (the "ERP" stand-in) ────────────────────────────
+    async saveB2bInvoice(inv: import('./types').B2bInvoice): Promise<void> {
+      await b2bInvoiceRepo.saveInvoice(inv);
+    },
+    async getUnpaidInvoiceByBuyer(buyerPhone: string): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone);
+    },
+    async getB2bInvoice(id: string): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.getInvoice(id);
+    },
+    async listB2bInvoices(partnerId: import('./types').PartnerId): Promise<import('./types').B2bInvoice[]> {
+      return b2bInvoiceRepo.listInvoices(partnerId);
+    },
+    async markB2bInvoicePaid(id: string, paidAt: string): Promise<void> {
+      await b2bInvoiceRepo.markPaid(id, paidAt);
     },
   };
 }

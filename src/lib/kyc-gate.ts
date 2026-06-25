@@ -33,3 +33,20 @@ export function isSendVerified<T extends { kycStatus: KycStatus }>(
 ): customer is T & { kycStatus: 'verified' } {
   return customer?.kycStatus === 'verified';
 }
+
+/**
+ * B2B KYB send gate (MVP). A business sender reuses the same customer verify
+ * machine — its customer record must be 'verified' to send. Sanctions screening
+ * still runs regardless (screenTransfer screens the business name). A richer
+ * entity-registration KYB flow (Companies House etc.) is a follow-up.
+ */
+export function isB2bSendVerified<T extends { kycStatus: KycStatus }>(
+  customer: T | null | undefined,
+): customer is T & { kycStatus: 'verified' } {
+  return isSendVerified(customer);
+}
+
+/** Whether the partner enforces our KYB gate before a B2B send (mirrors sendGateActive). */
+export function requiresKyb(partner: Partner | null | undefined): boolean {
+  return sendGateActive(partner);
+}
