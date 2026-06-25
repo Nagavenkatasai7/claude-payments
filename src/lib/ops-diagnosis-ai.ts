@@ -50,6 +50,19 @@ export type OpsSuggestedAction = (typeof OPS_SUGGESTED_ACTIONS)[number];
 export const OPS_BLAST_RADII = ['isolated', 'cluster', 'systemic'] as const;
 export type OpsBlastRadius = (typeof OPS_BLAST_RADII)[number];
 
+// WhatsApp Graph error codes that are PERMANENT for a send (agent.turn /
+// whatsapp.*): a blind in-app Retry re-fails the full 8-attempt cycle and
+// re-dies, because the gate lives in the Meta dashboard, not this codebase. For
+// these the honest ops resolution is Dismiss (or fix in Meta → then Retry), and
+// the Diagnose panel DISABLES Retry + steers to Dismiss.
+//   131030 — recipient phone number not in the sandbox allow-list (the common one)
+//   131031 — business account restricted/locked
+const PERMANENT_SEND_ERROR_CODES = ['131030', '131031'];
+export function isPermanentSendError(lastError: string | null | undefined): boolean {
+  if (!lastError) return false;
+  return PERMANENT_SEND_ERROR_CODES.some((code) => lastError.includes(`(#${code})`));
+}
+
 export interface OpsDiagnosis {
   failure_class: OpsFailureClass;
   suggested_action: OpsSuggestedAction;

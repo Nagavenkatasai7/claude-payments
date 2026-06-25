@@ -13,7 +13,6 @@ import { Button } from '@/components/ui/button';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
-import { retryDeadAction, dismissDeadAction } from './actions';
 import { DiagnosePanel } from './diagnose-panel';
 import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
 import { SenderCell, FundingRefs } from '../sender-cell';
@@ -152,19 +151,9 @@ export default async function OpsPage() {
                       </TableCell>
                       <TableCell>{age(row.createdAt?.toISOString?.() ?? String(row.createdAt))}</TableCell>
                       <TableCell className="text-right">
-                        <div className="flex flex-col items-end gap-2">
-                          <div className="flex justify-end gap-2">
-                            <form action={retryDeadAction}>
-                              <input type="hidden" name="id" value={row.id} />
-                              <Button type="submit" size="sm" variant="default">Retry</Button>
-                            </form>
-                            <form action={dismissDeadAction}>
-                              <input type="hidden" name="id" value={row.id} />
-                              <Button type="submit" size="sm" variant="outline">Dismiss</Button>
-                            </form>
-                          </div>
-                          <DiagnosePanel subjectId={String(row.id)} />
-                        </div>
+                        {/* The panel owns Retry/Dismiss now — Diagnose highlights the
+                            recommended one + disables Retry for permanent errors. */}
+                        <DiagnosePanel subjectId={String(row.id)} kind="dead_letter" />
                       </TableCell>
                     </TableRow>
                   ))}
@@ -208,7 +197,7 @@ export default async function OpsPage() {
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
                       <TableCell>{age(t.paidAt)} ago</TableCell>
                       <TableCell className="text-right">
-                        <DiagnosePanel subjectId={t.id} />
+                        <DiagnosePanel subjectId={t.id} kind="stuck_transfer" />
                       </TableCell>
                     </TableRow>
                   ))}

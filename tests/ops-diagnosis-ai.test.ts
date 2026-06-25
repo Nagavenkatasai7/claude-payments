@@ -19,6 +19,7 @@ import { chat } from '@/lib/ollama';
 import {
   diagnoseOps,
   errorPrefix,
+  isPermanentSendError,
   OPS_FAILURE_CLASSES,
   OPS_SUGGESTED_ACTIONS,
   OPS_BLAST_RADII,
@@ -213,5 +214,28 @@ describe('errorPrefix — deterministic normalization for sibling clustering', (
     expect(errorPrefix(null)).toBe('');
     expect(errorPrefix(undefined)).toBe('');
     expect(errorPrefix('   ')).toBe('');
+  });
+});
+
+describe('isPermanentSendError — deterministic Retry-disable for permanent send rejects', () => {
+  it('flags 131030 (recipient not on Meta allow-list) — the case that dead-letters in test mode', () => {
+    expect(
+      isPermanentSendError(
+        'WhatsApp send failed (400): {"error":{"message":"(#131030) Recipient phone number not in allowed list"',
+      ),
+    ).toBe(true);
+  });
+  it('flags 131031 (account restricted)', () => {
+    expect(isPermanentSendError('Graph error (#131031) account restricted')).toBe(true);
+  });
+  it('does NOT flag transient/other errors (a Retry could help)', () => {
+    expect(isPermanentSendError('WhatsApp send failed (400): (#131056) rate limited')).toBe(false);
+    expect(isPermanentSendError('Settlement instruction rejected (503)')).toBe(false);
+    expect(isPermanentSendError('partner_5xx')).toBe(false);
+  });
+  it('is safe on empty / null', () => {
+    expect(isPermanentSendError('')).toBe(false);
+    expect(isPermanentSendError(null)).toBe(false);
+    expect(isPermanentSendError(undefined)).toBe(false);
   });
 });
