@@ -34,6 +34,7 @@ const FUNDING_LABEL: Record<FundingMethod, string> = {
   credit_card: 'Credit card',
   debit_card: 'Debit card',
   bank_transfer: 'Bank transfer',
+  ach_pull: 'ACH bank debit',
 };
 
 /** "Which account to refund" — funding method + the provider charge/refund refs. */

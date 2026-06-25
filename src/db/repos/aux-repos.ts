@@ -1,6 +1,7 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import {
   auditEvents,
+  b2bInvoices,
   beneficiaries,
   corridorRequests,
   idempotencyKeys,
@@ -12,7 +13,10 @@ import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, openOptional } from './mappers';
 import type {
+  B2bInvoice,
   CorridorRequest,
+  CurrencyCode,
+  InvoiceLineItem,
   PartnerApplication,
   PartnerApplicationDetails,
   PartnerApplicationDocument,
@@ -340,3 +344,68 @@ export function createAuditRepo(db: DbOrTx) {
   };
 }
 export type AuditRepo = ReturnType<typeof createAuditRepo>;
+
+// ── B2B mock invoices (the "ERP" stand-in for the test case) ─────────────────
+export function createB2bInvoiceRepo(db: DbOrTx) {
+  const toDomain = (row: typeof b2bInvoices.$inferSelect): B2bInvoice => {
+    const inv: B2bInvoice = {
+      id: row.id,
+      partnerId: row.partnerId,
+      businessName: row.businessName,
+      buyerPhone: row.buyerPhone,
+      lineItems: (row.lineItems as InvoiceLineItem[]) ?? [],
+      amountUsd: Number(row.amountUsd),
+      currency: row.currency as CurrencyCode,
+      status: row.status as 'unpaid' | 'paid',
+      createdAt: row.createdAt.toISOString(),
+    };
+    if (row.paidAt) inv.paidAt = row.paidAt.toISOString();
+    return inv;
+  };
+  return {
+    async saveInvoice(inv: B2bInvoice): Promise<void> {
+      await db.insert(b2bInvoices).values({
+        id: inv.id,
+        partnerId: inv.partnerId,
+        businessName: inv.businessName,
+        buyerPhone: inv.buyerPhone,
+        lineItems: inv.lineItems,
+        amountUsd: inv.amountUsd.toFixed(2),
+        currency: inv.currency,
+        status: inv.status,
+        createdAt: new Date(inv.createdAt),
+        paidAt: inv.paidAt ? new Date(inv.paidAt) : null,
+      });
+    },
+    /** The buyer's most recent UNPAID invoice (what the bot presents in Phase 1). */
+    async getUnpaidByBuyer(buyerPhone: string): Promise<B2bInvoice | null> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(sql`${b2bInvoices.buyerPhone} = ${buyerPhone} AND ${b2bInvoices.status} = 'unpaid'`)
+        .orderBy(desc(b2bInvoices.createdAt))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    async getInvoice(id: string): Promise<B2bInvoice | null> {
+      const rows = await db.select().from(b2bInvoices).where(eq(b2bInvoices.id, id)).limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    async listInvoices(partnerId: PartnerId): Promise<B2bInvoice[]> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(eq(b2bInvoices.partnerId, partnerId))
+        .orderBy(desc(b2bInvoices.createdAt));
+      return rows.map(toDomain);
+    },
+    /** Phase 4 "update accounting": flip to paid when the transfer is delivered. Idempotent. */
+    async markPaid(id: string, paidAt: string): Promise<void> {
+      await db
+        .update(b2bInvoices)
+        .set({ status: 'paid', paidAt: new Date(paidAt) })
+        .where(eq(b2bInvoices.id, id));
+    },
+  };
+}
+export type B2bInvoiceRepo = ReturnType<typeof createB2bInvoiceRepo>;

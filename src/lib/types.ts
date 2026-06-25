@@ -1,6 +1,12 @@
 export type PayoutMethod = 'upi' | 'bank';
 
-export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer';
+// 'ach_pull' = B2B: the licensed partner ACH-debits the payer's business bank via
+// the signed settlement instruction. SmartRemit never captures funds for this
+// method (non-custodial) — see settlement.ts.
+export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer' | 'ach_pull';
+
+// B2B discriminators — absent/default ⇒ the consumer shape.
+export type EntityType = 'individual' | 'business';
 
 export type TransferStatus =
   | 'awaiting_payment'
@@ -80,6 +86,35 @@ export interface Transfer {
   purpose?: TransferPurpose;
   // ── KYC Tier 4 EDD snapshot at send time ──
   eddRequired?: boolean;                  // true when this send crossed the $3k cumulative trigger
+  // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
+  transferType?: 'b2c' | 'b2b';           // absent ⇒ 'b2c'
+  senderEntityType?: EntityType;          // absent ⇒ 'individual'
+  recipientEntityType?: EntityType;       // absent ⇒ 'individual'
+  senderBusinessName?: string;            // decrypted on explicit reads; masked ****last4 by default
+  recipientBusinessName?: string;
+  achTokenRef?: string;                   // partner's opaque ACH-pull mandate token (B2B ach_pull)
+  invoiceId?: string;                     // the B2bInvoice this transfer pays
+  kybReviewNotes?: string;
+}
+
+// ── B2B mock invoices (the "ERP" stand-in) ──
+export interface InvoiceLineItem {
+  description: string;
+  qty: number;
+  unitAmountUsd: number;
+}
+
+export interface B2bInvoice {
+  id: string;
+  partnerId: PartnerId;
+  businessName: string;        // the SELLER business issuing the invoice
+  buyerPhone: string;          // the buyer's WhatsApp number
+  lineItems: InvoiceLineItem[];
+  amountUsd: number;
+  currency: CurrencyCode;
+  status: 'unpaid' | 'paid';
+  createdAt: string;           // ISO-8601
+  paidAt?: string;
 }
 
 // ── KYC Travel-Rule (Tier 2) enums — per-send counterparty data ──

@@ -71,6 +71,22 @@ export function buildSettlementInstruction(transfer: Transfer) {
       destination_currency: transfer.destinationCurrency ?? 'INR',
       fx_rate: transfer.fxRate, // FX locked at quote time
     },
+    // B2B ACH-pull (non-custodial): SmartRemit performs NO funding capture — the
+    // LICENSED PARTNER's rail ACH-debits the payer using the opaque mandate token
+    // it already holds. SmartRemit only instructs; funds never touch us.
+    ...(transfer.fundingMethod === 'ach_pull'
+      ? { funding: { method: 'ach_debit', token: transfer.achTokenRef ?? null } }
+      : {}),
+    ...(transfer.transferType === 'b2b'
+      ? {
+          parties: {
+            sender_entity_type: transfer.senderEntityType ?? 'individual',
+            recipient_entity_type: transfer.recipientEntityType ?? 'individual',
+            sender_business_name: transfer.senderBusinessName,
+            recipient_business_name: transfer.recipientBusinessName,
+          },
+        }
+      : {}),
   };
 }
 
