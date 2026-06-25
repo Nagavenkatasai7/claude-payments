@@ -19,6 +19,7 @@ export type SidebarActive =
   | 'kyc'
   | 'analytics'
   | 'corridors'
+  | 'b2b'
   | 'partner-requests'
   | 'rates'
   | 'team'
@@ -71,6 +72,7 @@ export function visibleNavGroups(staff: Staff): NavGroup[] {
           'partners',
           'corridors',
           'rates', // platform-wide cross-tenant pricing — never shown to partner-scoped staff
+          'b2b', // B2B invoices + business-to-business transfers — platform-scoped review surface
           // partner-requests is an inbound business-lead inbox — platform admins only.
           ...(staff.role === 'admin' ? (['partner-requests', 'team', 'api-keys'] as NavItem[]) : []),
         ],
@@ -120,6 +122,7 @@ export const NAV_META: Record<NavItem, NavMeta> = {
   kyc:          { label: 'KYC',          icon: 'kyc',          hrefFor: () => '/admin-dashboard/kyc' },
   analytics:    { label: 'Analytics',    icon: 'analytics',    hrefFor: () => '/admin-dashboard/analytics' },
   corridors:    { label: 'Corridors',    icon: 'corridors',    hrefFor: () => '/admin-dashboard/corridors' },
+  b2b:          { label: 'B2B',           icon: 'building',     hrefFor: () => '/admin-dashboard/b2b' },
   'partner-requests': { label: 'Partner requests', icon: 'building', hrefFor: () => '/admin-dashboard/partner-requests' },
   rates:        { label: 'Rates',        icon: 'rates',        hrefFor: () => '/admin-dashboard/rates' },
   team:         { label: 'Team',         icon: 'team',         hrefFor: () => '/admin-dashboard/team' },
