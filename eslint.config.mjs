@@ -3,7 +3,10 @@ import nextCoreWebVitals from 'eslint-config-next/core-web-vitals';
 // Next.js shared config (flat).
 const config = [
   // .claude/** holds agent worktrees (full repo copies incl. their .next builds).
-  { ignores: ['.next/**', 'node_modules/**', 'coverage/**', '.vercel/**', '.superpowers/**', '.claude/**'] },
+  // workflows/** = ultracode dynamic-workflow scripts (Workflow-runtime globals
+  // like agent()/phase(), not standalone Node modules) — invoked by the scheduled
+  // overnight loops, never imported by the app.
+  { ignores: ['.next/**', 'node_modules/**', 'coverage/**', '.vercel/**', '.superpowers/**', '.claude/**', 'workflows/**'] },
   ...nextCoreWebVitals,
   {
     // `react-hooks/purity` flags Date.now() and other impure calls during
