@@ -205,7 +205,10 @@ export default async function PayPage({
             value={formatMoney(view.sourceTotalCharge, view.sourceCurrency)}
             bold
           />
-          <Row label="Paying with" value="Bank transfer" />
+          <Row
+            label="Paying with"
+            value={view.fundingMethod === 'ach_pull' ? 'ACH bank debit' : 'Bank transfer'}
+          />
         </div>
         {view.awaitingPayment ? (
           <PayForm
@@ -213,6 +216,7 @@ export default async function PayPage({
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}
             recipientName={view.recipientName}
+            fundingMethod={view.fundingMethod}
             summary={{
               destAmount: view.destAmount,
               destCurrency: view.destCurrency,

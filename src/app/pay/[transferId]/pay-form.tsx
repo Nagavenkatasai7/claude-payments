@@ -62,14 +62,28 @@ export function PayForm({
   destinationCountry,
   needsBankDetails,
   recipientName,
+  fundingMethod,
   summary,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
   needsBankDetails: boolean;
   recipientName: string;
+  fundingMethod: string;
   summary: PaySummary;
 }) {
+  // B2B ACH-pull (NON-CUSTODIAL): the payer authorizes an ACH debit of their
+  // business bank — the licensed partner pulls the funds, SmartRemit never
+  // captures. Collect routing / account / account type, then OTP-confirm + pay.
+  if (fundingMethod === 'ach_pull') {
+    return (
+      <AchDebitPayForm
+        transferId={transferId}
+        recipientName={recipientName}
+        summary={summary}
+      />
+    );
+  }
   // Scheduled / re-opened / cron links already carry the recipient's bank
   // details — keep today's single-step, no-body POST exactly as before.
   if (!needsBankDetails) {
@@ -405,6 +419,169 @@ function BankDetailsPayForm({
         );
       })}
       <button type="submit" className={primaryBtnClasses}>Continue</button>
+    </form>
+  );
+}
+
+// ── B2B ACH-pull path (NON-CUSTODIAL) ────────────────────────────────────────
+// The payer authorizes a one-time ACH debit of their BUSINESS bank. SmartRemit
+// never captures the funds — the licensed partner pulls them via the signed
+// settlement instruction. We collect routing / account / account type, OTP-
+// confirm, then POST { ach, otp }; the route tokenizes the bank fields into an
+// opaque mandate (raw digits never stored) and proceeds straight to settlement.
+
+const selectClasses =
+  'mt-1 w-full rounded-lg border border-[#2a3942] bg-[#2a3942] p-2.5 text-[16px] text-[#e9edef]';
+
+function AchDebitPayForm({
+  transferId,
+  recipientName,
+  summary,
+}: {
+  transferId: string;
+  recipientName: string;
+  summary: PaySummary;
+}) {
+  const [status, setStatus] = useState<Status>('idle');
+  const [routingNumber, setRoutingNumber] = useState('');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [accountType, setAccountType] = useState<'checking' | 'savings'>('checking');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [code, setCode] = useState('');
+  const [sent, setSent] = useState(false);
+  const [otpError, setOtpError] = useState('');
+
+  // Mirror the server's checks (the route re-validates authoritatively).
+  function clientErrors(): Record<string, string> {
+    const e: Record<string, string> = {};
+    if (routingNumber.replace(/\D/g, '').length !== 9) e.routingNumber = 'Enter the 9-digit routing number.';
+    if (accountNumber.replace(/\D/g, '').length < 4) e.accountNumber = 'Enter a valid account number.';
+    return e;
+  }
+
+  async function handlePay(e: FormEvent) {
+    e.preventDefault();
+    const e0 = clientErrors();
+    if (Object.keys(e0).length > 0) {
+      setErrors(e0);
+      return;
+    }
+    setErrors({});
+    setStatus('paying');
+    setOtpError('');
+    try {
+      const res = await fetch(`/api/pay/${transferId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ach: { routingNumber, accountNumber, accountType }, otp: code }),
+      });
+      if (res.ok) {
+        setStatus('done');
+        return;
+      }
+      try {
+        const data = (await res.json()) as { fieldErrors?: Record<string, string>; reason?: string };
+        if (data.reason === 'otp') {
+          setOtpError('That code is incorrect or expired — resend and try again.');
+        } else if (data.fieldErrors) {
+          setErrors(data.fieldErrors);
+        }
+      } catch {
+        /* non-JSON error body — fall through to the generic error message */
+      }
+      setStatus('error');
+    } catch {
+      setStatus('error');
+    }
+  }
+
+  if (status === 'done') {
+    return (
+      <p className={successClasses}>
+        {/* Inline SVG check (not the ✅ emoji) so the success state renders
+            identically on Windows / macOS / Android — emoji glyphs vary per OS. */}
+        <svg
+          className="shrink-0"
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path d="M8 12.5l2.5 2.5L16 9" />
+        </svg>
+        Payment authorized! Check WhatsApp for your receipt.
+      </p>
+    );
+  }
+
+  return (
+    <form onSubmit={handlePay}>
+      <div className={stepLabelClasses}>Authorize ACH bank debit</div>
+      <p className="mb-4 text-[13px] leading-normal text-[#8696a0]">
+        We&rsquo;ll debit {formatMoney(summary.sourceTotalCharge, summary.sourceCurrency)} from your
+        business account to settle with {recipientName}.
+      </p>
+      <label className={labelClasses}>
+        Routing number
+        <input
+          className={inputClasses}
+          name="routingNumber"
+          required
+          value={routingNumber}
+          onChange={(e) => {
+            setRoutingNumber(e.target.value.replace(/\D/g, ''));
+            if (errors.routingNumber) setErrors((p) => ({ ...p, routingNumber: '' }));
+          }}
+          inputMode="numeric"
+          maxLength={9}
+          autoComplete="off"
+        />
+        {errors.routingNumber && <span className={fieldErrorClasses}>{errors.routingNumber}</span>}
+      </label>
+      <label className={labelClasses}>
+        Account number
+        <input
+          className={inputClasses}
+          name="accountNumber"
+          required
+          value={accountNumber}
+          onChange={(e) => {
+            setAccountNumber(e.target.value.replace(/\D/g, ''));
+            if (errors.accountNumber) setErrors((p) => ({ ...p, accountNumber: '' }));
+          }}
+          inputMode="numeric"
+          maxLength={17}
+          autoComplete="off"
+        />
+        {errors.accountNumber && <span className={fieldErrorClasses}>{errors.accountNumber}</span>}
+      </label>
+      <label className={labelClasses}>
+        Account type
+        <select
+          className={selectClasses}
+          name="accountType"
+          value={accountType}
+          onChange={(e) => setAccountType(e.target.value === 'savings' ? 'savings' : 'checking')}
+        >
+          <option value="checking">Checking</option>
+          <option value="savings">Savings</option>
+        </select>
+        {errors.accountType && <span className={fieldErrorClasses}>{errors.accountType}</span>}
+      </label>
+      <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
+      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
+        {status === 'paying' ? 'Processing…' : 'Authorize & pay'}
+      </button>
+      {status === 'error' && !otpError && (
+        <p className={formErrorClasses}>Something went wrong. Please try again.</p>
+      )}
     </form>
   );
 }
