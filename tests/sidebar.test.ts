@@ -60,7 +60,7 @@ describe('visibleNavGroups (Stage 5b IA)', () => {
     expect(groups[0].items).toEqual(['overview', 'ops']);
     expect(groups.map((g) => g.label)).toEqual([undefined, 'Money', 'People', 'Support', 'Insights', 'Platform']);
     const platform = groups.find((g) => g.label === 'Platform')!;
-    expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'partner-requests', 'team', 'api-keys']);
+    expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'b2b', 'partner-requests', 'team', 'api-keys']);
     const supportGroup = groups.find((g) => g.label === 'Support')!;
     expect(supportGroup.items).toEqual(['tickets', 'my-queue', 'employee-questions']);
   });
@@ -68,7 +68,7 @@ describe('visibleNavGroups (Stage 5b IA)', () => {
   it('platform agent: no team, no api-keys in the Platform group', async () => {
     const { visibleNavGroups } = await import('@/app/admin-dashboard/nav');
     const platform = visibleNavGroups(staff('agent', undefined)).find((g) => g.label === 'Platform')!;
-    expect(platform.items).toEqual(['partners', 'corridors', 'rates']);
+    expect(platform.items).toEqual(['partners', 'corridors', 'rates', 'b2b']);
   });
 
   it('partner-scoped staff: no ops, Partner group with my-partner', async () => {
