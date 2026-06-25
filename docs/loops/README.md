@@ -5,6 +5,8 @@ hand. Each loop is a **feedback system with terminal states** — it observes fr
 state, takes one bounded action, verifies the result, and **stops** (it cannot run
 forever). Discovered + audited via the Loop Library / Loop Doctor workflow.
 
+> 📊 **Visual overview:** open [`LOOP-LIBRARY.html`](LOOP-LIBRARY.html) in a browser for a one-page reference of all 10 loops.
+
 ### Operational (the manual ops cadence)
 | Loop | Replaces | Authority | Stops when |
 |------|----------|-----------|------------|
@@ -19,6 +21,14 @@ forever). Discovered + audited via the Loop Library / Loop Doctor workflow.
 | [Dependency-CVE burndown](dependency-cve-burndown.md) | `npm audit` gate fails but never fixes (e.g. nodemailer HIGH) | dep change → **PR** | none high/critical (no-op) · unfixable → parked + skipped |
 | [Flaky-test stabilizer](flaky-test-stabilizer.md) | CI retry masking "flake accumulation" | edits tests → **PR** | consecutive-pass streak holds · couldn't reproduce (no-progress) |
 | [Security-invariant audit](security-invariant-audit.md) | New public surfaces silently skipping self-gate / spine invariants | read-only (find + report) | every changed surface passes (no-op) · one pass over changed surfaces |
+
+### Overnight (ultracode dynamic workflows — run nightly, leave a morning PR)
+Implemented as fan-out [`Workflow`](../../workflows/) scripts, scheduled by nightly cloud routines. None auto-merge; none write to prod.
+| Loop | Does | Authority | Run (ET) |
+|------|------|-----------|----------|
+| [`overnight-bug-hunt`](../../workflows/overnight-bug-hunt.mjs) | Fuzz the TDD'd pure helpers vs their invariants → fix PR | PR | 1:00 AM |
+| [`claims-vs-code-audit`](../../workflows/claims-vs-code-audit.mjs) | Public claims (landing/about/docs) vs enforcing code → report PR | read-only | 2:30 AM |
+| [`prod-health-triage`](../../workflows/prod-health-triage.mjs) | Dead-letter / stuck / stale (SELECT-only) → fix PR + ops report | read prod + PR | 4:00 AM |
 
 ## How to use
 - **Run on demand:** paste a loop's **Prompt** block into a session.
