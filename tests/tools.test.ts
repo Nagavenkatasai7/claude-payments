@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import {
   executeTool,
   toolSchemas,
@@ -97,7 +98,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all twenty tools', () => {
+  it('exposes all twenty-one tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_draft',
@@ -113,6 +114,7 @@ describe('toolSchemas', () => {
       'list_saved_recipients',
       'list_schedules',
       'open_recall_dispute',
+      'present_bill',
       'repeat_transfer',
       'request_refund',
       'resolve_recipient',
@@ -2864,5 +2866,148 @@ describe('transfer-id tools — strict ownership (404-never-403, both channels)'
     const r = await executeTool('update_recipient_phone', { transfer_id: id, recipient_phone: '919999999999' }, stranger);
     expect(r).toEqual({ error: 'Transfer not found.' });
     expect((await owner.store.getTransfer(id))?.recipientPhone).toBe('919876543210'); // untouched
+  });
+});
+
+// ── U1: present_bill + B2B create (Phase 1+2) ────────────────────────────────
+describe('present_bill — B2B mock invoice lookup (WhatsApp channel)', () => {
+  beforeEach(async () => {
+    // b2b_invoices is not in freshDb's TRUNCATE set — clear it per test so the
+    // buyer's "unpaid" lookup is deterministic.
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  it('present_bill is a WhatsApp-only tool (in toolSchemas, NOT web-allowlisted)', () => {
+    expect(toolSchemas.map((t) => t.function.name)).toContain('present_bill');
+    expect(WEB_TOOL_ALLOWLIST.has('present_bill')).toBe(false);
+    expect(WEB_ONLY_TOOLS.has('present_bill')).toBe(false); // visible on WhatsApp
+    expect(toolSchemasForChannel('whatsapp').map((t) => t.function.name)).toContain('present_bill');
+    expect(toolSchemasForChannel('web').map((t) => t.function.name)).not.toContain('present_bill');
+  });
+
+  it('returns the structured bill (seller, line items, total) for the buyer', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_u1', partnerId: 'default', businessName: 'Globex Trading LLC',
+      buyerPhone: PHONE,
+      lineItems: [
+        { description: 'Widgets', qty: 100, unitAmountUsd: 10 },
+        { description: 'Gadgets', qty: 5, unitAmountUsd: 40 },
+      ],
+      amountUsd: 1200, currency: 'USD', status: 'unpaid',
+      createdAt: new Date().toISOString(),
+    });
+    const r = await executeTool('present_bill', {}, ctx);
+    expect(r.has_bill).toBe(true);
+    const inv = r.invoice as Record<string, unknown>;
+    expect(inv.invoice_id).toBe('inv_u1');
+    expect(inv.seller_business_name).toBe('Globex Trading LLC');
+    expect(inv.amount_usd).toBe(1200);
+    expect(inv.line_items).toEqual([
+      { description: 'Widgets', qty: 100, unit_amount_usd: 10 },
+      { description: 'Gadgets', qty: 5, unit_amount_usd: 40 },
+    ]);
+  });
+
+  it('returns has_bill:false (clean no-op, never an error) when no unpaid invoice', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('present_bill', {}, ctx);
+    expect(r).toEqual({ has_bill: false });
+  });
+
+  it('present_bill is blocked at dispatch on the web channel', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_web', partnerId: 'default', businessName: 'Globex Trading LLC',
+      buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 10 }],
+      amountUsd: 10, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
+    const r = await executeTool('present_bill', {}, { ...ctx, channel: 'web' });
+    expect(r).toEqual({ error: 'not available here' });
+  });
+});
+
+describe('create_transfer — B2B (business-to-business, ach_pull, non-custodial)', () => {
+  it('mints a b2b transfer: discriminators, business names, invoice link; never captures funds', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const result = await executeTool('create_transfer', {
+      amount_source: 400,                          // within the seeded T0 $500/day cap
+      recipient_name: 'Globex Trading LLC',       // payee business legal name
+      recipient_phone: '919876543210',
+      funding_method: 'ach_pull',
+      entity_type: 'business',
+      sender_business_name: 'Acme Imports Ltd',    // payer business legal name
+      recipient_business_name: 'Globex Trading LLC',
+      invoice_id: 'inv_u1',
+    }, ctx);
+
+    expect(result.status).toBe('awaiting_payment'); // non-custodial: no capture at mint
+    expect(result.compliance_status).toBe('cleared');
+
+    const saved = await ctx.store.getTransferDecrypted(result.transfer_id as string);
+    expect(saved?.transferType).toBe('b2b');
+    expect(saved?.senderEntityType).toBe('business');
+    expect(saved?.recipientEntityType).toBe('business');
+    expect(saved?.senderBusinessName).toBe('Acme Imports Ltd');
+    expect(saved?.recipientBusinessName).toBe('Globex Trading LLC');
+    expect(saved?.fundingMethod).toBe('ach_pull'); // flat $1.99 ACH-pull fee (fx.ts), $0 on first send
+    expect(saved?.invoiceId).toBe('inv_u1');
+    expect(saved?.achTokenRef).toBeUndefined();     // bound at pay time (U2), NEVER here
+  });
+
+  it('a consumer create with no B2B args stays byte-for-byte b2c (path unchanged)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const result = await executeTool('create_transfer', {
+      amount_usd: 500, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    const saved = await ctx.store.getTransfer(result.transfer_id as string);
+    expect(saved?.transferType).toBe('b2c');
+    expect(saved?.senderEntityType).toBe('individual');
+    expect(saved?.recipientEntityType).toBe('individual');
+    expect(saved?.senderBusinessName).toBeUndefined();
+    expect(saved?.invoiceId).toBeUndefined();
+  });
+});
+
+describe('send_approve_picker — B2B draft → approve-tap mint threads business fields', () => {
+  it('carries b2b discriminators + business names + invoice through the draft to the mint', async () => {
+    const redis = fakeRedis();
+    const ctx = await buildCtx(redis);
+    // Prime the FX rate cache BEFORE we replace fetch with the WhatsApp-send stub.
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'ach_pull' }, ctx);
+    // Stub fetch for the CTA send (returns ok + text + json so both FX and the
+    // WhatsApp Cloud API call are satisfied). No real network, no money moves.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, text: async () => '', json: async () => ({ rates: { INR: MOCK_RATE } }),
+    })));
+    // Show the B2B approval card (creates a draft; sends a CTA, no money moves).
+    const picker = await executeTool('send_approve_picker', {
+      amount_source: 400,                          // within the seeded T0 $500/day cap
+      funding_method: 'ach_pull',
+      entity_type: 'business',
+      recipient_name: 'Globex Trading LLC',
+      recipient_business_name: 'Globex Trading LLC',
+      sender_business_name: 'Acme Imports Ltd',
+      recipient_phone: '919876543210',
+      invoice_id: 'inv_u1',
+    }, ctx);
+    const draftId = picker.draft_id as string;
+    expect(draftId).toBeTruthy();
+
+    // Approve-tap mint path: the system supplies the draftId via button-tap ctx.
+    const tapCtx = { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } as const };
+    const minted = await executeTool('create_transfer', {}, tapCtx);
+    expect(minted.status).toBe('awaiting_payment');
+
+    const saved = await ctx.store.getTransferDecrypted(minted.transfer_id as string);
+    expect(saved?.transferType).toBe('b2b');
+    expect(saved?.senderEntityType).toBe('business');
+    expect(saved?.recipientEntityType).toBe('business');
+    expect(saved?.senderBusinessName).toBe('Acme Imports Ltd');
+    expect(saved?.recipientBusinessName).toBe('Globex Trading LLC');
+    expect(saved?.fundingMethod).toBe('ach_pull');
+    expect(saved?.invoiceId).toBe('inv_u1');
+    expect(saved?.achTokenRef).toBeUndefined(); // bound at pay time (U2)
   });
 });

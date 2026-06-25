@@ -1,5 +1,5 @@
 import { createTransfer, quoteOverrideFromDraft } from './transfer-create';
-import { isSendVerified, sendGateActive } from './kyc-gate';
+import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
@@ -85,8 +85,11 @@ export async function finalizeDraftPayment(
 
   // Phase 3 verify-before-send gate — refuse BEFORE claiming/consuming so an
   // unverified sender keeps their (single-use) draft and can retry once verified.
-  // WL1: skipped for a 'delegated' partner; sanctions still run in createTransfer.
-  if (sendGateActive(partner) && !isSendVerified(customer)) return { ok: false, error: 'kyc_required' };
+  // B2B drafts use the B2B-aware KYB predicate (isB2bSendVerified === isSendVerified
+  // for the MVP). WL1: skipped for a 'delegated' partner; sanctions still run.
+  const payVerified =
+    draft.transferType === 'b2b' ? isB2bSendVerified(customer) : isSendVerified(customer);
+  if (sendGateActive(partner) && !payVerified) return { ok: false, error: 'kyc_required' };
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
   const todayUsedCents = await dailyVolumeStore.getTodayCents(draft.senderPhone);
@@ -134,6 +137,15 @@ export async function finalizeDraftPayment(
   // rules (legacy non-USD drafts get NO override and fall back to a re-quote).
   const quoteOverride = quoteOverrideFromDraft(draft);
 
+  // ── B2B: the pay page is the PRIMARY mint path (the Approve & Pay card opens
+  // /pay/<draftId>), so it MUST thread the same B2B discriminators + business
+  // names + linked invoice the draft carries. Without this a B2B bill paid via
+  // the card would mint as a plain b2c transfer — the business names + invoice
+  // link lost and, critically, the PAYER business unscreened. For sanctions the
+  // sender name becomes the payer business legal name (createTransfer screens it).
+  // achTokenRef is bound by the rail at pay/settlement time (U2), never here. ──
+  const isB2bDraft = draft.transferType === 'b2b';
+
   const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
     id: reservedId, // the claimed id — crash-replay re-mints the SAME row
     phone: draft.senderPhone,
@@ -152,7 +164,8 @@ export async function finalizeDraftPayment(
     purpose: draft.purpose,
     sourceOfFunds: draft.sourceOfFunds,
     occupation: draft.occupation,
-    senderName: customer.fullName,
+    // For B2B, screen the PAYER business name (else the individual sender name).
+    senderName: (isB2bDraft ? draft.senderBusinessName : undefined) ?? customer.fullName,
     senderKycStatus: customer.kycStatus,
     requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
     quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
@@ -161,6 +174,13 @@ export async function finalizeDraftPayment(
     // above re-quotes at mid, so it must drop the route too (never a
     // partner-routed transfer at a platform rate).
     settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
+    // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
+    transferType: draft.transferType,
+    senderEntityType: draft.senderEntityType,
+    recipientEntityType: draft.recipientEntityType,
+    senderBusinessName: draft.senderBusinessName,
+    recipientBusinessName: draft.recipientBusinessName,
+    invoiceId: draft.invoiceId,
   });
 
   // Consume AFTER the mint: the transfer now exists, so losing the draft here
