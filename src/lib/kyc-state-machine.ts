@@ -34,6 +34,13 @@ export function applyKycEvent(
     return {};
   }
 
+  // A watchlist hit is a hard hold — only a human can move the customer out
+  // of needs_review once it has been set by a sanctions/watchlist event.
+  // No subsequent Persona webhook should silently clear the watchlist hold.
+  if (customer.watchlistHit && customer.kycReviewState === 'needs_review') {
+    return {};
+  }
+
   const delta: KycDelta = {};
   if (event.inquiryId) {
     delta.kycInquiryId = event.inquiryId;

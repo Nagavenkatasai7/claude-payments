@@ -193,3 +193,28 @@ describe('quote — any-to-any cross-currency destination', () => {
     expect(q.fxRate).toBe(85);
   });
 });
+
+// ── Regression: bug-hunt fix #1 ─────────────────────────────────────────────
+describe('quote — negative destToUsd must throw, not produce negative fxRate/amount', () => {
+  it('throws QuoteError when destToUsd is negative (e.g. -0.27 AED)', () => {
+    // Cross-rate = rates.toUsd / destToUsd = 1 / -0.27 = -3.7037 (NEGATIVE).
+    // Before the fix: quote() returned a Quote with fxRate=-3.7037 and
+    // amountInr=-370, silently corrupting the payout amount.
+    // After the fix: throws QuoteError identical to sourceForDest()'s guard.
+    const rates: FxRates = { toInr: 85, toUsd: 1 };
+    expect(() => quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', -0.27)).toThrow(QuoteError);
+    expect(() => quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', -0.27)).toThrow('Invalid exchange rate');
+  });
+
+  it('throws QuoteError when destToUsd is negative for a non-USD source', () => {
+    const rates: FxRates = { toInr: 108, toUsd: 1.27 };
+    expect(() => quote(200, 'GBP', rates, 'bank_transfer', 0, 'AED', -0.27)).toThrow(QuoteError);
+  });
+
+  it('positive destToUsd still works (no regression)', () => {
+    const rates: FxRates = { toInr: 85, toUsd: 1 };
+    const q = quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', 0.27);
+    expect(q.fxRate).toBeGreaterThan(0);
+    expect(q.amountInr).toBeGreaterThan(0);
+  });
+});

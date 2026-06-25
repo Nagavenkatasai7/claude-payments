@@ -99,3 +99,47 @@ describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)
     expect(r.status).toBe('blocked');
   });
 });
+
+// ── Regression: bug-hunt fix #3 ─────────────────────────────────────────────
+describe('screenTransfer — blocked reason correctly identifies WHICH party matched', () => {
+  // Before the fix: both sender-hit and recipient-hit paths returned
+  // reasons: ['Recipient is on the compliance watchlist.'] — wrong for sender.
+  it('sender-only hit: reason text identifies SENDER, not Recipient', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'Mom',           // NOT on watchlist
+      senderName: 'John Doe',         // ON watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons.some((x) => /sender/i.test(x))).toBe(true);
+    expect(r.reasons.every((x) => !/^Recipient/i.test(x))).toBe(true);
+  });
+
+  it('recipient-only hit: reason text identifies RECIPIENT', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',      // ON watchlist
+      senderName: 'Mom',              // NOT on watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons.some((x) => /recipient/i.test(x))).toBe(true);
+  });
+
+  it('both sender and recipient hit: both reasons are present', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',      // ON watchlist
+      senderName: 'John Doe',         // ON watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons.some((x) => /sender/i.test(x))).toBe(true);
+    expect(r.reasons.some((x) => /recipient/i.test(x))).toBe(true);
+    expect(r.reasons).toHaveLength(2);
+  });
+});

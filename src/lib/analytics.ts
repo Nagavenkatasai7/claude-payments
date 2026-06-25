@@ -21,9 +21,25 @@ export function transfersInWindow(
 }
 
 function buildDateBuckets(now: number, days: number): string[] {
+  // Use calendar-day arithmetic anchored in Eastern time to avoid DST skips.
+  // A fixed 86_400_000 ms step can land in the wrong ET calendar day on the
+  // 23-hour spring-forward day (March) or the 25-hour fall-back day (November).
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = fmt.formatToParts(new Date(now));
+  const year  = Number(parts.find((p) => p.type === 'year')!.value);
+  const month = Number(parts.find((p) => p.type === 'month')!.value);
+  const day   = Number(parts.find((p) => p.type === 'day')!.value);
+
   const dates: string[] = [];
   for (let i = days - 1; i >= 0; i--) {
-    dates.push(easternDate(now - i * DAY_MS));
+    // Step back i calendar days; use noon UTC to stay safely inside the target ET date.
+    const d = new Date(Date.UTC(year, month - 1, day - i, 12, 0, 0));
+    dates.push(easternDate(d.getTime()));
   }
   return dates;
 }

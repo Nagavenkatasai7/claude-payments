@@ -37,10 +37,10 @@ export async function screenTransfer(input: {
     ? await screener.screen({ name: input.senderName ?? '', sourceCountry })   // NEW (KYC)
     : { matched: false };
   if (recipientHit.matched || senderHit.matched) {
-    return {
-      status: 'blocked',
-      reasons: ['Recipient is on the compliance watchlist.'],
-    };
+    const reasons: string[] = [];
+    if (recipientHit.matched) reasons.push('Recipient is on the compliance watchlist.');
+    if (senderHit.matched)    reasons.push('Sender is on the compliance watchlist.');
+    return { status: 'blocked', reasons };
   }
 
   const reasons: string[] = [];
