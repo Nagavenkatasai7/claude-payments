@@ -457,3 +457,56 @@ describe('finalizeDraftPayment', () => {
     expect(await stores.store.getTransfer('tr_crashed_attempt')).not.toBeNull();
   });
 });
+
+// U1: the pay page is the PRIMARY B2B mint path (the Approve & Pay card opens
+// /pay/<draftId>), so finalizeDraftPayment MUST thread the draft's B2B fields.
+describe('finalizeDraftPayment — B2B (business-to-business) mint threads business fields', () => {
+  it('a B2B draft mints a b2b transfer with discriminators, business names, invoice link (never b2c)', async () => {
+    const stores = await buildStores();
+    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE,
+      recipient: { name: 'Globex Trading LLC', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+      amountUsd: 400,                       // within the T0 $500/day cap
+      amountSource: 400,
+      sourceCurrency: 'USD',
+      fundingMethod: 'ach_pull',
+      quote: { feeUsd: 1.99, fxRate: 85, amountInr: 34000 },
+      // B2B fields the card showed — must survive to the mint.
+      transferType: 'b2b',
+      senderEntityType: 'business',
+      recipientEntityType: 'business',
+      senderBusinessName: 'Acme Imports Ltd',
+      recipientBusinessName: 'Globex Trading LLC',
+      invoiceId: 'inv_u1',
+    });
+
+    const result = await finalizeDraftPayment(stores, draftId, { payoutMethod: 'bank', payoutDestination: '1234567890 IFSC HDFC0001234' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+
+    const saved = await stores.store.getTransferDecrypted(result.transferId);
+    expect(saved?.transferType).toBe('b2b');                 // NOT defaulted to b2c
+    expect(saved?.senderEntityType).toBe('business');
+    expect(saved?.recipientEntityType).toBe('business');
+    expect(saved?.senderBusinessName).toBe('Acme Imports Ltd');
+    expect(saved?.recipientBusinessName).toBe('Globex Trading LLC');
+    expect(saved?.fundingMethod).toBe('ach_pull');
+    expect(saved?.invoiceId).toBe('inv_u1');
+    expect(saved?.achTokenRef).toBeUndefined();              // bound by the rail at pay/settle, never here
+  });
+
+  it('a consumer draft still mints a b2c transfer with no business fields (path unchanged)', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200); // no B2B fields on the draft
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    const saved = await stores.store.getTransfer(result.transferId);
+    expect(saved?.transferType).toBe('b2c');
+    expect(saved?.senderEntityType).toBe('individual');
+    expect(saved?.senderBusinessName).toBeUndefined();
+    expect(saved?.invoiceId).toBeUndefined();
+  });
+});

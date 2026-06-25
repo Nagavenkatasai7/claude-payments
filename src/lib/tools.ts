@@ -5,11 +5,11 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
-import { isSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
+import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
-import type { ChatTool, CountryCode, Customer, CurrencyCode, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
+import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
@@ -198,6 +198,32 @@ function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | un
   return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
 }
 
+// ── B2B (business-to-business) arg parsing ───────────────────────────────────
+// A send is treated as B2B when entity_type === 'business' OR funding_method is
+// 'ach_pull' (the two travel together — either alone is a malformed B2B call we
+// still treat as B2B so the flow gets the business shape + KYB gate). Pure: no
+// I/O. Returns null for a normal consumer send so every b2c path stays
+// byte-for-byte unchanged (B2B fields are all additive/optional downstream).
+interface ParsedB2b {
+  senderBusinessName?: string;
+  recipientBusinessName?: string;
+  invoiceId?: string;
+}
+function isB2bArgs(args: Record<string, unknown>): boolean {
+  return args.entity_type === 'business' || args.funding_method === 'ach_pull';
+}
+function parseB2bArgs(args: Record<string, unknown>): ParsedB2b | null {
+  if (!isB2bArgs(args)) return null;
+  const str = (v: unknown) =>
+    typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  return {
+    senderBusinessName: str(args.sender_business_name),
+    recipientBusinessName: str(args.recipient_business_name),
+    invoiceId: str(args.invoice_id),
+  };
+}
+const BUSINESS_ENTITY: EntityType = 'business';
+
 export const toolSchemas: ChatTool[] = [
   {
     type: 'function',
@@ -228,9 +254,9 @@ export const toolSchemas: ChatTool[] = [
           },
           funding_method: {
             type: 'string',
-            enum: ['credit_card', 'debit_card', 'bank_transfer'],
+            enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'],
             description:
-              "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. The fee depends on this choice.",
+              "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. The fee depends on this choice. For a BUSINESS bill payment use 'ach_pull' (flat $1.99 ACH bank debit).",
           },
           source_currency: {
             type: 'string',
@@ -245,6 +271,15 @@ export const toolSchemas: ChatTool[] = [
         },
         required: ['funding_method'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'present_bill',
+      description:
+        "Look up the buyer's most recent UNPAID business invoice (the mock 'ERP' bill) so you can show them what they owe. Call this when a business user wants to pay a bill or asks 'what do I owe' / 'show my invoice'. Takes no arguments — it uses the sender's own number. Returns { has_bill: true, invoice: { invoice_id, seller_business_name, line_items: [{description, qty, unit_amount_usd}], amount_usd, currency } } when there is one, or { has_bill: false } when none is outstanding. When has_bill is true, present the seller name, each line item (qty x unit), and the total, then proceed with the B2B pay flow (collect the payer's business name, quote with ach_pull, send the Approve & Pay card with the invoice_id). When has_bill is false, say there's no outstanding bill right now.",
+      parameters: { type: 'object', properties: {} },
     },
   },
   {
@@ -267,8 +302,8 @@ export const toolSchemas: ChatTool[] = [
           },
           funding_method: {
             type: 'string',
-            enum: ['credit_card', 'debit_card', 'bank_transfer'],
-            description: "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'.",
+            enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'],
+            description: "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. For a BUSINESS bill payment use 'ach_pull'.",
           },
           recipient_phone: {
             type: 'string',
@@ -284,6 +319,11 @@ export const toolSchemas: ChatTool[] = [
             type: 'string',
             description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
           },
+          // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
+          entity_type: { type: 'string', enum: ['business'], description: "Set to 'business' for a business-to-business bill payment (both parties are businesses). Omit for a normal consumer send." },
+          sender_business_name: { type: 'string', description: 'The PAYER business legal name (B2B only). For a B2B send this is used as the sender name for sanctions screening.' },
+          recipient_business_name: { type: 'string', description: 'The PAYEE / seller business legal name (B2B only). For a B2B send this is used as the recipient name for sanctions screening.' },
+          invoice_id: { type: 'string', description: 'The invoice_id returned by present_bill, linking this transfer to the business invoice it pays (B2B only).' },
         },
         required: [
           'amount_source',
@@ -508,7 +548,7 @@ export const toolSchemas: ChatTool[] = [
         properties: {
           amount_source: { type: 'number', description: "Send amount in the sender's OWN currency (rupees for India, dollars for the US, etc.). Do NOT convert it yourself." },
           amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
-          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
+          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'] },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string' },
           source_currency: {
@@ -525,6 +565,11 @@ export const toolSchemas: ChatTool[] = [
           purpose: { type: 'string', enum: ['family_support','gift','education','medical','savings','bills','business','other'] },
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
+          // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
+          entity_type: { type: 'string', enum: ['business'], description: "Set to 'business' for a business-to-business bill payment. Send funding_method 'ach_pull' too. Omit for a normal consumer send." },
+          sender_business_name: { type: 'string', description: 'The PAYER business legal name (B2B only).' },
+          recipient_business_name: { type: 'string', description: 'The PAYEE / seller business legal name (B2B only). Pass this as recipient_name as well so the card and sanctions screen name the business.' },
+          invoice_id: { type: 'string', description: 'The invoice_id from present_bill, linking this payment to the business invoice (B2B only).' },
         },
         required: [
           'amount_source',
@@ -811,6 +856,8 @@ export async function executeTool(
       return getQuoteTool(args, ctx);
     case 'create_transfer':
       return createTransferTool(args, ctx);
+    case 'present_bill':
+      return presentBillTool(args, ctx);
     case 'generate_payment_link':
       return generatePaymentLinkTool(args, ctx);
     case 'check_payment_status':
@@ -1032,8 +1079,13 @@ async function createTransferTool(
     const partner =
       (await ctx.partnerStore.getPartner(customer.partnerId)) ??
       (await ctx.partnerStore.ensureDefaultPartner());
-    // Phase 3 verify-before-send gate (last bot chokepoint before mint).
-    if (sendGateActive(partner) && !isSendVerified(customer)) {
+    // Phase 3 verify-before-send gate (last bot chokepoint before mint). B2B
+    // drafts use the B2B-aware KYB predicate (isB2bSendVerified === isSendVerified
+    // for the MVP) so this chokepoint stays in lockstep with the picker/legacy
+    // gates if the KYB predicate ever tightens.
+    const draftVerified =
+      draft.transferType === 'b2b' ? isB2bSendVerified(customer) : isSendVerified(customer);
+    if (sendGateActive(partner) && !draftVerified) {
       const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
       return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
     }
@@ -1054,6 +1106,13 @@ async function createTransferTool(
     // WITH that quote: a legacy draft that falls back to a re-quote at mid
     // drops both (never a partner-routed transfer at a platform rate).
     const quoteOverride = quoteOverrideFromDraft(draft);
+    // ── B2B: thread the draft's discriminators + business names + linked invoice
+    // through the mint. For a B2B transfer the SANCTIONS screen must cover the
+    // business legal names, so senderName/recipientName become the business names
+    // (createTransfer screens both via screenTransfer). achTokenRef is bound at
+    // pay time (U2) — never here. draft.transferType==='b2b' is the discriminant;
+    // a consumer draft leaves all of these undefined ⇒ the b2c mint is unchanged. ──
+    const isB2bDraft = draft.transferType === 'b2b';
     try {
       const transfer = await createTransfer(ctx.store, ctx.partnerStore, ctx.monthlyVolumeStore, {
         phone: ctx.phone,
@@ -1073,11 +1132,19 @@ async function createTransferTool(
         purpose: draft.purpose,
         sourceOfFunds: draft.sourceOfFunds,
         occupation: draft.occupation,
-        senderName: customer.fullName,
+        // For B2B, screen the PAYER business name (else the individual sender name).
+        senderName: (isB2bDraft ? draft.senderBusinessName : undefined) ?? customer.fullName,
         senderKycStatus: customer.kycStatus,
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
         quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
         settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
+        // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
+        transferType: draft.transferType,
+        senderEntityType: draft.senderEntityType,
+        recipientEntityType: draft.recipientEntityType,
+        senderBusinessName: draft.senderBusinessName,
+        recipientBusinessName: draft.recipientBusinessName,
+        invoiceId: draft.invoiceId,
       });
       await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
@@ -1111,9 +1178,16 @@ async function createTransferTool(
     args.source_currency,
     args.destination_country,
   );
-  // Phase 3 verify-before-send gate (legacy explicit-args create path).
+  // B2B (business-to-business): parsed once; null ⇒ a normal consumer send (every
+  // b2c line below is byte-for-byte unchanged). For B2B the recipient_name is the
+  // PAYEE business legal name and senderName becomes the PAYER business name so
+  // the existing sanctions screen covers both businesses.
+  const legacyB2b = parseB2bArgs(args);
+  // Phase 3 verify-before-send gate (legacy explicit-args create path). The B2B
+  // KYB gate reuses the same verify machine (isB2bSendVerified === isSendVerified).
   // WL1: skipped for a 'delegated' partner; sanctions still run in createTransfer.
-  if (sendGateActive(legacyPartner) && !isSendVerified(legacyCustomer)) {
+  const legacyVerified = legacyB2b ? isB2bSendVerified(legacyCustomer) : isSendVerified(legacyCustomer);
+  if (sendGateActive(legacyPartner) && !legacyVerified) {
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
@@ -1153,9 +1227,18 @@ async function createTransferTool(
       purpose: asEnum(PURPOSES, args.purpose),
       sourceOfFunds: legacySof,
       occupation: legacyOcc,
-      senderName: legacyCustomer.fullName,
+      // For B2B, screen the PAYER business name (else the individual sender name).
+      senderName: legacyB2b?.senderBusinessName ?? legacyCustomer.fullName,
       senderKycStatus: legacyCustomer.kycStatus,
       requiresKyc: sendGateActive(legacyPartner), // WL1: delegated ⇒ false; sanctions still run
+      // ── B2B discriminators + business names + linked invoice (undefined for b2c).
+      // achTokenRef is bound at pay time (U2), never on this chat path. ──
+      transferType: legacyB2b ? 'b2b' : undefined,
+      senderEntityType: legacyB2b ? BUSINESS_ENTITY : undefined,
+      recipientEntityType: legacyB2b ? BUSINESS_ENTITY : undefined,
+      senderBusinessName: legacyB2b?.senderBusinessName,
+      recipientBusinessName: legacyB2b?.recipientBusinessName ?? (legacyB2b ? String(args.recipient_name) : undefined),
+      invoiceId: legacyB2b?.invoiceId,
     });
     await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
@@ -1173,6 +1256,44 @@ async function createTransferTool(
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
+}
+
+/**
+ * present_bill — the B2B Phase-1 entry point. Looks up the buyer's most recent
+ * UNPAID business invoice (the mock "ERP" stand-in) keyed on the sender's own
+ * number, and returns a structured bill the agent can read aloud: the seller
+ * business name, each line item (description + qty + unit), and the total. The
+ * sender is implicit and unforgeable (ctx.phone) — the tool takes no arguments,
+ * so it can never surface another buyer's invoice. Read-only: it neither quotes
+ * nor moves money. A clean { has_bill: false } when nothing is outstanding so the
+ * agent can say there's no bill, never an error.
+ */
+async function presentBillTool(
+  _args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  let invoice: import('./types').B2bInvoice | null;
+  try {
+    invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone);
+  } catch (err) {
+    console.warn('present_bill getUnpaidInvoiceByBuyer failed:', err);
+    return { has_bill: false };
+  }
+  if (!invoice) return { has_bill: false };
+  return {
+    has_bill: true,
+    invoice: {
+      invoice_id: invoice.id,
+      seller_business_name: invoice.businessName,
+      line_items: invoice.lineItems.map((li) => ({
+        description: li.description,
+        qty: li.qty,
+        unit_amount_usd: li.unitAmountUsd,
+      })),
+      amount_usd: invoice.amountUsd,
+      currency: invoice.currency,
+    },
+  };
 }
 
 // Sticky EDD profile: when both SoF + occupation are supplied (validated) and
@@ -1850,13 +1971,22 @@ async function sendApprovePickerTool(
   // resolve_recipient), those args ARE supplied and we keep them verbatim.
   const payoutMethod: PayoutMethod = (args.payout_method as PayoutMethod | undefined) ?? 'bank';
   const payoutDestination = typeof args.payout_destination === 'string' ? args.payout_destination : '';
+  // B2B (business-to-business): a bill payment between two businesses, funded by
+  // ach_pull. Parsed once; null ⇒ a normal consumer send (every b2c line below
+  // is byte-for-byte unchanged). For B2B the recipient_name the card/screen use
+  // is the PAYEE business legal name (the model passes it as recipient_name too).
+  const b2b = parseB2bArgs(args);
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
   const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
     await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
   // Phase 3 verify-before-send gate — refuse to build the approval card / draft
-  // for an unverified sender; hand off the kyc_url instead.
+  // for an unverified sender; hand off the kyc_url instead. The B2B KYB gate
+  // reuses the same verify machine (isB2bSendVerified === isSendVerified for the
+  // MVP, requiresKyb === sendGateActive), so this single gate covers both shapes.
   // WL1: skipped for a 'delegated' partner; sanctions still run at mint time.
-  if (sendGateActive(partner) && !isSendVerified(customer)) {
+  const gateActive = sendGateActive(partner);
+  const verified = b2b ? isB2bSendVerified(customer) : isSendVerified(customer);
+  if (gateActive && !verified) {
     const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
@@ -1903,7 +2033,9 @@ async function sendApprovePickerTool(
       recipientName: String(args.recipient_name),
       transfersToday,
       sourceCountry: customer.senderCountry,
-      senderName: customer.fullName,
+      // B2B: screen the PAYER business legal name (defense-in-depth — the mint
+      // re-screens it too). A consumer send screens the individual sender name.
+      senderName: (b2b ? b2b.senderBusinessName : undefined) ?? customer.fullName,
     });
     if (screen.status === 'blocked') {
       // Record an auditable, never-charged blocked row (no velocity/volume bump).
@@ -1973,6 +2105,16 @@ async function sendApprovePickerTool(
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).
       settlementPartnerId,
+      // ── B2B: carry the discriminators + business names + linked invoice so the
+      // approve-tap mint threads exactly what the card showed. Absent (b2b===null)
+      // ⇒ undefined everywhere ⇒ the consumer draft shape is unchanged. The
+      // ACH-pull mandate token is bound at pay time (U2), never on the draft. ──
+      transferType: b2b ? 'b2b' : undefined,
+      senderEntityType: b2b ? BUSINESS_ENTITY : undefined,
+      recipientEntityType: b2b ? BUSINESS_ENTITY : undefined,
+      senderBusinessName: b2b?.senderBusinessName,
+      recipientBusinessName: b2b?.recipientBusinessName ?? (b2b ? String(args.recipient_name) : undefined),
+      invoiceId: b2b?.invoiceId,
     });
     const summary = buildApproveSummary(
       q,

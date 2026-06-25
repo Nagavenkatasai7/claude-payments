@@ -305,6 +305,18 @@ export interface Draft {
   // when its rate won the corridor at quote time (default-tenant only).
   // Internal — never shown to the customer. Absent ⇒ platform default.
   settlementPartnerId?: PartnerId;
+  // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape.
+  // Carried on the draft so the approve-tap mint threads the same discriminators,
+  // business names, and linked invoice into createTransfer that the card showed.
+  // achTokenRef is NOT set here — U2 binds the ACH-pull mandate token at pay time
+  // (non-custodial: the bot never captures funds). For a B2B draft recipient.name
+  // is the PAYEE business legal name (so the existing sanctions screen covers it).
+  transferType?: 'b2c' | 'b2b';
+  senderEntityType?: EntityType;
+  recipientEntityType?: EntityType;
+  senderBusinessName?: string;
+  recipientBusinessName?: string;
+  invoiceId?: string;
   createdAt: string; // ISO-8601
 }
 
