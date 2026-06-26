@@ -164,6 +164,24 @@ describe('quote (non-USD coverage)', () => {
   });
 });
 
+describe('quote — negative destToUsd guard (bug: negative crossRate returned)', () => {
+  it('throws QuoteError when destToUsd is negative (would produce negative fxRate and dest amount)', () => {
+    // Repro: destToUsd = -0.27 is truthy and finite, so the old guard let it through,
+    // computing crossRate = 1 / -0.27 = -3.7037 and amountInr = -370.
+    const USD2 = { toInr: 85, toUsd: 1 };
+    expect(() =>
+      quote(100, 'USD', USD2, 'bank_transfer', 0, 'AED', -0.27),
+    ).toThrow(QuoteError);
+  });
+
+  it('throws QuoteError with the "Invalid exchange rate" message for negative destToUsd', () => {
+    const USD2 = { toInr: 85, toUsd: 1 };
+    expect(() =>
+      quote(100, 'USD', USD2, 'bank_transfer', 0, 'AED', -0.27),
+    ).toThrow('Invalid exchange rate; please try again.');
+  });
+});
+
 describe('quote — any-to-any cross-currency destination', () => {
   const USD2 = { toInr: 85, toUsd: 1 };
   it('USD→INR is byte-for-byte the legacy result (5-arg call defaults to INR)', () => {

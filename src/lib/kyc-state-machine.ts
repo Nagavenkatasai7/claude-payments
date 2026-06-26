@@ -48,6 +48,14 @@ export function applyKycEvent(
     return delta;
   }
 
+  // If the customer already has an active watchlist hold, no inquiry event may
+  // clear or downgrade it — only a human reviewer can resolve it.
+  // This guard runs after inquiryId / idLast4 are captured so those are still
+  // recorded, but before the switch so kycReviewState cannot be overwritten.
+  if (customer.watchlistHit) {
+    return delta; // preserve needs_review; don't let inquiry.created overwrite it
+  }
+
   switch (event.name) {
     case 'inquiry.created':
     case 'inquiry.started':

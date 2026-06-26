@@ -157,6 +157,48 @@ describe('fundingMethodMix', () => {
   });
 });
 
+describe('buildDateBuckets DST edge cases', () => {
+  // DST spring-forward 2026: clocks jump from 2:00 AM EST to 3:00 AM EDT on March 8.
+  // now = midnight EDT on March 9, 2026 = 2026-03-09T04:00:00Z (UTC).
+  // Subtracting exactly 86400000 ms (1 "day") lands at 2026-03-08T04:00:00Z,
+  // which in Eastern time is 11:00 PM EST on March 7 — wrong bucket.
+  it('DST spring-forward: does not drop March 8 from a 2-day window', () => {
+    // now is exactly midnight EDT, March 9 2026 (04:00 UTC)
+    const springNow = Date.parse('2026-03-09T04:00:00Z');
+    // A transfer created at noon Eastern on March 8 (17:00 UTC)
+    const march8Transfer = makeTransfer({
+      id: 'dst-spring',
+      createdAt: new Date(Date.parse('2026-03-08T17:00:00Z')).toISOString(),
+      amountUsd: 100,
+      status: 'delivered',
+    });
+    const result = dailyCounts([march8Transfer], springNow, 2);
+    expect(result).toHaveLength(2);
+    // The two buckets should be March 8 and March 9, not March 7 and March 9
+    expect(result[0].date).toContain('3/8/');
+    expect(result[1].date).toContain('3/9/');
+    // March 8 transfer must appear in the March 8 bucket, not get silently dropped
+    expect(result[0].count).toBe(1);
+  });
+
+  // DST fall-back 2026: clocks fall from 2:00 AM EDT to 1:00 AM EST on November 1.
+  // now = midnight EST, November 2, 2026 = 2026-11-02T05:00:00Z (UTC).
+  // Subtracting exactly 1 × 86400000 ms lands at 2026-11-01T05:00:00Z = 1:00 AM EST
+  // on Nov 1 (still Nov 1 but the day is 25 h long); subtracting 2 × 86400000 ms
+  // lands at 2026-10-31T05:00:00Z = 1:00 AM EDT on Oct 31 — correct.
+  // Without the fix, both i=2 and i=1 land in Nov 1, producing a duplicate bucket.
+  it('DST fall-back: does not produce a duplicate November 1 bucket in a 3-day window', () => {
+    const fallNow = Date.parse('2026-11-02T05:00:00Z'); // midnight EST Nov 2
+    const result = dailyCounts([], fallNow, 3);
+    expect(result).toHaveLength(3);
+    const dates = result.map((r) => r.date);
+    // All three dates must be distinct
+    expect(new Set(dates).size).toBe(3);
+    // Must include Nov 2
+    expect(dates.some((d) => d.startsWith('11/2/'))).toBe(true);
+  });
+});
+
 describe('topRecipientsByCount', () => {
   it('returns top N by count, sorted desc with name tiebreaker', () => {
     const t = [

@@ -75,6 +75,9 @@ describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)
       senderName: 'John Doe',     // on the default WATCHLIST
     });
     expect(r.status).toBe('blocked');
+    // The reason must reference the SENDER, not the recipient
+    expect(r.reasons[0]).toMatch(/sender/i);
+    expect(r.reasons[0]).not.toMatch(/recipient/i);
   });
   it('clean sender + watchlisted recipient still blocks (recipient path unchanged)', async () => {
     const r = await screenTransfer({
@@ -82,6 +85,8 @@ describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)
       senderName: 'Clean Person',
     });
     expect(r.status).toBe('blocked');
+    // Reason must name the recipient when only the recipient is matched
+    expect(r.reasons[0]).toMatch(/recipient/i);
   });
   it('clean sender + clean recipient clears (no false positive)', async () => {
     const r = await screenTransfer({

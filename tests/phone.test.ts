@@ -29,6 +29,17 @@ describe('normalizePhone', () => {
   it('passes through a clean digit string unchanged', () => {
     expect(normalizePhone('919876543210')).toBe('919876543210');
   });
+
+  it('returns empty string when toString() throws (never-throw invariant for unknown inputs)', () => {
+    // A revoked Proxy, tampered prototype, or untrusted deserialized object may have
+    // a toString() that throws. normalizePhone must never propagate that exception.
+    const malformed = {
+      toString() {
+        throw new TypeError('boom');
+      },
+    };
+    expect(normalizePhone(malformed)).toBe('');
+  });
 });
 
 describe('isValidPhone', () => {

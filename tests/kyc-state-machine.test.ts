@@ -67,4 +67,27 @@ describe('applyKycEvent (human-review-only)', () => {
     const d = applyKycEvent(base, ev({ name: 'inquiry.transitioned', status: 'completed' }));
     expect(d.kycReviewState).toBeUndefined();
   });
+
+  it('out-of-order inquiry.created does NOT overwrite a prior watchlist hold (needs_review preserved)', () => {
+    // Step 1: watchlist report arrives first → needs_review + watchlistHit
+    // Step 2: late inquiry.created arrives → must NOT downgrade needs_review to inquiry_started
+    const afterWatchlist = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(afterWatchlist, ev({ name: 'inquiry.created', status: 'created' }));
+    // The state must stay needs_review — the watchlist hold is a hard stop
+    expect(d.kycReviewState).toBeUndefined();
+    // The inquiryId may still be captured (informational)
+    expect(d.kycInquiryId).toBe('inq_1');
+  });
+
+  it('out-of-order inquiry.completed does NOT overwrite a prior watchlist hold', () => {
+    const afterWatchlist = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(afterWatchlist, ev({ name: 'inquiry.completed', status: 'completed' }));
+    expect(d.kycReviewState).toBeUndefined();
+  });
+
+  it('inquiry.started does NOT overwrite a prior watchlist hold', () => {
+    const afterWatchlist = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(afterWatchlist, ev({ name: 'inquiry.started', status: 'started' }));
+    expect(d.kycReviewState).toBeUndefined();
+  });
 });

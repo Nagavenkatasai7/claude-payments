@@ -182,6 +182,13 @@ export function decryptField(
   const wrappedDek = fromB64url(wrappedB64);
   const ct = fromB64url(ctB64);
 
+  if (iv.length !== GCM_IV_BYTES) {
+    throw new Error('field-crypto: malformed blob (bad iv length)');
+  }
+  if (tag.length !== GCM_TAG_BYTES) {
+    throw new Error('field-crypto: malformed blob (bad tag length)');
+  }
+
   const dek = provider.unwrapDataKey(wrappedDek); // throws if master key mismatches
   const decipher = createDecipheriv('aes-256-gcm', dek, iv);
   decipher.setAAD(Buffer.from(version)); // must match the AAD bound at encrypt
