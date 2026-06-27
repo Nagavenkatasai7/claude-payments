@@ -112,10 +112,18 @@ export interface B2bInvoice {
   lineItems: InvoiceLineItem[];
   amountUsd: number;
   currency: CurrencyCode;
-  status: 'unpaid' | 'paid';
+  // unpaid → paid (on delivery). voided = staff killed the bill; disputed = buyer
+  // rejected it (a support ticket carries the reason). voided/disputed are NOT
+  // re-payable; reissue mints a fresh 'unpaid' invoice.
+  status: 'unpaid' | 'paid' | 'voided' | 'disputed';
   createdAt: string;           // ISO-8601
   paidAt?: string;
 }
+
+// Why a buyer declines a bill (decline/dispute). Closed list; surfaced to staff
+// via a support ticket. Kept small + non-accusatory.
+export const B2B_DISPUTE_REASONS = ['not_my_bill', 'wrong_amount', 'duplicate', 'already_paid', 'other'] as const;
+export type B2bDisputeReason = (typeof B2B_DISPUTE_REASONS)[number];
 
 // ── KYC Travel-Rule (Tier 2) enums — per-send counterparty data ──
 export type SenderRecipientRelationship =

@@ -416,3 +416,54 @@ describe('reconciliation query feed', () => {
     expect(stuck.map((t) => t.id)).toEqual(['wk_t1']);
   });
 });
+
+describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner reverse, not a PSP refund)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+
+  it('POSTs a SIGNED reverse instruction to the rail and completes the refund — no funds-provider capture', async () => {
+    // A paid ach_pull transfer with a reversal already requested+approved
+    // (refundStatus pending), exactly as reverseB2bSettlement leaves it.
+    await store.saveTransfer({
+      ...transferFixture(),
+      fundingMethod: 'ach_pull',
+      transferType: 'b2b',
+      achTokenRef: 'ach_deadbeef',
+      senderBusinessName: 'Raj Trading Co',
+      recipientBusinessName: 'Wilson HK Ltd',
+      refundStatus: 'pending',
+    } as Transfer);
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'reverse-rail-9' }) });
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+
+    // The ONLY outbound HTTP is the signed reverse instruction to the partner rail.
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://rail.example/settle');
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.action).toBe('reverse'); // return-ACH path, NOT a fresh payout
+    // DISTINCT reference from the original settle (reverse-<id>) so a rail that
+    // dedupes on reference cannot swallow the reverse as a replay of the settle.
+    expect(body.reference).toBe('reverse-wk_t1');
+    expect(body.partner_id).toBe('acme');
+    expect((init.headers as Record<string, string>)['x-signature']).toMatch(/^[0-9a-f]{64}$/);
+
+    // Refund lifecycle completes off the rail ack; the customer hears "reversed".
+    const t = (await store.getTransfer('wk_t1'))!;
+    expect(t.refundStatus).toBe('completed');
+    expect(t.refundRef).toBe('reverse-rail-9');
+    const dead = await outbox.listDead();
+    expect(dead).toHaveLength(0);
+  });
+});

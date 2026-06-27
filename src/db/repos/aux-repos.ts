@@ -357,7 +357,7 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
       lineItems: (row.lineItems as InvoiceLineItem[]) ?? [],
       amountUsd: Number(row.amountUsd),
       currency: row.currency as CurrencyCode,
-      status: row.status as 'unpaid' | 'paid',
+      status: row.status as B2bInvoice['status'],
       createdAt: row.createdAt.toISOString(),
     };
     if (row.paidAt) inv.paidAt = row.paidAt.toISOString();
@@ -421,12 +421,97 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
         .orderBy(desc(b2bInvoices.createdAt));
       return rows.map(toDomain);
     },
-    /** Phase 4 "update accounting": flip to paid when the transfer is delivered. Idempotent. */
+    /**
+     * Phase 4 "update accounting": flip to paid when the transfer is delivered.
+     * Guarded to ONLY unpaid → paid so a late delivery webhook can never resurrect
+     * a bill staff voided or a buyer disputed (those are terminal, not re-payable);
+     * idempotent on a re-delivered transfer (already-paid is a no-op).
+     */
     async markPaid(id: string, paidAt: string): Promise<void> {
       await db
         .update(b2bInvoices)
         .set({ status: 'paid', paidAt: new Date(paidAt) })
-        .where(eq(b2bInvoices.id, id));
+        .where(sql`${b2bInvoices.id} = ${id} AND ${b2bInvoices.status} = 'unpaid'`);
+    },
+    /** Partner-scoped fetch (tenant isolation) for admin lifecycle actions. */
+    async getInvoiceByIdScoped(id: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(sql`${b2bInvoices.id} = ${id} AND ${b2bInvoices.partnerId} = ${partnerId}`)
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /** Staff void of an UNPAID bill (kills it). Guarded + partner-scoped: only
+     *  unpaid → voided. Returns the voided invoice, or null if not eligible
+     *  (already paid/voided/disputed, or wrong tenant) — never un-pays a paid bill. */
+    async voidInvoice(id: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+      const rows = await db
+        .update(b2bInvoices)
+        .set({ status: 'voided' })
+        .where(
+          sql`${b2bInvoices.id} = ${id} AND ${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.status} = 'unpaid'`,
+        )
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /** Buyer dispute of an UNPAID bill. Guarded + partner-scoped: only unpaid →
+     *  disputed (the reason rides a support ticket). Null if not eligible. */
+    async markDisputed(id: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+      const rows = await db
+        .update(b2bInvoices)
+        .set({ status: 'disputed' })
+        .where(
+          sql`${b2bInvoices.id} = ${id} AND ${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.status} = 'unpaid'`,
+        )
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /** Reissue a voided/disputed bill as a fresh UNPAID invoice (new id, cloned
+     *  line items). Guarded + partner-scoped: source must be voided or disputed.
+     *  Null if not eligible. `newId` is supplied by the caller (deterministic). */
+    async reissueInvoice(sourceId: string, partnerId: PartnerId, newId: string): Promise<B2bInvoice | null> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(sql`${b2bInvoices.id} = ${sourceId} AND ${b2bInvoices.partnerId} = ${partnerId}`)
+        .limit(1);
+      const src = rows[0] ? toDomain(rows[0]) : null;
+      if (!src || (src.status !== 'voided' && src.status !== 'disputed')) return null;
+      const fresh: B2bInvoice = {
+        id: newId,
+        partnerId: src.partnerId,
+        businessName: src.businessName,
+        buyerPhone: src.buyerPhone, // already normalized on the original save
+        lineItems: src.lineItems,
+        amountUsd: src.amountUsd,
+        currency: src.currency,
+        status: 'unpaid',
+        createdAt: new Date().toISOString(),
+      };
+      // Idempotent on newId: a replayed/double-submitted reissue with the same
+      // deterministic id is a clean no-op (return the existing row), never a PK
+      // 500. (A genuinely distinct newId double-reissue is an admin-UX concern the
+      // L2 action guards; this closes the same-id replay foot-gun.)
+      const inserted = await db
+        .insert(b2bInvoices)
+        .values({
+          id: fresh.id,
+          partnerId: fresh.partnerId,
+          businessName: fresh.businessName,
+          buyerPhone: normalizePhone(fresh.buyerPhone),
+          lineItems: fresh.lineItems,
+          amountUsd: fresh.amountUsd.toFixed(2),
+          currency: fresh.currency,
+          status: fresh.status,
+          createdAt: new Date(fresh.createdAt),
+          paidAt: null,
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (inserted[0]) return toDomain(inserted[0]);
+      const existing = await db.select().from(b2bInvoices).where(eq(b2bInvoices.id, newId)).limit(1);
+      return existing[0] ? toDomain(existing[0]) : null;
     },
   };
 }

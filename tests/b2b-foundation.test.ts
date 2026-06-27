@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { transferToRow, rowToTransfer, type TransferRow } from '@/db/repos/mappers';
-import { buildSettlementInstruction } from '@/lib/providers/http-payment-provider';
+import { buildSettlementInstruction, buildReverseInstruction } from '@/lib/providers/http-payment-provider';
 import { wouldBeFeeUsd } from '@/lib/fx';
 import { isB2bSendVerified } from '@/lib/kyc-gate';
 import { createB2bInvoiceRepo } from '@/db/repos/aux-repos';
@@ -77,6 +77,18 @@ describe('B2B foundation — settlement instruction stays non-custodial', () => 
     expect(instr.funding).toBeUndefined();
     expect(instr.parties).toBeUndefined();
   });
+  it('the reverse instruction is action=reverse, keyed on the original pull, with NO payout/recipient capture', () => {
+    const rev = buildReverseInstruction(b2bTransfer()) as Record<string, unknown>;
+    expect(rev.action).toBe('reverse'); // return-ACH, not a fresh payout
+    expect(rev.reference).toBe('reverse-t_b2b1'); // DISTINCT from the settle's reference (transfer.id)
+    expect(rev.funding).toEqual({ method: 'ach_debit', token: 'achtok_xyz' });
+    // NON-CUSTODIAL: a reversal instructs the partner to return THEIR pull — it
+    // never carries a payout/recipient leg that could move money outward.
+    expect(rev.payout).toBeUndefined();
+    expect(rev.recipient).toBeUndefined();
+    const parties = rev.parties as Record<string, unknown>;
+    expect(parties.sender_business_name).toBe('Globex Trading LLC');
+  });
 });
 
 describe('B2B foundation — fee + KYB gate', () => {
@@ -150,6 +162,59 @@ describe('B2B foundation — mock invoice repo (PGlite, the "ERP" stand-in)', ()
     // Empty after normalize, and too-short — both unreachable, both thrown.
     await expect(repo.saveInvoice({ id: 'inv_bad1', buyerPhone: '+++', ...base })).rejects.toThrow(/valid phone/i);
     await expect(repo.saveInvoice({ id: 'inv_bad2', buyerPhone: '12345', ...base })).rejects.toThrow(/valid phone/i);
+  });
+
+  it('void / dispute / reissue lifecycle — guarded + partner-scoped', async () => {
+    await seedPartner(db, 'other');
+    const repo = createB2bInvoiceRepo(db);
+    const seed = (id: string, partnerId: string, status: B2bInvoice['status'] = 'unpaid'): B2bInvoice => ({
+      id, partnerId, businessName: 'Mango Exports', buyerPhone: '15551234567',
+      lineItems: [{ description: 'mangoes', qty: 1, unitAmountUsd: 25 }],
+      amountUsd: 25, currency: 'USD', status, createdAt: '2026-06-25T00:00:00.000Z',
+    });
+    await repo.saveInvoice(seed('inv_v', 'default'));
+    await repo.saveInvoice(seed('inv_d', 'default'));
+    await repo.saveInvoice(seed('inv_paid', 'default'));
+    await repo.markPaid('inv_paid', '2026-06-25T01:00:00.000Z');
+
+    // void: only an UNPAID bill, only the owning tenant.
+    expect(await repo.voidInvoice('inv_v', 'other')).toBeNull();           // wrong tenant
+    expect(await repo.voidInvoice('inv_paid', 'default')).toBeNull();      // can't un-pay a paid bill
+    expect((await repo.voidInvoice('inv_v', 'default'))?.status).toBe('voided');
+    expect(await repo.voidInvoice('inv_v', 'default')).toBeNull();         // not re-voidable
+
+    // dispute: only an UNPAID bill.
+    expect((await repo.markDisputed('inv_d', 'default'))?.status).toBe('disputed');
+    expect(await repo.markDisputed('inv_d', 'default')).toBeNull();
+
+    // reissue: voided/disputed → a fresh UNPAID clone with a new id; guarded.
+    expect(await repo.reissueInvoice('inv_paid', 'default', 'inv_new0')).toBeNull(); // paid isn't reissuable
+    const reissued = await repo.reissueInvoice('inv_v', 'default', 'inv_new1');
+    expect(reissued?.status).toBe('unpaid');
+    expect(reissued?.amountUsd).toBe(25);
+    // idempotent on the same newId (double-submit replay) — returns the row, no PK 500.
+    expect((await repo.reissueInvoice('inv_v', 'default', 'inv_new1'))?.id).toBe('inv_new1');
+    expect((await repo.getInvoiceByIdScoped('inv_new1', 'default'))?.status).toBe('unpaid');
+    expect(await repo.getInvoiceByIdScoped('inv_new1', 'other')).toBeNull(); // tenant-scoped
+    // the source invoice is unchanged (still voided)
+    expect((await repo.getInvoiceByIdScoped('inv_v', 'default'))?.status).toBe('voided');
+  });
+
+  it('markPaid never resurrects a voided/disputed bill (a late delivery webhook is a no-op on a killed bill)', async () => {
+    const repo = createB2bInvoiceRepo(db);
+    const seed = (id: string, status: B2bInvoice['status']): B2bInvoice => ({
+      id, partnerId: 'default', businessName: 'Mango Exports', buyerPhone: '15551234567',
+      lineItems: [{ description: 'mangoes', qty: 1, unitAmountUsd: 25 }],
+      amountUsd: 25, currency: 'USD', status: 'unpaid', createdAt: '2026-06-25T00:00:00.000Z',
+    });
+    await repo.saveInvoice(seed('inv_voided', 'unpaid'));
+    await repo.saveInvoice(seed('inv_unpaid', 'unpaid'));
+    await repo.voidInvoice('inv_voided', 'default');
+    // A delivery webhook firing on each — only the still-unpaid one flips to paid.
+    await repo.markPaid('inv_voided', '2026-06-25T02:00:00.000Z');
+    await repo.markPaid('inv_unpaid', '2026-06-25T02:00:00.000Z');
+    expect((await repo.getInvoice('inv_voided'))?.status).toBe('voided'); // NOT resurrected
+    expect((await repo.getInvoice('inv_unpaid'))?.status).toBe('paid');
   });
 
   it('scopes the bill lookup to ONE partner — a buyer can never be shown another tenant\'s invoice', async () => {

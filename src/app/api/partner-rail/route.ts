@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
 
   const raw = await req.text();
 
-  let body: { reference?: unknown; partner_id?: unknown } = {};
+  let body: { reference?: unknown; partner_id?: unknown; action?: unknown } = {};
   try {
     body = JSON.parse(raw) as typeof body;
   } catch {
@@ -35,6 +35,8 @@ export async function POST(req: NextRequest) {
   }
   const reference = typeof body.reference === 'string' ? body.reference : '';
   const partnerId = typeof body.partner_id === 'string' ? body.partner_id : '';
+  // 'reverse' = a B2B ach_pull return instruction; 'settle' (default) = a payout.
+  const action = typeof body.action === 'string' ? body.action : 'settle';
   if (!reference || !partnerId) {
     return NextResponse.json({ ok: false, error: 'reference and partner_id are required' }, { status: 400 });
   }
@@ -50,6 +52,15 @@ export async function POST(req: NextRequest) {
   const signature = req.headers.get('x-signature') ?? '';
   if (!verifyWebhookSignature(raw, signature, signingSecret)) {
     return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
+  }
+
+  // A REVERSE (B2B ach_pull return) has NO payout to settle — the rail simply
+  // acknowledges it returned the debit it owns. So we DON'T schedule a payout
+  // callback (which would POST a bogus `paid_out` for a non-existent transfer id);
+  // the worker completes the reversal synchronously on this 2xx ack, exactly as a
+  // funds-return (b2c refund) completes on its provider's response.
+  if (action === 'reverse') {
+    return NextResponse.json({ ok: true, providerRef: `simrail-${reference}`, action: 'reverse' });
   }
 
   // Settle asynchronously: a DELAYED outbox row (Stage 2b — was a best-effort

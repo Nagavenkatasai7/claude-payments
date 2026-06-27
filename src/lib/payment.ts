@@ -104,6 +104,16 @@ export function buildRefundMessage(transfer: Transfer): string {
     transfer.totalChargeSource ?? transfer.totalChargeUsd,
     transfer.sourceCurrency ?? 'USD',
   );
+  // NON-CUSTODIAL B2B ach_pull: we never captured funds, so this is a REVERSAL of
+  // the partner's ACH debit, not a SmartRemit refund — the wording must not imply
+  // we refunded to a card/payment method.
+  if (transfer.fundingMethod === 'ach_pull') {
+    return (
+      `Your bill payment ${transfer.id} has been cancelled. The ${sourceCharge} ` +
+      `ACH debit to your business account is being reversed — it typically clears ` +
+      `in 3-5 business days.`
+    );
+  }
   return (
     `Your transfer ${transfer.id} could not be completed. We've refunded ` +
     `${sourceCharge} to your original payment method — it typically arrives ` +

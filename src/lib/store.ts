@@ -240,6 +240,31 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async markB2bInvoicePaid(id: string, paidAt: string): Promise<void> {
       await b2bInvoiceRepo.markPaid(id, paidAt);
     },
+    async getB2bInvoiceScoped(
+      id: string,
+      partnerId: import('./types').PartnerId,
+    ): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.getInvoiceByIdScoped(id, partnerId);
+    },
+    async voidB2bInvoice(
+      id: string,
+      partnerId: import('./types').PartnerId,
+    ): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.voidInvoice(id, partnerId);
+    },
+    async markB2bInvoiceDisputed(
+      id: string,
+      partnerId: import('./types').PartnerId,
+    ): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.markDisputed(id, partnerId);
+    },
+    async reissueB2bInvoice(
+      sourceId: string,
+      partnerId: import('./types').PartnerId,
+      newId: string,
+    ): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.reissueInvoice(sourceId, partnerId, newId);
+    },
   };
 }
 

@@ -14,7 +14,59 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
   if (transfer.status === 'delivered' || transfer.status === 'cancelled') {
     return;
   }
+  // NON-CUSTODIAL guard: a PAID ach_pull transfer has already had its SIGNED
+  // settlement instruction POSTed to the partner's rail, so a bare status flip
+  // would say "cancelled" while the partner can still pull + pay out — money the
+  // status no longer tracks. The only safe cancel here is the partner REVERSE
+  // instruction via reverseB2bSettlement (refundStatus seam). Refuse the flip.
+  if (transfer.status === 'paid' && transfer.fundingMethod === 'ach_pull') {
+    throw new Error(
+      'Cannot cancel a paid ACH-pull transfer directly — use Reverse (it instructs the partner to return the debit).',
+    );
+  }
   await store.saveTransfer({ ...transfer, status: 'cancelled' });
+}
+
+/**
+ * Reverse a PAID/DELIVERED B2B ach_pull transfer (staff-approved). NON-CUSTODIAL:
+ * SmartRemit captured nothing — so unlike issueRefund this does NOT require a
+ * fundingRef. It flips refundStatus none → pending and enqueues the durable
+ * funding.refund effect IN ONE TRANSACTION; the worker's ach_pull branch turns
+ * that into a SIGNED partner REVERSE instruction (not a PSP refund). Eligibility
+ * is re-checked inside the txn so a double-click / wrong state throws and
+ * enqueues nothing, and the fresh-row assert prevents a flip with no effect to
+ * drain. The staff click IS the approval (the buyer's request_refund only flips
+ * none → requested; a human runs this).
+ */
+export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const repo = createTransferRepo(tx);
+    const transfer = await repo.getTransfer(id);
+    if (!transfer) {
+      throw new Error('Cannot reverse: transfer not found.');
+    }
+    if (transfer.fundingMethod !== 'ach_pull') {
+      throw new Error('Cannot reverse: only ACH-pull transfers are reversed — use Refund.');
+    }
+    if (transfer.status !== 'paid' && transfer.status !== 'delivered') {
+      throw new Error(
+        `Cannot reverse: transfer is ${transfer.status} — only paid or delivered ACH-pull transfers can be reversed.`,
+      );
+    }
+    if ((transfer.refundStatus ?? 'none') !== 'none') {
+      throw new Error('Cannot reverse: a reversal is already in progress or complete for this transfer.');
+    }
+    await repo.updateRefund(id, { refundStatus: 'pending' });
+    const fresh = await createOutboxRepo(tx).enqueue(
+      'funding.refund',
+      { transferId: id },
+      { dedupeKey: `refund:${id}` },
+    );
+    if (!fresh) {
+      throw new Error('Cannot reverse: a reversal effect already exists for this transfer.');
+    }
+  });
+  pokeWorker();
 }
 
 export async function assignTransfer(

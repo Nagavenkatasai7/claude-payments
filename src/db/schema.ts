@@ -145,12 +145,12 @@ export const b2bInvoices = pgTable(
     lineItems: jsonb('line_items').notNull().default([]), // {description, qty, unitAmountUsd}[]
     amountUsd: numeric('amount_usd', { precision: 12, scale: 2 }).notNull(),
     currency: text('currency').notNull().default('USD'),
-    status: text('status').notNull().default('unpaid'), // 'unpaid' | 'paid'
+    status: text('status').notNull().default('unpaid'), // 'unpaid' | 'paid' | 'voided' | 'disputed'
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
   },
   (t) => [
-    check('b2b_invoices_status_check', sql`${t.status} IN ('unpaid','paid')`),
+    check('b2b_invoices_status_check', sql`${t.status} IN ('unpaid','paid','voided','disputed')`),
     index('b2b_invoices_buyer').on(t.buyerPhone, t.status),
     index('b2b_invoices_partner').on(t.partnerId, t.createdAt.desc()),
   ],

@@ -71,6 +71,13 @@
       "when": 1782405459964,
       "tag": "0009_heavy_fenris",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782596278781,
+      "tag": "0010_wealthy_the_call",
+      "breakpoints": true
     }
   ]
 }

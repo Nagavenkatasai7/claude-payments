@@ -1,0 +1,2 @@
+ALTER TABLE "b2b_invoices" DROP CONSTRAINT "b2b_invoices_status_check";--> statement-breakpoint
+ALTER TABLE "b2b_invoices" ADD CONSTRAINT "b2b_invoices_status_check" CHECK ("b2b_invoices"."status" IN ('unpaid','paid','voided','disputed'));
