@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { transferToRow, rowToTransfer, type TransferRow } from '@/db/repos/mappers';
 import { buildSettlementInstruction } from '@/lib/providers/http-payment-provider';
 import { wouldBeFeeUsd } from '@/lib/fx';
@@ -104,14 +104,71 @@ describe('B2B foundation — mock invoice repo (PGlite, the "ERP" stand-in)', ()
       amountUsd: 1000, currency: 'USD', status: 'unpaid', createdAt: '2026-06-25T00:00:00.000Z',
     };
     await repo.saveInvoice(inv);
-    const found = await repo.getUnpaidByBuyer('15551112222');
+    const found = await repo.getUnpaidByBuyer('15551112222', 'default');
     expect(found?.id).toBe('inv_1');
     expect(found?.lineItems[0].description).toBe('Widgets');
     expect(found?.amountUsd).toBe(1000);
 
     await repo.markPaid('inv_1', '2026-06-25T01:00:00.000Z');
-    expect(await repo.getUnpaidByBuyer('15551112222')).toBeNull(); // no longer unpaid
+    expect(await repo.getUnpaidByBuyer('15551112222', 'default')).toBeNull(); // no longer unpaid
     expect((await repo.getInvoice('inv_1'))?.status).toBe('paid');
     expect((await repo.listInvoices('default')).length).toBe(1);
+  });
+
+  it('normalizes buyerPhone to digits-only so a "+1…" seed matches Meta\'s digits-only wa_id (the WhatsApp bug)', async () => {
+    const repo = createB2bInvoiceRepo(db);
+    // Seeded the way the admin form used to suggest ("+15551234567") and with
+    // spaces — both must persist digits-only and be found by the digits-only
+    // ctx.phone the bot's present_bill passes.
+    for (const [id, typed] of [
+      ['inv_plus', '+15551234567'],
+      ['inv_spaces', '+1 555 123 9999'],
+    ] as const) {
+      await repo.saveInvoice({
+        id, partnerId: 'default', businessName: 'Mango Exports Pvt Ltd', buyerPhone: typed,
+        lineItems: [{ description: 'Alphonso mangoes (case)', qty: 10, unitAmountUsd: 25 }],
+        amountUsd: 250, currency: 'USD', status: 'unpaid', createdAt: '2026-06-25T00:00:00.000Z',
+      });
+    }
+    // Stored digits-only…
+    expect((await repo.getInvoice('inv_plus'))?.buyerPhone).toBe('15551234567');
+    expect((await repo.getInvoice('inv_spaces'))?.buyerPhone).toBe('15551239999');
+    // …and resolvable by the digits-only wa_id Meta delivers, which is the fix.
+    expect((await repo.getUnpaidByBuyer('15551234567', 'default'))?.id).toBe('inv_plus');
+    // getUnpaidByBuyer also tolerates a formatted lookup arg (defense-in-depth).
+    expect((await repo.getUnpaidByBuyer('+1 555 123 9999', 'default'))?.id).toBe('inv_spaces');
+  });
+
+  it('rejects an unreachable buyer phone at the write boundary (repo owns the invariant)', async () => {
+    const repo = createB2bInvoiceRepo(db);
+    const base = {
+      partnerId: 'default' as const, businessName: 'Acme Co',
+      lineItems: [{ description: 'x', qty: 1, unitAmountUsd: 5 }],
+      amountUsd: 5, currency: 'USD' as const, status: 'unpaid' as const,
+      createdAt: '2026-06-25T00:00:00.000Z',
+    };
+    // Empty after normalize, and too-short — both unreachable, both thrown.
+    await expect(repo.saveInvoice({ id: 'inv_bad1', buyerPhone: '+++', ...base })).rejects.toThrow(/valid phone/i);
+    await expect(repo.saveInvoice({ id: 'inv_bad2', buyerPhone: '12345', ...base })).rejects.toThrow(/valid phone/i);
+  });
+
+  it('scopes the bill lookup to ONE partner — a buyer can never be shown another tenant\'s invoice', async () => {
+    await seedPartner(db, 'partner_b');
+    await seedPartner(db, 'partner_c');
+    const repo = createB2bInvoiceRepo(db);
+    const base = {
+      buyerPhone: '15557778888',
+      lineItems: [{ description: 'x', qty: 1, unitAmountUsd: 5 }],
+      amountUsd: 5, currency: 'USD' as const, status: 'unpaid' as const,
+      createdAt: '2026-06-25T00:00:00.000Z',
+    };
+    // Same buyer phone owes invoices under two different partners.
+    await repo.saveInvoice({ id: 'inv_a', partnerId: 'default', businessName: 'Partner A Seller', ...base });
+    await repo.saveInvoice({ id: 'inv_b', partnerId: 'partner_b', businessName: 'Partner B Seller', ...base });
+    // Each partner's bot resolves only its OWN tenant's bill.
+    expect((await repo.getUnpaidByBuyer('15557778888', 'default'))?.id).toBe('inv_a');
+    expect((await repo.getUnpaidByBuyer('15557778888', 'partner_b'))?.id).toBe('inv_b');
+    // A partner with no invoice for this buyer sees nothing (no cross-tenant leak).
+    expect(await repo.getUnpaidByBuyer('15557778888', 'partner_c')).toBeNull();
   });
 });

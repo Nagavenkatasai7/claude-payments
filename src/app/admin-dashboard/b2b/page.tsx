@@ -95,9 +95,12 @@ export default async function B2bPage() {
                 <input
                   name="buyerPhone"
                   required
-                  placeholder="+15551234567"
+                  placeholder="15551234567"
                   className="h-9 w-44 rounded-md border border-input bg-card px-2 text-sm"
                 />
+                <span className="text-[10px] text-muted-foreground">
+                  Country code + number, digits only (no +)
+                </span>
               </label>
               <label className="flex flex-col gap-1 text-xs">
                 <span className="text-muted-foreground">Line item</span>
