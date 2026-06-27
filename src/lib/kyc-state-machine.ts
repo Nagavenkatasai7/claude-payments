@@ -68,5 +68,27 @@ export function applyKycEvent(
     default:
       break;
   }
+
+  // Monotone rank guard: only advance to a higher-or-equal rank state; drop any
+  // kycReviewState update that would move the customer backward. This prevents a
+  // late/re-delivered inquiry.started webhook from silently regressing a customer
+  // who is already in pending_review (or needs_review) back to inquiry_started.
+  const STATE_RANK: Record<KycReviewState, number> = {
+    none: 0,
+    inquiry_started: 1,
+    pending_review: 2,
+    needs_review: 2,  // equal rank: both states await a human
+    approved: 3,
+    rejected: 3,
+  };
+
+  if (delta.kycReviewState && customer.kycReviewState) {
+    const currentRank = STATE_RANK[customer.kycReviewState] ?? 0;
+    const newRank = STATE_RANK[delta.kycReviewState] ?? 0;
+    if (newRank < currentRank) {
+      delete delta.kycReviewState;
+    }
+  }
+
   return delta;
 }

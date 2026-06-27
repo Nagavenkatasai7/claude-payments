@@ -71,14 +71,18 @@ export async function enforceIpRateLimit(
   windowSec = 60,
 ): Promise<NextResponse | null> {
   try {
-    const result = await checkIpRateLimit(limiterRedis(), scope, clientIpFrom(req.headers), {
-      limit,
-      windowSec,
-    });
+    const now = Date.now();
+    const result = await checkIpRateLimit(
+      limiterRedis(), scope, clientIpFrom(req.headers),
+      { limit, windowSec, now },
+    );
     if (!result.allowed) {
+      const windowMs = windowSec * 1000;
+      const windowEnd = (Math.floor(now / windowMs) + 1) * windowMs;
+      const retryAfterSec = Math.ceil((windowEnd - now) / 1000);
       return NextResponse.json(
         { ok: false, error: 'Too many requests — please retry in a minute.' },
-        { status: 429, headers: { 'retry-after': String(windowSec) } },
+        { status: 429, headers: { 'retry-after': String(retryAfterSec) } },
       );
     }
     return null;

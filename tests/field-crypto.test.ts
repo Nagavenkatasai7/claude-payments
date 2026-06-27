@@ -151,6 +151,31 @@ describe('EnvKeyProvider master-key validation', () => {
   });
 });
 
+describe('field-crypto lone surrogates — regression (bug-hunt)', () => {
+  it('throws when plaintext contains a lone high surrogate (U+D800)', () => {
+    const p = fixedProvider(KEY_A);
+    // '\uD800' is a lone high surrogate — not valid Unicode, not round-trippable via UTF-8
+    expect(() => encryptField('\uD800', p)).toThrow('lone surrogates');
+  });
+
+  it('throws when plaintext contains a lone low surrogate (U+DC00)', () => {
+    const p = fixedProvider(KEY_A);
+    expect(() => encryptField('\uDC00', p)).toThrow('lone surrogates');
+  });
+
+  it('throws for the partial emoji surrogate (U+D83D)', () => {
+    const p = fixedProvider(KEY_A);
+    expect(() => encryptField('\uD83D', p)).toThrow('lone surrogates');
+  });
+
+  it('still round-trips a valid emoji (properly paired surrogates)', () => {
+    const p = fixedProvider(KEY_A);
+    // U+1F600 GRINNING FACE — encoded as surrogate pair D83D DE00 in UTF-16
+    const blob = encryptField('\u{1F600}', p);
+    expect(decryptField(blob, p)).toBe('\u{1F600}');
+  });
+});
+
 describe('field-crypto default provider (env-driven)', () => {
   it('builds an EnvKeyProvider lazily from env.fieldEncryptionKey', async () => {
     const masterHex = randomBytes(32).toString('hex');

@@ -68,3 +68,55 @@ describe('applyKycEvent (human-review-only)', () => {
     expect(d.kycReviewState).toBeUndefined();
   });
 });
+
+describe('applyKycEvent — monotone rank guard (regression: bug-hunt)', () => {
+  it('does NOT regress pending_review → inquiry_started on a late inquiry.started webhook', () => {
+    const customer = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const lateEvent = ev({ name: 'inquiry.started', status: 'started', createdAt: '2026-06-01T09:00:00Z' });
+    const delta = applyKycEvent(customer, lateEvent);
+    // kycReviewState must NOT be set — backward move must be suppressed
+    expect(delta.kycReviewState).toBeUndefined();
+  });
+
+  it('does NOT regress needs_review → inquiry_started on a late inquiry.created webhook', () => {
+    const customer = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const lateEvent = ev({ name: 'inquiry.created', status: 'created', createdAt: '2026-06-01T08:00:00Z' });
+    const delta = applyKycEvent(customer, lateEvent);
+    expect(delta.kycReviewState).toBeUndefined();
+  });
+
+  it('allows needs_review → pending_review (equal rank 2 — a human still reviews both)', () => {
+    // needs_review and pending_review share rank 2 (both await human review),
+    // so the rank guard does NOT block this transition (newRank = currentRank = 2).
+    // A customer in needs_review who also gets a clean inquiry.approved event stays visible
+    // to reviewers — the watchlistHit flag is the actual hold signal, not the state alone.
+    const customer = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const approvedEvent = ev({ name: 'inquiry.approved', status: 'approved' });
+    const delta = applyKycEvent(customer, approvedEvent);
+    // Equal rank: allowed (not blocked)
+    expect(delta.kycReviewState).toBe('pending_review');
+  });
+
+  it('still allows forward transitions: inquiry_started → pending_review', () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    const approvedEvent = ev({ name: 'inquiry.approved', status: 'approved' });
+    const delta = applyKycEvent(customer, approvedEvent);
+    expect(delta.kycReviewState).toBe('pending_review');
+  });
+
+  it('still allows forward transitions: inquiry_started → needs_review', () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    const failedEvent = ev({ name: 'inquiry.failed', status: 'failed' });
+    const delta = applyKycEvent(customer, failedEvent);
+    expect(delta.kycReviewState).toBe('needs_review');
+  });
+
+  it('still allows watchlist hit from pending_review → needs_review (equal rank, but watchlist path returns early)', () => {
+    const customer = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const watchlistEvent = ev({ name: 'report/watchlist.matched', status: null, watchlistMatched: true });
+    const delta = applyKycEvent(customer, watchlistEvent);
+    // The watchlist early-return bypasses the rank guard, so this should still work
+    expect(delta.kycReviewState).toBe('needs_review');
+    expect(delta.watchlistHit).toBe(true);
+  });
+});

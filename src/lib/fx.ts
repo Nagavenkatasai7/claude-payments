@@ -93,6 +93,9 @@ export function quote(
     destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
       ? rates.toInr
       : rates.toUsd / destToUsd;
+  if (!Number.isFinite(crossRate) || crossRate <= 0) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
   const amountInr = Math.round(amountSource * crossRate); // amount in the destination currency
 
   return {

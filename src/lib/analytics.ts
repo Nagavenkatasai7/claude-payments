@@ -21,11 +21,12 @@ export function transfersInWindow(
 }
 
 function buildDateBuckets(now: number, days: number): string[] {
-  const dates: string[] = [];
-  for (let i = days - 1; i >= 0; i--) {
-    dates.push(easternDate(now - i * DAY_MS));
-  }
-  return dates;
+  const todayET = new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+  const [m, d, y] = todayET.split('/').map(Number);
+  return Array.from({ length: days }, (_, idx) => {
+    const offset = days - 1 - idx;
+    return new Date(y, m - 1, d - offset).toLocaleDateString('en-US');
+  });
 }
 
 function round2(n: number): number {

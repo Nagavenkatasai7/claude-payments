@@ -1,7 +1,6 @@
 export function newTransferId(): string {
-  let id = '';
-  while (id.length < 8) {
-    id += Math.random().toString(36).slice(2);
-  }
-  return id.slice(0, 8);
+  const chars = '0123456789abcdefghijklmnopqrstuvwxyz';
+  const arr = new Uint8Array(8);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => chars[b % 36]).join('');
 }

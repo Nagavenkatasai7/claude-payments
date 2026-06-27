@@ -63,6 +63,34 @@ describe('screenTransfer — corridor overrides', () => {
   });
 });
 
+describe('screenTransfer — sender block reason accuracy (regression: bug-hunt)', () => {
+  it('reasons[0] contains "Sender" (not "Recipient") when only senderName is watchlisted', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'Mom',         // clean recipient — NOT on watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'John Doe',       // watchlisted sender — triggers the block
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons[0]).toMatch(/sender/i);
+    expect(r.reasons[0]).not.toMatch(/recipient/i);
+  });
+
+  it('reasons[0] contains "Recipient" when only recipientName is watchlisted', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',    // watchlisted recipient
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'Clean Person',   // clean sender
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons[0]).toMatch(/recipient/i);
+    expect(r.reasons[0]).not.toMatch(/sender/i);
+  });
+});
+
 describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)', () => {
   it('dormant: no senderName reproduces today\'s recipient-only cleared result', async () => {
     const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' });

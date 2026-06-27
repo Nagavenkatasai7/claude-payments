@@ -31,6 +31,18 @@ describe('normalizePhone', () => {
   });
 });
 
+describe('normalizePhone — null-prototype and coercion-throwing objects', () => {
+  it('returns empty string for a null-prototype object (no toString)', () => {
+    // Object.create(null) has no toString — String() would throw TypeError without the guard
+    expect(normalizePhone(Object.create(null))).toBe('');
+  });
+
+  it('returns empty string when toString() itself throws', () => {
+    const evil = { toString() { throw new Error('bad coercion'); } };
+    expect(normalizePhone(evil)).toBe('');
+  });
+});
+
 describe('isValidPhone', () => {
   it('returns true for a 10-digit number', () => {
     expect(isValidPhone('9876543210')).toBe(true);

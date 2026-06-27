@@ -137,12 +137,16 @@ export function encryptField(
   plaintext: string,
   provider: EncryptionKeyProvider = defaultProvider(),
 ): string {
+  const plaintextBuf = Buffer.from(plaintext, 'utf8');
+  if (plaintextBuf.toString('utf8') !== plaintext) {
+    throw new Error('field-crypto: plaintext contains lone surrogates (not valid Unicode)');
+  }
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
   cipher.setAAD(Buffer.from(VERSION)); // bind the version as AAD (anti-transplant)
   const ct = Buffer.concat([
-    cipher.update(Buffer.from(plaintext, 'utf8')),
+    cipher.update(plaintextBuf),
     cipher.final(),
   ]);
   const tag = cipher.getAuthTag();

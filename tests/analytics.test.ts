@@ -157,6 +157,32 @@ describe('fundingMethodMix', () => {
   });
 });
 
+describe('dailyCounts — DST spring-forward regression (bug-hunt)', () => {
+  it('does NOT skip 3/8/2026 when now is the first hour of 3/9/2026 after spring-forward', () => {
+    // 2026-03-09T04:30:00Z = 00:30 EDT (first half-hour after DST spring-forward)
+    // The old buildDateBuckets subtracted 6*DAY_MS from now, landing at 2026-03-03T04:30Z
+    // which is STILL 2026-03-02 in ET (00:30 EDT - 25h DST offset issue).
+    // net effect: '3/8/2026' was absent, '3/9/2026' replaced it.
+    const dstNow = Date.parse('2026-03-09T04:30:00Z');
+    const transfer = makeTransfer({
+      id: 'dst-transfer',
+      createdAt: '2026-03-08T19:00:00.000Z', // 2 PM ET on 3/8 — clearly in the window
+    });
+
+    const result = dailyCounts([transfer], dstNow, 7);
+    const dates = result.map((b) => b.date);
+    // Must include 3/8 and NOT skip a day
+    expect(dates).toContain('3/8/2026');
+    // Must produce exactly 7 distinct buckets
+    expect(new Set(dates).size).toBe(7);
+    // The transfer must be counted
+    const marchEighthBucket = result.find((b) => b.date === '3/8/2026');
+    expect(marchEighthBucket?.count).toBe(1);
+    // Total count must equal 1 (transfer not silently dropped)
+    expect(result.reduce((s, b) => s + b.count, 0)).toBe(1);
+  });
+});
+
 describe('topRecipientsByCount', () => {
   it('returns top N by count, sorted desc with name tiebreaker', () => {
     const t = [
