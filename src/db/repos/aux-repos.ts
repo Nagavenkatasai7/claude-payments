@@ -11,6 +11,7 @@ import {
 } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
 import type {
   B2bInvoice,
@@ -364,11 +365,21 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
   };
   return {
     async saveInvoice(inv: B2bInvoice): Promise<void> {
+      // The repo OWNS the digits-only invariant: the bot resolves the bill by
+      // ctx.phone (Meta's wa_id, already digits-only), so a buyerPhone stored
+      // with a '+' or spaces would never match. Normalize AND validate on write
+      // here so every writer (seed action today, agent create-flow tomorrow) is
+      // safe — an unreachable buyer phone (empty/too-short after normalize) is
+      // rejected at the write boundary rather than silently never-matching later.
+      const buyerPhone = normalizePhone(inv.buyerPhone);
+      if (!isValidPhone(buyerPhone)) {
+        throw new Error('B2B invoice buyerPhone must be a valid phone (country code + number, digits only).');
+      }
       await db.insert(b2bInvoices).values({
         id: inv.id,
         partnerId: inv.partnerId,
         businessName: inv.businessName,
-        buyerPhone: inv.buyerPhone,
+        buyerPhone,
         lineItems: inv.lineItems,
         amountUsd: inv.amountUsd.toFixed(2),
         currency: inv.currency,
@@ -377,13 +388,24 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
         paidAt: inv.paidAt ? new Date(inv.paidAt) : null,
       });
     },
-    /** The buyer's most recent UNPAID invoice (what the bot presents in Phase 1). */
-    async getUnpaidByBuyer(buyerPhone: string): Promise<B2bInvoice | null> {
+    /**
+     * The buyer's most recent UNPAID invoice (what the bot presents in Phase 1),
+     * scoped to ONE partner. Tenant isolation is app-level (CLAUDE.md): the bill
+     * the bot surfaces must belong to the partner whose branded bot the buyer is
+     * talking to, never another tenant's seller — so `partnerId` is in the WHERE.
+     * `buyerPhone` is normalized on read too (defense-in-depth): match the
+     * digits-only form we store, regardless of how the caller formatted it.
+     */
+    async getUnpaidByBuyer(buyerPhone: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+      const phone = normalizePhone(buyerPhone);
       const rows = await db
         .select()
         .from(b2bInvoices)
-        .where(sql`${b2bInvoices.buyerPhone} = ${buyerPhone} AND ${b2bInvoices.status} = 'unpaid'`)
-        .orderBy(desc(b2bInvoices.createdAt))
+        .where(
+          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'`,
+        )
+        // id is the deterministic tiebreak when two invoices share a created_at.
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
         .limit(1);
       return rows[0] ? toDomain(rows[0]) : null;
     },

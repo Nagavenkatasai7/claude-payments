@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { newTransferId } from '@/lib/id';
+import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { DEFAULT_PARTNER_ID, DEFAULT_SOURCE_CURRENCY } from '@/lib/defaults';
 import type { B2bInvoice, InvoiceLineItem } from '@/lib/types';
 
@@ -24,13 +25,21 @@ export async function seedDemoInvoiceAction(formData: FormData): Promise<void> {
   }
 
   const businessName = String(formData.get('businessName') ?? '').trim();
-  const buyerPhone = String(formData.get('buyerPhone') ?? '').trim();
+  // Normalize to digits-only so the seeded invoice matches Meta's wa_id (which the
+  // bot resolves the bill by). isValidPhone catches the empty/too-short cases, but
+  // it can't infer a MISSING country code — the buyer must be entered in full
+  // international form (e.g. 1 5551234567) per the form's placeholder/caption, or
+  // Meta's country-code-prefixed wa_id will never equal it.
+  const buyerPhone = normalizePhone(formData.get('buyerPhone'));
   const itemDescription = String(formData.get('itemDescription') ?? '').trim();
   const qtyRaw = String(formData.get('qty') ?? '1').trim();
   const unitAmountRaw = String(formData.get('unitAmountUsd') ?? '').trim();
 
   if (!businessName) throw new Error('Seller business name is required.');
   if (!buyerPhone) throw new Error('Buyer phone is required.');
+  if (!isValidPhone(buyerPhone)) {
+    throw new Error('Enter a valid buyer phone — country code + number, digits only (e.g. 15551234567).');
+  }
   if (!itemDescription) throw new Error('A line-item description is required.');
 
   const qty = Number.parseInt(qtyRaw, 10);

@@ -225,8 +225,11 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async saveB2bInvoice(inv: import('./types').B2bInvoice): Promise<void> {
       await b2bInvoiceRepo.saveInvoice(inv);
     },
-    async getUnpaidInvoiceByBuyer(buyerPhone: string): Promise<import('./types').B2bInvoice | null> {
-      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone);
+    async getUnpaidInvoiceByBuyer(
+      buyerPhone: string,
+      partnerId: import('./types').PartnerId,
+    ): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId);
     },
     async getB2bInvoice(id: string): Promise<import('./types').B2bInvoice | null> {
       return b2bInvoiceRepo.getInvoice(id);

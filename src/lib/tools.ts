@@ -1274,7 +1274,13 @@ async function presentBillTool(
 ): Promise<ToolResult> {
   let invoice: import('./types').B2bInvoice | null;
   try {
-    invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone);
+    // Tenant-scope the lookup: surface only a bill belonging to the partner whose
+    // bot this buyer is talking to (their customer's partner), never another
+    // tenant's seller. Fail closed to the default partner when no customer row
+    // exists yet (the demo's single-number case).
+    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+    invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
   } catch (err) {
     console.warn('present_bill getUnpaidInvoiceByBuyer failed:', err);
     return { has_bill: false };
