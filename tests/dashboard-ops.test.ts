@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import {
   cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
-  issueRefund, approveRefund, dismissRefund, retryRefund,
+  issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement,
 } from '@/lib/dashboard-ops';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -85,6 +85,47 @@ describe('cancelTransfer', () => {
   it('throws for a missing transfer', async () => {
     const store = createStore(fakeRedis(), db);
     await expect(cancelTransfer(store, 'missing')).rejects.toThrow('Transfer not found');
+  });
+
+  it('REFUSES to bare-cancel a PAID ach_pull transfer (non-custodial guard — must use Reverse)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c5', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await expect(cancelTransfer(store, 'c5')).rejects.toThrow(/use Reverse/i);
+    // Status is untouched — the partner instruction is still live.
+    expect((await store.getTransfer('c5'))?.status).toBe('paid');
+  });
+
+  it('still cancels an AWAITING_PAYMENT ach_pull transfer (no instruction posted yet — safe void)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c6', status: 'awaiting_payment', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await cancelTransfer(store, 'c6');
+    expect((await store.getTransfer('c6'))?.status).toBe('cancelled');
+  });
+});
+
+describe('reverseB2bSettlement (non-custodial partner reverse via the refund seam)', () => {
+  it('paid ach_pull: flips refundStatus none→pending + enqueues funding.refund (no fundingRef needed)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'rv1', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await reverseB2bSettlement(db, 'rv1');
+    expect((await store.getTransfer('rv1'))?.refundStatus).toBe('pending');
+    expect(await outboxRows()).toEqual([{ kind: 'funding.refund', dedupe_key: 'refund:rv1' }]);
+  });
+
+  it('refuses a non-ach_pull transfer (that path uses Refund)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'rv2', status: 'paid', fundingMethod: 'credit_card' }));
+    await expect(reverseB2bSettlement(db, 'rv2')).rejects.toThrow(/only ACH-pull/i);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('refuses an awaiting_payment transfer (nothing pulled to reverse) and a double-reverse', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'rv3', status: 'awaiting_payment', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await expect(reverseB2bSettlement(db, 'rv3')).rejects.toThrow(/only paid or delivered/i);
+    await store.saveTransfer(makeTransfer({ id: 'rv4', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await reverseB2bSettlement(db, 'rv4');
+    await expect(reverseB2bSettlement(db, 'rv4')).rejects.toThrow(/already in progress/i);
   });
 });
 

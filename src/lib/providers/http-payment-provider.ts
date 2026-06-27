@@ -90,6 +90,38 @@ export function buildSettlementInstruction(transfer: Transfer) {
   };
 }
 
+/**
+ * The SIGNED reverse instruction for a B2B ach_pull cancel. NON-CUSTODIAL: when a
+ * paid B2B transfer is cancelled, SmartRemit never captured the funds — only the
+ * licensed partner's rail did the ACH-debit. So we don't refund; we INSTRUCT the
+ * partner to REVERSE/return the pull it owns, keyed on the SAME reference the
+ * original settlement instruction carried (transfer.id). Mirrors
+ * buildSettlementInstruction's shape with an `action: 'reverse'` discriminator so
+ * the rail routes it to its return-ACH path, not a fresh payout.
+ */
+export function buildReverseInstruction(transfer: Transfer) {
+  return {
+    action: 'reverse' as const,
+    // DISTINCT reference from the original settlement instruction (which used
+    // transfer.id): a rail that dedupes/idempotency-keys on `reference` MUST be
+    // able to tell a reverse from the settle it's reversing, or it would swallow
+    // the reverse as a replay and the debit would never be returned.
+    reference: `reverse-${transfer.id}`,
+    partner_id: transfer.partnerId,
+    funding: { method: 'ach_debit' as const, token: transfer.achTokenRef ?? null },
+    amount: {
+      source: transfer.amountSource ?? transfer.amountUsd,
+      currency: transfer.sourceCurrency ?? 'USD',
+    },
+    parties: {
+      sender_entity_type: transfer.senderEntityType ?? 'individual',
+      recipient_entity_type: transfer.recipientEntityType ?? 'individual',
+      sender_business_name: transfer.senderBusinessName,
+      recipient_business_name: transfer.recipientBusinessName,
+    },
+  };
+}
+
 export function signBody(rawBody: string, secret: string): string {
   return createHmac('sha256', secret).update(rawBody).digest('hex');
 }

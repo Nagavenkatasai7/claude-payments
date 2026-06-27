@@ -9,6 +9,7 @@ import { triageSuggest } from '@/lib/ticket-ai';
 import { eligibleAgents, pickLeastLoaded } from '@/lib/ticket-balancer';
 import {
   buildSettlementInstruction,
+  buildReverseInstruction,
   signBody,
 } from '@/lib/providers/http-payment-provider';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
@@ -219,7 +220,41 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
       // refundStatus stays 'pending' through retries/death — recovery is the
       // ops dead-letter Retry (re-runs this handler) or the funding webhook's
       // refund_failed (pending → failed, surfacing the ops Refunds queue).
-      const { refundRef } = await (deps.fundingProvider ?? getFundingProvider()).refund(transfer);
+      let refundRef: string;
+      if (transfer.fundingMethod === 'ach_pull') {
+        // NON-CUSTODIAL reverse: SmartRemit captured nothing on an ach_pull, so
+        // there is no funds-provider charge to refund. Instead we POST a SIGNED
+        // REVERSE instruction to the partner's rail — it ACH-debited the payer, so
+        // it owns the return. Reuses the settlement.instruct POST+sign recipe.
+        const full = await createTransferRepo(deps.db).getTransfer(transferId, { decrypt: true });
+        if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
+        const railPartnerId = full.settlementPartnerId ?? full.partnerId;
+        const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
+        const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
+        const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
+        if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
+        const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
+        const res = await deps.fetchFn(settlementUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
+          },
+          body: rawBody,
+        });
+        if (!res.ok) throw new Error(`Reverse instruction rejected (${res.status})`);
+        refundRef = `reverse-${transferId}`;
+        try {
+          const parsed = (await res.json()) as { providerRef?: unknown };
+          if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
+            refundRef = parsed.providerRef;
+          }
+        } catch {
+          /* non-JSON 2xx ack — keep the deterministic ref */
+        }
+      } else {
+        ({ refundRef } = await (deps.fundingProvider ?? getFundingProvider()).refund(transfer));
+      }
       // The customer-facing message rides the OWNING partner's number — the
       // brand the sender talks to — NEVER the settlement partner's.
       const { waCreds } = await partnerContext(deps, transfer.partnerId);
