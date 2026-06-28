@@ -10,7 +10,14 @@ import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { seedDemoInvoiceAction } from './actions';
+import type { B2bInvoice } from '@/lib/types';
+import {
+  seedDemoInvoiceAction,
+  cancelB2bTransferAction,
+  reverseB2bTransferAction,
+  voidB2bInvoiceAction,
+  reissueB2bInvoiceAction,
+} from './actions';
 
 // /admin-dashboard/b2b — the B2B (business-to-business) review surface. Shows the
 // mock invoices (the "ERP" stand-in) the WhatsApp bot presents to buyers, and
@@ -26,6 +33,7 @@ const INVOICE_COLUMNS: ExpandableColumn[] = [
   { label: 'Status', primary: true },
   { label: 'Created' },
   { label: 'Paid' },
+  { label: 'Actions', primary: true },
 ];
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
@@ -34,6 +42,7 @@ const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'Amount', primary: true, align: 'right' },
   { label: 'Status', primary: true },
   { label: 'KYB review notes' },
+  { label: 'Actions', primary: true },
 ];
 
 function shortDate(iso?: string): string {
@@ -42,6 +51,27 @@ function shortDate(iso?: string): string {
   // rather than rendering a garbled truncated string.
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '—' : iso.replace('T', ' ').slice(0, 16);
+}
+
+/**
+ * Render the invoice status as a DISTINCT badge for all four states. The old
+ * cell was a binary paid/Unpaid ternary, so `voided` and `disputed` bills wrongly
+ * showed as "Unpaid" — staff would re-chase a killed or disputed bill. Disputed
+ * is the loud one (destructive/red): a buyer rejected it and a support ticket
+ * carries the reason. Voided is muted (the bill is dead, not actionable).
+ */
+function invoiceStatusBadge(status: B2bInvoice['status']) {
+  switch (status) {
+    case 'paid':
+      return <Badge variant="outline" className="border-success/50 text-success">Paid</Badge>;
+    case 'voided':
+      return <Badge variant="outline" className="border-muted-foreground/40 text-muted-foreground">Voided</Badge>;
+    case 'disputed':
+      return <Badge variant="destructive">Disputed</Badge>;
+    case 'unpaid':
+    default:
+      return <Badge variant="secondary">Unpaid</Badge>;
+  }
 }
 
 export default async function B2bPage() {
@@ -55,6 +85,7 @@ export default async function B2bPage() {
   ]);
   const b2bTransfers = allTransfers.filter((t) => t.transferType === 'b2b');
   const unpaidCount = invoices.filter((i) => i.status === 'unpaid').length;
+  const disputedCount = invoices.filter((i) => i.status === 'disputed').length;
 
   return (
     <>
@@ -65,7 +96,8 @@ export default async function B2bPage() {
             <div className="sh-page-title">B2B</div>
             <div className="sh-page-sub">
               {invoices.length} invoice{invoices.length === 1 ? '' : 's'}
-              {unpaidCount > 0 ? ` · ${unpaidCount} unpaid` : ''} ·{' '}
+              {unpaidCount > 0 ? ` · ${unpaidCount} unpaid` : ''}
+              {disputedCount > 0 ? ` · ${disputedCount} disputed` : ''} ·{' '}
               {b2bTransfers.length} B2B transfer{b2bTransfers.length === 1 ? '' : 's'}
             </div>
           </div>
@@ -163,13 +195,37 @@ export default async function B2bPage() {
                       .join(', ')}
                   </span>,
                   <span key="total" className="tabular-nums">{money(inv.amountUsd, inv.currency)}</span>,
-                  inv.status === 'paid' ? (
-                    <Badge key="status" variant="outline" className="border-success/50 text-success">Paid</Badge>
-                  ) : (
-                    <Badge key="status" variant="secondary">Unpaid</Badge>
-                  ),
+                  <span key="status">{invoiceStatusBadge(inv.status)}</span>,
                   <span key="created" className="whitespace-nowrap text-muted-foreground">{shortDate(inv.createdAt)}</span>,
                   <span key="paid" className="whitespace-nowrap text-muted-foreground">{shortDate(inv.paidAt)}</span>,
+                  inv.status === 'unpaid' ? (
+                    <form key="actions" action={voidB2bInvoiceAction}>
+                      <input type="hidden" name="id" value={inv.id} />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        className="text-destructive"
+                        title="Kills this unpaid bill — the bot can no longer present it (reissue revives it as a fresh invoice)"
+                      >
+                        Void
+                      </Button>
+                    </form>
+                  ) : inv.status === 'voided' || inv.status === 'disputed' ? (
+                    <form key="actions" action={reissueB2bInvoiceAction}>
+                      <input type="hidden" name="id" value={inv.id} />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        title="Clones this bill into a fresh unpaid invoice the bot can present again"
+                      >
+                        Reissue
+                      </Button>
+                    </form>
+                  ) : (
+                    <span key="actions" className="text-xs text-muted-foreground">—</span>
+                  ),
                 ],
               }))}
             />
@@ -202,6 +258,37 @@ export default async function B2bPage() {
                     </span>
                   ) : (
                     <span key="kyb" className="text-xs text-muted-foreground">—</span>
+                  ),
+                  t.status === 'awaiting_payment' || t.status === 'in_review' ? (
+                    <form key="actions" action={cancelB2bTransferAction}>
+                      <input type="hidden" name="id" value={t.id} />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        className="text-destructive"
+                        title="Cancels this unpaid B2B transfer (non-custodial — nothing was pulled from the buyer)"
+                      >
+                        Cancel
+                      </Button>
+                    </form>
+                  ) : t.status === 'paid' && t.fundingMethod === 'ach_pull' ? (
+                    <form key="actions" action={reverseB2bTransferAction}>
+                      <input type="hidden" name="id" value={t.id} />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        className="text-destructive"
+                        title="Instructs the partner to return the ACH debit — a SIGNED reverse-instruction (SmartRemit holds no funds)"
+                      >
+                        Reverse
+                      </Button>
+                    </form>
+                  ) : t.status === 'delivered' ? (
+                    <span key="actions" className="text-xs text-muted-foreground">Recall via support</span>
+                  ) : (
+                    <span key="actions" className="text-xs text-muted-foreground">—</span>
                   ),
                 ],
               }))}
