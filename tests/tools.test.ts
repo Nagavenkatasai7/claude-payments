@@ -98,16 +98,19 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-one tools', () => {
+  it('exposes all twenty-four tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
+      'cancel_bill',
       'cancel_draft',
       'cancel_schedule',
       'capture_corridor_request',
+      'check_bill_status',
       'check_payment_status',
       'check_send_limit',
       'create_schedule',
       'create_transfer',
+      'dispute_bill',
       'generate_payment_link',
       'get_quote',
       'list_recent_transfers',
@@ -3009,5 +3012,322 @@ describe('send_approve_picker — B2B draft → approve-tap mint threads busines
     expect(saved?.fundingMethod).toBe('ach_pull');
     expect(saved?.invoiceId).toBe('inv_u1');
     expect(saved?.achTokenRef).toBeUndefined(); // bound at pay time (U2)
+  });
+});
+
+// ── L1: buyer-facing B2B lifecycle controls — check_bill_status / cancel_bill /
+//        dispute_bill (WhatsApp-only, NON-CUSTODIAL: no buyer chat tool moves
+//        money or directly reverses a paid transfer) ───────────────────────────
+describe('B2B buyer lifecycle controls (L1)', () => {
+  type Ctx = Awaited<ReturnType<typeof buildCtx>>;
+
+  beforeEach(async () => {
+    // b2b_invoices is not in freshDb's TRUNCATE set — clear it per test.
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  // Mint an awaiting_payment B2B transfer owned by ctx.phone via the real tool
+  // path (ach_pull, non-custodial — no capture at mint). $400 is within the seeded
+  // T0 $500/day cap, so one mint per test is safe.
+  async function mintB2b(ctx: Ctx, invoiceId?: string): Promise<string> {
+    const created = await executeTool('create_transfer', {
+      amount_source: 400,
+      recipient_name: 'Globex Trading LLC',
+      recipient_phone: '919876543210',
+      funding_method: 'ach_pull',
+      entity_type: 'business',
+      sender_business_name: 'Acme Imports Ltd',
+      recipient_business_name: 'Globex Trading LLC',
+      ...(invoiceId ? { invoice_id: invoiceId } : {}),
+    }, ctx);
+    expect(created.error).toBeUndefined();
+    return created.transfer_id as string;
+  }
+
+  // Force a status the webhook machine can't reach (in_review/blocked/cancelled).
+  async function forceStatus(ctx: Ctx, id: string, status: 'in_review' | 'blocked' | 'cancelled') {
+    const t = (await ctx.store.getTransfer(id))!;
+    await ctx.store.saveTransfer({ ...t, status });
+  }
+
+  async function seedUnpaidInvoice(ctx: Ctx, id = 'inv_dsp') {
+    await ctx.store.saveB2bInvoice({
+      id, partnerId: 'default', businessName: 'Globex Trading LLC',
+      buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 100, unitAmountUsd: 10 }],
+      amountUsd: 1000, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
+    return id;
+  }
+
+  // ── channel exposure: WhatsApp-only, mirroring present_bill ──
+  it.each(['check_bill_status', 'cancel_bill', 'dispute_bill'])(
+    '%s is a WhatsApp-only tool (in toolSchemas, NOT web-allowlisted)',
+    (name) => {
+      expect(toolSchemas.map((t) => t.function.name)).toContain(name);
+      expect(WEB_TOOL_ALLOWLIST.has(name)).toBe(false);
+      expect(WEB_ONLY_TOOLS.has(name)).toBe(false);
+      expect(toolSchemasForChannel('whatsapp').map((t) => t.function.name)).toContain(name);
+      expect(toolSchemasForChannel('web').map((t) => t.function.name)).not.toContain(name);
+    },
+  );
+
+  it.each(['check_bill_status', 'cancel_bill', 'dispute_bill'])(
+    '%s is blocked at dispatch on the web channel (defense-in-depth)',
+    async (name) => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool(name, { reason: 'other' }, { ...ctx, channel: 'web' });
+      expect(r).toEqual({ error: 'not available here' });
+    },
+  );
+
+  // ── check_bill_status (read-only, no money) ──
+  describe('check_bill_status', () => {
+    it('returns { found: false } when the buyer has no B2B transfer', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      expect(await executeTool('check_bill_status', {}, ctx)).toEqual({ found: false });
+    });
+
+    it('a B2C transfer alone still reads as no B2B bill', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await executeTool('create_transfer', {
+        amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
+        payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      }, ctx);
+      expect(await executeTool('check_bill_status', {}, ctx)).toEqual({ found: false });
+    });
+
+    it('reports awaiting_payment in buyer terms', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      const r = await executeTool('check_bill_status', {}, ctx);
+      expect(r.found).toBe(true);
+      expect(r.transfer_id).toBe(id);
+      expect(r.status).toBe('awaiting_payment');
+      expect(String(r.status_summary).toLowerCase()).toContain('not paid');
+    });
+
+    it('surfaces the seller name + invoice state from the linked invoice (not the masked transfer field)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await ctx.store.saveB2bInvoice({
+        id: 'inv_cbs', partnerId: 'default', businessName: 'Globex Trading LLC',
+        buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }],
+        amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+      });
+      const id = await mintB2b(ctx, 'inv_cbs');
+      await ctx.store.updateTransferFromWebhook(id, 'paid');
+      const r = await executeTool('check_bill_status', {}, ctx);
+      expect(r.status).toBe('paid');
+      expect(String(r.status_summary).toLowerCase()).toContain('settling');
+      expect(r.seller_business_name).toBe('Globex Trading LLC'); // plaintext, from the invoice
+      expect(r.invoice_status).toBe('unpaid');
+      expect(r.invoice_paid).toBe(false);
+      expect(JSON.stringify(r)).not.toContain('****'); // never the masked transfer field
+    });
+
+    it('reports delivered as settled', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      await ctx.store.updateTransferFromWebhook(id, 'paid');
+      await ctx.store.updateTransferFromWebhook(id, 'delivered');
+      const r = await executeTool('check_bill_status', {}, ctx);
+      expect(r.status).toBe('delivered');
+      expect(String(r.status_summary).toLowerCase()).toContain('settled');
+    });
+
+    it("STRICT ownership: a stranger sees none of the owner's B2B bill", async () => {
+      const redis = fakeRedis();
+      const owner = await buildCtx(redis);
+      await mintB2b(owner);
+      const stranger = await buildCtx(redis, '15559990000');
+      expect(await executeTool('check_bill_status', {}, stranger)).toEqual({ found: false });
+    });
+  });
+
+  // ── cancel_bill (NON-CUSTODIAL — never moves money) ──
+  describe('cancel_bill', () => {
+    it('awaiting_payment ⇒ flips to cancelled; nothing debited, no refund flag', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(true);
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint).toLowerCase()).toContain('nothing was debited');
+      const after = await ctx.store.getTransfer(id);
+      expect(after?.status).toBe('cancelled');
+      expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+
+    it('in_review ⇒ DEFERS to ops; the transfer is left untouched', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      await forceStatus(ctx, id, 'in_review');
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.deferred).toBe(true);
+      expect(r.cancelled).toBeUndefined();
+      expect(String(r.reply_hint).toLowerCase()).toContain('under review');
+      expect((await ctx.store.getTransfer(id))?.status).toBe('in_review'); // unchanged
+    });
+
+    it('paid ⇒ only REQUESTS a reverse (refundStatus none→requested); the debit is NOT reversed', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      expect(await ctx.store.updateTransferFromWebhook(id, 'paid')).not.toBeNull();
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.reverse_requested).toBe(true);
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint)).toContain('3-5 business days');
+      const after = await ctx.store.getTransfer(id);
+      expect(after?.status).toBe('paid');            // forward-only status untouched — NO reversal
+      expect(after?.refundStatus).toBe('requested');  // only an ops flag
+    });
+
+    it('a second cancel of a paid bill is the already-reviewed no-op', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      await ctx.store.updateTransferFromWebhook(id, 'paid');
+      await executeTool('cancel_bill', {}, ctx);
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.reverse_requested).toBeUndefined();
+      expect(r.error_code).toBe('already_requested');
+      expect((await ctx.store.getTransfer(id))?.refundStatus).toBe('requested');
+    });
+
+    it('delivered within 24h ⇒ opens a recall case (no money moves)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      await ctx.store.updateTransferFromWebhook(id, 'paid');
+      await ctx.store.updateTransferFromWebhook(id, 'delivered'); // deliveredAt = now()
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.recall_opened).toBe(true);
+      expect(String(r.case_id)).toMatch(/^tk_/);
+      const ticket = (await createTicketRepo(db).listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
+      expect(ticket.transferId).toBe(id);
+    });
+
+    it('delivered over 24h ago ⇒ past the recall window, no case', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      await ctx.store.updateTransferFromWebhook(id, 'paid');
+      await ctx.store.updateTransferFromWebhook(id, 'delivered');
+      const t = (await ctx.store.getTransfer(id))!;
+      await ctx.store.saveTransfer({ ...t, deliveredAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(false);
+      expect(String(r.reply_hint).toLowerCase()).toContain('recall window');
+      expect(await createTicketRepo(db).listByCustomer(ctx.phone)).toHaveLength(0);
+    });
+
+    it('no transfer but an active draft ⇒ discards the draft (nothing charged)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await ctx.draftStore.createDraft({
+        senderPhone: PHONE,
+        recipient: { name: 'Globex Trading LLC', recipientPhone: '919876543210', payoutMethod: 'bank' },
+        amountUsd: 400, amountSource: 400, sourceCurrency: 'USD', fundingMethod: 'ach_pull',
+        quote: { feeUsd: 1.99, fxRate: 1, amountInr: 400 },
+        transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+        senderBusinessName: 'Acme Imports Ltd', recipientBusinessName: 'Globex Trading LLC',
+        invoiceId: 'inv_u1',
+      });
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(true);
+      expect(r.action).toBe('draft_discarded');
+      expect(String(r.reply_hint).toLowerCase()).toContain('nothing was charged');
+      expect(await ctx.draftStore.getActiveDraftId(PHONE)).toBeNull(); // consumed
+    });
+
+    it('an already-cancelled bill ⇒ nothing to cancel', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      await forceStatus(ctx, id, 'cancelled');
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(false);
+      expect(String(r.reply_hint).toLowerCase()).toContain('nothing to cancel');
+    });
+
+    it('no B2B bill and no draft ⇒ found:false, nothing to cancel', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(false);
+      expect(r.found).toBe(false);
+    });
+
+    it("STRICT ownership: a stranger cannot cancel the owner's paid bill", async () => {
+      const redis = fakeRedis();
+      const owner = await buildCtx(redis);
+      const id = await mintB2b(owner);
+      await owner.store.updateTransferFromWebhook(id, 'paid');
+      const stranger = await buildCtx(redis, '15559990000');
+      const r = await executeTool('cancel_bill', {}, stranger);
+      expect(r.cancelled).toBe(false);
+      expect(r.found).toBe(false);
+      const after = await owner.store.getTransfer(id); // owner's bill untouched
+      expect(after?.status).toBe('paid');
+      expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+  });
+
+  // ── dispute_bill (opens a case + flips the invoice; no money) ──
+  describe('dispute_bill', () => {
+    it('opens a customer ticket (invoice + reason in the body) and flips the invoice unpaid→disputed', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const invId = await seedUnpaidInvoice(ctx);
+      const r = await executeTool('dispute_bill', { reason: 'wrong_amount' }, ctx);
+      expect(r.disputed).toBe(true);
+      expect(String(r.case_id)).toMatch(/^tk_/);
+      expect(String(r.reply_hint).toLowerCase()).toContain('disputed');
+
+      const repo = createTicketRepo(db);
+      const ticket = (await repo.listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
+      expect(ticket).toBeTruthy();
+      expect(ticket.kind).toBe('customer');
+      const msgs = await repo.listMessages(ticket.id, { includeInternal: true });
+      expect(msgs[0].body).toContain(invId);            // invoiceId in the body
+      expect(msgs[0].body.toLowerCase()).toContain('amount'); // reason label in the body
+
+      expect((await ctx.store.getB2bInvoice(invId))?.status).toBe('disputed');
+    });
+
+    it("no open bill ⇒ 'no open bill to dispute', opens nothing", async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('dispute_bill', { reason: 'not_my_bill' }, ctx);
+      expect(r.disputed).toBeUndefined();
+      expect(String(r.reply_hint).toLowerCase()).toContain('open bill to dispute');
+      expect(await createTicketRepo(db).listByCustomer(ctx.phone)).toHaveLength(0);
+    });
+
+    it('a second dispute is a natural no-op (the bill is no longer open)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await seedUnpaidInvoice(ctx);
+      await executeTool('dispute_bill', { reason: 'duplicate' }, ctx);
+      const r = await executeTool('dispute_bill', { reason: 'duplicate' }, ctx);
+      expect(r.disputed).toBeUndefined();
+      expect(String(r.reply_hint).toLowerCase()).toContain('open bill to dispute');
+    });
+
+    it('an unknown reason fails safe to other (the team still triages)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const invId = await seedUnpaidInvoice(ctx);
+      const r = await executeTool('dispute_bill', { reason: 'nonsense' }, ctx);
+      expect(r.disputed).toBe(true);
+      const ticket = (await createTicketRepo(db).listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
+      expect(ticket.subject.toLowerCase()).toContain('other');
+      expect((await ctx.store.getB2bInvoice(invId))?.status).toBe('disputed');
+    });
+
+    it('respects the open-case cap (5) — a 6th dispute is refused, invoice stays unpaid', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const repo = createTicketRepo(db);
+      for (let i = 0; i < 5; i++) {
+        await repo.createTicket({
+          id: `tk_pre${i}`, partnerId: 'default', kind: 'customer',
+          customerPhone: ctx.phone, subject: `existing ${i}`, body: 'open case',
+        });
+      }
+      const invId = await seedUnpaidInvoice(ctx);
+      const r = await executeTool('dispute_bill', { reason: 'other' }, ctx);
+      expect(r.error_code).toBe('too_many_open_cases');
+      expect(r.disputed).toBeUndefined();
+      expect((await ctx.store.getB2bInvoice(invId))?.status).toBe('unpaid'); // not flipped
+    });
   });
 });

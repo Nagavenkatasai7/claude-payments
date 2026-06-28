@@ -10,7 +10,7 @@ import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
-import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
+import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import type { DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
@@ -280,6 +280,44 @@ export const toolSchemas: ChatTool[] = [
       description:
         "Look up the buyer's most recent UNPAID business invoice (the mock 'ERP' bill) so you can show them what they owe. Call this when a business user wants to pay a bill or asks 'what do I owe' / 'show my invoice'. Takes no arguments — it uses the sender's own number. Returns { has_bill: true, invoice: { invoice_id, seller_business_name, line_items: [{description, qty, unit_amount_usd}], amount_usd, currency } } when there is one, or { has_bill: false } when none is outstanding. When has_bill is true, present the seller name, each line item (qty x unit), and the total, then proceed with the B2B pay flow (collect the payer's business name, quote with ach_pull, send the Approve & Pay card with the invoice_id). When has_bill is false, say there's no outstanding bill right now.",
       parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'check_bill_status',
+      description:
+        "Check the status of the buyer's most recent business bill payment (B2B). Takes no arguments — it uses the sender's own number. Use when a business user asks 'is my bill paid', 'where's my payment', or 'what's the status of that invoice'. Returns { found: true, transfer_id, status, status_summary, seller_business_name?, invoice_status?, invoice_paid? } — relay status_summary in plain words — or { found: false } when they have no bill payment. Read-only: it never moves money.",
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_bill',
+      description:
+        "Cancel or stop the buyer's most recent business bill payment (B2B) when they ask to 'cancel the payment', 'stop that bill', or 'I don't want to pay it'. Takes no arguments — it uses the sender's own number and acts on their most recent bill. It NEVER moves money on its own: an unpaid bill is cancelled outright (nothing was debited), a pending approval card is discarded, a bill that has ALREADY paid is only FLAGGED for our team to review a reverse (a human approves before any debit is returned — never promise a reversal), and a bill under review is left for our team. Always relay the tool's reply_hint to the buyer.",
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dispute_bill',
+      description:
+        "Flag the buyer's open business bill (B2B invoice) as disputed when they say it's wrong — 'this isn't my bill', 'wrong amount', 'I already paid this', 'this is a duplicate', or they want to dispute/decline it. Collect the reason FIRST. Moves NO money: it opens a support case for our team and marks the bill disputed. Returns { disputed: true, case_id } on success, or a reply_hint saying there's no open bill when nothing is outstanding.",
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            enum: ['not_my_bill', 'wrong_amount', 'duplicate', 'already_paid', 'other'],
+            description:
+              "Why the buyer is disputing the bill: 'not_my_bill', 'wrong_amount', 'duplicate', 'already_paid', or 'other'.",
+          },
+        },
+        required: ['reason'],
+      },
     },
   },
   {
@@ -858,6 +896,12 @@ export async function executeTool(
       return createTransferTool(args, ctx);
     case 'present_bill':
       return presentBillTool(args, ctx);
+    case 'check_bill_status':
+      return checkBillStatusTool(args, ctx);
+    case 'cancel_bill':
+      return cancelBillTool(args, ctx);
+    case 'dispute_bill':
+      return disputeBillTool(args, ctx);
     case 'generate_payment_link':
       return generatePaymentLinkTool(args, ctx);
     case 'check_payment_status':
@@ -1736,6 +1780,279 @@ function formatRecallAmount(transfer: import('./types').Transfer): string {
   } catch {
     return `${amount} ${currency}`;
   }
+}
+
+// ── B2B buyer lifecycle controls (L1) ────────────────────────────────────────
+// Three WhatsApp-only tools that let a B2B BUYER act on their OWN bill payment
+// from chat WITHOUT moving money. NON-CUSTODIAL is sacred: none of these capture,
+// release, or directly reverse funds. A bill that has already paid can only be
+// REVERSE-REQUESTED — the same guarded refundStatus none→requested flag
+// request_refund uses; a human approves before any debit is returned. We NEVER
+// call reverseB2bSettlement or cancelTransfer here (those are staff-only).
+//
+// Every resolution is own-phone and unforgeable: listTransfersByPhone(ctx.phone)
+// and getUnpaidInvoiceByBuyer(ctx.phone, …) are indexed own-phone reads, and the
+// tools take no transfer/invoice id from the model, so they can never surface or
+// touch another buyer's row. Partner-scoped store calls take the buyer's own
+// partnerId (customer.partnerId ?? DEFAULT_PARTNER_ID), the present_bill resolver.
+
+// How many of the buyer's most-recent transfers we scan to find their B2B ones.
+const B2B_LOOKBACK = 25;
+
+// The buyer's most-recent B2B transfer states cancel_bill can act on. blocked /
+// cancelled are terminal (nothing to cancel) and absent here on purpose.
+const CANCELLABLE_B2B_STATUSES = new Set<string>([
+  'awaiting_payment', 'in_review', 'paid', 'delivered',
+]);
+
+// Buyer-term, plain-language summary of a B2B transfer's state (read aloud by the
+// agent). Never leaks internal tokens beyond the status itself.
+const B2B_STATUS_SUMMARY: Record<string, string> = {
+  awaiting_payment: 'not paid yet — the payment link is still waiting to be completed',
+  paid: 'payment sent and settling to the seller',
+  in_review: 'under review by our team',
+  delivered: 'paid — settled to the seller',
+  cancelled: 'this bill payment was cancelled',
+  blocked: "this payment couldn't be completed and nothing was charged",
+};
+
+// Customer-facing reason phrasing for the dispute case body (never the enum token
+// alone). Mirrors B2B_DISPUTE_REASONS in types.ts.
+const B2B_DISPUTE_REASON_LABEL: Record<string, string> = {
+  not_my_bill: 'says this is not their bill',
+  wrong_amount: 'disputes the amount',
+  duplicate: 'says this is a duplicate bill',
+  already_paid: 'says this bill is already paid',
+  other: 'other issue with this bill',
+};
+
+// The buyer's own partner (present_bill's resolver): tenant-scopes every B2B store
+// call. Falls back to the default tenant for the demo's single-number case.
+async function resolveBuyerPartnerId(ctx: ToolContext): Promise<PartnerId> {
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  return customer?.partnerId ?? DEFAULT_PARTNER_ID;
+}
+
+// The buyer's B2B transfers, newest-first. Own-phone by construction.
+async function listOwnB2bTransfers(ctx: ToolContext): Promise<import('./types').Transfer[]> {
+  const rows = await ctx.store.listTransfersByPhone(ctx.phone, B2B_LOOKBACK); // newest-first, indexed
+  return rows.filter((t) => t.transferType === 'b2b');
+}
+
+/**
+ * check_bill_status — read-only B2B status read for the buyer. Resolves their
+ * most-recent B2B transfer (own-phone) and reports its state in buyer terms. When
+ * the transfer links an invoice we surface the SELLER business name + the
+ * invoice's own paid/unpaid state from the linked invoice (plaintext mock-ERP
+ * data, tenant-scoped) — NEVER the masked recipientBusinessName on the transfer.
+ * Moves no money. Clean { found: false } when the buyer has no B2B transfer.
+ */
+async function checkBillStatusTool(
+  _args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  let transfer: import('./types').Transfer | undefined;
+  try {
+    transfer = (await listOwnB2bTransfers(ctx))[0];
+  } catch (err) {
+    console.warn('check_bill_status listTransfersByPhone failed:', err);
+    return { found: false };
+  }
+  if (!transfer) return { found: false };
+
+  const result: ToolResult = {
+    found: true,
+    transfer_id: transfer.id,
+    status: transfer.status, // raw token (check_payment_status surfaces this too)
+    status_summary: B2B_STATUS_SUMMARY[transfer.status] ?? 'in progress',
+  };
+
+  if (transfer.invoiceId) {
+    try {
+      const partnerId = await resolveBuyerPartnerId(ctx);
+      const invoice = await ctx.store.getB2bInvoiceScoped(transfer.invoiceId, partnerId);
+      if (invoice) {
+        result.seller_business_name = invoice.businessName;
+        result.invoice_status = invoice.status;
+        result.invoice_paid = invoice.status === 'paid';
+      }
+    } catch (err) {
+      console.warn('check_bill_status getB2bInvoiceScoped failed:', err);
+    }
+  }
+  return result;
+}
+
+/**
+ * cancel_bill — buyer-initiated cancel/stop of their own B2B bill payment.
+ * NON-CUSTODIAL: it never moves money. Routes on the most-recent ACTIONABLE B2B
+ * transfer (own-phone):
+ *   • awaiting_payment → flip to cancelled (nothing was debited — the ACH pull
+ *     only fires after the buyer approves+pays).
+ *   • in_review        → DEFER to ops; never cancel from chat.
+ *   • paid             → reuse request_refund's guarded refundStatus none→requested
+ *     flag (REQUEST a reverse; a human approves). NEVER reverse directly.
+ *   • delivered        → reuse open_recall_dispute on THIS transfer (recall case
+ *     within the 24h window; else explain it is past the window).
+ * With no actionable transfer, a pending approval draft (pre-mint) is discarded
+ * (cancel_draft's consume logic). Otherwise there's nothing to cancel.
+ */
+async function cancelBillTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  let b2bTransfers: import('./types').Transfer[];
+  try {
+    b2bTransfers = await listOwnB2bTransfers(ctx);
+  } catch (err) {
+    console.warn('cancel_bill listTransfersByPhone failed:', err);
+    b2bTransfers = [];
+  }
+
+  const active = b2bTransfers.find((t) => CANCELLABLE_B2B_STATUSES.has(t.status));
+  if (active) {
+    // Ownership is structural (own-phone read); assert it anyway before any
+    // mutation — a B2B chat tool must never touch another buyer's row.
+    if (active.phone === ctx.phone) {
+      switch (active.status) {
+        case 'awaiting_payment':
+          await ctx.store.saveTransfer({ ...active, status: 'cancelled' });
+          return {
+            cancelled: true,
+            transfer_id: active.id,
+            reply_hint: 'Cancelled — nothing was debited.',
+          };
+        case 'in_review':
+          return {
+            deferred: true,
+            transfer_id: active.id,
+            reply_hint: 'This payment is under review; our team will handle it.',
+          };
+        case 'paid': {
+          // Reuse request_refund's guarded none→requested flag — a REQUEST only.
+          const rr = await requestRefundTool({ transfer_id: active.id }, ctx);
+          if (rr.requested) {
+            return {
+              reverse_requested: true,
+              transfer_id: active.id,
+              reply_hint:
+                'Reverse requested — our team reviews it; if approved, the debit is returned in 3-5 business days.',
+            };
+          }
+          // already_requested / in_progress / completed — relay the same
+          // customer-safe message request_refund produced.
+          return rr;
+        }
+        case 'delivered': {
+          // Reuse open_recall_dispute on THIS transfer (no money moves).
+          const recall = await openRecallDisputeTool(
+            { transfer_id: active.id, reason: 'other' },
+            ctx,
+          );
+          if (recall.opened) {
+            return {
+              recall_opened: true,
+              case_id: recall.case_id,
+              reply_hint:
+                'This bill already settled — I opened a recall case for our team to look into. Recovery is not guaranteed once funds are delivered.',
+            };
+          }
+          if (recall.error_code === 'recall_window_passed') {
+            return {
+              cancelled: false,
+              reply_hint:
+                "The payment already settled and it's past the recall window — our team can look into it.",
+            };
+          }
+          return recall;
+        }
+      }
+    }
+  }
+
+  // No actionable B2B transfer. A pending approval draft (pre-mint) means nothing
+  // was ever charged — discard it (reuse cancel_draft's consume logic).
+  const draftResult = await cancelDraftTool(args, ctx);
+  if (draftResult.cancelled) {
+    return { cancelled: true, action: 'draft_discarded', reply_hint: 'Cancelled — nothing was charged.' };
+  }
+
+  // Terminal (blocked/cancelled) bill, or no B2B payment at all.
+  if (b2bTransfers.length > 0) {
+    return { cancelled: false, reply_hint: "There's nothing to cancel." };
+  }
+  return { cancelled: false, found: false, reply_hint: "I don't see a bill payment to cancel." };
+}
+
+/**
+ * dispute_bill — the buyer rejects an UNPAID bill (wrong amount, not theirs, a
+ * duplicate, already paid, …). Clones open_recall_dispute: it opens a customer
+ * support case (kind 'customer', category 'dispute') + a durable 'ticket.triage'
+ * outbox row, respecting the per-buyer open-case cap, AND flips the linked invoice
+ * unpaid→disputed (scoped + guarded in the repo). Moves NO money. Resolves the
+ * buyer's open invoice with present_bill's own-phone, tenant-scoped resolver, so
+ * it can never dispute another buyer's bill. A second dispute is a natural no-op:
+ * once the invoice is 'disputed' it is no longer returned as the open bill.
+ */
+async function disputeBillTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const reason = asEnum(B2B_DISPUTE_REASONS, args.reason) ?? 'other'; // fail-safe; team still triages
+
+  const partnerId = await resolveBuyerPartnerId(ctx);
+  let invoice: import('./types').B2bInvoice | null;
+  try {
+    invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
+  } catch (err) {
+    console.warn('dispute_bill getUnpaidInvoiceByBuyer failed:', err);
+    return { error_code: 'no_open_bill', reply_hint: "I don't see an open bill to dispute." };
+  }
+  if (!invoice) {
+    return { error_code: 'no_open_bill', reply_hint: "I don't see an open bill to dispute." };
+  }
+
+  // Respect the per-buyer open-case cap (mirrors open_recall_dispute).
+  const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
+  const mine = await repo.listByCustomer(ctx.phone);
+  if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
+    return {
+      error_code: 'too_many_open_cases',
+      reply_hint:
+        'the customer already has several open cases — ask them to follow up on an existing one rather than opening another',
+    };
+  }
+
+  const reasonLabel = B2B_DISPUTE_REASON_LABEL[reason];
+  const ticket = await repo.createTicket({
+    id: `tk_${newTransferId()}`,
+    partnerId,
+    kind: 'customer',
+    customerPhone: ctx.phone,
+    subject: `Bill dispute: ${reason}`,
+    body: `Buyer disputes invoice ${invoice.id} from ${invoice.businessName} (${reasonLabel}).`,
+    category: 'dispute',
+  });
+
+  // Flip the invoice unpaid→disputed (scoped + guarded in the repo). Once disputed
+  // it is NOT re-payable and no longer the open bill, so a repeat dispute no-ops.
+  await ctx.store.markB2bInvoiceDisputed(invoice.id, partnerId);
+
+  // Out-of-band AI triage: a durable 'ticket.triage' outbox row the worker drains
+  // (never an inline Ollama call — this tool runs in the agent turn). Deduped on
+  // the ticket id.
+  await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+    'ticket.triage',
+    { ticketId: ticket.id },
+    { dedupeKey: `triage:${ticket.id}` },
+  );
+  pokeWorker();
+
+  return {
+    disputed: true,
+    case_id: ticket.id,
+    reply_hint: "Thanks — we've flagged this bill as disputed and our team will follow up.",
+  };
 }
 
 async function updateRecipientPhoneTool(
