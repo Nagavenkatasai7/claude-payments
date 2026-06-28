@@ -34,6 +34,13 @@ export function applyKycEvent(
     return {};
   }
 
+  // A prior watchlist or PEP hit is also a hard hold — subsequent Persona events
+  // (including clean inquiry.approved/completed delivered out of order) must not
+  // overwrite this until a human explicitly resolves the case.
+  if (customer.watchlistHit || customer.pepHit) {
+    return {};
+  }
+
   const delta: KycDelta = {};
   if (event.inquiryId) {
     delta.kycInquiryId = event.inquiryId;

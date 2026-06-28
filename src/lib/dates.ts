@@ -22,5 +22,9 @@ export function easternDayOfWeek(epochMs: number): number {
     timeZone: ET,
     weekday: 'short',
   });
-  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(short);
+  const idx = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(short);
+  if (idx === -1) {
+    throw new RangeError(`easternDayOfWeek: invalid epochMs ${epochMs}`);
+  }
+  return idx;
 }

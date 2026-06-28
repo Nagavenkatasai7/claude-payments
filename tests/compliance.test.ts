@@ -63,6 +63,50 @@ describe('screenTransfer — corridor overrides', () => {
   });
 });
 
+describe('screenTransfer — watchlist attribution (regression: wrong party named)', () => {
+  // Bug: when only the sender was watchlisted, reasons still said "Recipient is on the
+  // compliance watchlist." — the reasons array was always hardcoded to "Recipient".
+  it('attributes the block to Sender when only the sender matched', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'Mom',        // NOT on watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'John Doe',      // IS on default WATCHLIST
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons[0]).toMatch(/sender/i);
+    expect(r.reasons[0]).not.toMatch(/recipient/i);
+  });
+
+  it('attributes the block to Recipient when only the recipient matched', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',   // IS on watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'Clean Person',  // NOT on watchlist
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons[0]).toMatch(/recipient/i);
+    expect(r.reasons[0]).not.toMatch(/sender/i);
+  });
+
+  it('lists both reasons when both sender and recipient matched', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',   // on watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'John Doe',      // also on watchlist
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons).toHaveLength(2);
+    expect(r.reasons.some((x) => /recipient/i.test(x))).toBe(true);
+    expect(r.reasons.some((x) => /sender/i.test(x))).toBe(true);
+  });
+});
+
 describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)', () => {
   it('dormant: no senderName reproduces today\'s recipient-only cleared result', async () => {
     const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' });

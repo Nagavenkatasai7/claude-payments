@@ -27,7 +27,10 @@ export async function checkIpRateLimit(
 ): Promise<IpRateLimitResult> {
   const windowSec = opts.windowSec ?? 60;
   const window = Math.floor((opts.now ?? Date.now()) / (windowSec * 1000));
-  const key = `iprl:${scope}:${ip}:${window}`;
+  // Use '|' as delimiter — ':' is valid in both scope names and IPv6 addresses,
+  // allowing collisions like scope='a:b',ip='c' ↔ scope='a',ip='b:c'. Pipe is
+  // illegal in all standard scope names and in all IPv4/IPv6 address formats.
+  const key = `iprl|${scope}|${ip}|${window}`;
   const count = await redis.incr(key);
   // TTL set once when the window opens; stale counters self-evict.
   if (count === 1) await redis.expire(key, windowSec * 2);

@@ -93,6 +93,12 @@ export function quote(
     destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
       ? rates.toInr
       : rates.toUsd / destToUsd;
+  // Guard: a negative or non-finite destToUsd produces a non-positive crossRate which
+  // would yield a negative recipient amount. sourceForDest() already has this check;
+  // quote() must apply the same invariant.
+  if (!Number.isFinite(crossRate) || crossRate <= 0) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
   const amountInr = Math.round(amountSource * crossRate); // amount in the destination currency
 
   return {

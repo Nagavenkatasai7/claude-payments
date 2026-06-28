@@ -68,3 +68,51 @@ describe('applyKycEvent (human-review-only)', () => {
     expect(d.kycReviewState).toBeUndefined();
   });
 });
+
+describe('applyKycEvent — watchlistHit freeze guard (regression)', () => {
+  // Bug: a customer with watchlistHit:true and kycReviewState:'needs_review' could
+  // be silently advanced to 'pending_review' by a subsequent inquiry.approved Persona
+  // webhook. The HUMAN_TERMINAL guard only covered ['approved','rejected'], not the
+  // watchlist-triggered needs_review state.
+  const watchlisted: Customer = {
+    ...base,
+    kycReviewState: 'needs_review',
+    watchlistHit: true,
+  } as Customer;
+
+  const pepFlagged: Customer = {
+    ...base,
+    kycReviewState: 'needs_review',
+    pepHit: true,
+  } as Customer;
+
+  it('inquiry.approved does NOT advance a watchlistHit customer out of needs_review', () => {
+    const d = applyKycEvent(watchlisted, ev({ name: 'inquiry.approved', status: 'approved' }));
+    expect(d).toEqual({});
+  });
+
+  it('inquiry.completed does NOT advance a watchlistHit customer', () => {
+    const d = applyKycEvent(watchlisted, ev({ name: 'inquiry.completed', status: 'completed' }));
+    expect(d).toEqual({});
+  });
+
+  it('inquiry.created does NOT advance a watchlistHit customer', () => {
+    const d = applyKycEvent(watchlisted, ev({ name: 'inquiry.created', status: 'created' }));
+    expect(d).toEqual({});
+  });
+
+  it('inquiry.started does NOT advance a watchlistHit customer', () => {
+    const d = applyKycEvent(watchlisted, ev({ name: 'inquiry.started', status: 'started' }));
+    expect(d).toEqual({});
+  });
+
+  it('pepHit also freezes the customer (same hard-hold logic)', () => {
+    const d = applyKycEvent(pepFlagged, ev({ name: 'inquiry.approved', status: 'approved' }));
+    expect(d).toEqual({});
+  });
+
+  it('a clean customer with no watchlistHit still advances normally', () => {
+    const d = applyKycEvent(base, ev({ name: 'inquiry.approved', status: 'approved' }));
+    expect(d.kycReviewState).toBe('pending_review');
+  });
+});
