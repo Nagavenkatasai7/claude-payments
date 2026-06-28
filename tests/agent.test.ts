@@ -1236,10 +1236,13 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(20);
+    expect(seenTools).toHaveLength(23);
     const dn = seenTools.map((t) => t.function.name);
     expect(dn).toContain('send_approve_picker');
     expect(dn).toContain('present_bill'); // B2B — WhatsApp channel
+    expect(dn).toContain('cancel_bill'); // B2B lifecycle (L1) — WhatsApp channel
+    expect(dn).toContain('check_bill_status'); // B2B lifecycle (L1) — WhatsApp channel
+    expect(dn).toContain('dispute_bill'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).not.toContain('list_recent_transfers'); // web-only — never on WhatsApp
   });
 
