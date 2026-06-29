@@ -34,6 +34,16 @@ export function applyKycEvent(
     return {};
   }
 
+  // A watchlist/PEP hold (needs_review) is also locked from Persona events —
+  // only a human acting via kyc-case-store.review() may move the customer out
+  // of needs_review.  The sole exception is another watchlist/PEP event, which
+  // is idempotent and safe to re-apply (it only ever sets needs_review again).
+  const isWatchlistEvent =
+    event.watchlistMatched === true || event.name === 'report/watchlist.matched';
+  if (customer.kycReviewState === 'needs_review' && !isWatchlistEvent) {
+    return {};
+  }
+
   const delta: KycDelta = {};
   if (event.inquiryId) {
     delta.kycInquiryId = event.inquiryId;
@@ -42,7 +52,7 @@ export function applyKycEvent(
   if (event.idLast4) delta.idLast4 = event.idLast4;
 
   // Watchlist/PEP match is a hard hold regardless of inquiry status.
-  if (event.watchlistMatched || event.name === 'report/watchlist.matched') {
+  if (isWatchlistEvent) {
     delta.watchlistHit = true;
     delta.kycReviewState = 'needs_review';
     return delta;

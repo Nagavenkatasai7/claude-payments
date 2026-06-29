@@ -157,6 +157,42 @@ describe('fundingMethodMix', () => {
   });
 });
 
+describe('buildDateBuckets DST spring-forward (regression: off-by-one on 2026-03-09)', () => {
+  // 2026-03-08 is the spring-forward day: clocks jump from 02:00 to 03:00 ET,
+  // making the ET day only 23 hours long.  Subtracting multiples of DAY_MS (24h)
+  // in UTC-ms can land in the wrong calendar day around that boundary.
+  //
+  // Test: call dailyCounts with now = 2026-03-09T04:30:00Z (00:30 AM ET,
+  // the morning after spring-forward). The 7-bucket list must include 3/8/2026
+  // (spring-forward day) and must NOT reach back to 3/2/2026.
+  it('includes the spring-forward day (3/8/2026) and does not skip it', () => {
+    // 04:30 UTC on 2026-03-09 = 00:30 AM ET (spring forward happened at 07:00 UTC = 02:00 ET→03:00 ET)
+    const springForwardMorning = Date.parse('2026-03-09T04:30:00Z');
+    const result = dailyCounts([], springForwardMorning, 7);
+    const dates = result.map((b) => b.date);
+    expect(dates).toContain('3/8/2026');  // spring-forward day must be present
+    expect(dates).not.toContain('3/2/2026'); // window must not extend back an extra day
+    expect(dates).toHaveLength(7);
+    // The last bucket must be today in ET
+    expect(dates[dates.length - 1]).toBe('3/9/2026');
+    // The first bucket must be exactly 6 days before today
+    expect(dates[0]).toBe('3/3/2026');
+  });
+
+  it('includes the fall-back day (2025-11-02) correctly (non-regression, 25-hour day)', () => {
+    // 2025-11-02 is fall-back day. 05:00 UTC = 00:00 AM ET. A 7-bucket window
+    // starting here must include 11/2/2025 and reach back to 10/27/2025.
+    const fallbackMorning = Date.parse('2025-11-02T05:30:00Z'); // 00:30 AM ET post-fallback
+    const result = dailyCounts([], fallbackMorning, 7);
+    const dates = result.map((b) => b.date);
+    expect(dates).toContain('11/2/2025');
+    expect(dates).not.toContain('10/26/2025'); // must not reach back 8 days
+    expect(dates).toHaveLength(7);
+    expect(dates[0]).toBe('10/27/2025');
+    expect(dates[dates.length - 1]).toBe('11/2/2025');
+  });
+});
+
 describe('topRecipientsByCount', () => {
   it('returns top N by count, sorted desc with name tiebreaker', () => {
     const t = [

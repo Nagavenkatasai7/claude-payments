@@ -151,6 +151,44 @@ describe('EnvKeyProvider master-key validation', () => {
   });
 });
 
+describe('field-crypto lone-surrogate guard (regression: silent data corruption)', () => {
+  // Node.js Buffer.from(str, 'utf8') replaces lone surrogates with U+FFFD,
+  // so decrypt(encrypt(x)) !== x — silent data loss with no error thrown.
+  it('throws on a lone high surrogate (U+D800)', () => {
+    const p = fixedProvider(KEY_A);
+    const input = String.fromCharCode(0xd800); // lone high surrogate
+    expect(() => encryptField(input, p)).toThrow('field-crypto');
+    expect(() => encryptField(input, p)).toThrow(/lone surrogate/i);
+  });
+
+  it('throws on a lone low surrogate (U+DC00)', () => {
+    const p = fixedProvider(KEY_A);
+    const input = String.fromCharCode(0xdc00); // lone low surrogate
+    expect(() => encryptField(input, p)).toThrow('field-crypto');
+  });
+
+  it('throws on a lone high surrogate at end of string', () => {
+    const p = fixedProvider(KEY_A);
+    const input = 'valid prefix \uD83D'; // trailing lone high surrogate
+    expect(() => encryptField(input, p)).toThrow(/lone surrogate/i);
+  });
+
+  it('does NOT throw on a valid surrogate pair (emoji)', () => {
+    const p = fixedProvider(KEY_A);
+    // 😀 = 😀 — valid surrogate pair encoding supplementary codepoint U+1F600
+    const input = '😀 smile';
+    const blob = encryptField(input, p);
+    expect(decryptField(blob, p)).toBe(input);
+  });
+
+  it('round-trips supplementary plane characters (emoji, math) unchanged', () => {
+    const p = fixedProvider(KEY_A);
+    const input = '𝄞 musical score 🎵'; // U+1D11E and U+1F3B5
+    const blob = encryptField(input, p);
+    expect(decryptField(blob, p)).toBe(input);
+  });
+});
+
 describe('field-crypto default provider (env-driven)', () => {
   it('builds an EnvKeyProvider lazily from env.fieldEncryptionKey', async () => {
     const masterHex = randomBytes(32).toString('hex');

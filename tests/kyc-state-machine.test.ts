@@ -67,4 +67,40 @@ describe('applyKycEvent (human-review-only)', () => {
     const d = applyKycEvent(base, ev({ name: 'inquiry.transitioned', status: 'completed' }));
     expect(d.kycReviewState).toBeUndefined();
   });
+
+  it('a Persona event CANNOT downgrade needs_review to pending_review (regression: watchlist hold washout)', () => {
+    // Bug: customer.kycReviewState = 'needs_review' (set by a prior watchlist event).
+    // A later inquiry.completed event must NOT overwrite it with 'pending_review'.
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlistHeld, ev({ name: 'inquiry.completed', status: 'completed' }));
+    // Must return {} (no state change) — the hold can only be cleared by a human
+    expect(d.kycReviewState).toBeUndefined();
+    expect(d).toEqual({}); // no fields should be set
+  });
+
+  it('a Persona event CANNOT downgrade needs_review to inquiry_started', () => {
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlistHeld, ev({ name: 'inquiry.started', status: 'started' }));
+    expect(d.kycReviewState).toBeUndefined();
+    expect(d).toEqual({});
+  });
+
+  it('a Persona event CANNOT downgrade needs_review to approved', () => {
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlistHeld, ev({ name: 'inquiry.approved', status: 'approved' }));
+    expect(d.kycReviewState).toBeUndefined();
+    expect(d).toEqual({});
+  });
+
+  it('a watchlist event that arrives while already in needs_review is idempotent (safe to re-apply)', () => {
+    // A second watchlist event should be allowed (idempotent) — not blocked by the hold guard.
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(
+      watchlistHeld,
+      ev({ name: 'report/watchlist.matched', status: null, watchlistMatched: true }),
+    );
+    // Should still update watchlistHit and keep needs_review
+    expect(d.watchlistHit).toBe(true);
+    expect(d.kycReviewState).toBe('needs_review');
+  });
 });

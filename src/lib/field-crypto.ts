@@ -137,6 +137,11 @@ export function encryptField(
   plaintext: string,
   provider: EncryptionKeyProvider = defaultProvider(),
 ): string {
+  // Lone surrogates are not valid UTF-8; Buffer.from silently replaces them
+  // with U+FFFD, breaking the decrypt(encrypt(x)) === x invariant.
+  if (/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(plaintext)) {
+    throw new Error('field-crypto: plaintext contains lone surrogate — not encodable as UTF-8');
+  }
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);

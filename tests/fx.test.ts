@@ -164,6 +164,35 @@ describe('quote (non-USD coverage)', () => {
   });
 });
 
+describe('quote — crossRate infinity guard (regression: subnormal destToUsd overflows IEEE 754)', () => {
+  // Number.MIN_VALUE is 5e-324: finite, positive, truthy — both !destToUsd and
+  // !Number.isFinite(destToUsd) return false, so the guard was bypassed.
+  // rates.toUsd / 5e-324 overflows to Infinity, making amountInr = Infinity.
+  it('throws QuoteError when destToUsd is subnormal (Number.MIN_VALUE)', () => {
+    const rates = { toInr: 85, toUsd: 1 };
+    expect(() =>
+      quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', Number.MIN_VALUE),
+    ).toThrow(QuoteError);
+  });
+
+  it('throws QuoteError when destToUsd is so small it overflows the cross-rate to Infinity', () => {
+    const rates = { toInr: 85, toUsd: 1 };
+    // 3e-309 is below the IEEE 754 minimum normal; 1 / 3e-309 overflows to Infinity
+    expect(() =>
+      quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', 3e-309),
+    ).toThrow(QuoteError);
+  });
+
+  it('does NOT throw for a legitimate small-but-sane destToUsd like 0.001', () => {
+    const rates = { toInr: 85, toUsd: 1 };
+    // 1 / 0.001 = 1000 — finite cross-rate, valid
+    const q = quote(15, 'USD', rates, 'bank_transfer', 0, 'AED', 0.001);
+    expect(Number.isFinite(q.fxRate)).toBe(true);
+    expect(q.fxRate).toBeGreaterThan(0);
+    expect(Number.isFinite(q.amountInr)).toBe(true);
+  });
+});
+
 describe('quote — any-to-any cross-currency destination', () => {
   const USD2 = { toInr: 85, toUsd: 1 };
   it('USD→INR is byte-for-byte the legacy result (5-arg call defaults to INR)', () => {

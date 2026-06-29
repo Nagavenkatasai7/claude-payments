@@ -21,9 +21,17 @@ export function transfersInWindow(
 }
 
 function buildDateBuckets(now: number, days: number): string[] {
+  // Parse today's Eastern calendar components and use local (wall-clock) arithmetic
+  // to decrement by integer days.  Subtracting multiples of DAY_MS (86 400 000 ms)
+  // in UTC-epoch land is wrong across DST transitions: the spring-forward day is only
+  // 23 hours long, so "now − 1 × DAY_MS" can land on the previous date instead of
+  // the spring-forward date itself, silently skipping it.
+  const todayStr = new Date(now).toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+  const [m, d, y] = todayStr.split('/').map(Number);
   const dates: string[] = [];
   for (let i = days - 1; i >= 0; i--) {
-    dates.push(easternDate(now - i * DAY_MS));
+    const dt = new Date(y, m - 1, d - i); // local wall-clock arithmetic; Date normalises month/year rollovers
+    dates.push(`${dt.getMonth() + 1}/${dt.getDate()}/${dt.getFullYear()}`);
   }
   return dates;
 }

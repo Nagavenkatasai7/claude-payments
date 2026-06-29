@@ -76,6 +76,44 @@ describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)
     });
     expect(r.status).toBe('blocked');
   });
+  it('sender-only watchlist hit: reason correctly identifies the SENDER (regression)', async () => {
+    // Bug: when only the sender is matched, reasons[0] was incorrectly
+    // "Recipient is on the compliance watchlist." — persisted to audit_events
+    // and the transfer row, misleading compliance review.
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'Mom',       // clean — NOT on watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'John Doe',     // ON watchlist
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons.some((reason) => /sender/i.test(reason))).toBe(true);
+    expect(r.reasons.every((reason) => !/recipient/i.test(reason))).toBe(true);
+  });
+  it('recipient-only watchlist hit: reason correctly identifies the RECIPIENT', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',  // ON watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'Clean Person', // clean
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons.some((reason) => /recipient/i.test(reason))).toBe(true);
+  });
+  it('both sender and recipient on watchlist: reasons include both parties', async () => {
+    const r = await screenTransfer({
+      amountUsd: 200,
+      recipientName: 'John Doe',  // ON watchlist
+      transfersToday: 0,
+      sourceCountry: 'US',
+      senderName: 'John Doe',     // also ON watchlist
+    });
+    expect(r.status).toBe('blocked');
+    expect(r.reasons.some((reason) => /recipient/i.test(reason))).toBe(true);
+    expect(r.reasons.some((reason) => /sender/i.test(reason))).toBe(true);
+  });
   it('clean sender + watchlisted recipient still blocks (recipient path unchanged)', async () => {
     const r = await screenTransfer({
       amountUsd: 200, recipientName: 'John Doe', transfersToday: 0, sourceCountry: 'US',
