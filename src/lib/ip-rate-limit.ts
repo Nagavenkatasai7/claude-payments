@@ -8,7 +8,7 @@ import type { RedisLike } from './store';
 // per-phone OTP caps, per-IP login lockout): this is the blunt outer ring that
 // stops one address from hammering a money endpoint at all.
 //
-// Fixed window (INCR + EXPIRE), keyed `iprl:{scope}:{ip}:{window}` — scopes
+// Fixed window (INCR + EXPIRE), keyed `iprl|{scope}|{ip}|{window}` — scopes
 // never share budgets, and the route-facing guard FAILS OPEN on Redis errors:
 // a rate-limiter outage must never block payments (the inner per-entity
 // throttles still hold).
@@ -27,7 +27,10 @@ export async function checkIpRateLimit(
 ): Promise<IpRateLimitResult> {
   const windowSec = opts.windowSec ?? 60;
   const window = Math.floor((opts.now ?? Date.now()) / (windowSec * 1000));
-  const key = `iprl:${scope}:${ip}:${window}`;
+  // Delimit with '|', not ':' — ':' is valid in both scope names and IPv6
+  // addresses, so a ':'-joined key could collide (scope='a:b',ip='c' would key
+  // the same cell as scope='a',ip='b:c'). '|' appears in neither, so keys stay unique.
+  const key = `iprl|${scope}|${ip}|${window}`;
   const count = await redis.incr(key);
   // TTL set once when the window opens; stale counters self-evict.
   if (count === 1) await redis.expire(key, windowSec * 2);
@@ -71,14 +74,21 @@ export async function enforceIpRateLimit(
   windowSec = 60,
 ): Promise<NextResponse | null> {
   try {
+    const now = Date.now();
     const result = await checkIpRateLimit(limiterRedis(), scope, clientIpFrom(req.headers), {
       limit,
       windowSec,
+      now,
     });
     if (!result.allowed) {
+      // Accurate Retry-After: seconds until THIS fixed window rolls over, not a
+      // full window (which over-states the wait for a request late in a window).
+      const windowMs = windowSec * 1000;
+      const windowEnd = (Math.floor(now / windowMs) + 1) * windowMs;
+      const retryAfterSec = Math.ceil((windowEnd - now) / 1000);
       return NextResponse.json(
         { ok: false, error: 'Too many requests — please retry in a minute.' },
-        { status: 429, headers: { 'retry-after': String(windowSec) } },
+        { status: 429, headers: { 'retry-after': String(retryAfterSec) } },
       );
     }
     return null;

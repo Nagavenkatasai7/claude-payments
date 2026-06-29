@@ -139,10 +139,17 @@ export function encryptField(
 ): string {
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
+  // Reject lone UTF-16 surrogates: Buffer.from(…,'utf8') silently replaces them
+  // with U+FFFD, which would break the decrypt(encrypt(x)) === x invariant. Round-
+  // tripping through the buffer detects any such non-encodable input up front.
+  const plaintextBuf = Buffer.from(plaintext, 'utf8');
+  if (plaintextBuf.toString('utf8') !== plaintext) {
+    throw new Error('field-crypto: plaintext contains lone surrogates (not valid UTF-8)');
+  }
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
   cipher.setAAD(Buffer.from(VERSION)); // bind the version as AAD (anti-transplant)
   const ct = Buffer.concat([
-    cipher.update(Buffer.from(plaintext, 'utf8')),
+    cipher.update(plaintextBuf),
     cipher.final(),
   ]);
   const tag = cipher.getAuthTag();
@@ -181,6 +188,15 @@ export function decryptField(
   const tag = fromB64url(tagB64);
   const wrappedDek = fromB64url(wrappedB64);
   const ct = fromB64url(ctB64);
+  // A well-formed v1 blob has a 12-byte IV and a 16-byte GCM tag. Reject a blob
+  // whose IV/tag decode to the wrong length up front, with a clear error, rather
+  // than letting createDecipheriv/setAuthTag throw something opaque.
+  if (iv.length !== GCM_IV_BYTES) {
+    throw new Error('field-crypto: malformed blob (bad iv length)');
+  }
+  if (tag.length !== GCM_TAG_BYTES) {
+    throw new Error('field-crypto: malformed blob (bad tag length)');
+  }
 
   const dek = provider.unwrapDataKey(wrappedDek); // throws if master key mismatches
   const decipher = createDecipheriv('aes-256-gcm', dek, iv);

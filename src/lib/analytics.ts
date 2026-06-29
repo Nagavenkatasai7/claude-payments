@@ -21,9 +21,19 @@ export function transfersInWindow(
 }
 
 function buildDateBuckets(now: number, days: number): string[] {
+  // Anchor to today's Eastern calendar date, then walk back by whole calendar days.
+  // Using UTC noon (12:00) as the representative instant for each day ensures the
+  // Eastern date is unambiguous regardless of DST offset (±4 h / ±5 h from UTC is
+  // well inside ±12 h), preventing DST spring-forward from silently dropping a day
+  // and DST fall-back from producing a duplicate bucket.
+  const todayEt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' })
+    .format(new Date(now)); // 'YYYY-MM-DD'
+  const [Y, M, D] = todayEt.split('-').map(Number);
+
   const dates: string[] = [];
   for (let i = days - 1; i >= 0; i--) {
-    dates.push(easternDate(now - i * DAY_MS));
+    const noonUtcMs = Date.UTC(Y, M - 1, D - i, 12, 0, 0);
+    dates.push(easternDate(noonUtcMs));
   }
   return dates;
 }

@@ -67,4 +67,92 @@ describe('applyKycEvent (human-review-only)', () => {
     const d = applyKycEvent(base, ev({ name: 'inquiry.transitioned', status: 'completed' }));
     expect(d.kycReviewState).toBeUndefined();
   });
+
+  it('a Persona event CANNOT downgrade needs_review to pending_review (regression: watchlist hold washout)', () => {
+    // Bug: customer.kycReviewState = 'needs_review' (set by a prior watchlist event).
+    // A later inquiry.completed event must NOT overwrite it with 'pending_review'.
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlistHeld, ev({ name: 'inquiry.completed', status: 'completed' }));
+    // Must return {} (no state change) — the hold can only be cleared by a human
+    expect(d.kycReviewState).toBeUndefined();
+    expect(d).toEqual({}); // no fields should be set
+  });
+
+  it('a Persona event CANNOT downgrade needs_review to inquiry_started', () => {
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlistHeld, ev({ name: 'inquiry.started', status: 'started' }));
+    expect(d.kycReviewState).toBeUndefined();
+    expect(d).toEqual({});
+  });
+
+  it('a Persona event CANNOT downgrade needs_review to approved', () => {
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlistHeld, ev({ name: 'inquiry.approved', status: 'approved' }));
+    expect(d.kycReviewState).toBeUndefined();
+    expect(d).toEqual({});
+  });
+
+  it('a watchlist event that arrives while already in needs_review is idempotent (safe to re-apply)', () => {
+    // A second watchlist event should be allowed (idempotent) — not blocked by the hold guard.
+    const watchlistHeld = { ...base, kycReviewState: 'needs_review', watchlistHit: true } as Customer;
+    const d = applyKycEvent(
+      watchlistHeld,
+      ev({ name: 'report/watchlist.matched', status: null, watchlistMatched: true }),
+    );
+    // Should still update watchlistHit and keep needs_review
+    expect(d.watchlistHit).toBe(true);
+    expect(d.kycReviewState).toBe('needs_review');
+  });
+});
+
+
+describe('applyKycEvent — monotone rank guard (regression: bug-hunt)', () => {
+  it('does NOT regress pending_review → inquiry_started on a late inquiry.started webhook', () => {
+    const customer = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const lateEvent = ev({ name: 'inquiry.started', status: 'started', createdAt: '2026-06-01T09:00:00Z' });
+    const delta = applyKycEvent(customer, lateEvent);
+    // kycReviewState must NOT be set — backward move must be suppressed
+    expect(delta.kycReviewState).toBeUndefined();
+  });
+
+  it('does NOT regress needs_review → inquiry_started on a late inquiry.created webhook', () => {
+    const customer = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const lateEvent = ev({ name: 'inquiry.created', status: 'created', createdAt: '2026-06-01T08:00:00Z' });
+    const delta = applyKycEvent(customer, lateEvent);
+    expect(delta.kycReviewState).toBeUndefined();
+  });
+
+  it('does NOT clear a needs_review hold on a clean inquiry.approved (hold-lock outranks equal-rank)', () => {
+    // The hold-lock takes precedence over the equal-rank rule: a customer already
+    // in needs_review (a watchlist/PEP or failed-inquiry hold) must NOT be moved to
+    // pending_review by a later clean inquiry.approved delivered out of order — only
+    // a human via kyc-case-store.review() can clear the hold, so the delta is empty.
+    const customer = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const approvedEvent = ev({ name: 'inquiry.approved', status: 'approved' });
+    const delta = applyKycEvent(customer, approvedEvent);
+    expect(delta.kycReviewState).toBeUndefined();
+  });
+
+  it('still allows forward transitions: inquiry_started → pending_review', () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    const approvedEvent = ev({ name: 'inquiry.approved', status: 'approved' });
+    const delta = applyKycEvent(customer, approvedEvent);
+    expect(delta.kycReviewState).toBe('pending_review');
+  });
+
+  it('still allows forward transitions: inquiry_started → needs_review', () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    const failedEvent = ev({ name: 'inquiry.failed', status: 'failed' });
+    const delta = applyKycEvent(customer, failedEvent);
+    expect(delta.kycReviewState).toBe('needs_review');
+  });
+
+  it('still allows watchlist hit from pending_review → needs_review (equal rank, but watchlist path returns early)', () => {
+    const customer = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const watchlistEvent = ev({ name: 'report/watchlist.matched', status: null, watchlistMatched: true });
+    const delta = applyKycEvent(customer, watchlistEvent);
+    // The watchlist early-return bypasses the rank guard, so this should still work
+    expect(delta.kycReviewState).toBe('needs_review');
+    expect(delta.watchlistHit).toBe(true);
+  });
 });

@@ -1,5 +1,9 @@
 export function normalizePhone(raw: unknown): string {
-  return String(raw ?? '').replace(/\D/g, '');
+  try {
+    return String(raw ?? '').replace(/\D/g, '');
+  } catch {
+    return '';
+  }
 }
 
 export function isValidPhone(normalized: string): boolean {
