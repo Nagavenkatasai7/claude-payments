@@ -112,6 +112,13 @@ export interface B2bInvoice {
   lineItems: InvoiceLineItem[];
   amountUsd: number;
   currency: CurrencyCode;
+  // ── Cross-border (Plan 3) — all optional; absent ⇒ a US-domestic bill driven by
+  // amountUsd/currency (back-compat). When present, the obligation is FIXED in the
+  // seller's currency: the seller nets `invoicedAmount` exactly; the buyer pays the
+  // live-quoted FX equivalent + fees on top at payment time (never locked here).
+  sellerId?: string;                 // FK → sellers.id (the registered seller this bill belongs to)
+  invoicedAmount?: number;           // the seller's EXACT receive amount (the fixed obligation)
+  invoicedCurrency?: CurrencyCode;   // the seller's currency (the obligation's denomination)
   // unpaid → paid (on delivery). voided = staff killed the bill; disputed = buyer
   // rejected it (a support ticket carries the reason). voided/disputed are NOT
   // re-payable; reissue mints a fresh 'unpaid' invoice.

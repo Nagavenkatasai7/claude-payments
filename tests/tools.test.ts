@@ -2934,8 +2934,10 @@ describe('present_bill — B2B mock invoice lookup (WhatsApp channel)', () => {
 
 describe('register_seller — cross-border seller onboarding start (WhatsApp channel)', () => {
   beforeEach(async () => {
-    // sellers is not in freshDb's TRUNCATE set — clear it per test.
-    await db.execute(sql`TRUNCATE sellers`);
+    // sellers is not in freshDb's TRUNCATE set — clear it per test. CASCADE: the
+    // cross-border invoice FK (b2b_invoices.seller_id → sellers) makes a bare
+    // TRUNCATE of the referenced table illegal.
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
   });
 
   it('register_seller is a WhatsApp-only tool (in toolSchemas, NOT web-allowlisted)', () => {

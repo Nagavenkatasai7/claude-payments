@@ -145,6 +145,14 @@ export const b2bInvoices = pgTable(
     lineItems: jsonb('line_items').notNull().default([]), // {description, qty, unitAmountUsd}[]
     amountUsd: numeric('amount_usd', { precision: 12, scale: 2 }).notNull(),
     currency: text('currency').notNull().default('USD'),
+    // ── Cross-border B2B (Plan 3) — additive, all NULLABLE ──
+    // When set, these carry the cross-border obligation FIXED IN THE SELLER'S
+    // currency (e.g. 1,000 HKD): the seller receives `invoicedAmount` exactly and
+    // FX is quoted LIVE at payment, never locked here. A row with these null is a
+    // back-compat US-domestic bill driven by amountUsd/currency exactly as before.
+    sellerId: text('seller_id').references(() => sellers.id),
+    invoicedAmount: numeric('invoiced_amount', { precision: 12, scale: 2 }),
+    invoicedCurrency: text('invoiced_currency'),
     status: text('status').notNull().default('unpaid'), // 'unpaid' | 'paid' | 'voided' | 'disputed'
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),

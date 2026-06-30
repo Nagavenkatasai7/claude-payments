@@ -365,6 +365,13 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
       createdAt: row.createdAt.toISOString(),
     };
     if (row.paidAt) inv.paidAt = row.paidAt.toISOString();
+    // Cross-border fields (Plan 3) — present only on a cross-border bill; a row
+    // with all three null behaves exactly as a back-compat US-domestic invoice.
+    if (row.sellerId) inv.sellerId = row.sellerId;
+    if (row.invoicedAmount !== null && row.invoicedAmount !== undefined) {
+      inv.invoicedAmount = Number(row.invoicedAmount);
+    }
+    if (row.invoicedCurrency) inv.invoicedCurrency = row.invoicedCurrency as CurrencyCode;
     return inv;
   };
   return {
@@ -387,6 +394,10 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
         lineItems: inv.lineItems,
         amountUsd: inv.amountUsd.toFixed(2),
         currency: inv.currency,
+        // Cross-border (Plan 3) — persisted only when present; null ⇒ US-domestic.
+        sellerId: inv.sellerId ?? null,
+        invoicedAmount: inv.invoicedAmount !== undefined ? inv.invoicedAmount.toFixed(2) : null,
+        invoicedCurrency: inv.invoicedCurrency ?? null,
         status: inv.status,
         createdAt: new Date(inv.createdAt),
         paidAt: inv.paidAt ? new Date(inv.paidAt) : null,
@@ -493,6 +504,10 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
         status: 'unpaid',
         createdAt: new Date().toISOString(),
       };
+      // A reissued cross-border bill stays cross-border (same fixed obligation).
+      if (src.sellerId) fresh.sellerId = src.sellerId;
+      if (src.invoicedAmount !== undefined) fresh.invoicedAmount = src.invoicedAmount;
+      if (src.invoicedCurrency) fresh.invoicedCurrency = src.invoicedCurrency;
       // Idempotent on newId: a replayed/double-submitted reissue with the same
       // deterministic id is a clean no-op (return the existing row), never a PK
       // 500. (A genuinely distinct newId double-reissue is an admin-UX concern the
@@ -507,6 +522,9 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
           lineItems: fresh.lineItems,
           amountUsd: fresh.amountUsd.toFixed(2),
           currency: fresh.currency,
+          sellerId: fresh.sellerId ?? null,
+          invoicedAmount: fresh.invoicedAmount !== undefined ? fresh.invoicedAmount.toFixed(2) : null,
+          invoicedCurrency: fresh.invoicedCurrency ?? null,
           status: fresh.status,
           createdAt: new Date(fresh.createdAt),
           paidAt: null,

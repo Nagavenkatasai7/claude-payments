@@ -13,6 +13,24 @@ export class QuoteError extends Error {
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
+/**
+ * The source→destination cross-rate via the USD pivot — the single source of the
+ * FX cross-rate used by BOTH the forward quote() and the inverse sourceForDest().
+ * For an INR destination (or when no dest USD rate is supplied) this is the live
+ * source→INR rate (rates.toInr) — byte-for-byte the pre-any-to-any behavior;
+ * otherwise it pivots through USD: src->dest = src.toUsd / dest.toUsd. NOT
+ * validated here (callers guard finiteness/positivity where it matters).
+ */
+export function usdPivotCrossRate(
+  rates: FxRates,
+  destinationCurrency: CurrencyCode = 'INR',
+  destToUsd?: number,
+): number {
+  return destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
+    ? rates.toInr
+    : rates.toUsd / destToUsd;
+}
+
 /** Format a whole amount in the given ISO-4217 currency ($, ₹, £, AED, …). */
 function fmtAmount(amount: number, currency: CurrencyCode): string {
   try {
@@ -92,10 +110,7 @@ export function quote(
   // Source -> destination cross-rate. For an INR destination (or when no dest
   // rate is supplied) this is rates.toInr — byte-for-byte identical to the
   // pre-any-to-any behavior. Otherwise pivot through USD: src->dest = src.toUsd / dest.toUsd.
-  const crossRate =
-    destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
-      ? rates.toInr
-      : rates.toUsd / destToUsd;
+  const crossRate = usdPivotCrossRate(rates, destinationCurrency, destToUsd);
   // Guard: a non-finite or non-positive cross-rate would produce a negative/NaN
   // recipient amount. sourceForDest() already enforces this; quote() must too.
   if (!Number.isFinite(crossRate) || crossRate <= 0) {
@@ -156,10 +171,7 @@ export function sourceForDest(
   if (!Number.isFinite(amountDest) || amountDest <= 0) {
     throw new QuoteError('Please give a valid amount.');
   }
-  const crossRate =
-    destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
-      ? rates.toInr
-      : rates.toUsd / destToUsd;
+  const crossRate = usdPivotCrossRate(rates, destinationCurrency, destToUsd);
   if (!Number.isFinite(crossRate) || crossRate <= 0) {
     throw new QuoteError('Invalid exchange rate; please try again.');
   }

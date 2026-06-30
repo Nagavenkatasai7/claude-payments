@@ -49,8 +49,10 @@ async function seedPendingSeller(id = 's_hk1') {
 
 beforeEach(async () => {
   db = await freshDb();
-  // sellers is outside freshDb's TRUNCATE set — clear it per test.
-  await db.execute(sql`TRUNCATE sellers`);
+  // sellers is outside freshDb's TRUNCATE set — clear it per test. CASCADE: the
+  // cross-border invoice FK (b2b_invoices.seller_id → sellers) makes a bare
+  // TRUNCATE of the referenced table illegal.
+  await db.execute(sql`TRUNCATE sellers CASCADE`);
   redis = fakeRedis();
   store = createStore(redis, db);
   txOtp = createTransactionOtpStore(redis);
