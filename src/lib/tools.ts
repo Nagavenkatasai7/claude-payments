@@ -304,6 +304,34 @@ export const toolSchemas: ChatTool[] = [
   {
     type: 'function',
     function: {
+      name: 'create_invoice',
+      description:
+        "Create a cross-border bill (invoice) FOR an active registered SELLER to charge one of their buyers. Call this when a registered seller says 'bill / invoice / charge <someone> for <amount>'. amount is in the SELLER's OWN currency (their fixed obligation) — never convert it; the buyer pays the live FX equivalent + fees at payment time. Pass buyer_phone (the customer's WhatsApp number with country code) and amount; description is optional (what the bill is for). Returns { created: true, invoice_id, pay_url, amount, currency } — relay the secure pay_url back to the SELLER so they can forward it (we also try to message the buyer directly). If the seller is not registered/active yet it returns { created: false, needs_registration: true, reply_to_customer } — relay that and call register_seller to get them set up first. Invalid buyer number or a non-positive amount returns { created: false, reply_to_customer }. A seller can only bill from their OWN active profile (their number is the key).",
+      parameters: {
+        type: 'object',
+        properties: {
+          buyer_phone: {
+            type: 'string',
+            description:
+              "The buyer's WhatsApp number with country code, e.g. '+1 555 123 4567' or '15551234567'.",
+          },
+          amount: {
+            type: 'number',
+            description:
+              "The bill amount in the SELLER's own currency (their fixed obligation). Pass the number the seller stated — do NOT convert it.",
+          },
+          description: {
+            type: 'string',
+            description: 'Optional. What the bill is for, e.g. "design work" — shown on the bill.',
+          },
+        },
+        required: ['buyer_phone', 'amount'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'check_bill_status',
       description:
         "Check the status of the buyer's most recent business bill payment (B2B). Takes no arguments — it uses the sender's own number. Use when a business user asks 'is my bill paid', 'where's my payment', or 'what's the status of that invoice'. Returns { found: true, transfer_id, status, status_summary, seller_business_name?, invoice_status?, invoice_paid? } — relay status_summary in plain words — or { found: false } when they have no bill payment. Read-only: it never moves money.",
@@ -917,6 +945,8 @@ export async function executeTool(
       return presentBillTool(args, ctx);
     case 'register_seller':
       return registerSellerTool(args, ctx);
+    case 'create_invoice':
+      return createInvoiceTool(args, ctx);
     case 'check_bill_status':
       return checkBillStatusTool(args, ctx);
     case 'cancel_bill':
@@ -1503,6 +1533,169 @@ async function registerSellerTool(
     onboarding_url: `${env.appBaseUrl}/onboard/seller/${sellerId}`,
     reply_to_customer:
       "Great — you're registered as a seller. Finish your setup here (your payout bank details + a quick verification) and you'll be ready to send bills to your customers.",
+  };
+}
+
+/**
+ * create_invoice — the WhatsApp seller-initiated creation of a cross-border bill
+ * (Plan 5). An ACTIVE registered seller bills a buyer: the obligation is FIXED in
+ * the SELLER'S own currency (the buyer pays the live FX equivalent + fees at
+ * payment time, on /pay/b2b/<invoiceId>). This tool mints the invoice + the
+ * secure pay link and ENQUEUES a durable buyer-delivery push.
+ *
+ * Invariants:
+ *  • ctx.phone-owned — the seller is resolved BY their own number, so a seller can
+ *    only bill from their OWN active profile, never on another business's behalf.
+ *  • Active-only — a missing / pending / suspended seller is REFUSED (steered to
+ *    register_seller) and NO invoice is created.
+ *  • Tenant isolation — the invoice is partner-scoped to the seller's partner.
+ *  • No funds logic here — this only creates the obligation + link; the buyer pay
+ *    path (/api/pay/b2b/[invoiceId]) mints + settles non-custodially.
+ *  • Durable delivery — the buyer push is a transactional 'whatsapp.text' outbox
+ *    effect drained by the worker (best-effort: it delivers inside the 24h window,
+ *    silently fails outside it — the SELLER always has the link to forward).
+ *  • WhatsApp-only — not in WEB_TOOL_ALLOWLIST, so the web dispatch gate blocks it.
+ */
+async function createInvoiceTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  // Tenant scope: pin the bill to the partner whose bot the seller is talking to
+  // (same own-phone resolver as register_seller). Fail closed to the default
+  // partner when no customer row exists yet (the demo's single-number case).
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+
+  // The seller is resolved BY ctx.phone — implicit + unforgeable. Only an ACTIVE
+  // seller (payout set + sanctions clear) may issue bills; anything else is
+  // steered back to register_seller and creates NOTHING.
+  const seller = await ctx.store.getSeller(ctx.phone, partnerId);
+  if (!seller || seller.status !== 'active') {
+    return {
+      created: false,
+      needs_registration: true,
+      reply_to_customer: !seller
+        ? "Before you can send a bill you'll need to register as a seller — just say \"register as a seller\" and I'll get you set up (it takes a minute)."
+        : "You're almost there — finish your seller setup (your payout bank details + a quick verification) and then you can send bills to your customers.",
+    };
+  }
+
+  // Validate the buyer number — normalize first (Meta wa_id form), then check it
+  // is a well-formed international number. An empty/invalid number is refused.
+  const buyerPhone = normalizePhone(args.buyer_phone);
+  if (!isValidPhone(buyerPhone)) {
+    return {
+      created: false,
+      reply_to_customer:
+        "I couldn't read that customer number — please give it with the country code (e.g. +1 555 123 4567).",
+    };
+  }
+
+  // Validate the amount — finite and strictly positive (it is in the SELLER's
+  // own currency; we never convert it here).
+  const amount = Number(args.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return {
+      created: false,
+      reply_to_customer: 'How much should I bill them for? Please give a positive amount.',
+    };
+  }
+
+  const description = String(args.description ?? '').trim() || `Invoice from ${seller.businessName}`;
+
+  // Replay-safe minting (claim-first, the minting spine): the agent.turn outbox row
+  // is at-least-once — a transient reply-send 5xx re-runs the WHOLE turn, and the
+  // model can emit two calls in one turn — so bind a content key → invoiceId BEFORE
+  // the insert. A duplicate gets back the EXISTING id (and link) and skips both the
+  // insert and the buyer push, so an infra retry never double-bills. Same shape as
+  // send_approve_picker's content-keyed card dedup.
+  const billKey = `${seller.id}|${buyerPhone}|${amount}|${seller.currency}`;
+  const candidateId = `inv_${newTransferId()}`;
+  const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
+  const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
+  const sellerReply = `Your bill for ${amount} ${seller.currency} is ready. Share this secure link with your customer to get paid — I've also messaged it to them if they're reachable: ${payUrl}`;
+
+  if (invoiceId !== candidateId) {
+    // Duplicate within the TTL — the original run already created the bill and
+    // enqueued the buyer push; just hand the seller the SAME link (their reply may
+    // have failed to send the first time, which is what triggered this replay).
+    return { created: true, invoice_id: invoiceId, pay_url: payUrl, amount, currency: seller.currency, reply_to_customer: sellerReply };
+  }
+
+  // USD-equivalent snapshot for the NOT-NULL amountUsd column (back-compat display
+  // ONLY — the authoritative obligation is invoicedAmount/invoicedCurrency). A USD
+  // seller is exactly 1 (skip the FX hit); for any other currency getFxRates falls
+  // back to static rates internally, so this rarely moves and never blocks creation.
+  let amountUsd = amount;
+  if (seller.currency !== 'USD') {
+    try {
+      const sellerRates = await getFxRates(seller.currency);
+      if (Number.isFinite(sellerRates.toUsd) && sellerRates.toUsd > 0) {
+        amountUsd = round2(amount * sellerRates.toUsd);
+      }
+    } catch {
+      logWarn('create_invoice.fx-snapshot-failed', 'USD snapshot best-effort failed', { phone: ctx.phone });
+    }
+  }
+
+  const invoice: import('./types').B2bInvoice = {
+    id: invoiceId,
+    partnerId: seller.partnerId,
+    businessName: seller.businessName,
+    buyerPhone,
+    lineItems: [{ description, qty: 1, unitAmountUsd: amount }],
+    amountUsd,
+    currency: seller.currency,
+    sellerId: seller.id,
+    invoicedAmount: amount,
+    invoicedCurrency: seller.currency,
+    status: 'unpaid',
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    await ctx.store.saveB2bInvoice(invoice);
+  } catch (err) {
+    // Release the claim so the at-least-once retry can actually create the bill
+    // (the insert never happened). PII-scrubbed log per the money-path convention.
+    await ctx.store.clearBillInvoiceClaim(billKey).catch(() => {});
+    logWarn('create_invoice.save-failed', `saveB2bInvoice failed: ${err instanceof Error ? err.message : 'error'}`, { phone: ctx.phone });
+    return {
+      created: false,
+      reply_to_customer:
+        "I couldn't create that bill just now — please try again in a moment.",
+    };
+  }
+
+  // Durable buyer delivery — enqueue a 'whatsapp.text' effect the worker drains.
+  // Deduped on the (now replay-stable) invoice id so a re-enqueue of the SAME bill's
+  // push can never double-send. Best-effort: it delivers inside Meta's 24h session
+  // window and silently fails outside it (the approved template is Phase 2). The
+  // SELLER always has the link to forward, so delivery is NEVER a blocker. Buyer-
+  // facing copy is plain (no internal jargon).
+  try {
+    await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+      'whatsapp.text',
+      {
+        to: buyerPhone,
+        body: `You have a new bill from ${seller.businessName} — pay securely: ${payUrl}`,
+        ...(ctx.waCreds ? { creds: ctx.waCreds } : {}),
+      },
+      { dedupeKey: `billpush:${invoiceId}` },
+    );
+    pokeWorker();
+  } catch {
+    // Delivery is best-effort; a failed enqueue never fails the creation — the
+    // seller still has the link to forward.
+    logWarn('create_invoice.delivery-enqueue-failed', 'buyer-delivery enqueue failed', { phone: ctx.phone });
+  }
+
+  return {
+    created: true,
+    invoice_id: invoiceId,
+    pay_url: payUrl,
+    amount,
+    currency: seller.currency,
+    reply_to_customer: sellerReply,
   };
 }
 

@@ -1224,7 +1224,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).toHaveLength(12);
   });
 
-  it('default channel: the model still sees the full 20-tool set (call sites unchanged)', async () => {
+  it('default channel: the model still sees the full WhatsApp tool set (call sites unchanged)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     let seenTools: import('@/lib/types').ChatTool[] = [];
@@ -1236,11 +1236,12 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(24);
+    expect(seenTools).toHaveLength(25);
     const dn = seenTools.map((t) => t.function.name);
     expect(dn).toContain('send_approve_picker');
     expect(dn).toContain('present_bill'); // B2B — WhatsApp channel
     expect(dn).toContain('register_seller'); // cross-border seller onboarding — WhatsApp channel
+    expect(dn).toContain('create_invoice'); // cross-border seller billing — WhatsApp channel
     expect(dn).toContain('cancel_bill'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).toContain('check_bill_status'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).toContain('dispute_bill'); // B2B lifecycle (L1) — WhatsApp channel

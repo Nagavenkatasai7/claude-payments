@@ -167,6 +167,27 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async clearApproveCardSent(key: string): Promise<void> {
       await redis.del(`approvecard:${key}`);
     },
+    // Replay-safe bill creation (create_invoice). The agent.turn outbox row is
+    // at-least-once — a transient reply-send 5xx re-runs the WHOLE turn (and the
+    // model can emit two calls in one turn) — so binding a content key → invoiceId
+    // BEFORE the insert makes a duplicate a no-op (claim-first, the minting spine).
+    // Returns the EXISTING id when the key was already claimed (so a replay returns
+    // the SAME bill + link), else the candidate id. Same 120s TTL rationale as the
+    // approve card: a true "same seller, same buyer, same amount, right now"
+    // duplicate collides; a genuinely new bill (different amount/buyer, or after
+    // the TTL) gets its own id.
+    async claimBillInvoiceId(key: string, candidateId: string): Promise<string> {
+      const claimed = await redis.set(`billclaim:${key}`, candidateId, { ex: 120, nx: true });
+      if (claimed !== null) return candidateId;
+      const existing = await redis.get(`billclaim:${key}`);
+      return typeof existing === 'string' && existing ? existing : candidateId;
+    },
+    // Release a bill claim when the insert itself FAILED, so the at-least-once
+    // retry can actually create the bill (mirrors clearApproveCardSent). A failure
+    // in a LATER step (after the insert) keeps the claim, so that retry stays deduped.
+    async clearBillInvoiceClaim(key: string): Promise<void> {
+      await redis.del(`billclaim:${key}`);
+    },
     async getLastInboundAt(senderPhone: string): Promise<string | null> {
       return redis.get(`lastmsg:${senderPhone}`);
     },
