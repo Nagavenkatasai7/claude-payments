@@ -71,6 +71,29 @@ export function createB2bQuoteStore(redis: RedisLike, opts: B2bQuoteStoreOptions
 
 export type B2bQuoteStore = ReturnType<typeof createB2bQuoteStore>;
 
+/**
+ * The checkout quote for a cross-border bill: the LIVE-locked figure the buyer
+ * sees AND pays. Returns the existing locked quote when one is present (so a page
+ * reload / the pay submit reuse the exact figure shown), otherwise computes a
+ * fresh quote against live FX and locks it (~15-min TTL). On lock expiry
+ * getLockedQuote returns null → we re-quote, so the seller can never be paid off
+ * drifted FX while the buyer is always charged what they were shown.
+ *
+ * `isValid` lets the caller reject a stale lock whose currencies/amount no longer
+ * match this invoice (e.g. the obligation changed) and force a re-quote.
+ */
+export async function resolveCheckoutBillQuote(
+  store: B2bQuoteStore,
+  invoiceId: string,
+  compute: () => Promise<CrossBorderBillQuote> | CrossBorderBillQuote,
+  isValid?: (q: LockedB2bQuote) => boolean,
+): Promise<LockedB2bQuote> {
+  const existing = await store.getLockedQuote(invoiceId);
+  if (existing && (!isValid || isValid(existing))) return existing;
+  const fresh = await compute();
+  return store.lockQuote(invoiceId, fresh);
+}
+
 let cached: B2bQuoteStore | null = null;
 
 export function getB2bQuoteStore(): B2bQuoteStore {

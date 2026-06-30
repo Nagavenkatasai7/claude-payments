@@ -13,6 +13,7 @@ import {
   signBody,
 } from '@/lib/providers/http-payment-provider';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
+import { isPartnerPulled } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
@@ -221,11 +222,12 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
       // ops dead-letter Retry (re-runs this handler) or the funding webhook's
       // refund_failed (pending → failed, surfacing the ops Refunds queue).
       let refundRef: string;
-      if (transfer.fundingMethod === 'ach_pull') {
-        // NON-CUSTODIAL reverse: SmartRemit captured nothing on an ach_pull, so
-        // there is no funds-provider charge to refund. Instead we POST a SIGNED
-        // REVERSE instruction to the partner's rail — it ACH-debited the payer, so
-        // it owns the return. Reuses the settlement.instruct POST+sign recipe.
+      if (isPartnerPulled(transfer.fundingMethod)) {
+        // NON-CUSTODIAL reverse: SmartRemit captured nothing on a partner-pulled
+        // transfer (ach_pull / bank_pull), so there is no funds-provider charge to
+        // refund. Instead we POST a SIGNED REVERSE instruction to the partner's
+        // rail — it debited the payer, so it owns the return. Reuses the
+        // settlement.instruct POST+sign recipe.
         const full = await createTransferRepo(deps.db).getTransfer(transferId, { decrypt: true });
         if (!full) return; // gone ⇒ nothing to reverse (idempotent no-op)
         const railPartnerId = full.settlementPartnerId ?? full.partnerId;

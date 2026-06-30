@@ -3,7 +3,11 @@ export type PayoutMethod = 'upi' | 'bank';
 // 'ach_pull' = B2B: the licensed partner ACH-debits the payer's business bank via
 // the signed settlement instruction. SmartRemit never captures funds for this
 // method (non-custodial) — see settlement.ts.
-export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer' | 'ach_pull';
+// 'bank_pull' = cross-border B2B: the country-aware generalization of 'ach_pull'.
+// The licensed partner debits the BUYER's LOCAL bank (any of the 9 corridors)
+// AND pays out the seller — both legs in ONE signed instruction. SmartRemit never
+// captures funds for this method either (non-custodial). Same flat B2B bank fee.
+export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer' | 'ach_pull' | 'bank_pull';
 
 // B2B discriminators — absent/default ⇒ the consumer shape.
 export type EntityType = 'individual' | 'business';

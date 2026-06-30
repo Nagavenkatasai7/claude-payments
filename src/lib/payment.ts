@@ -1,3 +1,4 @@
+import { isPartnerPulled } from './funding-method';
 import type { Store } from './store';
 import type { CurrencyCode, Transfer } from './types';
 
@@ -104,10 +105,10 @@ export function buildRefundMessage(transfer: Transfer): string {
     transfer.totalChargeSource ?? transfer.totalChargeUsd,
     transfer.sourceCurrency ?? 'USD',
   );
-  // NON-CUSTODIAL B2B ach_pull: we never captured funds, so this is a REVERSAL of
-  // the partner's ACH debit, not a SmartRemit refund — the wording must not imply
-  // we refunded to a card/payment method.
-  if (transfer.fundingMethod === 'ach_pull') {
+  // NON-CUSTODIAL B2B pull (ach_pull / bank_pull): we never captured funds, so
+  // this is a REVERSAL of the partner's bank debit, not a SmartRemit refund — the
+  // wording must not imply we refunded to a card/payment method.
+  if (isPartnerPulled(transfer.fundingMethod)) {
     return (
       `Your bill payment ${transfer.id} has been cancelled. The ${sourceCharge} ` +
       `ACH debit to your business account is being reversed — it typically clears ` +

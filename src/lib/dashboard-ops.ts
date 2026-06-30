@@ -1,5 +1,6 @@
 import { env } from './env';
 import { completePaymentStage2 } from './payment';
+import { isPartnerPulled } from './funding-method';
 import { pokeWorker } from './outbox';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
@@ -14,14 +15,14 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
   if (transfer.status === 'delivered' || transfer.status === 'cancelled') {
     return;
   }
-  // NON-CUSTODIAL guard: a PAID ach_pull transfer has already had its SIGNED
-  // settlement instruction POSTed to the partner's rail, so a bare status flip
-  // would say "cancelled" while the partner can still pull + pay out — money the
-  // status no longer tracks. The only safe cancel here is the partner REVERSE
-  // instruction via reverseB2bSettlement (refundStatus seam). Refuse the flip.
-  if (transfer.status === 'paid' && transfer.fundingMethod === 'ach_pull') {
+  // NON-CUSTODIAL guard: a PAID partner-pulled transfer (ach_pull / bank_pull) has
+  // already had its SIGNED settlement instruction POSTed to the partner's rail, so
+  // a bare status flip would say "cancelled" while the partner can still pull + pay
+  // out — money the status no longer tracks. The only safe cancel here is the
+  // partner REVERSE instruction via reverseB2bSettlement (refundStatus seam).
+  if (transfer.status === 'paid' && isPartnerPulled(transfer.fundingMethod)) {
     throw new Error(
-      'Cannot cancel a paid ACH-pull transfer directly — use Reverse (it instructs the partner to return the debit).',
+      'Cannot cancel a paid partner-pulled transfer directly — use Reverse (it instructs the partner to return the debit).',
     );
   }
   await store.saveTransfer({ ...transfer, status: 'cancelled' });
@@ -45,12 +46,12 @@ export async function reverseB2bSettlement(db: Db, id: string): Promise<void> {
     if (!transfer) {
       throw new Error('Cannot reverse: transfer not found.');
     }
-    if (transfer.fundingMethod !== 'ach_pull') {
-      throw new Error('Cannot reverse: only ACH-pull transfers are reversed — use Refund.');
+    if (!isPartnerPulled(transfer.fundingMethod)) {
+      throw new Error('Cannot reverse: only partner-pulled (ACH/bank) transfers are reversed — use Refund.');
     }
     if (transfer.status !== 'paid' && transfer.status !== 'delivered') {
       throw new Error(
-        `Cannot reverse: transfer is ${transfer.status} — only paid or delivered ACH-pull transfers can be reversed.`,
+        `Cannot reverse: transfer is ${transfer.status} — only paid or delivered partner-pulled transfers can be reversed.`,
       );
     }
     if ((transfer.refundStatus ?? 'none') !== 'none') {

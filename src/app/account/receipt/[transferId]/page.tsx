@@ -7,6 +7,7 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
 import { isRecallEligible } from '@/lib/refund-policy';
+import { isPartnerPulled } from '@/lib/funding-method';
 import { AccountShell, PageHeader } from '../../shell';
 import { money, transferAmount, transferStatusLabel, transferStatusTone } from '../../format';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -111,7 +112,9 @@ export default async function ReceiptPage({
   const decrypted = isB2b ? await store.getTransferDecrypted(transferId) : null;
   const senderBusinessName = decrypted?.senderBusinessName;
   const recipientBusinessName = decrypted?.recipientBusinessName;
-  const achPull = t.fundingMethod === 'ach_pull';
+  // Both ach_pull (US) and bank_pull (cross-border) are NON-CUSTODIAL partner
+  // bank debits — neither is a card/PSP charge, so the receipt must say so.
+  const partnerPulled = isPartnerPulled(t.fundingMethod);
 
   // Customer-facing refund request — eligible ONLY when the transfer is paid
   // (a paid transfer is by definition not yet delivered — status is one value)
@@ -241,7 +244,7 @@ export default async function ReceiptPage({
                 />
                 <Row
                   label="Funding"
-                  value={achPull ? 'Debited from business account' : 'Card / bank'}
+                  value={partnerPulled ? 'Debited from business account' : 'Card / bank'}
                 />
               </dl>
             </CardContent>

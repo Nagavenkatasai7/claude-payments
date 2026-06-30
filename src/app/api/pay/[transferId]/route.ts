@@ -22,6 +22,7 @@ import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendText, sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
+import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
@@ -118,11 +119,11 @@ async function processTransferPayment(
   // clean 402 and the link stays retryable. Idempotent capture + write-once
   // setFundingRef make a replay POST (the 'already' branch below) harmless.
   //
-  // NON-CUSTODIAL B2B ACH-pull: SmartRemit captures NOTHING — the partner pulls
-  // via the signed instruction. Skip the funding provider entirely (derived from
-  // the transfer, so this holds for EVERY call site) and proceed straight to the
-  // compliance branch + beginSettlement.
-  if (transfer.fundingMethod !== 'ach_pull') {
+  // NON-CUSTODIAL B2B pull (ach_pull / bank_pull): SmartRemit captures NOTHING —
+  // the partner pulls via the signed instruction. Skip the funding provider
+  // entirely (derived from the transfer, so this holds for EVERY call site) and
+  // proceed straight to the compliance branch + beginSettlement.
+  if (!isPartnerPulled(transfer.fundingMethod)) {
     try {
       await captureFunding(transfer);
     } catch (err) {

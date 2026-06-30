@@ -5,6 +5,7 @@ const STALE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 const FUNDING_LABEL: Record<FundingMethod, string> = {
   bank_transfer: 'bank transfer',
   ach_pull: 'ACH bank debit',
+  bank_pull: 'bank debit',
   debit_card: 'debit card',
   credit_card: 'credit card',
 };

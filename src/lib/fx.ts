@@ -88,6 +88,7 @@ export function quote(
         feeUsd = 1.99;
         break;
       case 'ach_pull': // B2B ACH bank debit — flat, like a bank transfer
+      case 'bank_pull': // cross-border B2B local bank debit — same flat B2B fee
         feeUsd = 1.99;
         break;
       case 'debit_card':
@@ -144,6 +145,7 @@ export function wouldBeFeeUsd(amountUsd: number, fundingMethod: FundingMethod): 
   switch (fundingMethod) {
     case 'bank_transfer':
     case 'ach_pull':
+    case 'bank_pull':
       return 1.99;
     case 'debit_card':
       return 2.99;
