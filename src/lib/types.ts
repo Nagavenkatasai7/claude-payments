@@ -120,6 +120,29 @@ export interface B2bInvoice {
   paidAt?: string;
 }
 
+// ── Registered cross-border seller ──
+export type SellerStatus = 'pending' | 'active' | 'suspended';
+
+/**
+ * A registered cross-border seller (a business that issues bills and receives
+ * payouts in its own currency). MASKED domain shape: the payout destination is
+ * encrypted at rest and never present here — only payoutLast4. Decrypted reads
+ * are a separate, audited path (getSellerDecrypted).
+ */
+export interface Seller {
+  id: string;
+  partnerId: PartnerId;
+  phone: string;          // digits-only WhatsApp wa_id
+  businessName: string;   // plaintext — shown to buyers on the bill
+  country: CountryCode;
+  currency: CurrencyCode;
+  payoutLast4?: string;   // masked tail of the encrypted payout destination
+  status: SellerStatus;   // 'pending' until onboarding completes (payout + sanctions clear)
+  kycReviewState: KycReviewState;
+  createdAt: string;      // ISO-8601
+  updatedAt: string;      // ISO-8601
+}
+
 // Why a buyer declines a bill (decline/dispute). Closed list; surfaced to staff
 // via a support ticket. Kept small + non-accusatory.
 export const B2B_DISPUTE_REASONS = ['not_my_bill', 'wrong_amount', 'duplicate', 'already_paid', 'other'] as const;

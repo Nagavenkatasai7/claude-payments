@@ -156,6 +156,32 @@ export const b2bInvoices = pgTable(
   ],
 );
 
+// Registered cross-border B2B sellers — a business that issues bills and receives
+// payouts in its own currency. The payout destination is envelope-encrypted at rest
+// (field-crypto); only the masked last4 is stored in the clear. Partner-scoped.
+export const sellers = pgTable(
+  'sellers',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(), // digits-only WhatsApp wa_id
+    businessName: text('business_name').notNull(),
+    country: text('country').notNull(),
+    currency: text('currency').notNull(),
+    payoutDestinationEnc: text('payout_destination_enc'), // null until onboarding completes
+    payoutLast4: text('payout_last4'),
+    status: text('status').notNull().default('pending'), // 'pending' | 'active' | 'suspended'
+    kycReviewState: text('kyc_review_state').notNull().default('none'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('sellers_status_check', sql`${t.status} IN ('pending','active','suspended')`),
+    uniqueIndex('sellers_partner_phone').on(t.partnerId, t.phone),
+    index('sellers_partner_created').on(t.partnerId, t.createdAt.desc()),
+  ],
+);
+
 export const customers = pgTable(
   'customers',
   {

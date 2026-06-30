@@ -78,6 +78,13 @@
       "when": 1782596278781,
       "tag": "0010_wealthy_the_call",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1782849669638,
+      "tag": "0011_hot_blur",
+      "breakpoints": true
     }
   ]
 }
