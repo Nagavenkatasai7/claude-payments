@@ -2964,6 +2964,16 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(seller?.currency).toBe('USD');
     expect(seller?.businessName).toBe('Acme Exports Inc');
     expect(seller?.payoutLast4).toBeUndefined(); // not collected yet
+
+    // The onboarding link is delivered to the seller by the SYSTEM (durable outbox),
+    // NOT typed by the bot — assert it was enqueued to the seller's own number.
+    const rows = (await db.execute(
+      sql`SELECT payload, dedupe_key FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown>; dedupe_key: string }> };
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].payload.to).toBe(PHONE);
+    expect(String(rows.rows[0].payload.body)).toContain(String(r.onboarding_url));
+    expect(rows.rows[0].dedupe_key).toMatch(/^selleronboard:s_/);
   });
 
   it('SANCTIONS HIT: still creates the seller but returns NO link + flags review', async () => {
@@ -3080,17 +3090,21 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     const open = await ctx.store.getUnpaidInvoiceByBuyer('15559876543', 'default');
     expect(open?.id).toBe(String(r.invoice_id));
 
-    // A durable buyer-delivery effect was enqueued (deduped on the invoice id).
+    // TWO durable whatsapp.text effects: the buyer push AND the seller's OWN copy
+    // of the pay link (both deduped on the invoice id). The bot never types the URL.
     const rows = (await db.execute(
       sql`SELECT kind, payload, dedupe_key FROM outbox WHERE kind = 'whatsapp.text'`,
     )) as unknown as { rows: Array<{ kind: string; payload: Record<string, unknown>; dedupe_key: string }> };
-    expect(rows.rows).toHaveLength(1);
-    expect(rows.rows[0].dedupe_key).toBe(`billpush:${r.invoice_id}`);
-    expect(rows.rows[0].payload.to).toBe('15559876543');
-    expect(String(rows.rows[0].payload.body)).toContain('Acme Exports Inc');
-    expect(String(rows.rows[0].payload.body)).toContain(String(r.pay_url));
+    expect(rows.rows).toHaveLength(2);
+    const buyerPush = rows.rows.find((x) => x.dedupe_key === `billpush:${r.invoice_id}`)!;
+    expect(buyerPush.payload.to).toBe('15559876543');
+    expect(String(buyerPush.payload.body)).toContain('Acme Exports Inc');
+    expect(String(buyerPush.payload.body)).toContain(String(r.pay_url));
     // Buyer-facing copy carries no internal jargon.
-    expect(String(rows.rows[0].payload.body).toLowerCase()).not.toContain('corridor');
+    expect(String(buyerPush.payload.body).toLowerCase()).not.toContain('corridor');
+    const sellerPush = rows.rows.find((x) => x.dedupe_key === `sellerbill:${r.invoice_id}`)!;
+    expect(sellerPush.payload.to).toBe(PHONE); // the seller's OWN number
+    expect(String(sellerPush.payload.body)).toContain(String(r.pay_url));
   });
 
   it('is replay-safe: a duplicate call returns the SAME bill (one invoice, one buyer push)', async () => {
@@ -3106,12 +3120,13 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     expect(second.invoice_id).toBe(first.invoice_id); // same bill, same link
     expect(second.pay_url).toBe(first.pay_url);
 
-    // Exactly ONE invoice persisted, and ONE buyer-delivery effect enqueued.
+    // Exactly ONE invoice persisted, and the original run's TWO pushes (buyer +
+    // seller) — the duplicate call returns early and enqueues nothing more.
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(1);
     const rows = (await db.execute(
       sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'whatsapp.text'`,
     )) as unknown as { rows: Array<{ n: number }> };
-    expect(rows.rows[0].n).toBe(1);
+    expect(rows.rows[0].n).toBe(2);
   });
 
   it('refuses a seller with NO profile (steers to register) and creates NOTHING', async () => {
