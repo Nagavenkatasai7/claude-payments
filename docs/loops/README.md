@@ -28,7 +28,7 @@ Implemented as fan-out [`Workflow`](../../workflows/) scripts, scheduled by nigh
 |------|------|-----------|----------|
 | [`overnight-bug-hunt`](../../workflows/overnight-bug-hunt.mjs) | Fuzz the TDD'd pure helpers vs their invariants → fix PR | PR | 1:00 AM |
 | [`claims-vs-code-audit`](../../workflows/claims-vs-code-audit.mjs) | Public claims (landing/about/docs) vs enforcing code → report PR | read-only | 2:30 AM |
-| [`prod-health-triage`](../../workflows/prod-health-triage.mjs) | Dead-letter / stuck / stale (SELECT-only) → fix PR + ops report | read prod + PR | 4:00 AM |
+| [`prod-health-triage`](../../workflows/prod-health-triage.mjs) ⛔ **DISABLED 2026-06-29** | Dead-letter / stuck / stale (SELECT-only) → fix PR + ops report | read prod + PR | 4:00 AM |
 
 ## How to use
 - **Run on demand:** paste a loop's **Prompt** block into a session.

@@ -1,7 +1,7 @@
 export const meta = {
   name: 'prod-health-triage',
   description:
-    'Overnight: read prod telemetry (dead-letter outbox rows, stuck-paid transfers, stale reviews) READ-ONLY via a SELECT-only Neon role, root-cause each, open a PR of code fixes and a report of ops items needing a human. NEVER writes to prod.',
+    '[DISABLED 2026-06-29] Turned off at the user request (see the DISABLED kill-switch below; the smartremit_readonly role was dropped). When enabled: reads prod telemetry (dead-letter outbox rows, stuck-paid transfers, stale reviews) READ-ONLY via a SELECT-only Neon role, root-causes each, opens a PR of code fixes and a report of ops items needing a human. NEVER writes to prod.',
   phases: [
     { title: 'Observe', detail: 'read-only prod queries for dead / stuck / stale' },
     { title: 'Triage', detail: 'root-cause + classify code-fix vs ops-flag' },
@@ -43,6 +43,18 @@ const TRIAGE = {
   },
   required: ['id', 'klass', 'rootCause', 'fix', 'opsAction'],
   additionalProperties: false,
+}
+
+// ── DISABLED 2026-06-29 (user request) ───────────────────────────────────────
+// prod-health-triage is turned OFF. The nightly schedule that invokes this script
+// lives outside the repo and still fires, so this guard makes the run a clean
+// no-op regardless. The SELECT-only Neon role it used (smartremit_readonly) was
+// dropped. To RE-ENABLE: set DISABLED = false AND recreate + wire a
+// DATABASE_URL_READONLY secret on the nightly routine.
+const DISABLED = true;
+if (DISABLED) {
+  log('prod-health-triage is DISABLED — clean no-op. Flip DISABLED in workflows/prod-health-triage.mjs to re-enable.');
+  return { disabled: true, issues: 0, note: 'prod-health-triage intentionally disabled' };
 }
 
 phase('Observe')
