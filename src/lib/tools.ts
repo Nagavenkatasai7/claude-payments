@@ -706,7 +706,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'capture_corridor_request',
       description:
-        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 8 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 8 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
+        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 9 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 9 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
       parameters: {
         type: 'object',
         properties: {

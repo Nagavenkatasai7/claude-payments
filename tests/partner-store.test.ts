@@ -54,8 +54,8 @@ describe('partner store', () => {
     expect(p.id).toBe('default');
     expect(p.name).toBe('SmartRemit Default');
     // Any-to-any: the default tenant serves the supported source countries with
-    // unambiguous calling codes (CA excluded — shares +1 with the US).
-    expect(p.countries).toEqual(['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
+    // unambiguous calling codes (CA excluded — shares +1 with the US; HK = +852).
+    expect(p.countries).toEqual(['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK']);
     expect(p.status).toBe('active');
     expect(await ps.getPartner('default')).toEqual(p);
   });

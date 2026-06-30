@@ -15,4 +15,4 @@ export const DEFAULT_PARTNER_ID: PartnerId = 'default';   // NEW (P2)
 // unreachable by phone detection. A partner that genuinely serves Canada can
 // still configure 'CA' explicitly. White-label partners scope to their own
 // `countries`.
-export const DEFAULT_PARTNER_COUNTRIES: CountryCode[] = ['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN'];
+export const DEFAULT_PARTNER_COUNTRIES: CountryCode[] = ['US', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK'];

@@ -20,9 +20,9 @@ import { getRedis } from '@/lib/redis';
 // On success the lead is persisted AND an 'email.send' effect is enqueued in ONE
 // transaction (durable outbox), then the worker is poked to deliver promptly.
 
-// The 8 supported corridors + an "Other" escape hatch. Server-side allow-list:
+// The 9 supported corridors + an "Other" escape hatch. Server-side allow-list:
 // anything outside this set is dropped from the submitted corridors.
-const ALLOWED_CORRIDORS = new Set(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'Other']);
+const ALLOWED_CORRIDORS = new Set(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'Other']);
 
 const EMAIL_RE = /.+@.+\..+/;
 

@@ -460,12 +460,12 @@ export interface CapEvaluation {
 // Any-to-any: every code below is valid as BOTH a source and a destination
 // (e.g. INR→USD or USD→INR). Don't re-introduce a send-only / payout-only split.
 export type CountryCode =
-  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN';
+  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN' | 'HK';
 
 // ISO 4217 currency codes corresponding to the supported countries (any-to-any:
 // each is usable as source or destination).
 export type CurrencyCode =
-  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR';
+  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR' | 'HKD';
 
 // Single source of truth for "what's the home currency of country X?"
 // Consumed by the migration + bot defaults.
@@ -478,6 +478,7 @@ export const DEFAULT_CURRENCY_FOR_COUNTRY: Record<CountryCode, CurrencyCode> = {
   AU: 'AUD',
   NZ: 'NZD',
   IN: 'INR',
+  HK: 'HKD',
 };
 
 // ── Partner entity (P2) ───────────────────────────────────────────────
