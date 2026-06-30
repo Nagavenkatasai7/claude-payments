@@ -21,6 +21,30 @@ describe('dates', () => {
   });
 });
 
+describe('easternDayOfWeek — invalid epochMs must throw (regression)', () => {
+  // Bug: NaN/Infinity produced "Invalid Date" from toLocaleString which indexOf returned -1 for.
+  // Callers in schedule.ts comparing -1 === dayOfWeek would silently never fire schedules.
+  it('throws RangeError for NaN (e.g. Date.parse of a corrupt string)', () => {
+    expect(() => easternDayOfWeek(NaN)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for Infinity', () => {
+    expect(() => easternDayOfWeek(Infinity)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for -Infinity', () => {
+    expect(() => easternDayOfWeek(-Infinity)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for an out-of-range epochMs (> JS Date max)', () => {
+    expect(() => easternDayOfWeek(8.64e15 + 1)).toThrow(RangeError);
+  });
+
+  it('error message includes the offending value', () => {
+    expect(() => easternDayOfWeek(NaN)).toThrow(/easternDayOfWeek/);
+  });
+});
+
 describe('easternMonth', () => {
   it('returns YYYY-MM in Eastern time', () => {
     // 2026-05-24 18:00Z = 2pm ET → May 2026

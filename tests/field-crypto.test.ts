@@ -151,6 +151,33 @@ describe('EnvKeyProvider master-key validation', () => {
   });
 });
 
+describe('field-crypto malformed-blob length guards (GCM tag length)', () => {
+  it('throws when the auth tag is truncated to 4 bytes (should reject, not silently decrypt)', () => {
+    // Node.js crypto accepts GCM tags of 4, 8, 12-16 bytes per NIST SP 800-38D. A
+    // stored or injected blob with a 4-byte tag decrypts successfully unless we
+    // validate the tag length explicitly. This test pins the 16-byte requirement.
+    const p = fixedProvider(KEY_A);
+    const blob = encryptField('secret-value', p);
+    const parts = blob.split('.');
+    // Truncate the tag (index 2) from 16 bytes to 4 bytes
+    const fullTag = Buffer.from(parts[2], 'base64url');
+    const shortTag = fullTag.subarray(0, 4).toString('base64url');
+    const weakenedBlob = [parts[0], parts[1], shortTag, parts[3], parts[4]].join('.');
+    expect(() => decryptField(weakenedBlob, p)).toThrow(/malformed blob/);
+  });
+
+  it('throws when the IV is truncated below 12 bytes', () => {
+    const p = fixedProvider(KEY_A);
+    const blob = encryptField('secret-value', p);
+    const parts = blob.split('.');
+    // Truncate the IV (index 1) from 12 bytes to 8 bytes
+    const fullIv = Buffer.from(parts[1], 'base64url');
+    const shortIv = fullIv.subarray(0, 8).toString('base64url');
+    const weakenedBlob = [parts[0], shortIv, parts[2], parts[3], parts[4]].join('.');
+    expect(() => decryptField(weakenedBlob, p)).toThrow(/malformed blob/);
+  });
+});
+
 describe('field-crypto default provider (env-driven)', () => {
   it('builds an EnvKeyProvider lazily from env.fieldEncryptionKey', async () => {
     const masterHex = randomBytes(32).toString('hex');
@@ -165,3 +192,29 @@ describe('field-crypto default provider (env-driven)', () => {
     vi.resetModules();
   });
 });
+
+describe('field-crypto lone surrogates — regression (bug-hunt)', () => {
+  it('throws when plaintext contains a lone high surrogate (U+D800)', () => {
+    const p = fixedProvider(KEY_A);
+    // '\uD800' is a lone high surrogate — not valid Unicode, not round-trippable via UTF-8
+    expect(() => encryptField('\uD800', p)).toThrow('lone surrogates');
+  });
+
+  it('throws when plaintext contains a lone low surrogate (U+DC00)', () => {
+    const p = fixedProvider(KEY_A);
+    expect(() => encryptField('\uDC00', p)).toThrow('lone surrogates');
+  });
+
+  it('throws for the partial emoji surrogate (U+D83D)', () => {
+    const p = fixedProvider(KEY_A);
+    expect(() => encryptField('\uD83D', p)).toThrow('lone surrogates');
+  });
+
+  it('still round-trips a valid emoji (properly paired surrogates)', () => {
+    const p = fixedProvider(KEY_A);
+    // U+1F600 GRINNING FACE — encoded as surrogate pair D83D DE00 in UTF-16
+    const blob = encryptField('\u{1F600}', p);
+    expect(decryptField(blob, p)).toBe('\u{1F600}');
+  });
+});
+

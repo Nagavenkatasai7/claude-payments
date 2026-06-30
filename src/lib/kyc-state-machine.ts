@@ -34,6 +34,18 @@ export function applyKycEvent(
     return {};
   }
 
+  const isWatchlistEvent =
+    event.watchlistMatched === true || event.name === 'report/watchlist.matched';
+
+  // HOLD LOCK: once a customer is in needs_review (a watchlist/PEP hold, or a
+  // failed inquiry awaiting a human), no later NON-watchlist Persona event may
+  // touch it — only a human via kyc-case-store.review() can clear it. Return an
+  // empty delta so a clean inquiry.approved/completed delivered out of order
+  // cannot silently downgrade (or even partially overwrite) the hold.
+  if (customer.kycReviewState === 'needs_review' && !isWatchlistEvent) {
+    return {};
+  }
+
   const delta: KycDelta = {};
   if (event.inquiryId) {
     delta.kycInquiryId = event.inquiryId;
@@ -42,7 +54,7 @@ export function applyKycEvent(
   if (event.idLast4) delta.idLast4 = event.idLast4;
 
   // Watchlist/PEP match is a hard hold regardless of inquiry status.
-  if (event.watchlistMatched || event.name === 'report/watchlist.matched') {
+  if (isWatchlistEvent) {
     delta.watchlistHit = true;
     delta.kycReviewState = 'needs_review';
     return delta;
@@ -68,5 +80,25 @@ export function applyKycEvent(
     default:
       break;
   }
+
+  // MONOTONE-RANK GUARD: drop any kycReviewState update that would move the
+  // customer BACKWARD — e.g. a late/re-delivered inquiry.started arriving after
+  // pending_review must not regress the customer to inquiry_started.
+  const STATE_RANK: Record<KycReviewState, number> = {
+    none: 0,
+    inquiry_started: 1,
+    pending_review: 2,
+    needs_review: 2, // equal rank: both await a human
+    approved: 3,
+    rejected: 3,
+  };
+  if (delta.kycReviewState && customer.kycReviewState) {
+    const currentRank = STATE_RANK[customer.kycReviewState] ?? 0;
+    const newRank = STATE_RANK[delta.kycReviewState] ?? 0;
+    if (newRank < currentRank) {
+      delete delta.kycReviewState;
+    }
+  }
+
   return delta;
 }
