@@ -9,7 +9,7 @@ loop definitions in [`../docs/loops/`](../docs/loops/).
 |--------|------|-------------------|-----------|------------------|
 | `overnight-bug-hunt.mjs` | Edge-case bug hunt | 1:00 AM | PR | fix PR (or clean no-op) |
 | `claims-vs-code-audit.mjs` | Claims-vs-code audit | 2:30 AM | read-only | report PR |
-| `prod-health-triage.mjs` | Production-health triage | 4:00 AM | read prod (SELECT-only) + PR | fix PR + ops-flag report |
+| `prod-health-triage.mjs` | Production-health triage | 4:00 AM | read prod (SELECT-only) + PR | **⛔ DISABLED 2026-06-29** (kill-switch; role dropped) — fix PR + ops-flag report when enabled |
 
 ## How they run
 A scheduled cloud routine (Anthropic infra — runs while you sleep, independent of
@@ -19,11 +19,14 @@ observes a **fixed target set** → fans out finder agents → **adversarially v
 every finding → produces the artifact. Bounded by the target set + verify gate, so a
 run terminates; nothing is auto-merged.
 
-## prod-health-triage needs a read-only DB secret
-It reads `process.env.DATABASE_URL_READONLY` — a **SELECT-only** Neon role (it
-physically cannot write). Create the role and set the secret on the routine before
-enabling that loop; if the secret is unset the loop returns a clean no-op. The role
-SQL is in the PR that introduced these workflows.
+## prod-health-triage is DISABLED (2026-06-29)
+Turned off at the user's request via a `DISABLED` kill-switch at the top of
+`prod-health-triage.mjs` (the nightly schedule still fires but the run is a clean
+no-op), and the SELECT-only `smartremit_readonly` Neon role it used was **dropped**.
+To **re-enable**: flip `DISABLED = false`, recreate a SELECT-only Neon role, and set
+its connection string as `DATABASE_URL_READONLY` on the nightly routine. When enabled
+it reads `process.env.DATABASE_URL_READONLY` (a role that physically cannot write); if
+that secret is unset the loop also returns a clean no-op.
 
 ## Not linted / not built
 `workflows/**` is eslint-ignored and `.mjs` (outside tsconfig's `**/*.ts`), so these
