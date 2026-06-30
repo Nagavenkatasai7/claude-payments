@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-four tools', () => {
+  it('exposes all twenty-five tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -118,6 +118,7 @@ describe('toolSchemas', () => {
       'list_schedules',
       'open_recall_dispute',
       'present_bill',
+      'register_seller',
       'repeat_transfer',
       'request_refund',
       'resolve_recipient',
@@ -2559,6 +2560,7 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     'capture_corridor_request',
     'send_recipient_picker',
     'send_approve_picker',
+    'register_seller', // WhatsApp-only (not in WEB_TOOL_ALLOWLIST)
   ];
 
   it.each(BLOCKED)('%s on web returns { error: "not available here" }', async (name) => {
@@ -2927,6 +2929,92 @@ describe('present_bill — B2B mock invoice lookup (WhatsApp channel)', () => {
     });
     const r = await executeTool('present_bill', {}, { ...ctx, channel: 'web' });
     expect(r).toEqual({ error: 'not available here' });
+  });
+});
+
+describe('register_seller — cross-border seller onboarding start (WhatsApp channel)', () => {
+  beforeEach(async () => {
+    // sellers is not in freshDb's TRUNCATE set — clear it per test.
+    await db.execute(sql`TRUNCATE sellers`);
+  });
+
+  it('register_seller is a WhatsApp-only tool (in toolSchemas, NOT web-allowlisted)', () => {
+    expect(toolSchemas.map((t) => t.function.name)).toContain('register_seller');
+    expect(WEB_TOOL_ALLOWLIST.has('register_seller')).toBe(false);
+    expect(WEB_ONLY_TOOLS.has('register_seller')).toBe(false); // visible on WhatsApp
+    expect(toolSchemasForChannel('whatsapp').map((t) => t.function.name)).toContain('register_seller');
+    expect(toolSchemasForChannel('web').map((t) => t.function.name)).not.toContain('register_seller');
+  });
+
+  it('creates a PENDING seller and returns the secure onboarding link', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    expect(r.registered).toBe(true);
+    expect(r.status).toBe('pending');
+    expect(String(r.onboarding_url)).toMatch(/\/onboard\/seller\/s_[a-z0-9]+$/i);
+
+    // The seller exists, pending, country/currency derived from the US phone.
+    const seller = await ctx.store.getSeller(PHONE, 'default');
+    expect(seller?.status).toBe('pending');
+    expect(seller?.country).toBe('US');
+    expect(seller?.currency).toBe('USD');
+    expect(seller?.businessName).toBe('Acme Exports Inc');
+    expect(seller?.payoutLast4).toBeUndefined(); // not collected yet
+  });
+
+  it('SANCTIONS HIT: still creates the seller but returns NO link + flags review', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    // 'test blocked' is on the mock watchlist (case-insensitive exact match).
+    const r = await executeTool('register_seller', { business_name: 'Test Blocked' }, ctx);
+    expect(r.registered).toBe(false);
+    expect(r.review).toBe(true);
+    expect(r.onboarding_url).toBeUndefined();
+    // Never names sanctions/watchlist to the customer.
+    expect(String(r.reply_to_customer).toLowerCase()).not.toContain('sanction');
+    expect(String(r.reply_to_customer).toLowerCase()).not.toContain('watchlist');
+
+    // The seller row exists, stays pending, and is flagged for review.
+    const seller = await ctx.store.getSeller(PHONE, 'default');
+    expect(seller).not.toBeNull();
+    expect(seller?.status).toBe('pending');
+    expect(seller?.kycReviewState).toBe('needs_review');
+  });
+
+  it('asks which country when the calling code is unknown (never guesses)', async () => {
+    const ctx = await buildCtx(fakeRedis(), '99912340000'); // no known calling code
+    const r = await executeTool('register_seller', { business_name: 'Mystery Co' }, ctx);
+    expect(r.needs_country).toBe(true);
+    expect(r.onboarding_url).toBeUndefined();
+    // Nothing was created.
+    expect(await ctx.store.getSeller('99912340000', 'default')).toBeNull();
+  });
+
+  it('does not duplicate: an already-ACTIVE seller is told they are registered (no link)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    await ctx.store.setSellerStatus(PHONE, 'default', 'active');
+    const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    expect(r.already_registered).toBe(true);
+    expect(r.status).toBe('active');
+    expect(r.onboarding_url).toBeUndefined();
+  });
+
+  it('re-offers the link to a still-PENDING seller without creating a second row', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    const second = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    expect(second.already_registered).toBe(true);
+    expect(second.status).toBe('pending');
+    // Same seller id (no duplicate).
+    expect(String(second.onboarding_url)).toBe(String(first.onboarding_url));
+  });
+
+  it('is blocked at dispatch on the web channel (WhatsApp-only)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, { ...ctx, channel: 'web' });
+    expect(r).toEqual({ error: 'not available here' });
+    // Nothing created on the blocked web call.
+    expect(await ctx.store.getSeller(PHONE, 'default')).toBeNull();
   });
 });
 

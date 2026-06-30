@@ -269,3 +269,36 @@ describe('composePayoutDestination', () => {
     expect(v.payoutDestination).toBe(composePayoutDestination('US', fields));
   });
 });
+
+// HK is the Phase-1 cross-border seller corridor: bank code (3) + branch code (3)
+// + account number. The account is composed LAST so accountLast4 targets it.
+describe('HK payout fields (cross-border seller corridor)', () => {
+  it('defines bank code (3) + branch code (3) + account number, in order', () => {
+    expect(BANK_FIELDS_BY_COUNTRY.HK.map((f) => f.key)).toEqual(['bankCode', 'branchCode', 'accountNumber']);
+    expect(BANK_FIELDS_BY_COUNTRY.HK.find((f) => f.key === 'bankCode')!.digits).toBe(3);
+    expect(BANK_FIELDS_BY_COUNTRY.HK.find((f) => f.key === 'branchCode')!.digits).toBe(3);
+  });
+
+  it('accepts a valid HK bank/branch/account and composes account-last', () => {
+    const r = validatePayoutFields('HK', { bankCode: '024', branchCode: '388', accountNumber: '12345678' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.payoutDestination).toBe('024 388 12345678');
+    // The account number is the LAST run of digits → last4 targets it.
+    expect(accountLast4(r.payoutDestination)).toBe('5678');
+  });
+
+  it('rejects a bank code / branch code that is not exactly 3 digits', () => {
+    const r = validatePayoutFields('HK', { bankCode: '24', branchCode: '388', accountNumber: '12345678' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.bankCode).toBeDefined();
+  });
+
+  it('rejects a too-short account number', () => {
+    const r = validatePayoutFields('HK', { bankCode: '024', branchCode: '388', accountNumber: '123' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.accountNumber).toBeDefined();
+  });
+});

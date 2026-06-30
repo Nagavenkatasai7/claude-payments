@@ -561,6 +561,12 @@ export function createSellerRepo(db: DbOrTx) {
     async createSeller(input: {
       id: string; partnerId: PartnerId; phone: string; businessName: string;
       country: CountryCode; currency: CurrencyCode;
+      // The INITIAL review state, set atomically at insert. The onboarding tool
+      // screens sanctions BEFORE creating the row and passes 'needs_review' on a
+      // hit OR a screener error (fail-closed) — so a 'none' row provably means a
+      // CLEAN screen completed. A pending+'none' row is the ONLY shape that ever
+      // earns an onboarding link, so a never-cleared business can't look clean.
+      kycReviewState?: Seller['kycReviewState'];
     }): Promise<Seller> {
       const phone = requireValidPhone(input.phone);
       await db.insert(sellers).values({
@@ -571,7 +577,7 @@ export function createSellerRepo(db: DbOrTx) {
         country: input.country,
         currency: input.currency,
         status: 'pending',
-        kycReviewState: 'none',
+        kycReviewState: input.kycReviewState ?? 'none',
       });
       const row = await fetchRow(phone, input.partnerId);
       return toDomain(row!);
@@ -580,6 +586,18 @@ export function createSellerRepo(db: DbOrTx) {
     async getSeller(phone: string, partnerId: PartnerId): Promise<Seller | null> {
       const row = await fetchRow(phone, partnerId);
       return row ? toDomain(row) : null;
+    },
+
+    /**
+     * Masked read by the seller's own id — the unguessable capability the hosted
+     * onboarding link (`/onboard/seller/<id>`) carries, mirroring how the pay page
+     * loads a transfer by id. Returns the masked Seller (phone + partnerId ride
+     * along so the onboarding action can re-scope its writes), or null when no row
+     * matches (404-never-403: a missing id is indistinguishable from a stranger's).
+     */
+    async getSellerById(id: string): Promise<Seller | null> {
+      const rows = await db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
     },
 
     async getSellerDecrypted(
@@ -613,6 +631,53 @@ export function createSellerRepo(db: DbOrTx) {
         .update(sellers)
         .set({ status, updatedAt: new Date() })
         .where(sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalized}`)
+        .returning();
+      return updated[0] ? toDomain(updated[0]) : null;
+    },
+
+    /**
+     * Drive the seller's KYC/compliance review state (partner-scoped). The
+     * onboarding tool sets 'needs_review' when the business name hits the
+     * sanctions screen — the seller stays 'pending' (never silently passes) and
+     * no onboarding link is issued until staff clear it. Returns the updated row
+     * or null when no scoped seller matches.
+     */
+    async setReviewState(
+      phone: string, partnerId: PartnerId, kycReviewState: Seller['kycReviewState'],
+    ): Promise<Seller | null> {
+      const normalized = normalizePhone(phone);
+      const updated = await db
+        .update(sellers)
+        .set({ kycReviewState, updatedAt: new Date() })
+        .where(sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalized}`)
+        .returning();
+      return updated[0] ? toDomain(updated[0]) : null;
+    },
+
+    /**
+     * Complete onboarding ATOMICALLY: encrypt + store the payout AND flip status
+     * to 'active' in ONE guarded UPDATE. The WHERE GUARDS on `status = 'pending'
+     * AND kycReviewState <> 'needs_review'`, so:
+     *   • a TOCTOU race (staff flag 'needs_review' between the seller's page load
+     *     and submit) can NEVER activate a held seller — the guard matches 0 rows;
+     *   • there is no payout-stored-but-still-pending half-state a two-write path
+     *     would leave on a mid-sequence failure;
+     *   • a no-op (already active / suspended / under review / gone) returns null,
+     *     so the caller can refuse instead of falsely reporting success.
+     * Returns the activated row, or null when the guard matched nothing.
+     */
+    async activateOnboarding(
+      phone: string, partnerId: PartnerId, payoutDestination: string,
+    ): Promise<Seller | null> {
+      const normalized = normalizePhone(phone);
+      const enc = encryptField(payoutDestination);
+      const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
+      const updated = await db
+        .update(sellers)
+        .set({ payoutDestinationEnc: enc, payoutLast4: tail, status: 'active', updatedAt: new Date() })
+        .where(
+          sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalized} AND ${sellers.status} = 'pending' AND ${sellers.kycReviewState} <> 'needs_review'`,
+        )
         .returning();
       return updated[0] ? toDomain(updated[0]) : null;
     },

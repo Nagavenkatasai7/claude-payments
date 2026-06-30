@@ -1,6 +1,6 @@
 import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { getFxRates, type FxRates } from './rate';
-import { resolveSendCurrency, destinationCountryForRecipientPhone } from './partner-currency';
+import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -280,6 +280,25 @@ export const toolSchemas: ChatTool[] = [
       description:
         "Look up the buyer's most recent UNPAID business invoice (the mock 'ERP' bill) so you can show them what they owe. Call this when a business user wants to pay a bill or asks 'what do I owe' / 'show my invoice'. Takes no arguments — it uses the sender's own number. Returns { has_bill: true, invoice: { invoice_id, seller_business_name, line_items: [{description, qty, unit_amount_usd}], amount_usd, currency } } when there is one, or { has_bill: false } when none is outstanding. When has_bill is true, present the seller name, each line item (qty x unit), and the total, then proceed with the B2B pay flow (collect the payer's business name, quote with ach_pull, send the Approve & Pay card with the invoice_id). When has_bill is false, say there's no outstanding bill right now.",
       parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'register_seller',
+      description:
+        "Register the business the user is texting from as a cross-border SELLER so they can issue bills/invoices to their customers. Call this when a business says they want to send invoices, bill a customer, get paid, or register/sign up as a seller. Pass business_name (the legal or trading name of THEIR business — it is shown to buyers on every bill). The seller's country and currency are derived from their own WhatsApp number, and their number is the seller key — never bill on another business's behalf. Returns { registered: true, onboarding_url } with a secure link for them to finish their payout details + verification, or { needs_country: true } when their country can't be derived from their number (ask them which country their business is in — do NOT guess), or { already_registered: true, status } when they already have a seller profile, or { registered: false, review: true } when their registration needs a manual review first (no link). Always relay reply_to_customer, and share onboarding_url when present.",
+      parameters: {
+        type: 'object',
+        properties: {
+          business_name: {
+            type: 'string',
+            description:
+              'The legal or trading name of the seller business (the sender). Shown to buyers on every bill they issue.',
+          },
+        },
+        required: ['business_name'],
+      },
     },
   },
   {
@@ -896,6 +915,8 @@ export async function executeTool(
       return createTransferTool(args, ctx);
     case 'present_bill':
       return presentBillTool(args, ctx);
+    case 'register_seller':
+      return registerSellerTool(args, ctx);
     case 'check_bill_status':
       return checkBillStatusTool(args, ctx);
     case 'cancel_bill':
@@ -1343,6 +1364,145 @@ async function presentBillTool(
       amount_usd: invoice.amountUsd,
       currency: invoice.currency,
     },
+  };
+}
+
+/**
+ * register_seller — the WhatsApp-start of cross-border seller onboarding. A
+ * business texting "I want to send invoices / bill someone / register as a
+ * seller" gets a PENDING seller profile keyed on their own number (ctx.phone —
+ * implicit + unforgeable, so a seller can never be created on another business's
+ * behalf), then a secure web link to finish payout + identity off-chat.
+ *
+ * Invariants:
+ *  • Tenant isolation — the seller is scoped to the buyer's/customer's partner
+ *    (present_bill's resolver), never a bare global write.
+ *  • Country/currency are DERIVED from the seller's own phone — never guessed.
+ *    An unknown calling code returns { needs_country } so the agent asks.
+ *  • Sanctions screening ALWAYS runs on the business name (structural, via the
+ *    same screenTransfer seam as a transfer). A hit creates the seller but
+ *    flags kycReviewState='needs_review', keeps them pending, and returns NO
+ *    onboarding link — the team reviews first. The customer is NEVER told the
+ *    word sanctions/watchlist (copy discipline matches the transfer block path).
+ *  • WhatsApp-only — not in WEB_TOOL_ALLOWLIST, so the web dispatch gate blocks it.
+ */
+async function registerSellerTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const businessName = String(args.business_name ?? '').trim();
+  if (businessName === '') {
+    return {
+      registered: false,
+      reply_to_customer: "What's the name of your business? I'll use it to register you as a seller.",
+    };
+  }
+
+  // Tenant scope: pin the seller to the partner whose bot they're talking to
+  // (present_bill's own-phone resolver). Fail closed to the default partner when
+  // no customer row exists yet (the demo's single-number case).
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+
+  // Country + currency are DERIVED from the seller's own number — never guessed.
+  const country = countryForPhone(ctx.phone);
+  const currency = currencyForPhone(ctx.phone);
+  if (!country || !currency) {
+    return {
+      needs_country: true,
+      reply_to_customer:
+        "I couldn't tell which country your business is based in from your number — which country are you registering from?",
+    };
+  }
+
+  // Already registered? Don't duplicate.
+  const existing = await ctx.store.getSeller(ctx.phone, partnerId);
+  if (existing) {
+    if (existing.status === 'active') {
+      return {
+        already_registered: true,
+        status: 'active',
+        reply_to_customer:
+          "You're already registered as a seller — you can start sending bills to your customers any time.",
+      };
+    }
+    if (existing.status === 'pending' && existing.kycReviewState !== 'needs_review') {
+      // Still finishing onboarding — re-offer the link.
+      return {
+        already_registered: true,
+        status: 'pending',
+        onboarding_url: `${env.appBaseUrl}/onboard/seller/${existing.id}`,
+        reply_to_customer:
+          "You're already partway through registering. Finish your seller setup (payout details + verification) here, then you can start billing.",
+      };
+    }
+    // pending+needs_review, or suspended → in our hands; no link.
+    return {
+      already_registered: true,
+      status: existing.status,
+      reply_to_customer:
+        "Thanks — your seller registration is with our team for review. We'll be in touch before you can start sending bills.",
+    };
+  }
+
+  // Create the PENDING seller (claim the profile) BEFORE screening, so a hit is
+  // recorded on a real row the team can review.
+  // Sanctions screen the business name — ALWAYS, via the same seam transfers use,
+  // and FAIL-CLOSED. The screen runs BEFORE the row is created, and a hit OR a
+  // screener error both create the seller flagged 'needs_review' (no link). A
+  // 'none' row therefore provably means a CLEAN screen completed — so a blocked
+  // or never-screened business can never look clean and self-activate via the
+  // re-offer branch above. Never name sanctions/watchlist to the customer.
+  let cleared: boolean;
+  try {
+    const screen = await screenTransfer({
+      amountUsd: 0,
+      recipientName: businessName,
+      transfersToday: 0,
+      sourceCountry: country,
+    });
+    cleared = screen.status !== 'blocked';
+  } catch (err) {
+    console.warn('register_seller sanctions screen failed (fail-closed → review):', err);
+    cleared = false;
+  }
+
+  const sellerId = `s_${newTransferId()}`;
+  try {
+    await ctx.store.createSeller({
+      id: sellerId,
+      partnerId,
+      phone: ctx.phone,
+      businessName,
+      country,
+      currency,
+      // Atomic: a screen hit / error lands the row already flagged for review.
+      kycReviewState: cleared ? 'none' : 'needs_review',
+    });
+  } catch (err) {
+    console.warn('register_seller createSeller failed:', err);
+    return {
+      registered: false,
+      reply_to_customer:
+        "I couldn't complete your seller registration just now — please try again in a moment.",
+    };
+  }
+
+  if (!cleared) {
+    return {
+      registered: false,
+      review: true,
+      reply_to_customer:
+        "Thanks — we've started your seller registration. Our team needs to review a few details before you can send bills, and we'll be in touch shortly.",
+    };
+  }
+
+  return {
+    registered: true,
+    status: 'pending',
+    onboarding_url: `${env.appBaseUrl}/onboard/seller/${sellerId}`,
+    reply_to_customer:
+      "Great — you're registered as a seller. Finish your setup here (your payout bank details + a quick verification) and you'll be ready to send bills to your customers.",
   };
 }
 
