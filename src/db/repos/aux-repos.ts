@@ -8,14 +8,16 @@ import {
   partnerApplications,
   partnerRequests,
   recipients,
+  sellers,
 } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
 import type {
   B2bInvoice,
   CorridorRequest,
+  CountryCode,
   CurrencyCode,
   InvoiceLineItem,
   PartnerApplication,
@@ -25,6 +27,8 @@ import type {
   PartnerRequest,
   PayoutMethod,
   Recipient,
+  Seller,
+  SellerStatus,
 } from '@/lib/types';
 
 // aux-repos — the smaller aggregates, one factory each, mirroring the surfaces
@@ -516,3 +520,102 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
   };
 }
 export type B2bInvoiceRepo = ReturnType<typeof createB2bInvoiceRepo>;
+
+// ── Registered cross-border B2B sellers ─────────────────────────────────────
+export function createSellerRepo(db: DbOrTx) {
+  const toDomain = (row: typeof sellers.$inferSelect): Seller => {
+    const s: Seller = {
+      id: row.id,
+      partnerId: row.partnerId,
+      phone: row.phone,
+      businessName: row.businessName,
+      country: row.country as CountryCode,
+      currency: row.currency as CurrencyCode,
+      status: row.status as SellerStatus,
+      kycReviewState: row.kycReviewState as Seller['kycReviewState'],
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+    if (row.payoutLast4) s.payoutLast4 = row.payoutLast4;
+    return s;
+  };
+
+  const requireValidPhone = (raw: string): string => {
+    const phone = normalizePhone(raw);
+    if (!isValidPhone(phone)) {
+      throw new Error('Seller phone must be a valid phone (country code + number, digits only).');
+    }
+    return phone;
+  };
+
+  const fetchRow = async (phone: string, partnerId: PartnerId) => {
+    const rows = await db
+      .select()
+      .from(sellers)
+      .where(sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalizePhone(phone)}`)
+      .limit(1);
+    return rows[0] ?? null;
+  };
+
+  return {
+    async createSeller(input: {
+      id: string; partnerId: PartnerId; phone: string; businessName: string;
+      country: CountryCode; currency: CurrencyCode;
+    }): Promise<Seller> {
+      const phone = requireValidPhone(input.phone);
+      await db.insert(sellers).values({
+        id: input.id,
+        partnerId: input.partnerId,
+        phone,
+        businessName: input.businessName,
+        country: input.country,
+        currency: input.currency,
+        status: 'pending',
+        kycReviewState: 'none',
+      });
+      const row = await fetchRow(phone, input.partnerId);
+      return toDomain(row!);
+    },
+
+    async getSeller(phone: string, partnerId: PartnerId): Promise<Seller | null> {
+      const row = await fetchRow(phone, partnerId);
+      return row ? toDomain(row) : null;
+    },
+
+    async getSellerDecrypted(
+      phone: string, partnerId: PartnerId,
+    ): Promise<(Seller & { payoutDestination: string }) | null> {
+      const row = await fetchRow(phone, partnerId);
+      if (!row) return null;
+      const payoutDestination = row.payoutDestinationEnc ? decryptField(row.payoutDestinationEnc) : '';
+      return { ...toDomain(row), payoutDestination };
+    },
+
+    async setPayoutDestination(
+      phone: string, partnerId: PartnerId, payoutDestination: string,
+    ): Promise<Seller | null> {
+      const normalized = normalizePhone(phone);
+      const enc = encryptField(payoutDestination);
+      const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
+      const updated = await db
+        .update(sellers)
+        .set({ payoutDestinationEnc: enc, payoutLast4: tail, updatedAt: new Date() })
+        .where(sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalized}`)
+        .returning();
+      return updated[0] ? toDomain(updated[0]) : null;
+    },
+
+    async setStatus(
+      phone: string, partnerId: PartnerId, status: SellerStatus,
+    ): Promise<Seller | null> {
+      const normalized = normalizePhone(phone);
+      const updated = await db
+        .update(sellers)
+        .set({ status, updatedAt: new Date() })
+        .where(sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalized}`)
+        .returning();
+      return updated[0] ? toDomain(updated[0]) : null;
+    },
+  };
+}
+export type SellerRepo = ReturnType<typeof createSellerRepo>;
