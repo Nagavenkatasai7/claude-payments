@@ -154,3 +154,70 @@ describe('signBody + buildSettlementInstruction', () => {
     expect(signBody('abc', 'k')).toBe(createHmac('sha256', 'k').update('abc').digest('hex'));
   });
 });
+
+describe('buildSettlementInstruction — non-custodial funding legs', () => {
+  // A US-domestic B2B ach_pull transfer.
+  function achPull(): Transfer {
+    return {
+      ...fixture(),
+      id: 'ach_t1', fundingMethod: 'ach_pull', achTokenRef: 'ach_abc123',
+      transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      senderBusinessName: 'Buyer LLC', recipientBusinessName: 'Acme Pvt Ltd',
+    } as Transfer;
+  }
+  // A cross-border B2B bank_pull transfer: buyer in HK (HKD) → seller in IN (INR).
+  // amountSource = PRINCIPAL (1000, reconciles: 1000 * 8.5 = 8500), feeSource = 10,
+  // totalChargeSource = 1010 (the FULL buyer debit the funding leg carries).
+  function bankPull(): Transfer {
+    return {
+      ...fixture(),
+      id: 'bp_t1', fundingMethod: 'bank_pull', achTokenRef: 'bankpull_deadbeef',
+      sourceCountry: 'HK', sourceCurrency: 'HKD', amountSource: 1000, feeSource: 10, totalChargeSource: 1010,
+      destinationCountry: 'IN', destinationCurrency: 'INR', amountInr: 8500, fxRate: 8.5,
+      payoutMethod: 'bank', payoutDestination: '123456789 HDFC0001234',
+      recipientName: 'Mumbai Imports', recipientPhone: '919876543210',
+      transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      senderBusinessName: 'HK Buyer Co', recipientBusinessName: 'Mumbai Imports',
+    } as Transfer;
+  }
+
+  it('b2c (card/bank) carries NO funding block — byte-unchanged', () => {
+    const i = buildSettlementInstruction(fixture()) as Record<string, unknown>;
+    expect('funding' in i).toBe(false);
+    expect('parties' in i).toBe(false);
+  });
+
+  it('ach_pull funding block is byte-unchanged: {method:ach_debit, token} only', () => {
+    const i = buildSettlementInstruction(achPull()) as Record<string, unknown>;
+    expect(i.funding).toEqual({ method: 'ach_debit', token: 'ach_abc123' });
+    // ach_pull must NOT gain the bank_pull cross-border fields.
+    expect(i.funding).not.toHaveProperty('amount');
+    expect(i.funding).not.toHaveProperty('country');
+  });
+
+  it('bank_pull is a SIGNED DUAL-LEG instruction: FUNDING (debit buyer) + PAYOUT (pay seller exactly)', () => {
+    const i = buildSettlementInstruction(bankPull()) as Record<string, unknown>;
+    // FUNDING leg — debit the BUYER's local bank for the FULL buyer total
+    // (totalChargeSource = 1010, principal + fee) in HKD. token is OPAQUE (no raw
+    // bank digits); SmartRemit captures nothing.
+    expect(i.funding).toEqual({
+      method: 'bank_debit',
+      token: 'bankpull_deadbeef',
+      amount: 1010,
+      currency: 'HKD',
+      country: 'HK',
+    });
+    // PAYOUT leg — pay the SELLER their EXACT invoiced amount in the seller currency,
+    // to the seller-profile destination. amount.source = principal (1000), so
+    // source * fx_rate (1000 * 8.5) === destination (8500) — reconciles.
+    expect(i.payout).toEqual({ rail: 'bank', destination: '123456789 HDFC0001234' });
+    expect(i.amount).toMatchObject({
+      source: 1000, currency: 'HKD',
+      destination: 8500, destination_currency: 'INR', fx_rate: 8.5,
+    });
+    // It's a B2B instruction (parties present), and the same HMAC recipe signs it.
+    expect(i.parties).toMatchObject({ recipient_business_name: 'Mumbai Imports' });
+    const body = JSON.stringify(i);
+    expect(signBody(body, 'sign-secret')).toBe(createHmac('sha256', 'sign-secret').update(body).digest('hex'));
+  });
+});

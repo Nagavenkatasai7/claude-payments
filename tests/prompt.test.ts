@@ -134,8 +134,8 @@ describe('SYSTEM_PROMPT — QA hardening (Fix #1 #2 #3 #4 #5 #6)', () => {
     expect(SYSTEM_PROMPT).toContain("Lead with the limitation");
     // Country list appears in the example message
     expect(SYSTEM_PROMPT).toContain("We don't deliver to <country> yet");
-    // The 8 countries are named in the unsupported-destination example
-    expect(SYSTEM_PROMPT).toContain('US, Canada, UK, UAE, Singapore, Australia, New Zealand, and India');
+    // The 9 countries are named in the unsupported-destination example
+    expect(SYSTEM_PROMPT).toContain('US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, and Hong Kong');
     // The bot must NOT start with an affirmative opener that implies the country is supported
     expect(SYSTEM_PROMPT).toContain('Do NOT start with "That sounds great!"');
     // QA batch 3: hardened into a mandatory ordered sequence with explicit forbidden openers
@@ -259,15 +259,15 @@ describe('whatsapp-ux: any-to-any bank-to-bank flow', () => {
     expect(SYSTEM_PROMPT).toContain('source_currency');
   });
 
-  it('a2a: supports all 8 countries (no India-only restriction)', () => {
+  it('a2a: supports all 9 countries (no India-only restriction)', () => {
     // The old "pays out only in India" restriction is gone
     expect(SYSTEM_PROMPT.toLowerCase()).not.toContain('pays out only in india');
-    // All 8 countries are listed
+    // All 9 countries are listed
     expect(SYSTEM_PROMPT).toContain('[SEND CURRENCIES');
     // The old blanket "sending money to India" promise is gone
     expect(SYSTEM_PROMPT).not.toContain('Do not promise anything beyond sending money to India');
-    // Now sends between 8 countries in any direction
-    expect(SYSTEM_PROMPT.toLowerCase()).toContain('8 countries');
+    // Now sends between 9 countries in any direction
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('9 countries');
     expect(SYSTEM_PROMPT).toContain('bank-to-bank');
   });
 
@@ -394,7 +394,7 @@ describe('buildSystemPrompt (WL1 white-label factory)', () => {
   it('a partner brand replaces SmartRemit in the bot identity — no SmartRemit leaks', () => {
     const p = buildSystemPrompt({ brand: 'Acme Pay' });
     expect(p).toContain('You are the assistant for Acme Pay');
-    expect(p).toContain('Acme Pay currently pays out to 8 countries');
+    expect(p).toContain('Acme Pay currently pays out to 9 countries');
     expect(p).not.toContain('SmartRemit');
     // all the behavioral rules survive the rebrand
     expect(p).toContain('get_quote');

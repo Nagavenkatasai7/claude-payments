@@ -77,6 +77,28 @@ export function buildSettlementInstruction(transfer: Transfer) {
     ...(transfer.fundingMethod === 'ach_pull'
       ? { funding: { method: 'ach_debit', token: transfer.achTokenRef ?? null } }
       : {}),
+    // Cross-border B2B bank-pull (non-custodial): ONE signed instruction carries
+    // BOTH legs. The FUNDING leg here tells the LICENSED PARTNER's rail to debit
+    // the BUYER's LOCAL bank for the FULL buyer charge (`amount` = principal + fee,
+    // the buyer-borne total) in `currency` (any of the 9 corridors); the PAYOUT
+    // leg is the `payout` block + `amount.destination`/`destination_currency` above
+    // — pay the seller their EXACT invoiced amount in the seller currency
+    // (amount.source = the principal, so amount.source * fx_rate ≈ amount.destination).
+    // The partner does the debit, the FX, and the payout, keeping the fee margin.
+    // SmartRemit performs NO funding capture: `token` is the OPAQUE buyer-bank
+    // reference (raw bank digits never persisted), exactly as ach_pull keeps only
+    // an opaque mandate.
+    ...(transfer.fundingMethod === 'bank_pull'
+      ? {
+          funding: {
+            method: 'bank_debit',
+            token: transfer.achTokenRef ?? null,
+            amount: transfer.totalChargeSource ?? transfer.amountSource ?? transfer.amountUsd,
+            currency: transfer.sourceCurrency ?? 'USD',
+            country: transfer.sourceCountry ?? null,
+          },
+        }
+      : {}),
     ...(transfer.transferType === 'b2b'
       ? {
           parties: {
@@ -108,7 +130,13 @@ export function buildReverseInstruction(transfer: Transfer) {
     // the reverse as a replay and the debit would never be returned.
     reference: `reverse-${transfer.id}`,
     partner_id: transfer.partnerId,
-    funding: { method: 'ach_debit' as const, token: transfer.achTokenRef ?? null },
+    // Cross-border bank_pull reverses a local-bank debit ('bank_debit'); the
+    // US-domestic ach_pull reverse stays byte-identical ('ach_debit'). Either way
+    // the partner returns the buyer's debit in the source currency it pulled.
+    funding: {
+      method: transfer.fundingMethod === 'bank_pull' ? ('bank_debit' as const) : ('ach_debit' as const),
+      token: transfer.achTokenRef ?? null,
+    },
     amount: {
       source: transfer.amountSource ?? transfer.amountUsd,
       currency: transfer.sourceCurrency ?? 'USD',

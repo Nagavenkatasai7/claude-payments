@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { isPartnerPulled } from '@/lib/funding-method';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { money } from '../format';
@@ -272,7 +273,7 @@ export default async function B2bPage() {
                         Cancel
                       </Button>
                     </form>
-                  ) : t.status === 'paid' && t.fundingMethod === 'ach_pull' ? (
+                  ) : t.status === 'paid' && isPartnerPulled(t.fundingMethod) ? (
                     <form key="actions" action={reverseB2bTransferAction}>
                       <input type="hidden" name="id" value={t.id} />
                       <Button

@@ -4,7 +4,7 @@ import { QuoteError } from './fx';
 
 // Calling-code prefix → CountryCode (greedy longest-match: 971 before 9, etc.).
 const CALLING_CODE_TO_COUNTRY: Record<string, CountryCode> = {
-  '1': 'US', '44': 'GB', '971': 'AE', '61': 'AU', '64': 'NZ', '65': 'SG', '91': 'IN',
+  '1': 'US', '44': 'GB', '971': 'AE', '61': 'AU', '64': 'NZ', '65': 'SG', '91': 'IN', '852': 'HK',
 };
 
 /** Best-effort CountryCode from a normalized (digits-only) sender phone. undefined if unknown. */

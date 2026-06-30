@@ -145,6 +145,14 @@ export const b2bInvoices = pgTable(
     lineItems: jsonb('line_items').notNull().default([]), // {description, qty, unitAmountUsd}[]
     amountUsd: numeric('amount_usd', { precision: 12, scale: 2 }).notNull(),
     currency: text('currency').notNull().default('USD'),
+    // ── Cross-border B2B (Plan 3) — additive, all NULLABLE ──
+    // When set, these carry the cross-border obligation FIXED IN THE SELLER'S
+    // currency (e.g. 1,000 HKD): the seller receives `invoicedAmount` exactly and
+    // FX is quoted LIVE at payment, never locked here. A row with these null is a
+    // back-compat US-domestic bill driven by amountUsd/currency exactly as before.
+    sellerId: text('seller_id').references(() => sellers.id),
+    invoicedAmount: numeric('invoiced_amount', { precision: 12, scale: 2 }),
+    invoicedCurrency: text('invoiced_currency'),
     status: text('status').notNull().default('unpaid'), // 'unpaid' | 'paid' | 'voided' | 'disputed'
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
@@ -153,6 +161,32 @@ export const b2bInvoices = pgTable(
     check('b2b_invoices_status_check', sql`${t.status} IN ('unpaid','paid','voided','disputed')`),
     index('b2b_invoices_buyer').on(t.buyerPhone, t.status),
     index('b2b_invoices_partner').on(t.partnerId, t.createdAt.desc()),
+  ],
+);
+
+// Registered cross-border B2B sellers — a business that issues bills and receives
+// payouts in its own currency. The payout destination is envelope-encrypted at rest
+// (field-crypto); only the masked last4 is stored in the clear. Partner-scoped.
+export const sellers = pgTable(
+  'sellers',
+  {
+    id: text('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    phone: text('phone').notNull(), // digits-only WhatsApp wa_id
+    businessName: text('business_name').notNull(),
+    country: text('country').notNull(),
+    currency: text('currency').notNull(),
+    payoutDestinationEnc: text('payout_destination_enc'), // null until onboarding completes
+    payoutLast4: text('payout_last4'),
+    status: text('status').notNull().default('pending'), // 'pending' | 'active' | 'suspended'
+    kycReviewState: text('kyc_review_state').notNull().default('none'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('sellers_status_check', sql`${t.status} IN ('pending','active','suspended')`),
+    uniqueIndex('sellers_partner_phone').on(t.partnerId, t.phone),
+    index('sellers_partner_created').on(t.partnerId, t.createdAt.desc()),
   ],
 );
 

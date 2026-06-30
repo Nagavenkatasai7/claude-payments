@@ -115,7 +115,7 @@ describe('reverseB2bSettlement (non-custodial partner reverse via the refund sea
   it('refuses a non-ach_pull transfer (that path uses Refund)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rv2', status: 'paid', fundingMethod: 'credit_card' }));
-    await expect(reverseB2bSettlement(db, 'rv2')).rejects.toThrow(/only ACH-pull/i);
+    await expect(reverseB2bSettlement(db, 'rv2')).rejects.toThrow(/only partner-pulled/i);
     expect(await outboxRows()).toHaveLength(0);
   });
 

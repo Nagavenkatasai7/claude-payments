@@ -1,6 +1,6 @@
 import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
 import { getFxRates, type FxRates } from './rate';
-import { resolveSendCurrency, destinationCountryForRecipientPhone } from './partner-currency';
+import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
@@ -280,6 +280,53 @@ export const toolSchemas: ChatTool[] = [
       description:
         "Look up the buyer's most recent UNPAID business invoice (the mock 'ERP' bill) so you can show them what they owe. Call this when a business user wants to pay a bill or asks 'what do I owe' / 'show my invoice'. Takes no arguments — it uses the sender's own number. Returns { has_bill: true, invoice: { invoice_id, seller_business_name, line_items: [{description, qty, unit_amount_usd}], amount_usd, currency } } when there is one, or { has_bill: false } when none is outstanding. When has_bill is true, present the seller name, each line item (qty x unit), and the total, then proceed with the B2B pay flow (collect the payer's business name, quote with ach_pull, send the Approve & Pay card with the invoice_id). When has_bill is false, say there's no outstanding bill right now.",
       parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'register_seller',
+      description:
+        "Register the business the user is texting from as a cross-border SELLER so they can issue bills/invoices to their customers. Call this when a business says they want to send invoices, bill a customer, get paid, or register/sign up as a seller. Pass business_name (the legal or trading name of THEIR business — it is shown to buyers on every bill). The seller's country and currency are derived from their own WhatsApp number, and their number is the seller key — never bill on another business's behalf. Returns { registered: true, onboarding_url } with a secure link for them to finish their payout details + verification, or { needs_country: true } when their country can't be derived from their number (ask them which country their business is in — do NOT guess), or { already_registered: true, status } when they already have a seller profile, or { registered: false, review: true } when their registration needs a manual review first (no link). Always relay reply_to_customer, and share onboarding_url when present.",
+      parameters: {
+        type: 'object',
+        properties: {
+          business_name: {
+            type: 'string',
+            description:
+              'The legal or trading name of the seller business (the sender). Shown to buyers on every bill they issue.',
+          },
+        },
+        required: ['business_name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_invoice',
+      description:
+        "Create a cross-border bill (invoice) FOR an active registered SELLER to charge one of their buyers. Call this when a registered seller says 'bill / invoice / charge <someone> for <amount>'. amount is in the SELLER's OWN currency (their fixed obligation) — never convert it; the buyer pays the live FX equivalent + fees at payment time. Pass buyer_phone (the customer's WhatsApp number with country code) and amount; description is optional (what the bill is for). Returns { created: true, invoice_id, pay_url, amount, currency } — relay the secure pay_url back to the SELLER so they can forward it (we also try to message the buyer directly). If the seller is not registered/active yet it returns { created: false, needs_registration: true, reply_to_customer } — relay that and call register_seller to get them set up first. Invalid buyer number or a non-positive amount returns { created: false, reply_to_customer }. A seller can only bill from their OWN active profile (their number is the key).",
+      parameters: {
+        type: 'object',
+        properties: {
+          buyer_phone: {
+            type: 'string',
+            description:
+              "The buyer's WhatsApp number with country code, e.g. '+1 555 123 4567' or '15551234567'.",
+          },
+          amount: {
+            type: 'number',
+            description:
+              "The bill amount in the SELLER's own currency (their fixed obligation). Pass the number the seller stated — do NOT convert it.",
+          },
+          description: {
+            type: 'string',
+            description: 'Optional. What the bill is for, e.g. "design work" — shown on the bill.',
+          },
+        },
+        required: ['buyer_phone', 'amount'],
+      },
     },
   },
   {
@@ -706,7 +753,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'capture_corridor_request',
       description:
-        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 8 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 8 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
+        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 9 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 9 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
       parameters: {
         type: 'object',
         properties: {
@@ -896,6 +943,10 @@ export async function executeTool(
       return createTransferTool(args, ctx);
     case 'present_bill':
       return presentBillTool(args, ctx);
+    case 'register_seller':
+      return registerSellerTool(args, ctx);
+    case 'create_invoice':
+      return createInvoiceTool(args, ctx);
     case 'check_bill_status':
       return checkBillStatusTool(args, ctx);
     case 'cancel_bill':
@@ -1343,6 +1394,308 @@ async function presentBillTool(
       amount_usd: invoice.amountUsd,
       currency: invoice.currency,
     },
+  };
+}
+
+/**
+ * register_seller — the WhatsApp-start of cross-border seller onboarding. A
+ * business texting "I want to send invoices / bill someone / register as a
+ * seller" gets a PENDING seller profile keyed on their own number (ctx.phone —
+ * implicit + unforgeable, so a seller can never be created on another business's
+ * behalf), then a secure web link to finish payout + identity off-chat.
+ *
+ * Invariants:
+ *  • Tenant isolation — the seller is scoped to the buyer's/customer's partner
+ *    (present_bill's resolver), never a bare global write.
+ *  • Country/currency are DERIVED from the seller's own phone — never guessed.
+ *    An unknown calling code returns { needs_country } so the agent asks.
+ *  • Sanctions screening ALWAYS runs on the business name (structural, via the
+ *    same screenTransfer seam as a transfer). A hit creates the seller but
+ *    flags kycReviewState='needs_review', keeps them pending, and returns NO
+ *    onboarding link — the team reviews first. The customer is NEVER told the
+ *    word sanctions/watchlist (copy discipline matches the transfer block path).
+ *  • WhatsApp-only — not in WEB_TOOL_ALLOWLIST, so the web dispatch gate blocks it.
+ */
+async function registerSellerTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const businessName = String(args.business_name ?? '').trim();
+  if (businessName === '') {
+    return {
+      registered: false,
+      reply_to_customer: "What's the name of your business? I'll use it to register you as a seller.",
+    };
+  }
+
+  // Tenant scope: pin the seller to the partner whose bot they're talking to
+  // (present_bill's own-phone resolver). Fail closed to the default partner when
+  // no customer row exists yet (the demo's single-number case).
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+
+  // Country + currency are DERIVED from the seller's own number — never guessed.
+  const country = countryForPhone(ctx.phone);
+  const currency = currencyForPhone(ctx.phone);
+  if (!country || !currency) {
+    return {
+      needs_country: true,
+      reply_to_customer:
+        "I couldn't tell which country your business is based in from your number — which country are you registering from?",
+    };
+  }
+
+  // Already registered? Don't duplicate.
+  const existing = await ctx.store.getSeller(ctx.phone, partnerId);
+  if (existing) {
+    if (existing.status === 'active') {
+      return {
+        already_registered: true,
+        status: 'active',
+        reply_to_customer:
+          "You're already registered as a seller — you can start sending bills to your customers any time.",
+      };
+    }
+    if (existing.status === 'pending' && existing.kycReviewState !== 'needs_review') {
+      // Still finishing onboarding — re-offer the link.
+      return {
+        already_registered: true,
+        status: 'pending',
+        onboarding_url: `${env.appBaseUrl}/onboard/seller/${existing.id}`,
+        reply_to_customer:
+          "You're already partway through registering. Finish your seller setup (payout details + verification) here, then you can start billing.",
+      };
+    }
+    // pending+needs_review, or suspended → in our hands; no link.
+    return {
+      already_registered: true,
+      status: existing.status,
+      reply_to_customer:
+        "Thanks — your seller registration is with our team for review. We'll be in touch before you can start sending bills.",
+    };
+  }
+
+  // Create the PENDING seller (claim the profile) BEFORE screening, so a hit is
+  // recorded on a real row the team can review.
+  // Sanctions screen the business name — ALWAYS, via the same seam transfers use,
+  // and FAIL-CLOSED. The screen runs BEFORE the row is created, and a hit OR a
+  // screener error both create the seller flagged 'needs_review' (no link). A
+  // 'none' row therefore provably means a CLEAN screen completed — so a blocked
+  // or never-screened business can never look clean and self-activate via the
+  // re-offer branch above. Never name sanctions/watchlist to the customer.
+  let cleared: boolean;
+  try {
+    const screen = await screenTransfer({
+      amountUsd: 0,
+      recipientName: businessName,
+      transfersToday: 0,
+      sourceCountry: country,
+    });
+    cleared = screen.status !== 'blocked';
+  } catch (err) {
+    console.warn('register_seller sanctions screen failed (fail-closed → review):', err);
+    cleared = false;
+  }
+
+  const sellerId = `s_${newTransferId()}`;
+  try {
+    await ctx.store.createSeller({
+      id: sellerId,
+      partnerId,
+      phone: ctx.phone,
+      businessName,
+      country,
+      currency,
+      // Atomic: a screen hit / error lands the row already flagged for review.
+      kycReviewState: cleared ? 'none' : 'needs_review',
+    });
+  } catch (err) {
+    console.warn('register_seller createSeller failed:', err);
+    return {
+      registered: false,
+      reply_to_customer:
+        "I couldn't complete your seller registration just now — please try again in a moment.",
+    };
+  }
+
+  if (!cleared) {
+    return {
+      registered: false,
+      review: true,
+      reply_to_customer:
+        "Thanks — we've started your seller registration. Our team needs to review a few details before you can send bills, and we'll be in touch shortly.",
+    };
+  }
+
+  return {
+    registered: true,
+    status: 'pending',
+    onboarding_url: `${env.appBaseUrl}/onboard/seller/${sellerId}`,
+    reply_to_customer:
+      "Great — you're registered as a seller. Finish your setup here (your payout bank details + a quick verification) and you'll be ready to send bills to your customers.",
+  };
+}
+
+/**
+ * create_invoice — the WhatsApp seller-initiated creation of a cross-border bill
+ * (Plan 5). An ACTIVE registered seller bills a buyer: the obligation is FIXED in
+ * the SELLER'S own currency (the buyer pays the live FX equivalent + fees at
+ * payment time, on /pay/b2b/<invoiceId>). This tool mints the invoice + the
+ * secure pay link and ENQUEUES a durable buyer-delivery push.
+ *
+ * Invariants:
+ *  • ctx.phone-owned — the seller is resolved BY their own number, so a seller can
+ *    only bill from their OWN active profile, never on another business's behalf.
+ *  • Active-only — a missing / pending / suspended seller is REFUSED (steered to
+ *    register_seller) and NO invoice is created.
+ *  • Tenant isolation — the invoice is partner-scoped to the seller's partner.
+ *  • No funds logic here — this only creates the obligation + link; the buyer pay
+ *    path (/api/pay/b2b/[invoiceId]) mints + settles non-custodially.
+ *  • Durable delivery — the buyer push is a transactional 'whatsapp.text' outbox
+ *    effect drained by the worker (best-effort: it delivers inside the 24h window,
+ *    silently fails outside it — the SELLER always has the link to forward).
+ *  • WhatsApp-only — not in WEB_TOOL_ALLOWLIST, so the web dispatch gate blocks it.
+ */
+async function createInvoiceTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  // Tenant scope: pin the bill to the partner whose bot the seller is talking to
+  // (same own-phone resolver as register_seller). Fail closed to the default
+  // partner when no customer row exists yet (the demo's single-number case).
+  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+
+  // The seller is resolved BY ctx.phone — implicit + unforgeable. Only an ACTIVE
+  // seller (payout set + sanctions clear) may issue bills; anything else is
+  // steered back to register_seller and creates NOTHING.
+  const seller = await ctx.store.getSeller(ctx.phone, partnerId);
+  if (!seller || seller.status !== 'active') {
+    return {
+      created: false,
+      needs_registration: true,
+      reply_to_customer: !seller
+        ? "Before you can send a bill you'll need to register as a seller — just say \"register as a seller\" and I'll get you set up (it takes a minute)."
+        : "You're almost there — finish your seller setup (your payout bank details + a quick verification) and then you can send bills to your customers.",
+    };
+  }
+
+  // Validate the buyer number — normalize first (Meta wa_id form), then check it
+  // is a well-formed international number. An empty/invalid number is refused.
+  const buyerPhone = normalizePhone(args.buyer_phone);
+  if (!isValidPhone(buyerPhone)) {
+    return {
+      created: false,
+      reply_to_customer:
+        "I couldn't read that customer number — please give it with the country code (e.g. +1 555 123 4567).",
+    };
+  }
+
+  // Validate the amount — finite and strictly positive (it is in the SELLER's
+  // own currency; we never convert it here).
+  const amount = Number(args.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return {
+      created: false,
+      reply_to_customer: 'How much should I bill them for? Please give a positive amount.',
+    };
+  }
+
+  const description = String(args.description ?? '').trim() || `Invoice from ${seller.businessName}`;
+
+  // Replay-safe minting (claim-first, the minting spine): the agent.turn outbox row
+  // is at-least-once — a transient reply-send 5xx re-runs the WHOLE turn, and the
+  // model can emit two calls in one turn — so bind a content key → invoiceId BEFORE
+  // the insert. A duplicate gets back the EXISTING id (and link) and skips both the
+  // insert and the buyer push, so an infra retry never double-bills. Same shape as
+  // send_approve_picker's content-keyed card dedup.
+  const billKey = `${seller.id}|${buyerPhone}|${amount}|${seller.currency}`;
+  const candidateId = `inv_${newTransferId()}`;
+  const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
+  const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
+  const sellerReply = `Your bill for ${amount} ${seller.currency} is ready. Share this secure link with your customer to get paid — I've also messaged it to them if they're reachable: ${payUrl}`;
+
+  if (invoiceId !== candidateId) {
+    // Duplicate within the TTL — the original run already created the bill and
+    // enqueued the buyer push; just hand the seller the SAME link (their reply may
+    // have failed to send the first time, which is what triggered this replay).
+    return { created: true, invoice_id: invoiceId, pay_url: payUrl, amount, currency: seller.currency, reply_to_customer: sellerReply };
+  }
+
+  // USD-equivalent snapshot for the NOT-NULL amountUsd column (back-compat display
+  // ONLY — the authoritative obligation is invoicedAmount/invoicedCurrency). A USD
+  // seller is exactly 1 (skip the FX hit); for any other currency getFxRates falls
+  // back to static rates internally, so this rarely moves and never blocks creation.
+  let amountUsd = amount;
+  if (seller.currency !== 'USD') {
+    try {
+      const sellerRates = await getFxRates(seller.currency);
+      if (Number.isFinite(sellerRates.toUsd) && sellerRates.toUsd > 0) {
+        amountUsd = round2(amount * sellerRates.toUsd);
+      }
+    } catch {
+      logWarn('create_invoice.fx-snapshot-failed', 'USD snapshot best-effort failed', { phone: ctx.phone });
+    }
+  }
+
+  const invoice: import('./types').B2bInvoice = {
+    id: invoiceId,
+    partnerId: seller.partnerId,
+    businessName: seller.businessName,
+    buyerPhone,
+    lineItems: [{ description, qty: 1, unitAmountUsd: amount }],
+    amountUsd,
+    currency: seller.currency,
+    sellerId: seller.id,
+    invoicedAmount: amount,
+    invoicedCurrency: seller.currency,
+    status: 'unpaid',
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    await ctx.store.saveB2bInvoice(invoice);
+  } catch (err) {
+    // Release the claim so the at-least-once retry can actually create the bill
+    // (the insert never happened). PII-scrubbed log per the money-path convention.
+    await ctx.store.clearBillInvoiceClaim(billKey).catch(() => {});
+    logWarn('create_invoice.save-failed', `saveB2bInvoice failed: ${err instanceof Error ? err.message : 'error'}`, { phone: ctx.phone });
+    return {
+      created: false,
+      reply_to_customer:
+        "I couldn't create that bill just now — please try again in a moment.",
+    };
+  }
+
+  // Durable buyer delivery — enqueue a 'whatsapp.text' effect the worker drains.
+  // Deduped on the (now replay-stable) invoice id so a re-enqueue of the SAME bill's
+  // push can never double-send. Best-effort: it delivers inside Meta's 24h session
+  // window and silently fails outside it (the approved template is Phase 2). The
+  // SELLER always has the link to forward, so delivery is NEVER a blocker. Buyer-
+  // facing copy is plain (no internal jargon).
+  try {
+    await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+      'whatsapp.text',
+      {
+        to: buyerPhone,
+        body: `You have a new bill from ${seller.businessName} — pay securely: ${payUrl}`,
+        ...(ctx.waCreds ? { creds: ctx.waCreds } : {}),
+      },
+      { dedupeKey: `billpush:${invoiceId}` },
+    );
+    pokeWorker();
+  } catch {
+    // Delivery is best-effort; a failed enqueue never fails the creation — the
+    // seller still has the link to forward.
+    logWarn('create_invoice.delivery-enqueue-failed', 'buyer-delivery enqueue failed', { phone: ctx.phone });
+  }
+
+  return {
+    created: true,
+    invoice_id: invoiceId,
+    pay_url: payUrl,
+    amount,
+    currency: seller.currency,
+    reply_to_customer: sellerReply,
   };
 }
 

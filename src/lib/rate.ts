@@ -18,6 +18,7 @@ export const FALLBACK_FX_RATES: Record<CurrencyCode, FxRates> = {
   AUD: { toInr: 56, toUsd: 0.66 },
   NZD: { toInr: 51, toUsd: 0.6 },
   INR: { toInr: 1, toUsd: 0.0118 }, // ≈ 1/85; any-to-any offline fallback for an INR SOURCE (e.g. India → US)
+  HKD: { toInr: 10.9, toUsd: 0.128 }, // HKD is USD-pegged ≈ 7.8/USD; Frankfurter serves it live
 };
 
 // Stage 4: 5-minute freshness (was 1h) — quotes on a money product should

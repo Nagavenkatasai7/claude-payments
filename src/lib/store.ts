@@ -2,7 +2,7 @@ import { getRedis } from './redis';
 import { easternDate } from './dates';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo } from '@/db/repos/aux-repos';
+import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo } from '@/db/repos/aux-repos';
 import type { ChatMessage, Transfer, TransferStatus } from './types';
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
@@ -55,6 +55,7 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
   const partnerReqRepo = createPartnerRequestRepo(db);
   const partnerAppRepo = createPartnerApplicationRepo(db);
   const b2bInvoiceRepo = createB2bInvoiceRepo(db);
+  const sellerRepo = createSellerRepo(db);
 
   return {
     // ── Conversations (Redis — hot, trimmed, ephemeral) ──────────────────
@@ -166,6 +167,27 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async clearApproveCardSent(key: string): Promise<void> {
       await redis.del(`approvecard:${key}`);
     },
+    // Replay-safe bill creation (create_invoice). The agent.turn outbox row is
+    // at-least-once — a transient reply-send 5xx re-runs the WHOLE turn (and the
+    // model can emit two calls in one turn) — so binding a content key → invoiceId
+    // BEFORE the insert makes a duplicate a no-op (claim-first, the minting spine).
+    // Returns the EXISTING id when the key was already claimed (so a replay returns
+    // the SAME bill + link), else the candidate id. Same 120s TTL rationale as the
+    // approve card: a true "same seller, same buyer, same amount, right now"
+    // duplicate collides; a genuinely new bill (different amount/buyer, or after
+    // the TTL) gets its own id.
+    async claimBillInvoiceId(key: string, candidateId: string): Promise<string> {
+      const claimed = await redis.set(`billclaim:${key}`, candidateId, { ex: 120, nx: true });
+      if (claimed !== null) return candidateId;
+      const existing = await redis.get(`billclaim:${key}`);
+      return typeof existing === 'string' && existing ? existing : candidateId;
+    },
+    // Release a bill claim when the insert itself FAILED, so the at-least-once
+    // retry can actually create the bill (mirrors clearApproveCardSent). A failure
+    // in a LATER step (after the insert) keeps the claim, so that retry stays deduped.
+    async clearBillInvoiceClaim(key: string): Promise<void> {
+      await redis.del(`billclaim:${key}`);
+    },
     async getLastInboundAt(senderPhone: string): Promise<string | null> {
       return redis.get(`lastmsg:${senderPhone}`);
     },
@@ -264,6 +286,66 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
       newId: string,
     ): Promise<import('./types').B2bInvoice | null> {
       return b2bInvoiceRepo.reissueInvoice(sourceId, partnerId, newId);
+    },
+
+    // ── Registered cross-border B2B sellers (Postgres, encrypted payout) ──
+    async createSeller(input: {
+      id: string;
+      partnerId: import('./types').PartnerId;
+      phone: string;
+      businessName: string;
+      country: import('./types').CountryCode;
+      currency: import('./types').CurrencyCode;
+      kycReviewState?: import('./types').KycReviewState;
+    }): Promise<import('./types').Seller> {
+      return sellerRepo.createSeller(input);
+    },
+    async getSeller(
+      phone: string,
+      partnerId: import('./types').PartnerId,
+    ): Promise<import('./types').Seller | null> {
+      return sellerRepo.getSeller(phone, partnerId);
+    },
+    /** By-id capability read (the hosted onboarding link carries the unguessable id). */
+    async getSellerById(id: string): Promise<import('./types').Seller | null> {
+      return sellerRepo.getSellerById(id);
+    },
+    /** Decrypted read for the few sites that genuinely need the full payout (settlement). */
+    async getSellerDecrypted(
+      phone: string,
+      partnerId: import('./types').PartnerId,
+    ): Promise<(import('./types').Seller & { payoutDestination: string }) | null> {
+      return sellerRepo.getSellerDecrypted(phone, partnerId);
+    },
+    async setSellerPayout(
+      phone: string,
+      partnerId: import('./types').PartnerId,
+      payoutDestination: string,
+    ): Promise<import('./types').Seller | null> {
+      return sellerRepo.setPayoutDestination(phone, partnerId, payoutDestination);
+    },
+    async setSellerStatus(
+      phone: string,
+      partnerId: import('./types').PartnerId,
+      status: import('./types').SellerStatus,
+    ): Promise<import('./types').Seller | null> {
+      return sellerRepo.setStatus(phone, partnerId, status);
+    },
+    async setSellerReviewState(
+      phone: string,
+      partnerId: import('./types').PartnerId,
+      kycReviewState: import('./types').KycReviewState,
+    ): Promise<import('./types').Seller | null> {
+      return sellerRepo.setReviewState(phone, partnerId, kycReviewState);
+    },
+    /** Atomic guarded onboarding completion: encrypt payout + flip ACTIVE in one
+     *  UPDATE (guarded on pending + not-needs_review). Null when not eligible. */
+    async completeSellerOnboarding(
+      phone: string,
+      partnerId: import('./types').PartnerId,
+      payoutDestination: string,
+    ): Promise<import('./types').Seller | null> {
+      return sellerRepo.activateOnboarding(phone, partnerId, payoutDestination);
     },
   };
 }

@@ -104,6 +104,11 @@ export const BANK_FIELDS_BY_COUNTRY: Record<CountryCode, Field[]> = {
       patternMessage: 'Enter a valid 11-character IFSC code (e.g. HDFC0001234).',
     },
   ],
+  HK: [
+    { key: 'bankCode', label: 'Bank code', digits: 3 },
+    { key: 'branchCode', label: 'Branch code', digits: 3 },
+    { ...ACCOUNT_FIELD },
+  ],
 };
 
 export type ValidationResult =

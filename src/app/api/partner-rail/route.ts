@@ -27,7 +27,12 @@ export async function POST(req: NextRequest) {
 
   const raw = await req.text();
 
-  let body: { reference?: unknown; partner_id?: unknown; action?: unknown } = {};
+  let body: {
+    reference?: unknown;
+    partner_id?: unknown;
+    action?: unknown;
+    funding?: { method?: unknown };
+  } = {};
   try {
     body = JSON.parse(raw) as typeof body;
   } catch {
@@ -37,6 +42,17 @@ export async function POST(req: NextRequest) {
   const partnerId = typeof body.partner_id === 'string' ? body.partner_id : '';
   // 'reverse' = a B2B ach_pull return instruction; 'settle' (default) = a payout.
   const action = typeof body.action === 'string' ? body.action : 'settle';
+  // Cross-border B2B (Plan 4): a DUAL-LEG instruction carries `funding.method ===
+  // 'bank_debit'` (debit the buyer's local bank) alongside the payout block (pay
+  // the seller). The reference rail accepts it and simulates BOTH legs as ONE
+  // atomic settlement: the partner debits + does FX + pays out, then reports
+  // `paid_out`. So a dual-leg `settle` flows through the SAME forward loop below
+  // as a single-leg payout — the delayed `paid_out` callback completes it.
+  const fundingMethod =
+    body.funding && typeof body.funding === 'object' && typeof body.funding.method === 'string'
+      ? body.funding.method
+      : '';
+  const isDualLeg = fundingMethod === 'bank_debit';
   if (!reference || !partnerId) {
     return NextResponse.json({ ok: false, error: 'reference and partner_id are required' }, { status: 400 });
   }
@@ -74,5 +90,11 @@ export async function POST(req: NextRequest) {
   );
   pokeWorker();
 
-  return NextResponse.json({ ok: true, providerRef: `simrail-${reference}` });
+  // `legs:'dual'` confirms the rail accepted the cross-border buyer-debit +
+  // seller-payout instruction (both settled atomically before the callback).
+  return NextResponse.json({
+    ok: true,
+    providerRef: `simrail-${reference}`,
+    ...(isDualLeg ? { legs: 'dual' } : {}),
+  });
 }

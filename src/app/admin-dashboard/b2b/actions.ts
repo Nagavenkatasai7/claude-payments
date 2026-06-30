@@ -6,6 +6,7 @@ import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { cancelTransfer, reverseB2bSettlement } from '@/lib/dashboard-ops';
+import { isPartnerPulled } from '@/lib/funding-method';
 import { newTransferId } from '@/lib/id';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { DEFAULT_PARTNER_ID, DEFAULT_SOURCE_CURRENCY } from '@/lib/defaults';
@@ -109,7 +110,7 @@ export async function cancelB2bTransferAction(formData: FormData): Promise<void>
   if (!transfer || transfer.transferType !== 'b2b') {
     throw new Error('B2B transfer not found.');
   }
-  if (transfer.status === 'paid' && transfer.fundingMethod === 'ach_pull') {
+  if (transfer.status === 'paid' && isPartnerPulled(transfer.fundingMethod)) {
     throw new Error('A paid B2B transfer cannot be cancelled — use Reverse (it instructs the partner to return the debit).');
   }
   if (transfer.status !== 'awaiting_payment' && transfer.status !== 'in_review') {
@@ -147,8 +148,8 @@ export async function reverseB2bTransferAction(formData: FormData): Promise<void
   if (!transfer || transfer.transferType !== 'b2b') {
     throw new Error('B2B transfer not found.');
   }
-  if (transfer.fundingMethod !== 'ach_pull') {
-    throw new Error('Only ACH-pull B2B transfers can be reversed.');
+  if (!isPartnerPulled(transfer.fundingMethod)) {
+    throw new Error('Only partner-pulled (ACH / bank) B2B transfers can be reversed.');
   }
   if (transfer.status !== 'paid') {
     throw new Error(`Cannot reverse a ${transfer.status} B2B transfer in-app — a delivered transfer is recalled via support.`);
