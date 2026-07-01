@@ -3013,14 +3013,22 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(r.onboarding_url).toBeUndefined();
   });
 
-  it('re-offers the link to a still-PENDING seller without creating a second row', async () => {
+  it('re-offers (RE-SENDS) the link to a still-PENDING seller without creating a second row', async () => {
     const ctx = await buildCtx(fakeRedis());
     const first = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
     const second = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
     expect(second.already_registered).toBe(true);
     expect(second.status).toBe('pending');
-    // Same seller id (no duplicate).
+    // Same seller id (no duplicate row).
     expect(String(second.onboarding_url)).toBe(String(first.onboarding_url));
+    // A resend must NOT be swallowed — the re-offer re-sends the link via the system
+    // (the initial registration + this resend both enqueue a link to the seller).
+    const rows = (await db.execute(
+      sql`SELECT payload FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown> }> };
+    expect(rows.rows.length).toBeGreaterThanOrEqual(2);
+    expect(rows.rows.every((x) => x.payload.to === PHONE)).toBe(true);
+    expect(rows.rows.every((x) => String(x.payload.body).includes(String(second.onboarding_url)))).toBe(true);
   });
 
   it('is blocked at dispatch on the web channel (WhatsApp-only)', async () => {

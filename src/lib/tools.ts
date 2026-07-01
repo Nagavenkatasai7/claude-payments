@@ -1459,11 +1459,15 @@ async function registerSellerTool(
     if (existing.status === 'pending' && existing.kycReviewState !== 'needs_review') {
       // Still finishing onboarding — RE-SEND the link via the system (not the bot).
       const onboardingUrl = `${env.appBaseUrl}/onboard/seller/${existing.id}`;
+      // A RESEND must actually re-send (the seller explicitly asked again). Key by a
+      // coarse minute bucket so an at-least-once turn replay (seconds apart) is still
+      // deduped, but a genuine resend a minute+ later goes out — never permanently
+      // swallowed the way a fixed per-seller key would.
       await enqueueSellerLink(
         ctx,
         ctx.phone,
         `Finish your seller setup here to start billing: ${onboardingUrl}`,
-        `selleronboard:${existing.id}`,
+        `selleronboard:${existing.id}:${Math.floor(Date.now() / 60000)}`,
       );
       return {
         already_registered: true,
