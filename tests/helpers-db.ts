@@ -33,6 +33,14 @@ afterAll(async () => {
     await _pgliteClient.close();
     _pgliteClient = undefined;
     _pgliteDb = undefined;
+    // Force a GC cycle so the ~670 MB WASM ArrayBuffer backing store is
+    // reclaimed before this worker thread exits. Without this, PGlite's WASM
+    // memory stays live in RSS across all 169 sequential workers, accumulating
+    // to ~7 GB and OOMing the 169th. --expose-gc in the npm test script makes
+    // global.gc() available inside worker threads via --experimental-worker.
+    if (typeof (global as { gc?: () => void }).gc === 'function') {
+      (global as { gc?: () => void }).gc!();
+    }
   }
 });
 
