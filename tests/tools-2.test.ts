@@ -750,7 +750,7 @@ describe('any-to-any corridors — destination_country threading', () => {
         return { ok: true, json: async () => ({ rates: { INR: 23.1, USD: 0.27 } }) };
       }
       // WhatsApp API or USD
-      if (u.includes('graph.facebook.com') || u.includes('whatsapp')) {
+      if (u.startsWith('https://graph.facebook.com/') || u.includes('whatsapp')) {
         return { ok: true, text: async () => '' };
       }
       return { ok: true, json: async () => ({ rates: { INR: 85 } }) };

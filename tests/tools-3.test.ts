@@ -576,7 +576,7 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     expect(r).toEqual({ error: 'not available here' });
     expect(createDraft).not.toHaveBeenCalled();
     // No WhatsApp interactive left the building.
-    const waCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes('graph.facebook.com'));
+    const waCalls = fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('https://graph.facebook.com/'));
     expect(waCalls).toHaveLength(0);
   });
 
@@ -789,7 +789,7 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
     expect(draft?.amountSource).toBe(200);
 
     // …and no WhatsApp send happened.
-    const waCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes('graph.facebook.com'));
+    const waCalls = fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('https://graph.facebook.com/'));
     expect(waCalls).toHaveLength(0);
   });
 
