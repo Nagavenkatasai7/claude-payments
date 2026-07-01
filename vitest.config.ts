@@ -40,6 +40,10 @@ export default defineConfig({
     poolOptions: {
       threads: {
         maxThreads: 1,
+        // Give each worker thread 2 GB old-space. Worker threads start with
+        // an EMPTY V8 isolate (no COW inheritance), so 2 GB covers even the
+        // heaviest PGlite file without risk of aggregate OOM on maxThreads:1.
+        execArgv: ['--max-old-space-size=2048'],
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
