@@ -20,15 +20,16 @@ export default defineConfig({
     // repeated migration inside a file's beforeEach calls). The OS reclaims the
     // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
     //
-    // maxForks:1 + execArgv --max-old-space-size=13312:
-    // agent*.test.ts mock @/db/client (via vi.hoisted + vi.mock) so the Neon
-    // WebSocket driver and ws are never loaded — that's what caused the 12+ GB
-    // non-reclaimable heap that OOM'd the 7 GB ubuntu-latest CI runner. With the
-    // mock, the module-loading baseline is ~2-3 GB; PGlite WASM grows ~115 MB per
-    // test. 13 GB is a generous ceiling that V8 will never approach; it is kept
-    // because lowering it risks OOM if a future import re-introduces a heavy dep.
-    // agent.test.ts (15 tests), agent-2.test.ts (16), agent-3.test.ts (14) are
-    // split so no single file's PGlite WASM growth gets too large.
+    // maxForks:1 + execArgv --max-old-space-size=4096:
+    // Each test file runs in its own fresh forked process (isolateWorkers:true).
+    // agent*.test.ts mock @/db/client so the Neon WebSocket driver is never
+    // loaded. Peak RSS measured locally: ~430 MB for all agent tests.
+    //
+    // The cap is INTENTIONALLY modest (4 GB):
+    // A large cap (e.g. 13 GB) tells V8 it has room and defers GC until the
+    // heap fills the limit. On a 7 GB ubuntu-latest CI runner that means swap
+    // thrashing, a full Mark-Compact that frees ZERO bytes, and a FATAL OOM.
+    // 4 GB fits comfortably in physical RAM and keeps the GC running early.
     //
     // DO NOT set isolate:false in poolOptions.forks — that sets isolateWorkers:false
     // (long-lived workers that reuse module registry), which freezes static mock
@@ -37,7 +38,7 @@ export default defineConfig({
     poolOptions: {
       forks: {
         maxForks: 1,
-        execArgv: ['--max-old-space-size=13312'],
+        execArgv: ['--max-old-space-size=4096'],
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
