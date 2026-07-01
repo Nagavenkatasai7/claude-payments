@@ -20,16 +20,14 @@ export default defineConfig({
     // repeated migration inside a file's beforeEach calls). The OS reclaims the
     // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
     //
-    // maxForks:1 + execArgv --max-old-space-size=4096:
-    // Each test file runs in its own fresh forked process (isolateWorkers:true).
-    // agent*.test.ts mock @/db/client so the Neon WebSocket driver is never
-    // loaded. Peak RSS measured locally: ~430 MB for all agent tests.
-    //
-    // The cap is INTENTIONALLY modest (4 GB):
-    // A large cap (e.g. 13 GB) tells V8 it has room and defers GC until the
-    // heap fills the limit. On a 7 GB ubuntu-latest CI runner that means swap
-    // thrashing, a full Mark-Compact that frees ZERO bytes, and a FATAL OOM.
-    // 4 GB fits comfortably in physical RAM and keeps the GC running early.
+    // maxForks:1 (no execArgv heap cap):
+    // Each test file forks from the main Vitest process. By file ~87, the main
+    // process has accumulated ~2 GB of test-result state. An explicit
+    // --max-old-space-size (4 GB or 13 GB) tells V8 it may grow to that ceiling
+    // before GCing — the forked worker then tries to claim up to 2 + 4 = 6 GB,
+    // exhausting the 7 GB CI runner and OOMing. Without the flag V8 defaults to
+    // ~1.4 GB old-space, GCs early and often, and the actual working set stays
+    // near the 430 MB measured locally (agent tests peak RSS).
     //
     // DO NOT set isolate:false in poolOptions.forks — that sets isolateWorkers:false
     // (long-lived workers that reuse module registry), which freezes static mock
@@ -38,7 +36,6 @@ export default defineConfig({
     poolOptions: {
       forks: {
         maxForks: 1,
-        execArgv: ['--max-old-space-size=4096'],
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
