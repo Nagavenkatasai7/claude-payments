@@ -37,7 +37,7 @@ afterAll(async () => {
     // backing store before the next file starts. Without this, V8's lazy GC
     // defers collection and multiple files' WASM memories pile up to 4+ GB.
     // Requires --expose-gc (set via NODE_OPTIONS in CI and locally).
-    (global as Record<string, unknown>).gc?.();
+    (global as typeof globalThis & { gc?: () => void }).gc?.();
   }
 });
 
