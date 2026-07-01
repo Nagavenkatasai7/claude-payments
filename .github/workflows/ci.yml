@@ -17,9 +17,9 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    # Raised from 10 to 20: vmForks pool runs 167 test files across 4 workers
-    # (~5 min) plus setup steps (npm ci, drizzle check, typecheck, lint) and the
-    # Next.js build all fit comfortably in 20 min with headroom.
+    # 20 min: forks pool runs 167 test files across 4 workers (~5 min) plus
+    # setup steps (npm ci, drizzle check, typecheck, lint) and the Next.js
+    # build all fit comfortably with headroom.
     timeout-minutes: 20
 
     steps:
@@ -66,6 +66,11 @@ jobs:
         run: npm run lint
 
       - name: Test
+        # --expose-gc lets helpers-db.ts call global.gc() after each PGlite
+        # close() to synchronously free the WASM backing store. Without it,
+        # V8's lazy GC defers collection and per-worker heap hits 4+ GB OOM.
+        env:
+          NODE_OPTIONS: --expose-gc
         run: npm test
 
       - name: Build
