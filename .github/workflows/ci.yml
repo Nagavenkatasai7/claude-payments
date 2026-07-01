@@ -66,11 +66,6 @@ jobs:
         run: npm run lint
 
       - name: Test
-        # --expose-gc lets helpers-db.ts call global.gc() after each PGlite
-        # close() to synchronously free the WASM backing store. Without it,
-        # V8's lazy GC defers collection and per-worker heap hits 4+ GB OOM.
-        env:
-          NODE_OPTIONS: --expose-gc
         run: npm test
 
       - name: Build

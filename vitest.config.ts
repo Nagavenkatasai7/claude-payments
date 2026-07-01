@@ -9,16 +9,15 @@ export default defineConfig({
     // .claude/worktrees holds agent worktrees (full repo copies) — their stale
     // test copies must never run against this checkout's src.
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
-    // forks pool: each test file reimports modules in a long-lived forked worker.
-    // isolate:true (default) clears the module registry between files, so
-    // helpers-db's initPromise singleton is reset and PGlite instances lose all
-    // references — normal V8 GC reclaims them.  This avoids the vmForks problem
-    // where V8 VM contexts accumulated 4+ GB of un-GCed WASM-backed PGlite
-    // memory across 83 files in a single worker (FATAL: heap out of memory).
-    // vmForks could not fix this: VM context boundaries don't help GC of WASM
-    // ArrayBuffer backing stores held at the native/V8 boundary.
-    // 4 workers × ~400 MB peak each = 1.6 GB workers + 1.5 GB OS ≈ 3.1 GB —
-    // well within 7 GB.  Wall-clock ≈ 5–6 min for the full suite.
+    // forks pool: each test file runs in a long-lived forked worker with
+    // isolate:true (module registry cleared between files). helpers-db.ts stores
+    // PGlite in global.__pgliteDb so ONE WASM engine is shared per worker
+    // process rather than spawned per file. Per-file spawn accumulated ~670 MB
+    // per instance and could not be GC'd mid-run (vitest retains test-function
+    // closures that hold the drizzle→PGlite→WASM chain live across module resets,
+    // making gc() ineffective — confirmed OOM at exactly 4 GB after ~6 files).
+    // With a single global engine: 4 workers × ~670 MB = ~2.7 GB — safe.
+    // Wall-clock ≈ 5–6 min for the full suite.
     pool: 'forks',
     poolOptions: { forks: { maxForks: 4 } },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s

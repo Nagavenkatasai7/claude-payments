@@ -16,13 +16,3 @@ process.env.FIELD_ENCRYPTION_KEY ||=
   '0707070707070707070707070707070707070707070707070707070707070707';
 // PGlite-backed singletons must never dial a real database in tests.
 process.env.DATABASE_URL ||= 'postgres://test-not-used';
-
-// In vitest forks pool (isolate:true) this file is re-evaluated for every
-// test file, right after the previous file's module registry is cleared.
-// At that point the previous file's PGlite WASM backing stores are unreachable
-// (the test's `db` variable and helpers-db's module-level refs are both gone),
-// so a gc() here actually frees the memory before the new file allocates more.
-// Without this, gc() in helpers-db.ts afterAll fires while the test's `db`
-// variable is still live — the WASM memory is reachable and cannot be freed,
-// causing 6+ PGlite instances × ~670 MB to accumulate to 4 GB OOM.
-(global as typeof globalThis & { gc?: () => void }).gc?.();
