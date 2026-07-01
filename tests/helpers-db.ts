@@ -1,3 +1,4 @@
+import { afterAll } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
@@ -10,22 +11,30 @@ import type { Db } from '@/db/client';
 // SKIP LOCKED, or the rank-guarded atomic UPDATE — which are exactly the
 // behaviors under test, so we run the genuine engine.
 //
-// One PGlite instance per vitest worker (module singleton), migrated once;
-// freshDb() truncates everything and re-seeds the default partner between
-// tests to keep the suite fast.
+// One PGlite instance per test file (module singleton reset on each fresh
+// import). freshDb() truncates and re-seeds between tests in the same file.
 //
-// The returned handle is cast to the app's `Db` type (neon-serverless drizzle):
-// both are PgDatabase instances over the same schema — query/transaction APIs
-// are runtime-identical; only the driver HKT differs.
+// afterAll closes the client so PGlite.close() frees the WASM backing store
+// before the module is discarded. Without this, the WASM ArrayBuffer from
+// every file accumulates in the worker-process heap and hits V8's 4 GB limit.
 
+let pgliteClient: PGlite | null = null;
 let initPromise: Promise<ReturnType<typeof drizzle<typeof schema>>> | null = null;
 
 async function initOnce() {
-  const client = new PGlite();
-  const db = drizzle(client, { schema });
+  pgliteClient = new PGlite();
+  const db = drizzle(pgliteClient, { schema });
   await migrate(db, { migrationsFolder: './drizzle' });
   return db;
 }
+
+afterAll(async () => {
+  if (pgliteClient) {
+    await pgliteClient.close();
+    pgliteClient = null;
+    initPromise = null;
+  }
+});
 
 const ALL_TABLES = [
   'outbox',
