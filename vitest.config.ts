@@ -19,7 +19,19 @@ export default defineConfig({
     // after ~6 PGlite files per worker. One engine per worker:
     // 4 workers × ~670 MB = ~2.7 GB — safe. Wall-clock ≈ 5–6 min.
     pool: 'forks',
-    poolOptions: { forks: { maxForks: 4 } },
+    poolOptions: {
+      forks: {
+        maxForks: 4,
+        // isolate:false keeps helpers-db's module-level _pgliteDb alive for
+        // the worker's entire lifetime (one WASM engine per worker process).
+        // With isolate:true (default) vitest re-imports every module per file,
+        // creating a fresh PGlite instance each time; 6 instances × ~670 MB
+        // overflows the ~4 GB auto-sized V8 heap. isolate:false means the
+        // module registry is NOT cleared between files, so _pgliteDb is
+        // allocated once per worker and reused — 4 workers × ~670 MB = safe.
+        isolate: false,
+      },
+    },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
     // default.  15 s gives ample headroom without masking real hangs.
     testTimeout: 15000,

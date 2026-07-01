@@ -10,23 +10,23 @@ import type { Db } from '@/db/client';
 // SKIP LOCKED, or the rank-guarded atomic UPDATE — which are exactly the
 // behaviors under test, so we run the genuine engine.
 //
-// ONE PGlite instance per worker process, stored on `process` so it survives
-// vitest's per-file module-registry reset (isolate:true in forks pool).
-// We store on `process` (not `global`) because vitest's forks pool evaluates
-// each test file in a fresh vm context where `globalThis` is per-context, but
-// `process` is the same injected reference across all contexts in the worker.
-// Creating a new WASM engine per file accumulates ~670 MB/instance and cannot
-// be reclaimed mid-run: vitest retains test-function closures that hold the
-// freshDb→drizzle→PGlite→WASM reference chain live across module resets,
-// blocking gc() from collecting the ArrayBuffer backing stores (confirmed by
-// repeated OOM at exactly 4 GB after ~6 PGlite files per worker).
-// With a single engine per worker: 4 workers × ~670 MB = ~2.7 GB — safe.
+// ONE PGlite instance per worker process, stored as a module-level variable.
+// vitest.config.ts sets isolate:false in the forks pool so the module registry
+// is NOT cleared between test files in the same worker — _pgliteDb is allocated
+// once per worker and reused across every file that worker handles.
+//
+// With isolate:true (default), vitest re-imports every module per file, which
+// creates a fresh PGlite WASM instance each time. Each instance holds ~670 MB
+// of V8 heap in ArrayBuffer backing stores that cannot be reclaimed mid-run
+// (vitest keeps test-function closures alive for retry/reporting). On a 7 GB
+// runner Node.js auto-sizes the heap to ~4 GB, so 6 instances × ~670 MB = OOM.
+// With isolate:false: 4 workers × ~670 MB = ~2.7 GB — safe.
 // The engine is freed when the OS reclaims the worker process after all its
 // files complete; no explicit close() is needed.
 
-type ProcWithDb = typeof process & {
-  __pgliteDb?: Promise<ReturnType<typeof drizzle<typeof schema>>>;
-};
+// Module-level singleton — survives for the worker's entire lifetime because
+// isolate:false keeps this module loaded (not re-imported) between test files.
+let _pgliteDb: Promise<ReturnType<typeof drizzle<typeof schema>>> | undefined;
 
 const ALL_TABLES = [
   'outbox',
@@ -48,16 +48,15 @@ const ALL_TABLES = [
 ].join(', ');
 
 export async function freshDb(): Promise<Db> {
-  const proc = process as ProcWithDb;
-  if (!proc.__pgliteDb) {
-    proc.__pgliteDb = (async () => {
+  if (!_pgliteDb) {
+    _pgliteDb = (async () => {
       const client = new PGlite();
       const db = drizzle(client, { schema });
       await migrate(db, { migrationsFolder: './drizzle' });
       return db;
     })();
   }
-  const db = await proc.__pgliteDb;
+  const db = await _pgliteDb;
   await db.execute(sql.raw(`TRUNCATE ${ALL_TABLES} RESTART IDENTITY CASCADE`));
   await db.execute(
     sql.raw(
