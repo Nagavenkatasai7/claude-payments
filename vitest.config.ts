@@ -36,9 +36,11 @@ export default defineConfig({
     // static mock bindings in cached modules.
     //
     // maxThreads:1 keeps memory bounded (one ~670 MB PGlite instance at a time).
-    // helpers-db.ts registers an afterAll that calls client.close() to release
-    // the WASM ArrayBuffer before each worker thread exits, preventing RSS
-    // accumulation across 169 sequential files on the 7 GB CI runner.
+    // helpers-db.ts registers an afterAll that calls client.close() before each
+    // worker thread exits. CI runs two shards (ci.yml: npm test -- --shard=N/2)
+    // so the main Vitest process never accumulates heap for all 169 files at
+    // once — the per-shard accumulation stays low enough that V8's adaptive
+    // heap limit for the 170th worker remains above PGlite's 670 MB WASM alloc.
     pool: 'threads',
     poolOptions: {
       threads: {

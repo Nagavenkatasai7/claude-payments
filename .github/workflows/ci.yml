@@ -65,8 +65,15 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Test
-        run: npm test
+      # Two shards: each shard runs ~85 of the 169 test files in a fresh Node.js
+      # process. The single-process run accumulated enough main-process heap by
+      # file 169 that V8 set a low adaptive heap limit for the 169th worker
+      # thread, which then couldn't fit PGlite's 670 MB WASM allocation and
+      # crashed with ERR_WORKER_OUT_OF_MEMORY. Sharding halves the accumulation.
+      - name: Test (shard 1/2)
+        run: npm test -- --shard=1/2
+      - name: Test (shard 2/2)
+        run: npm test -- --shard=2/2
 
       - name: Build
         run: npm run build
