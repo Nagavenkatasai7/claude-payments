@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { authenticationTemplateParams } from '@/lib/whatsapp-templates';
-import { sendOtpCode } from '@/lib/whatsapp';
+import { sendOtpCode, sendTransactionOtp } from '@/lib/whatsapp';
 
 // env is read through a getter (process.env.OTP_DEV_MODE === 'true'); we toggle
 // the real env var per-test so we exercise the production getter, not a mock.
@@ -173,6 +173,61 @@ describe('sendOtpCode — live mode', () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect(String((caught as Error).message)).not.toContain('246802');
+  });
+});
+
+// The B2B pay-page OTP: a cross-border buyer opens a seller-FORWARDED link and may
+// have NO open 24h window — so the transaction OTP must go via the AUTHENTICATION
+// template (delivers outside the window), not a free-form send that Meta drops.
+describe('sendTransactionOtp — cross-border buyer (forwarded link, may be out of session)', () => {
+  it('sends via the AUTHENTICATION template when configured (delivers outside the 24h window)', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'verification_code';
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendTransactionOtp('15551234567', '246813');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.type).toBe('template'); // NOT a free-form text that a cold buyer never gets
+    expect(body.template.name).toBe('verification_code');
+    expect(body.to).toBe('15551234567');
+  });
+
+  it('falls back to free-form text when the template send fails (in-session buyer)', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'verification_code';
+    const fetchMock = vi.fn(
+      async (
+        _url: string,
+        init: RequestInit,
+      ): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        const body = JSON.parse(init.body as string);
+        if (body.type === 'template') return { ok: false, status: 400, text: async () => 'not approved' };
+        return { ok: true, text: async () => '' };
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(sendTransactionOtp('15551234567', '246813')).resolves.toBeUndefined();
+    const textCall = fetchMock.mock.calls.find(
+      ([, init]) => JSON.parse((init as RequestInit).body as string).type === 'text',
+    );
+    expect(textCall).toBeDefined();
+  });
+
+  it('with NO template configured, sends pure free-form (unchanged in-session path)', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    delete process.env.WHATSAPP_AUTH_TEMPLATE;
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendTransactionOtp('15551234567', '246813');
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string).type).toBe('text');
   });
 });
 
