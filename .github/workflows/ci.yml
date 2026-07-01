@@ -63,6 +63,8 @@ jobs:
         run: npm run lint
 
       - name: Test
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm test
 
       - name: Build
