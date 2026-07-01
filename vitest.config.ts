@@ -9,20 +9,20 @@ export default defineConfig({
     // .claude/worktrees holds agent worktrees (full repo copies) — their stale
     // test copies must never run against this checkout's src.
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
-    // vmForks: each test file runs in a fresh V8 VM subprocess — module cache is
-    // discarded between files so PGlite instances don't bleed between files.
-    // maxForks:2 balances memory vs wall-clock time.  One worker accumulates
-    // >4 GB across 167 files and hits V8's per-process heap limit (OOM).
-    // Four workers saturate the 7 GB runner RAM at the heavy-PGlite-test wave
-    // (4 × ~1.4 GB = 5.8 GB workers + OS overhead > 7 GB → OS OOM killer).
-    // Two workers peak at ~2 GB each (4 GB total) + 1.5 GB OS/orchestrator =
-    // ~5.5 GB — comfortably within 7 GB.  Wall-clock ≈ 11 min for the full
-    // suite, fitting in the 20-min CI timeout with ample headroom.
-    pool: 'vmForks',
-    poolOptions: { vmForks: { maxForks: 2 } },
-    // 15 s per test: heavy PGlite migrations + GC pauses inside long-lived workers
-    // can push simple tests past the 5 s default.  15 s gives ample headroom
-    // without masking real hangs.
+    // forks pool: each test file reimports modules in a long-lived forked worker.
+    // isolate:true (default) clears the module registry between files, so
+    // helpers-db's initPromise singleton is reset and PGlite instances lose all
+    // references — normal V8 GC reclaims them.  This avoids the vmForks problem
+    // where V8 VM contexts accumulated 4+ GB of un-GCed WASM-backed PGlite
+    // memory across 83 files in a single worker (FATAL: heap out of memory).
+    // vmForks could not fix this: VM context boundaries don't help GC of WASM
+    // ArrayBuffer backing stores held at the native/V8 boundary.
+    // 4 workers × ~400 MB peak each = 1.6 GB workers + 1.5 GB OS ≈ 3.1 GB —
+    // well within 7 GB.  Wall-clock ≈ 5–6 min for the full suite.
+    pool: 'forks',
+    poolOptions: { forks: { maxForks: 4 } },
+    // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
+    // default.  15 s gives ample headroom without masking real hangs.
     testTimeout: 15000,
     // CI-only: PGlite suites occasionally flake 1-3 tests under parallel runs
     // (they pass in isolation — see CLAUDE.md gotchas). One retry keeps known
