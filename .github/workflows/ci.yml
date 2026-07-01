@@ -17,7 +17,10 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised from 10 to 20: vmForks pool runs 167 test files across 4 workers
+    # (~5 min) plus setup steps (npm ci, drizzle check, typecheck, lint) and the
+    # Next.js build all fit comfortably in 20 min with headroom.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
