@@ -65,15 +65,23 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # Two shards: each shard runs ~85 of the 169 test files in a fresh Node.js
-      # process. The single-process run accumulated enough main-process heap by
-      # file 169 that V8 set a low adaptive heap limit for the 169th worker
-      # thread, which then couldn't fit PGlite's 670 MB WASM allocation and
-      # crashed with ERR_WORKER_OUT_OF_MEMORY. Sharding halves the accumulation.
-      - name: Test (shard 1/2)
-        run: npm test -- --shard=1/2
-      - name: Test (shard 2/2)
-        run: npm test -- --shard=2/2
+      # Four shards: each shard runs ~42 of the 169 test files in a fresh Node.js
+      # process. Root cause: each PGlite test file allocates a 670 MB WASM
+      # ArrayBuffer; even after client.close() + worker termination, a residual
+      # ~75 MB per file lingers in the process RSS until the OS reclaims the
+      # pages. After ~83 files the accumulated residual pushes total RSS above
+      # 6.3 GB, leaving < 670 MB free for the next WASM allocation →
+      # ERR_WORKER_OUT_OF_MEMORY on the last file. Two shards (84 files each)
+      # still hit this threshold. Four shards (~42 files each) keep the
+      # per-shard residual under 3.2 GB, well within the 7 GB CI runner limit.
+      - name: Test (shard 1/4)
+        run: npm test -- --shard=1/4
+      - name: Test (shard 2/4)
+        run: npm test -- --shard=2/4
+      - name: Test (shard 3/4)
+        run: npm test -- --shard=3/4
+      - name: Test (shard 4/4)
+        run: npm test -- --shard=4/4
 
       - name: Build
         run: npm run build
