@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { newTransferId } from '@/lib/id';
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('newTransferId', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -42,5 +46,18 @@ describe('newTransferId', () => {
     const id = newTransferId();
     expect(id).toHaveLength(8);
     expect(id).toMatch(/^[a-z0-9]{8}$/);
+  });
+});
+
+// ---- REGRESSION: Math.random()===0 caused infinite loop ----
+describe('regression: newTransferId infinite loop when Math.random() always returns 0 (bug fix)', () => {
+  it('terminates and returns an 8-character alphanumeric id when Math.random() perpetually returns 0', () => {
+    // Before fix: (0).toString(36).slice(2) === '' (empty string), so `if (chunk) id += chunk`
+    // never advanced id.length past 0, causing an infinite loop.
+    // After fix: `|| '0'` fallback appends '0' each iteration, so the loop terminates.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const id = newTransferId();
+    expect(id).toMatch(/^[a-z0-9]{8}$/);
+    expect(id).toBe('00000000');
   });
 });

@@ -217,3 +217,28 @@ describe('quote — any-to-any cross-currency destination', () => {
     expect(q.fxRate).toBe(85);
   });
 });
+
+// ---- REGRESSION: destToUsd=0 silently used INR cross-rate for non-INR destination ----
+describe('regression: usdPivotCrossRate destToUsd=0 falsy short-circuit (bug fix)', () => {
+  const rates = { toInr: 85, toUsd: 1 };
+
+  it('quote() throws QuoteError when destToUsd=0 for a non-INR destination (not a ~23x wrong payout)', () => {
+    // Before fix: destToUsd=0 was falsy, so `!destToUsd` was true,
+    // causing crossRate = rates.toInr = 85 (INR rate used for AED) → silent ~23x error.
+    // After fix: destToUsd=0 is not null/undefined, so 1/0 = Infinity → QuoteError thrown.
+    expect(() => quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', 0)).toThrow(QuoteError);
+  });
+
+  it('sourceForDest() throws QuoteError when destToUsd=0 for a non-INR destination', () => {
+    // Before fix: crossRate = rates.toInr = 85 → sourceForDest(370, ..., 'AED', 0) returned ~4.35 USD
+    // instead of ~100 USD. After fix: crossRate = Infinity → QuoteError thrown.
+    expect(() => sourceForDest(370, rates, 'AED', 0)).toThrow(QuoteError);
+  });
+
+  it('quote() with a valid non-zero destToUsd still produces the correct cross-rate', () => {
+    // Sanity: a valid AED rate (0.27) must still work correctly post-fix.
+    const q = quote(100, 'USD', rates, 'bank_transfer', 0, 'AED', 0.27);
+    expect(q.fxRate).toBeCloseTo(1 / 0.27, 3); // ~3.7037, NOT 85
+    expect(q.amountInr).toBe(Math.round(100 * (1 / 0.27))); // ~370 AED, NOT 8500
+  });
+});
