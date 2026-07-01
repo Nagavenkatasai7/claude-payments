@@ -10,13 +10,13 @@ import type { Db } from '@/db/client';
 // SKIP LOCKED, or the rank-guarded atomic UPDATE — which are exactly the
 // behaviors under test, so we run the genuine engine.
 //
-// vitest.config.ts uses pool:'forks' with default isolate:true, so each test
-// file runs in its own fresh forked process (isolateWorkers:true in tinypool).
-// This module-level _pgliteDb singleton ensures ONE PGlite WASM engine per
-// worker process — preventing repeated migration in a file's beforeEach calls.
-// The OS reclaims the ~670 MB WASM ArrayBuffer when the worker exits after the
-// file completes; no explicit close() needed. At most 4 concurrent workers:
-// 4 × ~670 MB = ~2.7 GB — safe.
+// vitest.config.ts uses pool:'threads' with isolate:true (default), so each
+// test file runs in its own worker_thread with a fresh module registry and a
+// separate V8 isolate. This module-level _pgliteDb singleton allocates ONE
+// PGlite WASM engine per thread — preventing repeated migration in a file's
+// beforeEach calls. The thread exits after the file completes, reclaiming the
+// ~670 MB WASM ArrayBuffer; no explicit close() needed. maxThreads:1 means at
+// most 1 PGlite instance exists at a time.
 
 let _pgliteDb: Promise<ReturnType<typeof drizzle<typeof schema>>> | undefined;
 

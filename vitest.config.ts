@@ -14,28 +14,32 @@ export default defineConfig({
     // vi.restoreAllMocks() in agent*.test.ts afterEach, but harmless.
     clearMocks: true,
     unstubGlobals: true,
-    // forks pool: default isolate:true → isolateWorkers:true in tinypool, so each
-    // test file runs in its own fresh forked process. helpers-db's module-level
-    // _pgliteDb singleton allocates ONE PGlite WASM engine per file (preventing
-    // repeated migration inside a file's beforeEach calls). The OS reclaims the
-    // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
+    // threads pool: each test file runs in its own worker_thread with a SEPARATE
+    // V8 isolate (separate heap, no parent-heap inheritance). helpers-db's
+    // module-level _pgliteDb singleton allocates ONE PGlite WASM engine per
+    // thread. The thread exits after the file completes, reclaiming ~670 MB.
     //
-    // maxForks:1 (no execArgv heap cap):
-    // Each test file forks from the main Vitest process. By file ~87, the main
-    // process has accumulated ~2 GB of test-result state. An explicit
-    // --max-old-space-size (4 GB or 13 GB) tells V8 it may grow to that ceiling
-    // before GCing — the forked worker then tries to claim up to 2 + 4 = 6 GB,
-    // exhausting the 7 GB CI runner and OOMing. Without the flag V8 defaults to
-    // ~1.4 GB old-space, GCs early and often, and the actual working set stays
-    // near the 430 MB measured locally (agent tests peak RSS).
+    // WHY threads instead of forks:
+    // forks uses fork(2) (copy-on-write). After running ~127 test files, the
+    // main Vitest process accumulates ~4 GB of V8 heap (module resolver cache,
+    // test result state, tinypool message buffers). The next fork inherits all
+    // of this via COW — V8's GC sees the inherited pages as live (it cannot
+    // distinguish COW from real allocations), so Mark-Compact frees ZERO bytes
+    // and the worker immediately OOMs (confirmed from CI GC logs).
+    // worker_threads have truly separate V8 isolates: the thread heap starts
+    // empty, accumulates only what the test file actually allocates (~few hundred
+    // MB), and never hits the 4 GB adaptive limit on the 7 GB CI runner.
     //
-    // DO NOT set isolate:false in poolOptions.forks — that sets isolateWorkers:false
-    // (long-lived workers that reuse module registry), which freezes static mock
-    // bindings in cached modules and breaks vi.mock() isolation between files.
-    pool: 'forks',
+    // isolate:true is the default for threads — each file gets a fresh module
+    // registry, preserving vi.mock() isolation between files. DO NOT set
+    // isolate:false — that reuses the module registry across files and freezes
+    // static mock bindings in cached modules.
+    //
+    // maxThreads:1 keeps memory bounded (one ~670 MB PGlite instance at a time).
+    pool: 'threads',
     poolOptions: {
-      forks: {
-        maxForks: 1,
+      threads: {
+        maxThreads: 1,
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
