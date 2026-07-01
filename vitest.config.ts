@@ -15,11 +15,12 @@ export default defineConfig({
     // repeated migration inside a file's beforeEach calls). The OS reclaims the
     // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
     //
-    // maxForks:2 + execArgv --max-old-space-size=6144: heavy test files (e.g.
-    // agent.test.ts at 1372 lines) load the full Next.js+app module tree and can
-    // push one fork's V8 heap past Node 24's auto-sized 4 GB limit. 6 GB per fork
-    // gives headroom. 2 forks × 6 GB = 12 GB max V8 + 2 × ~670 MB WASM ≈ 13.3 GB
-    // — fits the GitHub runner's 16 GB with room to spare. Wall-clock ≈ 8–10 min.
+    // maxForks:1 + execArgv --max-old-space-size=8192: agent.test.ts (1372 lines,
+    // full Next.js+app module tree + PGlite) consumes >6 GB of V8 heap alone,
+    // confirmed by GC logs hitting the 6144 MB limit. maxForks:2 with 8 GB each
+    // would require 2×8+2×0.67 ≈ 17.3 GB — exceeds the 16 GB runner. One fork
+    // at a time at 8 GB: 8 + 0.67 ≈ 8.7 GB peak — fits comfortably. Serial
+    // execution adds ~2 min vs 2-fork parallel but stays well within 20-min budget.
     //
     // DO NOT set isolate:false in poolOptions.forks — that sets isolateWorkers:false
     // (long-lived workers that reuse module registry), which freezes static mock
@@ -27,8 +28,8 @@ export default defineConfig({
     pool: 'forks',
     poolOptions: {
       forks: {
-        maxForks: 2,
-        execArgv: ['--max-old-space-size=6144'],
+        maxForks: 1,
+        execArgv: ['--max-old-space-size=8192'],
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
