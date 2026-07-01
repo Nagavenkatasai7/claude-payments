@@ -77,18 +77,29 @@ function OtpFields({
   otpError?: string;
 }) {
   const [requesting, setRequesting] = useState(false);
+  const [requestError, setRequestError] = useState('');
 
   async function requestCode() {
     setRequesting(true);
+    setRequestError('');
     try {
       const res = await fetch(`/api/pay/b2b/${invoiceId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'request_otp' }),
       });
-      if (res.ok) setSent(true);
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      if (res.ok && data.ok) {
+        setSent(true);
+      } else {
+        // Honest non-delivery: do NOT advance to the code input pretending a code is
+        // on the way. Tell the buyer + point them back to the sender.
+        setRequestError(
+          "We couldn't send a code to this WhatsApp number. Make sure it's on WhatsApp, or ask whoever sent the bill to resend it.",
+        );
+      }
     } catch {
-      /* leave !sent so the button stays available to retry */
+      setRequestError("We couldn't send the code right now — please try again.");
     } finally {
       setRequesting(false);
     }
@@ -96,9 +107,12 @@ function OtpFields({
 
   if (!sent) {
     return (
-      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-        {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
-      </button>
+      <div>
+        <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
+          {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+        </button>
+        {requestError && <span className={fieldErrorClasses}>{requestError}</span>}
+      </div>
     );
   }
   return (
@@ -121,6 +135,7 @@ function OtpFields({
       <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
         {requesting ? 'Sending…' : 'Resend code'}
       </button>
+      {requestError && <span className={fieldErrorClasses}>{requestError}</span>}
     </div>
   );
 }

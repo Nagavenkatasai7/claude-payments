@@ -321,19 +321,23 @@ export async function sendAuthTemplate(
   templateName: string,
   languageCode: string,
   components: AuthenticationTemplateComponent[],
+  creds?: WaCreds,
 ): Promise<void> {
   return postWithBackoff(
-    GRAPH_MESSAGES_URL(),
-    authedJsonInit({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'template',
-      template: {
-        name: templateName,
-        language: { code: languageCode },
-        components,
+    GRAPH_MESSAGES_URL(creds),
+    authedJsonInit(
+      {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: languageCode },
+          components,
+        },
       },
-    }),
+      creds,
+    ),
     'WhatsApp auth template send failed',
   );
 }
@@ -599,12 +603,43 @@ export async function sendVerificationStatus(
 }
 
 /**
- * Phase 3 — deliver a per-transaction step-up OTP. A send is in-session (the
- * customer is actively paying), so free-form text works without an
- * AUTHENTICATION template. Never logs the code. Throws on a hard delivery
- * failure (the caller surfaces a generic error; the pay route still won't
- * finalize without a verified code, so a failed send never lets money through).
+ * Phase 3 — deliver a per-transaction step-up OTP. Most payers are in-session (the
+ * consumer paying on the bot), so free-form works — BUT a cross-border B2B buyer
+ * arrives via a seller-FORWARDED pay link and may have NEVER messaged the bot, so
+ * no 24h window is open and a free-form send is silently dropped, stranding them at
+ * the OTP gate. So (mirroring sendOtpCode) deliver via the approved AUTHENTICATION
+ * template when configured — it reaches an allow-listed number OUTSIDE the window,
+ * from the partner's own number via `creds` — with a free-form fallback for the
+ * in-session case and for before the template is approved. Never logs the code;
+ * throws on a hard failure so the route can surface non-delivery (and the pay route
+ * still won't finalize without a verified code, so a failed send never lets money
+ * through).
  */
 export async function sendTransactionOtp(phone: string, code: string, creds?: WaCreds): Promise<void> {
-  await sendText(phone, transactionOtpMessage(code), creds);
+  if (env.otpDevMode) {
+    console.log(`[otp] dev-mode: transaction code ready for ${maskPhone(phone)}`);
+    return;
+  }
+  // No configured template ⇒ pure free-form (the in-session consumer path, unchanged).
+  if (!env.whatsappAuthTemplate) {
+    await sendText(phone, transactionOtpMessage(code), creds);
+    return;
+  }
+  try {
+    await sendAuthTemplate(
+      phone,
+      env.whatsappAuthTemplate,
+      OTP_TEMPLATE_LANG,
+      authenticationTemplateParams(code),
+      creds,
+    );
+  } catch (err) {
+    // Template unavailable (not yet approved) → free-form fallback for an in-session
+    // buyer. Log only the masked phone + the error message (never the code/body).
+    console.warn(
+      `transaction OTP template send failed for ${maskPhone(phone)}; falling back to free-form text:`,
+      err instanceof Error ? err.message : 'unknown error',
+    );
+    await sendText(phone, transactionOtpMessage(code), creds);
+  }
 }

@@ -95,18 +95,25 @@ export async function POST(
     const otpStore = getTransactionOtpStore();
     if (typeof body.action === 'string' && body.action === 'request_otp') {
       const issued = await otpStore.issue(invoiceId, buyerPhone);
-      if (issued.ok) {
-        let otpCreds: WaCreds | undefined;
-        try {
-          otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(invoice.partnerId));
-        } catch {
-          /* fall back to the shared env number */
-        }
-        try {
-          await sendTransactionOtp(buyerPhone, issued.code, otpCreds);
-        } catch {
-          /* generic surface; never log the code */
-        }
+      if (!issued.ok) {
+        // Cooldown — a code was just issued and is still valid; treat as sent (don't
+        // re-send, and don't claim a failure the buyer would act on).
+        return NextResponse.json({ ok: true, sent: true });
+      }
+      let otpCreds: WaCreds | undefined;
+      try {
+        otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(invoice.partnerId));
+      } catch {
+        /* fall back to the shared env number */
+      }
+      try {
+        await sendTransactionOtp(buyerPhone, issued.code, otpCreds);
+      } catch {
+        // Delivery FAILED — e.g. a session-less buyer whose number can't receive a
+        // free-form send and no approved AUTHENTICATION template is set (or the
+        // number isn't allow-listed). Surface it so the UI doesn't tell the buyer a
+        // code is on the way when it isn't. Never log the code.
+        return NextResponse.json({ ok: false, reason: 'otp_send_failed' });
       }
       return NextResponse.json({ ok: true, sent: true });
     }
