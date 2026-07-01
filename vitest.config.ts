@@ -20,14 +20,16 @@ export default defineConfig({
     // repeated migration inside a file's beforeEach calls). The OS reclaims the
     // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
     //
-    // maxForks:1 + execArgv --max-old-space-size=10240: PGlite WASM linear memory
-    // grows MONOTONICALLY — PostgreSQL WAL and shared buffers consume ~106 MB per
-    // test and never shrink within a process. The original agent.test.ts (45 tests)
-    // reached ~12.7 GB peak (8 GB module base + 45×106 MB), OOM-ing at 10 GB.
-    // Fix: split into agent.test.ts (15), agent-2.test.ts (16), agent-3.test.ts (14).
-    // Each file's process peaks at ~8 GB + 16×106 MB ≈ 9.7 GB — under 10 GB limit.
-    // maxForks:2 with 10 GB each would need 2×10+2×0.67 ≈ 21.3 GB — exceeds
-    // 16 GB runner. One fork at a time: 10+0.67+~2 GB overhead ≈ 12.7 GB peak.
+    // maxForks:1 + execArgv --max-old-space-size=13312:
+    // agent*.test.ts imports @/lib/agent which pulls in the full Next.js+app module
+    // tree. That module loading baseline consumes ~10 GB of V8 heap before any test
+    // runs. On top of that, PGlite WASM linear memory grows ~115 MB per test
+    // (WAL/shared buffers never shrink). So each file peaks at:
+    //   10 GB (base) + 15 tests × 0.115 GB ≈ 11.7 GB
+    // agent.test.ts (15 tests), agent-2.test.ts (16), agent-3.test.ts (14) are
+    // split so no file exceeds ~12 GB. 13 GB gives ample headroom.
+    // Total system: 13 GB V8 + 0.67 GB WASM + 0.5 GB OS ≈ 14.2 GB — within the
+    // 16 GB CI runner (maxForks:1 means only one fork runs at a time).
     //
     // DO NOT set isolate:false in poolOptions.forks — that sets isolateWorkers:false
     // (long-lived workers that reuse module registry), which freezes static mock
@@ -36,7 +38,7 @@ export default defineConfig({
     poolOptions: {
       forks: {
         maxForks: 1,
-        execArgv: ['--max-old-space-size=10240'],
+        execArgv: ['--max-old-space-size=13312'],
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
