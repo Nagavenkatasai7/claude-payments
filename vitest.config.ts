@@ -36,12 +36,9 @@ export default defineConfig({
     // static mock bindings in cached modules.
     //
     // maxThreads:1 keeps memory bounded (one ~670 MB PGlite instance at a time).
-    //
-    // Worker thread heap limit: Node.js 22 rejects --max-old-space-size in
-    // execArgv (ERR_WORKER_INVALID_EXEC_ARGV) and Vitest's pool doesn't expose
-    // resourceLimits. Instead the npm test script runs vitest under
-    // `node --max-old-space-size=2048`, which sets V8's global flag before any
-    // isolates are created — worker isolates inherit it as their default limit.
+    // helpers-db.ts registers an afterAll that calls client.close() to release
+    // the WASM ArrayBuffer before each worker thread exits, preventing RSS
+    // accumulation across 169 sequential files on the 7 GB CI runner.
     pool: 'threads',
     poolOptions: {
       threads: {
