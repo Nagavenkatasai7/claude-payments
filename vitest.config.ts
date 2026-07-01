@@ -11,12 +11,15 @@ export default defineConfig({
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
     // vmForks: each test file runs in a fresh V8 VM subprocess — module cache is
     // discarded between files so PGlite instances don't bleed between files.
-    // maxForks:4 gives four parallel workers (~42 files each, ~1 GB peak per
-    // worker) instead of one worker that would accumulate >4 GB across 167 files
-    // and OOM.  vmFork isolation means each worker has its own initPromise /
-    // PGlite, so parallel-run flakes from shared state are eliminated.
+    // maxForks:2 balances memory vs wall-clock time.  One worker accumulates
+    // >4 GB across 167 files and hits V8's per-process heap limit (OOM).
+    // Four workers saturate the 7 GB runner RAM at the heavy-PGlite-test wave
+    // (4 × ~1.4 GB = 5.8 GB workers + OS overhead > 7 GB → OS OOM killer).
+    // Two workers peak at ~2 GB each (4 GB total) + 1.5 GB OS/orchestrator =
+    // ~5.5 GB — comfortably within 7 GB.  Wall-clock ≈ 11 min for the full
+    // suite, fitting in the 20-min CI timeout with ample headroom.
     pool: 'vmForks',
-    poolOptions: { vmForks: { maxForks: 4 } },
+    poolOptions: { vmForks: { maxForks: 2 } },
     // 15 s per test: heavy PGlite migrations + GC pauses inside long-lived workers
     // can push simple tests past the 5 s default.  15 s gives ample headroom
     // without masking real hangs.
