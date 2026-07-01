@@ -1457,13 +1457,20 @@ async function registerSellerTool(
       };
     }
     if (existing.status === 'pending' && existing.kycReviewState !== 'needs_review') {
-      // Still finishing onboarding — re-offer the link.
+      // Still finishing onboarding — RE-SEND the link via the system (not the bot).
+      const onboardingUrl = `${env.appBaseUrl}/onboard/seller/${existing.id}`;
+      await enqueueSellerLink(
+        ctx,
+        ctx.phone,
+        `Finish your seller setup here to start billing: ${onboardingUrl}`,
+        `selleronboard:${existing.id}`,
+      );
       return {
         already_registered: true,
         status: 'pending',
-        onboarding_url: `${env.appBaseUrl}/onboard/seller/${existing.id}`,
+        onboarding_url: onboardingUrl,
         reply_to_customer:
-          "You're already partway through registering. Finish your seller setup (payout details + verification) here, then you can start billing.",
+          "You're already partway through registering — I've re-sent your secure setup link. Finish your payout details + verification, then you can start billing.",
       };
     }
     // pending+needs_review, or suspended → in our hands; no link.
@@ -1527,12 +1534,19 @@ async function registerSellerTool(
     };
   }
 
+  const onboardingUrl = `${env.appBaseUrl}/onboard/seller/${sellerId}`;
+  await enqueueSellerLink(
+    ctx,
+    ctx.phone,
+    `Finish your seller setup here — add your payout bank details + a quick verification, then you can start billing: ${onboardingUrl}`,
+    `selleronboard:${sellerId}`,
+  );
   return {
     registered: true,
     status: 'pending',
-    onboarding_url: `${env.appBaseUrl}/onboard/seller/${sellerId}`,
+    onboarding_url: onboardingUrl,
     reply_to_customer:
-      "Great — you're registered as a seller. Finish your setup here (your payout bank details + a quick verification) and you'll be ready to send bills to your customers.",
+      "Great — you're registered as a seller. I've just sent you a secure link to finish your setup (your payout bank details + a quick verification) — tap it and you'll be ready to send bills to your customers.",
   };
 }
 
@@ -1613,7 +1627,7 @@ async function createInvoiceTool(
   const candidateId = `inv_${newTransferId()}`;
   const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
   const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
-  const sellerReply = `Your bill for ${amount} ${seller.currency} is ready. Share this secure link with your customer to get paid — I've also messaged it to them if they're reachable: ${payUrl}`;
+  const sellerReply = `Your bill for ${amount} ${seller.currency} is ready — I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`;
 
   if (invoiceId !== candidateId) {
     // Duplicate within the TTL — the original run already created the bill and
@@ -1689,6 +1703,16 @@ async function createInvoiceTool(
     logWarn('create_invoice.delivery-enqueue-failed', 'buyer-delivery enqueue failed', { phone: ctx.phone });
   }
 
+  // Durable SELLER delivery — the seller's OWN clickable copy of the pay link to
+  // forward. The bot is globally barred from typing URLs, so the seller's link is
+  // system-delivered (like the buyer push), never left to the model.
+  await enqueueSellerLink(
+    ctx,
+    ctx.phone,
+    `Your bill for ${amount} ${seller.currency} is ready — share this secure link with your customer to get paid: ${payUrl}`,
+    `sellerbill:${invoiceId}`,
+  );
+
   return {
     created: true,
     invoice_id: invoiceId,
@@ -1697,6 +1721,28 @@ async function createInvoiceTool(
     currency: seller.currency,
     reply_to_customer: sellerReply,
   };
+}
+
+// Seller-facing links (onboarding / pay) are delivered by the SYSTEM via the
+// durable outbox — NOT typed by the bot, which is globally barred from writing URLs
+// (the consumer pay link is system-delivered the same way). Best-effort + deduped:
+// a failed enqueue never fails the action, and a replay can't double-send.
+async function enqueueSellerLink(
+  ctx: ToolContext,
+  to: string,
+  body: string,
+  dedupeKey: string,
+): Promise<void> {
+  try {
+    await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
+      'whatsapp.text',
+      { to, body, ...(ctx.waCreds ? { creds: ctx.waCreds } : {}) },
+      { dedupeKey },
+    );
+    pokeWorker();
+  } catch {
+    logWarn('seller-link.enqueue-failed', 'seller link enqueue failed', { phone: to });
+  }
 }
 
 // Sticky EDD profile: when both SoF + occupation are supplied (validated) and
