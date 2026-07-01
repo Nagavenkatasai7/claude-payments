@@ -22,7 +22,6 @@ import type { Db } from '@/db/client';
 // files complete; no explicit close() is needed.
 
 declare global {
-  // eslint-disable-next-line no-var
   var __pgliteDb: Promise<ReturnType<typeof drizzle<typeof schema>>> | undefined;
 }
 
