@@ -62,14 +62,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # Split into two shards so the vitest orchestrator never accumulates more
-      # than ~half the suite's results in memory at once. Each shard peaks at
-      # ~2 GB; the default 4 GB heap is sufficient with headroom for GC.
-      - name: Test (shard 1/2)
-        run: npx vitest run --passWithNoTests --shard=1/2
-
-      - name: Test (shard 2/2)
-        run: npx vitest run --passWithNoTests --shard=2/2
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build
