@@ -10,12 +10,17 @@ export default defineConfig({
     // test copies must never run against this checkout's src.
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
     // vmForks: each test file runs in a fresh V8 VM subprocess — module cache is
-    // discarded between files, so peak heap = one file's footprint (~300 MB) rather
-    // than the sum of all parallel workers.  maxForks:1 serialises execution to
-    // keep memory flat; the suite is I/O-bound (PGlite) not CPU-bound, so
-    // concurrency would not help much anyway.
+    // discarded between files so PGlite instances don't bleed between files.
+    // maxForks:4 gives four parallel workers (~42 files each, ~1 GB peak per
+    // worker) instead of one worker that would accumulate >4 GB across 167 files
+    // and OOM.  vmFork isolation means each worker has its own initPromise /
+    // PGlite, so parallel-run flakes from shared state are eliminated.
     pool: 'vmForks',
-    poolOptions: { vmForks: { maxForks: 1 } },
+    poolOptions: { vmForks: { maxForks: 4 } },
+    // 15 s per test: heavy PGlite migrations + GC pauses inside long-lived workers
+    // can push simple tests past the 5 s default.  15 s gives ample headroom
+    // without masking real hangs.
+    testTimeout: 15000,
     // CI-only: PGlite suites occasionally flake 1-3 tests under parallel runs
     // (they pass in isolation — see CLAUDE.md gotchas). One retry keeps known
     // flakes from evicting good PRs from the merge queue; locally retries stay
