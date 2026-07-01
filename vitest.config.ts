@@ -9,12 +9,6 @@ export default defineConfig({
     // .claude/worktrees holds agent worktrees (full repo copies) — their stale
     // test copies must never run against this checkout's src.
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
-    // forks pool: each test file runs in its own process. PGlite (in-process
-    // Postgres) holds ~200–500 MB per suite; with the default threads pool the
-    // heap accumulates across all 150+ files and OOMs on CI runners. forks
-    // reclaim that memory on process exit and also eliminate the shared-heap
-    // flakes noted in CLAUDE.md.
-    pool: 'forks',
     // CI-only: PGlite suites occasionally flake 1-3 tests under parallel runs
     // (they pass in isolation — see CLAUDE.md gotchas). One retry keeps known
     // flakes from evicting good PRs from the merge queue; locally retries stay
