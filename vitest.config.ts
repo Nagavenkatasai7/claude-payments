@@ -21,15 +21,14 @@ export default defineConfig({
     // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
     //
     // maxForks:1 + execArgv --max-old-space-size=13312:
-    // agent*.test.ts imports @/lib/agent which pulls in the full Next.js+app module
-    // tree. That module loading baseline consumes ~10 GB of V8 heap before any test
-    // runs. On top of that, PGlite WASM linear memory grows ~115 MB per test
-    // (WAL/shared buffers never shrink). So each file peaks at:
-    //   10 GB (base) + 15 tests × 0.115 GB ≈ 11.7 GB
+    // agent*.test.ts mock @/db/client (via vi.hoisted + vi.mock) so the Neon
+    // WebSocket driver and ws are never loaded — that's what caused the 12+ GB
+    // non-reclaimable heap that OOM'd the 7 GB ubuntu-latest CI runner. With the
+    // mock, the module-loading baseline is ~2-3 GB; PGlite WASM grows ~115 MB per
+    // test. 13 GB is a generous ceiling that V8 will never approach; it is kept
+    // because lowering it risks OOM if a future import re-introduces a heavy dep.
     // agent.test.ts (15 tests), agent-2.test.ts (16), agent-3.test.ts (14) are
-    // split so no file exceeds ~12 GB. 13 GB gives ample headroom.
-    // Total system: 13 GB V8 + 0.67 GB WASM + 0.5 GB OS ≈ 14.2 GB — within the
-    // 16 GB CI runner (maxForks:1 means only one fork runs at a time).
+    // split so no single file's PGlite WASM growth gets too large.
     //
     // DO NOT set isolate:false in poolOptions.forks — that sets isolateWorkers:false
     // (long-lived workers that reuse module registry), which freezes static mock

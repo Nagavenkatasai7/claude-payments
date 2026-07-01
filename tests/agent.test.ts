@@ -14,11 +14,15 @@ import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
 import type { Db } from '@/db/client';
 
-// Best-rate routing (B2): the agent wires the LIVE route selector into the
-// tool ctx — `selectSettlementRoute(getDb(), …)`. getDb() dials the dud test
-// DATABASE_URL, so the module is mocked file-wide; the default impl returns
-// the platform route (mid), which is byte-identical to no routing for every
-// pre-existing test. The wiring suite overrides per-test.
+// Mock @/db/client so the Neon WebSocket driver (+ ws) is never loaded in this
+// test process — these are the modules responsible for the 12 GB heap footprint
+// that OOMs the 7 GB CI runner. getDb() returns the PGlite instance set each
+// beforeEach so tools that call getDb() get the real in-process Postgres.
+const _dbProxy = vi.hoisted(() => ({ current: null as any }));
+vi.mock('@/db/client', () => ({ getDb: () => _dbProxy.current }));
+
+// selectSettlementRoute is mocked to return a fixed mid-rate so tests don't
+// depend on live FX routing logic.
 vi.mock('@/lib/partner-rates', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/partner-rates')>()),
   selectSettlementRoute: vi.fn(
@@ -51,6 +55,7 @@ const PHONE = '15551234567';
 beforeEach(async () => {
   resetRateCacheForTests();
   db = await freshDb();
+  _dbProxy.current = db;
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue({
