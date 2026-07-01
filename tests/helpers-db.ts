@@ -10,20 +10,23 @@ import type { Db } from '@/db/client';
 // SKIP LOCKED, or the rank-guarded atomic UPDATE — which are exactly the
 // behaviors under test, so we run the genuine engine.
 //
-// ONE PGlite instance per worker process, stored in `global` so it survives
+// ONE PGlite instance per worker process, stored on `process` so it survives
 // vitest's per-file module-registry reset (isolate:true in forks pool).
+// We store on `process` (not `global`) because vitest's forks pool evaluates
+// each test file in a fresh vm context where `globalThis` is per-context, but
+// `process` is the same injected reference across all contexts in the worker.
 // Creating a new WASM engine per file accumulates ~670 MB/instance and cannot
 // be reclaimed mid-run: vitest retains test-function closures that hold the
 // freshDb→drizzle→PGlite→WASM reference chain live across module resets,
 // blocking gc() from collecting the ArrayBuffer backing stores (confirmed by
 // repeated OOM at exactly 4 GB after ~6 PGlite files per worker).
-// With a single global engine: 4 workers × ~670 MB = ~2.7 GB — safe.
+// With a single engine per worker: 4 workers × ~670 MB = ~2.7 GB — safe.
 // The engine is freed when the OS reclaims the worker process after all its
 // files complete; no explicit close() is needed.
 
-declare global {
-  var __pgliteDb: Promise<ReturnType<typeof drizzle<typeof schema>>> | undefined;
-}
+type ProcWithDb = typeof process & {
+  __pgliteDb?: Promise<ReturnType<typeof drizzle<typeof schema>>>;
+};
 
 const ALL_TABLES = [
   'outbox',
@@ -45,15 +48,16 @@ const ALL_TABLES = [
 ].join(', ');
 
 export async function freshDb(): Promise<Db> {
-  if (!global.__pgliteDb) {
-    global.__pgliteDb = (async () => {
+  const proc = process as ProcWithDb;
+  if (!proc.__pgliteDb) {
+    proc.__pgliteDb = (async () => {
       const client = new PGlite();
       const db = drizzle(client, { schema });
       await migrate(db, { migrationsFolder: './drizzle' });
       return db;
     })();
   }
-  const db = await global.__pgliteDb;
+  const db = await proc.__pgliteDb;
   await db.execute(sql.raw(`TRUNCATE ${ALL_TABLES} RESTART IDENTITY CASCADE`));
   await db.execute(
     sql.raw(
