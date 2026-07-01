@@ -9,29 +9,18 @@ export default defineConfig({
     // .claude/worktrees holds agent worktrees (full repo copies) — their stale
     // test copies must never run against this checkout's src.
     exclude: ['**/node_modules/**', '**/dist/**', 'tests/e2e/**', '.claude/**'],
-    // forks pool: each test file runs in a long-lived forked worker with
-    // isolate:true (module registry cleared between files). helpers-db.ts stores
-    // PGlite on `process` (not `global`) so ONE WASM engine is shared per worker.
-    // vitest evaluates each file in a fresh vm context where `globalThis` differs
-    // per-context, but `process` is the same object injected across all contexts
-    // in the fork. Per-file WASM allocation accumulated ~670 MB/instance and could
-    // not be GC'd (vitest holds closures live for retry/reporting) — OOM at 4 GB
-    // after ~6 PGlite files per worker. One engine per worker:
-    // 4 workers × ~670 MB = ~2.7 GB — safe. Wall-clock ≈ 5–6 min.
+    // forks pool: default isolate:true → isolateWorkers:true in tinypool, so each
+    // test file runs in its own fresh forked process. helpers-db's module-level
+    // _pgliteDb singleton allocates ONE PGlite WASM engine per file (preventing
+    // repeated migration inside a file's beforeEach calls). The OS reclaims the
+    // ~670 MB WASM ArrayBuffer when the worker process exits after each file.
+    // At most 4 concurrent workers: 4 × ~670 MB = ~2.7 GB — safe.
+    // Wall-clock ≈ 5–6 min. DO NOT set isolate:false in poolOptions.forks —
+    // that sets isolateWorkers:false (long-lived workers that reuse module
+    // registry), which freezes static mock bindings in cached modules and breaks
+    // vi.mock() isolation between files.
     pool: 'forks',
-    poolOptions: {
-      forks: {
-        maxForks: 4,
-        // isolate:false keeps helpers-db's module-level _pgliteDb alive for
-        // the worker's entire lifetime (one WASM engine per worker process).
-        // With isolate:true (default) vitest re-imports every module per file,
-        // creating a fresh PGlite instance each time; 6 instances × ~670 MB
-        // overflows the ~4 GB auto-sized V8 heap. isolate:false means the
-        // module registry is NOT cleared between files, so _pgliteDb is
-        // allocated once per worker and reused — 4 workers × ~670 MB = safe.
-        isolate: false,
-      },
-    },
+    poolOptions: { forks: { maxForks: 4 } },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
     // default.  15 s gives ample headroom without masking real hangs.
     testTimeout: 15000,

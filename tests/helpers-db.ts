@@ -10,22 +10,14 @@ import type { Db } from '@/db/client';
 // SKIP LOCKED, or the rank-guarded atomic UPDATE — which are exactly the
 // behaviors under test, so we run the genuine engine.
 //
-// ONE PGlite instance per worker process, stored as a module-level variable.
-// vitest.config.ts sets isolate:false in the forks pool so the module registry
-// is NOT cleared between test files in the same worker — _pgliteDb is allocated
-// once per worker and reused across every file that worker handles.
-//
-// With isolate:true (default), vitest re-imports every module per file, which
-// creates a fresh PGlite WASM instance each time. Each instance holds ~670 MB
-// of V8 heap in ArrayBuffer backing stores that cannot be reclaimed mid-run
-// (vitest keeps test-function closures alive for retry/reporting). On a 7 GB
-// runner Node.js auto-sizes the heap to ~4 GB, so 6 instances × ~670 MB = OOM.
-// With isolate:false: 4 workers × ~670 MB = ~2.7 GB — safe.
-// The engine is freed when the OS reclaims the worker process after all its
-// files complete; no explicit close() is needed.
+// vitest.config.ts uses pool:'forks' with default isolate:true, so each test
+// file runs in its own fresh forked process (isolateWorkers:true in tinypool).
+// This module-level _pgliteDb singleton ensures ONE PGlite WASM engine per
+// worker process — preventing repeated migration in a file's beforeEach calls.
+// The OS reclaims the ~670 MB WASM ArrayBuffer when the worker exits after the
+// file completes; no explicit close() needed. At most 4 concurrent workers:
+// 4 × ~670 MB = ~2.7 GB — safe.
 
-// Module-level singleton — survives for the worker's entire lifetime because
-// isolate:false keeps this module loaded (not re-imported) between test files.
 let _pgliteDb: Promise<ReturnType<typeof drizzle<typeof schema>>> | undefined;
 
 const ALL_TABLES = [
