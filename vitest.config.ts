@@ -36,14 +36,16 @@ export default defineConfig({
     // static mock bindings in cached modules.
     //
     // maxThreads:1 keeps memory bounded (one ~670 MB PGlite instance at a time).
+    //
+    // Worker thread heap limit: Node.js 22 rejects --max-old-space-size in
+    // execArgv (ERR_WORKER_INVALID_EXEC_ARGV) and Vitest's pool doesn't expose
+    // resourceLimits. Instead the npm test script runs vitest under
+    // `node --max-old-space-size=2048`, which sets V8's global flag before any
+    // isolates are created — worker isolates inherit it as their default limit.
     pool: 'threads',
     poolOptions: {
       threads: {
         maxThreads: 1,
-        // Give each worker thread 2 GB old-space. Worker threads start with
-        // an EMPTY V8 isolate (no COW inheritance), so 2 GB covers even the
-        // heaviest PGlite file without risk of aggregate OOM on maxThreads:1.
-        execArgv: ['--max-old-space-size=2048'],
       },
     },
     // 15 s per test: heavy PGlite migrations can push simple tests past the 5 s
