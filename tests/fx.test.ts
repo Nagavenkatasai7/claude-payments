@@ -188,6 +188,22 @@ describe('quote — cross-rate invariant: negative destToUsd must throw (regress
   });
 });
 
+describe('quote — IEEE 754 overflow guard (regression)', () => {
+  // amountUsd = round2(1e305 × 1e-303) = round2(100) = 100 — passes min/max check
+  // amountInr = Math.round(1e305 × 2000) = Math.round(2e308) = Infinity — must be caught
+  it('throws QuoteError when amountInr would overflow to Infinity (extreme-but-finite inputs)', () => {
+    expect(() =>
+      quote(1e305, 'USD', { toInr: 2000, toUsd: 1e-303 }, 'bank_transfer', 0),
+    ).toThrow(QuoteError);
+  });
+  it('throws QuoteError on a first transfer (feeUsd=0) so feeSource guard does not mask amountInr guard', () => {
+    // Verifies the amountInr guard fires independently of the feeSource path.
+    expect(() =>
+      quote(1e305, 'USD', { toInr: 2000, toUsd: 1e-303 }, 'bank_transfer', 0),
+    ).toThrow('Amount too large');
+  });
+});
+
 describe('quote — any-to-any cross-currency destination', () => {
   const USD2 = { toInr: 85, toUsd: 1 };
   it('USD→INR is byte-for-byte the legacy result (5-arg call defaults to INR)', () => {

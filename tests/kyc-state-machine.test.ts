@@ -103,6 +103,28 @@ describe('applyKycEvent (human-review-only)', () => {
     expect(d.watchlistHit).toBe(true);
     expect(d.kycReviewState).toBe('needs_review');
   });
+
+  // Regression: 'report/pep.matched' was falling through to the default switch branch —
+  // pepHit was never set and the customer stayed in pending_review with no visible flag.
+  it('a PEP match → needs_review + pepHit (regression: was silently ignored)', () => {
+    const pending = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const d = applyKycEvent(pending, ev({ name: 'report/pep.matched', status: null, pepMatched: true }));
+    expect(d.kycReviewState).toBe('needs_review');
+    expect(d.pepHit).toBe(true);
+    expect(d.watchlistHit).toBeUndefined(); // watchlist flag must not bleed across
+  });
+
+  it('report/pep.matched event name alone (no pepMatched flag) also triggers needs_review', () => {
+    const d = applyKycEvent(base, ev({ name: 'report/pep.matched', status: null }));
+    expect(d.kycReviewState).toBe('needs_review');
+    expect(d.pepHit).toBe(true);
+  });
+
+  it('hold lock: a routine inquiry event on a needs_review customer is ignored', () => {
+    const held = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const d = applyKycEvent(held, ev({ name: 'inquiry.completed', status: 'completed' }));
+    expect(d).toEqual({}); // routine event must not downgrade the compliance hold
+  });
 });
 
 

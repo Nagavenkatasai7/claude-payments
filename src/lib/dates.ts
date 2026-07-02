@@ -12,8 +12,12 @@ export function easternMonth(epochMs: number): string {
 }
 
 export function easternDayOfMonth(epochMs: number): number {
+  const d = new Date(epochMs);
+  if (isNaN(d.getTime())) {
+    throw new RangeError(`easternDayOfMonth: invalid epochMs ${epochMs}`);
+  }
   return Number(
-    new Date(epochMs).toLocaleString('en-US', { timeZone: ET, day: 'numeric' }),
+    d.toLocaleString('en-US', { timeZone: ET, day: 'numeric' }),
   );
 }
 

@@ -45,6 +45,24 @@ describe('easternDayOfWeek — invalid epochMs must throw (regression)', () => {
   });
 });
 
+describe('easternDayOfMonth — invalid epochMs must throw (regression)', () => {
+  // easternDayOfWeek already throws for invalid dates; easternDayOfMonth was missing the same guard.
+  // When a corrupt DB field yields NaN the monthly-schedule comparison (dayOfMonth === NaN) is
+  // always false, silently preventing the schedule from firing.
+  it('throws RangeError for NaN', () => {
+    expect(() => easternDayOfMonth(NaN)).toThrow(RangeError);
+  });
+  it('throws RangeError for Infinity', () => {
+    expect(() => easternDayOfMonth(Infinity)).toThrow(RangeError);
+  });
+  it('throws RangeError for -Infinity', () => {
+    expect(() => easternDayOfMonth(-Infinity)).toThrow(RangeError);
+  });
+  it('throws RangeError for an out-of-range epochMs (> 8.64e15)', () => {
+    expect(() => easternDayOfMonth(8.64e15 + 1)).toThrow(RangeError);
+  });
+});
+
 describe('easternMonth', () => {
   it('returns YYYY-MM in Eastern time', () => {
     // 2026-05-24 18:00Z = 2pm ET → May 2026
