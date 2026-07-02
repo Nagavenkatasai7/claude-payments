@@ -118,6 +118,12 @@ export function quote(
     throw new QuoteError('Invalid exchange rate; please try again.');
   }
   const amountInr = Math.round(amountSource * crossRate); // amount in the destination currency
+  if (!Number.isFinite(amountInr)) {
+    throw new QuoteError('Amount too large; please try again.');
+  }
+  if (!Number.isFinite(feeSource)) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
 
   return {
     amountUsd,

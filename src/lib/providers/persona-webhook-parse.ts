@@ -13,13 +13,15 @@ export interface PersonaEvent {
   eventId: string;
   name: string; // 'inquiry.created' | 'inquiry.started' | 'inquiry.completed' | 'inquiry.approved'
   //            | 'inquiry.declined' | 'inquiry.failed' | 'inquiry.marked-for-review'
-  //            | 'inquiry.expired' | 'inquiry.transitioned' | 'report/watchlist.matched' | …
+  //            | 'inquiry.expired' | 'inquiry.transitioned' | 'report/watchlist.matched'
+  //            | 'report/pep.matched' | …
   createdAt: string; // ISO — order events by this when reconciling out-of-order delivery
   inquiryId: string | null;
   referenceId: string | null;
   status: string | null;
   idLast4?: string;
   watchlistMatched?: boolean;
+  pepMatched?: boolean; // true for 'report/pep.matched' events
 }
 
 function digitsLast4(v: unknown): string | undefined {
@@ -58,6 +60,7 @@ export function parsePersonaEvent(body: unknown): PersonaEvent | null {
       status: iAttrs?.status ?? null,
       idLast4: digitsLast4(idField),
       watchlistMatched: name === 'report/watchlist.matched' ? true : undefined,
+      pepMatched: name === 'report/pep.matched' ? true : undefined,
     };
   } catch {
     return null;
