@@ -178,6 +178,7 @@ export const sellers = pgTable(
     currency: text('currency').notNull(),
     payoutDestinationEnc: text('payout_destination_enc'), // null until onboarding completes
     payoutLast4: text('payout_last4'),
+    payoutMethod: text('payout_method').notNull().default('bank'), // 'bank' | 'usdc' — how payouts are delivered
     status: text('status').notNull().default('pending'), // 'pending' | 'active' | 'suspended'
     kycReviewState: text('kyc_review_state').notNull().default('none'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

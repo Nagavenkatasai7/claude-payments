@@ -6,7 +6,7 @@ import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
-import { validatePayoutFields } from '@/lib/payout-format';
+import { composeUsdcDestination, validatePayoutFields, validateUsdcAddress } from '@/lib/payout-format';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import { logError } from '@/lib/log';
@@ -63,17 +63,21 @@ export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean 
 }
 
 /**
- * Step-up (2) + activate: verify the OTP, re-validate the payout bank fields
- * authoritatively for the SELLER's own country, compose + ENCRYPT the payout
- * destination (repo encrypts), and flip the seller to ACTIVE. Self-gated: the
+ * Step-up (2) + activate: verify the OTP, re-validate the payout fields
+ * authoritatively — per-country BANK fields, or (method 'usdc') the wallet
+ * address shape — compose + ENCRYPT the payout destination (repo encrypts),
+ * and flip the seller to ACTIVE with the chosen payout method. Self-gated: the
  * seller must exist and still be PENDING (refuses an already-active, suspended,
  * under-review, or unknown seller). Nothing is written until the OTP and the
- * fields both pass.
+ * fields both pass. The METHOD is never trusted raw: anything but the literal
+ * 'usdc' validates as bank, so a forged method can't skip the bank validation.
  */
 export async function activateSellerAction(input: {
   id: string;
   fields: Record<string, string>;
   otp: string;
+  /** Payout method chosen on the page. Absent/unknown ⇒ 'bank' (back-compat). */
+  method?: 'bank' | 'usdc';
 }): Promise<OnboardResult> {
   const id = String(input?.id ?? '');
   try {
@@ -99,26 +103,39 @@ export async function activateSellerAction(input: {
       return { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' };
     }
 
-    // Re-validate the bank fields authoritatively for the SELLER's own country,
-    // composing the canonical payout string server-side (never trust the client).
+    // Re-validate the payout fields authoritatively server-side (never trust the
+    // client): bank ⇒ the SELLER's own country's field rules; usdc ⇒ the wallet
+    // address shape, composed to the canonical `USDC|<address>` string here.
+    // Strict equality on the literal 'usdc' — any other value validates as bank.
+    const method: 'bank' | 'usdc' = input?.method === 'usdc' ? 'usdc' : 'bank';
     const rawFields = input?.fields && typeof input.fields === 'object' ? input.fields : {};
     const fields: Record<string, string> = {};
     for (const [k, v] of Object.entries(rawFields)) {
       if (typeof v === 'string') fields[k] = v;
     }
-    const validation = validatePayoutFields(seller.country, fields);
-    if (!validation.ok) {
-      return { ok: false, error: 'Please check your payout bank details.', fieldErrors: validation.errors };
+    let payoutDestination: string;
+    if (method === 'usdc') {
+      const wallet = validateUsdcAddress(fields.walletAddress ?? '');
+      if (!wallet.ok) {
+        return { ok: false, error: 'Please check your wallet address.', fieldErrors: { walletAddress: wallet.error } };
+      }
+      payoutDestination = composeUsdcDestination(wallet.address);
+    } else {
+      const validation = validatePayoutFields(seller.country, fields);
+      if (!validation.ok) {
+        return { ok: false, error: 'Please check your payout bank details.', fieldErrors: validation.errors };
+      }
+      payoutDestination = validation.payoutDestination;
     }
 
-    // Persist the ENCRYPTED payout AND flip ACTIVE in ONE guarded atomic write,
-    // scoped by the seller's own phone + partner. The guard re-checks pending +
-    // not-needs_review at WRITE time (closes the TOCTOU against a review hold that
-    // lands between page load and submit); a null return means the seller was no
-    // longer eligible (raced, re-flagged, or gone) → refuse rather than report a
-    // false success.
+    // Persist the ENCRYPTED payout + the chosen payout method AND flip ACTIVE in
+    // ONE guarded atomic write, scoped by the seller's own phone + partner. The
+    // guard re-checks pending + not-needs_review at WRITE time (closes the TOCTOU
+    // against a review hold that lands between page load and submit); a null
+    // return means the seller was no longer eligible (raced, re-flagged, or gone)
+    // → refuse rather than report a false success.
     const activated = await getStore().completeSellerOnboarding(
-      seller.phone, seller.partnerId, validation.payoutDestination,
+      seller.phone, seller.partnerId, payoutDestination, method,
     );
     if (!activated) {
       return { ok: false, error: 'This onboarding link is no longer active.', reason: 'state' };

@@ -82,8 +82,51 @@ describe('createSellerRepo', () => {
       const done = await repo.activateOnboarding('85291234567', DEFAULT_PARTNER_ID, 'HK|024|388|123456789');
       expect(done?.status).toBe('active');
       expect(done?.payoutLast4).toBe('6789');
+      expect(done?.payoutMethod).toBe('bank'); // omitted method defaults to bank — byte-unchanged
       const dec = await repo.getSellerDecrypted('85291234567', DEFAULT_PARTNER_ID);
       expect(dec?.payoutDestination).toBe('HK|024|388|123456789');
+    });
+
+    it('USDC: activates with payoutMethod usdc — encrypted wallet round-trips, last4 = address tail', async () => {
+      const repo = createSellerRepo(db);
+      await repo.createSeller(base);
+      const wallet = 'USDC|0x8ba1f109551bD432803012645Ac136ddd64DBA72';
+      const done = await repo.activateOnboarding('85291234567', DEFAULT_PARTNER_ID, wallet, 'usdc');
+      expect(done?.status).toBe('active');
+      expect(done?.payoutMethod).toBe('usdc');
+      expect(done?.payoutLast4).toBe('BA72'); // the address TAIL, not a digit run
+
+      // Masked read carries the method + last4 only; decrypt round-trips the canonical string.
+      const masked = await repo.getSeller('85291234567', DEFAULT_PARTNER_ID);
+      expect(masked?.payoutMethod).toBe('usdc');
+      expect((masked as unknown as Record<string, unknown>).payoutDestination).toBeUndefined();
+      const dec = await repo.getSellerDecrypted('85291234567', DEFAULT_PARTNER_ID);
+      expect(dec?.payoutDestination).toBe(wallet);
+    });
+
+    it('USDC: the needs_review hold still refuses at write time (no payout, no method flip)', async () => {
+      const repo = createSellerRepo(db);
+      await repo.createSeller({ ...base, kycReviewState: 'needs_review' });
+      const done = await repo.activateOnboarding(
+        '85291234567', DEFAULT_PARTNER_ID, 'USDC|0x8ba1f109551bD432803012645Ac136ddd64DBA72', 'usdc',
+      );
+      expect(done).toBeNull();
+      const still = await repo.getSeller('85291234567', DEFAULT_PARTNER_ID);
+      expect(still?.status).toBe('pending');
+      expect(still?.payoutLast4).toBeUndefined();
+      expect(still?.payoutMethod).toBe('bank'); // untouched default
+    });
+
+    it('USDC: an already-active seller and a cross-tenant write still refuse', async () => {
+      const repo = createSellerRepo(db);
+      await repo.createSeller(base);
+      expect(
+        await repo.activateOnboarding('85291234567', 'other', 'USDC|0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA', 'usdc'),
+      ).toBeNull();
+      await repo.setStatus('85291234567', DEFAULT_PARTNER_ID, 'active');
+      expect(
+        await repo.activateOnboarding('85291234567', DEFAULT_PARTNER_ID, 'USDC|0xaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaA', 'usdc'),
+      ).toBeNull();
     });
 
     it('REFUSES (null, no write) a seller flagged needs_review — the hold holds at write time', async () => {

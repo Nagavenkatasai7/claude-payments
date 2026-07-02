@@ -184,7 +184,10 @@ export async function finalizeCrossBorderBillPayment(
     phone: invoice.buyerPhone, // the payer (buyer)
     recipientName: sellerMasked.businessName, // SCREENED (seller side)
     recipientPhone: sellerMasked.phone, // the delivered notification reaches the seller
-    payoutMethod: 'bank',
+    // The payout RAIL is the seller's verified onboarding choice: 'usdc' ⇒ the
+    // partner delivers USDC to the profile wallet; anything else ⇒ 'bank',
+    // exactly as before (strict equality so an unexpected value can't leak).
+    payoutMethod: sellerMasked.payoutMethod === 'usdc' ? 'usdc' : 'bank',
     payoutDestination: sellerPayout, // FROM THE PROFILE — never buyer input
     fundingMethod: 'bank_pull',
     amountSource: buyerPrincipal, // (ignored under the quote override, but kept consistent)

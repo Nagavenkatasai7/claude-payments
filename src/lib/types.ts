@@ -1,4 +1,7 @@
-export type PayoutMethod = 'upi' | 'bank';
+// 'usdc' = a stablecoin payout to the seller's verified wallet address (B2B
+// cross-border sellers only; chosen at onboarding). NON-CUSTODIAL: the licensed
+// partner executes the USDC transfer — SmartRemit never holds crypto or fiat.
+export type PayoutMethod = 'upi' | 'bank' | 'usdc';
 
 // 'ach_pull' = B2B: the licensed partner ACH-debits the payer's business bank via
 // the signed settlement instruction. SmartRemit never captures funds for this
@@ -134,6 +137,12 @@ export interface B2bInvoice {
 // ── Registered cross-border seller ──
 export type SellerStatus = 'pending' | 'active' | 'suspended';
 
+// How a seller RECEIVES payouts, chosen on the verified onboarding page:
+// 'bank' = per-country bank deposit (the default); 'usdc' = USDC to a wallet
+// address (canonical destination `USDC|<0x address>` in the same encrypted
+// slot). The partner rail executes either — SmartRemit never holds funds.
+export type SellerPayoutMethod = 'bank' | 'usdc';
+
 /**
  * A registered cross-border seller (a business that issues bills and receives
  * payouts in its own currency). MASKED domain shape: the payout destination is
@@ -148,6 +157,7 @@ export interface Seller {
   country: CountryCode;
   currency: CurrencyCode;
   payoutLast4?: string;   // masked tail of the encrypted payout destination
+  payoutMethod: SellerPayoutMethod; // 'bank' (default) | 'usdc' — set at onboarding
   status: SellerStatus;   // 'pending' until onboarding completes (payout + sanctions clear)
   kycReviewState: KycReviewState;
   createdAt: string;      // ISO-8601

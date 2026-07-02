@@ -338,14 +338,16 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     ): Promise<import('./types').Seller | null> {
       return sellerRepo.setReviewState(phone, partnerId, kycReviewState);
     },
-    /** Atomic guarded onboarding completion: encrypt payout + flip ACTIVE in one
-     *  UPDATE (guarded on pending + not-needs_review). Null when not eligible. */
+    /** Atomic guarded onboarding completion: encrypt payout + persist the chosen
+     *  payout method ('bank' default | 'usdc') + flip ACTIVE in one UPDATE
+     *  (guarded on pending + not-needs_review). Null when not eligible. */
     async completeSellerOnboarding(
       phone: string,
       partnerId: import('./types').PartnerId,
       payoutDestination: string,
+      payoutMethod: import('./types').SellerPayoutMethod = 'bank',
     ): Promise<import('./types').Seller | null> {
-      return sellerRepo.activateOnboarding(phone, partnerId, payoutDestination);
+      return sellerRepo.activateOnboarding(phone, partnerId, payoutDestination, payoutMethod);
     },
   };
 }

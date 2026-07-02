@@ -4,6 +4,11 @@ import {
   validatePayoutFields,
   composePayoutDestination,
   accountLast4,
+  USDC_ADDRESS_PATTERN,
+  validateUsdcAddress,
+  composeUsdcDestination,
+  usdcAddressFromDestination,
+  payoutMethodLabel,
 } from '@/lib/payout-format';
 import type { CountryCode } from '@/lib/types';
 
@@ -300,5 +305,74 @@ describe('HK payout fields (cross-border seller corridor)', () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('expected fail');
     expect(r.errors.accountNumber).toBeDefined();
+  });
+});
+
+// ── USDC seller payout (2026-07-02 spec): EVM address shape + canonical compose ──
+const VALID_USDC_ADDRESS = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
+
+describe('validateUsdcAddress — EVM address shape', () => {
+  it('accepts a well-formed 0x + 40-hex address (mixed case)', () => {
+    const r = validateUsdcAddress(VALID_USDC_ADDRESS);
+    expect(r).toEqual({ ok: true, address: VALID_USDC_ADDRESS });
+  });
+
+  it('accepts an all-lowercase and an all-uppercase hex body', () => {
+    expect(validateUsdcAddress(`0x${'a'.repeat(40)}`).ok).toBe(true);
+    expect(validateUsdcAddress(`0x${'F'.repeat(40)}`).ok).toBe(true);
+  });
+
+  it('trims surrounding whitespace before validating', () => {
+    const r = validateUsdcAddress(`  ${VALID_USDC_ADDRESS}\n`);
+    expect(r).toEqual({ ok: true, address: VALID_USDC_ADDRESS });
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace only', '   '],
+    ['missing 0x prefix', '8ba1f109551bD432803012645Ac136ddd64DBA72aa'],
+    ['too short (39 hex)', `0x${'a'.repeat(39)}`],
+    ['too long (41 hex)', `0x${'a'.repeat(41)}`],
+    ['non-hex characters', `0x${'g'.repeat(40)}`],
+    ['embedded space', `0x${'a'.repeat(20)} ${'a'.repeat(19)}`],
+    ['a bank account, not a wallet', '021000021 123456789'],
+    ['an ENS name', 'seller.eth'],
+  ])('rejects %s with a clear error', (_label, raw) => {
+    const r = validateUsdcAddress(raw);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.error.length).toBeGreaterThan(0);
+  });
+
+  it('the exported pattern anchors the whole string (no partial matches)', () => {
+    expect(USDC_ADDRESS_PATTERN.test(VALID_USDC_ADDRESS)).toBe(true);
+    expect(USDC_ADDRESS_PATTERN.test(`x${VALID_USDC_ADDRESS}`)).toBe(false);
+    expect(USDC_ADDRESS_PATTERN.test(`${VALID_USDC_ADDRESS}9`)).toBe(false);
+  });
+});
+
+describe('composeUsdcDestination / usdcAddressFromDestination — canonical round-trip', () => {
+  it('composes the canonical USDC|<address> destination string', () => {
+    expect(composeUsdcDestination(VALID_USDC_ADDRESS)).toBe(`USDC|${VALID_USDC_ADDRESS}`);
+  });
+
+  it('strips the prefix back to the BARE address (the wire format the partner gets)', () => {
+    expect(usdcAddressFromDestination(`USDC|${VALID_USDC_ADDRESS}`)).toBe(VALID_USDC_ADDRESS);
+  });
+
+  it('passes a non-prefixed destination through unchanged (defensive)', () => {
+    expect(usdcAddressFromDestination(VALID_USDC_ADDRESS)).toBe(VALID_USDC_ADDRESS);
+    expect(usdcAddressFromDestination('')).toBe('');
+  });
+});
+
+describe('payoutMethodLabel — receipt/admin payout wording', () => {
+  it('usdc renders as "USDC wallet"', () => {
+    expect(payoutMethodLabel('usdc')).toBe('USDC wallet');
+  });
+
+  it('bank and upi keep the existing uppercase rendering (byte-unchanged)', () => {
+    expect(payoutMethodLabel('bank')).toBe('BANK');
+    expect(payoutMethodLabel('upi')).toBe('UPI');
   });
 });

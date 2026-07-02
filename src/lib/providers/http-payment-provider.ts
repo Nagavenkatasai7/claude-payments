@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import type { Store } from '../store';
+import { usdcAddressFromDestination } from '../payout-format';
 import type { Transfer, TransferStatus } from '../types';
 import type { PartnerPaymentConfig } from '../partner-integrations';
 import type {
@@ -56,9 +57,18 @@ export function buildSettlementInstruction(transfer: Transfer) {
       source: transfer.sourceCountry ?? 'US',
       destination: transfer.destinationCountry ?? 'IN',
     },
+    // USDC seller payout (non-custodial): the rail is 'usdc' and the wire
+    // destination is the BARE 0x wallet address — the canonical `USDC|` storage
+    // prefix is OURS, stripped here so the partner gets exactly the address it
+    // must pay. The seller still nets the EXACT invoiced `amount.destination`;
+    // which chain the USDC moves on is the partner rail's configuration.
+    // Bank/UPI payout legs are byte-unchanged.
     payout: {
       rail: transfer.payoutMethod,
-      destination: transfer.payoutDestination,
+      destination:
+        transfer.payoutMethod === 'usdc'
+          ? usdcAddressFromDestination(transfer.payoutDestination)
+          : transfer.payoutDestination,
     },
     recipient: {
       name: transfer.recipientName,

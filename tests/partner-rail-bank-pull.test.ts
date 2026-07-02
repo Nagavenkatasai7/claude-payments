@@ -75,6 +75,25 @@ describe('partner-rail — cross-border dual-leg bank_pull', () => {
     expect(cbs[0].delayed).toBe(true); // realistic settlement lag → forward loop completes
   });
 
+  it('accepts a SIGNED usdc-payout instruction exactly like bank: ack + the same delayed paid_out callback', async () => {
+    const res = await postInstruction({
+      reference: 'usdc_t1',
+      partner_id: 'default',
+      corridor: { source: 'US', destination: 'HK' },
+      // The USDC seller-payout leg: bare 0x wallet address on the wire.
+      payout: { rail: 'usdc', destination: '0x8ba1f109551bD432803012645Ac136ddd64DBA72' },
+      amount: { source: 128.4, currency: 'USD', destination: 1000, destination_currency: 'HKD', fx_rate: 7.788 },
+      funding: { method: 'bank_debit', token: 'bankpull_abc', amount: 133.4, currency: 'USD', country: 'US' },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, providerRef: 'simrail-usdc_t1', legs: 'dual' });
+
+    const cbs = await railCallbacks();
+    expect(cbs).toHaveLength(1);
+    expect(cbs[0].dedupe_key).toBe('railcb:usdc_t1');
+    expect(cbs[0].delayed).toBe(true); // same forward loop → delivered → invoice paid
+  });
+
   it('rejects a tampered/unsigned dual-leg instruction (fail-closed)', async () => {
     const raw = JSON.stringify({
       reference: 'xb_t2', partner_id: 'default',

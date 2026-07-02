@@ -6,7 +6,7 @@ describe('sellers table', () => {
     const cols = Object.keys(sellers);
     for (const c of [
       'id', 'partnerId', 'phone', 'businessName', 'country', 'currency',
-      'payoutDestinationEnc', 'payoutLast4', 'status', 'kycReviewState',
+      'payoutDestinationEnc', 'payoutLast4', 'payoutMethod', 'status', 'kycReviewState',
       'createdAt', 'updatedAt',
     ]) {
       expect(cols).toContain(c);
