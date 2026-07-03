@@ -306,7 +306,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'create_invoice',
       description:
-        "Create a cross-border bill (invoice) FOR an active registered SELLER to charge one of their buyers. Call this when a registered seller says 'bill / invoice / charge <someone> for <amount>'. amount is in the SELLER's OWN currency (their fixed obligation) — never convert it; the buyer pays the live FX equivalent + fees at payment time. Pass buyer_phone (the customer's WhatsApp number with country code) and amount; description is optional (what the bill is for). Returns { created: true, invoice_id, pay_url, amount, currency } — relay the secure pay_url back to the SELLER so they can forward it (we also try to message the buyer directly). If the seller is not registered/active yet it returns { created: false, needs_registration: true, reply_to_customer } — relay that and call register_seller to get them set up first. Invalid buyer number or a non-positive amount returns { created: false, reply_to_customer }. A seller can only bill from their OWN active profile (their number is the key).",
+        "Create a cross-border bill (invoice) FOR an active registered SELLER to charge one of their buyers. Call this when a registered seller says 'bill / invoice / charge <someone> for <amount>'. The bill may be denominated in the SELLER's own currency (the default — the seller then nets that exact amount and the buyer pays the live FX equivalent + fees at payment time) OR in the BUYER's currency (the buyer then pays that exact amount + fees and the seller receives the live-converted equivalent at payment time). Never convert the amount yourself. Pass buyer_phone (the customer's WhatsApp number with country code) and amount; pass currency ONLY when the seller named one (e.g. 'bill them 1200 MXN' → currency 'MXN'); description is optional (what the bill is for). Returns { created: true, invoice_id, pay_url, amount, currency } — relay the secure pay_url back to the SELLER so they can forward it (we also try to message the buyer directly). If the seller is not registered/active yet it returns { created: false, needs_registration: true, reply_to_customer } — relay that and call register_seller to get them set up first. Invalid buyer number, a non-positive amount, or a currency that is neither the seller's nor the buyer's returns { created: false, reply_to_customer } — relay it (it names the allowed currencies). A seller can only bill from their OWN active profile (their number is the key).",
       parameters: {
         type: 'object',
         properties: {
@@ -318,7 +318,12 @@ export const toolSchemas: ChatTool[] = [
           amount: {
             type: 'number',
             description:
-              "The bill amount in the SELLER's own currency (their fixed obligation). Pass the number the seller stated — do NOT convert it.",
+              'The bill amount (the fixed obligation), in the currency the seller stated. Pass the number the seller stated — do NOT convert it.',
+          },
+          currency: {
+            type: 'string',
+            description:
+              "Optional ISO code of the currency the seller stated (e.g. 'USD', 'MXN'). Omit when the seller didn't name one — the bill then uses the seller's own currency. Only the seller's currency or the buyer's currency is accepted; anything else is refused.",
           },
           description: {
             type: 'string',
@@ -753,7 +758,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'capture_corridor_request',
       description:
-        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 9 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 9 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
+        "Capture a lead when a user wants to send to a country we don't deliver to yet (any country outside the 10 supported: US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong, Mexico). Saves their destination + rough amount for the team. PRECONDITION: only call this AFTER you have already told the customer, as the FIRST sentence of your reply, that we don't deliver to that country yet and listed the 10 supported countries. Never call this before that limitation sentence, and never let needing an approx_amount make you open with a 'how much' question.",
       parameters: {
         type: 'object',
         properties: {
@@ -1557,9 +1562,13 @@ async function registerSellerTool(
 /**
  * create_invoice — the WhatsApp seller-initiated creation of a cross-border bill
  * (Plan 5). An ACTIVE registered seller bills a buyer: the obligation is FIXED in
- * the SELLER'S own currency (the buyer pays the live FX equivalent + fees at
- * payment time, on /pay/b2b/<invoiceId>). This tool mints the invoice + the
- * secure pay link and ENQUEUES a durable buyer-delivery push.
+ * the SELLER'S own currency (Case S, the default — the buyer pays the live FX
+ * equivalent + fees at payment time) OR, when the seller names it, in the
+ * BUYER'S currency (Case B, 2026-07-02 spec — the buyer pays that exact amount
+ * + fees; the seller receives the live-converted equivalent at payment time, on
+ * /pay/b2b/<invoiceId>). Any third currency is refused and NOTHING is created.
+ * This tool mints the invoice + the secure pay link and ENQUEUES a durable
+ * buyer-delivery push.
  *
  * Invariants:
  *  • ctx.phone-owned — the seller is resolved BY their own number, so a seller can
@@ -1609,8 +1618,8 @@ async function createInvoiceTool(
     };
   }
 
-  // Validate the amount — finite and strictly positive (it is in the SELLER's
-  // own currency; we never convert it here).
+  // Validate the amount — finite and strictly positive (it is in the bill's
+  // stated denomination; we never convert it here).
   const amount = Number(args.amount);
   if (!Number.isFinite(amount) || amount <= 0) {
     return {
@@ -1619,6 +1628,29 @@ async function createInvoiceTool(
     };
   }
 
+  // ── Denomination (2026-07-02 spec): the SELLER's currency (Case S, the
+  // default) OR the BUYER's currency (Case B, derived from the buyer's number).
+  // Any third currency is REFUSED, naming the two allowed options, and NOTHING
+  // is created. An unmapped buyer calling code leaves only Case S available.
+  const requestedCurrency = String(args.currency ?? '').trim().toUpperCase();
+  const buyerCurrency = currencyForPhone(buyerPhone);
+  let invoicedCurrency: CurrencyCode;
+  if (requestedCurrency === '' || requestedCurrency === seller.currency) {
+    invoicedCurrency = seller.currency; // Case S — today's behavior, byte-unchanged
+  } else if (buyerCurrency && requestedCurrency === buyerCurrency) {
+    invoicedCurrency = buyerCurrency; // Case B — the buyer's price is the fixed side
+  } else {
+    const options =
+      buyerCurrency && buyerCurrency !== seller.currency
+        ? `${seller.currency} (your currency) or ${buyerCurrency} (your customer's currency)`
+        : `${seller.currency} (your currency)`;
+    return {
+      created: false,
+      reply_to_customer: `I can bill in ${options} — which should this ${amount} be in?`,
+    };
+  }
+  const buyerDenominated = invoicedCurrency !== seller.currency; // Case B
+
   const description = String(args.description ?? '').trim() || `Invoice from ${seller.businessName}`;
 
   // Replay-safe minting (claim-first, the minting spine): the agent.turn outbox row
@@ -1626,30 +1658,36 @@ async function createInvoiceTool(
   // model can emit two calls in one turn — so bind a content key → invoiceId BEFORE
   // the insert. A duplicate gets back the EXISTING id (and link) and skips both the
   // insert and the buyer push, so an infra retry never double-bills. Same shape as
-  // send_approve_picker's content-keyed card dedup.
-  const billKey = `${seller.id}|${buyerPhone}|${amount}|${seller.currency}`;
+  // send_approve_picker's content-keyed card dedup. Keyed on the RESOLVED
+  // denomination so a 500-USD bill and a 500-MXN bill to the same buyer are
+  // distinct claims (Case S keys are byte-identical to before).
+  const billKey = `${seller.id}|${buyerPhone}|${amount}|${invoicedCurrency}`;
   const candidateId = `inv_${newTransferId()}`;
   const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
   const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
-  const sellerReply = `Your bill for ${amount} ${seller.currency} is ready — I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`;
+  // Case B copy is explicit that the seller's side floats: the customer pays the
+  // exact billed figure; the seller receives the converted amount at payment.
+  const sellerReply = buyerDenominated
+    ? `Your bill for ${amount} ${invoicedCurrency} is ready — your customer pays exactly ${amount} ${invoicedCurrency}, and you'll receive the converted ${seller.currency} amount at payment time. I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`
+    : `Your bill for ${amount} ${invoicedCurrency} is ready — I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`;
 
   if (invoiceId !== candidateId) {
     // Duplicate within the TTL — the original run already created the bill and
     // enqueued the buyer push; just hand the seller the SAME link (their reply may
     // have failed to send the first time, which is what triggered this replay).
-    return { created: true, invoice_id: invoiceId, pay_url: payUrl, amount, currency: seller.currency, reply_to_customer: sellerReply };
+    return { created: true, invoice_id: invoiceId, pay_url: payUrl, amount, currency: invoicedCurrency, reply_to_customer: sellerReply };
   }
 
   // USD-equivalent snapshot for the NOT-NULL amountUsd column (back-compat display
   // ONLY — the authoritative obligation is invoicedAmount/invoicedCurrency). A USD
-  // seller is exactly 1 (skip the FX hit); for any other currency getFxRates falls
+  // bill is exactly 1 (skip the FX hit); for any other denomination getFxRates falls
   // back to static rates internally, so this rarely moves and never blocks creation.
   let amountUsd = amount;
-  if (seller.currency !== 'USD') {
+  if (invoicedCurrency !== 'USD') {
     try {
-      const sellerRates = await getFxRates(seller.currency);
-      if (Number.isFinite(sellerRates.toUsd) && sellerRates.toUsd > 0) {
-        amountUsd = round2(amount * sellerRates.toUsd);
+      const invoicedRates = await getFxRates(invoicedCurrency);
+      if (Number.isFinite(invoicedRates.toUsd) && invoicedRates.toUsd > 0) {
+        amountUsd = round2(amount * invoicedRates.toUsd);
       }
     } catch {
       logWarn('create_invoice.fx-snapshot-failed', 'USD snapshot best-effort failed', { phone: ctx.phone });
@@ -1666,7 +1704,7 @@ async function createInvoiceTool(
     currency: seller.currency,
     sellerId: seller.id,
     invoicedAmount: amount,
-    invoicedCurrency: seller.currency,
+    invoicedCurrency,
     status: 'unpaid',
     createdAt: new Date().toISOString(),
   };
@@ -1713,7 +1751,7 @@ async function createInvoiceTool(
   await enqueueSellerLink(
     ctx,
     ctx.phone,
-    `Your bill for ${amount} ${seller.currency} is ready — share this secure link with your customer to get paid: ${payUrl}`,
+    `Your bill for ${amount} ${invoicedCurrency} is ready — share this secure link with your customer to get paid: ${payUrl}`,
     `sellerbill:${invoiceId}`,
   );
 
@@ -1722,7 +1760,7 @@ async function createInvoiceTool(
     invoice_id: invoiceId,
     pay_url: payUrl,
     amount,
-    currency: seller.currency,
+    currency: invoicedCurrency,
     reply_to_customer: sellerReply,
   };
 }

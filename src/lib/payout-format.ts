@@ -109,6 +109,10 @@ export const BANK_FIELDS_BY_COUNTRY: Record<CountryCode, Field[]> = {
     { key: 'branchCode', label: 'Branch code', digits: 3 },
     { ...ACCOUNT_FIELD },
   ],
+  MX: [
+    // The standard 18-digit Mexican interbank account number (CLABE).
+    { key: 'clabe', label: 'CLABE', digits: 18, isAccount: true },
+  ],
 };
 
 export type ValidationResult =

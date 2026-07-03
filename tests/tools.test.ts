@@ -3181,6 +3181,98 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
   });
 
+  // ── Denomination (2026-07-02 spec): seller currency OR buyer currency ──────
+
+  it('currency ABSENT → Case S: the bill is denominated in the seller currency (today\'s behavior)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    const r = await executeTool('create_invoice', { buyer_phone: '525512345678', amount: 250 }, ctx);
+    expect(r.created).toBe(true);
+    expect(r.currency).toBe('USD');
+    const inv = await ctx.store.getB2bInvoice(String(r.invoice_id));
+    expect(inv?.invoicedAmount).toBe(250);
+    expect(inv?.invoicedCurrency).toBe('USD');
+  });
+
+  it("currency = the SELLER's → Case S (explicit)", async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    const r = await executeTool(
+      'create_invoice',
+      { buyer_phone: '525512345678', amount: 250, currency: 'usd' }, // case-insensitive
+      ctx,
+    );
+    expect(r.created).toBe(true);
+    expect(r.currency).toBe('USD');
+    expect((await ctx.store.getB2bInvoice(String(r.invoice_id)))?.invoicedCurrency).toBe('USD');
+  });
+
+  it("currency = the BUYER's → Case B: the bill is denominated in the buyer currency", async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    const r = await executeTool(
+      'create_invoice',
+      { buyer_phone: '+52 55 1234 5678', amount: 1200, currency: 'MXN' },
+      ctx,
+    );
+    expect(r.created).toBe(true);
+    expect(r.amount).toBe(1200);
+    expect(r.currency).toBe('MXN');
+    // The seller reply says the customer pays exactly 1200 MXN and the seller
+    // receives the CONVERTED amount at payment — never a seller-nets-exact promise.
+    expect(String(r.reply_to_customer)).toContain('1200 MXN');
+    expect(String(r.reply_to_customer).toLowerCase()).toContain('converted');
+    const inv = await ctx.store.getB2bInvoice(String(r.invoice_id));
+    expect(inv?.invoicedAmount).toBe(1200);
+    expect(inv?.invoicedCurrency).toBe('MXN');
+    expect(inv?.status).toBe('unpaid');
+  });
+
+  it('a THIRD currency is refused, naming BOTH allowed currencies — NOTHING created', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    const r = await executeTool(
+      'create_invoice',
+      { buyer_phone: '525512345678', amount: 500, currency: 'GBP' },
+      ctx,
+    );
+    expect(r.created).toBe(false);
+    expect(r.invoice_id).toBeUndefined();
+    expect(String(r.reply_to_customer)).toContain('USD');
+    expect(String(r.reply_to_customer)).toContain('MXN');
+    expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
+  });
+
+  it('an UNMAPPED buyer calling code leaves only the seller currency (Case B unavailable)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    // +49 (Germany) is not a supported corridor — currencyForPhone is undefined.
+    const r = await executeTool(
+      'create_invoice',
+      { buyer_phone: '4915123456789', amount: 500, currency: 'EUR' },
+      ctx,
+    );
+    expect(r.created).toBe(false);
+    expect(String(r.reply_to_customer)).toContain('USD');
+    expect(String(r.reply_to_customer)).not.toContain('EUR');
+    expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
+  });
+
+  it('a 500-USD bill and a 500-MXN bill to the SAME buyer are DISTINCT claims (two invoices)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    const usd = await executeTool('create_invoice', { buyer_phone: '525512345678', amount: 500 }, ctx);
+    const mxn = await executeTool(
+      'create_invoice',
+      { buyer_phone: '525512345678', amount: 500, currency: 'MXN' },
+      ctx,
+    );
+    expect(usd.created).toBe(true);
+    expect(mxn.created).toBe(true);
+    expect(mxn.invoice_id).not.toBe(usd.invoice_id); // not a replay — a different obligation
+    expect(await ctx.store.listB2bInvoices('default')).toHaveLength(2);
+  });
+
   it('is blocked at dispatch on the web channel (WhatsApp-only) — creates NOTHING', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedActiveSeller(ctx);

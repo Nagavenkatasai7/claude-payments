@@ -2,17 +2,19 @@ import { getStore } from '@/lib/store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-config';
 import { getB2bQuoteStore, resolveCheckoutBillQuote } from '@/lib/b2b-quote-store';
-import { quoteCrossBorderBill } from '@/lib/b2b-quote';
+import { billDenomination, quoteCrossBorderBill, quoteBuyerDenominatedBill } from '@/lib/b2b-quote';
 import { getFxRates } from '@/lib/rate';
 import { countryForPhone, currencyForPhone } from '@/lib/partner-currency';
 import { BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { BillPayForm } from './bill-pay-form';
 
 // Cross-border B2B bill checkout page (Plan 4). The buyer opens /pay/b2b/<invoiceId>:
-// the obligation is FIXED in the seller's currency; we quote the buyer's FX
-// equivalent + fees LIVE and LOCK it for the checkout, then collect the buyer's
-// LOCAL bank details + OTP. The transfer is minted at submit time (see the route).
-// WhatsApp-dark theme, mirroring /pay/[transferId].
+// the obligation is FIXED in the seller's currency (Case S — we quote the buyer's
+// FX equivalent + fees LIVE) or in the BUYER's currency (Case B, 2026-07-02 spec —
+// the buyer pays the exact billed amount + fees; the seller's converted receipt is
+// quoted LIVE). Either way the quote is LOCKED for the checkout, then we collect
+// the buyer's LOCAL bank details + OTP. The transfer is minted at submit time (see
+// the route). WhatsApp-dark theme, mirroring /pay/[transferId].
 
 const pageClasses =
   "flex min-h-svh justify-center bg-[#0b141a] px-4 py-8 font-[-apple-system,BlinkMacSystemFont,'Segoe_UI',sans-serif] text-[#e9edef]";
@@ -98,6 +100,18 @@ export default async function CrossBorderBillPayPage({
   }
   const sellerCurrency = seller.currency;
   const invoicedAmount = invoice.invoicedAmount!;
+  const invoicedCurrency = invoice.invoicedCurrency!;
+
+  // Denomination model (2026-07-02 spec), DERIVED — no migration. Case S
+  // (seller currency — today's model; S === B degenerates there) or Case B
+  // (buyer currency — the buyer's price is the fixed side); a third-currency
+  // bill is never payable. billDenomination() is the ONE shared authority
+  // (this page, the POST route, and the finalize defense can never disagree).
+  const denomination = billDenomination(invoicedCurrency, sellerCurrency, buyerCurrency);
+  if (!denomination) {
+    return <Inactive branding={branding} message="This bill is no longer payable" />;
+  }
+  const isBuyerDenominated = denomination === 'buyer';
 
   // Live-locked checkout quote — reused on reload, re-quoted on expiry. Wrapped:
   // a QuoteError (bad/unavailable FX) degrades to the friendly Inactive sheet
@@ -111,19 +125,25 @@ export default async function CrossBorderBillPayPage({
       async () => {
         const sellerRates = await getFxRates(sellerCurrency);
         const sellerToUsd = sellerCurrency === 'USD' ? 1 : sellerRates.toUsd;
-        return quoteCrossBorderBill({
+        const input = {
           invoicedAmount,
           sellerCurrency,
           buyerCurrency,
           rates: buyerRates,
           sellerToUsd,
           fundingMethod: 'bank_pull',
-        });
+        } as const;
+        return isBuyerDenominated ? quoteBuyerDenominatedBill(input) : quoteCrossBorderBill(input);
       },
+      // A stale lock must still describe THIS obligation — the FIXED side is the
+      // one pinned to the invoice (Case S: the seller amount; Case B: the buyer
+      // principal); the floating side is whatever that lock quoted.
       (q) =>
         q.buyerCurrency === buyerCurrency &&
         q.sellerCurrency === sellerCurrency &&
-        Math.round(q.sellerAmount * 100) === Math.round(invoicedAmount * 100),
+        (isBuyerDenominated
+          ? Math.round(q.buyerPrincipal * 100) === Math.round(invoicedAmount * 100)
+          : Math.round(q.sellerAmount * 100) === Math.round(invoicedAmount * 100)),
     );
   } catch {
     return <Inactive branding={branding} message="This bill can't be paid right now — please try again shortly" />;
@@ -139,10 +159,25 @@ export default async function CrossBorderBillPayPage({
             <span className="text-[#8696a0]">Bill from</span>
             <span>{seller.businessName}</span>
           </div>
-          <div className={lineClasses}>
-            <span className="text-[#8696a0]">Amount due</span>
-            <span>{formatMoney(quote.sellerAmount, sellerCurrency)}</span>
-          </div>
+          {isBuyerDenominated ? (
+            <>
+              {/* Case B: the bill is fixed in the BUYER's currency — the amount
+                  due is exact; the seller's converted receipt is the estimate. */}
+              <div className={lineClasses}>
+                <span className="text-[#8696a0]">Amount due</span>
+                <span>{formatMoney(quote.buyerPrincipal, buyerCurrency)} (exact)</span>
+              </div>
+              <div className={lineClasses}>
+                <span className="text-[#8696a0]">Seller receives</span>
+                <span>≈ {formatMoney(quote.sellerAmount, sellerCurrency)}</span>
+              </div>
+            </>
+          ) : (
+            <div className={lineClasses}>
+              <span className="text-[#8696a0]">Amount due</span>
+              <span>{formatMoney(quote.sellerAmount, sellerCurrency)}</span>
+            </div>
+          )}
           <div className={lineClasses}>
             <span className="text-[#8696a0]">Exchange rate</span>
             <span>

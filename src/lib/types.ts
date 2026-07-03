@@ -7,7 +7,7 @@ export type PayoutMethod = 'upi' | 'bank' | 'usdc';
 // the signed settlement instruction. SmartRemit never captures funds for this
 // method (non-custodial) — see settlement.ts.
 // 'bank_pull' = cross-border B2B: the country-aware generalization of 'ach_pull'.
-// The licensed partner debits the BUYER's LOCAL bank (any of the 9 corridors)
+// The licensed partner debits the BUYER's LOCAL bank (any of the 10 corridors)
 // AND pays out the seller — both legs in ONE signed instruction. SmartRemit never
 // captures funds for this method either (non-custodial). Same flat B2B bank fee.
 export type FundingMethod = 'credit_card' | 'debit_card' | 'bank_transfer' | 'ach_pull' | 'bank_pull';
@@ -120,12 +120,17 @@ export interface B2bInvoice {
   amountUsd: number;
   currency: CurrencyCode;
   // ── Cross-border (Plan 3) — all optional; absent ⇒ a US-domestic bill driven by
-  // amountUsd/currency (back-compat). When present, the obligation is FIXED in the
-  // seller's currency: the seller nets `invoicedAmount` exactly; the buyer pays the
-  // live-quoted FX equivalent + fees on top at payment time (never locked here).
+  // amountUsd/currency (back-compat). When present, the obligation is FIXED in
+  // `invoicedCurrency` — the SELLER's currency (Case S: the seller nets
+  // `invoicedAmount` exactly; the buyer pays the live-quoted FX equivalent + fees
+  // on top at payment time) OR the BUYER's currency (Case B, 2026-07-02 spec: the
+  // buyer pays `invoicedAmount` exactly + fees; the seller receives the
+  // live-quoted conversion). The model is DERIVED at pay time by comparing
+  // invoicedCurrency to the seller/buyer currencies (billDenomination()) — FX is
+  // never locked here.
   sellerId?: string;                 // FK → sellers.id (the registered seller this bill belongs to)
-  invoicedAmount?: number;           // the seller's EXACT receive amount (the fixed obligation)
-  invoicedCurrency?: CurrencyCode;   // the seller's currency (the obligation's denomination)
+  invoicedAmount?: number;           // the fixed obligation, in invoicedCurrency
+  invoicedCurrency?: CurrencyCode;   // the obligation's denomination (seller's currency, or the buyer's — Case B)
   // unpaid → paid (on delivery). voided = staff killed the bill; disputed = buyer
   // rejected it (a support ticket carries the reason). voided/disputed are NOT
   // re-payable; reissue mints a fresh 'unpaid' invoice.
@@ -504,12 +509,12 @@ export interface CapEvaluation {
 // Any-to-any: every code below is valid as BOTH a source and a destination
 // (e.g. INR→USD or USD→INR). Don't re-introduce a send-only / payout-only split.
 export type CountryCode =
-  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN' | 'HK';
+  | 'US' | 'CA' | 'GB' | 'AE' | 'SG' | 'AU' | 'NZ' | 'IN' | 'HK' | 'MX';
 
 // ISO 4217 currency codes corresponding to the supported countries (any-to-any:
 // each is usable as source or destination).
 export type CurrencyCode =
-  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR' | 'HKD';
+  | 'USD' | 'CAD' | 'GBP' | 'AED' | 'SGD' | 'AUD' | 'NZD' | 'INR' | 'HKD' | 'MXN';
 
 // Single source of truth for "what's the home currency of country X?"
 // Consumed by the migration + bot defaults.
@@ -523,6 +528,7 @@ export const DEFAULT_CURRENCY_FOR_COUNTRY: Record<CountryCode, CurrencyCode> = {
   NZ: 'NZD',
   IN: 'INR',
   HK: 'HKD',
+  MX: 'MXN',
 };
 
 // ── Partner entity (P2) ───────────────────────────────────────────────
