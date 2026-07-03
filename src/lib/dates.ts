@@ -12,9 +12,13 @@ export function easternMonth(epochMs: number): string {
 }
 
 export function easternDayOfMonth(epochMs: number): number {
-  return Number(
+  const n = Number(
     new Date(epochMs).toLocaleString('en-US', { timeZone: ET, day: 'numeric' }),
   );
+  if (isNaN(n)) {
+    throw new RangeError(`easternDayOfMonth: invalid epochMs ${epochMs}`);
+  }
+  return n;
 }
 
 export function easternDayOfWeek(epochMs: number): number {

@@ -64,7 +64,17 @@ export function applyKycEvent(
     case 'inquiry.created':
     case 'inquiry.started':
       delta.kycReviewState = 'inquiry_started';
-      if (!customer.kycSubmittedAt) delta.kycSubmittedAt = nowIso;
+      // Only stamp kycSubmittedAt when the customer is still at or before
+      // inquiry_started (rank 0-1). If the customer has already advanced to
+      // pending_review or beyond, this is a backward-suppressed event and must
+      // not corrupt the audit timestamp. (The caller's rank guard only removes
+      // kycReviewState; this guard prevents the side-effect from leaking through.)
+      if (!customer.kycSubmittedAt &&
+          (!customer.kycReviewState ||
+           customer.kycReviewState === 'none' ||
+           customer.kycReviewState === 'inquiry_started')) {
+        delta.kycSubmittedAt = nowIso;
+      }
       break;
     case 'inquiry.completed':
     case 'inquiry.approved':

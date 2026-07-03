@@ -188,6 +188,24 @@ describe('quote — cross-rate invariant: negative destToUsd must throw (regress
   });
 });
 
+describe('quote / sourceForDest — destToUsd=0 guard (regression: zero treated as absent)', () => {
+  // Bug: !destToUsd treats 0 the same as undefined, so the INR cross-rate is silently
+  // used for a non-INR destination.  With the fix (destToUsd == null), 0 reaches the
+  // division branch (rates.toUsd / 0 = Infinity), which the downstream finite/positive
+  // guard converts into a QuoteError.
+  const USD2: FxRates = { toInr: 85, toUsd: 1 };
+
+  it('quote throws QuoteError when destToUsd=0 for a non-INR destination', () => {
+    expect(() =>
+      quote(100, 'USD', USD2, 'bank_transfer', 0, 'AED', 0),
+    ).toThrow(QuoteError);
+  });
+
+  it('sourceForDest throws QuoteError when destToUsd=0 for a non-INR destination', () => {
+    expect(() => sourceForDest(1000, USD2, 'AED', 0)).toThrow(QuoteError);
+  });
+});
+
 describe('quote — any-to-any cross-currency destination', () => {
   const USD2 = { toInr: 85, toUsd: 1 };
   it('USD→INR is byte-for-byte the legacy result (5-arg call defaults to INR)', () => {
