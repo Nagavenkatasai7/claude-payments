@@ -227,3 +227,67 @@ export function maskAccountDisplay(dest: string): string {
   const l4 = accountLast4(dest);
   return l4 ? `****${l4}` : (dest ?? '');
 }
+
+// ── USDC seller payout (2026-07-02 spec) ─────────────────────────────────────
+//
+// A cross-border SELLER may choose to receive payouts as USDC to a wallet
+// address instead of a bank deposit. The address is captured ONLY on the
+// verified onboarding page (OTP-gated), validated here, composed to the
+// canonical `USDC|<address>` destination string, and stored in the SAME
+// encrypted slot bank details use. NON-CUSTODIAL: the licensed partner
+// executes the stablecoin transfer — SmartRemit never holds crypto or fiat.
+//
+// Phase 1 carries only the EVM address shape (0x + 40 hex); WHICH chain the
+// USDC moves on is the partner rail's configuration, not ours.
+
+/** EVM address shape: 0x followed by exactly 40 hex characters (anchored). */
+export const USDC_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
+
+/** Canonical destination prefix marking a USDC wallet payout. */
+export const USDC_DESTINATION_PREFIX = 'USDC|';
+
+export type UsdcAddressResult =
+  | { ok: true; address: string }
+  | { ok: false; error: string };
+
+/**
+ * Validates a USDC wallet address (trimmed). Intentionally strict — anything
+ * that is not exactly `0x` + 40 hex characters is rejected with a clear,
+ * human-readable error (no checksum validation; the shape check stops
+ * obviously-garbage values from ever reaching a payable instruction).
+ */
+export function validateUsdcAddress(raw: string): UsdcAddressResult {
+  const address = (raw ?? '').trim();
+  if (address === '') return { ok: false, error: 'Wallet address is required.' };
+  if (!USDC_ADDRESS_PATTERN.test(address)) {
+    return {
+      ok: false,
+      error: 'Enter a valid USDC wallet address — it starts with 0x followed by 40 letters (a–f) and digits.',
+    };
+  }
+  return { ok: true, address };
+}
+
+/** Composes the canonical stored destination string for a USDC payout. */
+export function composeUsdcDestination(address: string): string {
+  return `${USDC_DESTINATION_PREFIX}${address}`;
+}
+
+/**
+ * Strips the canonical `USDC|` prefix back to the BARE 0x address — the wire
+ * format the partner rail receives in the signed settlement instruction. A
+ * non-prefixed value passes through unchanged (defensive).
+ */
+export function usdcAddressFromDestination(dest: string): string {
+  const d = dest ?? '';
+  return d.startsWith(USDC_DESTINATION_PREFIX) ? d.slice(USDC_DESTINATION_PREFIX.length) : d;
+}
+
+/**
+ * Human label for a payout method on receipts/admin views: 'usdc' renders as
+ * "USDC wallet"; every other method keeps the existing uppercase rendering
+ * ("BANK" / "UPI") byte-for-byte.
+ */
+export function payoutMethodLabel(method: string): string {
+  return method === 'usdc' ? 'USDC wallet' : (method ?? '').toUpperCase();
+}

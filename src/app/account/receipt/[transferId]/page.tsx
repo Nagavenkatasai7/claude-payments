@@ -6,6 +6,7 @@ import { notFound } from 'next/navigation';
 import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
+import { payoutMethodLabel } from '@/lib/payout-format';
 import { isRecallEligible } from '@/lib/refund-policy';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { AccountShell, PageHeader } from '../../shell';
@@ -210,7 +211,7 @@ export default async function ReceiptPage({
                 label="Account"
                 value={
                   <span className="font-mono text-xs">
-                    {t.payoutMethod.toUpperCase()} · {t.payoutDestination || '—'}
+                    {payoutMethodLabel(t.payoutMethod)} · {t.payoutDestination || '—'}
                   </span>
                 }
               />

@@ -183,6 +183,32 @@ describe('finalizeCrossBorderBillPayment — the cross-border mint', () => {
     const decrypted = await stores.store.getTransferDecrypted(res.transferId);
     expect(decrypted!.payoutDestination).toBe(SELLER_PAYOUT); // the encrypted profile payout
     expect(decrypted!.recipientName).toBe(SELLER.businessName);
+    expect(decrypted!.payoutMethod).toBe('bank'); // a bank seller mints a bank payout, byte-unchanged
+  });
+
+  it('USDC seller: mints payoutMethod usdc + the profile wallet destination + the EXACT invoiced amount', async () => {
+    const stores = await buildStores();
+    const WALLET_DEST = 'USDC|0x8ba1f109551bD432803012645Ac136ddd64DBA72';
+    await stores.store.createSeller(SELLER);
+    const activated = await stores.store.completeSellerOnboarding(
+      SELLER.phone, DEFAULT_PARTNER_ID, WALLET_DEST, 'usdc',
+    );
+    expect(activated?.payoutMethod).toBe('usdc');
+    await seedBuyer(stores);
+    const invoiceId = await seedInvoice(stores);
+
+    const res = await finalize(stores, invoiceId);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    const decrypted = await stores.store.getTransferDecrypted(res.transferId);
+    expect(decrypted!.payoutMethod).toBe('usdc');
+    // Wallet only from the VERIFIED ENCRYPTED PROFILE — never invoice/buyer input.
+    expect(decrypted!.payoutDestination).toBe(WALLET_DEST);
+    // The seller nets EXACTLY the invoiced amount on the usdc rail too.
+    expect(decrypted!.amountInr).toBe(INVOICED_AMOUNT);
+    expect(decrypted!.destinationCurrency).toBe('HKD');
+    expect(decrypted!.fundingMethod).toBe('bank_pull'); // the buyer-side leg is unchanged
   });
 
   it('is claim-first idempotent: a double-submit mints exactly ONE transfer', async () => {

@@ -221,3 +221,48 @@ describe('buildSettlementInstruction — non-custodial funding legs', () => {
     expect(signBody(body, 'sign-secret')).toBe(createHmac('sha256', 'sign-secret').update(body).digest('hex'));
   });
 });
+
+describe('buildSettlementInstruction — USDC seller payout leg', () => {
+  const WALLET = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
+
+  // A cross-border B2B bank_pull whose SELLER chose a USDC wallet payout: the
+  // ledger row carries the canonical `USDC|<address>` profile destination.
+  function usdcSeller(): Transfer {
+    return {
+      ...fixture(),
+      id: 'usdc_t1', fundingMethod: 'bank_pull', achTokenRef: 'bankpull_deadbeef',
+      sourceCountry: 'US', sourceCurrency: 'USD', amountSource: 128.4, feeSource: 5, totalChargeSource: 133.4,
+      destinationCountry: 'HK', destinationCurrency: 'HKD', amountInr: 1000, fxRate: 7.788,
+      payoutMethod: 'usdc', payoutDestination: `USDC|${WALLET}`,
+      recipientName: 'Kowloon Design Co', recipientPhone: '85291234567',
+      transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      senderBusinessName: 'US Buyer Co', recipientBusinessName: 'Kowloon Design Co',
+    } as Transfer;
+  }
+
+  it('usdc seller ⇒ payout { rail: usdc, destination: the BARE 0x address } — prefix stripped for the wire', () => {
+    const i = buildSettlementInstruction(usdcSeller()) as Record<string, unknown>;
+    expect(i.payout).toEqual({ rail: 'usdc', destination: WALLET });
+    // The seller still nets EXACTLY the invoiced amount — same field, same value.
+    expect(i.amount).toMatchObject({ destination: 1000, destination_currency: 'HKD' });
+    // The buyer-side FUNDING leg is byte-unchanged by the payout rail.
+    expect(i.funding).toEqual({
+      method: 'bank_debit', token: 'bankpull_deadbeef', amount: 133.4, currency: 'USD', country: 'US',
+    });
+  });
+
+  it('a BANK seller instruction is byte-unchanged by the usdc feature', () => {
+    const bank = {
+      ...usdcSeller(),
+      payoutMethod: 'bank', payoutDestination: '024 388 12345678',
+    } as Transfer;
+    const i = buildSettlementInstruction(bank) as Record<string, unknown>;
+    expect(i.payout).toEqual({ rail: 'bank', destination: '024 388 12345678' });
+  });
+
+  it('defensive: a usdc payout whose destination lacks the prefix passes the raw value through', () => {
+    const t = { ...usdcSeller(), payoutDestination: WALLET } as Transfer;
+    const i = buildSettlementInstruction(t) as Record<string, unknown>;
+    expect(i.payout).toEqual({ rail: 'usdc', destination: WALLET });
+  });
+});

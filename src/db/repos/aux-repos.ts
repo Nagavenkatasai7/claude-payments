@@ -549,6 +549,7 @@ export function createSellerRepo(db: DbOrTx) {
       businessName: row.businessName,
       country: row.country as CountryCode,
       currency: row.currency as CurrencyCode,
+      payoutMethod: row.payoutMethod === 'usdc' ? 'usdc' : 'bank',
       status: row.status as SellerStatus,
       kycReviewState: row.kycReviewState as Seller['kycReviewState'],
       createdAt: row.createdAt.toISOString(),
@@ -673,7 +674,8 @@ export function createSellerRepo(db: DbOrTx) {
     },
 
     /**
-     * Complete onboarding ATOMICALLY: encrypt + store the payout AND flip status
+     * Complete onboarding ATOMICALLY: encrypt + store the payout, persist the
+     * chosen payout METHOD ('bank' default | 'usdc' wallet), AND flip status
      * to 'active' in ONE guarded UPDATE. The WHERE GUARDS on `status = 'pending'
      * AND kycReviewState <> 'needs_review'`, so:
      *   • a TOCTOU race (staff flag 'needs_review' between the seller's page load
@@ -686,13 +688,14 @@ export function createSellerRepo(db: DbOrTx) {
      */
     async activateOnboarding(
       phone: string, partnerId: PartnerId, payoutDestination: string,
+      payoutMethod: Seller['payoutMethod'] = 'bank',
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
       const enc = encryptField(payoutDestination);
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)
-        .set({ payoutDestinationEnc: enc, payoutLast4: tail, status: 'active', updatedAt: new Date() })
+        .set({ payoutDestinationEnc: enc, payoutLast4: tail, payoutMethod, status: 'active', updatedAt: new Date() })
         .where(
           sql`${sellers.partnerId} = ${partnerId} AND ${sellers.phone} = ${normalized} AND ${sellers.status} = 'pending' AND ${sellers.kycReviewState} <> 'needs_review'`,
         )

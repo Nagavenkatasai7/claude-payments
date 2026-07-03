@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { payoutMethodLabel } from '@/lib/payout-format';
 import type { PayoutMethod } from '@/lib/types';
 import { revealDestinationAction } from './actions';
 
@@ -25,7 +26,8 @@ export function MaskedDestination({
 }) {
   const [full, setFull] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  const method = payoutMethod.toUpperCase();
+  // 'usdc' renders "USDC wallet · ****<tail>"; bank/upi keep the uppercase form.
+  const method = payoutMethodLabel(payoutMethod);
   const canReveal = /^\*{4}/.test(payoutDestination);
 
   if (!canReveal) {

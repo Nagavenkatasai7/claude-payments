@@ -1,8 +1,13 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import type { CountryCode } from '@/lib/types';
-import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields, type Field } from '@/lib/payout-format';
+import type { CountryCode, SellerPayoutMethod } from '@/lib/types';
+import {
+  BANK_FIELDS_BY_COUNTRY,
+  validatePayoutFields,
+  validateUsdcAddress,
+  type Field,
+} from '@/lib/payout-format';
 import { requestSellerOtpAction, activateSellerAction } from './actions';
 
 type Status = 'idle' | 'saving' | 'done' | 'error';
@@ -46,6 +51,13 @@ function CheckMark() {
   );
 }
 
+// The payout-method toggle: two side-by-side pills mirroring the theme's
+// secondary buttons; the active pill picks up the WhatsApp green.
+const methodBtnClasses =
+  'flex-1 cursor-pointer rounded-xl border p-2.5 text-[13px] font-bold disabled:cursor-default';
+const methodBtnActive = 'border-[#25d366] bg-[#25d366]/10 text-[#25d366]';
+const methodBtnIdle = 'border-[#2a3942] bg-transparent text-[#8696a0]';
+
 export function SellerOnboardForm({
   sellerId,
   country,
@@ -56,9 +68,11 @@ export function SellerOnboardForm({
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[country] ?? [];
 
   const [status, setStatus] = useState<Status>('idle');
+  const [method, setMethod] = useState<SellerPayoutMethod>('bank');
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(defs.map((d) => [d.key, ''])),
   );
+  const [wallet, setWallet] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
@@ -68,6 +82,11 @@ export function SellerOnboardForm({
   function setField(key: string, v: string) {
     setValues((prev) => ({ ...prev, [key]: v }));
     if (errors[key]) setErrors((prev) => ({ ...prev, [key]: '' }));
+  }
+
+  function pickMethod(next: SellerPayoutMethod) {
+    setMethod(next);
+    setErrors({}); // stale per-method field errors don't carry across the toggle
   }
 
   async function requestCode() {
@@ -84,17 +103,26 @@ export function SellerOnboardForm({
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    // Client-side validate via the SAME validator the server re-runs (no drift).
-    const result = validatePayoutFields(country, values);
-    if (!result.ok) {
-      setErrors(result.errors);
-      return;
+    // Client-side validate via the SAME validators the server re-runs (no drift).
+    if (method === 'usdc') {
+      const wr = validateUsdcAddress(wallet);
+      if (!wr.ok) {
+        setErrors({ walletAddress: wr.error });
+        return;
+      }
+    } else {
+      const result = validatePayoutFields(country, values);
+      if (!result.ok) {
+        setErrors(result.errors);
+        return;
+      }
     }
     setErrors({});
     setStatus('saving');
     setOtpError('');
     try {
-      const res = await activateSellerAction({ id: sellerId, fields: values, otp: code });
+      const fields = method === 'usdc' ? { walletAddress: wallet } : values;
+      const res = await activateSellerAction({ id: sellerId, method, fields, otp: code });
       if (res.ok) {
         setStatus('done');
         return;
@@ -121,29 +149,75 @@ export function SellerOnboardForm({
 
   return (
     <form onSubmit={handleSubmit}>
-      <div className={stepLabelClasses}>Your payout bank details</div>
+      <div className={stepLabelClasses}>How you get paid</div>
       <p className="mb-4 text-[13px] leading-normal text-[#8696a0]">
         This is where you&rsquo;ll receive the money your customers pay. We encrypt and store it securely.
       </p>
-      {defs.map((def) => {
-        const digitOnly = typeof def.digits === 'number';
-        return (
-          <label key={def.key} className={labelClasses}>
-            {def.label}
+      <div className="mb-4 flex gap-2" role="group" aria-label="Payout method">
+        <button
+          type="button"
+          className={`${methodBtnClasses} ${method === 'bank' ? methodBtnActive : methodBtnIdle}`}
+          aria-pressed={method === 'bank'}
+          onClick={() => pickMethod('bank')}
+        >
+          Bank account
+        </button>
+        <button
+          type="button"
+          className={`${methodBtnClasses} ${method === 'usdc' ? methodBtnActive : methodBtnIdle}`}
+          aria-pressed={method === 'usdc'}
+          onClick={() => pickMethod('usdc')}
+        >
+          USDC wallet
+        </button>
+      </div>
+
+      {method === 'bank' ? (
+        defs.map((def) => {
+          const digitOnly = typeof def.digits === 'number';
+          return (
+            <label key={def.key} className={labelClasses}>
+              {def.label}
+              <input
+                className={inputClasses}
+                name={def.key}
+                required
+                value={values[def.key] ?? ''}
+                onChange={(e) => setField(def.key, e.target.value)}
+                inputMode={digitOnly ? 'numeric' : 'text'}
+                maxLength={digitOnly ? def.digits : undefined}
+                autoComplete="off"
+              />
+              {errors[def.key] && <span className={fieldErrorClasses}>{errors[def.key]}</span>}
+            </label>
+          );
+        })
+      ) : (
+        <div>
+          <label className={labelClasses}>
+            USDC wallet address
             <input
               className={inputClasses}
-              name={def.key}
+              name="walletAddress"
               required
-              value={values[def.key] ?? ''}
-              onChange={(e) => setField(def.key, e.target.value)}
-              inputMode={digitOnly ? 'numeric' : 'text'}
-              maxLength={digitOnly ? def.digits : undefined}
+              value={wallet}
+              onChange={(e) => {
+                setWallet(e.target.value);
+                if (errors.walletAddress) setErrors({});
+              }}
+              placeholder="0x…"
+              spellCheck={false}
               autoComplete="off"
             />
-            {errors[def.key] && <span className={fieldErrorClasses}>{errors[def.key]}</span>}
+            {errors.walletAddress && <span className={fieldErrorClasses}>{errors.walletAddress}</span>}
           </label>
-        );
-      })}
+          <p className="mb-4 text-[13px] leading-normal text-[#8696a0]">
+            Your payouts arrive as USDC (a digital dollar) sent to this wallet address by your
+            payment partner — we never hold your funds. Double-check the address: crypto
+            transfers can&rsquo;t be reversed.
+          </p>
+        </div>
+      )}
 
       <div className="mt-5">
         {!sent ? (

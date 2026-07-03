@@ -130,6 +130,79 @@ describe('activateSellerAction', () => {
   });
 });
 
+describe('activateSellerAction — USDC wallet payout', () => {
+  const WALLET = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
+
+  it('activates with method usdc: canonical USDC|<address> stored ENCRYPTED, method persisted', async () => {
+    const id = await seedPendingSeller();
+    const issued = await txOtp.issue(id, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+
+    const res = await activateSellerAction({
+      id, method: 'usdc', fields: { walletAddress: `  ${WALLET} ` }, otp: issued.code,
+    });
+    expect(res.ok).toBe(true);
+
+    const masked = await store.getSeller(PHONE, 'default');
+    expect(masked?.status).toBe('active');
+    expect(masked?.payoutMethod).toBe('usdc');
+    expect(masked?.payoutLast4).toBe('BA72'); // the address tail
+
+    const decrypted = await store.getSellerDecrypted(PHONE, 'default');
+    expect(decrypted?.payoutDestination).toBe(`USDC|${WALLET}`);
+
+    // Encrypted at rest — the ciphertext never contains the plaintext address.
+    const raw = await db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
+    expect(raw[0].payoutDestinationEnc ?? '').not.toContain(WALLET);
+  });
+
+  it('rejects a malformed wallet address SERVER-SIDE with a field error (no activation)', async () => {
+    const id = await seedPendingSeller();
+    const issued = await txOtp.issue(id, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+
+    const res = await activateSellerAction({
+      id, method: 'usdc', fields: { walletAddress: '0x1234' }, otp: issued.code,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected refusal');
+    expect(res.fieldErrors?.walletAddress).toBeDefined();
+    const still = await store.getSeller(PHONE, 'default');
+    expect(still?.status).toBe('pending');
+    expect(still?.payoutMethod).toBe('bank');
+  });
+
+  it('never trusts the client method: an unknown method falls back to BANK validation', async () => {
+    const id = await seedPendingSeller();
+    const issued = await txOtp.issue(id, PHONE);
+    if (!issued.ok) throw new Error('issue failed');
+
+    // A bogus method with wallet fields must NOT slip through as a usdc payout —
+    // it validates as bank (HK fields) and fails on the missing bank fields.
+    const res = await activateSellerAction({
+      id,
+      method: 'dogecoin' as unknown as 'usdc',
+      fields: { walletAddress: WALLET },
+      otp: issued.code,
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected refusal');
+    expect(res.fieldErrors?.bankCode).toBeDefined();
+    expect((await store.getSeller(PHONE, 'default'))?.status).toBe('pending');
+  });
+
+  it('still requires a valid OTP for a usdc activation', async () => {
+    const id = await seedPendingSeller();
+    const res = await activateSellerAction({
+      id, method: 'usdc', fields: { walletAddress: WALLET }, otp: '000000',
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected refusal');
+    expect(res.reason).toBe('otp');
+    expect((await store.getSeller(PHONE, 'default'))?.status).toBe('pending');
+  });
+});
+
 describe('requestSellerOtpAction', () => {
   it('issues + delivers a code to the seller WhatsApp for a pending seller', async () => {
     const id = await seedPendingSeller();

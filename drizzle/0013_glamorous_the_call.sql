@@ -1,0 +1,1 @@
+ALTER TABLE "sellers" ADD COLUMN "payout_method" text DEFAULT 'bank' NOT NULL;
