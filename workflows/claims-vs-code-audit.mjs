@@ -43,6 +43,16 @@ const VERDICT = {
   additionalProperties: false,
 }
 
+// ── DISABLED 2026-07-03 (user request) ───────────────────────────────────────
+// claims-vs-code-audit is turned OFF. The nightly schedule that invokes this
+// script lives outside the repo and still fires, so this guard makes the run a
+// clean no-op regardless — no audit, no report PR. To RE-ENABLE: set DISABLED = false.
+const DISABLED = true;
+if (DISABLED) {
+  log('claims-vs-code-audit is DISABLED — clean no-op. Flip DISABLED in workflows/claims-vs-code-audit.mjs to re-enable.');
+  return { disabled: true, claims: 0, note: 'claims-vs-code-audit intentionally disabled' };
+}
+
 phase('Extract')
 const extracted = await agent(
   'Read the PUBLIC-facing copy and list every concrete product claim a customer or partner could hold us to: src/app/page.tsx (landing), src/app/about/page.tsx, and docs/ (partner docs). Claim types include: non-custodial / "never holds funds", sanctions screening always-on, the fee schedule, the corridor/country count, encryption-at-rest, "licensed partners settle", delivery wording. For each give a short id, the exact claim text, its source file, and a risk level (high = money/compliance/security claims). Do NOT invent claims — only list ones actually present in the copy.',
