@@ -7,6 +7,7 @@ import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { getB2bQuoteStore } from '@/lib/b2b-quote-store';
+import { billDenomination } from '@/lib/b2b-quote';
 import { getFxRates } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { beginSettlement } from '@/lib/settlement';
@@ -118,18 +119,33 @@ export async function POST(
     }
     const sellerCurrency = seller.currency;
     const invoicedAmount = invoice.invoicedAmount!;
+    const invoicedCurrency = invoice.invoicedCurrency!;
+
+    // Denomination model (2026-07-02 spec), DERIVED via the ONE shared
+    // billDenomination() authority (this route, the page, and the finalize
+    // defense can never disagree). Seller currency ⇒ Case S (S === B
+    // degenerates there); buyer currency ⇒ Case B. A third-currency bill is
+    // never payable.
+    const denomination = billDenomination(invoicedCurrency, sellerCurrency, buyerCurrency);
+    if (!denomination) {
+      return NextResponse.json({ ok: false, error: 'This bill is no longer payable.' }, { status: 400 });
+    }
+    const isBuyerDenominated = denomination === 'buyer';
 
     // ── The LOCKED checkout quote the buyer was shown (the page is the SOLE
     // compute+lock site). What-you-see-is-what-you-pay: we NEVER silently re-quote
     // here — if the lock is gone (expired) or no longer describes this bill, refuse
     // with `quote_expired` so the form reloads + re-shows the fresh total BEFORE the
-    // buyer authorizes a different figure.
+    // buyer authorizes a different figure. The FIXED side is the one pinned to the
+    // invoice (Case S: the seller amount; Case B: the buyer principal).
     const lockedQuote = await getB2bQuoteStore().getLockedQuote(invoiceId);
     if (
       !lockedQuote ||
       lockedQuote.buyerCurrency !== buyerCurrency ||
       lockedQuote.sellerCurrency !== sellerCurrency ||
-      Math.round(lockedQuote.sellerAmount * 100) !== Math.round(invoicedAmount * 100)
+      (isBuyerDenominated
+        ? Math.round(lockedQuote.buyerPrincipal * 100) !== Math.round(invoicedAmount * 100)
+        : Math.round(lockedQuote.sellerAmount * 100) !== Math.round(invoicedAmount * 100))
     ) {
       return NextResponse.json(
         { ok: false, reason: 'quote_expired', error: 'The rate updated — please review the new total.' },

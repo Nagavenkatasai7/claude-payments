@@ -42,7 +42,7 @@ const COUNTRIES = [
 ];
 
 // Corridor checkbox options for the "Partner with us" form. Values are the
-// allow-listed codes the server action accepts (9 supported corridors + Other);
+// allow-listed codes the server action accepts (10 supported corridors + Other);
 // labels are the friendly names shown to prospects.
 const PARTNER_CORRIDORS = [
   { value: 'US', label: 'United States' },
@@ -54,6 +54,7 @@ const PARTNER_CORRIDORS = [
   { value: 'NZ', label: 'New Zealand' },
   { value: 'IN', label: 'India' },
   { value: 'HK', label: 'Hong Kong' },
+  { value: 'MX', label: 'Mexico' },
   { value: 'Other', label: 'Other' },
 ];
 

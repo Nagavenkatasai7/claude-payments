@@ -8,7 +8,7 @@ import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
 import type { PartnerStore } from './partner-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
-import type { CrossBorderBillQuote } from './b2b-quote';
+import { billDenomination, type CrossBorderBillQuote } from './b2b-quote';
 import type { CurrencyCode } from './types';
 
 // b2b-pay-finalize — pay-time mint for a CROSS-BORDER B2B bill (Plan 4). The
@@ -99,18 +99,9 @@ export async function finalizeCrossBorderBillPayment(
     return { ok: false, error: 'not_payable' };
   }
 
-  // ── Defense: the locked quote must describe THIS obligation ───────────────
-  // The buyer pays what they saw, but it must be the bill they were shown — a
-  // stale-currency / wrong-amount lock can never mint against this invoice.
-  if (
-    quote.sellerCurrency !== invoice.invoicedCurrency ||
-    quote.buyerCurrency !== buyerCurrency ||
-    round2(quote.sellerAmount) !== round2(invoice.invoicedAmount)
-  ) {
-    return { ok: false, error: 'currency_mismatch' };
-  }
-
   // ── SELLER PAYOUT — from the PROFILE ONLY, never from buyer input ─────────
+  // Resolved BEFORE the quote defense: the denomination model is derived from
+  // the seller PROFILE currency, never from the locked quote or buyer input.
   const sellerMasked = await store.getSellerById(invoice.sellerId);
   if (!sellerMasked || sellerMasked.status !== 'active' || sellerMasked.partnerId !== partnerId) {
     return { ok: false, error: 'seller_unavailable' };
@@ -119,10 +110,42 @@ export async function finalizeCrossBorderBillPayment(
   const sellerPayout = (sellerDecrypted?.payoutDestination ?? '').trim();
   if (sellerPayout === '') return { ok: false, error: 'seller_unavailable' };
 
-  // The obligation is FIXED in the seller currency; the seller nets it EXACTLY.
-  const destinationCurrency = invoice.invoicedCurrency;
+  // ── Denomination model (2026-07-02 spec), derived — no migration ──────────
+  // Case S (seller currency — today's model; S === B degenerates there) or
+  // Case B (buyer currency — the buyer's price is the fixed side); a third
+  // currency is NOT payable. billDenomination() is the ONE shared authority
+  // (the pay page, the pay route, and this defense can never disagree).
+  const sellerCurrency = sellerMasked.currency;
+  const denomination = billDenomination(invoice.invoicedCurrency, sellerCurrency, buyerCurrency);
+  if (!denomination) {
+    return { ok: false, error: 'currency_mismatch' };
+  }
+  const isBuyerDenominated = denomination === 'buyer';
+
+  // ── Defense: the locked quote must describe THIS obligation ───────────────
+  // The buyer pays what they saw, but it must be the bill they were shown — a
+  // stale-currency / wrong-amount lock can never mint against this invoice.
+  // Case S pins the SELLER side (sellerAmount === invoicedAmount, as today —
+  // sellerCurrency === invoicedCurrency by the derivation above); Case B pins
+  // the BUYER side (buyerPrincipal === invoicedAmount, and the locked buyer
+  // currency IS the invoiced currency, again by the derivation above).
+  if (
+    quote.sellerCurrency !== sellerCurrency ||
+    quote.buyerCurrency !== buyerCurrency ||
+    (isBuyerDenominated
+      ? round2(quote.buyerPrincipal) !== round2(invoice.invoicedAmount)
+      : round2(quote.sellerAmount) !== round2(invoice.invoicedAmount))
+  ) {
+    return { ok: false, error: 'currency_mismatch' };
+  }
+
+  // The payout leg is ALWAYS in the seller's currency. Case S: the obligation
+  // IS the seller amount — the seller nets it EXACTLY. Case B: the seller
+  // receives the LOCKED quote's converted amount (what-you-see-is-what-you-pay
+  // governs BOTH sides — never re-derived from live FX here).
+  const destinationCurrency = sellerCurrency;
   const destinationCountry = countryForCurrency(destinationCurrency);
-  const sellerAmount = round2(invoice.invoicedAmount);
+  const sellerAmount = isBuyerDenominated ? round2(quote.sellerAmount) : round2(invoice.invoicedAmount);
 
   // ── Buyer (the payer) ─────────────────────────────────────────────────────
   const customer =
@@ -205,7 +228,7 @@ export async function finalizeCrossBorderBillPayment(
       feeUsd,
       totalChargeUsd,
       fxRate: quote.fxRate,
-      amountInr: sellerAmount, // destination amount = the seller's EXACT receipt
+      amountInr: sellerAmount, // destination amount = the seller's receipt (Case S: the exact obligation; Case B: the LOCKED conversion)
       amountSource: buyerPrincipal, // principal: amountSource * fxRate ≈ amountDest
       feeSource: feeBuyer,
       totalChargeSource: buyerTotal, // the buyer pays principal + fee

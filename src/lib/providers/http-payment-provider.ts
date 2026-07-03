@@ -90,10 +90,12 @@ export function buildSettlementInstruction(transfer: Transfer) {
     // Cross-border B2B bank-pull (non-custodial): ONE signed instruction carries
     // BOTH legs. The FUNDING leg here tells the LICENSED PARTNER's rail to debit
     // the BUYER's LOCAL bank for the FULL buyer charge (`amount` = principal + fee,
-    // the buyer-borne total) in `currency` (any of the 9 corridors); the PAYOUT
+    // the buyer-borne total) in `currency` (any of the 10 corridors); the PAYOUT
     // leg is the `payout` block + `amount.destination`/`destination_currency` above
-    // — pay the seller their EXACT invoiced amount in the seller currency
-    // (amount.source = the principal, so amount.source * fx_rate ≈ amount.destination).
+    // — pay the seller the LOCKED destination amount in the seller currency (a
+    // seller-denominated bill: their exact invoiced amount; a buyer-denominated
+    // bill: the locked conversion — same instruction shape either way;
+    // amount.source = the principal, so amount.source * fx_rate ≈ amount.destination).
     // The partner does the debit, the FX, and the payout, keeping the fee margin.
     // SmartRemit performs NO funding capture: `token` is the OPAQUE buyer-bank
     // reference (raw bank digits never persisted), exactly as ach_pull keeps only

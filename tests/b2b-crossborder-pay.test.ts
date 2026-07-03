@@ -5,7 +5,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createB2bQuoteStore, resolveCheckoutBillQuote } from '@/lib/b2b-quote-store';
-import { quoteCrossBorderBill, type CrossBorderBillQuote } from '@/lib/b2b-quote';
+import { quoteCrossBorderBill, quoteBuyerDenominatedBill, type CrossBorderBillQuote } from '@/lib/b2b-quote';
 import { FALLBACK_FX_RATES } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
@@ -274,5 +274,115 @@ describe('finalizeCrossBorderBillPayment — the cross-border mint', () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.error).toBe('blocked');
+  });
+});
+
+// ── Case B (2026-07-02 spec): the obligation is FIXED in the BUYER currency ──
+// The USD buyer is billed EXACTLY 500 USD; the HKD seller receives the LOCKED
+// quote's converted amount. Case S above is byte-unchanged.
+
+const CASE_B_AMOUNT = 500; // USD (the buyer's fixed obligation)
+
+/** The Case-B quote the USD buyer locks for the 500-USD bill (offline FX). */
+function computeCaseBQuote(): CrossBorderBillQuote {
+  return quoteBuyerDenominatedBill({
+    invoicedAmount: CASE_B_AMOUNT,
+    sellerCurrency: 'HKD',
+    buyerCurrency: 'USD',
+    rates: FALLBACK_FX_RATES.USD,
+    sellerToUsd: FALLBACK_FX_RATES.HKD.toUsd,
+    fundingMethod: 'bank_pull',
+  });
+}
+
+async function seedCaseBInvoice(stores: Stores, id = 'inv_xb_b'): Promise<string> {
+  const inv: B2bInvoice = {
+    id, partnerId: DEFAULT_PARTNER_ID, businessName: SELLER.businessName, buyerPhone: BUYER_PHONE,
+    lineItems: [{ description: 'Design work', qty: 1, unitAmountUsd: 0 }],
+    amountUsd: 0, currency: 'USD',
+    // Denominated in the BUYER's currency (USD) — the seller side floats.
+    sellerId: SELLER.id, invoicedAmount: CASE_B_AMOUNT, invoicedCurrency: 'USD',
+    status: 'unpaid', createdAt: new Date().toISOString(),
+  };
+  await stores.store.saveB2bInvoice(inv);
+  return id;
+}
+
+describe('finalizeCrossBorderBillPayment — Case B (buyer-denominated) mint', () => {
+  it('charges the buyer EXACTLY invoicedAmount + fee; amountDest = the LOCKED converted sellerAmount', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const invoiceId = await seedCaseBInvoice(stores);
+    const quote = computeCaseBQuote();
+
+    const res = await finalize(stores, invoiceId, quote);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    const t = await stores.store.getTransfer(res.transferId);
+    expect(t).not.toBeNull();
+    expect(t!.fundingMethod).toBe('bank_pull');
+    expect(t!.transferType).toBe('b2b');
+    // The BUYER side is the fixed obligation: exactly 500 USD + the flat fee.
+    expect(t!.sourceCurrency).toBe('USD');
+    expect(t!.amountSource).toBe(CASE_B_AMOUNT); // exactly the invoiced amount
+    expect(t!.feeSource).toBe(quote.feeBuyer);
+    expect(t!.totalChargeSource).toBe(quote.buyerTotal); // invoicedAmount + fee, nothing more
+    // The SELLER side is the LOCKED conversion — in the seller's currency.
+    expect(t!.destinationCurrency).toBe('HKD');
+    expect(t!.destinationCountry).toBe('HK');
+    expect(t!.amountInr).toBe(quote.sellerAmount); // amountDest = the LOCKED quote's sellerAmount
+    expect(t!.amountInr).toBe(3906.25); // round2(500 × 7.8125) — never the invoiced 500
+    expect(t!.fxRate).toBe(quote.fxRate);
+    // Payout still from the encrypted seller PROFILE, never buyer input.
+    const decrypted = await stores.store.getTransferDecrypted(res.transferId);
+    expect(decrypted!.payoutDestination).toBe(SELLER_PAYOUT);
+    expect(t!.invoiceId).toBe(invoiceId);
+  });
+
+  it('is claim-first idempotent in Case B too: a double-submit mints exactly ONE transfer', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const invoiceId = await seedCaseBInvoice(stores);
+
+    const a = await finalize(stores, invoiceId, computeCaseBQuote());
+    const b = await finalize(stores, invoiceId, computeCaseBQuote());
+    expect(a.ok && b.ok).toBe(true);
+    if (!a.ok || !b.ok) return;
+    expect(b.transferId).toBe(a.transferId);
+    expect(await transferCount(stores)).toBe(1);
+  });
+
+  it('DEFENSE: a locked quote whose buyerPrincipal ≠ the invoiced amount is refused (currency_mismatch)', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const invoiceId = await seedCaseBInvoice(stores);
+
+    // A stale/tampered lock for a DIFFERENT buyer figure can never mint this bill.
+    const wrong = { ...computeCaseBQuote(), buyerPrincipal: 400, buyerTotal: 401.99 };
+    const res = await finalize(stores, invoiceId, wrong);
+    expect(res).toMatchObject({ ok: false, error: 'currency_mismatch' });
+    expect(await transferCount(stores)).toBe(0);
+  });
+
+  it('a THIRD-currency invoice (neither seller nor buyer currency) is NOT payable', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const inv: B2bInvoice = {
+      id: 'inv_third', partnerId: DEFAULT_PARTNER_ID, businessName: SELLER.businessName, buyerPhone: BUYER_PHONE,
+      lineItems: [{ description: 'Design work', qty: 1, unitAmountUsd: 0 }],
+      amountUsd: 0, currency: 'USD',
+      sellerId: SELLER.id, invoicedAmount: 500, invoicedCurrency: 'GBP', // neither HKD (S) nor USD (B)
+      status: 'unpaid', createdAt: new Date().toISOString(),
+    };
+    await stores.store.saveB2bInvoice(inv);
+
+    const res = await finalize(stores, 'inv_third', computeCaseBQuote());
+    expect(res).toMatchObject({ ok: false, error: 'currency_mismatch' });
+    expect(await transferCount(stores)).toBe(0);
   });
 });
