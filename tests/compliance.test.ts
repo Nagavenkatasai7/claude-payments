@@ -75,6 +75,8 @@ describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)
       senderName: 'John Doe',     // on the default WATCHLIST
     });
     expect(r.status).toBe('blocked');
+    // Reason must name the SENDER, not the recipient
+    expect(r.reasons).toEqual(['Sender is on the compliance watchlist.']);
   });
   it('clean sender + watchlisted recipient still blocks (recipient path unchanged)', async () => {
     const r = await screenTransfer({

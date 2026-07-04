@@ -31,6 +31,31 @@ describe('checkIpRateLimit — fixed window per (scope, ip)', () => {
   });
 });
 
+describe('checkIpRateLimit — windowSec=0 guard', () => {
+  it('windowSec=0 is clamped to ≥1 so the Infinity-window key is never formed', async () => {
+    // Bug: windowSec=0 → Math.floor(now/(0*1000)) = Math.floor(Infinity) = Infinity
+    // → all calls share the key "iprl:w0:ip:Infinity" regardless of `now`.
+    // With fakeRedis (expire=noop) the counter accumulates, so budget gets exhausted,
+    // but the window NEVER resets — once blocked, ALWAYS blocked forever.
+    // Fix: clamp windowSec to Math.max(1, ...) so T0 and T0+2000 land in different windows.
+    const redis = fakeRedis();
+    // exhaust limit=1 at T0
+    await checkIpRateLimit(redis, 'w0', '3.3.3.3', { limit: 1, windowSec: 0, now: T0 });
+    const blocked = await checkIpRateLimit(redis, 'w0', '3.3.3.3', { limit: 1, windowSec: 0, now: T0 });
+    expect(blocked.allowed).toBe(false);
+
+    // 2 seconds later must be a fresh window.
+    // Without fix: Infinity-window key → counter=3 → still blocked.
+    // With fix (windowSec clamped to 1): T0+2000 → different 1-second window → counter=1 → allowed.
+    const nextWindow = await checkIpRateLimit(redis, 'w0', '3.3.3.3', {
+      limit: 1,
+      windowSec: 0,
+      now: T0 + 2000,
+    });
+    expect(nextWindow.allowed).toBe(true);
+  });
+});
+
 describe('clientIpFrom', () => {
   it('takes the FIRST x-forwarded-for entry (the platform-set client ip)', () => {
     expect(clientIpFrom(new Headers({ 'x-forwarded-for': '9.9.9.9, 10.0.0.1' }))).toBe('9.9.9.9');

@@ -25,7 +25,11 @@ export async function checkIpRateLimit(
   ip: string,
   opts: { limit: number; windowSec?: number; now?: number },
 ): Promise<IpRateLimitResult> {
-  const windowSec = opts.windowSec ?? 60;
+  // Clamp to ≥1 so Math.floor(now / (0*1000)) = Math.floor(Infinity) = Infinity can
+  // never happen.  An Infinity window key would (a) bucket ALL IPs/scopes/times together
+  // and (b) let EXPIRE key 0 silently delete the counter on real Redis (DEL semantics),
+  // bypassing the rate limiter entirely.
+  const windowSec = Math.max(1, opts.windowSec ?? 60);
   const window = Math.floor((opts.now ?? Date.now()) / (windowSec * 1000));
   const key = `iprl:${scope}:${ip}:${window}`;
   const count = await redis.incr(key);

@@ -137,12 +137,22 @@ export function encryptField(
   plaintext: string,
   provider: EncryptionKeyProvider = defaultProvider(),
 ): string {
+  // Guard: lone surrogates (e.g. '\uD800') cannot be encoded as valid UTF-8; the
+  // Buffer round-trip silently replaces them with U+FFFD, breaking decrypt(encrypt(x))===x.
+  // Fail loudly so callers fix their input rather than silently corrupting data.
+  const raw = Buffer.from(plaintext, 'utf8');
+  if (raw.toString('utf8') !== plaintext) {
+    throw new Error(
+      'field-crypto: plaintext contains lone surrogates that cannot be ' +
+      'encoded as UTF-8 losslessly — use well-formed Unicode strings',
+    );
+  }
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
   cipher.setAAD(Buffer.from(VERSION)); // bind the version as AAD (anti-transplant)
   const ct = Buffer.concat([
-    cipher.update(Buffer.from(plaintext, 'utf8')),
+    cipher.update(raw),
     cipher.final(),
   ]);
   const tag = cipher.getAuthTag();

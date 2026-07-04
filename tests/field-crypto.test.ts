@@ -151,6 +151,26 @@ describe('EnvKeyProvider master-key validation', () => {
   });
 });
 
+describe('field-crypto lone-surrogate guard', () => {
+  it('throws for lone surrogates that cannot be UTF-8 encoded losslessly', () => {
+    const p = fixedProvider(KEY_A);
+    // '\uD800' is a lone high surrogate — valid JS string, invalid UTF-8
+    expect(() => encryptField('\uD800', p)).toThrow('lone surrogates');
+  });
+
+  it('throws for lone low surrogate', () => {
+    const p = fixedProvider(KEY_A);
+    expect(() => encryptField('\uDC00', p)).toThrow('lone surrogates');
+  });
+
+  it('does NOT throw for a well-formed surrogate pair (valid Unicode scalar)', () => {
+    const p = fixedProvider(KEY_A);
+    // '😀' = 😀 — a valid surrogate PAIR (U+1F600)
+    const blob = encryptField('😀', p);
+    expect(decryptField(blob, p)).toBe('😀');
+  });
+});
+
 describe('field-crypto default provider (env-driven)', () => {
   it('builds an EnvKeyProvider lazily from env.fieldEncryptionKey', async () => {
     const masterHex = randomBytes(32).toString('hex');

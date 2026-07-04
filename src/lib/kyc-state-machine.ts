@@ -41,6 +41,14 @@ export function applyKycEvent(
   }
   if (event.idLast4) delta.idLast4 = event.idLast4;
 
+  // Watchlist / PEP hard hold is a compliance-terminal state that only a human
+  // can clear.  A late Persona inquiry result (approved, completed, etc.) must
+  // NEVER advance kycReviewState past the hold — only factual fields recorded above
+  // are kept.  Return early so the switch statement below cannot touch review state.
+  if (customer.watchlistHit || customer.pepHit) {
+    return delta;
+  }
+
   // Watchlist/PEP match is a hard hold regardless of inquiry status.
   if (event.watchlistMatched || event.name === 'report/watchlist.matched') {
     delta.watchlistHit = true;

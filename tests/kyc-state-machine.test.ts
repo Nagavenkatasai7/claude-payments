@@ -67,4 +67,21 @@ describe('applyKycEvent (human-review-only)', () => {
     const d = applyKycEvent(base, ev({ name: 'inquiry.transitioned', status: 'completed' }));
     expect(d.kycReviewState).toBeUndefined();
   });
+
+  it('a late inquiry.approved does NOT advance kycReviewState when watchlistHit is already set', () => {
+    // Repro: watchlist event arrives first (needs_review + watchlistHit=true),
+    // then a late inquiry.approved arrives.  The hard hold must be terminal.
+    const watchlisted = { ...base, kycReviewState: 'needs_review' as const, watchlistHit: true } as Customer;
+    const d = applyKycEvent(watchlisted, ev({ name: 'inquiry.approved', status: 'approved' }));
+    // watchlist hard-hold wins: kycReviewState must NOT be changed by the webhook
+    expect(d.kycReviewState).toBeUndefined();
+    // factual inquiry fields are still recorded
+    expect(d.kycInquiryId).toBe('inq_1');
+  });
+
+  it('a late inquiry.completed does NOT advance kycReviewState when pepHit is already set', () => {
+    const pepFlagged = { ...base, kycReviewState: 'needs_review' as const, pepHit: true } as Customer;
+    const d = applyKycEvent(pepFlagged, ev({ name: 'inquiry.completed', status: 'completed' }));
+    expect(d.kycReviewState).toBeUndefined();
+  });
 });
