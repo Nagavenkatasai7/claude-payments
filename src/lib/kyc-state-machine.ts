@@ -59,6 +59,11 @@ export function applyKycEvent(
     delta.kycReviewState = 'needs_review';
     return delta;
   }
+  if (event.pepMatched || event.name === 'report/pep.matched') {
+    delta.pepHit = true;
+    delta.kycReviewState = 'needs_review';
+    return delta;
+  }
 
   switch (event.name) {
     case 'inquiry.created':

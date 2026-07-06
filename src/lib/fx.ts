@@ -26,7 +26,7 @@ export function usdPivotCrossRate(
   destinationCurrency: CurrencyCode = 'INR',
   destToUsd?: number,
 ): number {
-  return destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
+  return destinationCurrency === 'INR' || destToUsd == null || !Number.isFinite(destToUsd)
     ? rates.toInr
     : rates.toUsd / destToUsd;
 }

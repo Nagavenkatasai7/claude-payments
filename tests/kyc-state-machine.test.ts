@@ -63,6 +63,24 @@ describe('applyKycEvent (human-review-only)', () => {
     expect(d).toEqual({}); // no change — human terminal decision wins
   });
 
+  it('a PEP match → needs_review + pepHit (hard hold, mirrors watchlist invariant) [regression]', () => {
+    // Bug: report/pep.matched was not handled; pepHit was never set and kycReviewState
+    // stayed at its previous value (e.g. pending_review) instead of moving to needs_review.
+    const customer = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const pepEvent: PersonaEvent = {
+      eventId: 'e2',
+      name: 'report/pep.matched',
+      createdAt: '2026-06-02T21:00:00Z',
+      inquiryId: 'inq_1',
+      referenceId: '15551230000',
+      status: null,
+    };
+    const d = applyKycEvent(customer, pepEvent);
+    expect(d.pepHit).toBe(true);
+    expect(d.kycReviewState).toBe('needs_review');
+    expect('kycStatus' in d).toBe(false); // human-review-only invariant still holds
+  });
+
   it('ignores unknown/no-op events (expired, transitioned) for state', () => {
     const d = applyKycEvent(base, ev({ name: 'inquiry.transitioned', status: 'completed' }));
     expect(d.kycReviewState).toBeUndefined();

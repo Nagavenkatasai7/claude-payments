@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { fakeRedis } from './helpers';
 
@@ -58,6 +58,34 @@ describe('checkIpRateLimit — colon-in-scope/ip collision regression', () => {
     // The real IPv6 address should be unaffected
     const r = await checkIpRateLimit(redis, 'x', '2001:db8::1', { limit, now: T0 });
     expect(r.allowed).toBe(true);
+  });
+});
+
+describe('checkIpRateLimit — windowSec=0 safety (regression)', () => {
+  it('clamps windowSec=0 to 1 so expire is never called with TTL=0 (real Redis deletes key on TTL≤0)', async () => {
+    // Bug: windowSec=0 → Math.floor(now/(0*1000))=Infinity → key "iprl:…:Infinity",
+    //      expire(key, 0*2=0) → real Redis EXPIRE with TTL=0 immediately deletes the key,
+    //      resetting count to 1 on every request and permanently bypassing rate limiting.
+    // fakeRedis expire() is a no-op, so the monotone count still accumulates here;
+    // what we can assert is that the window key never contains "Infinity" and
+    // expire() is never called with TTL=0.
+    const redis = fakeRedis();
+    const expireSpy = vi.spyOn(redis, 'expire');
+    await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec: 0, now: T0 });
+    // With fix (clamp to 1): expire(key, 2) — key is never Infinity, TTL is 2 not 0.
+    expect(expireSpy).not.toHaveBeenCalledWith(expect.any(String), 0);
+    const keys = [...(redis as import('./helpers').FakeRedis).dump.keys()];
+    expect(keys.every(k => !k.includes('Infinity'))).toBe(true);
+  });
+
+  it('rate-limiting still works correctly when windowSec=0 is passed (clamped to 1)', async () => {
+    const redis = fakeRedis();
+    for (let i = 0; i < 3; i++) {
+      const r = await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec: 0, now: T0 });
+      expect(r.allowed).toBe(true);
+    }
+    const fourth = await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec: 0, now: T0 });
+    expect(fourth.allowed).toBe(false);
   });
 });
 
