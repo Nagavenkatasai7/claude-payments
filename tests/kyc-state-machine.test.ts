@@ -67,4 +67,45 @@ describe('applyKycEvent (human-review-only)', () => {
     const d = applyKycEvent(base, ev({ name: 'inquiry.transitioned', status: 'completed' }));
     expect(d.kycReviewState).toBeUndefined();
   });
+
+  // Regression: PEP events were silently ignored — neither pepHit nor needs_review was set.
+  it('a PEP match sets pepHit + needs_review (regression: was silently discarded)', () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    const pepEvent = ev({ name: 'report/pep.matched', status: null, watchlistMatched: undefined });
+    const d = applyKycEvent(customer, pepEvent);
+    expect(d.pepHit).toBe(true);
+    expect(d.kycReviewState).toBe('needs_review');
+    // inquiryId in the event is still recorded for traceability
+    expect(d.kycInquiryId).toBe('inq_1');
+    expect(d.kycProviderRef).toBe('inq_1');
+    expect('kycStatus' in d).toBe(false); // NEVER touch tier-driving field
+  });
+
+  it('a PEP match from the null state (fresh customer) also sets pepHit + needs_review', () => {
+    const d = applyKycEvent(base, ev({ name: 'report/pep.matched', status: null }));
+    expect(d.pepHit).toBe(true);
+    expect(d.kycReviewState).toBe('needs_review');
+    expect(d.watchlistHit).toBeUndefined();
+  });
+
+  it('a PEP match does NOT set watchlistHit (separate flag from watchlist events)', () => {
+    const d = applyKycEvent(base, ev({ name: 'report/pep.matched', status: null }));
+    expect(d.watchlistHit).toBeUndefined();
+    expect(d.pepHit).toBe(true);
+  });
+
+  // HOLD LOCK: needs_review must be sealed against non-hard-hold events.
+  it('needs_review is not downgraded by a subsequent inquiry.approved (HOLD LOCK)', () => {
+    const customer = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const d = applyKycEvent(customer, ev({ name: 'inquiry.approved', status: 'approved' }));
+    expect(d).toEqual({}); // sealed — inquiry.approved must not move needs_review to pending_review
+  });
+
+  it('needs_review allows a second hard-hold event (watchlist after PEP)', () => {
+    const customer = { ...base, kycReviewState: 'needs_review' } as Customer;
+    const wlEvent = ev({ name: 'report/watchlist.matched', status: null, watchlistMatched: true });
+    const d = applyKycEvent(customer, wlEvent);
+    expect(d.watchlistHit).toBe(true);
+    expect(d.kycReviewState).toBe('needs_review');
+  });
 });

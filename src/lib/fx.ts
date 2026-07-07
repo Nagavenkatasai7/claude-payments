@@ -90,9 +90,12 @@ export function quote(
   // rate is supplied) this is rates.toInr — byte-for-byte identical to the
   // pre-any-to-any behavior. Otherwise pivot through USD: src->dest = src.toUsd / dest.toUsd.
   const crossRate =
-    destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
+    destinationCurrency === 'INR' || destToUsd == null || !Number.isFinite(destToUsd)
       ? rates.toInr
       : rates.toUsd / destToUsd;
+  if (!Number.isFinite(crossRate) || crossRate <= 0) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
   const amountInr = Math.round(amountSource * crossRate); // amount in the destination currency
 
   return {
@@ -148,7 +151,7 @@ export function sourceForDest(
     throw new QuoteError('Please give a valid amount.');
   }
   const crossRate =
-    destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
+    destinationCurrency === 'INR' || destToUsd == null || !Number.isFinite(destToUsd)
       ? rates.toInr
       : rates.toUsd / destToUsd;
   if (!Number.isFinite(crossRate) || crossRate <= 0) {

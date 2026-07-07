@@ -164,6 +164,38 @@ describe('quote (non-USD coverage)', () => {
   });
 });
 
+describe('quote — destToUsd=0 guard (regression: was silently using INR rate)', () => {
+  it('quote() with destToUsd=0 throws QuoteError (Infinity cross-rate caught)', () => {
+    // Before fix: !0 === true so destToUsd=0 fell back to rates.toInr (85), returning a
+    // plausible-looking quote with fxRate=85 and amountInr=8500 for an AED destination.
+    // After fix: destToUsd==null is false for 0, so cross-rate = 1/0 = Infinity,
+    // which the existing !Number.isFinite(crossRate) guard in quote() catches.
+    expect(() =>
+      quote(100, 'USD', { toInr: 85, toUsd: 1 }, 'bank_transfer', 0, 'AED', 0),
+    ).toThrow(QuoteError);
+    expect(() =>
+      quote(100, 'USD', { toInr: 85, toUsd: 1 }, 'bank_transfer', 0, 'AED', 0),
+    ).toThrow('Invalid exchange rate; please try again.');
+  });
+
+  it('sourceForDest() with destToUsd=0 throws QuoteError (Infinity cross-rate caught)', () => {
+    // Before fix: !0 === true so destToUsd=0 fell back to rates.toInr, returning 250/85 ≈ 2.94
+    // (the USD-equivalent of 250 INR) instead of throwing.
+    // After fix: cross-rate = 1/0 = Infinity, caught by !Number.isFinite(crossRate)||crossRate<=0.
+    expect(() => sourceForDest(250, { toInr: 85, toUsd: 1 }, 'AED', 0)).toThrow(QuoteError);
+    expect(() => sourceForDest(250, { toInr: 85, toUsd: 1 }, 'AED', 0)).toThrow(
+      'Invalid exchange rate; please try again.',
+    );
+  });
+
+  it('undefined destToUsd still falls back to rates.toInr (back-compat, not affected by fix)', () => {
+    // undefined == null is true, so the INR fallback path is unchanged.
+    const q = quote(100, 'USD', { toInr: 85, toUsd: 1 }, 'bank_transfer', 0, 'AED', undefined);
+    expect(q.fxRate).toBe(85);
+    expect(q.amountInr).toBe(8500);
+  });
+});
+
 describe('quote — any-to-any cross-currency destination', () => {
   const USD2 = { toInr: 85, toUsd: 1 };
   it('USD→INR is byte-for-byte the legacy result (5-arg call defaults to INR)', () => {

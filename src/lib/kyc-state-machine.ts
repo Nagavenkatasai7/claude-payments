@@ -34,6 +34,16 @@ export function applyKycEvent(
     return {};
   }
 
+  const isWatchlistEvent =
+    event.watchlistMatched === true || event.name === 'report/watchlist.matched';
+  const isPepEvent = event.name === 'report/pep.matched';
+  const isHardHold = isWatchlistEvent || isPepEvent;
+
+  // HOLD LOCK: keep needs_review sealed against anything except another hard-hold event
+  if (customer.kycReviewState === 'needs_review' && !isHardHold) {
+    return {};
+  }
+
   const delta: KycDelta = {};
   if (event.inquiryId) {
     delta.kycInquiryId = event.inquiryId;
@@ -42,8 +52,9 @@ export function applyKycEvent(
   if (event.idLast4) delta.idLast4 = event.idLast4;
 
   // Watchlist/PEP match is a hard hold regardless of inquiry status.
-  if (event.watchlistMatched || event.name === 'report/watchlist.matched') {
-    delta.watchlistHit = true;
+  if (isHardHold) {
+    if (isWatchlistEvent) delta.watchlistHit = true;
+    if (isPepEvent) delta.pepHit = true;
     delta.kycReviewState = 'needs_review';
     return delta;
   }
