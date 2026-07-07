@@ -47,11 +47,8 @@ const TARGETS = [
   { module: 'src/lib/ip-rate-limit.ts', inv: 'fail-open on backend error (returns allowed); counts monotone within a window; window rollover resets' },
 ]
 
-// ── DISABLED 2026-07-03 (user request) ───────────────────────────────────────
-// overnight-bug-hunt is turned OFF. The nightly schedule that invokes this script
-// lives outside the repo and still fires, so this guard makes the run a clean
-// no-op regardless — no fuzzing, no branch, no PR. To RE-ENABLE: set DISABLED = false.
-const DISABLED = true;
+// ── RE-ENABLED 2026-07-07 (user request) ─────────────────────────────────────
+const DISABLED = false;
 if (DISABLED) {
   log('overnight-bug-hunt is DISABLED — clean no-op. Flip DISABLED in workflows/overnight-bug-hunt.mjs to re-enable.');
   return { disabled: true, prs: 0, note: 'overnight-bug-hunt intentionally disabled' };
