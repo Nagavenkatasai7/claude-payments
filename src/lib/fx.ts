@@ -2,7 +2,7 @@ import type { CurrencyCode, FundingMethod, Quote } from './types';
 import type { FxRates } from './rate';
 
 export const MIN_USD = 10;
-export const MAX_USD = 2999;
+export const MAX_USD = 999999;
 
 export class QuoteError extends Error {
   constructor(message: string) {

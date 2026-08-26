@@ -29,7 +29,7 @@ describe('any-to-any: sourceForDest (cross-rate-aware receive-first back-solve)'
 
 describe('any-to-any: out-of-range refusal is stated in the SENDER currency', () => {
   it('USD source keeps the exact legacy dollar message (byte-for-byte)', () => {
-    expect(() => quote(5, 'USD', USD, 'bank_transfer', 0)).toThrow('Transfers must be between $10 and $2999.');
+    expect(() => quote(5, 'USD', USD, 'bank_transfer', 0)).toThrow('Transfers must be between $10 and $999999.');
   });
   it('INR source states the range in rupees, never in dollars', () => {
     // ₹210 ≈ $2.48 → below the $10 floor (the exact 6/16 production failure).
@@ -78,7 +78,7 @@ describe('quote (non-USD source)', () => {
   it('enforces MIN_USD/MAX_USD on the USD-equivalent', () => {
     expect(() => quote(5, 'GBP', GBP, 'bank_transfer', 0)).toThrow(QuoteError); // 5×1.27=6.35 < 10
     expect(MIN_USD).toBe(10);
-    expect(MAX_USD).toBe(2999);
+    expect(MAX_USD).toBe(999999);
   });
 });
 
@@ -160,7 +160,7 @@ describe('quote (non-USD coverage)', () => {
     expect(q.feeSource).toBe(5.35);      // 6.8 / 1.27
   });
   it('enforces MAX_USD on the USD-equivalent for a non-USD source', () => {
-    expect(() => quote(2362, 'GBP', GBP, 'bank_transfer', 0)).toThrow(QuoteError); // 2362×1.27=2999.74 > 2999
+    expect(() => quote(800000, 'GBP', GBP, 'bank_transfer', 0)).toThrow(QuoteError); // 800000×1.27=1,016,000 > 999999
   });
 });
 

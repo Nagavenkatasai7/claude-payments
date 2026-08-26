@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SYSTEM_PROMPT, buildSystemPrompt } from '@/lib/prompt';
+import { MAX_USD } from '@/lib/fx';
+import { T1_DAILY_CAP_CENTS } from '@/lib/tier-rules';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -185,9 +187,11 @@ describe('SYSTEM_PROMPT — QA batch 2 (multi-currency cap labels, opener, block
 });
 
 describe('SYSTEM_PROMPT — anti-upsell / no-fabricated-minimum rule', () => {
-  it('states the minimum is $10 INCLUSIVE and the max is $2,999', () => {
+  it('states the minimum is $10 INCLUSIVE and the max is the MAX_USD cap', () => {
     expect(SYSTEM_PROMPT).toContain('$10 INCLUSIVE');
-    expect(SYSTEM_PROMPT).toContain('$2,999');
+    // Derived, not literal: the prompt interpolates fx.ts's MAX_USD, so this
+    // assertion follows a cap change instead of going stale against it.
+    expect(SYSTEM_PROMPT).toContain(`$${MAX_USD.toLocaleString('en-US')}`);
   });
 
   it('forbids inventing a minimum-amount error or calling $10+ too low', () => {
@@ -321,11 +325,11 @@ describe('SYSTEM_PROMPT — live-audit fixes: daily-cap framing + T0→T1 timeli
     }
   });
 
-  it('T0 refusals add the 3-day timeline via day_of_window and the rise to $2,999/day', () => {
+  it('T0 refusals add the 3-day timeline via day_of_window and the rise to the T1 cap', () => {
     for (const p of variants) {
       expect(p).toContain('day_of_window');
       expect(p).toContain('of your first 3 days');
-      expect(p).toContain('your daily limit rises to $2,999/day');
+      expect(p).toContain(`your daily limit rises to $${(T1_DAILY_CAP_CENTS / 100).toLocaleString('en-US')}/day`);
     }
   });
 

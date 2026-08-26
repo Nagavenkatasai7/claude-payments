@@ -15,6 +15,7 @@ import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
@@ -698,14 +699,19 @@ describe('schedule tools', () => {
   });
 });
 
+// Cap-relative fixtures: derived from the constant so a cap change cannot
+// silently turn an "over the cap" assertion into an under-the-cap no-op.
+const T0_CAP_USD = T0_DAILY_CAP_CENTS / 100;
+const OVER_CAP_USD = T0_CAP_USD + 200;
+
 describe('check_send_limit', () => {
   it('T0 brand-new customer with no spend → within_cap true with day_of_window=1', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
     const r = await executeTool('check_send_limit', { amount_usd: 100 }, ctx);
     expect(r.within_cap).toBe(true);
     expect(r.tier).toBe('T0');
-    expect(r.daily_cap_usd).toBe(500);
-    expect(r.today_remaining_usd).toBe(500);
+    expect(r.daily_cap_usd).toBe(T0_CAP_USD);
+    expect(r.today_remaining_usd).toBe(T0_CAP_USD);
     expect(r.day_of_window).toBe(1);
     // The default partner has NOT opted into verify-before-send → no kyc_url
     // even for T0 (the gate-ON variant is covered in its own suite below).
@@ -714,7 +720,7 @@ describe('check_send_limit', () => {
 
   it('T0 customer over the per-transfer cap returns reason=over_per_transfer_cap', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
-    const r = await executeTool('check_send_limit', { amount_usd: 700 }, ctx);
+    const r = await executeTool('check_send_limit', { amount_usd: OVER_CAP_USD }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_per_transfer_cap');
   });
@@ -723,11 +729,12 @@ describe('check_send_limit', () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550001111');
     await ctx.customerStore.upsertOnFirstInbound('15550001111');
-    await ctx.dailyVolumeStore.addCents('15550001111', 30_000); // $300 today
+    // Spend down to $200 of headroom, then ask for $300.
+    await ctx.dailyVolumeStore.addCents('15550001111', T0_DAILY_CAP_CENTS - 20_000);
     const r = await executeTool('check_send_limit', { amount_usd: 300 }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
-    expect(r.today_used_usd).toBe(300);
+    expect(r.today_used_usd).toBe(T0_CAP_USD - 200);
     expect(r.today_remaining_usd).toBe(200);
   });
 
@@ -1063,7 +1070,7 @@ describe('send_approve_picker — cap enforcement', () => {
       return { ok: true, text: async () => '' };
     }));
     const r = await executeTool('send_approve_picker', {
-      amount_usd: 700, // over T0 $500 per-transfer cap
+      amount_usd: OVER_CAP_USD, // over the T0 per-transfer cap
       funding_method: 'bank_transfer',
       recipient_name: 'Mom',
       recipient_phone: '919876543210',
@@ -1543,29 +1550,30 @@ describe('resolve_recipient — payout_destination masking (Fix #1)', () => {
 describe('get_quote cap guard (Bundle D)', () => {
   it('refuses an over-per-transfer amount with a cap result (no quote)', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const r = await executeTool('get_quote', { amount_usd: 700, funding_method: 'bank_transfer' }, ctx);
+    const r = await executeTool('get_quote', { amount_usd: OVER_CAP_USD, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_per_transfer_cap');
     expect(r.fee_usd).toBeUndefined();        // NO quote presented
     expect(r.amount_inr).toBeUndefined();
     expect(r.kyc_url).toBeUndefined();        // gate-off partner ⇒ no verify handoff
-    expect(r.per_transfer_cap_usd).toBe(500);
+    expect(r.per_transfer_cap_usd).toBe(T0_CAP_USD);
   });
 
   it('refuses an over-daily amount and reports the remaining', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await ctx.dailyVolumeStore.addCents(PHONE, 40_000); // $400 already used today
+    // Leave exactly $100 of headroom, then ask for $200.
+    await ctx.dailyVolumeStore.addCents(PHONE, T0_DAILY_CAP_CENTS - 10_000);
     const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
-    expect(r.today_remaining_usd).toBe(100); // $500 cap − $400 used
+    expect(r.today_remaining_usd).toBe(100); // cap − used
     expect(r.fee_usd).toBeUndefined();
   });
 
   it('guards the receive-first (amount_inr) path too', async () => {
     const ctx = await buildCtx(fakeRedis());
-    // 70000 INR / 85 ≈ $823 USD-equiv → over the $500 per-transfer cap
-    const r = await executeTool('get_quote', { amount_inr: 70000, funding_method: 'bank_transfer' }, ctx);
+    // INR amount whose USD-equivalent (÷85) clears the per-transfer cap.
+    const r = await executeTool('get_quote', { amount_inr: OVER_CAP_USD * 85, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.fee_usd).toBeUndefined();
   });
@@ -1837,12 +1845,12 @@ describe('KYC gate OFF — cap refusals never surface verification (QA audit fix
   it('check_send_limit over-cap: refusal fields intact, no kyc_url, no startVerification', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550002222');
     const startSpy = vi.spyOn(ctx.kycProvider, 'startVerification');
-    const r = await executeTool('check_send_limit', { amount_usd: 5000 }, ctx);
+    const r = await executeTool('check_send_limit', { amount_usd: OVER_CAP_USD }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_per_transfer_cap');
     expect(r.tier).toBe('T0');
-    expect(r.daily_cap_usd).toBe(500);
-    expect(r.today_remaining_usd).toBe(500);
+    expect(r.daily_cap_usd).toBe(T0_CAP_USD);
+    expect(r.today_remaining_usd).toBe(T0_CAP_USD);
     expect(r.kyc_url).toBeUndefined();
     expect(startSpy).not.toHaveBeenCalled();
   });
@@ -1850,7 +1858,7 @@ describe('KYC gate OFF — cap refusals never surface verification (QA audit fix
   it('get_quote over-cap: refusal fields intact, no kyc_url, no startVerification', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550002222');
     const startSpy = vi.spyOn(ctx.kycProvider, 'startVerification');
-    const r = await executeTool('get_quote', { amount_usd: 5000, funding_method: 'bank_transfer' }, ctx);
+    const r = await executeTool('get_quote', { amount_usd: OVER_CAP_USD, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.tier).toBe('T0');
     expect(r.kyc_url).toBeUndefined();
@@ -1864,7 +1872,7 @@ describe('KYC gate OFF — cap refusals never surface verification (QA audit fix
     const dflt = await ctx.partnerStore.ensureDefaultPartner();
     await ctx.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: nowIso });
     const startSpy = vi.spyOn(ctx.kycProvider, 'startVerification');
-    const r = await executeTool('check_send_limit', { amount_usd: 5000 }, ctx);
+    const r = await executeTool('check_send_limit', { amount_usd: OVER_CAP_USD }, ctx);
     expect(r.within_cap).toBe(false);
     expect(typeof r.kyc_url).toBe('string');
     expect(startSpy).toHaveBeenCalled();
