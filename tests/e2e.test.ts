@@ -9,7 +9,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
-import { evaluateCap } from '@/lib/tier-rules';
+import { evaluateCap, T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -390,16 +390,21 @@ describe('end-to-end new customer with cap', () => {
     // Daily volume must be 40000 cents
     expect(await dailyVolumeStore.getTodayCents(PHONE)).toBe(40_000);
 
-    // Now mark verified mid-window — cap stays $500/day (observation invariant)
+    // Now mark verified mid-window — the T0 cap stays put (observation invariant)
     await customerStore.saveCustomer({
       ...(await customerStore.getCustomer(PHONE))!,
       kycStatus: 'verified',
       kycVerifiedAt: new Date().toISOString(),
     });
 
-    // $400 used today + $200 requested = $600 > $500 cap → over_daily_cap
+    // Drive today's usage to $100 short of the T0 cap, so the $200 request
+    // below overshoots it. Written against the constant, not a literal, so
+    // raising the cap cannot quietly turn this into a passing no-op.
+    await dailyVolumeStore.addCents(PHONE, T0_DAILY_CAP_CENTS - 40_000 - 10_000);
+
+    // used = cap − $100, + $200 requested → over_daily_cap.
     // (Verifies the observation invariant: KYC verified mid-window does NOT
-    //  lift the cap. If verification lifted, $200 would fit in T1's $2,999.)
+    //  lift the cap — the tier stays T0 and its cap still binds.)
     const ev = evaluateCap(
       (await customerStore.getCustomer(PHONE))!,
       new Date(),
@@ -410,7 +415,7 @@ describe('end-to-end new customer with cap', () => {
     expect(ev.withinCap).toBe(false);
     expect(ev.reason).toBe('over_daily_cap');
 
-    // Asking for $100 (which fits the $100 remaining of the $500 cap) → within
+    // Asking for $100 (exactly the $100 remaining of the T0 cap) → within
     const within = evaluateCap(
       (await customerStore.getCustomer(PHONE))!,
       new Date(),

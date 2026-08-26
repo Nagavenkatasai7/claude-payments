@@ -61,7 +61,7 @@ export default function RateCalculator({ liveRate }: Props) {
               type="number"
               inputMode="decimal"
               min={10}
-              max={2999}
+              max={999999}
               step={50}
               value={amount}
               onChange={(e) => setAmount(e.target.value)}

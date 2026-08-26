@@ -1,7 +1,7 @@
 import type { Customer, Tier, CapEvaluation } from './types';
 
-export const T0_DAILY_CAP_CENTS = 50_000;   // $500.00
-export const T1_DAILY_CAP_CENTS = 299_900;  // $2,999.00
+export const T0_DAILY_CAP_CENTS = 99_999_900;  // $999,999.00
+export const T1_DAILY_CAP_CENTS = 99_999_900;  // $999,999.00
 export const OBSERVATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**

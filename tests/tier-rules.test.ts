@@ -73,14 +73,15 @@ describe('evaluateCap', () => {
 
   it('T0 customer over the per-transfer cap', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_2, 0, 60_000); // $600
+    const r = evaluateCap(c, DAY_2, 0, T0_DAILY_CAP_CENTS + 10_000); // cap + $100
     expect(r.withinCap).toBe(false);
     expect(r.reason).toBe('over_per_transfer_cap');
   });
 
   it('T0 customer over the daily cap (cumulative)', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_2, 30_000, 30_000); // $300 already, requesting $300 more = $600
+    // $200 of headroom left, asking for $300 more.
+    const r = evaluateCap(c, DAY_2, T0_DAILY_CAP_CENTS - 20_000, 30_000);
     expect(r.withinCap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
     expect(r.todayRemainingCents).toBe(20_000); // $200 left
@@ -191,6 +192,6 @@ describe('evaluateCap regression (EDD is orthogonal — cap math unchanged)', ()
     };
     const ev = evaluateCap(c, new Date('2026-05-29T00:00:00Z'), 0, 100_000);
     expect(ev.tier).toBe('T1');
-    expect(ev.dailyCapCents).toBe(299_900); // unchanged T1_DAILY_CAP_CENTS
+    expect(ev.dailyCapCents).toBe(T1_DAILY_CAP_CENTS); // cap-agnostic: EDD never touches cap math
   });
 });

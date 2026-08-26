@@ -7,6 +7,7 @@ import { createDraftStore } from '@/lib/draft-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
+import { T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
 import { resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -120,8 +121,9 @@ describe('finalizeDraftPayment', () => {
     const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
 
-    // Exhaust the T0 daily cap ($500 = 50_000 cents)
-    await stores.dailyVolumeStore.addCents(PHONE, 50_000);
+    // Exhaust the T0 daily cap (read from the constant so a cap change
+    // can never silently turn this into a no-op assertion).
+    await stores.dailyVolumeStore.addCents(PHONE, T0_DAILY_CAP_CENTS);
 
     const result = await finalizeDraftPayment(stores, draftId);
 
