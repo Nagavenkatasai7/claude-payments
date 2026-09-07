@@ -8,7 +8,10 @@ coverage
 .vercel
 .env*
 .superpowers
-.claude
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/skills/
 playwright-report
 test-results
 /playwright/.cache
