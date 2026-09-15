@@ -2553,7 +2553,7 @@ import { test, expect } from '@playwright/test';
 // `||` not `??`: GitHub Actions sets env vars to empty string when the
 // referenced secret doesn't exist, and `??` only falls back on undefined.
 const USERNAME = process.env.E2E_USERNAME || 'forextransfer';
-const PASSWORD = process.env.E2E_PASSWORD || 'forex@123';
+const PASSWORD = process.env.E2E_PASSWORD || '<redacted>';
 
 const PARTNER_USERNAME = process.env.E2E_PARTNER_USERNAME || '';
 const PARTNER_PASSWORD = process.env.E2E_PARTNER_PASSWORD || '';
