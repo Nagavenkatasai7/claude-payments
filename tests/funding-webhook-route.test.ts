@@ -1,9 +1,10 @@
 /**
  * W1 — /api/funding-webhook/[provider]: the funding provider's async callback
  * (captures/refunds confirmed out-of-band). Mirrors payment-webhook's posture:
- * per-IP limit fail-open, HMAC over the RAW body FAIL-CLOSED for any provider
- * !== 'mock' (secret via FUNDING_WEBHOOK_SECRET_<PROVIDER>, '' ⇒ reject),
- * unknown/junk ⇒ 200 ignored. The route only mirrors funding state:
+ * per-IP limit fail-open, HMAC over the RAW body FAIL-CLOSED for every provider
+ * including 'mock' (secret via FUNDING_WEBHOOK_SECRET_<PROVIDER>, '' ⇒ reject;
+ * no carve-out — money-01 / F42), unknown/junk ⇒ 200 ignored. The route only
+ * mirrors funding state:
  *  - captured      ⇒ setFundingRef (write-once; NO status change — the pay
  *                    route owns settlement)
  *  - refunded      ⇒ refundStatus pending→completed (+ref +refundedAt)
@@ -30,6 +31,7 @@ vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }))
 import { POST } from '@/app/api/funding-webhook/[provider]/route';
 
 const SECRET = 'stripe-funding-secret';
+const MOCK_SECRET = 'mock-funding-secret';
 const sig = (b: string, s = SECRET) => createHmac('sha256', s).update(b).digest('hex');
 
 function post(provider: string, raw: string, signature?: string) {
@@ -59,10 +61,12 @@ beforeEach(async () => {
   db = await freshDb();
   repo = createTransferRepo(db);
   process.env.FUNDING_WEBHOOK_SECRET_STRIPE = SECRET;
+  process.env.FUNDING_WEBHOOK_SECRET_MOCK = MOCK_SECRET;
 });
 
 afterEach(() => {
   delete process.env.FUNDING_WEBHOOK_SECRET_STRIPE;
+  delete process.env.FUNDING_WEBHOOK_SECRET_MOCK;
 });
 
 describe('POST /api/funding-webhook/[provider] — refund lifecycle', () => {
@@ -71,7 +75,7 @@ describe('POST /api/funding-webhook/[provider] — refund lifecycle', () => {
       id: 'fw1', status: 'paid', fundingRef: 'fund-fw1', refundStatus: 'pending',
     }));
     const body = JSON.stringify({ transfer_id: 'fw1', event: 'refunded', ref: 'rf-001' });
-    const res = await post('mock', body); // mock carve-out: no signature required
+    const res = await post('mock', body, sig(body, MOCK_SECRET)); // mock is signed like every provider
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true });
 
@@ -89,7 +93,7 @@ describe('POST /api/funding-webhook/[provider] — refund lifecycle', () => {
       id: 'fw2', status: 'paid', fundingRef: 'fund-fw2', refundStatus: 'pending',
     }));
     const body = JSON.stringify({ transfer_id: 'fw2', event: 'refund_failed' });
-    const res = await post('mock', body);
+    const res = await post('mock', body, sig(body, MOCK_SECRET));
     expect(res.status).toBe(200);
 
     const t = await repo.getTransfer('fw2');
@@ -100,12 +104,24 @@ describe('POST /api/funding-webhook/[provider] — refund lifecycle', () => {
   it("refunded for a transfer NOT pending → guarded no-op (replays are harmless), still 200", async () => {
     await repo.saveTransfer(makeTransfer({ id: 'fw3', status: 'paid', fundingRef: 'fund-fw3' }));
     const body = JSON.stringify({ transfer_id: 'fw3', event: 'refunded', ref: 'rf-x' });
-    const res = await post('mock', body);
+    const res = await post('mock', body, sig(body, MOCK_SECRET));
     expect(res.status).toBe(200);
 
     const t = await repo.getTransfer('fw3');
     expect(t?.refundStatus ?? 'none').toBe('none'); // updateRefund's legal-from guard held
     expect(t?.refundRef).toBeUndefined();
+  });
+
+  it('mock provider with NO secret configured → 401 and no mutation (fail-closed like every other provider)', async () => {
+    delete process.env.FUNDING_WEBHOOK_SECRET_MOCK;
+    await repo.saveTransfer(makeTransfer({
+      id: 'fw9', status: 'paid', fundingRef: 'fund-fw9', refundStatus: 'pending',
+    }));
+    const body = JSON.stringify({ transfer_id: 'fw9', event: 'refunded', ref: 'rf-009' });
+
+    expect((await post('mock', body)).status).toBe(401);                 // unsigned
+    expect((await post('mock', body, sig(body, ''))).status).toBe(401);  // signed with the empty secret
+    expect((await repo.getTransfer('fw9'))?.refundStatus).toBe('pending');
   });
 });
 
@@ -113,7 +129,7 @@ describe('POST /api/funding-webhook/[provider] — captured event', () => {
   it('captured sets fundingRef write-once and NEVER touches status', async () => {
     await repo.saveTransfer(makeTransfer({ id: 'fw4' })); // awaiting_payment, no fundingRef
     const body = JSON.stringify({ transfer_id: 'fw4', event: 'captured', ref: 'fund-async-1' });
-    expect((await post('mock', body)).status).toBe(200);
+    expect((await post('mock', body, sig(body, MOCK_SECRET))).status).toBe(200);
 
     let t = await repo.getTransfer('fw4');
     expect(t?.fundingRef).toBe('fund-async-1');
@@ -121,7 +137,7 @@ describe('POST /api/funding-webhook/[provider] — captured event', () => {
 
     // Replay with a DIFFERENT ref → write-once guard keeps the first.
     const replay = JSON.stringify({ transfer_id: 'fw4', event: 'captured', ref: 'fund-async-2' });
-    expect((await post('mock', replay)).status).toBe(200);
+    expect((await post('mock', replay, sig(replay, MOCK_SECRET))).status).toBe(200);
     t = await repo.getTransfer('fw4');
     expect(t?.fundingRef).toBe('fund-async-1');
   });
@@ -153,9 +169,9 @@ describe('POST /api/funding-webhook/[provider] — security posture', () => {
     expect((await post('stripe', body, sig(body, 'guess'))).status).toBe(401);
   });
 
-  it("mock carve-out closes when FUNDING_WEBHOOK_SECRET_MOCK is set: unsigned → 401, signed → processed", async () => {
+  it('mock provider WITH a secret: unsigned → 401, signed → processed', async () => {
     // Unlike the payment mock (a no-op handleWebhook), the funding mock ACTS
-    // on parsed bodies — so prod can lock /mock by configuring its secret.
+    // on parsed bodies — only a caller holding the configured secret gets through.
     process.env.FUNDING_WEBHOOK_SECRET_MOCK = 'mock-lock';
     try {
       await repo.saveTransfer(makeTransfer({
@@ -184,17 +200,19 @@ describe('POST /api/funding-webhook/[provider] — security posture', () => {
   });
 
   it('junk-but-valid JSON (no transfer_id / unknown event) → 200 ignored, no mutation', async () => {
-    const res = await post('mock', JSON.stringify({ hello: 'world' }));
+    const junk = JSON.stringify({ hello: 'world' });
+    const res = await post('mock', junk, sig(junk, MOCK_SECRET));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, ignored: true });
 
-    const res2 = await post('mock', JSON.stringify({ transfer_id: 'fw1', event: 'exploded' }));
+    const unknownEvent = JSON.stringify({ transfer_id: 'fw1', event: 'exploded' });
+    const res2 = await post('mock', unknownEvent, sig(unknownEvent, MOCK_SECRET));
     expect(res2.status).toBe(200);
     expect(await res2.json()).toMatchObject({ ok: true, ignored: true });
   });
 
   it('malformed JSON → 400', async () => {
-    expect((await post('mock', '{not json')).status).toBe(400);
+    expect((await post('mock', '{not json', sig('{not json', MOCK_SECRET))).status).toBe(400);
   });
 
   it('sends NO WhatsApp messages and writes NO outbox rows (the refund engine owns messaging)', async () => {
@@ -202,7 +220,7 @@ describe('POST /api/funding-webhook/[provider] — security posture', () => {
       id: 'fw7', status: 'paid', fundingRef: 'fund-fw7', refundStatus: 'pending',
     }));
     const body = JSON.stringify({ transfer_id: 'fw7', event: 'refunded', ref: 'rf-007' });
-    expect((await post('mock', body)).status).toBe(200);
+    expect((await post('mock', body, sig(body, MOCK_SECRET))).status).toBe(200);
     const rows = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as {
       rows: Array<{ n: number }>;
     };
