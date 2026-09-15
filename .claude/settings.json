@@ -1,0 +1,185 @@
+{
+  "enabledPlugins": {
+    "vercel@claude-plugins-official": true,
+    "github@claude-plugins-official": true,
+    "sentry@claude-plugins-official": true,
+    "posthog@claude-plugins-official": true,
+    "circle-skills@claude-plugins-official": true,
+    "langfuse@claude-plugins-official": true,
+    "deepeval@claude-plugins-official": true,
+    "neon@claude-plugins-official": true,
+    "redis-development@claude-plugins-official": true,
+    "playwright@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npm run typecheck)",
+      "Bash(npm run lint)",
+      "Bash(npm run test)",
+      "Bash(npm run test:*)",
+      "Bash(npm run build)",
+      "Bash(npm run e2e)",
+      "Bash(npm run e2e:*)",
+      "Bash(npm test)",
+      "Bash(npm ci)",
+      "Bash(npm audit:*)",
+      "Bash(npm ls:*)",
+      "Bash(npm outdated:*)",
+      "Bash(npm view:*)",
+      "Bash(npx vitest:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx eslint:*)",
+      "Bash(npx playwright test:*)",
+      "Bash(npx drizzle-kit generate:*)",
+      "Bash(npx drizzle-kit check:*)",
+      "Bash(node_modules/.bin/vitest:*)",
+      "Bash(node_modules/.bin/tsc:*)",
+      "Bash(node_modules/.bin/eslint:*)",
+      "Bash(node_modules/.bin/playwright test:*)",
+      "Bash(set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/outbox-status.ts:*)",
+      "Bash(set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/migration-status.ts:*)",
+      "Bash(set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/routing-status.ts:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
+      "Bash(git stash list:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git blame:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git remote:*)",
+      "Bash(git worktree list:*)",
+      "Bash(git add:*)",
+      "Bash(git checkout -b:*)",
+      "Bash(git switch -c:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr status:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh workflow list:*)",
+      "Bash(gh workflow view:*)",
+      "Bash(gh repo view:*)",
+      "Bash(gh auth status:*)",
+      "Bash(npx vercel logs:*)",
+      "Bash(npx vercel ls:*)",
+      "Bash(npx vercel inspect:*)",
+      "Bash(npx vercel env ls:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(find:*)",
+      "Bash(sed -n:*)",
+      "Bash(jq:*)",
+      "Bash(diff:*)",
+      "Bash(tree:*)",
+      "Bash(which:*)",
+      "Bash(node -v)",
+      "Bash(npm -v)",
+      "Bash(claude plugin list:*)",
+      "Bash(curl -s https://api.frankfurter.app/*)",
+      "Bash(curl -sI https://smartremit.ai/*)",
+      "WebSearch",
+      "WebFetch(domain:nextjs.org)",
+      "WebFetch(domain:react.dev)",
+      "WebFetch(domain:orm.drizzle.team)",
+      "WebFetch(domain:neon.tech)",
+      "WebFetch(domain:neon.com)",
+      "WebFetch(domain:upstash.com)",
+      "WebFetch(domain:vercel.com)",
+      "WebFetch(domain:playwright.dev)",
+      "WebFetch(domain:developers.facebook.com)",
+      "WebFetch(domain:ollama.com)",
+      "WebFetch(domain:docs.ollama.com)",
+      "WebFetch(domain:tailwindcss.com)",
+      "WebFetch(domain:ui.shadcn.com)",
+      "WebFetch(domain:vitest.dev)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:code.claude.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:frankfurter.dev)",
+      "WebFetch(domain:api.frankfurter.app)",
+      "WebFetch(domain:recharts.org)",
+      "WebFetch(domain:developer.mozilla.org)",
+      "WebFetch(domain:nodejs.org)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:owasp.org)",
+      "WebFetch(domain:cheatsheetseries.owasp.org)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.production)",
+      "Read(./.env.development)",
+      "Bash(cat .env*)",
+      "Bash(cat ./.env*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/icloud-dup-sweep.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-git-main.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/migration-reminder.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/component-boundary.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify-on-stop.sh\"",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}
