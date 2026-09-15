@@ -5,13 +5,18 @@ import { test, expect, type Page } from '@playwright/test';
 // requireScope server-side guard (the nav hiding is presentation, never the
 // guard). Modeled on dashboard-smoke.spec.ts's self-provisioning style.
 
-// `||` not `??`: GitHub Actions sets env vars to empty string when the
-// referenced secret doesn't exist, and `??` only falls back on undefined.
-const USERNAME = process.env.E2E_USERNAME || 'forextransfer';
-const PASSWORD = process.env.E2E_PASSWORD || 'forex@123';
-// Reuses the existing CI secret so no new secret is required; an explicit
-// E2E_SUPPORT_PASSWORD overrides it if ever split out.
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} is required for the prod smoke: add it as a GitHub Actions secret (or export it locally).`);
+  return v;
+}
+const USERNAME = requireEnv('E2E_USERNAME');
+const PASSWORD = requireEnv('E2E_PASSWORD');
+// Reuses the partner secret unless an explicit E2E_SUPPORT_PASSWORD is split out.
 const SUPPORT_PASSWORD = process.env.E2E_SUPPORT_PASSWORD || process.env.E2E_PARTNER_PASSWORD || '';
+if (!SUPPORT_PASSWORD && process.env.CI) {
+  throw new Error('E2E_SUPPORT_PASSWORD or E2E_PARTNER_PASSWORD must be set in CI for the support smoke.');
+}
 
 const SMOKE_SUPPORT_USERNAME = 'e2e-smoke-support';
 

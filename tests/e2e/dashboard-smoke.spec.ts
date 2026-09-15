@@ -1,10 +1,16 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// `||` not `??`: GitHub Actions sets env vars to empty string when the
-// referenced secret doesn't exist, and `??` only falls back on undefined.
-const USERNAME = process.env.E2E_USERNAME || 'forextransfer';
-const PASSWORD = process.env.E2E_PASSWORD || 'forex@123';
-const PARTNER_PASSWORD = process.env.E2E_PARTNER_PASSWORD || '';
+// The prod smoke needs real credentials from CI secrets (or a local export).
+// GitHub Actions sets a referenced-but-missing secret to '' — so check for
+// emptiness, never fall back to a literal (a literal here is a public login).
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} is required for the prod smoke: add it as a GitHub Actions secret (or export it locally).`);
+  return v;
+}
+const USERNAME = requireEnv('E2E_USERNAME');
+const PASSWORD = requireEnv('E2E_PASSWORD');
+const PARTNER_PASSWORD = process.env.E2E_PARTNER_PASSWORD ?? '';
 
 // SELF-PROVISIONED partner fixture (post Postgres fresh-start): the old
 // E2E_PARTNER_USERNAME/_ID secrets referenced a partner row that only existed
