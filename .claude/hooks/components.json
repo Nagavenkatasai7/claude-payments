@@ -1,0 +1,77 @@
+{
+  "_doc": "Component map used by .claude/hooks/component-boundary.sh and documented in docs/COMPONENTS.md. Order matters: the FIRST component whose path matches wins, so list specific paths (b2b, compliance-kyc) before broad ones (money-paths, admin-dashboard). Patterns: 'dir/' = prefix, '*' = glob, otherwise exact.",
+  "shared": [
+    "src/lib/types.ts", "src/lib/env.ts", "src/lib/utils.ts", "src/lib/dates.ts", "src/lib/phone.ts",
+    "src/lib/defaults.ts", "src/lib/id.ts", "src/lib/mask.ts", "src/lib/log.ts",
+    "src/app/layout.tsx", "src/app/tailwind.css",
+    "src/db/schema.ts", "drizzle/",
+    "package.json", "package-lock.json", "CLAUDE.md", "README.md", "docs/", ".claude/", "tests/setup.ts", "tests/helpers/"
+  ],
+  "neverWarn": ["db-layer"],
+  "components": {
+    "b2b": { "branch": "component/b2b", "paths": [
+      "src/lib/b2b-*", "src/app/pay/b2b/", "src/app/api/pay/b2b/", "src/app/admin-dashboard/b2b/", "tests/b2b-*"
+    ]},
+    "compliance-kyc": { "branch": "component/compliance-kyc", "paths": [
+      "src/lib/compliance*", "src/lib/consent.ts", "src/lib/kyc-*", "src/lib/tier-rules.ts", "src/lib/review-triage-ai.ts",
+      "src/lib/providers/kyc-provider.ts", "src/lib/providers/mock-kyc-provider.ts", "src/lib/providers/persona-*", "src/lib/providers/sanctions-provider.ts",
+      "src/app/api/persona-webhook/", "src/app/admin-dashboard/compliance/", "src/app/admin-dashboard/kyc/", "src/app/admin-dashboard/kyc-badge.tsx",
+      "tests/compliance*", "tests/kyc-*", "tests/consent.test.ts", "tests/persona-*", "tests/sanctions*", "tests/tier-*"
+    ]},
+    "corridors-fx": { "branch": "component/corridors-fx", "paths": [
+      "src/lib/rate.ts", "src/lib/fx.ts", "src/lib/partner-rates.ts", "src/lib/partner-currency.ts", "src/lib/payout-format.ts",
+      "src/lib/sender-defaults.ts", "src/lib/rate-staleness.ts", "src/lib/corridor-*", "src/db/repos/partner-rate-repo.ts",
+      "src/app/admin-dashboard/corridors/", "src/app/admin-dashboard/rates/", "scripts/refresh-demo-rates.ts", "scripts/routing-status.ts",
+      "tests/*corridor*", "tests/rate*", "tests/fx*", "tests/partner-rates*", "tests/partner-currency*", "tests/payout-format*"
+    ]},
+    "whatsapp-agent": { "branch": "component/whatsapp-agent", "paths": [
+      "src/lib/agent.ts", "src/lib/prompt.ts", "src/lib/tools.ts", "src/lib/ollama.ts", "src/lib/whatsapp*", "src/lib/web-chat.ts",
+      "src/lib/draft-store.ts", "src/lib/sender-names.ts", "src/lib/providers/meta-signature-verify.ts",
+      "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
+    ]},
+    "outbox-worker": { "branch": "component/outbox-worker", "paths": [
+      "src/lib/outbox.ts", "src/lib/outbox-worker.ts", "src/lib/reconcile.ts", "src/lib/cron-run.ts", "src/db/repos/outbox-repo.ts",
+      "src/app/api/worker/", "src/app/api/cron/", ".github/workflows/worker-heartbeat.yml", "scripts/outbox-status.ts",
+      "tests/outbox*", "tests/reconcile*", "tests/cron-*", "tests/worker*"
+    ]},
+    "money-paths": { "branch": "component/money-paths", "paths": [
+      "src/lib/settlement.ts", "src/lib/pay-finalize.ts", "src/lib/transfer-create.ts", "src/lib/payment.ts", "src/lib/funding-method.ts",
+      "src/lib/refund-policy.ts", "src/lib/transaction-otp.ts", "src/lib/schedule.ts", "src/lib/schedule-store.ts",
+      "src/lib/providers/payment-provider.ts", "src/lib/providers/http-payment-provider.ts", "src/lib/providers/funding-provider.ts", "src/lib/providers/payment-webhook-verify.ts",
+      "src/db/repos/transfer-repo.ts", "src/db/repos/schedule-repo.ts",
+      "src/app/api/pay/", "src/app/api/payment-webhook/", "src/app/api/funding-webhook/", "src/app/api/partner-rail/",
+      "src/app/admin-dashboard/refunds/", "src/app/admin-dashboard/schedules/", "src/app/admin-dashboard/transactions/",
+      "tests/settlement*", "tests/pay-*", "tests/transfer-*", "tests/payment*", "tests/funding*", "tests/refund*", "tests/schedule*", "tests/partner-rail*"
+    ]},
+    "partner-api": { "branch": "component/partner-api", "paths": [
+      "src/lib/partner-api*", "src/lib/partner-config.ts", "src/lib/partner-integrations*", "src/lib/partner-rate-limit.ts",
+      "src/lib/partner-application-token.ts", "src/lib/partner-store.ts", "src/lib/onboarding-token.ts",
+      "src/db/repos/api-key-repo.ts", "src/db/repos/integrations-repo.ts", "src/db/repos/partner-repo.ts",
+      "src/app/api/partner/", "src/app/api/partner-application/", "src/app/admin-dashboard/api-keys/", "src/app/admin-dashboard/partners/", "src/app/admin-dashboard/partner-requests/",
+      "src/app/onboard/", "scripts/seed-demo-partners.ts", "scripts/promote-demo-partners.ts", "scripts/clean-smoke-partner.ts", "scripts/set-partner-logos.ts",
+      "tests/partner-api*", "tests/partner-store*", "tests/partner-integrations*", "tests/api-key*", "tests/onboarding*"
+    ]},
+    "customer-portal": { "branch": "component/customer-portal", "paths": [
+      "src/app/account/", "src/app/api/account/", "src/lib/customer-*", "src/lib/otp-store.ts", "src/lib/verify-link.ts",
+      "src/lib/pending-auth-store.ts", "src/lib/recent-transfers.ts", "src/db/repos/customer-repo.ts",
+      "tests/account-*", "tests/customer-*", "tests/otp*", "tests/verify-link*"
+    ]},
+    "pay-page": { "branch": "component/pay-page", "paths": [ "src/app/pay/" ]},
+    "admin-dashboard": { "branch": "component/admin-dashboard", "paths": [
+      "src/app/admin-dashboard/", "src/app/login/", "src/app/api/dashboard/", "src/lib/dashboard*", "src/lib/analytics.ts",
+      "src/lib/auth.ts", "src/lib/auth-store.ts", "src/lib/staff-scope.ts", "src/lib/permissions.ts", "src/lib/session-cookie.ts",
+      "src/lib/password.ts", "src/lib/pwned.ts", "src/lib/ticket-*", "src/lib/ops-diagnosis-ai.ts", "src/lib/partner-health*", "src/lib/audit-log-store.ts",
+      "src/db/repos/ticket-repo.ts", "tests/dashboard*", "tests/analytics*", "tests/auth*", "tests/admin-*", "tests/ticket*", "tests/staff-*", "tests/permissions*", "tests/employee-*"
+    ]},
+    "landing-docs": { "branch": "component/landing-docs", "paths": [
+      "src/app/page.tsx", "src/app/landing/", "src/app/about/", "src/app/docs/", "src/app/partners/", "src/app/partners-action.ts",
+      "src/lib/logo.ts", "src/lib/blob.ts", "src/lib/email.ts", "public/"
+    ]},
+    "platform-security": { "branch": "component/platform-security", "paths": [
+      "src/middleware.ts", "src/instrumentation.ts", "src/lib/boot-assert.ts", "src/lib/field-crypto.ts", "src/lib/ip-rate-limit.ts",
+      "src/lib/redis.ts", "src/lib/store.ts", "src/lib/scoped-store.ts", "src/lib/seed.ts", "next.config.*", "vitest.config.*", "playwright.config.*",
+      "eslint.config.*", "tsconfig.json", ".github/", "tests/e2e/", "tests/boot-assert*", "tests/field-crypto*", "tests/ip-rate-limit*", "tests/security*", "tests/middleware*"
+    ]},
+    "db-layer": { "branch": "component/db-layer", "paths": [ "src/db/", "drizzle/", "drizzle.config.ts", "scripts/migration-status.ts" ]}
+  }
+}
