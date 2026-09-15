@@ -53,3 +53,29 @@ PART 3: VERCEL (project claude-payments, team "venkat's projects")
 17. Project → Settings → Environment Variables. Expected: SEED_ADMIN_USERNAME and SEED_ADMIN_PASSWORD are present, scoped to Production, and marked Sensitive (values hidden). PASS/FAIL. Do not click Edit or Reveal.
 
 REPORT. Produce a table with columns: # | check | expected | observed | PASS/FAIL. Then one paragraph: overall verdict (all pass, or which checks failed), MAIN_SHA, the Production deployment hash, and anything unexpected you saw on the way. Do not include any password, secret value or session token in the report.
+
+---
+
+## Run 2 — 2026-09-15 21:20Z (executed by the agent: gh API, curl, Claude in Chrome as `e2e_smoke`)
+
+| # | check | observed | result |
+|---|---|---|---|
+| 1 | PRs #237 #242 #243 #245 #241 #244 merged | all six MERGED 2026-09-15 | PASS |
+| 2 | main CI green | `ci` success on `742f6a8` (MAIN_SHA) | PASS |
+| 3 | newest non-skipped smoke = MAIN_SHA | run 35023596442 on `742f6a8`: first attempt red (E2E_PASSWORD pasted short), re-run green after the secret was re-set | PASS |
+| 4 | repo secrets | CRON_SECRET, E2E_PARTNER_ID/PASSWORD/USERNAME, E2E_PASSWORD, E2E_USERNAME present | PASS |
+| 5 | no open high/critical Dependabot alert for next/nodemailer/sharp | none for those; one open **high: js-yaml (dev)** → PR #246 | PASS (with follow-up) |
+| 6 | spec uses requireEnv, no literal fallbacks | 2 requireEnv hits, 0 literal-fallback hits on main | PASS |
+| 7 | landing renders | 200 | PASS |
+| 8 | /login renders | 200 | PASS |
+| 9 | logged-out /admin-dashboard → /login | 307 → https://smartremit.ai/login | PASS |
+| 10 | unsigned funding webhook | 401 | PASS |
+| 11 | bad-signature funding webhook | 401 | PASS |
+| 12 | new admin logs in, lands on Overview | `e2e_smoke` session, `/admin-dashboard` title "Overview", sidebar present | PASS |
+| 13 | team page: new admin listed, `forextransfer` absent | `forextransfer` removed by `e2e_smoke` (audit trail 21:19Z, sessions purged); 4 members: partner_smoke (platform admin), venkat123 (platform agent), venky, e2e_smoke | PASS |
+| 14 | Transactions / Operations / Customers render | all 200 with titles, no error banner | PASS |
+| 15 | old account cannot log in | account row deleted + `deleteAllSessionsFor`; no login attempt made | PASS (by deletion) |
+| 16 | production deployment = MAIN_SHA | dpl_7z6eHF6SmukKDTEB377R4phggFab READY, target production, `742f6a8` | PASS |
+| 17 | SEED_ADMIN_* Production + Sensitive | owner step 4, not yet verified | NOT VERIFIED |
+
+Unexpected: a burst of HTTP 503s on `/admin-dashboard/team` (server action POST) and three sidebar prefetches at ~21:14Z, gone a minute later with no function log entry — likely Hobby-plan throttling; carry to Phase 1 observability. Syncing the 13 `component/*` anchors queued 13 preview builds on Vercel.
