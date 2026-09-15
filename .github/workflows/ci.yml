@@ -51,11 +51,6 @@ jobs:
           fi
           echo "schema.ts and drizzle/ migrations agree"
 
-      # Blocking at high: verified 2026-06-12 that the current tree exits 0
-      # here (only 2 moderate findings, below the threshold).
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
-
       - name: Typecheck
         run: npm run typecheck
 
@@ -67,3 +62,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Blocking at high. Runs LAST so a dependency advisory never hides
+      # typecheck/lint/test/build results on the PR (2026-09-09 to 09-14 every
+      # PR was red here and no other check ran).
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
