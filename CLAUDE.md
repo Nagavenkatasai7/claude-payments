@@ -8,15 +8,11 @@ Project context for any Claude session working in this repo. Keep concise; updat
 
 Live at **https://smartremit.ai** — the canonical production domain (the `claude-payments.vercel.app` alias still resolves for old links). Admin credentials in Vercel env `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` — never commit literal values.
 
-## Stack
+## Stack notes (only what `package.json` can't tell you)
 
-- **Next.js 16** (App Router) on **Vercel** — serverless, Fluid Compute
-- **TypeScript** + **Vitest** (~120 test files / ~1,270 tests; **PGlite** for real in-process Postgres + `fakeRedis` for Redis-side)
-- **Neon Postgres** via **Drizzle ORM** (`drizzle-orm/neon-serverless` WebSocket Pool — money paths need interactive transactions + `FOR UPDATE SKIP LOCKED`) — THE ledger
-- **Upstash Redis** — hot/ephemeral only: sessions, conversations (30d TTL), drafts, OTPs, throttles, msg dedup, rate limits, velocity counters, FX L2 cache
-- **Tailwind v4 + shadcn/ui** — ONE stylesheet pipeline (`src/app/tailwind.css`); legacy CSS deleted
-- **Ollama Cloud / Kimi K2.6** — the conversational agent; **Meta WhatsApp Cloud API** — chat I/O (per-partner BYO numbers supported)
-- **Recharts** (analytics) · **Frankfurter** (live FX, no key)
+- **Neon via `drizzle-orm/neon-serverless` WebSocket Pool** — money paths need interactive transactions + `FOR UPDATE SKIP LOCKED`. Neon is THE ledger.
+- **Upstash Redis is hot/ephemeral only**: sessions, conversations (30d TTL), drafts, OTPs, throttles, msg dedup, rate limits, velocity counters, FX L2 cache.
+- **ONE stylesheet pipeline** (`src/app/tailwind.css`); legacy CSS deleted. **Ollama Cloud / Kimi K2.6** is the agent; Meta WhatsApp Cloud API is chat I/O (per-partner BYO numbers supported).
 
 ## Architecture spine (do not regress these)
 
@@ -27,31 +23,9 @@ Live at **https://smartremit.ai** — the canonical production domain (the `clau
 - **Sanctions screening always runs** — structurally untoggleable, in both KYC modes. KYC may be delegated to the partner; sanctions may not.
 - **Security pack**: instrumentation boot assert (prod refuses to start with missing secrets — the assert's contract MUST mirror the accepting code, see the FIELD_ENCRYPTION_KEY incident), security headers + **enforced CSP**, `/account` + `/admin-dashboard` middleware gates, per-IP rate limits (fail-open) on pay/rail/webhooks, PII-scrubbing logger (`src/lib/log.ts`) in money paths.
 
-## Repo layout (orientation, not exhaustive)
+## Repo layout
 
-```
-src/
-  db/            schema.ts (14 tables) · client.ts (getDb Pool singleton) · repos/* (transfer, partner,
-                 integrations, api-key, customer, schedule, outbox, aux: idempotency/audit/beneficiaries)
-  lib/           agent/tools/prompt (chat) · settlement.ts · pay-finalize.ts · outbox-worker.ts ·
-                 reconcile.ts · transfer-create.ts · compliance.ts · partner-api-service.ts ·
-                 *-store.ts (thin wrappers; getRedis() in redis.ts is THE shared client) ·
-                 ip-rate-limit.ts · log.ts · boot-assert.ts · field-crypto.ts
-  app/
-    api/         whatsapp[/partnerId] (HMAC fail-closed) · pay/[id] · partner/v1/* (Bearer key) ·
-                 payment-webhook/[provider] (signed) · partner-rail (hosted reference rail) ·
-                 worker · cron · dashboard/summary (stamp polling)
-    admin-dashboard/  shadcn pages: overview · ops · transactions (keyset paged) · schedules · customers ·
-                      compliance · kyc · analytics · partners (wizard at /new, tabs at /[id]) · corridors
-                      (platform-only) · team · api-keys
-    account/     customer portal (WhatsApp-dark Tailwind): auth + history + receipt/[id]
-    pay/[id]/    hosted pay page (WhatsApp-dark Tailwind)
-    page.tsx     dual-audience landing · docs/ (partner integration hub)
-    tailwind.css THE stylesheet pipeline (theme tokens, preflight, scaffold classes, keyframes)
-  middleware.ts  gates /admin-dashboard (staff cookie) + /account (customer __Host- cookie)
-tests/           one spec per lib module + PGlite repo/tx suites + e2e/ (Playwright smoke, self-provisioning)
-drizzle/         checked-in SQL migrations (0001 seeds the 'default' partner)
-```
+See `docs/COMPONENTS.md` (13 component anchors → directories) and `docs/architecture/smartremit-blueprint.html`. `drizzle/` holds checked-in SQL migrations (0001 seeds the 'default' partner); `tests/e2e/` is the self-provisioning Playwright smoke.
 
 ## Conventions & gotchas
 
@@ -67,23 +41,20 @@ drizzle/         checked-in SQL migrations (0001 seeds the 'default' partner)
 - **Vercel CLI v54**: piped `vercel env add` stores EMPTY values (use `--value`); prod vars are sensitive-by-default so `env pull` returns `''` — verify secrets at RUNTIME.
 - **Set-once, never rotate**: `FIELD_ENCRYPTION_KEY` (hex64 OR base64-32 — both valid) and `PASSWORD_PEPPER`.
 
-## Key env vars (see `.env.example`)
+## Env vars
 
-`DATABASE_URL` (Neon) · `KV_REST_API_URL/TOKEN` (Upstash) · `FIELD_ENCRYPTION_KEY` · `PASSWORD_PEPPER` · `CRON_SECRET` (worker/cron auth) · `META_APP_SECRET` + `WHATSAPP_*` (Meta) · `OPS_ALERT_PHONE` (stuck-money WhatsApp alerts) · `OLLAMA_*` · `SEED_ADMIN_*` · `APP_BASE_URL` (self-derives on Vercel). Production refuses to boot if the money-grade ones are missing (`src/lib/boot-assert.ts`).
+Listed in `.env.example`. Production refuses to boot if the money-grade ones are missing (`src/lib/boot-assert.ts`); `APP_BASE_URL` self-derives on Vercel.
 
 ## Workflow rules
 
 - **Plan first, get approval, then build** (`superpowers:brainstorming` → `writing-plans` → `subagent-driven-development` for meaningful changes).
-- **No direct pushes to `main`.** PR + the `ci / ci` check; merge auto-deploys prod; then **verify the post-deploy `smoke.yml` run went green**.
+- **No direct pushes to `main`.** GitHub branch protection (PR required, `ci / ci` check, enforce_admins) is the real gate; `guard-git-main.sh` is a local convenience guard that regex-matches and can be bypassed by quoting. Merge auto-deploys prod; then **verify the post-deploy `smoke.yml` run went green**.
 - Branches: `main` deploys (GitHub `Nagavenkatasai7/claude-payments`); old `master` archived as `archive/initial-scaffold`.
 - See `docs/ROADMAP.md` for feature inventory and the path to production; memory file `sendhome-total-platform-program` tracks the staged program history.
 
-## Claude Code tooling (set up 2026-09-07 — see docs/COMPONENTS.md)
+## Claude Code tooling
 
-- **Plugins** — user scope (`~/.claude/settings.json`): superpowers, security-guidance, claude-security, pr-review-toolkit, code-review, commit-commands, hookify, claude-md-management, remember, claude-code-setup, session-report, receipts, frontend-design, modern-web-guidance, context7, typescript-lsp, skill-creator, plugin-dev. Project scope (`.claude/settings.json`, committed): vercel, github, sentry, posthog, circle-skills, langfuse, deepeval, neon, redis-development, playwright. Vercel/Neon/Sentry/PostHog MCPs auth via OAuth on first use; the GitHub MCP needs `GITHUB_PERSONAL_ACCESS_TOKEN` in the shell (`export GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token)`); context7 works keyless (`CONTEXT7_API_KEY` raises limits).
-- **Hooks** (`.claude/hooks/`, wired in `.claude/settings.json`): `guard-git-main.sh` (PreToolUse Bash — denies push/commit to main) · `verify-on-stop.sh` (Stop — tsc + eslint on changed files + `vitest --changed`; blocks the stop until green, once per tree state) · `migration-reminder.sh` + `component-boundary.sh` (PostToolUse Edit/Write — advisory context) · `icloud-dup-sweep.sh` (SessionStart — deletes untracked `* 2.*` duplicates whose real file exists; reports the rest).
-- **Skills** (`.claude/skills/`): `/migrate-prod` (user-only; approval-gated prod migration + verify) · `/post-merge-check` (smoke watch for a merged SHA, migration gate first) · `/worker-poke` (user-only; drains via `worker-heartbeat.yml`) · `/outbox-status` (read-only stuck-money report, `scripts/outbox-status.ts`) · `/new-corridor` (touchpoint checklist from #214) · `/sync-branches` (user-only; fast-forwards `component/*` to main).
-- **Permissions**: dev-loop commands and read-only git/gh/vercel are pre-allowed; `.env*` reads are denied (source them in a command instead, never print values); force-push is denied.
+Plugins, hooks (`.claude/hooks/`) and skills (`.claude/skills/`) are inventoried in `docs/COMPONENTS.md`. Non-obvious bits: the GitHub MCP needs `export GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token)` in the shell; the Stop hook blocks until tsc + eslint + `vitest --changed` are green; `.env*` reads are denied (source them inside a command, never print values); force-push and any commit/push to `main` are denied.
 
 ## Ground truth & proof (non-negotiable on a money app)
 
@@ -102,6 +73,6 @@ Pass `model:` explicitly on every Agent call:
 
 ## Branching model
 
-- `main` deploys; never commit or push to it (hook-enforced). PR + `ci / ci` → squash-merge → `/post-merge-check` → `/sync-branches`.
+- `main` deploys; never commit or push to it (GitHub-protected; local hook is advisory). PR + `ci / ci` → squash-merge → `/post-merge-check` → `/sync-branches`.
 - `component/<name>` (13 anchors, docs/COMPONENTS.md) stay equal to main. Cut `feat/<component>/<slug>` or `fix/<component>/<slug>` from the anchor; the prefix is what the boundary hook keys on.
 - Parallel work = one git worktree per component **outside iCloud** (`git worktree add ~/dev/wt/<component> origin/component/<component>`).
