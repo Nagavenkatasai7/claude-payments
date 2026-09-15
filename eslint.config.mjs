@@ -6,7 +6,7 @@ const config = [
   // workflows/** = ultracode dynamic-workflow scripts (Workflow-runtime globals
   // like agent()/phase(), not standalone Node modules) — invoked by the scheduled
   // overnight loops, never imported by the app.
-  { ignores: ['.next/**', 'node_modules/**', 'coverage/**', '.vercel/**', '.superpowers/**', '.claude/**', 'workflows/**'] },
+  { ignores: ['.next/**', 'node_modules/**', 'node_modules.nosync/**', 'coverage/**', '.vercel/**', '.superpowers/**', '.claude/**', 'workflows/**'] },
   ...nextCoreWebVitals,
   {
     // `react-hooks/purity` flags Date.now() and other impure calls during
