@@ -1,0 +1,936 @@
+{
+ "program": "SmartRemit upgrade program 2026-09",
+ "spec": "docs/superpowers/specs/2026-09-14-upgrade-program-design.md",
+ "audit": "docs/AUDIT-2026-09-14.md",
+ "merge_model": "integration/phase-N branch per phase; fix PRs auto-merge into it when ci green + review clean; owner merges the phase PR into main",
+ "migrations": "/migrate-prod gate after each merged fix that adds a drizzle file",
+ "phases": [
+  {
+   "phase": 0,
+   "name": "Unblock and close the doors",
+   "fixes": [
+    {
+     "fix": 1,
+     "title": "Close the unauthenticated funding webhook that writes the money ledger",
+     "severity": "critical",
+     "category": "money-safety",
+     "area": "money-path / security-authz",
+     "finding_ids": [
+      "money-01",
+      "authz-01",
+      "F42",
+      "F61"
+     ],
+     "files": "src/app/api/funding-webhook/[provider]/route.ts, src/lib/providers/funding-provider.ts, tests/funding-webhook-route.test.ts",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 2,
+     "title": "Rotate the leaked production staff-admin credential and delete the hardcoded literals",
+     "severity": "critical",
+     "category": "security",
+     "area": "security-surface / ci-workflows / integrations-observability",
+     "finding_ids": [
+      "sec-01",
+      "gha-01",
+      "obs-10"
+     ],
+     "files": "tests/e2e/dashboard-smoke.spec.ts, tests/e2e/support-smoke.spec.ts, .github/workflows/nightly.yml, .github/workflows/smoke.yml, docs/superpowers/plans/2026-05-23-cicd.md, docs/superpowers/plans/2026-05-27-partner-sub-admin-auth.md, Vercel env SEED_ADMIN_PASSWORD, GitHub secrets E2E_USERNAME/E2E_PASSWORD",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 3,
+     "title": "Unblock CI: bump the vulnerable dependencies and reorder the audit gate so checks actually run",
+     "severity": "high",
+     "category": "reliability",
+     "area": "ci-workflows / code-health / security-surface",
+     "finding_ids": [
+      "gha-02",
+      "sec-04",
+      "obs-05",
+      "build-02",
+      "obs-04",
+      "build-01",
+      "gha-07",
+      "gha-09",
+      "gha-13",
+      "prs-06"
+     ],
+     "files": "package.json, package-lock.json, .github/workflows/ci.yml, .github/workflows/nightly.yml, .github/dependabot.yml",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    }
+   ],
+   "fix_count": 3,
+   "findings_closed": 17
+  },
+  {
+   "phase": 1,
+   "name": "Money-safe core",
+   "fixes": [
+    {
+     "fix": 4,
+     "title": "Scope phone-keyed customer state by tenant on the partner API and the WhatsApp webhook",
+     "severity": "high",
+     "category": "security",
+     "area": "partner API / customers",
+     "finding_ids": [
+      "F44",
+      "F45",
+      "F47",
+      "F50",
+      "F52"
+     ],
+     "files": "src/lib/partner-api-service.ts, src/lib/transfer-create.ts, src/lib/sender-names.ts, src/db/repos/customer-repo.ts, src/lib/whatsapp-inbound.ts, src/db/schema.ts (customers PK)",
+     "effort": "days",
+     "owner_gated": null,
+     "note": "customers keyed by (partner_id, phone) with backfill to current partner"
+    },
+    {
+     "fix": 5,
+     "title": "Keep untrusted text out of the agent's system role and always mask payout destinations shown to the model",
+     "severity": "high",
+     "category": "security",
+     "area": "bot / partner API",
+     "finding_ids": [
+      "F43",
+      "F63"
+     ],
+     "files": "src/lib/agent.ts:195-236, src/lib/recent-transfers.ts, src/lib/tools.ts:116, src/lib/partner-api-service.ts (name validation)",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 6,
+     "title": "Enforce the compliance hold on every settlement path, including partner-API confirm and the pay route",
+     "severity": "high",
+     "category": "money-safety",
+     "area": "partner API / pay",
+     "finding_ids": [
+      "F51",
+      "F53"
+     ],
+     "files": "src/lib/partner-api-service.ts:382, src/app/api/pay/[transferId]/route.ts:137, src/lib/settlement.ts (listAwaitingWithFunding)",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 8,
+     "title": "Implement the failure path: a 'failed' rail callback must refund, notify and alert",
+     "severity": "critical",
+     "category": "money-safety",
+     "area": "money-path / rails-readiness",
+     "finding_ids": [
+      "money-02",
+      "rail-02"
+     ],
+     "files": "src/lib/providers/http-payment-provider.ts, src/app/api/payment-webhook/[provider]/route.ts, src/db/repos/transfer-repo.ts, src/lib/reconcile.ts, src/app/docs/page.tsx",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 9,
+     "title": "Stop staff 'Cancel' from voiding a paid transfer with no refund",
+     "severity": "high",
+     "category": "money-safety",
+     "area": "money-path",
+     "finding_ids": [
+      "money-05"
+     ],
+     "files": "src/lib/dashboard-ops.ts, src/app/admin-dashboard/transactions-tabs.tsx, tests/dashboard-ops.test.ts",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 10,
+     "title": "Stop minting and settling with the masked placeholder '****last4' as the payout account",
+     "severity": "critical",
+     "category": "money-safety",
+     "area": "bot-context",
+     "finding_ids": [
+      "ctx-01"
+     ],
+     "files": "src/lib/tools.ts, src/lib/transfer-create.ts, src/lib/pay-finalize.ts, tests/tools.test.ts",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 11,
+     "title": "Add outbox lock leases and timeouts on every outbound fetch",
+     "severity": "high",
+     "category": "reliability",
+     "area": "money-path / rails-readiness / integrations-observability / bot-pipeline",
+     "finding_ids": [
+      "vercel-04",
+      "neon-04",
+      "obs-03",
+      "money-03",
+      "rail-09",
+      "whatsapp-06",
+      "bot-03",
+      "obs-09",
+      "rail-08",
+      "bot-04"
+     ],
+     "files": "src/db/repos/outbox-repo.ts, drizzle/, src/lib/outbox-worker.ts, src/lib/reconcile.ts, src/lib/ollama.ts, src/lib/whatsapp.ts, src/lib/providers/http-payment-provider.ts, scripts/outbox-status.ts, src/app/admin-dashboard/ops/page.tsx, tests/outbox-worker.test.ts",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 12,
+     "title": "Move the outbox drain to a scheduler with a real cadence",
+     "severity": "high",
+     "category": "reliability",
+     "area": "vercel / integrations-observability / ci-workflows / money-path",
+     "finding_ids": [
+      "vercel-05",
+      "neon-05",
+      "obs-02",
+      "gha-03",
+      "repo-08",
+      "money-04",
+      "rail-07",
+      "bot-05"
+     ],
+     "files": "vercel.json, .github/workflows/worker-heartbeat.yml, src/lib/reconcile.ts, CLAUDE.md, docs/ROADMAP.md",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": "free-tier amendment: lease reclaim + heartbeat tuning only; Vercel per-minute cron waits for Pro"
+    },
+    {
+     "fix": 13,
+     "title": "Make FX failure loud: refuse to quote on stale or unavailable rates, fix AED and the 0-rate fail-open",
+     "severity": "high",
+     "category": "money-safety",
+     "area": "integrations-observability / money-path / app-public-surface",
+     "finding_ids": [
+      "obs-08",
+      "money-07",
+      "ui-08",
+      "prs-04",
+      "live-02",
+      "live-03"
+     ],
+     "files": "src/lib/rate.ts, src/lib/fx.ts, src/lib/types.ts, src/lib/rate-staleness.ts, src/app/page.tsx",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 16,
+     "title": "Restore real send caps and derive volume counters from the ledger",
+     "severity": "high",
+     "category": "compliance",
+     "area": "money-path / compliance-kyc / bot-pipeline",
+     "finding_ids": [
+      "money-06",
+      "compliance-05",
+      "compliance-06",
+      "bot-12"
+     ],
+     "files": "src/lib/tier-rules.ts, src/lib/daily-volume-store.ts, src/lib/monthly-volume-store.ts, src/lib/store.ts, src/db/repos/transfer-repo.ts, src/lib/compliance.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": "default ladder = pre-#234 tier limits from git history"
+    },
+    {
+     "fix": 18,
+     "title": "Stop persisting secrets in outbox payloads: resolve WhatsApp tokens and capability tokens at run time",
+     "severity": "medium",
+     "category": "security",
+     "area": "outbox / settlement",
+     "finding_ids": [
+      "F49",
+      "F54",
+      "F58",
+      "F66"
+     ],
+     "files": "src/lib/settlement.ts:50, src/lib/outbox-worker.ts:274, src/app/partners-action.ts:123, src/db/schema.ts:506",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 22,
+     "title": "Add an SSRF guard, https validation and redirect cap to partner-settable settlement URLs",
+     "severity": "high",
+     "category": "security",
+     "area": "security-authz / rails-readiness",
+     "finding_ids": [
+      "authz-04",
+      "rail-13",
+      "F69"
+     ],
+     "files": "src/lib/providers/http-payment-provider.ts, src/lib/outbox-worker.ts, src/app/admin-dashboard/partners/actions.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 23,
+     "title": "Replace Math.random() transfer ids with a CSPRNG and rate-limit the hosted pay page",
+     "severity": "high",
+     "category": "security",
+     "area": "security-authz / security-crypto-auth / money-path",
+     "finding_ids": [
+      "authz-02",
+      "crypto-13",
+      "money-08",
+      "F48"
+     ],
+     "files": "src/lib/id.ts, src/app/pay/[transferId]/page.tsx, src/app/pay/b2b/[invoiceId]/page.tsx, src/app/api/pay/[transferId]/route.ts",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    }
+   ],
+   "fix_count": 13,
+   "findings_closed": 52
+  },
+  {
+   "phase": 2,
+   "name": "Bot and product for the demo",
+   "fixes": [
+    {
+     "fix": 19,
+     "title": "Make OTP and login attempt counters atomic (INCR with TTL) and stop third parties locking a victim out",
+     "severity": "medium",
+     "category": "security",
+     "area": "auth",
+     "finding_ids": [
+      "F59",
+      "F60",
+      "F71",
+      "F67"
+     ],
+     "files": "src/lib/transaction-otp.ts:72-85, src/lib/customer-auth-store.ts:401-416",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 20,
+     "title": "Strip password hashes from staff RSC payloads and hash session tokens before using them as Redis keys",
+     "severity": "medium",
+     "category": "security",
+     "area": "admin / sessions",
+     "finding_ids": [
+      "F56",
+      "F57",
+      "F65"
+     ],
+     "files": "src/app/admin-dashboard/transactions/page.tsx:105, src/lib/auth-store.ts:46, src/lib/customer-auth-store.ts:322",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 21,
+     "title": "Close the account-enumeration oracles on password reset and staff login",
+     "severity": "medium",
+     "category": "security",
+     "area": "auth",
+     "finding_ids": [
+      "F55",
+      "F62"
+     ],
+     "files": "src/app/account/actions.ts:301, src/app/login/actions.ts:19",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 24,
+     "title": "Make partner KYB/licence/AML document storage private",
+     "severity": "high",
+     "category": "security",
+     "area": "security-authz / customer-b2b-schedules / integrations-observability",
+     "finding_ids": [
+      "authz-07",
+      "partner-01",
+      "obs-narrative-blob",
+      "F74"
+     ],
+     "files": "src/lib/blob.ts, src/app/admin-dashboard/partners/actions.ts, src/app/admin-dashboard/partners/[id]/",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 32,
+     "title": "Fix schedule-run idempotency, stale-draft expiry and the reconcile escalation ladder",
+     "severity": "medium",
+     "category": "money-safety",
+     "area": "database-neon / compliance-kyc",
+     "finding_ids": [
+      "neon-08",
+      "neon-09",
+      "neon-10",
+      "compliance-11"
+     ],
+     "files": "src/lib/cron-run.ts, src/lib/reconcile.ts, src/lib/settlement.ts, src/db/repos/transfer-repo.ts, src/app/admin-dashboard/ops/page.tsx",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 33,
+     "title": "Stop the bot silently coercing Mexico and Hong Kong to India, and flipping currencies",
+     "severity": "high",
+     "category": "money-safety",
+     "area": "prompt-quality / live-bot-session / customer-b2b-schedules",
+     "finding_ids": [
+      "prompt-01",
+      "prompt-02",
+      "live-16",
+      "b2b-02",
+      "docs-06"
+     ],
+     "files": "src/lib/tools.ts, src/lib/prompt.ts, src/lib/phone.ts, src/app/page.tsx, tests/tools.test.ts, tests/eval/, .claude/skills/new-corridor/SKILL.md",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 34,
+     "title": "Close the bot's honesty and silence failures: dropped replies, fabricated history, false escalation promises",
+     "severity": "high",
+     "category": "product-ux",
+     "area": "live-bot-session / bot-pipeline / prompt-quality",
+     "finding_ids": [
+      "live-09a",
+      "live-10",
+      "prompt-03",
+      "bot-14",
+      "live-14",
+      "live-08",
+      "bot-10",
+      "bot-06",
+      "live-09b",
+      "prompt-09"
+     ],
+     "files": "src/lib/outbox-worker.ts, src/lib/agent.ts, src/lib/tools.ts, src/lib/prompt.ts, src/lib/whatsapp-inbound.ts, src/lib/recent-transfers.ts, src/lib/consent.ts, tests/outbox-worker.test.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": "human handoff creates a ticket and answers honestly"
+    },
+    {
+     "fix": 36,
+     "title": "Make refunds real and give operators a kill switch on recurring schedules",
+     "severity": "high",
+     "category": "money-safety",
+     "area": "customer-b2b-schedules",
+     "finding_ids": [
+      "refunds-01",
+      "schedules-02"
+     ],
+     "files": "src/lib/refund-policy.ts, src/lib/providers/funding-provider.ts, src/lib/cron-run.ts, src/app/admin-dashboard/schedules/",
+     "effort": "days",
+     "owner_gated": null,
+     "note": "schedule kill switch now; real refunds need the PSP (Phase 4)"
+    },
+    {
+     "fix": 37,
+     "title": "Stop leaking PII into LLM context, outbox payloads, admin URLs and unaudited screens",
+     "severity": "medium",
+     "category": "security",
+     "area": "bot-context / app-admin-walk / security-crypto-auth",
+     "finding_ids": [
+      "ctx-02",
+      "ctx-03",
+      "ctx-07",
+      "dash-04",
+      "dash-05",
+      "crypto-06",
+      "dash-06",
+      "obs-13"
+     ],
+     "files": "src/lib/tools.ts, src/lib/store.ts, src/lib/whatsapp.ts, src/lib/log.ts, src/app/admin-dashboard/customers/[phone]/page.tsx, src/app/api/copilot/kyc-review/route.ts, src/db/schema.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 38,
+     "title": "Scope conversation state by tenant and bound partner/seller-controlled strings",
+     "severity": "medium",
+     "category": "security",
+     "area": "bot-context / prompt-quality",
+     "finding_ids": [
+      "ctx-04",
+      "ctx-05",
+      "ctx-08",
+      "prompt-06"
+     ],
+     "files": "src/lib/store.ts, src/lib/prompt.ts, src/lib/tools.ts, src/app/admin-dashboard/partners/actions.ts",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 41,
+     "title": "Fix the public product surface: error boundaries, favicon, robots, sitemap, mobile nav",
+     "severity": "medium",
+     "category": "product-ux",
+     "area": "app-public-surface / app-admin-walk",
+     "finding_ids": [
+      "dash-07",
+      "ui-04",
+      "ui-03",
+      "ui-09",
+      "ui-07",
+      "ui-05",
+      "ui-06",
+      "ui-02",
+      "ui-10",
+      "sec-14"
+     ],
+     "files": "src/app/global-error.tsx, src/app/not-found.tsx, src/app/admin-dashboard/error.tsx, src/app/layout.tsx, src/app/icon.png, src/app/robots.ts, src/app/sitemap.ts, src/app/opengraph-image.tsx, src/app/docs/page.tsx, src/app/account/, src/app/about/page.tsx, next.config.ts",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 42,
+     "title": "Correct the documentation that misrepresents the product",
+     "severity": "medium",
+     "category": "product-ux",
+     "area": "docs-vs-reality / integrations-observability",
+     "finding_ids": [
+      "docs-04",
+      "docs-05",
+      "docs-07",
+      "docs-08",
+      "docs-13",
+      "obs-12"
+     ],
+     "files": "README.md, docs/ROADMAP.md, docs/CODEBASE-FEATURE-MAP.md, src/app/docs/page.tsx, .env.example, CLAUDE.md",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    }
+   ],
+   "fix_count": 12,
+   "findings_closed": 62
+  },
+  {
+   "phase": 3,
+   "name": "Production-grade",
+   "fixes": [
+    {
+     "fix": 14,
+     "title": "Replace the mock sanctions screener with a real list, and record provable screening evidence",
+     "severity": "critical",
+     "category": "compliance",
+     "area": "compliance-kyc / pr-disposition / docs-vs-reality",
+     "finding_ids": [
+      "compliance-01",
+      "prs-03",
+      "compliance-07",
+      "docs-01"
+     ],
+     "files": "src/lib/providers/sanctions-provider.ts, src/lib/compliance.ts, src/lib/compliance-config.ts, src/lib/transfer-create.ts, src/db/schema.ts, src/db/repos/aux-repos.ts, vercel.json, src/app/api/cron/route.ts, src/app/page.tsx, src/app/docs/page.tsx",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 15,
+     "title": "Ship Reg E remittance disclosures, the 30-minute cancellation right, Terms and Privacy",
+     "severity": "critical",
+     "category": "compliance",
+     "area": "compliance-kyc / customer-b2b-schedules / docs-vs-reality",
+     "finding_ids": [
+      "compliance-02",
+      "compliance-01-app",
+      "docs-02"
+     ],
+     "files": "src/app/pay/[transferId]/page.tsx, src/app/pay/[transferId]/pay-form.tsx, src/app/pay/b2b/[invoiceId]/page.tsx, src/app/account/receipt/[transferId]/page.tsx, src/lib/refund-policy.ts, src/lib/partner-config.ts, src/app/about/page.tsx, src/app/page.tsx",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": "copy drafted for counsel review"
+    },
+    {
+     "fix": 17,
+     "title": "Harden staff authentication: rate limit, lockout, MFA, audit trail and a password-change path",
+     "severity": "high",
+     "category": "security",
+     "area": "security-surface / security-authz / security-crypto-auth",
+     "finding_ids": [
+      "sec-02",
+      "authz-05",
+      "crypto-01",
+      "sec-03",
+      "sec-13",
+      "crypto-07",
+      "F46"
+     ],
+     "files": "src/app/login/actions.ts, src/lib/auth-store.ts, src/lib/customer-auth-store.ts, src/lib/ip-rate-limit.ts, src/middleware.ts, src/app/admin-dashboard/team/actions.ts, src/app/admin-dashboard/team/[username]/page.tsx, src/app/admin-dashboard/partners/actions.ts, src/lib/seed.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 28,
+     "title": "Make compliance decisions durably auditable and remove the one-click KYC override",
+     "severity": "high",
+     "category": "compliance",
+     "area": "compliance-kyc",
+     "finding_ids": [
+      "compliance-03",
+      "compliance-08",
+      "compliance-04",
+      "compliance-12"
+     ],
+     "files": "src/app/admin-dashboard/actions.ts, src/app/admin-dashboard/customers/actions.ts, src/app/admin-dashboard/customers/[phone]/page.tsx, src/lib/kyc-case-store.ts, src/db/repos/aux-repos.ts, src/db/schema.ts, tests/review-kyc-action.test.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 29,
+     "title": "Add replay protection, key rotation and amount validation to the rail HMAC contract",
+     "severity": "high",
+     "category": "money-safety",
+     "area": "security-crypto-auth / rails-readiness / money-path",
+     "finding_ids": [
+      "crypto-02",
+      "rail-04",
+      "money-09",
+      "authz-08"
+     ],
+     "files": "src/lib/providers/http-payment-provider.ts, src/lib/payment-webhook-verify.ts, src/app/api/payment-webhook/[provider]/route.ts, src/lib/reconcile.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 30,
+     "title": "Verify Meta phone_number_id ownership before a partner can register a BYO number",
+     "severity": "medium",
+     "category": "security",
+     "area": "partner integrations",
+     "finding_ids": [
+      "F64"
+     ],
+     "files": "src/db/schema.ts:250, partner integrations actions, src/lib/whatsapp-creds.ts",
+     "effort": "hours",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 31,
+     "title": "Give partners a reconciliation surface and put compliance data in the settlement instruction",
+     "severity": "high",
+     "category": "compliance",
+     "area": "rails-readiness",
+     "finding_ids": [
+      "rail-10",
+      "rail-11"
+     ],
+     "files": "src/app/api/partner/v1/settlements/route.ts, src/lib/partner-api-service.ts, src/lib/providers/http-payment-provider.ts, src/lib/types.ts, src/lib/compliance.ts, src/lib/reconcile.ts, src/app/docs/page.tsx",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 35,
+     "title": "Turn KYC on, stop discarding PEP report events, and prove the Persona loop",
+     "severity": "high",
+     "category": "compliance",
+     "area": "bot-context / prompt-quality / pr-disposition / compliance-kyc",
+     "finding_ids": [
+      "ctx-06",
+      "prompt-04",
+      "prs-02",
+      "compliance-10"
+     ],
+     "files": "src/lib/kyc-state-machine.ts, src/lib/providers/persona-webhook-parse.ts, src/app/admin-dashboard/partners/actions.ts, src/lib/seed.ts, drizzle/, tests/kyc-state-machine.test.ts, tests/persona-webhook-parse.test.ts",
+     "effort": "days",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 39,
+     "title": "Fix email authentication and the silent partner-onboarding email no-op",
+     "severity": "medium",
+     "category": "infrastructure",
+     "area": "domain-dns-email",
+     "finding_ids": [
+      "domain-08",
+      "domain-11",
+      "domain-12",
+      "vercel-11",
+      "domain-06",
+      "domain-05"
+     ],
+     "files": "src/lib/email.ts, Vercel DNS, docs/ROADMAP.md",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 40,
+     "title": "Repair the local and CI verification loop",
+     "severity": "medium",
+     "category": "code-health",
+     "area": "code-health / git-repo / ci-workflows",
+     "finding_ids": [
+      "repo-04",
+      "build-03",
+      "build-07",
+      "vercel-12",
+      "build-09",
+      "build-06",
+      "gha-04",
+      "gha-05",
+      "build-08",
+      "ui-14",
+      "docs-09",
+      "repo-03",
+      "repo-10"
+     ],
+     "files": "tsconfig.json, eslint.config.mjs, vitest.config.ts, package.json, .nvmrc, src/middleware.ts, .github/workflows/preview-smoke.yml, .claude/hooks/icloud-dup-sweep.sh, tests/e2e/dashboard-smoke.spec.ts",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 43,
+     "title": "Add behavioural AML monitoring: structuring, first-transfer holds, beneficiary clustering",
+     "severity": "medium",
+     "category": "compliance",
+     "area": "compliance-kyc",
+     "finding_ids": [
+      "compliance-13",
+      "compliance-09"
+     ],
+     "files": "src/lib/compliance.ts, src/lib/compliance-config.ts, src/db/repos/transfer-repo.ts, src/lib/transfer-create.ts, src/db/repos/aux-repos.ts, src/app/admin-dashboard/compliance/page.tsx",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 44,
+     "title": "Separate sandbox from live and scope partner API keys",
+     "severity": "medium",
+     "category": "compliance",
+     "area": "rails-readiness / security-crypto-auth / customer-b2b-schedules",
+     "finding_ids": [
+      "rail-12",
+      "crypto-11",
+      "rail-01",
+      "rates-01",
+      "b2b-04",
+      "b2b-03"
+     ],
+     "files": "src/db/schema.ts, src/db/repos/api-key-repo.ts, src/lib/partner-api-service.ts, src/lib/env.ts, src/app/admin-dashboard/api-keys/, src/lib/b2b-pay-finalize.ts, src/app/api/cron/route.ts",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 45,
+     "title": "Harden the crypto and session substrate",
+     "severity": "medium",
+     "category": "security",
+     "area": "security-crypto-auth / security-surface",
+     "finding_ids": [
+      "crypto-04",
+      "crypto-05",
+      "crypto-03",
+      "sec-11",
+      "crypto-10",
+      "crypto-14",
+      "authz-06",
+      "authz-09",
+      "authz-03"
+     ],
+     "files": "src/lib/field-crypto.ts, src/lib/auth-store.ts, src/lib/session-cookie.ts, src/db/schema.ts, src/app/api/worker/route.ts, src/app/admin-dashboard/actions.ts, src/lib/transaction-otp.ts, src/app/api/pay/[transferId]/route.ts",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 46,
+     "title": "Bind the encryption envelope AAD to table, column and row; restrict document refs to the platform's own Blob tenant",
+     "severity": "low",
+     "category": "security",
+     "area": "crypto / partner applications",
+     "finding_ids": [
+      "F72",
+      "F73",
+      "F70"
+     ],
+     "files": "src/lib/field-crypto.ts:203, src/app/partners/apply/[token]/actions.ts:85, src/lib/customer-auth-store.ts:197",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 47,
+     "title": "Tighten the CSP, triage CodeQL, and decide the repo's visibility",
+     "severity": "low",
+     "category": "security",
+     "area": "security-surface / git-repo / integrations-observability",
+     "finding_ids": [
+      "sec-06",
+      "authz-10",
+      "sec-12",
+      "obs-13",
+      "repo-05",
+      "gha-10"
+     ],
+     "files": "next.config.ts, src/middleware.ts, src/lib/log.ts, src/lib/whatsapp.ts, .github/workflows/ci.yml, casual-review-documents/",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 48,
+     "title": "Land the parked bug-fix hunks and clear the PR backlog",
+     "severity": "low",
+     "category": "code-health",
+     "area": "pr-disposition / git-repo",
+     "finding_ids": [
+      "prs-05",
+      "prs-08",
+      "prs-12",
+      "repo-07",
+      "prs-07",
+      "build-13"
+     ],
+     "files": "src/lib/dates.ts, src/lib/ip-rate-limit.ts, src/lib/kyc-state-machine.ts, src/lib/fx.ts, package.json",
+     "effort": "day",
+     "owner_gated": null,
+     "note": null
+    },
+    {
+     "fix": 49,
+     "title": "Finish the long-tail product gaps: opt-out holes, media messages, tickets SLA, portal MFA, USDC chain, partner approval",
+     "severity": "medium",
+     "category": "product-ux",
+     "area": "whatsapp-live / customer-b2b-schedules / rails-readiness / prompt-quality",
+     "finding_ids": [
+      "whatsapp-10",
+      "whatsapp-08",
+      "whatsapp-11",
+      "tickets-01",
+      "portal-03",
+      "partner-02",
+      "rail-14",
+      "prompt-05",
+      "prompt-07",
+      "prompt-08",
+      "prompt-10",
+      "prompt-11",
+      "live-05"
+     ],
+     "files": "src/lib/whatsapp.ts, src/lib/whatsapp-inbound.ts, src/lib/prompt.ts, src/lib/tools.ts, src/db/schema.ts, src/app/admin-dashboard/tickets/, src/app/account/, src/lib/b2b-pay-finalize.ts, tests/eval/",
+     "effort": "week+",
+     "owner_gated": null,
+     "note": null
+    }
+   ],
+   "fix_count": 17,
+   "findings_closed": 93
+  },
+  {
+   "phase": 4,
+   "name": "Owner-gated + MCP/copilots",
+   "fixes": [
+    {
+     "fix": 7,
+     "title": "Build real sender-side funds capture behind the FundingProvider seam",
+     "severity": "critical",
+     "category": "money-safety",
+     "area": "rails-readiness",
+     "finding_ids": [
+      "rail-03"
+     ],
+     "files": "src/lib/providers/funding-provider.ts, src/app/api/pay/[transferId]/route.ts, src/app/api/funding-webhook/[provider]/route.ts, src/lib/boot-assert.ts",
+     "effort": "week+",
+     "owner_gated": "PSP decision + contract (Plaid Auth + ACH originator under the partner licence, or Stripe sales)",
+     "note": null
+    },
+    {
+     "fix": 25,
+     "title": "Get off Meta's sandbox number: production WABA, templates, and honest send-failure handling",
+     "severity": "critical",
+     "category": "product-ux",
+     "area": "whatsapp-live / bot-pipeline / app-public-surface / customer-b2b-schedules",
+     "finding_ids": [
+      "whatsapp-04",
+      "bot-07",
+      "ctx-14",
+      "obs-06",
+      "vercel-06",
+      "neon-07",
+      "ui-01",
+      "docs-03",
+      "portal-01",
+      "whatsapp-07",
+      "b2b-01",
+      "prs-01",
+      "crypto-12"
+     ],
+     "files": "src/lib/whatsapp.ts, src/lib/outbox-worker.ts, src/app/landing/wa.ts, src/app/page.tsx, src/app/api/pay/b2b/[invoiceId]/route.ts, src/app/api/pay/[transferId]/route.ts, src/app/onboard/seller/[id]/actions.ts, src/app/account/actions.ts, docs/meta-whatsapp-config.md",
+     "effort": "days",
+     "owner_gated": "Meta business verification, production number, template approvals",
+     "note": null
+    },
+    {
+     "fix": 26,
+     "title": "Wire observability: error tracking, a second alert channel, and durable log retention",
+     "severity": "high",
+     "category": "reliability",
+     "area": "integrations-observability / whatsapp-live / vercel",
+     "finding_ids": [
+      "obs-01",
+      "obs-07",
+      "obs-11",
+      "vercel-03",
+      "whatsapp-05",
+      "bot-13"
+     ],
+     "files": "src/instrumentation.ts, instrumentation-client.ts, next.config.ts, package.json, src/lib/boot-assert.ts, src/lib/outbox-worker.ts, src/db/schema.ts",
+     "effort": "day",
+     "owner_gated": "Sentry project/DSN (code side lands in Phase 2 as a no-op until DSN set)",
+     "note": null
+    },
+    {
+     "fix": 27,
+     "title": "Upgrade the hosting and database plans before any partner go-live",
+     "severity": "high",
+     "category": "infrastructure",
+     "area": "vercel / database-neon / domain-dns-email",
+     "finding_ids": [
+      "vercel-02",
+      "neon-03",
+      "domain-13",
+      "vercel-09",
+      "neon-12",
+      "neon-14"
+     ],
+     "files": "docs/ROADMAP.md, vercel.json, src/db/client.ts",
+     "effort": "day",
+     "owner_gated": "Vercel Pro + Neon Launch purchase (deferred by owner 2026-09-14)",
+     "note": null
+    }
+   ],
+   "fix_count": 4,
+   "findings_closed": 26
+  }
+ ]
+}
