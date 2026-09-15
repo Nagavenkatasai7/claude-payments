@@ -76,6 +76,6 @@ REPORT. Produce a table with columns: # | check | expected | observed | PASS/FAI
 | 14 | Transactions / Operations / Customers render | all 200 with titles, no error banner | PASS |
 | 15 | old account cannot log in | account row deleted + `deleteAllSessionsFor`; no login attempt made | PASS (by deletion) |
 | 16 | production deployment = MAIN_SHA | dpl_7z6eHF6SmukKDTEB377R4phggFab READY, target production, `742f6a8` | PASS |
-| 17 | SEED_ADMIN_* Production + Sensitive | owner step 4, not yet verified | NOT VERIFIED |
+| 17 | SEED_ADMIN_* Production + Sensitive | both rows show the secret lock icon, environment Production, updated 21:29Z by the owner; production redeployed (dpl_DSk7xZivacETCw6wCjXvU8D3usXQ, `742f6a8`, READY) and smoke re-ran green 21:31Z | PASS |
 
-Unexpected: a burst of HTTP 503s on `/admin-dashboard/team` (server action POST) and three sidebar prefetches at ~21:14Z, gone a minute later with no function log entry — likely Hobby-plan throttling; carry to Phase 1 observability. Syncing the 13 `component/*` anchors queued 13 preview builds on Vercel.
+Unexpected: Vercel flags `BLOB_READ_WRITE_TOKEN` as "Needs Attention" on the env-var page (All Environments, added Jun 25) — owner to open the row and read Vercel's reason. Also a burst of HTTP 503s on `/admin-dashboard/team` (server action POST) and three sidebar prefetches at ~21:14Z, gone a minute later with no function log entry — likely Hobby-plan throttling; carry to Phase 1 observability. Syncing the 13 `component/*` anchors queued 13 preview builds on Vercel.
