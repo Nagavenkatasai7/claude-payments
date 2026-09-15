@@ -61,6 +61,7 @@ drizzle/         checked-in SQL migrations (0001 seeds the 'default' partner)
 - **Test fixtures**: never hardcode dates that interact with time windows (the 3-day T0 observation window has detonated a suite before — use relative dates). Tests stub global `fetch` (Frankfurter); the FX Redis L2 is VITEST-skipped for that reason.
 - **PGlite + fake timers**: `freshDb()` BEFORE `vi.useFakeTimers()`. Occasional parallel-run flakes pass in isolation.
 - **`Duplicate identifier` in `.next/types/* 2.ts`** = iCloud duplicate file, not a regression: delete the ` 2` file, `rm -rf .next`.
+- **iCloud evicts `node_modules`**: the repo lives in iCloud Drive with Optimize Mac Storage, so files go `dataless` (see `ls -lO`). tsc / eslint / vitest then block on first read with ~0 CPU (a 10-minute "hang" in 2026-09-07's setup). Re-materialize with `find node_modules -type f -print0 | xargs -0 -P 64 -n 100 cat >/dev/null`; the durable fix is keeping the checkout (or at least `node_modules`) outside iCloud.
 - **Upstash**: `automaticDeserialization: false` everywhere (via the single `getRedis()`); hgetall returns flat arrays otherwise.
 - **Migrations are MANUAL**: nothing in CI/Vercel applies drizzle migrations to prod Neon. After merging ANY PR with a new `drizzle/` file, run `set -a; source .env.local; set +a; npx drizzle-kit migrate` immediately — drizzle selects explicit column lists, so an unapplied migration breaks EVERY query on the altered table (2026-06-11 dashboard outage).
 - **Vercel CLI v54**: piped `vercel env add` stores EMPTY values (use `--value`); prod vars are sensitive-by-default so `env pull` returns `''` — verify secrets at RUNTIME.
@@ -76,3 +77,31 @@ drizzle/         checked-in SQL migrations (0001 seeds the 'default' partner)
 - **No direct pushes to `main`.** PR + the `ci / ci` check; merge auto-deploys prod; then **verify the post-deploy `smoke.yml` run went green**.
 - Branches: `main` deploys (GitHub `Nagavenkatasai7/claude-payments`); old `master` archived as `archive/initial-scaffold`.
 - See `docs/ROADMAP.md` for feature inventory and the path to production; memory file `sendhome-total-platform-program` tracks the staged program history.
+
+## Claude Code tooling (set up 2026-09-07 — see docs/COMPONENTS.md)
+
+- **Plugins** — user scope (`~/.claude/settings.json`): superpowers, security-guidance, claude-security, pr-review-toolkit, code-review, commit-commands, hookify, claude-md-management, remember, claude-code-setup, session-report, receipts, frontend-design, modern-web-guidance, context7, typescript-lsp, skill-creator, plugin-dev. Project scope (`.claude/settings.json`, committed): vercel, github, sentry, posthog, circle-skills, langfuse, deepeval, neon, redis-development, playwright. Vercel/Neon/Sentry/PostHog MCPs auth via OAuth on first use; the GitHub MCP needs `GITHUB_PERSONAL_ACCESS_TOKEN` in the shell (`export GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token)`); context7 works keyless (`CONTEXT7_API_KEY` raises limits).
+- **Hooks** (`.claude/hooks/`, wired in `.claude/settings.json`): `guard-git-main.sh` (PreToolUse Bash — denies push/commit to main) · `verify-on-stop.sh` (Stop — tsc + eslint on changed files + `vitest --changed`; blocks the stop until green, once per tree state) · `migration-reminder.sh` + `component-boundary.sh` (PostToolUse Edit/Write — advisory context) · `icloud-dup-sweep.sh` (SessionStart — deletes untracked `* 2.*` duplicates whose real file exists; reports the rest).
+- **Skills** (`.claude/skills/`): `/migrate-prod` (user-only; approval-gated prod migration + verify) · `/post-merge-check` (smoke watch for a merged SHA, migration gate first) · `/worker-poke` (user-only; drains via `worker-heartbeat.yml`) · `/outbox-status` (read-only stuck-money report, `scripts/outbox-status.ts`) · `/new-corridor` (touchpoint checklist from #214) · `/sync-branches` (user-only; fast-forwards `component/*` to main).
+- **Permissions**: dev-loop commands and read-only git/gh/vercel are pre-allowed; `.env*` reads are denied (source them in a command instead, never print values); force-push is denied.
+
+## Ground truth & proof (non-negotiable on a money app)
+
+- **No API from memory.** Before using an unfamiliar or fast-moving API (Next.js 16, Drizzle, Neon serverless, Upstash, Playwright, Meta Cloud API), read the installed types in `node_modules` or fetch current docs (context7 / the official site) and cite the source (file:line or URL) in the PR or the reply.
+- **"Done" means proof in this session.** typecheck + lint + the relevant vitest specs ran and passed, and the output is quoted. The Stop hook enforces this; fix the failure rather than explaining around it. UI changes get a Claude-in-Chrome walk-through against the deployed page.
+- **Every helper is TDD'd** (superpowers red/green); every bug fix starts with a failing test that reproduces it.
+- **No collisions.** Before changing a contract (type, function signature, table, event payload, HTTP shape), `grep` every caller and update all of them + their tests in the same PR. The component-boundary hook flags cross-seam edits; treat the flag as "check callers now".
+- **Security posture per change**: no secret in code or logs; PII only through the masked/encrypted paths; server actions self-gate; webhooks verify signatures fail-closed; every DB query stays tenant-scoped; new inputs are validated at the edge. Run `/security-review` before opening a PR that touches auth, money, webhooks, crypto, or compliance; run `/claude-security` on main after each release batch.
+
+## Subagent model routing (usage budget)
+
+Pass `model:` explicitly on every Agent call:
+- **Fable 5.1** — money paths, settlement/outbox/reconcile, auth, crypto, compliance, migrations, and every final review.
+- **Opus 5** — multi-file features off the money path, refactors, plan authoring, PR-level review.
+- **Sonnet 5** — read-only exploration, doc lookups, test scaffolding, log triage, formatting.
+
+## Branching model
+
+- `main` deploys; never commit or push to it (hook-enforced). PR + `ci / ci` → squash-merge → `/post-merge-check` → `/sync-branches`.
+- `component/<name>` (13 anchors, docs/COMPONENTS.md) stay equal to main. Cut `feat/<component>/<slug>` or `fix/<component>/<slug>` from the anchor; the prefix is what the boundary hook keys on.
+- Parallel work = one git worktree per component **outside iCloud** (`git worktree add ~/dev/wt/<component> origin/component/<component>`).
