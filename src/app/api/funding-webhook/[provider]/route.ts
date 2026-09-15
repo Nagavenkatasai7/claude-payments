@@ -16,9 +16,8 @@ import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 //  - refund_failed ⇒ refundStatus pending→failed
 // updateRefund's legal-from guard makes replays/out-of-order callbacks
 // harmless no-ops. NO WhatsApp sends here — the refund-engine worker owns
-// customer messaging. HMAC FAIL-CLOSED for any provider !== 'mock'; the mock
-// carve-out mirrors payment-webhook's (the mock never posts callbacks, and
-// unlike settlement there is no per-partner rail config to bypass through).
+// customer messaging. HMAC FAIL-CLOSED for every provider including 'mock'
+// (no carve-out: see money-01 / F42).
 
 export async function POST(
   req: NextRequest,
@@ -32,19 +31,16 @@ export async function POST(
 
   const raw = await req.text();                           // raw body first (for HMAC)
 
-  // Every real provider MUST verify against FUNDING_WEBHOOK_SECRET_<PROVIDER>;
-  // '' ⇒ unconfigured ⇒ reject (fail-closed, never fail-open). The 'mock'
-  // carve-out skips verification ONLY while no mock secret is configured —
-  // unlike the payment mock (whose handleWebhook is a no-op), the funding
-  // mock's handleWebhook ACTS on any parsed body, so production can lock this
-  // endpoint by setting FUNDING_WEBHOOK_SECRET_MOCK (same opt-in-enforcement
-  // posture as META_APP_SECRET).
+  // Every provider, the mock included, MUST verify against
+  // FUNDING_WEBHOOK_SECRET_<PROVIDER>; '' ⇒ unconfigured ⇒ reject. The mock
+  // funding provider never posts callbacks, and its handleWebhook ACTS on any
+  // parsed body, so there is no legitimate unsigned caller (audit money-01 /
+  // scan F42: the old carve-out let an anonymous POST arm settlement or forge
+  // a completed refund in production).
   const secret = env.fundingWebhookSecret(provider);
-  if (provider !== 'mock' || secret !== '') {
-    const signature = req.headers.get('x-signature') ?? '';
-    if (!verifyWebhookSignature(raw, signature, secret)) {
-      return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
-    }
+  const signature = req.headers.get('x-signature') ?? '';
+  if (!verifyWebhookSignature(raw, signature, secret)) {
+    return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
 
   let body: unknown;
