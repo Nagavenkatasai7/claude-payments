@@ -26,6 +26,13 @@ import { sendText, type WaCreds } from '../whatsapp';
 // verification recipe covers both directions of the integration.
 
 /**
+ * Rail ack budget (rail-09). The partner contract (src/app/docs/page.tsx §3)
+ * promises we wait at most this long for a 2xx; a slower rail is a RETRYABLE
+ * failure. Single source for the worker's three rail POSTs too.
+ */
+export const RAIL_TIMEOUT_MS = 15_000;
+
+/**
  * Normalize a partner-rail lifecycle status to our TransferStatus.
  * created → awaiting_payment (no-op transition), funded → paid,
  * paid_out → delivered. failed/unknown → null (logged by the caller; reversal

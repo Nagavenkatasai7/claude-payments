@@ -53,7 +53,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     recipientTemplateName: RECIPIENT_TEMPLATE_NAME,
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
     listStaff: () => getAuthStore().listStaff(),
-    runAgentTurn: async (phone, message, turn, waCreds) => {
+    runAgentTurn: async (phone, message, turn, waCreds, opts) => {
       const customerStore = getCustomerStore(store);
       const agent = createAgent({
         chat,
@@ -67,7 +67,8 @@ async function run(req: NextRequest): Promise<NextResponse> {
         partnerStore: getPartnerStore(),
         waCreds, // WL2: interactive sends + replies leave from the partner's number
       });
-      return agent.runAgentTurn(phone, message, turn);
+      // Fix 7: the worker's cooperative row deadline stops the turn between tool rounds.
+      return agent.runAgentTurn(phone, message, turn, { signal: opts?.signal });
     },
   };
 

@@ -1370,3 +1370,52 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`);
   });
 });
+
+describe('row deadline (fix 7)', () => {
+  it('a turn whose second tool round is in flight at the deadline stops, answers with the fallback, and mints nothing twice', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    const now = new Date().toISOString();
+    await deps.customerStore.saveCustomer({
+      senderPhone: PHONE, firstSeenAt: now, kycStatus: 'verified', senderCountry: 'US',
+      partnerId: 'default', optInAt: now, createdAt: now, updatedAt: now,
+    });
+    const ctrl = new AbortController();
+    const chat = vi.fn(async (_messages: ChatMessage[], _tools: unknown, opts?: { signal?: AbortSignal }): Promise<ChatMessage> => {
+      if (chat.mock.calls.length === 1) {
+        // Round 0: the model mints with FULL legacy explicit args (no buttonTap ⇒
+        // the explicit-args path; an empty payload would refuse and mint nothing).
+        return {
+          role: 'assistant', content: '',
+          tool_calls: [{ id: 'c1', type: 'function', function: {
+            name: 'create_transfer',
+            arguments: JSON.stringify({
+              recipient_name: 'Mom', recipient_phone: '919876543210', amount_usd: 50,
+              payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+            }),
+          } }],
+        };
+      }
+      // Round 1: the worker's row deadline fires WHILE this LLM call is in flight.
+      // Deterministic — no timer: this double aborts the caller's signal itself and
+      // throws the same AbortError ollama.chat raises for a caller abort.
+      expect(opts?.signal).toBe(ctrl.signal); // the agent threads the signal into every deps.chat call
+      ctrl.abort();
+      throw Object.assign(new Error('Ollama request aborted by the caller (row deadline)'), { name: 'AbortError' });
+    });
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps, chat,
+    });
+
+    const reply = await agent.runAgentTurn(PHONE, 'send $50 to Mom', { isNewConversation: false }, { signal: ctrl.signal });
+
+    expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?"); // FALLBACK_REPLY (agent.ts:25-26)
+    expect(await store.listTransfers()).toHaveLength(1); // round 0 minted EXACTLY once and is never re-run
+    expect(chat).toHaveBeenCalledTimes(2); // no chatWithRetry second call after the abort
+    const saved = await store.getConversation(PHONE); // history preserved by runAgentTurn's catch
+    expect(saved.some((m) => m.role === 'user' && m.content === 'send $50 to Mom')).toBe(true);
+    expect(saved.some((m) => m.role === 'assistant' && (m.tool_calls?.length ?? 0) > 0)).toBe(true);
+    expect(saved.some((m) => m.role === 'tool')).toBe(true); // the round-0 tool result
+  });
+});

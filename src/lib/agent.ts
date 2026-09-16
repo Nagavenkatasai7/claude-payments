@@ -26,7 +26,7 @@ const FALLBACK_REPLY =
   "Sorry, I'm having trouble right now. Could you send that again?";
 
 export interface AgentDeps {
-  chat: (messages: ChatMessage[], tools: ChatTool[]) => Promise<ChatMessage>;
+  chat: (messages: ChatMessage[], tools: ChatTool[], opts?: { signal?: AbortSignal }) => Promise<ChatMessage>;
   store: Store;
   scheduleStore: ScheduleStore;
   draftStore: DraftStore;
@@ -73,15 +73,19 @@ export function createAgent(deps: AgentDeps) {
   // One retry on a transient chat() failure (Ollama Cloud 5xx / timeout / a
   // momentarily malformed response). A throw means history.push(assistant) never
   // ran, so the retry re-sends the identical messages cleanly.
+  // Never retry once the caller's row deadline (fix 7) has fired: the retry
+  // would be a second LLM call past the deadline.
   async function chatWithRetry(
     messages: ChatMessage[],
     tools: ChatTool[],
+    signal?: AbortSignal,
   ): Promise<ChatMessage> {
     try {
-      return await deps.chat(messages, tools);
+      return await deps.chat(messages, tools, { signal });
     } catch (err) {
+      if (signal?.aborted) throw err;
       console.warn('chat() failed once — retrying:', err);
-      return await deps.chat(messages, tools);
+      return await deps.chat(messages, tools, { signal });
     }
   }
 
@@ -89,6 +93,7 @@ export function createAgent(deps: AgentDeps) {
     phone: string,
     incomingText: string,
     turn: TurnContext = { isNewConversation: false },
+    opts: { signal?: AbortSignal } = {},
   ): Promise<string> {
     const history = await deps.store.getConversation(phone);
     history.push({ role: 'user', content: incomingText });
@@ -98,7 +103,7 @@ export function createAgent(deps: AgentDeps) {
     // AND drop the turn. Degrade to a friendly retry line and PRESERVE history
     // (the inbound message + any partial turns) so the customer can just resend.
     try {
-      return await completeTurn(phone, turn, history);
+      return await completeTurn(phone, turn, history, opts.signal);
     } catch (err) {
       console.error('runAgentTurn failed — returning fallback:', err);
       try {
@@ -114,6 +119,7 @@ export function createAgent(deps: AgentDeps) {
     phone: string,
     turn: TurnContext,
     history: ChatMessage[],
+    signal?: AbortSignal,
   ): Promise<string> {
     // Channel seam (B5): resolve once per turn. 'web' narrows the schemas the
     // model sees to WEB_TOOL_ALLOWLIST; executeTool re-checks at dispatch.
@@ -159,6 +165,11 @@ export function createAgent(deps: AgentDeps) {
     let historyLink: string | null = null;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      // Cooperative row deadline (fix 7): the worker aborts this signal at
+      // ROW_DEADLINE_MS. Stop BEFORE starting another LLM call / tool round so
+      // no tool runs after the worker has given up on us; the catch in
+      // runAgentTurn turns this into FALLBACK_REPLY with history preserved.
+      if (signal?.aborted) throw new Error('agent turn aborted: row deadline');
       // A one-off system note for new conversations. Not persisted to history
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
@@ -257,11 +268,14 @@ export function createAgent(deps: AgentDeps) {
       }
       messages.push(...history);
 
-      const assistant = await chatWithRetry(messages, channelTools);
+      const assistant = await chatWithRetry(messages, channelTools, signal);
       history.push(assistant);
 
       if (assistant.tool_calls && assistant.tool_calls.length > 0) {
         for (const call of assistant.tool_calls) {
+          // Same deadline check before EACH tool (outside the per-tool catch
+          // below, so it ends the turn instead of becoming a tool error).
+          if (signal?.aborted) throw new Error('agent turn aborted: row deadline');
           let args: Record<string, unknown> = {};
           try {
             args = JSON.parse(call.function.arguments || '{}');

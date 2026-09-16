@@ -1,5 +1,5 @@
 import type { Db } from '@/db/client';
-import { createOutboxRepo, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, MAX_ATTEMPTS, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
@@ -11,6 +11,7 @@ import {
   buildSettlementInstruction,
   buildReverseInstruction,
   signBody,
+  RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
@@ -19,6 +20,7 @@ import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, rec
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
+import { logWarn } from '@/lib/log';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
 import type { Staff, TurnContext } from '@/lib/types';
@@ -32,6 +34,11 @@ import type { Staff, TurnContext } from '@/lib/types';
 // Handlers are dispatch-by-kind, DI'd so PGlite tests run them without any
 // network. Every handler is IDEMPOTENT by construction (dedupe keys upstream +
 // forward-only state machine downstream), so at-least-once delivery is safe.
+//
+// Rows are LEASED (LEASE_MS) at claim; an expired lease is reclaimed by the
+// next drain and the handlers' idempotency makes the re-run safe — except
+// agent.turn, which is terminal on a row deadline. Every outbound fetch carries
+// an AbortSignal deadline.
 
 export interface WorkerDeps {
   db: Db;
@@ -58,6 +65,8 @@ export interface WorkerDeps {
     message: string,
     turn: TurnContext,
     waCreds?: WaCreds,
+    /** Cooperative row deadline (fix 7) — the agent stops between tool rounds when it fires. Task 1 adds `routedPartnerId` here. */
+    opts?: { signal?: AbortSignal },
   ) => Promise<string>;
   /**
    * The funds-capture seam for refunds (DI'd like the other effects; absent ⇒
@@ -79,6 +88,87 @@ export interface WorkerDeps {
   listStaff: () => Promise<Staff[]>;
 }
 
+/**
+ * Hard per-row wall clock. Money handlers are bounded by RAIL_TIMEOUT_MS (15s)
+ * far inside this. It exists for agent.turn and ticket.triage — and the
+ * honest budget arithmetic is: an agent turn may run MAX_TOOL_ROUNDS (6) tool
+ * rounds, each up to 2 × OLLAMA_TIMEOUT_MS (chatWithRetry) = 40s, i.e. up to
+ * 240s for a legitimate long turn. Nothing that long fits a 60s function, so
+ * the deadline is enforced COOPERATIVELY: the agent.turn branch hands
+ * runAgentTurn an AbortSignal that fires at (rowDeadlineMs − COOP_GRACE_MS);
+ * agent.ts threads it into every deps.chat call and checks signal.aborted
+ * before each tool round, so the turn ends inside the grace with the agent's
+ * own FALLBACK_REPLY ("send that again") and its history saved — BEFORE the
+ * race timer below gives up on the row. Must stay under TIME_BUDGET_MS (45s)
+ * and maxDuration (60s) in src/app/api/worker/route.ts.
+ *
+ * A RowDeadlineError is RETRYABLE (markFailed + 2^attempts backoff) for every
+ * kind EXCEPT agent.turn, where it is TERMINAL (dead + the deduped dead:<id>
+ * alert). Reason: withRowDeadline ABANDONS the handler promise, and an agent
+ * turn is not idempotent — send_approve_picker creates a draft + sends a
+ * cta_url card, create_transfer/create_schedule mint fresh ids with no
+ * idempotency key, sendText has no dedupe key — so a retry running beside a
+ * turn that ignored its signal (a hung tool) would double-mint and double-send.
+ * The abandoned turn's late reply is dropped by the `abandoned` check in `handle`.
+ */
+export const ROW_DEADLINE_MS = 40_000;
+
+/**
+ * Cooperative grace: the signal a handler receives fires THIS much BEFORE the
+ * row's hard deadline. If both fired at the same instant, `signal.aborted`
+ * would be true on the cooperative path too (the agent's catch does
+ * saveConversation I/O before returning FALLBACK_REPLY), so the fallback would
+ * always arrive after the race lost — every deadline terminal, no fallback
+ * ever sent. 5s covers the agent's catch path with margin.
+ */
+export const COOP_GRACE_MS = 5_000;
+
+/**
+ * The per-row signal handed to `handle`: an AbortSignal that fires at
+ * (deadline − COOP_GRACE_MS) for handlers that can stop cooperatively, plus
+ * `abandoned`, set by withRowDeadline ONLY when ITS timer won the race. That
+ * flag — never `.aborted` — is the discriminator for dropping a late reply:
+ * `.aborted` alone means "stop now; your reply still counts".
+ */
+export type RowSignal = AbortSignal & { abandoned: boolean };
+
+function newRowSignal(rowDeadlineMs: number): RowSignal {
+  const coopMs = Math.max(1, rowDeadlineMs - COOP_GRACE_MS); // tests shrink rowDeadlineMs; never a non-positive timeout
+  return Object.assign(AbortSignal.timeout(coopMs), { abandoned: false });
+}
+
+export class RowDeadlineError extends Error {
+  constructor(ms: number) {
+    super(`outbox row deadline exceeded (${ms}ms)`);
+    this.name = 'RowDeadlineError';
+  }
+}
+
+/** Kinds whose handler is NOT idempotent: a deadline is terminal, never a retry. */
+const TERMINAL_ON_DEADLINE: ReadonlySet<string> = new Set(['agent.turn']);
+
+/**
+ * Race `work` against the row deadline. The handler already holds `signal`
+ * (cooperative — it fired COOP_GRACE_MS earlier); the timer here is the
+ * backstop for handlers that ignore it, and it marks the row `abandoned` when
+ * it fires so a late completion of the abandoned promise can be told apart
+ * from a cooperative one that finished inside the grace.
+ */
+async function withRowDeadline<T>(work: Promise<T>, ms: number, signal: RowSignal): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      signal.abandoned = true;
+      reject(new RowDeadlineError(ms));
+    }, ms);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 type Payload = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -92,7 +182,7 @@ async function partnerContext(deps: WorkerDeps, partnerId: string) {
   };
 }
 
-async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
+async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Promise<void> {
   const p = row.payload as Payload;
   switch (row.kind) {
     // ── Plain customer-facing sends (the transactional message outbox) ──────
@@ -171,6 +261,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
           ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
         },
         body: rawBody,
+        signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
       });
       if (!res.ok) {
         throw new Error(`Settlement instruction rejected (${res.status})`);
@@ -202,6 +293,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
           ...(webhookSecret ? { 'x-signature': signBody(callbackBody, webhookSecret) } : {}),
         },
         body: callbackBody,
+        signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
       });
       if (!res.ok) throw new Error(`Rail status callback rejected (${res.status})`);
       return;
@@ -243,6 +335,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
             ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
           },
           body: rawBody,
+          signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
         });
         if (!res.ok) throw new Error(`Reverse instruction rejected (${res.status})`);
         refundRef = `reverse-${transferId}`;
@@ -363,7 +456,19 @@ async function handle(deps: WorkerDeps, row: OutboxRow): Promise<void> {
         str(p.messageText),
         (p.turn ?? {}) as TurnContext,
         waCreds,
+        { signal },
       );
+      // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
+      // and the row is already dead — never send its late reply (a second
+      // customer message for the same inbound). The COOPERATIVE path is not
+      // abandoned: the agent saw `signal.aborted` at (deadline − COOP_GRACE_MS),
+      // returned FALLBACK_REPLY and saved history inside the grace — but
+      // `signal.aborted` is true there too, so the discriminator is `abandoned`
+      // (set only by the race timer), never `aborted`.
+      if (signal.abandoned) {
+        logWarn('worker.agent', 'agent.turn reply dropped: row deadline already passed', { id: row.id, kind: row.kind });
+        return;
+      }
       if (reply.trim()) await deps.sendText(phone, reply, waCreds);
       return;
     }
@@ -377,6 +482,24 @@ export interface DrainResult {
   processed: number;
   failed: number;
   dead: number;
+  /** Rows claimed but handed back unstarted because `stopAfter` passed. */
+  released: number;
+}
+
+export interface DrainOptions {
+  /** Epoch ms after which no further claimed row is STARTED; the rest are released. */
+  stopAfter?: number;
+  /** Per-row wall clock (tests shrink it); defaults to ROW_DEADLINE_MS. */
+  rowDeadlineMs?: number;
+  /**
+   * Epoch ms when the platform will KILL this invocation (route: started +
+   * maxDuration − margin). A NON-idempotent row (TERMINAL_ON_DEADLINE) that
+   * could still be running then is released unstarted rather than started:
+   * killed mid-turn it would be reclaimed after LEASE_MS and RE-RUN beside its
+   * own ghost — the double-mint invariant 5 forbids. Money rows (15s rail
+   * deadline) still start; stopAfter bounds them.
+   */
+  hardStopAt?: number;
 }
 
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
@@ -384,25 +507,63 @@ export async function drainOnce(
   deps: WorkerDeps,
   workerId: string,
   batchSize = 10,
+  opts: DrainOptions = {},
 ): Promise<DrainResult> {
   const outbox: OutboxRepo = createOutboxRepo(deps.db);
   const rows = await outbox.claimBatch(batchSize, workerId);
-  const result: DrainResult = { processed: 0, failed: 0, dead: 0 };
-  for (const row of rows) {
+  const rowDeadlineMs = opts.rowDeadlineMs ?? ROW_DEADLINE_MS;
+  const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (opts.stopAfter !== undefined && Date.now() >= opts.stopAfter) {
+      // Out of budget: give the unstarted remainder back NOW (attempt refunded)
+      // rather than parking it under a 5-minute lease.
+      result.released += await outbox.releaseUnstarted(rows.slice(i).map((r) => r.id), workerId);
+      break;
+    }
+    if (
+      opts.hardStopAt !== undefined &&
+      TERMINAL_ON_DEADLINE.has(row.kind) &&
+      Date.now() + rowDeadlineMs > opts.hardStopAt
+    ) {
+      // Cannot finish before the platform kills us: hand the non-idempotent
+      // row back unstarted (attempt refunded) for the next invocation.
+      result.released += await outbox.releaseUnstarted([row.id], workerId);
+      continue;
+    }
+    // One COOPERATIVE signal per row (fires COOP_GRACE_MS before the hard
+    // deadline): handlers that can stop cooperatively (agent.turn) get it; the
+    // timer inside withRowDeadline is the backstop for the ones that cannot,
+    // and it flags the row `abandoned` when it fires.
+    const signal = newRowSignal(rowDeadlineMs);
     try {
-      await handle(deps, row);
-      await outbox.markDone(row.id);
-      result.processed++;
+      await withRowDeadline(handle(deps, row, signal), rowDeadlineMs, signal);
+      if (await outbox.markDone(row.id, workerId)) {
+        result.processed++;
+      } else {
+        // Our lease was reclaimed while we ran (we outlived LEASE_MS): the new
+        // owner's outcome wins. Ids/kinds only — never the payload.
+        logWarn('worker.lease', 'markDone refused: lease no longer ours', { id: row.id, kind: row.kind });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'unknown error';
-      const status = await outbox.markFailed(row.id, row.attempts, message);
+      // TERMINAL deadline: an abandoned non-idempotent handler (agent.turn) must
+      // never be retried beside its own ghost — force the dead ceiling so the
+      // ordinary dead-letter path (one deduped dead:<id> alert) handles it.
+      const terminal = err instanceof RowDeadlineError && TERMINAL_ON_DEADLINE.has(row.kind);
+      const status = await outbox.markFailed(row.id, terminal ? MAX_ATTEMPTS : row.attempts, message, workerId);
+      if (status === 'lost') {
+        logWarn('worker.lease', 'markFailed refused: lease no longer ours', { id: row.id, kind: row.kind });
+        continue;
+      }
       if (status === 'dead') {
         result.dead++;
         // Exactly one alert per dead row (dedupe key), never recursive.
         if (row.kind !== 'ops.alert') {
           await outbox.enqueue(
             'ops.alert',
-            { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) DEAD after ${row.attempts} attempts: ${message.slice(0, 140)}` },
+            // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
+            { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}` },
             { dedupeKey: `dead:${row.id}` },
           );
         }

@@ -7,10 +7,11 @@ import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
+import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
+import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 
 // The durability engine's failure paths: retry with backoff, dead-letter with
 // exactly-one ops alert, and the settlement.instruct happy path (signed POST +
@@ -241,6 +242,7 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     expect(r.processed).toBe(1);
     expect(runAgentTurn).toHaveBeenCalledWith(
       '15551230000', 'send $200 to mom', { isNewConversation: true }, undefined,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(sendText).toHaveBeenCalledWith('15551230000', 'Here is your quote!', undefined);
   });
@@ -465,5 +467,183 @@ describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner 
     expect(t.refundRef).toBe('reverse-rail-9');
     const dead = await outbox.listDead();
     expect(dead).toHaveLength(0);
+  });
+});
+
+describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
+  it('a row abandoned by a dead worker is re-handled on the next drain and marked done', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi' });
+    const [row] = await outbox.claimBatch(1, 'w_dead'); // w_dead never comes back
+    await db.execute(sql`UPDATE outbox SET lease_until = now() - interval '10 minutes' WHERE id = ${row.id}`);
+
+    const r = await drainOnce(deps(), 'w_new');
+    expect(r.processed).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const res = await db.execute(sql`SELECT status, attempts, lease_owner FROM outbox WHERE id = ${row.id}`);
+    const [{ status, attempts, lease_owner }] =
+      (res as unknown as { rows: Array<{ status: string; attempts: number; lease_owner: string | null }> }).rows;
+    expect(status).toBe('done');
+    expect(attempts).toBe(2); // the reclaim counted as a retry
+    expect(lease_owner).toBeNull();
+  });
+
+  it('a LIVE lease is left alone — no double execution', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi' });
+    await outbox.claimBatch(1, 'w_alive');
+    const r = await drainOnce(deps(), 'w_other');
+    expect(r.processed + r.failed + r.dead).toBe(0);
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('a NON-agent row that exceeds the per-row deadline fails RETRYABLY and does not starve the rest of the batch', async () => {
+    // A hung Graph POST that ignores its own signal (the deadline is the backstop).
+    sendText.mockImplementationOnce(() => new Promise<void>(() => {})); // never resolves
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'slow' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'next' });
+
+    const r = await drainOnce(deps(), 'w1', 10, { rowDeadlineMs: 50 });
+    expect(r).toMatchObject({ failed: 1, processed: 1, dead: 0 });
+    const res = await db.execute(sql`SELECT status, last_error FROM outbox WHERE payload->>'body' = 'slow'`);
+    const [{ status, last_error }] = (res as unknown as { rows: Array<{ status: string; last_error: string }> }).rows;
+    expect(status).toBe('failed');
+    expect(last_error).toMatch(/row deadline/);
+    expect(ROW_DEADLINE_MS).toBeLessThan(45_000); // under TIME_BUDGET_MS (route.ts:36) and maxDuration
+  });
+
+  it('agent.turn receives an AbortSignal that fires BEFORE the row deadline (COOP_GRACE_MS), and a turn that honours it (fallback reply) is marked DONE with its reply SENT', async () => {
+    // `runAgentTurn` is declared `vi.fn(async (..._a: unknown[]) => '')` at :39 — an implementation
+    // whose 5th parameter is annotated `opts?: { signal?: AbortSignal }` does not type-check under
+    // strictFunctionTypes (tsconfig includes tests/), so keep the rest-`unknown[]` shape and cast.
+    runAgentTurn.mockImplementation(async (..._a: unknown[]) => {
+      const opts = _a[4] as { signal?: AbortSignal } | undefined;
+      expect(opts?.signal).toBeInstanceOf(AbortSignal); // 5th argument: (phone, message, turn, waCreds, opts)
+      await new Promise((res) => opts!.signal!.addEventListener('abort', res, { once: true }));
+      return "Sorry, I'm having trouble right now. Could you send that again?"; // the agent's own FALLBACK_REPLY on abort
+    });
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'slow', turn: {} });
+    // rowDeadlineMs 200 ⇒ the COOPERATIVE signal fires at max(1, 200 − COOP_GRACE_MS) = 1ms,
+    // the hard race timer at 200ms. The agent returns inside that grace, so the row
+    // is a normal completion even though `signal.aborted` is true — the worker
+    // discriminates on the row's `abandoned` flag (set only by the race timer).
+    const r = await drainOnce(deps(), 'w1', 10, { rowDeadlineMs: 200 });
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(String((sendText.mock.calls[0] as unknown[])[1])).toMatch(/send that again/);
+  });
+
+  it('agent.turn that IGNORES the deadline is TERMINAL (dead + one deduped alert), never retried, and its late reply is never sent', async () => {
+    // A tool hung past the signal: the handler promise is abandoned by withRowDeadline…
+    let resolveLate!: (v: string) => void;
+    runAgentTurn.mockImplementation(() => new Promise<string>((res) => { resolveLate = res; }));
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'slow', turn: {} });
+
+    const r = await drainOnce(deps(), 'w1', 10, { rowDeadlineMs: 50 });
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1 });
+    const res = await db.execute(sql`SELECT status, last_error FROM outbox WHERE kind = 'agent.turn'`);
+    const [{ status, last_error }] = (res as unknown as { rows: Array<{ status: string; last_error: string }> }).rows;
+    expect(status).toBe('dead'); // NOT 'failed': a retry would re-run the same inbound message beside the abandoned turn
+    expect(last_error).toMatch(/row deadline/);
+    const alerts = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
+    expect(alerts.rows.map((a) => a.dedupe_key)).toHaveLength(1);
+    expect(alerts.rows[0].dedupe_key).toMatch(/^dead:/);
+    // A second drain does NOT re-run the turn (terminal), and only drains the alert.
+    expect(runAgentTurn).toHaveBeenCalledTimes(1);
+    await drainOnce(deps(), 'w2');
+    expect(runAgentTurn).toHaveBeenCalledTimes(1);
+    // …and when the abandoned turn finally resolves, the worker's agent.turn branch sees the row's
+    // `abandoned` flag (set by the race timer — NOT `signal.aborted`, which is also true on the
+    // cooperative path above) and SKIPS sendText.
+    resolveLate('late reply');
+    await new Promise((res) => setTimeout(res, 10));
+    expect(sendText.mock.calls.map((c) => String((c as unknown[])[1]))).not.toContain('late reply');
+  });
+
+  it('an agent.turn that could still be running at hardStopAt is RELEASED unstarted — never started, killed by the platform and re-run beside its ghost — while a money row still starts', async () => {
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'hi', turn: {} });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'fits' });
+    // 10s of invocation left, 40s row deadline: the non-idempotent turn cannot fit; the send can.
+    const r = await drainOnce(deps(), 'w1', 10, { rowDeadlineMs: 40_000, hardStopAt: Date.now() + 10_000 });
+    expect(r).toMatchObject({ processed: 1, released: 1, failed: 0, dead: 0 });
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(await outbox.countPending()).toBe(1); // the turn waits for the next invocation, attempt refunded
+  });
+
+  it('stopAfter RELEASES unstarted rows (owner-only, attempt refunded) instead of parking them under a 5-minute lease', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'a' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'b' });
+    const r = await drainOnce(deps(), 'w1', 10, { stopAfter: Date.now() - 1 });
+    expect(r).toMatchObject({ released: 2, processed: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(await outbox.countPending()).toBe(2);
+    const r2 = await drainOnce(deps(), 'w2');
+    expect(r2.processed).toBe(2);
+  });
+});
+
+describe('drainOnce — outbound deadlines (rail-09 / obs-03)', () => {
+  const timeoutError = () =>
+    Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+
+  beforeEach(async () => {
+    await store.saveTransfer(transferFixture());
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+
+  it('settlement.instruct POSTs with an AbortSignal carrying the rail deadline', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({}) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal!.aborted).toBe(false);
+    expect(RAIL_TIMEOUT_MS).toBe(15_000);
+  });
+
+  it('an aborted rail POST is a RETRYABLE failure (failed + backoff), not a dead letter on attempt 1', async () => {
+    fetchFn.mockRejectedValue(timeoutError());
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0, processed: 0 });
+    expect(await outbox.listDead()).toHaveLength(0);
+    const res = await db.execute(sql`SELECT status, last_error, next_attempt_at FROM outbox WHERE kind = 'settlement.instruct'`);
+    const [{ status, last_error, next_attempt_at }] =
+      (res as unknown as { rows: Array<{ status: string; last_error: string; next_attempt_at: string }> }).rows;
+    expect(status).toBe('failed');
+    expect(last_error).toMatch(/aborted/i);
+    expect(new Date(next_attempt_at).getTime()).toBeGreaterThan(Date.now()); // rides the 2^attempts backoff
+  });
+
+  it('an aborted settlement.instruct never writes providerRef', async () => {
+    fetchFn.mockRejectedValue(timeoutError());
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' });
+    await drainOnce(deps(), 'w1');
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it('rail.callback and the non-custodial reverse POST also carry the deadline signal', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({}) });
+    await outbox.enqueue('rail.callback', { reference: 'wk_t1', partner_id: 'acme' });
+    await store.saveTransfer({
+      ...transferFixture(), fundingMethod: 'ach_pull', transferType: 'b2b',
+      achTokenRef: 'ach_deadbeef', refundStatus: 'pending',
+    } as Transfer);
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    for (const call of fetchFn.mock.calls) {
+      const [, init] = call as [string, RequestInit];
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
   });
 });
