@@ -67,6 +67,11 @@ export async function runDueSchedules(
           customerId: schedule.phone,
           senderPhone: schedule.phone,
         });
+        // Record the inquiry on the schedule's (tenant, phone) row so the Persona
+        // completion binds to it even when the phone has sibling tenant rows (fix 1).
+        if (start.providerRef) {
+          await deps.customerStore.recordKycInquiry(schedule.partnerId, schedule.phone, start.providerRef);
+        }
         await deps.sendScheduledSkipped(schedule, owner ?? null, start.url);
       }
       continue;

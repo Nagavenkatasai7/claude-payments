@@ -3791,3 +3791,39 @@ describe('tools are tenant-scoped (fix 1)', () => {
     expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();
   });
 });
+
+describe('verification hand-offs record the inquiry under the TURN tenant (review item 1)', () => {
+  // The Persona webhook binds a completion by kycInquiryId once a phone has rows
+  // under several tenants. Every tool that mints an inquiry must therefore
+  // record it on the (ctx.partnerId, phone) row — never on a sibling's.
+  it.each([
+    ['check_send_limit', {}],
+    ['get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }],
+    ['send_approve_picker', { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi' }],
+    ['create_transfer', { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi' }],
+  ])('%s under acme records the inquiry on acme\'s row only', async (tool, args) => {
+    const redis = fakeRedis();
+    const dflt = await buildCtx(redis); // verified default-tenant row for PHONE
+    const nowIso = new Date().toISOString();
+    await dflt.partnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active', kycMode: 'ours',
+      requireKycBeforeSend: true, createdAt: nowIso, updatedAt: nowIso,
+    });
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    await acme.customerStore.saveCustomer({
+      ...(await acme.customerStore.getCustomer('acme', PHONE))!, kycStatus: 'not_started',
+    });
+    const ctx = {
+      ...acme,
+      kycProvider: {
+        startVerification: async () => ({ url: 'https://kyc.example/v', providerRef: 'inq_tool_1' }),
+        getStatus: async () => 'pending' as const,
+        handleWebhook: async () => null,
+      },
+    };
+    const r = await executeTool(tool, { ...args, amount_usd: (args as { amount_usd?: number }).amount_usd ?? 100 }, ctx);
+    expect(JSON.stringify(r)).toContain('https://kyc.example/v');
+    expect((await acme.customerStore.getCustomer('acme', PHONE))!.kycInquiryId).toBe('inq_tool_1');
+    expect((await acme.customerStore.getCustomer('default', PHONE))!.kycInquiryId).toBeUndefined();
+  });
+});

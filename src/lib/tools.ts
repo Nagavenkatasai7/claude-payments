@@ -834,6 +834,25 @@ const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
 // currency for that partner, fresh FX rates, AND the destination country/currency.
 // destinationCountryArg is validated against the CountryCode union; unknown values
 // fall back to 'IN' (India) so the default US→India path is unchanged.
+/**
+ * Mint a KYC inquiry for the turn's customer AND record it on the
+ * (ctx.partnerId, phone) row (fix 1 review). Once a phone has rows under several
+ * tenants the Persona webhook binds a completion by kycInquiryId only — an
+ * unrecorded inquiry would be ignored and the customer would stay unverified.
+ * Recording is fail-soft: the customer still gets the link if the write fails.
+ */
+async function startVerificationForTurn(ctx: ToolContext) {
+  const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+  if (start.providerRef) {
+    try {
+      await ctx.customerStore.recordKycInquiry(ctx.partnerId, ctx.phone, start.providerRef);
+    } catch (err) {
+      logWarn('kyc.record_inquiry', err);
+    }
+  }
+  return start;
+}
+
 async function resolveCurrencyAndRates(
   ctx: ToolContext,
   requested: unknown,
@@ -1016,10 +1035,7 @@ async function getQuoteTool(
     // building any quote so the bot directs the customer to verify first.
     // WL1: skipped for a 'delegated' partner (they run KYC). Sanctions unaffected.
     if (sendGateActive(partner) && !isSendVerified(customer)) {
-      const start = await ctx.kycProvider.startVerification({
-        customerId: ctx.phone,
-        senderPhone: ctx.phone,
-      });
+      const start = await startVerificationForTurn(ctx);
       return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
     }
 
@@ -1051,10 +1067,7 @@ async function getQuoteTool(
         // cap refusal with no verification handoff.
         let kycUrl: string | undefined;
         if (sendGateActive(partner) && (ev.tier === 'T0' || ev.tier === 'Suspended')) {
-          const start = await ctx.kycProvider.startVerification({
-            customerId: ctx.phone,
-            senderPhone: ctx.phone,
-          });
+          const start = await startVerificationForTurn(ctx);
           kycUrl = start.url;
         }
         return {
@@ -1197,7 +1210,7 @@ async function createTransferTool(
     const draftVerified =
       draft.transferType === 'b2b' ? isB2bSendVerified(customer) : isSendVerified(customer);
     if (sendGateActive(partner) && !draftVerified) {
-      const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+      const start = await startVerificationForTurn(ctx);
       return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
     }
     {
@@ -1299,7 +1312,7 @@ async function createTransferTool(
   // WL1: skipped for a 'delegated' partner; sanctions still run in createTransfer.
   const legacyVerified = legacyB2b ? isB2bSendVerified(legacyCustomer) : isSendVerified(legacyCustomer);
   if (sendGateActive(legacyPartner) && !legacyVerified) {
-    const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+    const start = await startVerificationForTurn(ctx);
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
   const amountSource = Number(args.amount_source ?? args.amount_usd);
@@ -2760,7 +2773,7 @@ async function sendApprovePickerTool(
   const gateActive = sendGateActive(partner);
   const verified = b2b ? isB2bSendVerified(customer) : isSendVerified(customer);
   if (gateActive && !verified) {
-    const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+    const start = await startVerificationForTurn(ctx);
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
   const amountSource = Number(args.amount_source ?? args.amount_usd);
@@ -3120,7 +3133,7 @@ async function checkSendLimitTool(
   // cap/EDD logic. A NEW condition on kycStatus, independent of the T0/Suspended
   // branch below (which is left intact). WL1: skipped for a 'delegated' partner.
   if (sendGateActive(partner) && !isSendVerified(customer)) {
-    const start = await ctx.kycProvider.startVerification({ customerId: ctx.phone, senderPhone: ctx.phone });
+    const start = await startVerificationForTurn(ctx);
     return { within_cap: false, reason: SEND_GATE_REASON, kyc_url: start.url };
   }
   const amountSource = Number(args.amount_source ?? args.amount_usd ?? 0);
@@ -3140,10 +3153,7 @@ async function checkSendLimitTool(
   // creates a real Persona inquiry, so it must not run as a side effect.
   let kycUrl: string | undefined;
   if (sendGateActive(partner) && (evalResult.tier === 'T0' || evalResult.tier === 'Suspended')) {
-    const start = await ctx.kycProvider.startVerification({
-      customerId: ctx.phone,
-      senderPhone: ctx.phone,
-    });
+    const start = await startVerificationForTurn(ctx);
     kycUrl = start.url;
   }
 
