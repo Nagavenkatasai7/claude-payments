@@ -4,6 +4,8 @@
 //
 // Usage: node scripts/tracker/snapshot.mjs --db <dir> --out <dir>
 //   --db   directory produced by ArtifactData list with out_dir (expects <db>/prs/*.json and <db>/fixes/*.json)
+//   --versions  optional JSON map {"prs/pr-237": 3, "meta/state": 5, ...} of current document versions
+//          (from the ArtifactData list/get results); required to overwrite existing docs, which the db pins
 //   --out  where to write meta__state.json, prs__pr-N.json, events__*.json, fix-proposals.json and batch-N.json
 //
 // Read-only against GitHub. It never marks a fix "done": a merged PR only proposes "merged";
@@ -19,7 +21,7 @@ const FIRST_PROGRAM_PR = 237;
 const LEGACY_FIX_MAP = { 242: [1], 243: [3], 244: [2], 246: [3], 247: [2], 248: [2] };
 
 const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
-const DB = arg('--db'); const OUT = arg('--out');
+const DB = arg('--db'); const OUT = arg('--out'); const VERSIONS = arg('--versions') ? JSON.parse(readFileSync(arg('--versions'), 'utf8')) : {};
 if (!DB || !OUT) { console.error('usage: snapshot.mjs --db <dir> --out <dir>'); process.exit(2); }
 mkdirSync(OUT, { recursive: true });
 
@@ -48,7 +50,8 @@ const writes = []; const events = [];
 const put = (collection, docId, body) => {
   const file = join(OUT, `${collection}__${docId}.json`);
   writeFileSync(file, JSON.stringify(body));
-  writes.push({ op: 'set', collection, doc_id: docId, file_path: file });
+  const v = VERSIONS[`${collection}/${docId}`];
+  writes.push({ op: 'set', collection, doc_id: docId, file_path: file, ...(v ? { if_version: v } : {}) });
 };
 const now = new Date().toISOString();
 const proposals = new Map();

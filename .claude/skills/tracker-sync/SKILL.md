@@ -17,10 +17,11 @@ Ledger: https://claude.ai/artifact/7wD2psZ6fndztDjwZC3oNZ (private to the owner)
 ArtifactData, url = the ledger:
 - `list` collection `prs` (limit 200), `fixes` (limit 100), both with `out_dir: <scratch>/ledger-db`
 - `get` meta/state with the same `out_dir`
+- The results list each document's `version`. Write them to `<scratch>/ledger-db/versions.json` as `{"prs/pr-237": 2, "fixes/fix-04": 1, "meta/state": 7}`. The database refuses to overwrite an existing document without its version.
 
 ## 2. Snapshot GitHub
 ```
-node scripts/tracker/snapshot.mjs --db <scratch>/ledger-db --out <scratch>/ledger-snap
+node scripts/tracker/snapshot.mjs --db <scratch>/ledger-db --versions <scratch>/ledger-db/versions.json --out <scratch>/ledger-snap
 ```
 It prints `{mainSha, ciMain, smokeMain, prWrites, events, fixProposals, batches}` and writes `batch-N.json` (PRs, meta/state, events) plus `fix-proposals.json`. PR bodies should carry `Program-Fix: <n>` lines; legacy Phase 0 PRs are mapped in the script.
 
@@ -30,6 +31,8 @@ It prints `{mainSha, ciMain, smokeMain, prWrites, events, fixProposals, batches}
 - When a phase changes state (plan approved, first fix merged, all fixes done), `update` `phases/phase-N` (`status`, `note`).
 - Add an `events/<yyyymmddThhmmss>-<slug>` doc for anything a reader should see in the timeline that the snapshot did not generate (verification runs, plan approvals, incidents, owner actions). Fields: `at` (ISO), `kind` (merge | verify | plan | review | incident | security | milestone), `title`, `detail`.
 - Backlog items (`backlog/<key>`): set `status: "done"` when closed, with a one-line `detail`.
+
+If a batch fails with `version_mismatch`, someone wrote in between: re-read that document, rebuild, resend. Never drop `if_version` to force it.
 
 ## 4. Library refresh (only with `--corpus`, or when a doc it indexes changed: the audit, security results, spec, phase plans, verification records, COMPONENTS/architecture docs, blueprint data)
 ```
