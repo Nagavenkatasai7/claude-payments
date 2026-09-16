@@ -453,4 +453,18 @@ describe('WhatsApp number routing is identity (fix 1, D11)', () => {
     expect(e?.cause?.code).toBe('23505');
     expect(e?.cause?.message).toMatch(/partner_integrations_wa_pnid/);
   });
+
+  it('a RACE on the same pnid leaves no orphan partner: the loser is refused with the generic message and nothing it wrote survives (review item 3)', async () => {
+    currentStaff = staff({ role: 'admin' }); // platform staff
+    const before = (await ps.listPartners()).length;
+    const results = await Promise.allSettled([
+      wizardCreatePartnerAction({ name: 'Racer One', countries: ['US'], whatsapp: { phoneNumberId: 'pn_race', token: 't1' } }),
+      wizardCreatePartnerAction({ name: 'Racer Two', countries: ['US'], whatsapp: { phoneNumberId: 'pn_race', token: 't2' } }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0].reason as Error).message).toBe('That WhatsApp number cannot be used.');
+    expect((await ps.listPartners()).length).toBe(before + 1); // no orphan ACTIVE partner from the loser
+  });
 });

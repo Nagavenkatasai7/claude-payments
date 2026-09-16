@@ -6,9 +6,13 @@ import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { getPartnerStore } from '@/lib/partner-store';
+import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
-import { getPartnerIntegrationsStore, partnerForPhoneNumberId } from '@/lib/partner-integrations-store';
+import {
+  createPartnerIntegrationsStore,
+  getPartnerIntegrationsStore,
+  partnerForPhoneNumberId,
+} from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
@@ -424,7 +428,6 @@ export async function wizardCreatePartnerAction(
   // D11 (fix 1): refuse a taken/platform WhatsApp number BEFORE any write, so a
   // refusal never leaves an orphan active partner behind.
   await assertPhoneNumberIdFree(id, clean((input.whatsapp ?? {}).phoneNumberId));
-  await getPartnerStore().savePartner(partner);
 
   // Integrations — only persisted when the wizard actually captured something.
   const wa = input.whatsapp ?? {};
@@ -446,20 +449,26 @@ export async function wizardCreatePartnerAction(
   }
   const whatsappConfigured = Boolean(clean(wa.phoneNumberId) && clean(wa.token));
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
+  // The partner row and its integrations commit in ONE transaction (fix 1
+  // review): if the pnid unique index loses a race (23505), the partner insert
+  // rolls back too — never an orphan ACTIVE partner with no integrations/key.
   try {
-    await getPartnerIntegrationsStore().saveIntegrations(id, {
-      kyc: {},
-      whatsapp: {
-        phoneNumberId: clean(wa.phoneNumberId),
-        token: clean(wa.token),
-        verifyToken: clean(wa.verifyToken),
-        appSecret: clean(wa.appSecret),
-      },
-      payment: {
-        providerType,
-        credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-        webhookSecret,
-      },
+    await getDb().transaction(async (tx) => {
+      await createPartnerStore(tx).savePartner(partner);
+      await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
+        kyc: {},
+        whatsapp: {
+          phoneNumberId: clean(wa.phoneNumberId),
+          token: clean(wa.token),
+          verifyToken: clean(wa.verifyToken),
+          appSecret: clean(wa.appSecret),
+        },
+        payment: {
+          providerType,
+          credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+          webhookSecret,
+        },
+      });
     });
   } catch (e) {
     rethrowPnidConflict(e);
