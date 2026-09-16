@@ -206,6 +206,7 @@ export class HttpPaymentProvider implements PaymentProvider {
         ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
       },
       body: rawBody,
+      signal: AbortSignal.timeout(RAIL_TIMEOUT_MS),
     });
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');

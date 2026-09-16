@@ -17,6 +17,7 @@ import {
   railCallbackTransferId,
   buildSettlementInstruction,
   signBody,
+  RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
 
 function fixture(): Transfer {
@@ -121,6 +122,21 @@ describe('HttpPaymentProvider.initiateTransfer (the real rail loop, outbound leg
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down' }) as unknown as Response));
     const provider = new HttpPaymentProvider(store, PAYMENT);
     await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/503/);
+  });
+
+  it('passes the rail deadline signal and rethrows an abort (stage-1 already sent; providerRef never written)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(fixture());
+    let signal: AbortSignal | null | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      signal = init.signal;
+      throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    }));
+    const provider = new HttpPaymentProvider(store, PAYMENT);
+    await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/aborted/);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(RAIL_TIMEOUT_MS).toBe(15_000);
+    expect((await store.getTransfer('rail_t1'))!.paymentProviderRef).toBeFalsy();
   });
 });
 
