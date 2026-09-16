@@ -331,39 +331,57 @@ describe('customer-store P2: partnerId', () => {
   });
 });
 
-describe('WL2 follow-the-number routing (upsertOnFirstInbound + routedPartnerId)', () => {
+describe('tenant-scoped identity (fix 1 / F44): upsertOnFirstInbound never re-homes a customer', () => {
   it('creates a NEW customer under the routed partner', async () => {
     await seedPartner(db, 'acme');
     const { cs } = mkStores();
-    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE, 'acme');
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound('acme', PHONE);
     expect(wasCreated).toBe(true);
     expect(customer.partnerId).toBe('acme');
   });
 
-  it('MOVES an existing default-partner customer to the partner that owns the number', async () => {
+  it('does NOT re-home a customer owned by "default" — it creates a sibling row under acme', async () => {
     await seedPartner(db, 'acme');
     const { cs } = mkStores();
-    await cs.upsertOnFirstInbound(PHONE); // created under 'default'
-    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE, 'acme');
-    expect(wasCreated).toBe(false);
+    const first = await cs.upsertOnFirstInbound('default', PHONE);
+    await cs.saveCustomer({ ...first.customer, kycStatus: 'verified', fullName: 'Asha Patel', passwordHash: 'pw-hash' });
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound('acme', PHONE);
+    expect(wasCreated).toBe(true);
     expect(customer.partnerId).toBe('acme');
-    // persisted, not just in-memory
-    expect((await cs.getCustomer(PHONE))!.partnerId).toBe('acme');
+    expect(customer.kycStatus).toBe('not_started');
+    expect(customer.fullName).toBeUndefined();
+    expect(customer.passwordHash).toBeUndefined();
+    // the default-tenant row is untouched: partner_id, kyc_status, PII, password all stay
+    const dflt = (await cs.getCustomer('default', PHONE))!;
+    expect(dflt.partnerId).toBe('default');
+    expect(dflt.kycStatus).toBe('verified');
+    expect(dflt.fullName).toBe('Asha Patel');
+    expect(dflt.passwordHash).toBe('pw-hash');
   });
 
-  it('no routedPartnerId ⇒ existing customer keeps their partner (no churn)', async () => {
+  it('getCustomer(acme, phone) is null for a phone whose only row belongs to default', async () => {
     await seedPartner(db, 'acme');
     const { cs } = mkStores();
-    await cs.upsertOnFirstInbound(PHONE, 'acme');
-    const { customer } = await cs.upsertOnFirstInbound(PHONE);
-    expect(customer.partnerId).toBe('acme');
+    await cs.upsertOnFirstInbound('default', PHONE);
+    expect(await cs.getCustomer('acme', PHONE)).toBeNull();
+    expect((await cs.findByPhone(PHONE)).map((c) => c.partnerId)).toEqual(['default']);
+  });
+
+  it('kyc_status flipped under acme leaves the default-tenant row untouched', async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    await cs.upsertOnFirstInbound('default', PHONE);
+    const acme = (await cs.upsertOnFirstInbound('acme', PHONE)).customer;
+    await cs.saveCustomer({ ...acme, kycStatus: 'verified' });
+    expect((await cs.getCustomer('acme', PHONE))!.kycStatus).toBe('verified');
+    expect((await cs.getCustomer('default', PHONE))!.kycStatus).toBe('not_started');
   });
 
   it('same routedPartnerId ⇒ idempotent (no extra write needed)', async () => {
     await seedPartner(db, 'acme');
     const { cs } = mkStores();
-    const first = await cs.upsertOnFirstInbound(PHONE, 'acme');
-    const second = await cs.upsertOnFirstInbound(PHONE, 'acme');
+    const first = await cs.upsertOnFirstInbound('acme', PHONE);
+    const second = await cs.upsertOnFirstInbound('acme', PHONE);
     expect(second.customer.updatedAt).toBe(first.customer.updatedAt);
   });
 });
