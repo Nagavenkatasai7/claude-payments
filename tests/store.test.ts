@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createStore } from '@/lib/store';
+import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -73,10 +74,10 @@ describe('store transfers index', () => {
 describe('store transfer count (derived from non-blocked rows)', () => {
   it('defaults to 0 and counts each saved transfer row', async () => {
     const store = createStore(fakeRedis(), db);
-    expect(await store.getTransferCount('p')).toBe(0);
+    expect(await store.getTransferCount('default', 'p')).toBe(0);
     await store.saveTransfer(sampleTransfer('t1', '2026-05-21T01:00:00.000Z', 'p'));
     await store.saveTransfer(sampleTransfer('t2', '2026-05-21T02:00:00.000Z', 'p'));
-    expect(await store.getTransferCount('p')).toBe(2);
+    expect(await store.getTransferCount('default', 'p')).toBe(2);
   });
 
   it('excludes blocked transfers from the count', async () => {
@@ -86,52 +87,89 @@ describe('store transfer count (derived from non-blocked rows)', () => {
       ...sampleTransfer('bad1', '2026-05-21T02:00:00.000Z', 'p'),
       status: 'blocked',
     });
-    expect(await store.getTransferCount('p')).toBe(1);
+    expect(await store.getTransferCount('default', 'p')).toBe(1);
   });
 
   it('counts are isolated per phone', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(sampleTransfer('t1', '2026-05-21T01:00:00.000Z', 'p1'));
-    expect(await store.getTransferCount('p1')).toBe(1);
-    expect(await store.getTransferCount('p2')).toBe(0);
+    expect(await store.getTransferCount('default', 'p1')).toBe(1);
+    expect(await store.getTransferCount('default', 'p2')).toBe(0);
   });
 });
 
-describe('firstTransferAt', () => {
-  it('returns null when the phone has no transfers', async () => {
+describe('firstTransferAt (tenant-scoped)', () => {
+  it('returns null when the phone has no transfers under this tenant', async () => {
     const store = createStore(fakeRedis(), db);
-    expect(await store.firstTransferAt('p')).toBeNull();
+    expect(await store.firstTransferAt('default', 'p')).toBeNull();
   });
 
-  it('returns the earliest createdAt for the phone', async () => {
+  it('returns the earliest createdAt for (partner, phone) — another tenant\'s rows do not grandfather', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(sampleTransfer('t2', '2026-05-21T02:00:00.000Z', 'p'));
     await store.saveTransfer(sampleTransfer('t1', '2026-05-21T01:00:00.000Z', 'p'));
-    expect(await store.firstTransferAt('p')).toBe('2026-05-21T01:00:00.000Z');
+    expect(await store.firstTransferAt('default', 'p')).toBe('2026-05-21T01:00:00.000Z');
+    expect(await store.firstTransferAt('acme', 'p')).toBeNull();
+    expect(await store.getTransferCount('default', 'p')).toBe(2);
+    expect(await store.getTransferCount('acme', 'p')).toBe(0);
+    expect((await store.listTransfersByPhone('default', 'p')).map((t) => t.id)).toEqual(['t2', 't1']);
+    expect(await store.listTransfersByPhone('acme', 'p')).toEqual([]);
   });
 });
 
-describe('store velocity counter', () => {
+describe('store velocity counter (tenant-scoped)', () => {
   it('defaults today count to 0 and increments', async () => {
     const store = createStore(fakeRedis(), db);
-    expect(await store.getTodayTransferCount('p')).toBe(0);
-    await store.incrementTodayTransferCount('p');
-    await store.incrementTodayTransferCount('p');
-    expect(await store.getTodayTransferCount('p')).toBe(2);
+    expect(await store.getTodayTransferCount('default', 'p')).toBe(0);
+    await store.incrementTodayTransferCount('default', 'p');
+    await store.incrementTodayTransferCount('default', 'p');
+    expect(await store.getTodayTransferCount('default', 'p')).toBe(2);
   });
 
-  it('velocity is isolated per phone', async () => {
+  it('velocity is isolated per (partner, phone) — a partner-API mint never inflates another tenant\'s counter', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.incrementTodayTransferCount('p1');
-    expect(await store.getTodayTransferCount('p1')).toBe(1);
-    expect(await store.getTodayTransferCount('p2')).toBe(0);
+    await store.incrementTodayTransferCount('default', 'p1');
+    expect(await store.getTodayTransferCount('default', 'p1')).toBe(1);
+    expect(await store.getTodayTransferCount('acme', 'p1')).toBe(0);
+    expect(await store.getTodayTransferCount('default', 'p2')).toBe(0);
   });
 
-  it('uses an eastern-date-keyed velocity key', async () => {
+  it('uses velocity:{partnerId}:{phone}:{easternDate}', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
-    await store.incrementTodayTransferCount('p');
-    expect(redis.dump.has(`velocity:p:${easternDate(Date.now())}`)).toBe(true);
+    await store.incrementTodayTransferCount('default', 'p');
+    expect(redis.dump.has(`velocity:default:p:${easternDate(Date.now())}`)).toBe(true);
+  });
+
+  it('TRANSITIONAL: reads fall back to the legacy phone-only key for one window — ONLY for the phone\'s pre-fix (oldest-row) tenant; the first increment absorbs it', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    // Pre-fix state: the phone has exactly ONE customer row, under default.
+    await createCustomerStore(db, store).upsertOnFirstInbound('default', 'p');
+    await redis.set(`velocity:p:${easternDate(Date.now())}`, '3');
+    expect(await store.getTodayTransferCount('default', 'p')).toBe(3);
+    await store.incrementTodayTransferCount('default', 'p');
+    expect(await store.getTodayTransferCount('default', 'p')).toBe(4);
+  });
+
+  it('TRANSITIONAL: a post-fix sibling tenant NEVER reads the legacy key (D3 — no cross-tenant compliance oracle)', async () => {
+    const { seedPartner } = await import('./helpers-db');
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const cs = createCustomerStore(db, store);
+    // The pre-fix owner is seeded with an EXPLICIT createdAt one minute in the past: two
+    // upsertOnFirstInbound calls can land in the same millisecond, and findByPhone's
+    // asc(partnerId) tie-break would then make 'acme' the "oldest" row (flake).
+    const T0 = new Date(Date.now() - 60_000).toISOString();
+    await cs.saveCustomer({ senderPhone: 'p', firstSeenAt: T0, kycStatus: 'not_started', senderCountry: 'US', partnerId: 'default', optInAt: T0, createdAt: T0, updatedAt: T0 }); // pre-fix owner
+    await cs.upsertOnFirstInbound('acme', 'p');    // post-fix sibling (createdAt = now, strictly later)
+    await redis.set(`velocity:p:${easternDate(Date.now())}`, '3');
+    expect(await store.getTodayTransferCount('default', 'p')).toBe(3);
+    expect(await store.getTodayTransferCount('acme', 'p')).toBe(0);
+    // No customer row at all ⇒ no legacy read either (fail closed).
+    await redis.set(`velocity:q:${easternDate(Date.now())}`, '9');
+    expect(await store.getTodayTransferCount('default', 'q')).toBe(0);
   });
 });
 
@@ -207,10 +245,10 @@ describe('store', () => {
 
   it('round-trips conversation history', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveConversation('15551234567', [
+    await store.saveConversation('default', '15551234567', [
       { role: 'user', content: 'hi' },
     ]);
-    const conv = await store.getConversation('15551234567');
+    const conv = await store.getConversation('default', '15551234567');
     expect(conv).toHaveLength(1);
     expect(conv[0].content).toBe('hi');
   });
@@ -227,10 +265,22 @@ describe('store', () => {
       role: 'user' as const,
       content: `m${i}`,
     }));
-    await store.saveConversation('p', many);
-    const conv = await store.getConversation('p');
+    await store.saveConversation('default', 'p', many);
+    const conv = await store.getConversation('default', 'p');
     expect(conv).toHaveLength(40);
     expect(conv[conv.length - 1].content).toBe('m59');
+  });
+
+  it('conv is keyed (partnerId, phone) and a sibling tenant starts empty (fix 1, D12)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await store.saveConversation('default', 'p', [{ role: 'user', content: 'hi' }]);
+    expect(redis.dump.has('conv:default:p')).toBe(true);
+    expect(redis.dump.has('conv:p')).toBe(false);
+    expect(await store.getConversation('acme', 'p')).toEqual([]);
+    await store.recordInboundNow('default', 'p');
+    expect(redis.dump.has('lastmsg:default:p')).toBe(true);
+    expect(await store.getLastInboundAt('acme', 'p')).toBeNull();
   });
 });
 

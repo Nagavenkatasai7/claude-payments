@@ -176,9 +176,9 @@ describe('transfer-repo: provider ref + reconciliation + scan-killers', () => {
     await repo.saveTransfer(fixture({ id: 'a', createdAt: '2026-06-01T00:00:00.000Z' }));
     await repo.saveTransfer(fixture({ id: 'b', createdAt: '2026-06-05T00:00:00.000Z' }));
     await repo.saveTransfer(fixture({ id: 'c', phone: '15559990000', createdAt: '2026-05-01T00:00:00.000Z' }));
-    expect(await repo.firstTransferAt('15551230000')).toBe('2026-06-01T00:00:00.000Z');
-    expect(await repo.firstTransferAt('19990000000')).toBeNull();
-    expect(await repo.countByPhone('15551230000')).toBe(2);
+    expect(await repo.firstTransferAt('default', '15551230000')).toBe('2026-06-01T00:00:00.000Z');
+    expect(await repo.firstTransferAt('default', '19990000000')).toBeNull();
+    expect(await repo.countByPhone('default', '15551230000')).toBe(2);
   });
 });
 

@@ -347,8 +347,9 @@ export function createTransferRepo(
       return page(and(eq(transfers.partnerId, partnerId)), req);
     },
 
-    listByPhone(phone: string, req: PageReq): Promise<Page<Transfer>> {
-      return page(and(eq(transfers.phone, phone)), req);
+    /** Indexed per-(tenant, customer) page — a phone alone is not an identity (fix 1). */
+    listByPhone(partnerId: PartnerId, phone: string, req: PageReq): Promise<Page<Transfer>> {
+      return page(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone)), req);
     },
 
     /** Staff-only unscoped list (server actions behind requireStaff). */
@@ -360,12 +361,12 @@ export function createTransferRepo(
       return page(conds.length ? and(...conds) : and(sql`true`), req);
     },
 
-    /** Replaces the full-ledger scan in upsertOnFirstInbound (grandfathering). */
-    async firstTransferAt(phone: string): Promise<string | null> {
+    /** Replaces the full-ledger scan in upsertOnFirstInbound (grandfathering, per tenant). */
+    async firstTransferAt(partnerId: PartnerId, phone: string): Promise<string | null> {
       const rows = await db
         .select({ min: sql<string | null>`min(${transfers.createdAt})` })
         .from(transfers)
-        .where(eq(transfers.phone, phone));
+        .where(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone)));
       const v = rows[0]?.min;
       return v ? new Date(v).toISOString() : null;
     },
@@ -377,11 +378,17 @@ export function createTransferRepo(
      * the customer's free first transfer (the old counter incremented on the
      * createTransfer-blocked path; that was a latent bug, not a contract).
      */
-    async countByPhone(phone: string): Promise<number> {
+    async countByPhone(partnerId: PartnerId, phone: string): Promise<number> {
       const rows = await db
         .select({ n: sql<number>`count(*)::int` })
         .from(transfers)
-        .where(and(eq(transfers.phone, phone), sql`${transfers.status} != 'blocked'`));
+        .where(
+          and(
+            eq(transfers.partnerId, partnerId),
+            eq(transfers.phone, phone),
+            sql`${transfers.status} != 'blocked'`,
+          ),
+        );
       return rows[0]?.n ?? 0;
     },
 
