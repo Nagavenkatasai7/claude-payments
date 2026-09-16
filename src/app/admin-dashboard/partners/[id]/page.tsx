@@ -327,7 +327,7 @@ export default async function PartnerDetailPage({
                     label: t.id,
                     cells: [
                       t.id,
-                      <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} />,
+                      <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />,
                       <div key="amount" className="font-medium tabular-nums">${t.amountUsd.toFixed(2)}</div>,
                       t.status,
                       new Date(t.createdAt).toLocaleString(),

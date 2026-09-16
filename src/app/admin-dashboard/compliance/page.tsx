@@ -84,7 +84,7 @@ function transferCells(t: Transfer, senderNames: Map<string, string>) {
       )}
     </span>,
     new Date(t.createdAt).toLocaleString(),
-    <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} />,
+    <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />,
   ];
 }
 

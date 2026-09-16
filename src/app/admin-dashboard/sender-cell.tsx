@@ -11,8 +11,9 @@ import type { FundingMethod } from '@/lib/types';
 // actual trail ops use to trigger/track a refund.
 
 /** Sender identity for a transfer row: name (if KYC-captured) + phone, linked to the profile. */
-export function SenderCell({ name, phone }: { name?: string; phone: string }) {
-  const href = `/admin-dashboard/customers/${phone}`;
+export function SenderCell({ name, phone, partnerId }: { name?: string; phone: string; partnerId?: string }) {
+  // The detail page is per (tenant, phone) since fix 1 — carry the row's tenant.
+  const href = `/admin-dashboard/customers/${phone}${partnerId ? `?partner=${encodeURIComponent(partnerId)}` : ''}`;
   if (!name) {
     return (
       <Link href={href} className="font-medium text-foreground hover:underline">

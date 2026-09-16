@@ -138,7 +138,7 @@ export default async function RefundsPage() {
                     return (
                       <TableRow key={t.id}>
                         <TableCell className="font-mono text-xs">{t.id}</TableCell>
-                        <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} /></TableCell>
+                        <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                         <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
                         <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                         <TableCell><FundingRefs fundingMethod={t.fundingMethod} fundingRef={t.fundingRef} refundRef={t.refundRef} /></TableCell>

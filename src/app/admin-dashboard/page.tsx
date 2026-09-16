@@ -154,7 +154,7 @@ export default async function DashboardPage() {
               label: t.recipientName,
               cells: [
                 <div className="font-semibold" key="r">{t.recipientName}</div>,
-                <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} />,
+                <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />,
                 <div key="a">
                   <div className="font-semibold tabular-nums">{money(t.amountSource, t.sourceCurrency)}</div>
                   {t.sourceCurrency !== 'USD' && (

@@ -238,7 +238,7 @@ export default async function OpsPage() {
                         </Link>
                       </TableCell>
                       <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                      <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} /></TableCell>
+                      <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
                       <TableCell>{age(t.paidAt)} ago</TableCell>
                       <TableCell className="text-right">
@@ -291,7 +291,7 @@ export default async function OpsPage() {
                         <TableRow key={t.id}>
                           <TableCell>{t.id}</TableCell>
                           <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                          <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} /></TableCell>
+                          <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                           <TableCell><FundingRefs fundingMethod={t.fundingMethod} fundingRef={t.fundingRef} refundRef={t.refundRef} /></TableCell>
                           <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                           <TableCell>{age(t.createdAt)} ago</TableCell>
@@ -342,7 +342,7 @@ export default async function OpsPage() {
                         <TableRow key={t.id}>
                           <TableCell>{t.id}</TableCell>
                           <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                          <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} /></TableCell>
+                          <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                           <TableCell><FundingRefs fundingMethod={t.fundingMethod} fundingRef={t.fundingRef} refundRef={t.refundRef} /></TableCell>
                           <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                           <TableCell>{age(t.createdAt)} ago</TableCell>
@@ -386,7 +386,7 @@ export default async function OpsPage() {
                     <TableRow key={t.id}>
                       <TableCell>{t.id}</TableCell>
                       <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                      <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} /></TableCell>
+                      <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
                       <TableCell>{age(t.paidAt)} ago</TableCell>
                       <TableCell className="text-right">

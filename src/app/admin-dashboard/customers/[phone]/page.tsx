@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic';
 
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
@@ -30,29 +31,29 @@ const DL_CLASS =
 
 export default async function CustomerDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ phone: string }>;
+  searchParams: Promise<{ partner?: string }>;
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
   const { phone } = await params;
+  const { partner: partnerHint } = await searchParams;
 
   const scoped = createScopedStore(staff);
   const dailyVolumeStore = getDailyVolumeStore();
-  const customer = await scoped.getCustomer(phone);
+  const customer = await scoped.getCustomer(phone, { partnerId: partnerHint || undefined });
   if (!customer) notFound();
+  const siblingTenants = (await scoped.customerTenants(phone)).filter((id) => id !== customer.partnerId);
 
   const [mine, todayUsedCents, partner, kycAudit] = await Promise.all([
-    // Stage 5e scan fix: indexed WHERE phone = $1 (newest-first), not a full
-    // ledger load filtered in JS. The customer above is already scope-checked.
-    getStore().listTransfersByPhone(phone, 50),
-    dailyVolumeStore.getTodayCents(phone),
+    // Indexed WHERE partner_id = $1 AND phone = $2 (newest-first) — the F44 read sink is tenant-keyed.
+    getStore().listTransfersByPhone(customer.partnerId, phone, 50),
+    dailyVolumeStore.getTodayCents(customer.partnerId, phone),
     scoped.getPartner(customer.partnerId),
-    // The audit trail is non-critical UI. A store hiccup must degrade to an
-    // empty trail, never 500 the whole detail page (getAudit is already
-    // defensive about corrupt entries; this catches transport-level failures).
     getKycCaseStore(getStore())
-      .getAudit(phone)
+      .getAudit(customer.partnerId, phone)
       .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>),
   ]);
   const inReview =
@@ -70,6 +71,20 @@ export default async function CustomerDetailPage({
             <div className="sh-page-sub">
               Customer · joined {new Date(customer.firstSeenAt).toLocaleDateString()}
             </div>
+            {siblingTenants.length > 0 && (
+              <p className="sh-page-sub">
+                This number also exists under:{' '}
+                {siblingTenants.map((id) => (
+                  <Link
+                    key={id}
+                    href={`/admin-dashboard/customers/${phone}?partner=${encodeURIComponent(id)}`}
+                    className="mr-2 underline-offset-2 hover:underline"
+                  >
+                    {id}
+                  </Link>
+                ))}
+              </p>
+            )}
           </div>
         </div>
 
@@ -107,12 +122,14 @@ export default async function CustomerDetailPage({
             {isAdmin && customer.kycStatus !== 'verified' && customer.kycStatus !== 'grandfathered' && (
               <form action={markCustomerVerifiedAction} className="mt-4 flex flex-wrap items-center gap-2">
                 <input type="hidden" name="phone" value={customer.senderPhone} />
+                <input type="hidden" name="partnerId" value={customer.partnerId} />
                 <Button type="submit">Mark KYC verified</Button>
               </form>
             )}
             {isAdmin && customer.kycStatus !== 'rejected' && (
               <form action={markCustomerRejectedAction} className="mt-3 flex flex-wrap items-center gap-2">
                 <input type="hidden" name="phone" value={customer.senderPhone} />
+                <input type="hidden" name="partnerId" value={customer.partnerId} />
                 <Input type="text" name="reason" placeholder="Rejection reason (optional)" className="max-w-xs" />
                 <Button type="submit" variant="outline">Mark KYC rejected</Button>
               </form>
@@ -126,6 +143,7 @@ export default async function CustomerDetailPage({
                 </p>
                 <form action={reviewKycAction} className="space-y-3">
                   <input type="hidden" name="phone" value={customer.senderPhone} />
+                  <input type="hidden" name="partnerId" value={customer.partnerId} />
                   <textarea
                     name="reason"
                     required
@@ -138,7 +156,7 @@ export default async function CustomerDetailPage({
                     <Button type="submit" name="decision" value="reject" variant="outline">Reject KYC</Button>
                   </div>
                 </form>
-                <KycCopilotPanel phone={customer.senderPhone} />
+                <KycCopilotPanel phone={customer.senderPhone} partnerId={customer.partnerId} />
               </div>
             )}
 

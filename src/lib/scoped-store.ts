@@ -1,4 +1,4 @@
-import type { Staff } from './types';
+import type { Customer, PartnerId, Staff } from './types';
 import type { Store } from './store';
 import type { CustomerStore } from './customer-store';
 import type { PartnerStore } from './partner-store';
@@ -70,10 +70,8 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
         : all.filter((t) => t.partnerId === scope.partnerId);
     },
     async listCustomers() {
-      const all = await customerStore.listCustomers();
-      return scope.kind === 'platform'
-        ? all
-        : all.filter((c) => c.partnerId === scope.partnerId);
+      // Tenant-scoped at the WHERE (fix 1); platform staff see every tenant.
+      return customerStore.listCustomers(scope.kind === 'partner' ? scope.partnerId : undefined);
     },
     async listSchedules() {
       const all = await scheduleStore.listSchedules();
@@ -92,10 +90,31 @@ export function createScopedStore(staff: Staff, deps?: ScopedStoreDeps) {
       if (!t || !canSee(scope, t.partnerId)) return null;
       return t;
     },
-    async getCustomer(phone: string) {
-      const c = await customerStore.getCustomer(phone);
+    /**
+     * A customer by phone under ONE tenant. Partner staff are PINNED to their
+     * own tenant at the query — the hint is ignored. Platform staff pass the
+     * tenant explicitly (`?partner=` on the detail page); without a hint a phone
+     * that exists under several tenants resolves to the most recently updated
+     * row (callers list the siblings via customerTenants). canSee stays as
+     * defence-in-depth on the row that comes back.
+     */
+    async getCustomer(phone: string, opts: { partnerId?: PartnerId } = {}) {
+      let c: Customer | null;
+      if (scope.kind === 'partner') {
+        c = await customerStore.getCustomer(scope.partnerId, phone);
+      } else if (opts.partnerId) {
+        c = await customerStore.getCustomer(opts.partnerId, phone);
+      } else {
+        const rows = await customerStore.findByPhone(phone);
+        c = rows.length === 0 ? null : rows.reduce((a, b) => (b.updatedAt > a.updatedAt ? b : a));
+      }
       if (!c || !canSee(scope, c.partnerId)) return null;
       return c;
+    },
+    /** The tenants a phone exists under, filtered to what this viewer may see. */
+    async customerTenants(phone: string): Promise<PartnerId[]> {
+      const rows = await customerStore.findByPhone(phone);
+      return rows.map((c) => c.partnerId).filter((id) => canSee(scope, id));
     },
     async getPartner(id: string) {
       const p = await partnerStore.getPartner(id);

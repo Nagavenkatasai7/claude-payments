@@ -107,7 +107,7 @@ export default async function TransactionDetailPage({
                 </span>
               </Field>
               <Field label="Sender">
-                <SenderCell name={senderName} phone={t.phone} />
+                <SenderCell name={senderName} phone={t.phone} partnerId={t.partnerId} />
               </Field>
               <Field label="Recipient">{t.recipientName}</Field>
               <Field label="Payout destination">

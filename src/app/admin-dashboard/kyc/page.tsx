@@ -22,7 +22,9 @@ export default async function KycPage() {
   const { staff } = await requireScope();
   const scoped = createScopedStore(staff);
   const customers = await scoped.listCustomers();
-  const needsKyc = (await getKycCaseStore(getStore()).listNeedsReview()).filter((c) =>
+  const needsKyc = (
+    await getKycCaseStore(getStore()).listNeedsReview(scoped.scope.kind === 'partner' ? scoped.scope.partnerId : undefined)
+  ).filter((c) =>
     canSee(scopeOf(staff), c.partnerId),
   );
 
@@ -82,13 +84,13 @@ export default async function KycPage() {
               columns={[{ label: 'Phone', primary: true }, { label: 'KYC', primary: true }, { label: '' }]}
               empty={<>No customers awaiting KYC review.</>}
               rows={needsKyc.map((c) => ({
-                key: c.senderPhone,
+                key: `${c.partnerId}:${c.senderPhone}`,
                 label: `+${c.senderPhone}`,
                 cells: [
                   <span key="phone">+{c.senderPhone}</span>,
                   <KycBadge key="kyc" kyc={c} />,
                   <Button key="open" asChild size="sm" variant="outline">
-                    <a href={`/admin-dashboard/customers/${c.senderPhone}`}>Review</a>
+                    <a href={`/admin-dashboard/customers/${c.senderPhone}?partner=${encodeURIComponent(c.partnerId)}`}>Review</a>
                   </Button>,
                 ],
               }))}
