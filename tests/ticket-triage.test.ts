@@ -430,6 +430,7 @@ describe('enqueue sites — every customer ticket creation queues a triage', () 
 
       const ctx = {
         phone: PHONE,
+        partnerId: 'p1', // fix 1: the turn runs under the transfer's tenant
         store,
         scheduleStore: createScheduleStore(db),
         draftStore: createDraftStore(redis),
