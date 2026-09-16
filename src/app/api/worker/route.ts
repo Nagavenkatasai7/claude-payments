@@ -14,6 +14,7 @@ import {
   RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
 import { newTransferId } from '@/lib/id';
+import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { chat } from '@/lib/ollama';
 import { createAgent } from '@/lib/agent';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -30,12 +31,28 @@ export const maxDuration = 60;
 // reconciliation sweep (Stage 2d). Invoked two ways:
 //   • the after() POKE from any enqueue site (fast path, best effort),
 //   • the GitHub Actions 5-minute heartbeat (the delivery guarantee).
-// Claiming uses FOR UPDATE SKIP LOCKED, so overlapping invocations are safe by
-// construction. Auth mirrors /api/cron: Bearer CRON_SECRET when configured.
+// Claiming uses FOR UPDATE SKIP LOCKED and a 5-minute LEASE, so overlapping
+// invocations are safe and a killed invocation's rows are reclaimed. Auth
+// mirrors /api/cron: Bearer CRON_SECRET when configured.
 
 const TIME_BUDGET_MS = 45_000;
+// No row STARTS after this point in the invocation: a money row (bounded by the
+// 15s rail deadline + two DB round trips) started at the cutoff still finishes
+// inside TIME_BUDGET_MS and well inside maxDuration. Fix 8 owns cadence and
+// may retune this.
+const START_CUTOFF_MS = TIME_BUDGET_MS - RAIL_TIMEOUT_MS;
+// The platform kills the invocation at maxDuration (60s). START_CUTOFF_MS (30s)
+// + ROW_DEADLINE_MS (40s) exceeds it, so an agent.turn started at 29s would be
+// killed mid-turn, reclaimed after LEASE_MS and RE-RUN — the non-idempotent
+// re-run invariant 5 forbids. drainOnce therefore refuses to START a
+// TERMINAL_ON_DEADLINE row that could still be running at hardStopAt and
+// releases it (attempt refunded) for the next invocation instead.
+const HARD_STOP_MARGIN_MS = 2_000;
 
 async function run(req: NextRequest): Promise<NextResponse> {
+  // The platform's kill clock starts at invocation, not after the sweeps —
+  // hardStopAt below must be derived from THIS instant.
+  const invocationStart = Date.now();
   if (env.cronSecret) {
     const auth = req.headers.get('authorization');
     if (auth !== `Bearer ${env.cronSecret}`) {
@@ -53,7 +70,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     recipientTemplateName: RECIPIENT_TEMPLATE_NAME,
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
     listStaff: () => getAuthStore().listStaff(),
-    runAgentTurn: async (phone, message, turn, waCreds) => {
+    runAgentTurn: async (phone, message, turn, waCreds, opts) => {
       const customerStore = getCustomerStore(store);
       const agent = createAgent({
         chat,
@@ -67,7 +84,8 @@ async function run(req: NextRequest): Promise<NextResponse> {
         partnerStore: getPartnerStore(),
         waCreds, // WL2: interactive sends + replies leave from the partner's number
       });
-      return agent.runAgentTurn(phone, message, turn);
+      // Fix 7: the worker's cooperative row deadline stops the turn between tool rounds.
+      return agent.runAgentTurn(phone, message, turn, { signal: opts?.signal });
     },
   };
 
@@ -91,21 +109,35 @@ async function run(req: NextRequest): Promise<NextResponse> {
   }
 
   const workerId = `w_${newTransferId()}`;
-  const started = Date.now();
+  const started = Date.now(); // drain-loop budget clock (after the sweeps)
+  const hardStopAt = invocationStart + maxDuration * 1000 - HARD_STOP_MARGIN_MS;
+  // Slow sweeps must not let a money row START so late that its 15s rail deadline
+  // outruns the platform kill: the cutoff is also bounded by hardStopAt.
+  const stopAfter = Math.min(started + START_CUTOFF_MS, hardStopAt - RAIL_TIMEOUT_MS);
   let processed = 0;
   let failed = 0;
   let dead = 0;
-  // Keep draining until the queue is empty or the time budget is spent.
+  let released = 0;
+  // Keep draining until the queue is empty or the start cutoff passes. A batch
+  // is only CLAIMED while a row could still be started — a claim we cannot
+  // start would sit under its lease until the next drain reclaimed it.
   for (;;) {
-    const r = await drainOnce(deps, workerId, 10);
+    const r = await drainOnce(deps, workerId, 10, { stopAfter, hardStopAt });
     processed += r.processed;
     failed += r.failed;
     dead += r.dead;
+    released += r.released;
+    // A release-only pass ends the loop: `released` is deliberately NOT counted.
+    // Past (hardStopAt − ROW_DEADLINE_MS) every remaining agent.turn row would
+    // otherwise be claimed (attempts+1, lease) and released (attempts−1) on EVERY
+    // iteration until stopAfter — ~12s of claim/release churn against Neon that,
+    // with ORDER BY id and batch 10, starves higher-id money rows. Released rows
+    // are pending again; the next poke/heartbeat picks them up.
     const drainedNothing = r.processed + r.failed + r.dead === 0;
-    if (drainedNothing || Date.now() - started > TIME_BUDGET_MS) break;
+    if (drainedNothing || Date.now() >= stopAfter) break;
   }
 
-  return NextResponse.json({ ok: true, processed, failed, dead, sweep, staleRates });
+  return NextResponse.json({ ok: true, processed, failed, dead, released, sweep, staleRates });
 }
 
 export async function POST(req: NextRequest) {

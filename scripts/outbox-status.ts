@@ -8,7 +8,8 @@
  */
 import { getDb } from '@/db/client';
 import { sql } from 'drizzle-orm';
-import { STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STUCK_REFUND_MINUTES } from '@/lib/reconcile';
+import { STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STUCK_REFUND_MINUTES, STALE_LOCK_MINUTES } from '@/lib/reconcile';
+import { LEASE_MS } from '@/db/repos/outbox-repo';
 
 type Row = Record<string, unknown>;
 
@@ -29,7 +30,7 @@ async function main() {
 
   const host = (() => { try { return new URL(process.env.DATABASE_URL ?? '').host; } catch { return '?'; } })();
   console.log(`\nOutbox status against ${host} — ${new Date().toISOString()}`);
-  console.log(`thresholds (src/lib/reconcile.ts): stuck paid >${STUCK_PAID_MINUTES}m · stale review >${STALE_REVIEW_HOURS}h · stuck refund >${STUCK_REFUND_MINUTES}m`);
+  console.log(`thresholds (src/lib/reconcile.ts): stuck paid >${STUCK_PAID_MINUTES}m · stale review >${STALE_REVIEW_HOURS}h · stuck refund >${STUCK_REFUND_MINUTES}m · stale lock >${STALE_LOCK_MINUTES}m past lease`);
 
   const byStatus = await q(sql`
     SELECT status, count(*)::int AS n, max(attempts)::int AS max_attempts, min(created_at) AS oldest
@@ -52,11 +53,33 @@ async function main() {
     FROM outbox WHERE status = 'dead' ORDER BY created_at DESC LIMIT 20`);
   section('DEAD rows (never auto-retry — admin-dashboard/ops → Retry)', dead);
 
+  // Effective lease: lease_until, or locked_at + LEASE_MS for rows claimed by
+  // pre-lease code (lease_until NULL) — the same expression claimBatch uses.
+  const leaseSec = LEASE_MS / 1000;
+  const expiredLeases = await q(sql`
+    SELECT count(*)::int AS reclaimable,
+           min(coalesce(lease_until, locked_at + make_interval(secs => ${leaseSec}))) AS oldest_lease
+    FROM outbox
+    WHERE status = 'processing' AND coalesce(lease_until, locked_at + make_interval(secs => ${leaseSec})) < now()`);
+  section('EXPIRED leases (worker died mid-row — RECLAIMED by the next drain, attempts++)', expiredLeases);
+
   const staleLocks = await q(sql`
-    SELECT id, kind, locked_by, locked_at
-    FROM outbox WHERE status = 'processing' AND locked_at < now() - interval '5 minutes'
+    SELECT id, kind, attempts, coalesce(lease_owner, locked_by) AS owner,
+           coalesce(lease_until, locked_at + make_interval(secs => ${leaseSec})) AS lease_until
+    FROM outbox
+    WHERE status = 'processing'
+      AND coalesce(lease_until, locked_at + make_interval(secs => ${leaseSec})) < now() - make_interval(mins => ${STALE_LOCK_MINUTES})
+    ORDER BY 5 LIMIT 20`);
+  section(`STALE locks (lease expired >${STALE_LOCK_MINUTES}m and NOT reclaimed — the drain is not running; check worker-heartbeat.yml)`, staleLocks);
+
+  // Rows claimed by PRE-0014 code (never leased). Informational: claimBatch and the
+  // stale-lock sweep treat them as leased until locked_at + LEASE_MS, so they are
+  // reclaimed automatically; this list should drain to empty after the deploy settles.
+  const unleased = await q(sql`
+    SELECT id, kind, attempts, locked_by, locked_at
+    FROM outbox WHERE status = 'processing' AND lease_until IS NULL
     ORDER BY locked_at LIMIT 20`);
-  section('STALE processing locks (>5m — a worker died mid-row; reclaimed on the next drain)', staleLocks);
+  section('UNLEASED processing rows (claimed by pre-lease code — implied lease locked_at + 5m, reclaimed automatically)', unleased);
 
   const stuckPaid = await q(sql`
     SELECT id, partner_id, paid_at, refund_status
@@ -81,7 +104,7 @@ async function main() {
   section(`PENDING REFUNDS (stuck if last_refund_effect_at is null or older than ${STUCK_REFUND_MINUTES}m)`, pendingRefunds);
 
   const needsHuman =
-    dead.length + stuckPaid.length + staleReview.length + pendingRefunds.length;
+    dead.length + staleLocks.length + stuckPaid.length + staleReview.length + pendingRefunds.length;
   console.log(`\nSUMMARY: ${needsHuman === 0 ? 'nothing needs a human' : `${needsHuman} row(s) need a human — see sections above`}\n`);
 }
 

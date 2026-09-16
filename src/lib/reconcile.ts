@@ -16,7 +16,8 @@ import type { Transfer } from '@/lib/types';
 //   • a compliance hold ('in_review') nobody has touched in 24h → alert,
 //   • a CHARGED transfer still awaiting_payment (fundingRef set; the process
 //     died between capture and beginSettlement) → resume settlement + alert,
-//   • a refund in flight for over an hour → alert (ops decides; no auto-retry).
+//   • a refund in flight for over an hour → alert (ops decides; no auto-retry),
+//   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert.
 // Every enqueue is dedupe-keyed per transfer, so the sweep firing every minute
 // can never spam: one re-instruction and one alert per stuck transfer, ever.
 
@@ -24,15 +25,22 @@ export const STUCK_PAID_MINUTES = 15;
 export const STALE_REVIEW_HOURS = 24;
 export const FUNDING_RESUME_MINUTES = 10;
 export const STUCK_REFUND_MINUTES = 60;
+/**
+ * A 'processing' row whose lease expired this long ago and is STILL unreclaimed.
+ * claimBatch reclaims expired leases on every drain, so a survivor means the
+ * drain is not running (heartbeat / poke down) — alert per row, deduped.
+ */
+export const STALE_LOCK_MINUTES = 15;
 
 export interface SweepResult {
   stuckPaid: number;
   reinstructed: number;
   staleReviews: number;
   // Optional ONLY so pre-existing zero-literals (the worker route's fallback)
-  // stay assignable; reconcileSweep itself always returns both.
+  // stay assignable; reconcileSweep itself always returns all of them.
   fundingResumed?: number;
   stuckRefunds?: number;
+  staleLocks?: number;
 }
 
 export async function reconcileSweep(db: Db): Promise<SweepResult> {
@@ -156,12 +164,31 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     );
   }
 
+  // STALE LOCKS (fix 7): leases the drain should have reclaimed but has not.
+  // The alert is itself an outbox row — if the drain is dead it will not send,
+  // which is why the ops page and scripts/outbox-status.ts read this out of
+  // band. Ids/kinds only: payloads may still carry creds (fix 11).
+  const staleLocks = await outbox.listStaleProcessing(STALE_LOCK_MINUTES);
+  for (const row of staleLocks) {
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) has sat in 'processing' for ` +
+          `>${STALE_LOCK_MINUTES}m past its lease and was not reclaimed — the worker drain is not running; ` +
+          `check the GitHub Actions heartbeat.`,
+      },
+      { dedupeKey: `stalelock:${row.id}` },
+    );
+  }
+
   return {
     stuckPaid: stuck.length,
     reinstructed,
     staleReviews: stale.length,
     fundingResumed,
     stuckRefunds,
+    staleLocks: staleLocks.length,
   };
 }
 
@@ -170,6 +197,8 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
 export interface OpsSnapshot {
   pendingOutbox: number;
   deadLetters: OutboxRow[];
+  /** 'processing' rows whose lease expired >STALE_LOCK_MINUTES ago and were not reclaimed. */
+  staleLocks: OutboxRow[];
   stuckPaid: Transfer[];
   staleReviews: Transfer[];
   /** Refund queues (masked reads): customer-requested / in flight / failed. */
@@ -184,6 +213,7 @@ export async function getOpsSnapshot(db: Db): Promise<OpsSnapshot> {
   return {
     pendingOutbox: await outbox.countPending(),
     deadLetters: await outbox.listDead(),
+    staleLocks: await outbox.listStaleProcessing(STALE_LOCK_MINUTES),
     stuckPaid: await transfers.findStuckPaid(STUCK_PAID_MINUTES),
     staleReviews: await transfers.findInReviewOlderThan(STALE_REVIEW_HOURS),
     refundsRequested: await transfers.listByRefundStatus('requested'),

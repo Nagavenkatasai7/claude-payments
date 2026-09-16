@@ -8,6 +8,13 @@ import { env } from './env';
 // is the GUARANTEE; the poke is only the fast path — its loss costs latency,
 // never correctness.
 
+/**
+ * A hung poke would keep the poking function's after() alive for the whole
+ * function ceiling. /api/worker never reads req.signal, so aborting the poke
+ * frees THIS function without stopping the drain it triggered.
+ */
+export const POKE_TIMEOUT_MS = 10_000;
+
 async function fetchWorker(): Promise<void> {
   try {
     await fetch(`${env.appBaseUrl}/api/worker`, {
@@ -15,9 +22,10 @@ async function fetchWorker(): Promise<void> {
       headers: env.cronSecret
         ? { authorization: `Bearer ${env.cronSecret}` }
         : {},
+      signal: AbortSignal.timeout(POKE_TIMEOUT_MS),
     });
   } catch {
-    /* best effort — the heartbeat will drain */
+    /* best effort (including a timeout) — the heartbeat will drain */
   }
 }
 

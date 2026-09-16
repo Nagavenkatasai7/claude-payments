@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
+import { sql } from 'drizzle-orm';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createApiKeyRepo } from '@/db/repos/api-key-repo';
@@ -11,7 +12,7 @@ import {
   createIdempotencyRepo,
   createAuditRepo,
 } from '@/db/repos/aux-repos';
-import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { EMPTY_PARTNER_INTEGRATIONS } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
@@ -262,5 +263,107 @@ describe('outbox-repo (durability backbone)', () => {
     const r = createOutboxRepo(db);
     await r.enqueue('mock.settle', { transferId: 'tr_1' }, { delayMs: 60_000 });
     expect(await r.claimBatch(10, 'w1')).toHaveLength(0);
+  });
+
+  // ── Lease reclaim (Phase 1 fix 7: money-03 / neon-04 / vercel-04) ──────────
+  // Fixture rule (CLAUDE.md): age leases with SQL-relative time, never a date.
+
+  it('claimBatch RECLAIMS a processing row whose lease has expired and increments attempts', async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('settlement.instruct', { transferId: 'tr_1' });
+    const [claimed] = await r.claimBatch(1, 'w_dead');
+    expect(claimed.attempts).toBe(1);
+    expect(claimed.leaseOwner).toBe('w_dead');
+    expect(claimed.leaseUntil!.getTime()).toBeGreaterThan(Date.now() + LEASE_MS - 60_000);
+    // w_dead was killed by the 60s function ceiling and never comes back.
+    await db.execute(sql`UPDATE outbox SET lease_until = now() - interval '10 minutes' WHERE id = ${claimed.id}`);
+    const [reclaimed] = await r.claimBatch(1, 'w_new');
+    expect(reclaimed.id).toBe(claimed.id);
+    expect(reclaimed.status).toBe('processing');
+    expect(reclaimed.attempts).toBe(2); // a reclaim IS a retry — attempts keeps climbing
+    expect(reclaimed.leaseOwner).toBe('w_new');
+  });
+
+  it('claimBatch does NOT reclaim a processing row whose lease is still live', async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('whatsapp.text', { to: 'x' });
+    expect(await r.claimBatch(1, 'w_alive')).toHaveLength(1);
+    expect(await r.claimBatch(1, 'w_other')).toHaveLength(0);
+  });
+
+  it('a reclaimed row still dies at MAX_ATTEMPTS — the lease never resets the death ceiling', async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('rail.callback', { reference: 'tr_1' });
+    const [row] = await r.claimBatch(1, 'w1');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    const [reclaimed] = await r.claimBatch(1, 'w2');
+    expect(reclaimed.attempts).toBe(MAX_ATTEMPTS);
+    expect(await r.markFailed(reclaimed.id, reclaimed.attempts, 'still hung', 'w2')).toBe('dead');
+    expect(await r.listDead()).toHaveLength(1);
+  });
+
+  it("markDone/markFailed from a worker that lost its lease cannot clobber the new owner's claim", async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('settlement.instruct', { transferId: 'tr_1' });
+    const [row] = await r.claimBatch(1, 'w_old');
+    await db.execute(sql`UPDATE outbox SET lease_until = now() - interval '1 minute' WHERE id = ${row.id}`);
+    const [stolen] = await r.claimBatch(1, 'w_new');
+    expect(stolen.leaseOwner).toBe('w_new');
+    // The resurrected old worker finishes late: both of its outcomes are refused.
+    expect(await r.markDone(row.id, 'w_old')).toBe(false);
+    expect(await r.markFailed(row.id, row.attempts, 'late failure', 'w_old')).toBe('lost');
+    const res = await db.execute(sql`SELECT status, lease_owner FROM outbox WHERE id = ${row.id}`);
+    const [{ status, lease_owner }] = (res as unknown as { rows: Array<{ status: string; lease_owner: string }> }).rows;
+    expect(status).toBe('processing');
+    expect(lease_owner).toBe('w_new');
+    // The live owner's outcome lands and clears the lease.
+    expect(await r.markDone(row.id, 'w_new')).toBe(true);
+    // An owner-less markDone (staff "dismiss" on a dead row, ops/actions.ts:47) stays legal.
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status) VALUES ('whatsapp.text', '{}'::jsonb, 'dead')`);
+    const [dead] = await r.listDead();
+    expect(await r.markDone(dead.id)).toBe(true);
+  });
+
+  it('a processing row claimed by PRE-lease code (lease_until NULL) is reclaimed once locked_at + LEASE_MS has passed, and is visible to listStaleProcessing', async () => {
+    const r = createOutboxRepo(db);
+    // Old code: status/locked_at/locked_by only, never a lease.
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, attempts, locked_at, locked_by)
+      VALUES ('whatsapp.text', '{"to":"old"}'::jsonb, 'processing', 1, now() - interval '30 minutes', 'w_legacy')`);
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, attempts, locked_at, locked_by)
+      VALUES ('whatsapp.text', '{"to":"live"}'::jsonb, 'processing', 1, now() - interval '1 minute', 'w_legacy_live')`);
+    const stale = await r.listStaleProcessing(15);
+    expect(stale.map((o) => o.lockedBy)).toEqual(['w_legacy']); // 30m − 5m lease = 25m > 15m; the live one is not stale
+    const reclaimed = await r.claimBatch(10, 'w_new');
+    expect(reclaimed).toHaveLength(1); // the 1-minute-old legacy claim is still inside its implied lease
+    expect(reclaimed[0].lockedBy).toBe('w_new');
+    expect(reclaimed[0].attempts).toBe(2);
+    expect(reclaimed[0].leaseOwner).toBe('w_new');
+  });
+
+  it('markFailed minBackoffSec parks the row at least that long (deadline failures: past any abandoned handler)', async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('whatsapp.text', { to: 'x' });
+    const [row] = await r.claimBatch(1, 'w1');
+    expect(await r.markFailed(row.id, row.attempts, 'row deadline', 'w1', { minBackoffSec: LEASE_MS / 1000 })).toBe('failed');
+    const res = await db.execute(
+      sql`SELECT extract(epoch FROM (next_attempt_at - now()))::float AS wait_s FROM outbox WHERE id = ${row.id}`,
+    );
+    const [{ wait_s }] = (res as unknown as { rows: Array<{ wait_s: number }> }).rows;
+    expect(wait_s).toBeGreaterThan(LEASE_MS / 1000 - 10);
+  });
+
+  it("releaseUnstarted hands back only the OWNER's untouched rows and refunds the claim's attempt", async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('whatsapp.text', { to: 'a' });
+    await r.enqueue('whatsapp.text', { to: 'b' });
+    const [ra, rb] = await r.claimBatch(2, 'w1');
+    expect(await r.releaseUnstarted([ra.id, rb.id], 'w_other')).toBe(0); // not the owner
+    expect(await r.releaseUnstarted([ra.id], 'w1')).toBe(1);
+    expect(await r.countPending()).toBe(1);
+    const [again] = await r.claimBatch(1, 'w2');
+    expect(again.id).toBe(ra.id);
+    expect(again.attempts).toBe(1); // the release refunded the never-run attempt; this claim re-charges it
   });
 });

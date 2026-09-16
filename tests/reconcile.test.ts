@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
-import { reconcileSweep, getOpsSnapshot } from '@/lib/reconcile';
+import { reconcileSweep, getOpsSnapshot, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
@@ -59,7 +59,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     await store.saveTransfer(fixture());
 
     const first = await reconcileSweep(db);
-    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
+    expect(first).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -75,7 +75,7 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {
     await store.saveTransfer(fixture({ paidAt: new Date().toISOString() }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
     expect(await outboxRows()).toHaveLength(0);
   });
 });
@@ -84,7 +84,7 @@ describe('reconcileSweep — stuck paid (mock rail)', () => {
   it('alerts but NEVER re-instructs (there is no rail to instruct)', async () => {
     await store.saveTransfer(fixture()); // 'acme' has no integrations row ⇒ mock
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'recon:rc_t1' }]);
   });
 });
@@ -106,7 +106,7 @@ describe('reconcileSweep — stuck paid (ROUTED via settlementPartnerId)', () =>
     await store.saveTransfer(fixture({ settlementPartnerId: 'railp' }));
 
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0 });
+    expect(r).toEqual({ stuckPaid: 1, reinstructed: 1, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
     expect(await outboxRows()).toEqual([
       { kind: 'settlement.instruct', dedupe_key: 'reinstruct:rc_t1' },
       { kind: 'ops.alert', dedupe_key: 'recon:rc_t1' },
@@ -125,7 +125,7 @@ describe('reconcileSweep — stale compliance reviews', () => {
   it('alerts exactly once for an in_review transfer older than 24h', async () => {
     await store.saveTransfer(fixture({ id: 'rc_rev1', status: 'in_review' }));
     const r = await reconcileSweep(db);
-    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0 });
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 1, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
     expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'review:rc_rev1' }]);
     await reconcileSweep(db);
     expect(await outboxRows()).toHaveLength(1);
@@ -279,6 +279,40 @@ describe('reconcileSweep — stuck refunds', () => {
   });
 });
 
+describe('reconcileSweep — stale processing locks (the drain itself is down)', () => {
+  async function claimAndStrand(ageMinutes: number): Promise<number> {
+    const outbox = createOutboxRepo(db);
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'x', turn: {} });
+    const [row] = await outbox.claimBatch(1, 'w_dead');
+    // Age the LEASE with SQL-relative time (CLAUDE.md fixture rule).
+    await db.execute(sql`UPDATE outbox SET lease_until = now() - make_interval(mins => ${ageMinutes}) WHERE id = ${row.id}`);
+    return row.id;
+  }
+
+  it('counts rows whose lease expired >15m and raises EXACTLY ONE deduped ops.alert per row', async () => {
+    const id = await claimAndStrand(STALE_LOCK_MINUTES + 1);
+    const first = await reconcileSweep(db);
+    expect(first.staleLocks).toBe(1);
+    expect(await outboxRows()).toEqual([
+      { kind: 'agent.turn', dedupe_key: null },
+      { kind: 'ops.alert', dedupe_key: `stalelock:${id}` },
+    ]);
+    const second = await reconcileSweep(db);
+    expect(second.staleLocks).toBe(1);
+    expect(await outboxRows()).toHaveLength(2); // deduped: nothing added
+  });
+
+  it('a live lease raises no alert, and a freshly-expired one is the DRAIN\'s job (reclaim), not the sweep\'s', async () => {
+    const outbox = createOutboxRepo(db);
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'live', turn: {} });
+    await outbox.claimBatch(1, 'w_alive');
+    await claimAndStrand(1); // expired 1 minute ago — claimBatch reclaims it on the next drain
+    const r = await reconcileSweep(db);
+    expect(r.staleLocks).toBe(0);
+    expect((await outboxRows()).filter((o) => o.kind === 'ops.alert')).toHaveLength(0);
+  });
+});
+
 describe('getOpsSnapshot', () => {
   it('returns the ops surfaces (pending, dead, stuck, stale, refund queues)', async () => {
     await store.saveTransfer(fixture());
@@ -292,6 +326,8 @@ describe('getOpsSnapshot', () => {
     const outbox = createOutboxRepo(db);
     await outbox.enqueue('whatsapp.text', { to: 'x', body: 'y' });
     await db.execute(sql`INSERT INTO outbox (kind, payload, status) VALUES ('whatsapp.text', '{}'::jsonb, 'dead')`);
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, lease_until, lease_owner)
+      VALUES ('agent.turn', '{}'::jsonb, 'processing', now() - interval '20 minutes', 'w_dead')`);
 
     const snap = await getOpsSnapshot(db);
     expect(snap.pendingOutbox).toBe(1);
@@ -301,5 +337,7 @@ describe('getOpsSnapshot', () => {
     expect(snap.refundsRequested.map((t) => t.id)).toEqual(['rc_req1']);
     expect(snap.refundsPending).toEqual([]);
     expect(snap.refundsFailed.map((t) => t.id)).toEqual(['rc_fail1']);
+    expect(snap.pendingOutbox).toBe(1); // 'processing' is not "pending" — unchanged
+    expect(snap.staleLocks.map((o) => o.kind)).toEqual(['agent.turn']);
   });
 });

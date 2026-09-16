@@ -187,6 +187,23 @@ function authedJsonInit(payload: unknown, creds?: WaCreds): RequestInit {
   };
 }
 
+/**
+ * Meta Graph budget (whatsapp-06): one send may never hold a worker row longer
+ * than this. A timeout THROWS (TimeoutError) so the outbox retries the row —
+ * never a silent success, never a silent fallback.
+ */
+export const META_TIMEOUT_MS = 10_000;
+
+/**
+ * The single fetch chokepoint for every Graph POST. The signal is created PER
+ * CALL: AbortSignal.timeout starts counting at creation, so a signal baked into
+ * `init` and reused across postWithBackoff's retries would already be expired
+ * after the first 6.5s rate-limit sleep.
+ */
+function graphFetch(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(META_TIMEOUT_MS) });
+}
+
 function isRateLimited(status: number, body: string): boolean {
   return status === 429 || body.includes('131056');
 }
@@ -208,7 +225,7 @@ async function postWithBackoff(
   let lastBody = '';
   let lastStatus = 0;
   for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
-    const res = await fetch(url, init);
+    const res = await graphFetch(url, init);
     if (res.ok) return;
     lastStatus = res.status;
     lastBody = await res.text();
@@ -471,7 +488,7 @@ export async function sendInteractive(
     .join('\n');
   const fullBody = `${bodyText}\n\n${numbered}`;
 
-  const res = await fetch(
+  const res = await graphFetch(
     GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
       messaging_product: 'whatsapp',
@@ -525,7 +542,7 @@ export async function sendCtaUrl(
   if (button.displayText.length > 20) throw new Error('sendCtaUrl: displayText must be <= 20 chars');
   const fallbackText = `${bodyText}\n\n${button.displayText}\n${button.url}`;
 
-  const res = await fetch(
+  const res = await graphFetch(
     GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
       messaging_product: 'whatsapp',
