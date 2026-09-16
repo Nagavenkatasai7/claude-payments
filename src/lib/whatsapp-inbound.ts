@@ -14,16 +14,20 @@ import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn } from '@/lib/log';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
 // (/api/whatsapp/[partnerId]) run THIS after their own signature gate:
-//   status events → parse → dedup → consent → customer upsert (routed to the
-//   owning partner; follow-the-number) → agent turn ENQUEUED (durable outbox).
-// `routedPartnerId` is the partner that OWNS the receiving number (null ⇒ the
-// shared/default number); `waCreds` are that partner's outbound credentials so
-// every reply leaves FROM the number the customer messaged.
+//   status events → parse → dedup → consent → customer resolve/create UNDER THE
+//   ROUTED TENANT → agent turn ENQUEUED (durable outbox).
+// A tenant-signed webhook proves the TENANT, not the sender (fix 1 / F44): every
+// customer read/write below is keyed (tenant, phone), where tenant is the partner
+// that OWNS the receiving number and the shared/default number IS the default
+// tenant. An existing row under another partner is never touched or moved.
+// `waCreds` are that partner's outbound credentials so every reply leaves FROM
+// the number the customer messaged.
 
 export interface InboundContext {
   routedPartnerId: PartnerId | null;
@@ -73,39 +77,39 @@ export async function processInboundWebhook(
   if (!isNew) return { ok: true };
 
   const customerStore = getCustomerStore(store);
+  // The shared number (routedPartnerId null) is the default tenant's channel.
+  const tenantId: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
 
   // STOP / START consent short-circuit (order intentional — see consent.ts).
   if (incoming.kind === 'text') {
     if (isResumeKeyword(incoming.text)) {
-      await customerStore.clearOptedOut(incoming.from);
+      await customerStore.clearOptedOut(tenantId, incoming.from);
       await sendText(incoming.from, OPT_IN_REPLY, waCreds);
       return { ok: true };
     }
     if (isOptOutKeyword(incoming.text)) {
-      await customerStore.setOptedOut(incoming.from);
+      await customerStore.setOptedOut(tenantId, incoming.from);
       await sendText(incoming.from, OPT_OUT_REPLY, waCreds);
       return { ok: true };
     }
-    const existing = await customerStore.getCustomer(incoming.from);
+    const existing = await customerStore.getCustomer(tenantId, incoming.from);
     if (existing?.optedOutAt) {
       await sendText(incoming.from, OPT_OUT_REMINDER, waCreds);
       return { ok: true };
     }
   }
 
-  const lastInboundAt = await store.getLastInboundAt(incoming.from);
+  // D12: the "is this a new conversation" marker is per (tenant, phone) too —
+  // a customer of another tenant messaging THIS number starts fresh here.
+  const lastInboundAt = await store.getLastInboundAt(tenantId, incoming.from);
   const isNewConversation = lastInboundAt === null;
-  await store.recordInboundNow(incoming.from);
+  await store.recordInboundNow(tenantId, incoming.from);
 
-  // WL2: route the customer to the partner that owns the receiving number —
-  // new customers are created under it; existing customers follow the number.
-  const { customer, wasCreated } = await customerStore.upsertOnFirstInbound(
-    incoming.from,
-    routedPartnerId ?? undefined,
-  );
+  // Resolve/create the customer under the ROUTED tenant only — never re-home.
+  const { customer, wasCreated } = await customerStore.upsertOnFirstInbound(tenantId, incoming.from);
 
   if (!customer.optInAt) {
-    await customerStore.setOptedIn(incoming.from);
+    await customerStore.setOptedIn(tenantId, incoming.from);
   }
 
   const now = new Date();

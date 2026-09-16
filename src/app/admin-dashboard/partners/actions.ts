@@ -8,7 +8,7 @@ import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
-import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { getPartnerIntegrationsStore, partnerForPhoneNumberId } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
@@ -169,21 +169,52 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
 // the integrations store. Non-secret routing data (phoneNumberId, providerType)
 // is stored in the clear and may be shown back in the form.
 
+/**
+ * D11 (fix 1): a WhatsApp phone_number_id routes inbound traffic to ONE tenant,
+ * so it is REFUSED when it is the platform's own number or already held by a
+ * different partner. One generic message for both cases — the refusal must not
+ * tell a partner who holds a number. The partial unique index
+ * partner_integrations_wa_pnid is the race-proof last line.
+ */
+async function assertPhoneNumberIdFree(partnerId: string, pnid: string | undefined): Promise<void> {
+  if (!pnid) return;
+  const holder = await partnerForPhoneNumberId(pnid);
+  if (pnid === env.whatsappPhoneNumberId || (holder && holder !== partnerId)) {
+    throw new Error('That WhatsApp number cannot be used.');
+  }
+}
+
+/** Same generic refusal when the partial unique index loses a race (SQLSTATE 23505). */
+function rethrowPnidConflict(e: unknown): never {
+  // The partial unique index partner_integrations_wa_pnid is the race-proof
+  // last line (two admins saving the same number at once). SAME generic
+  // message as assertPhoneNumberIdFree — never who holds it, never "race".
+  // drizzle wraps the driver error (DrizzleQueryError.cause — node_modules/drizzle-orm/errors.js).
+  const err = e as { code?: string; cause?: { code?: string } } | null;
+  if (err?.code === '23505' || err?.cause?.code === '23505') throw new Error('That WhatsApp number cannot be used.');
+  throw e;
+}
+
 export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
   const store = getPartnerIntegrationsStore();
   const existing = await store.getIntegrations(id);
   const newPnid = String(formData.get('phoneNumberId') ?? '').trim();
-  await store.saveIntegrations(id, {
-    ...existing,
-    whatsapp: {
-      phoneNumberId: newPnid || undefined,
-      token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
-      verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
-      appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
-    },
-  });
+  await assertPhoneNumberIdFree(id, newPnid || undefined);
+  try {
+    await store.saveIntegrations(id, {
+      ...existing,
+      whatsapp: {
+        phoneNumberId: newPnid || undefined,
+        token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
+        verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
+        appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
+      },
+    });
+  } catch (e) {
+    rethrowPnidConflict(e);
+  }
   // No separate reverse index to maintain anymore — inbound routing resolves
   // the partner straight off the integrations row (partnerForPhoneNumberId).
   revalidatePath(`/admin-dashboard/partners/${id}`);
@@ -390,6 +421,9 @@ export async function wizardCreatePartnerAction(
     createdAt: now,
     updatedAt: now,
   };
+  // D11 (fix 1): refuse a taken/platform WhatsApp number BEFORE any write, so a
+  // refusal never leaves an orphan active partner behind.
+  await assertPhoneNumberIdFree(id, clean((input.whatsapp ?? {}).phoneNumberId));
   await getPartnerStore().savePartner(partner);
 
   // Integrations — only persisted when the wizard actually captured something.
@@ -412,20 +446,24 @@ export async function wizardCreatePartnerAction(
   }
   const whatsappConfigured = Boolean(clean(wa.phoneNumberId) && clean(wa.token));
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
-  await getPartnerIntegrationsStore().saveIntegrations(id, {
-    kyc: {},
-    whatsapp: {
-      phoneNumberId: clean(wa.phoneNumberId),
-      token: clean(wa.token),
-      verifyToken: clean(wa.verifyToken),
-      appSecret: clean(wa.appSecret),
-    },
-    payment: {
-      providerType,
-      credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-      webhookSecret,
-    },
-  });
+  try {
+    await getPartnerIntegrationsStore().saveIntegrations(id, {
+      kyc: {},
+      whatsapp: {
+        phoneNumberId: clean(wa.phoneNumberId),
+        token: clean(wa.token),
+        verifyToken: clean(wa.verifyToken),
+        appSecret: clean(wa.appSecret),
+      },
+      payment: {
+        providerType,
+        credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+        webhookSecret,
+      },
+    });
+  } catch (e) {
+    rethrowPnidConflict(e);
+  }
 
   const issued = await getPartnerApiKeyStore().issue(id);
 

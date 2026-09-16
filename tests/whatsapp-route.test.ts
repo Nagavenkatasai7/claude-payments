@@ -12,8 +12,8 @@ vi.mock('next/server', async (orig) => {
 // markMessageSeen is the first side-effect after the signature gate; asserting on
 // it tells us whether a request got PAST the gate or was rejected before it.
 const markMessageSeen = vi.fn(async (_id: string) => true);
-const getLastInboundAt = vi.fn(async (_from: string) => null);
-const recordInboundNow = vi.fn(async (_from: string) => {});
+const getLastInboundAt = vi.fn(async (_tenant: string, _from: string) => null);
+const recordInboundNow = vi.fn(async (_tenant: string, _from: string) => {});
 vi.mock('@/lib/store', () => ({
   getStore: () => ({ markMessageSeen, getLastInboundAt, recordInboundNow }),
 }));
@@ -31,15 +31,17 @@ const {
   getCustomer,
   upsertOnFirstInbound,
   enqueue,
+  partnerForPhoneNumberId,
+  getIntegrations,
 } = vi.hoisted(() => ({
   sendText: vi.fn(async () => {}),
-  setOptedOut: vi.fn(async (_phone: string) => {}),
-  clearOptedOut: vi.fn(async (_phone: string) => {}),
-  setOptedIn: vi.fn(async (_phone: string) => {}),
+  setOptedOut: vi.fn(async (_tenant: string, _phone: string) => {}),
+  clearOptedOut: vi.fn(async (_tenant: string, _phone: string) => {}),
+  setOptedIn: vi.fn(async (_tenant: string, _phone: string) => {}),
   // Default: an opted-IN customer (optInAt set, no optedOutAt). Tests override.
   // Typed loosely so per-test overrides can add optedOutAt / drop optInAt.
   getCustomer: vi.fn(
-    async (_phone: string): Promise<Record<string, unknown> | null> => ({
+    async (_tenant: string, _phone: string): Promise<Record<string, unknown> | null> => ({
       senderPhone: '15551230000',
       optInAt: new Date().toISOString(),
     }),
@@ -51,6 +53,17 @@ const {
     }),
   ),
   enqueue: vi.fn(async () => true),
+  // Fix 1 D11 routing doubles. Default: UNROUTED (null) ⇒ every pre-existing test is untouched.
+  partnerForPhoneNumberId: vi.fn(async (_pnid: string): Promise<string | null> => null),
+  getIntegrations: vi.fn(async (_partnerId: string) => ({
+    kyc: {},
+    payment: {},
+    whatsapp: {} as { phoneNumberId?: string; token?: string; appSecret?: string },
+  })),
+}));
+vi.mock('@/lib/partner-integrations-store', () => ({
+  partnerForPhoneNumberId,
+  getPartnerIntegrationsStore: () => ({ getIntegrations }),
 }));
 vi.mock('@/lib/whatsapp', async (orig) => {
   const real = await orig<typeof import('@/lib/whatsapp')>();
@@ -111,6 +124,8 @@ beforeEach(() => {
   clearOptedOut.mockClear();
   setOptedIn.mockClear();
   enqueue.mockClear();
+  partnerForPhoneNumberId.mockClear().mockResolvedValue(null);
+  getIntegrations.mockClear().mockResolvedValue({ kyc: {}, payment: {}, whatsapp: {} });
   // Reset customer lookups to the opted-IN default each test.
   getCustomer.mockClear().mockResolvedValue({
     senderPhone: '15551230000',
@@ -122,16 +137,13 @@ beforeEach(() => {
   });
 });
 
-function textBody(text: string, id = 'wamid.TXT', from = '15551230000') {
+function textBody(text: string, id = 'wamid.TXT', from = '15551230000', opts: { phoneNumberId?: string } = {}) {
   return JSON.stringify({
     object: 'whatsapp_business_account',
-    entry: [
-      {
-        changes: [
-          { value: { messages: [{ from, id, type: 'text', text: { body: text } }] } },
-        ],
-      },
-    ],
+    entry: [{ changes: [{ value: {
+      ...(opts.phoneNumberId ? { metadata: { phone_number_id: opts.phoneNumberId } } : {}),
+      messages: [{ from, id, type: 'text', text: { body: text } }],
+    } }] }],
   });
 }
 
@@ -246,7 +258,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
   it('inbound "STOP" → setOptedOut, confirmation sent, agent NOT run', async () => {
     const res = await post(textBody('STOP', 'wamid.STOP1'));
     expect(res.status).toBe(200);
-    expect(setOptedOut).toHaveBeenCalledWith('15551230000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
     expect(enqueue).not.toHaveBeenCalled();
   });
@@ -254,7 +266,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
   it('inbound "START" → clearOptedOut, confirmation sent, agent NOT run', async () => {
     const res = await post(textBody('start', 'wamid.START1'));
     expect(res.status).toBe(200);
-    expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
+    expect(clearOptedOut).toHaveBeenCalledWith('default', '15551230000');
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
     expect(enqueue).not.toHaveBeenCalled();
   });
@@ -300,7 +312,7 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     });
     const res = await post(textBody('START', 'wamid.RESUME1'));
     expect(res.status).toBe(200);
-    expect(clearOptedOut).toHaveBeenCalledWith('15551230000');
+    expect(clearOptedOut).toHaveBeenCalledWith('default', '15551230000');
     expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
     expect(enqueue).not.toHaveBeenCalled();
     // The state-skip reminder must NOT fire for a resume keyword.
@@ -321,6 +333,27 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
 });
 
 describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', () => {
+  it('the shared number is the DEFAULT tenant: every customer read/write is keyed (default, phone) and the turn carries routedPartnerId null', async () => {
+    const res = await post(textBody('hi', 'wamid.TENANT1'));
+    expect(res.status).toBe(200);
+    expect(getCustomer).toHaveBeenCalledWith('default', '15551230000');
+    expect(upsertOnFirstInbound).toHaveBeenCalledWith('default', '15551230000');
+    expect(getLastInboundAt).toHaveBeenCalledWith('default', '15551230000');
+    expect(recordInboundNow).toHaveBeenCalledWith('default', '15551230000');
+    expect(enqueue).toHaveBeenCalledWith(
+      'agent.turn',
+      expect.objectContaining({ phone: '15551230000', routedPartnerId: null }),
+      expect.objectContaining({ dedupeKey: 'wamid:wamid.TENANT1' }),
+    );
+  });
+
+  it('STOP / START consent writes are tenant-scoped too', async () => {
+    await post(textBody('STOP', 'wamid.STOPT'));
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    await post(textBody('START', 'wamid.STARTT'));
+    expect(clearOptedOut).toHaveBeenCalledWith('default', '15551230000');
+  });
+
   it('an opted-IN customer whose record lacks optInAt → setOptedIn is called (backfill)', async () => {
     upsertOnFirstInbound.mockResolvedValue({
       customer: { firstSeenAt: '2026-01-01T00:00:00Z' }, // NO optInAt
@@ -332,7 +365,7 @@ describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', ()
     });
     const res = await post(textBody('hi', 'wamid.BACKFILL1'));
     expect(res.status).toBe(200);
-    expect(setOptedIn).toHaveBeenCalledWith('15551230000');
+    expect(setOptedIn).toHaveBeenCalledWith('default', '15551230000');
     expect(enqueue).toHaveBeenCalled();
   });
 
@@ -345,5 +378,47 @@ describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', ()
     expect(res.status).toBe(200);
     expect(setOptedIn).not.toHaveBeenCalled();
     expect(enqueue).toHaveBeenCalled();
+  });
+});
+
+describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret only (fix 1, D11 — variant A, fail closed)', () => {
+  const ACME_WITH_SECRET = { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't', appSecret: 'acme_secret' } };
+  const ACME_NO_SECRET = { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't' } };
+  beforeEach(() => { process.env.META_APP_SECRET = SECRET; }); // the file's afterEach deletes it again
+
+  it('routed + partner has an appSecret ⇒ the partner secret verifies (200, turn enqueued under acme); the PLATFORM secret is refused (401)', async () => {
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
+    const body = textBody('hi', 'wamid.R1', '15551230000', { phoneNumberId: 'pn_acme' });
+    expect((await post(body, sign(body, SECRET))).status).toBe(401); // platform-signed ⇒ never the partner's event
+    expect(markMessageSeen).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    const res = await post(body, sign(body, 'acme_secret'));
+    expect(res.status).toBe(200);
+    expect(markMessageSeen).toHaveBeenCalledWith('wamid.R1');
+    expect(enqueue).toHaveBeenCalledWith(
+      'agent.turn',
+      expect.objectContaining({ phone: '15551230000', routedPartnerId: 'acme' }),
+      expect.objectContaining({ dedupeKey: 'wamid:wamid.R1' }),
+    );
+  });
+
+  it('routed + partner has NO appSecret ⇒ 401 fail closed even when signed with the platform secret — no fallback for a routed event', async () => {
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_NO_SECRET);
+    const body = textBody('hi', 'wamid.R2', '15551230000', { phoneNumberId: 'pn_acme' });
+    expect((await post(body, sign(body, SECRET))).status).toBe(401);
+    expect((await post(body, sign(body, 'acme_secret'))).status).toBe(401);
+    expect(markMessageSeen).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('unrouted (the shared number) keeps the platform secret', async () => {
+    const body = textBody('hi', 'wamid.R3'); // no metadata ⇒ partnerForPhoneNumberId is never consulted
+    expect((await post(body, sign(body, 'acme_secret'))).status).toBe(401);
+    const res = await post(body, sign(body, SECRET));
+    expect(res.status).toBe(200);
+    expect(partnerForPhoneNumberId).not.toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalledWith('agent.turn', expect.objectContaining({ routedPartnerId: null }), expect.anything());
   });
 });
