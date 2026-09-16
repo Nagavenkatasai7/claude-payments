@@ -1,4 +1,4 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import {
   auditEvents,
   b2bInvoices,
@@ -35,14 +35,15 @@ import type {
 // call sites already use. Payout destinations (full bank accounts) are
 // envelope-encrypted at rest everywhere they appear.
 
-// ── Saved recipients (per-sender address book; was recipients:{phone} hash) ──
+// ── Saved recipients (per-TENANT, per-sender address book) ──────────────────
 export function createRecipientRepo(
   db: DbOrTx,
   provider: EncryptionKeyProvider = defaultProvider(),
 ) {
   return {
-    async upsertRecipient(senderPhone: string, r: Recipient): Promise<void> {
+    async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<void> {
       const row = {
+        partnerId,
         senderPhone,
         recipientPhone: r.recipientPhone,
         name: r.name,
@@ -55,16 +56,16 @@ export function createRecipientRepo(
         .insert(recipients)
         .values(row)
         .onConflictDoUpdate({
-          target: [recipients.senderPhone, recipients.recipientPhone],
+          target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
           set: row,
         });
     },
 
-    async listRecipients(senderPhone: string, limit: number): Promise<Recipient[]> {
+    async listRecipients(partnerId: PartnerId, senderPhone: string, limit: number): Promise<Recipient[]> {
       const rows = await db
         .select()
         .from(recipients)
-        .where(eq(recipients.senderPhone, senderPhone))
+        .where(and(eq(recipients.partnerId, partnerId), eq(recipients.senderPhone, senderPhone)))
         .orderBy(desc(recipients.lastUsedAt))
         .limit(limit);
       return rows.map((row) => ({

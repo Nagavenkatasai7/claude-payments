@@ -42,7 +42,7 @@ function mkTransfer(over: Partial<Transfer> = {}): Transfer {
 describe('customer store', () => {
   it('getCustomer returns null when no record', async () => {
     const { cs } = mkStores();
-    expect(await cs.getCustomer(PHONE)).toBeNull();
+    expect(await cs.getCustomer('default', PHONE)).toBeNull();
   });
 
   it('saveCustomer + getCustomer round-trips', async () => {
@@ -57,12 +57,12 @@ describe('customer store', () => {
       partnerId: 'default' as const,
     };
     await cs.saveCustomer(c);
-    expect(await cs.getCustomer(PHONE)).toEqual(c);
+    expect(await cs.getCustomer('default', PHONE)).toEqual(c);
   });
 
   it('upsertOnFirstInbound creates a brand-new customer (wasCreated=true) when no transfers exist', async () => {
     const { cs } = mkStores();
-    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound('default', PHONE);
     expect(wasCreated).toBe(true);
     expect(customer.kycStatus).toBe('not_started');
     expect(customer.senderPhone).toBe(PHONE);
@@ -71,8 +71,8 @@ describe('customer store', () => {
 
   it('upsertOnFirstInbound is idempotent: second call returns existing record with wasCreated=false', async () => {
     const { cs } = mkStores();
-    const first = await cs.upsertOnFirstInbound(PHONE);
-    const second = await cs.upsertOnFirstInbound(PHONE);
+    const first = await cs.upsertOnFirstInbound('default', PHONE);
+    const second = await cs.upsertOnFirstInbound('default', PHONE);
     expect(second.wasCreated).toBe(false);
     expect(second.customer.firstSeenAt).toBe(first.customer.firstSeenAt);
   });
@@ -104,7 +104,7 @@ describe('customer store', () => {
     // updatedAt (now) fall in different milliseconds on fast hardware.
     await new Promise((r) => setTimeout(r, 5));
     const cs = createCustomerStore(db, store);
-    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound('default', PHONE);
     expect(wasCreated).toBe(false); // grandfathered, not a "real" new customer
     expect(customer.kycStatus).toBe('grandfathered');
     expect(customer.kycVerifiedAt).toBeDefined();
@@ -114,8 +114,8 @@ describe('customer store', () => {
 
   it('listCustomers returns every saved customer', async () => {
     const { cs } = mkStores();
-    await cs.upsertOnFirstInbound('15551111111');
-    await cs.upsertOnFirstInbound('15552222222');
+    await cs.upsertOnFirstInbound('default', '15551111111');
+    await cs.upsertOnFirstInbound('default', '15552222222');
     const all = await cs.listCustomers();
     expect(all.map((c) => c.senderPhone).sort()).toEqual(['15551111111', '15552222222']);
   });
@@ -124,7 +124,7 @@ describe('customer store', () => {
 describe('customer-store P1: senderCountry', () => {
   it('upsertOnFirstInbound writes senderCountry: US on a brand-new customer', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound('15550009999');
+    const { customer } = await cs.upsertOnFirstInbound('default', '15550009999');
     expect(customer.senderCountry).toBe('US');
   });
 
@@ -150,7 +150,7 @@ describe('customer-store P1: senderCountry', () => {
       senderKycStatus: 'verified',
     });
     const cs = createCustomerStore(db, store);
-    const { customer } = await cs.upsertOnFirstInbound('15550008888');
+    const { customer } = await cs.upsertOnFirstInbound('default', '15550008888');
     expect(customer.senderCountry).toBe('US');
     expect(customer.kycStatus).toBe('grandfathered');
   });
@@ -159,25 +159,25 @@ describe('customer-store P1: senderCountry', () => {
 describe('customer-store multicountry: senderCountry inferred from phone', () => {
   it('AE phone (971...) → senderCountry AE', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound('971501234567');
+    const { customer } = await cs.upsertOnFirstInbound('default', '971501234567');
     expect(customer.senderCountry).toBe('AE');
   });
 
   it('GB phone (44...) → senderCountry GB', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound('447911123456');
+    const { customer } = await cs.upsertOnFirstInbound('default', '447911123456');
     expect(customer.senderCountry).toBe('GB');
   });
 
   it('US phone (1...) → senderCountry US', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound('15551234567');
+    const { customer } = await cs.upsertOnFirstInbound('default', '15551234567');
     expect(customer.senderCountry).toBe('US');
   });
 
   it('unknown calling code (886...) → senderCountry falls back to DEFAULT_SENDER_COUNTRY (US)', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound('886123456');
+    const { customer } = await cs.upsertOnFirstInbound('default', '886123456');
     expect(customer.senderCountry).toBe('US');
   });
 
@@ -191,7 +191,7 @@ describe('customer-store multicountry: senderCountry inferred from phone', () =>
       sourceCountry: 'AE', sourceCurrency: 'AED',
       amountSource: 200, feeSource: 2, totalChargeSource: 202,
     }));
-    const { customer } = await cs.upsertOnFirstInbound('971509999999');
+    const { customer } = await cs.upsertOnFirstInbound('default', '971509999999');
     expect(customer.senderCountry).toBe('AE');
     expect(customer.kycStatus).toBe('grandfathered');
   });
@@ -200,23 +200,23 @@ describe('customer-store multicountry: senderCountry inferred from phone', () =>
 describe('recordFundingMethod (Bundle C sticky funding)', () => {
   it('persists lastFundingMethod + lastFundingMethodAt on an existing customer', async () => {
     const { cs } = mkStores();
-    await cs.upsertOnFirstInbound(PHONE); // creates the customer record
-    await cs.recordFundingMethod(PHONE, 'credit_card');
-    const c = await cs.getCustomer(PHONE);
+    await cs.upsertOnFirstInbound('default', PHONE); // creates the customer record
+    await cs.recordFundingMethod('default', PHONE, 'credit_card');
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.lastFundingMethod).toBe('credit_card');
     expect(typeof c?.lastFundingMethodAt).toBe('string');
   });
   it('is a no-op when there is no customer record yet', async () => {
     const { cs } = mkStores();
-    await cs.recordFundingMethod(PHONE, 'bank_transfer'); // must not throw
-    expect(await cs.getCustomer(PHONE)).toBeNull();
+    await cs.recordFundingMethod('default', PHONE, 'bank_transfer'); // must not throw
+    expect(await cs.getCustomer('default', PHONE)).toBeNull();
   });
 });
 
 describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
   it('upsertOnFirstInbound sets optInAt on a brand-new customer', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound(PHONE);
+    const { customer } = await cs.upsertOnFirstInbound('default', PHONE);
     expect(customer.optInAt).toBeDefined();
     expect(new Date(customer.optInAt!).toString()).not.toBe('Invalid Date');
   });
@@ -238,11 +238,11 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
     });
 
-    const { customer, wasCreated } = await cs.upsertOnFirstInbound(PHONE);
+    const { customer, wasCreated } = await cs.upsertOnFirstInbound('default', PHONE);
     expect(wasCreated).toBe(false); // still an existing record, not a fresh create
     expect(customer.optInAt).toBeDefined();
     // And it is actually PERSISTED (not just filled in-memory)
-    const persisted = await cs.getCustomer(PHONE);
+    const persisted = await cs.getCustomer('default', PHONE);
     expect(persisted?.optInAt).toBeDefined();
   });
 
@@ -259,7 +259,7 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
     });
-    const { customer } = await cs.upsertOnFirstInbound(PHONE);
+    const { customer } = await cs.upsertOnFirstInbound('default', PHONE);
     expect(customer.optInAt).toBe(existingOptIn); // first contact wins, untouched
   });
 
@@ -275,44 +275,44 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
     });
-    await cs.setOptedIn(PHONE);
-    const first = (await cs.getCustomer(PHONE))!.optInAt;
+    await cs.setOptedIn('default', PHONE);
+    const first = (await cs.getCustomer('default', PHONE))!.optInAt;
     expect(first).toBeDefined();
     await new Promise((r) => setTimeout(r, 3));
-    await cs.setOptedIn(PHONE); // second call must NOT overwrite
-    const second = (await cs.getCustomer(PHONE))!.optInAt;
+    await cs.setOptedIn('default', PHONE); // second call must NOT overwrite
+    const second = (await cs.getCustomer('default', PHONE))!.optInAt;
     expect(second).toBe(first);
   });
 
   it('setOptedOut sets optedOutAt', async () => {
     const { cs } = mkStores();
-    await cs.upsertOnFirstInbound(PHONE);
-    await cs.setOptedOut(PHONE);
-    expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeDefined();
+    await cs.upsertOnFirstInbound('default', PHONE);
+    await cs.setOptedOut('default', PHONE);
+    expect((await cs.getCustomer('default', PHONE))?.optedOutAt).toBeDefined();
   });
 
   it('clearOptedOut removes optedOutAt (undefined)', async () => {
     const { cs } = mkStores();
-    await cs.upsertOnFirstInbound(PHONE);
-    await cs.setOptedOut(PHONE);
-    expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeDefined();
-    await cs.clearOptedOut(PHONE);
-    expect((await cs.getCustomer(PHONE))?.optedOutAt).toBeUndefined();
+    await cs.upsertOnFirstInbound('default', PHONE);
+    await cs.setOptedOut('default', PHONE);
+    expect((await cs.getCustomer('default', PHONE))?.optedOutAt).toBeDefined();
+    await cs.clearOptedOut('default', PHONE);
+    expect((await cs.getCustomer('default', PHONE))?.optedOutAt).toBeUndefined();
   });
 
   it('setOptedIn / setOptedOut / clearOptedOut are no-ops when no customer exists', async () => {
     const { cs } = mkStores();
-    await cs.setOptedIn(PHONE); // must not throw
-    await cs.setOptedOut(PHONE);
-    await cs.clearOptedOut(PHONE);
-    expect(await cs.getCustomer(PHONE)).toBeNull();
+    await cs.setOptedIn('default', PHONE); // must not throw
+    await cs.setOptedOut('default', PHONE);
+    await cs.clearOptedOut('default', PHONE);
+    expect(await cs.getCustomer('default', PHONE)).toBeNull();
   });
 });
 
 describe('customer-store P2: partnerId', () => {
   it('upsertOnFirstInbound writes partnerId: default on a brand-new customer', async () => {
     const { cs } = mkStores();
-    const { customer } = await cs.upsertOnFirstInbound('15550009999');
+    const { customer } = await cs.upsertOnFirstInbound('default', '15550009999');
     expect(customer.partnerId).toBe('default');
   });
 
@@ -325,7 +325,7 @@ describe('customer-store P2: partnerId', () => {
       totalChargeUsd: 51.99, amountInr: 4260,
       amountSource: 50, feeSource: 1.99, totalChargeSource: 51.99,
     }));
-    const { customer } = await cs.upsertOnFirstInbound('15550008888');
+    const { customer } = await cs.upsertOnFirstInbound('default', '15550008888');
     expect(customer.partnerId).toBe('default');
     expect(customer.kycStatus).toBe('grandfathered');
   });

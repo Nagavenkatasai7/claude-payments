@@ -197,7 +197,10 @@ export const sellers = pgTable(
 export const customers = pgTable(
   'customers',
   {
-    phone: text('phone').primaryKey(), // senderPhone
+    // Tenant-scoped identity (fix 1 / F44): a phone is NOT a global key. The same
+    // number can be a customer of several partners, each with its OWN row (own
+    // kyc_status, own encrypted PII, own password). PK (partner_id, phone).
+    phone: text('phone').notNull(), // senderPhone
     partnerId: text('partner_id').notNull().references(() => partners.id),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull(),
     senderCountry: text('sender_country').notNull(),
@@ -236,23 +239,41 @@ export const customers = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('customers_partner_created').on(t.partnerId, t.createdAt.desc())],
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.phone] }),
+    index('customers_partner_created').on(t.partnerId, t.createdAt.desc()),
+    // The three legitimate phone-alone lookups (portal login, platform-staff
+    // detail page, Persona webhook) go through customer-repo.findByPhone — indexed.
+    index('customers_phone').on(t.phone),
+  ],
 );
 
-export const partnerIntegrations = pgTable('partner_integrations', {
-  partnerId: text('partner_id').primaryKey().references(() => partners.id),
-  kycProviderType: text('kyc_provider_type'),
-  kycApiKeyEnc: text('kyc_api_key_enc'),
-  kycWebhookSecretEnc: text('kyc_webhook_secret_enc'),
-  paymentProviderType: text('payment_provider_type'),
-  paymentCredentialsEnc: text('payment_credentials_enc'),
-  paymentWebhookSecretEnc: text('payment_webhook_secret_enc'),
-  waPhoneNumberId: text('wa_phone_number_id'),
-  waTokenEnc: text('wa_token_enc'),
-  waVerifyTokenEnc: text('wa_verify_token_enc'),
-  waAppSecretEnc: text('wa_app_secret_enc'),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const partnerIntegrations = pgTable(
+  'partner_integrations',
+  {
+    partnerId: text('partner_id').primaryKey().references(() => partners.id),
+    kycProviderType: text('kyc_provider_type'),
+    kycApiKeyEnc: text('kyc_api_key_enc'),
+    kycWebhookSecretEnc: text('kyc_webhook_secret_enc'),
+    paymentProviderType: text('payment_provider_type'),
+    paymentCredentialsEnc: text('payment_credentials_enc'),
+    paymentWebhookSecretEnc: text('payment_webhook_secret_enc'),
+    waPhoneNumberId: text('wa_phone_number_id'),
+    waTokenEnc: text('wa_token_enc'),
+    waVerifyTokenEnc: text('wa_verify_token_enc'),
+    waAppSecretEnc: text('wa_app_secret_enc'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // D11 (fix 1): a WhatsApp phone_number_id routes inbound traffic to ONE
+    // tenant, so it may be held by ONE partner. Partial: partners without a
+    // BYO number keep NULL. The write-time refusal lives in partners/actions.ts;
+    // this index is the last line against a race or a hand-edited row.
+    uniqueIndex('partner_integrations_wa_pnid')
+      .on(t.waPhoneNumberId)
+      .where(sql`${t.waPhoneNumberId} IS NOT NULL`),
+  ],
+);
 
 // Per-partner conversion pricing per corridor (best-rate selection). A partner
 // competes for a corridor when it has a FRESH pushed rate (effective_rate with
@@ -391,11 +412,13 @@ export const beneficiaries = pgTable(
   (t) => [index('beneficiaries_partner').on(t.partnerId, t.createdAt.desc())],
 );
 
-// Per-sender saved recipients (the recipients:{phone} Redis hash today). Holds
-// full bank accounts → encrypted; the last plaintext account store leaves Redis.
+// Per-sender saved recipients. Holds full bank accounts → encrypted. The
+// address book is per (TENANT, sender): partner B can never read or overwrite
+// partner A's saved payout destinations for the same phone (fix 1 / F45, F47).
 export const recipients = pgTable(
   'recipients',
   {
+    partnerId: text('partner_id').notNull().references(() => partners.id),
     senderPhone: text('sender_phone').notNull(),
     recipientPhone: text('recipient_phone').notNull(),
     name: text('name').notNull(),
@@ -404,7 +427,7 @@ export const recipients = pgTable(
     payoutDestinationLast4: text('payout_destination_last4').notNull().default(''),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.senderPhone, t.recipientPhone] })],
+  (t) => [primaryKey({ columns: [t.partnerId, t.senderPhone, t.recipientPhone] })],
 );
 
 export const auditEvents = pgTable(
