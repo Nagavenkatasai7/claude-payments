@@ -326,6 +326,22 @@ describe('outbox-repo (durability backbone)', () => {
     expect(await r.markDone(dead.id)).toBe(true);
   });
 
+  it('a processing row claimed by PRE-lease code (lease_until NULL) is reclaimed once locked_at + LEASE_MS has passed, and is visible to listStaleProcessing', async () => {
+    const r = createOutboxRepo(db);
+    // Old code: status/locked_at/locked_by only, never a lease.
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, attempts, locked_at, locked_by)
+      VALUES ('whatsapp.text', '{"to":"old"}'::jsonb, 'processing', 1, now() - interval '30 minutes', 'w_legacy')`);
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, attempts, locked_at, locked_by)
+      VALUES ('whatsapp.text', '{"to":"live"}'::jsonb, 'processing', 1, now() - interval '1 minute', 'w_legacy_live')`);
+    const stale = await r.listStaleProcessing(15);
+    expect(stale.map((o) => o.lockedBy)).toEqual(['w_legacy']); // 30m − 5m lease = 25m > 15m; the live one is not stale
+    const reclaimed = await r.claimBatch(10, 'w_new');
+    expect(reclaimed).toHaveLength(1); // the 1-minute-old legacy claim is still inside its implied lease
+    expect(reclaimed[0].lockedBy).toBe('w_new');
+    expect(reclaimed[0].attempts).toBe(2);
+    expect(reclaimed[0].leaseOwner).toBe('w_new');
+  });
+
   it('markFailed minBackoffSec parks the row at least that long (deadline failures: past any abandoned handler)', async () => {
     const r = createOutboxRepo(db);
     await r.enqueue('whatsapp.text', { to: 'x' });

@@ -43,6 +43,7 @@ export const MAX_ATTEMPTS = 8;
  * attempts++ as on any retry, so a poison row still dies at MAX_ATTEMPTS.
  */
 export const LEASE_MS = 5 * 60_000;
+const LEASE_SEC = LEASE_MS / 1000;
 
 export function createOutboxRepo(db: DbOrTx) {
   return {
@@ -72,7 +73,9 @@ export function createOutboxRepo(db: DbOrTx) {
     /**
      * Atomically claim up to `limit` rows (SKIP LOCKED — drain-safe):
      *   • due rows ('pending'/'failed' with next_attempt_at <= now()), and
-     *   • ABANDONED rows ('processing' whose lease_until has passed).
+     *   • ABANDONED rows ('processing' whose lease_until has passed). A row
+     *     claimed by PRE-lease code has lease_until NULL; its implied lease is
+     *     locked_at + LEASE_MS, so the migrate→deploy window needs no backfill.
      * Both paths charge one attempt and take a fresh lease for `workerId`.
      */
     async claimBatch(limit: number, workerId: string, leaseMs = LEASE_MS): Promise<OutboxRow[]> {
@@ -85,7 +88,7 @@ export function createOutboxRepo(db: DbOrTx) {
         WHERE id IN (
           SELECT id FROM outbox
           WHERE (status IN ('pending','failed') AND next_attempt_at <= now())
-             OR (status = 'processing' AND lease_until < now())
+             OR (status = 'processing' AND coalesce(lease_until, locked_at + make_interval(secs => ${LEASE_SEC})) < now())
           ORDER BY id
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
@@ -199,9 +202,9 @@ export function createOutboxRepo(db: DbOrTx) {
         .select()
         .from(outbox)
         .where(
-          sql`${outbox.status} = 'processing' AND ${outbox.leaseUntil} < now() - make_interval(mins => ${minutes})`,
+          sql`${outbox.status} = 'processing' AND coalesce(${outbox.leaseUntil}, ${outbox.lockedAt} + make_interval(secs => ${LEASE_SEC})) < now() - make_interval(mins => ${minutes})`,
         )
-        .orderBy(outbox.leaseUntil)
+        .orderBy(sql`coalesce(${outbox.leaseUntil}, ${outbox.lockedAt} + make_interval(secs => ${LEASE_SEC}))`)
         .limit(limit);
     },
 
