@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -535,6 +535,17 @@ export function createTransferRepo(
         .select()
         .from(transfers)
         .orderBy(desc(transfers.createdAt), desc(transfers.id));
+      return rows.map((r) => toDomain(r));
+    },
+
+    /** cancelled + funding_ref set + refund_status 'none' — the capture↔cancel race; alert-only. */
+    async findCancelledCharged(limit = 100): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(eq(transfers.status, 'cancelled'), isNotNull(transfers.fundingRef), eq(transfers.refundStatus, 'none')))
+        .orderBy(transfers.createdAt)
+        .limit(limit);
       return rows.map((r) => toDomain(r));
     },
 

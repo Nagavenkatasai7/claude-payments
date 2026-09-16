@@ -219,6 +219,82 @@ describe('reconcileSweep — crash-resume (charged but never settled)', () => {
     expect(r.fundingResumed).toBe(0);
     expect(await outboxRows()).toHaveLength(0);
   });
+
+  it('a FLAGGED charged victim is HELD (in_review + stage1 row + its own deduped ops alert) and NO settlement.instruct is enqueued', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(victim({ complianceStatus: 'flagged' }));
+
+    const first = await reconcileSweep(db);
+    expect(first.fundingResumed).toBe(1); // resumed to its CORRECT next state (held)
+    const after = await store.getTransfer('rc_fund1');
+    expect(after?.status).toBe('in_review');
+    expect(after?.paidAt).toBeTruthy();
+    expect(after?.fundingRef).toBe('mockfund-rc_fund1'); // the charge is not lost
+    expect(await outboxRows()).toEqual([
+      { kind: 'whatsapp.text', dedupe_key: 'stage1:rc_fund1' },
+      { kind: 'ops.alert', dedupe_key: 'fundhold:rc_fund1' },
+    ]);
+    const alert = (await db.execute(
+      sql`SELECT payload->>'message' AS message FROM outbox WHERE dedupe_key = 'fundhold:rc_fund1'`,
+    )) as unknown as { rows: Array<{ message: string }> };
+    expect(alert.rows[0].message).toContain('HELD for compliance review');
+
+    // The stale-review sweep now owns it (>24h) — and re-sweeping adds nothing.
+    const second = await reconcileSweep(db);
+    expect(second.fundingResumed).toBe(0);
+    expect(await outboxRows()).toHaveLength(2);
+  });
+
+  it('a cleared charged victim still resumes to paid with the instruct row (regression)', async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+    await store.saveTransfer(victim());
+    const r = await reconcileSweep(db);
+    expect(r.fundingResumed).toBe(1);
+    expect((await store.getTransfer('rc_fund1'))?.status).toBe('paid');
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual([
+      'stage1:rc_fund1', 'instruct:rc_fund1', 'fundresume:rc_fund1',
+    ]);
+  });
+
+  it('a CANCELLED row that was CHARGED and never refunded (the capture↔cancel race) raises ONE deduped cancelcharged:<id> alert and moves nothing', async () => {
+    // captureFunding = provider.capture THEN setFundingRef; Task 5's cancel guard is
+    // funding_ref IS NULL, so a cancel that lands between those two calls leaves
+    // exactly this row. No sweep watched it before.
+    await store.saveTransfer(victim({ status: 'cancelled', refundStatus: 'none' }));
+    const first = await reconcileSweep(db);
+    expect(first.fundingResumed).toBe(0);
+    expect(await outboxRows()).toEqual([{ kind: 'ops.alert', dedupe_key: 'cancelcharged:rc_fund1' }]);
+    expect((await store.getTransfer('rc_fund1'))?.status).toBe('cancelled');
+    await reconcileSweep(db);
+    expect(await outboxRows()).toHaveLength(1);
+    // A cancelled row whose refund is already in flight is NOT alerted by THIS arm (that is Task 5's
+    // reject/refund path doing its job). Seed its funding.refund effect row first: without one, the
+    // PRE-EXISTING stuck-refund sweep in the same reconcileSweep call selects rc_fund2 too
+    // (listByRefundStatus('pending') → zero recent effect rows → `refundstuck:rc_fund2`, exactly as
+    // 'a pending refund with NO effect row at all (lost effect) alerts immediately' pins), and the
+    // whole-outbox assertion would read ['cancelcharged:rc_fund1', 'refundstuck:rc_fund2'].
+    await store.saveTransfer(victim({ id: 'rc_fund2', status: 'cancelled', refundStatus: 'pending' }));
+    await createOutboxRepo(db).enqueue('funding.refund', { transferId: 'rc_fund2' }, { dedupeKey: 'refund:rc_fund2' });
+    await reconcileSweep(db);
+    expect((await outboxRows()).map((x) => x.dedupe_key).filter((k) => k?.startsWith('cancelcharged:'))).toEqual(['cancelcharged:rc_fund1']);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('refundstuck:rc_fund2'); // fresh effect row ⇒ not stuck either
+  });
 });
 
 describe('reconcileSweep — stuck refunds', () => {
