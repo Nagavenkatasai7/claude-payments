@@ -267,25 +267,25 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     expect(((runAgentTurn.mock.calls[0] as unknown[])[4] as { routedPartnerId: string }).routedPartnerId).toBe('acme'); // the routed tenant reaches the agent
   });
 
-  it('a routedPartnerId that names NO partner runs the turn under DEFAULT and raises one deduped ops alert (a malformed/legacy row never runs under a nonexistent tenant)', async () => {
+  it('a routedPartnerId that names NO partner runs NO turn (fail closed — never under another tenant) and raises one deduped ops alert', async () => {
     await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'hi', turn: {}, routedPartnerId: 'ghost_partner' }, { dedupeKey: 'wamid:ghost1' });
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
-    const opts = (runAgentTurn.mock.calls[0] as unknown[])[4] as { routedPartnerId: string | null };
-    expect(opts.routedPartnerId).toBeNull(); // ⇒ DEFAULT_PARTNER_ID in the route wiring
+    expect(runAgentTurn).not.toHaveBeenCalled(); // never falls back to the default tenant
+    expect(sendText).not.toHaveBeenCalled();
     const alerts = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
     expect(alerts.rows.map((a) => a.dedupe_key)).toEqual([expect.stringMatching(/^badtenant:\d+$/)]);
   });
 
-  it('a routedPartnerId naming a SUSPENDED partner is treated the same: default tenant + one deduped badtenant alert (a suspended tenant must not keep serving customers through the shared number / its BYO pnid)', async () => {
+  it('a routedPartnerId naming a SUSPENDED partner is treated the same: no turn, no reply, one deduped badtenant alert (its still-valid app secret must not drive turns under ANY tenant)', async () => {
     await seedPartner(db, 'dormant');
     const repo = createPartnerRepo(db);
     await repo.savePartner({ ...(await repo.getPartner('dormant'))!, status: 'suspended', updatedAt: new Date().toISOString() }); // the non-active value Partner['status'] allows — check src/lib/types.ts
     await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'hi', turn: {}, routedPartnerId: 'dormant' }, { dedupeKey: 'wamid:dormant1' });
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
-    const opts = (runAgentTurn.mock.calls[0] as unknown[])[4] as { routedPartnerId: string | null };
-    expect(opts.routedPartnerId).toBeNull();
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
     const alerts = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
     expect(alerts.rows.map((a) => a.dedupe_key)).toEqual([expect.stringMatching(/^badtenant:\d+$/)]);
   });

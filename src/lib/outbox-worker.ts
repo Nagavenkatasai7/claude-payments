@@ -452,24 +452,25 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
       const requested = str(p.routedPartnerId);
       // The payload's routedPartnerId is an IDENTITY input (fix 1, D4): assert
       // it names an existing AND ACTIVE partner before a turn runs under it.
-      // /api/whatsapp/[partnerId] already refuses a suspended partner; the
-      // shared number + a BYO pnid must not keep serving a suspended tenant's
-      // customers through this path either. A malformed, legacy or inactive
-      // row falls back to the default tenant and raises ONE deduped ops alert
-      // — never a turn under a nonexistent or suspended tenant.
+      // FAIL CLOSED: an unknown or inactive (e.g. suspended) partner still holds
+      // a valid Meta app secret, so its signed webhook could name ANY `from`
+      // phone — running that turn under the default tenant would let it act as
+      // (and inject history into) another tenant's customer. The row is
+      // finished with NO agent run and NO reply, and ONE deduped ops alert is
+      // raised (keyed on the row id, so retries never re-alert).
       let routedPartnerId: PartnerId | null = null;
       if (requested) {
         const known = await createPartnerRepo(deps.db).getPartner(requested);
-        if (known && known.status === 'active') {
-          routedPartnerId = requested;
-        } else {
-          logWarn('worker.agent', 'agent.turn routedPartnerId names no ACTIVE partner — running under default', { id: row.id, kind: row.kind });
+        if (!known || known.status !== 'active') {
+          logWarn('worker.agent', 'agent.turn routedPartnerId names no ACTIVE partner — turn dropped', { id: row.id, kind: row.kind });
           await createOutboxRepo(deps.db).enqueue(
             'ops.alert',
-            { message: `⚠️ SmartRemit ops: outbox #${row.id} (agent.turn) carried an unknown or inactive routedPartnerId; the turn ran under the default tenant. Check the inbound routing config.` },
+            { message: `⚠️ SmartRemit ops: outbox #${row.id} (agent.turn) carried an unknown or inactive routedPartnerId; the turn was dropped. Check the inbound routing config.` },
             { dedupeKey: `badtenant:${row.id}` },
           );
+          return;
         }
+        routedPartnerId = requested;
       }
       // Re-resolve the routing partner's outbound creds at RUN time (the
       // payload never carries tokens; rotation is picked up automatically).
