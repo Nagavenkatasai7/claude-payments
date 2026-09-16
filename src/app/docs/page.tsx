@@ -213,6 +213,14 @@ x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
             stored write-once against the transfer. Use <code>reference</code> to deduplicate: the
             instruction is at-least-once.
           </p>
+          {/* keep in sync with RAIL_TIMEOUT_MS in src/lib/providers/http-payment-provider.ts */}
+          <p className="text-sm text-muted-foreground">
+            <strong>Ack deadline: 15 seconds.</strong> We wait at most 15s for your <code>2xx</code>;
+            a slower response is treated as a failure and the SAME instruction (same{' '}
+            <code>reference</code>) is retried with exponential backoff. Persist and ack first, then
+            process asynchronously — and dedupe on <code>reference</code>, so a retry after a slow
+            ack can never pay out twice.
+          </p>
         </section>
 
         <Separator />

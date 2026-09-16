@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { requireScope } from '@/lib/auth';
 import { getDb } from '@/db/client';
-import { getOpsSnapshot, STUCK_PAID_MINUTES, STALE_REVIEW_HOURS } from '@/lib/reconcile';
+import { getOpsSnapshot, STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -56,6 +56,7 @@ export default async function OpsPage() {
     snap.refundsRequested.length + snap.refundsPending.length + snap.refundsFailed.length;
   const healthy =
     snap.deadLetters.length === 0 &&
+    snap.staleLocks.length === 0 &&
     snap.stuckPaid.length === 0 &&
     snap.staleReviews.length === 0 &&
     refundsTotal === 0;
@@ -73,7 +74,7 @@ export default async function OpsPage() {
           </div>
         </div>
 
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4 mb-6">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-5 mb-6">
           <Card>
             <CardHeader className="pb-2">
               <CardDescription>Outbox pending</CardDescription>
@@ -90,6 +91,15 @@ export default async function OpsPage() {
             </CardHeader>
             <CardContent className="text-xs text-muted-foreground">
               effects that exhausted retries
+            </CardContent>
+          </Card>
+          <Card className={snap.staleLocks.length ? 'border-destructive/50' : ''}>
+            <CardHeader className="pb-2">
+              <CardDescription>Stale locks</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{snap.staleLocks.length}</CardTitle>
+            </CardHeader>
+            <CardContent className="text-xs text-muted-foreground">
+              lease expired &gt;{STALE_LOCK_MINUTES}m, not reclaimed — drain down?
             </CardContent>
           </Card>
           <Card className={snap.stuckPaid.length ? 'border-destructive/50' : ''}>
@@ -155,6 +165,41 @@ export default async function OpsPage() {
                             recommended one + disables Retry for permanent errors. */}
                         <DiagnosePanel subjectId={String(row.id)} kind="dead_letter" />
                       </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        )}
+
+        {snap.staleLocks.length > 0 && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>Stale locks</CardTitle>
+              <CardDescription>
+                Effects still marked processing more than {STALE_LOCK_MINUTES}m after their lease
+                expired. The next drain reclaims them automatically — if these persist, the worker
+                heartbeat is not running.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>#</TableHead>
+                    <TableHead>Kind</TableHead>
+                    <TableHead>Attempts</TableHead>
+                    <TableHead>Lease expired</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {snap.staleLocks.map((row) => (
+                    <TableRow key={row.id}>
+                      <TableCell className="tabular-nums">{row.id}</TableCell>
+                      <TableCell><Badge variant="outline">{row.kind}</Badge></TableCell>
+                      <TableCell className="tabular-nums">{row.attempts}</TableCell>
+                      <TableCell>{age(row.leaseUntil?.toISOString())} ago</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
