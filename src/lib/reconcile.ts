@@ -3,7 +3,7 @@ import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { beginSettlement } from '@/lib/settlement';
+import { settleOrHold } from '@/lib/settlement';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import type { Transfer } from '@/lib/types';
 
@@ -15,7 +15,9 @@ import type { Transfer } from '@/lib/types';
 //     never called back, or the instruction died) → re-instruct ONCE + alert,
 //   • a compliance hold ('in_review') nobody has touched in 24h → alert,
 //   • a CHARGED transfer still awaiting_payment (fundingRef set; the process
-//     died between capture and beginSettlement) → resume settlement + alert,
+//     died between capture and settleOrHold) → resume settlement (cleared) or
+//     HOLD for review (flagged) + alert,
+//   • cancelled + charged + unrefunded → alert (`cancelcharged:`),
 //   • a refund in flight for over an hour → alert (ops decides; no auto-retry),
 //   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert.
 // Every enqueue is dedupe-keyed per transfer, so the sweep firing every minute
@@ -105,11 +107,17 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
   }
 
   // CRASH-RESUME: the customer was CHARGED (fundingRef is write-once, set
-  // before beginSettlement) but the process died before settlement started —
-  // the one state the funds-capture seam can strand. Resume it: beginSettlement
-  // is the same atomic claim the pay route uses (markPaidIfAwaiting), so the
-  // sweep firing every minute settles each victim EXACTLY once, and a victim
-  // racing its own resurrected pay request is still a clean no-op.
+  // before settlement) but the process died before settlement/hold committed —
+  // the one state the funds-capture seam can strand. Resume it through
+  // settleOrHold, the same atomic claims the pay route uses, so the sweep
+  // firing every minute moves each victim EXACTLY once and a victim racing its
+  // own resurrected pay request is still a clean no-op. COMPLIANCE: a charged
+  // FLAGGED victim is HELD (in_review + held stage-1 message, one transaction)
+  // and never instructed; a charged BLOCKED victim (should not exist — blocked
+  // rows are never charged) is left untouched with its own alert for ops to
+  // refund. Both count as "resumed": the charged row reached its correct next
+  // state. NEVER add a compliance predicate to listAwaitingWithFunding — that
+  // would abandon charged flagged rows instead of holding them.
   const victims = await transfers.listAwaitingWithFunding(FUNDING_RESUME_MINUTES * 60_000);
   let fundingResumed = 0;
   for (const t of victims) {
@@ -122,16 +130,67 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     const brandIntegrations = t.settlementPartnerId
       ? await integrationsRepo.getIntegrations(t.partnerId)
       : railIntegrations;
-    const result = await beginSettlement(db, t, railIntegrations, waCredsFrom(brandIntegrations));
-    if (result.kind === 'started') fundingResumed++;
+    const result = await settleOrHold(db, t, railIntegrations, waCredsFrom(brandIntegrations));
+    const prefix = `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged (${t.fundingRef}) but never settled — `;
+    switch (result.kind) {
+      case 'started':
+        fundingResumed++;
+        await outbox.enqueue(
+          'ops.alert',
+          { message: prefix + 'resumed settlement from the sweep.' },
+          { dedupeKey: `fundresume:${t.id}` },
+        );
+        break;
+      case 'held':
+        // Correct ONLY because a staff release actually instructs the rail
+        // (settlement.releaseHold, Step 2) — otherwise "held" would be a
+        // charged row the rail is never told about.
+        fundingResumed++;
+        await outbox.enqueue(
+          'ops.alert',
+          { message: prefix + 'flagged by compliance, so it was HELD for compliance review (in_review), not instructed. Release or reject it in the dashboard.' },
+          { dedupeKey: `fundhold:${t.id}` },
+        );
+        break;
+      case 'refused':
+        // Charged AND blocked: nothing may move. Practically unreachable (a
+        // sanctions hit lands as status 'blocked' at mint, before any charge,
+        // and nothing re-screens a row after mint) — but the tests construct
+        // it, so name the escalation honestly: there is NO in-app remedy for a
+        // charged blocked row (fix 5's Cancel refuses a charged row, Refund
+        // accepts only paid|delivered), so it is a change-ticket: refund at the
+        // funding provider, then record the outcome with a direct ledger edit
+        // (status 'cancelled', refund_status 'completed', refund_ref).
+        await outbox.enqueue(
+          'ops.alert',
+          { message: prefix + 'it is BLOCKED by compliance and was CHARGED. NOT settled. No dashboard action applies — refund at the funding provider and close it with a direct ledger edit under a change ticket.' },
+          { dedupeKey: `fundblocked:${t.id}` },
+        );
+        break;
+      case 'already':
+        // Lost the race to a resurrected pay request / a concurrent sweep —
+        // the row already moved; keep today's alert (deduped) for the record.
+        await outbox.enqueue(
+          'ops.alert',
+          { message: prefix + 'resumed settlement from the sweep.' },
+          { dedupeKey: `fundresume:${t.id}` },
+        );
+        break;
+    }
+  }
+
+  // CHARGED-BUT-CANCELLED (the capture↔cancel race): captureFunding is
+  // provider.capture THEN setFundingRef, and the staff cancel guard (Task 5,
+  // cancelIfCancellable) is `funding_ref IS NULL`, so a cancel landing between
+  // those two calls leaves a cancelled row the customer paid for and nothing
+  // refunds. No sweep watched that state. Alert once per row; ops refund it by
+  // hand (issueRefund accepts paid|delivered only — by design, the remedy is a
+  // human decision). Rows already refunding are Task 5's reject path at work.
+  for (const t of await transfers.findCancelledCharged()) {
     await outbox.enqueue(
       'ops.alert',
-      {
-        message:
-          `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged ` +
-          `(${t.fundingRef}) but never settled — resumed settlement from the sweep.`,
-      },
-      { dedupeKey: `fundresume:${t.id}` },
+      { message: `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) is CANCELLED but was CHARGED (${t.fundingRef}) and has no refund in flight — refund it by hand.` },
+      { dedupeKey: `cancelcharged:${t.id}` },
     );
   }
 

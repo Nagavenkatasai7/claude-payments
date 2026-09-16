@@ -90,7 +90,7 @@ export default function DocsPage() {
               <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header REQUIRED" />
               <Endpoint method="GET" path="/transactions" desc="List your transfers (keyset: ?limit=&cursor=)" />
               <Endpoint method="GET" path="/transactions/:id" desc="Fetch one transfer (404 outside your scope)" />
-              <Endpoint method="POST" path="/transactions/:id/confirm" desc="Confirm funds captured → settlement begins" />
+              <Endpoint method="POST" path="/transactions/:id/confirm" desc="Confirm funds captured → settlement begins (a flagged transfer is held in_review for compliance release; a blocked one is 422)" />
               <Endpoint method="PUT" path="/rates" desc="Push one corridor's wholesale conversion rate" />
               <Endpoint method="GET" path="/rates" desc="Your current rate sheet (freshness + margin)" />
             </CardContent>

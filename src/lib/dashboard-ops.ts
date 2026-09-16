@@ -1,11 +1,14 @@
 import { env } from './env';
-import { completePaymentStage2 } from './payment';
 import { isPartnerPulled } from './funding-method';
 import { pokeWorker } from './outbox';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { releaseHold } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
+import type { Scope } from './staff-scope';
+import type { Partner } from './types';
 
 export async function cancelTransfer(store: Store, id: string): Promise<void> {
   const transfer = await store.getTransfer(id);
@@ -25,7 +28,12 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
       'Cannot cancel a paid partner-pulled transfer directly — use Reverse (it instructs the partner to return the debit).',
     );
   }
-  await store.saveTransfer({ ...transfer, status: 'cancelled' });
+  // Status-guarded: a release / settlement that moved the row after the read
+  // above must never be overwritten by a stale full-row save.
+  const cancelled = await store.updateTransferIfStatus(id, transfer.status, { status: 'cancelled' });
+  if (!cancelled) {
+    throw new Error('Cannot cancel: the transfer changed concurrently — reload and try again.');
+  }
 }
 
 /**
@@ -80,7 +88,11 @@ export async function assignTransfer(
   if (!transfer) {
     throw new Error('Transfer not found');
   }
-  await store.saveTransfer({ ...transfer, assignedTo: assignee, adminNote: note });
+  // Status-guarded + column-targeted: never a stale full-row upsert.
+  const assigned = await store.updateTransferIfStatus(id, transfer.status, { assignedTo: assignee, adminNote: note });
+  if (!assigned) {
+    throw new Error('Cannot assign: the transfer changed concurrently — reload and try again.');
+  }
 }
 
 export async function resendPaymentLink(
@@ -97,11 +109,36 @@ export async function resendPaymentLink(
 }
 
 /**
- * Release a held (in_review) transfer: run stage 2 delivery.
- * Called by the compliance dashboard "Release" action.
- * Throws if the transfer is not exactly in_review (guards double-release/wrong-status).
+ * WHO may release a compliance hold. OWNER DECISION (2026-09-16): releasing a
+ * transfer that SmartRemit's OWN screening flagged — owning partner kycMode
+ * 'ours', which is also the default when kycMode is unset — requires PLATFORM
+ * staff. A partner-scoped admin may release only a 'delegated'-mode partner's
+ * hold. A missing partner row fails CLOSED for partner-scoped staff.
+ * Sanctions-blocked rows stay unreleasable for everyone regardless of this
+ * (markPaidIfInReview carries compliance_status <> 'blocked').
+ * Pure: the server action (authoritative gate) and the compliance page (which
+ * hides the Release button) both call it, so the UI can never drift from it.
  */
-export async function releaseTransfer(store: Store, id: string): Promise<void> {
+export function canReleaseHeld(
+  scope: Scope,
+  owner: Pick<Partner, 'kycMode'> | null | undefined,
+): boolean {
+  if (scope.kind === 'platform') return true;
+  return owner?.kycMode === 'delegated';
+}
+
+/**
+ * Release a held (in_review) transfer — a SETTLEMENT, not a status flip:
+ * settlement.releaseHold commits in_review → paid AND the rail effect (signed
+ * instruct / delayed mock settle) in ONE transaction, so the partner rail is
+ * actually told to pay out (and to debit a B2B buyer). Rail config follows
+ * the same rule as every settlement caller: the SETTLEMENT partner's when
+ * routed, else the owner's. Throws if the transfer is not exactly in_review
+ * (guards double-release / wrong status) — the status check is re-done by the
+ * guarded claim inside releaseHold, so a race can never release twice.
+ * Called by the compliance dashboard "Release" action (admin-gated, audited).
+ */
+export async function releaseTransfer(store: Store, db: Db, id: string): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
@@ -109,7 +146,12 @@ export async function releaseTransfer(store: Store, id: string): Promise<void> {
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot release: transfer is not in_review (current status: ${transfer.status})`);
   }
-  await completePaymentStage2(store, id);
+  const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
+  const r = await releaseHold(db, transfer, railIntegrations);
+  if (r.kind === 'already') {
+    throw new Error('Cannot release: transfer is not in_review (it moved concurrently)');
+  }
+  pokeWorker(); // fast path for the rail effect — the heartbeat is the guarantee
 }
 
 /**
@@ -129,27 +171,28 @@ export async function rejectTransfer(store: Store, db: Db, id: string): Promise<
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot reject: transfer is not in_review (current status: ${transfer.status})`);
   }
-  const cancelled = { ...transfer, status: 'cancelled' as const, adminNote: 'rejected in review' };
-  if (!transfer.fundingRef) {
-    // Uncharged legacy rows: cancel-only — there is no charge to return.
-    await store.saveTransfer(cancelled);
-    return;
-  }
-  // CHARGED: the cancel, the refund-pending flip and the durable funding.refund
-  // effect commit in ONE transaction — a crash can never leave a cancelled,
-  // charged, UNREFUNDED transfer (a state no sweep watches). none → pending is
-  // a legal move; a replayed reject is blocked upstream by the in_review check,
-  // and the dedupe key blocks a duplicate effect.
-  await db.transaction(async (tx) => {
+  // The in_review check above is advisory; the GUARDED UPDATE below is the
+  // claim. A concurrent release (in_review → paid + rail instructed) between
+  // the read and here makes it match nothing ⇒ throw, enqueue nothing — never
+  // pay out AND refund. CHARGED: the cancel claim, the refund-pending flip and
+  // the durable funding.refund effect commit in ONE transaction, so a crash
+  // can never leave a cancelled, charged, UNREFUNDED transfer.
+  const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    await repo.saveTransfer(cancelled);
+    const cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+    if (!cancelled) {
+      throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+    }
+    if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only
     await repo.updateRefund(id, { refundStatus: 'pending' });
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
       { transferId: id },
       { dedupeKey: `refund:${id}` },
     );
+    return true;
   });
+  if (!refunding) return;
   pokeWorker(); // fast path — the heartbeat is the guarantee
 }
 

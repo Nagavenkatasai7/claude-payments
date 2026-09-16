@@ -97,6 +97,14 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async saveTransfer(transfer: Transfer): Promise<void> {
       await transfersRepo.saveTransfer(transfer);
     },
+    /** Status-guarded staff edit (reject / cancel / assign) — see transfer-repo.updateIfStatus. */
+    async updateTransferIfStatus(
+      id: string,
+      expected: TransferStatus,
+      patch: { status?: TransferStatus; adminNote?: string; assignedTo?: string },
+    ): Promise<Transfer | null> {
+      return transfersRepo.updateIfStatus(id, expected, patch);
+    },
     async updateTransferFromWebhook(
       transferId: string,
       status: TransferStatus,

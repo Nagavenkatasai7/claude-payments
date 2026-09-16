@@ -369,23 +369,31 @@ export default async function PartnerDetailPage({
                       <Label>Logo</Label>
                       <LogoUpload name="logoUrl" defaultValue={partner.logoUrl ?? ''} />
                     </div>
-                    <fieldset className="rounded-lg border border-border p-4">
-                      <legend className="px-1 text-sm font-medium">KYC handling</legend>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="p-kycmode">Who runs identity verification?</Label>
-                        <select id="p-kycmode" className={SELECT_CLASS} name="kycMode" defaultValue={partner.kycMode ?? 'ours'}>
-                          <option value="ours">SmartRemit runs KYC (default)</option>
-                          <option value="delegated">Partner runs KYC (delegated)</option>
-                        </select>
-                      </div>
-                      <label className="mt-3 flex items-center gap-1.5 text-sm">
-                        <input type="checkbox" name="requireKycBeforeSend" defaultChecked={partner.requireKycBeforeSend === true} />{' '}
-                        Require identity verification before sending (off ⇒ customers send immediately)
-                      </label>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Off by default. Sanctions screening always runs, in both modes, regardless of this setting.
+                    {/* KYC posture is platform-governed (owner decision 2026-09-16):
+                        the server action ignores a partner admin's values. */}
+                    {!staff.partnerId ? (
+                      <fieldset className="rounded-lg border border-border p-4">
+                        <legend className="px-1 text-sm font-medium">KYC handling</legend>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="p-kycmode">Who runs identity verification?</Label>
+                          <select id="p-kycmode" className={SELECT_CLASS} name="kycMode" defaultValue={partner.kycMode ?? 'ours'}>
+                            <option value="ours">SmartRemit runs KYC (default)</option>
+                            <option value="delegated">Partner runs KYC (delegated)</option>
+                          </select>
+                        </div>
+                        <label className="mt-3 flex items-center gap-1.5 text-sm">
+                          <input type="checkbox" name="requireKycBeforeSend" defaultChecked={partner.requireKycBeforeSend === true} />{' '}
+                          Require identity verification before sending (off ⇒ customers send immediately)
+                        </label>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          Off by default. Sanctions screening always runs, in both modes, regardless of this setting.
+                        </p>
+                      </fieldset>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        KYC handling: {partner.kycMode === 'delegated' ? 'partner-run (delegated)' : 'SmartRemit-run'} — changed by SmartRemit platform staff.
                       </p>
-                    </fieldset>
+                    )}
                     <Input name="adminNote" defaultValue={partner.adminNote ?? ''} placeholder="Admin note (internal, optional)" />
                     <Button type="submit">Save changes</Button>
                   </form>

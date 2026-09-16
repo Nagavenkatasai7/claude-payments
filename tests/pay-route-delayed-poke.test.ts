@@ -195,20 +195,21 @@ describe('pay route — delayed best-effort poke for the delivered message', () 
     expect(workerCalls()).toBe(1);
   });
 
-  it("'already' replay (double submit): NO delayed poke is scheduled", async () => {
-    // Not awaiting_payment anymore ⇒ beginSettlement returns kind 'already'.
+  it("'already' replay (double submit): NO poke at all is scheduled — the status guard returns before any effect", async () => {
+    // Not awaiting_payment anymore ⇒ the pre-capture status guard reports
+    // current truth; nothing was enqueued, so there is nothing to drain.
     await store.saveTransfer(makeTransfer({ id: 'd3', status: 'paid' }));
     const res = await post('d3');
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, status: 'paid' });
 
-    expect(captured.afterCallbacks).toHaveLength(1); // immediate poke only
+    expect(captured.afterCallbacks).toHaveLength(0);
 
     vi.useFakeTimers();
     const settled = startCallbacks();
     await vi.advanceTimersByTimeAsync(DELIVERY_DELAY_MS + 60_000);
     await settled;
-    expect(workerCalls()).toBe(1);
+    expect(workerCalls()).toBe(0);
   });
 
   it("ROUTED transfer: the RAIL is the settlement partner's; stage-1 creds stay the OWNER's", async () => {

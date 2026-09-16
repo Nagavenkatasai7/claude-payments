@@ -10,7 +10,7 @@ import { getB2bQuoteStore } from '@/lib/b2b-quote-store';
 import { billDenomination } from '@/lib/b2b-quote';
 import { getFxRates } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
-import { beginSettlement } from '@/lib/settlement';
+import { settleOrHold } from '@/lib/settlement';
 import { isB2bSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { countryForPhone, currencyForPhone } from '@/lib/partner-currency';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
@@ -52,7 +52,7 @@ function validateAndTokenizeBuyerBank(
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ invoiceId: string }> },
-) {
+): Promise<NextResponse> {
   const { invoiceId } = await params;
 
   // Per-IP ceiling over the whole route (request_otp + pay attempts). Fail-open.
@@ -233,6 +233,9 @@ export async function POST(
     }
 
     // ── NON-CUSTODIAL settlement: ONE signed dual-leg instruction; NO capture ─
+    // settleOrHold is the ONE compliance decision: cleared → beginSettlement
+    // (signed instruct); flagged → beginHold (in_review + held message, NO
+    // instruction — the partner never debits the buyer until staff release).
     const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
     const integrationsStore = getPartnerIntegrationsStore();
     const railIntegrations = await integrationsStore.getIntegrations(railPartnerId);
@@ -242,13 +245,23 @@ export async function POST(
         : await integrationsStore.getIntegrations(transfer.partnerId);
     const waCreds = waCredsFrom(brandIntegrations);
 
-    const result = await beginSettlement(getDb(), transfer, railIntegrations, waCreds);
+    const result = await settleOrHold(getDb(), transfer, railIntegrations, waCreds);
     pokeWorker();
-    if (result.kind === 'already') {
-      const current = await store.getTransfer(transfer.id);
-      return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
+    switch (result.kind) {
+      case 'held':
+        return NextResponse.json({ ok: true, status: 'in_review' });
+      case 'already': {
+        const current = await store.getTransfer(transfer.id);
+        return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
+      }
+      case 'refused':
+        // b2b-pay-finalize already returns { error: 'blocked' } for a blocked
+        // mint (handled above) — kept exhaustive so a refusal never reads as
+        // success. Same generic copy as the blocked mint: no compliance leak.
+        return NextResponse.json({ ok: false, error: "We can't process this payment." }, { status: 400 });
+      case 'started':
+        return NextResponse.json({ ok: true, status: 'processing' });
     }
-    return NextResponse.json({ ok: true, status: 'processing' });
   } catch (err) {
     logError('pay.b2b.route', err, { invoiceId });
     return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });

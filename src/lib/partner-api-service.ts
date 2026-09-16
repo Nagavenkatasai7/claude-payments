@@ -22,7 +22,7 @@ import {
   type BeneficiaryRecord,
 } from '@/db/repos/aux-repos';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { beginSettlement } from './settlement';
+import { beginHold, settleOrHold } from './settlement';
 import { pokeWorker, pokeWorkerDelayed } from './outbox';
 import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
@@ -379,6 +379,13 @@ export async function getTransaction(
 }
 
 // ── POST /transactions/:id/confirm (ownership-scoped) ─────────────────────
+//
+// COMPLIANCE HOLD (F51): the hold is decided HERE — before, and independent
+// of, the injectable `deps.initiatePayment` seam — so neither a test double
+// nor any partner configuration can route a flagged transfer to a rail.
+// Sanctions/compliance screening is structurally untoggleable and applies in
+// BOTH KYC modes: a delegated-KYC key holds exactly like an 'ours' key (the
+// check is on complianceStatus, never on kycMode).
 export async function confirmTransaction(
   deps: PartnerApiDeps,
   partner: Partner,
@@ -386,17 +393,40 @@ export async function confirmTransaction(
   id: string,
 ): Promise<SvcResult<unknown>> {
   const t = await deps.store.getTransfer(id);
+  // 404 (never 403) BEFORE any read or mutation of another tenant's row.
   if (!t || t.partnerId !== partner.id) return err(404, 'Transaction not found.');
   if (t.complianceStatus === 'blocked' || t.status === 'blocked') return err(422, 'This transfer was blocked by compliance screening.');
-  if (t.status === 'paid' || t.status === 'delivered') return ok(200, await transferViewWithName(deps, t)); // already confirmed
+  // Idempotent replay: already settled OR already held → current truth, no second effect.
+  if (t.status === 'paid' || t.status === 'delivered' || t.status === 'in_review') {
+    return ok(200, await transferViewWithName(deps, t));
+  }
   if (t.status !== 'awaiting_payment') return err(409, `Cannot confirm a transfer in status ${t.status}.`);
+
+  if (t.complianceStatus !== 'cleared') {
+    // FLAGGED: hold, never settle. beginHold is ONE transaction (in_review
+    // flip + held stage-1 outbox row, dedupe stage1:<id>); NO rail effect.
+    // Partner-scoped: ownership was checked above; creds are the OWNER's.
+    const integrations = await deps.integrationsStore.getIntegrations(partner.id);
+    const hold = await beginHold(deps.db as Db, t, waCredsFrom(integrations));
+    if (hold.kind === 'held') {
+      pokeWorker(); // the held "payment received / under review" message is READY now
+      // Audit ONLY a real transition (mirrors the settle path below): on the
+      // 'already' race a concurrent confirm/pay won and audited it — a second
+      // transaction.confirm row here would record a no-op as an action.
+      await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);
+    }
+    const held = await deps.store.getTransfer(id);
+    return ok(200, await transferViewWithName(deps, held ?? t));
+  }
 
   const initiate = deps.initiatePayment ?? (async (tr: Transfer) => {
     // Stage 2c: the atomic settlement transaction — paid flip + stage-1 message
     // + rail effect (signed instruct / delayed mock settle) commit together,
-    // with the partner's WhatsApp creds on the customer message.
+    // with the partner's WhatsApp creds on the customer message. settleOrHold
+    // re-checks the LEDGER: if the row was re-screened to flagged since the
+    // read above, it is held instead of instructed.
     const integrations = await deps.integrationsStore.getIntegrations(partner.id);
-    const result = await beginSettlement(deps.db as Db, tr, integrations, waCredsFrom(integrations));
+    const result = await settleOrHold(deps.db as Db, tr, integrations, waCredsFrom(integrations));
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its
     // simulated DELIVERY_DELAY_MS. The 5-min heartbeat stays the guarantee.
@@ -404,6 +434,8 @@ export async function confirmTransaction(
     if (result.kind === 'started' && !result.webhookDriven) {
       pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);
     }
+    // 'held' / 'already' / 'refused' need no further effect here: the re-read
+    // below returns the ledger's current truth (in_review / paid / awaiting).
   });
   await initiate(t);
   await appendAudit(deps, partner.id, keyId, 'transaction.confirm', t.id);

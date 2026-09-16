@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -14,6 +15,11 @@ import {
   type PartnerApiDeps,
 } from '@/lib/partner-api-service';
 import type { Partner } from '@/lib/types';
+import { pokeWorker } from '@/lib/outbox';
+
+// The hold path pokes the worker inside confirmTransaction — assert the poke
+// instead of tolerating after() throwing outside a request context.
+vi.mock('@/lib/outbox', () => ({ pokeWorker: vi.fn(), pokeWorkerDelayed: vi.fn() }));
 
 const NOW = '2026-06-08T00:00:00Z';
 
@@ -78,6 +84,7 @@ const txBody = (over: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   resetRateCacheForTests();
+  vi.mocked(pokeWorker).mockClear();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
   }));
@@ -453,5 +460,103 @@ describe('partner-api-service: sender.phone is bound to the calling tenant (fix 
     expect(missing).toMatchObject({ ok: false, status: 404 });
     expect(await createIdempotencyRepo(deps.db).find('acme', 'idem-t5')).toBeNull();
     expect(await customerStore.getCustomer('acme', '15557770001')).toBeNull();
+  });
+});
+
+describe('partner-api-service: confirmTransaction enforces the compliance hold (F51)', () => {
+  async function outboxRows(db: Awaited<ReturnType<typeof harness>>['db']) {
+    const r = await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
+    return (r as unknown as { rows: Array<{ kind: string; dedupe_key: string | null }> }).rows;
+  }
+  /** Mint a cleared transfer, then flag it on the ledger (the way the velocity /
+   *  large-amount rules would at createTransfer time). Decrypted read → save,
+   *  so the stored payout destination is not clobbered by the mask. */
+  async function mintFlagged(h: Awaited<ReturnType<typeof harness>>, p: Partner, idem: string) {
+    const created = await createTransaction(h.deps, p, 'pk_1', idem, txBody());
+    if (!created.ok) throw new Error('unexpected: ' + created.error);
+    const id = (created.data as { id: string }).id;
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
+    return id;
+  }
+
+  it('on a FLAGGED transfer returns 200 with status in_review and enqueues NO settlement.instruct / mock.settle row', async () => {
+    const h = await harness();
+    const id = await mintFlagged(h, DELEGATED, 'idem-hold-1');
+
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as { status: string; compliance_status: string })).toMatchObject({ status: 'in_review', compliance_status: 'flagged' });
+
+    const after = await h.store.getTransfer(id);
+    expect(after?.status).toBe('in_review');
+    expect(after?.paidAt).toBeTruthy();
+    const rows = await outboxRows(h.db);
+    expect(rows.map((x) => x.kind)).not.toContain('settlement.instruct');
+    expect(rows.map((x) => x.kind)).not.toContain('mock.settle');
+    expect(rows.filter((x) => x.dedupe_key === `stage1:${id}`)).toEqual([{ kind: 'whatsapp.text', dedupe_key: `stage1:${id}` }]);
+    expect(pokeWorker).toHaveBeenCalled(); // the held stage-1 message is READY now — fast-path drain requested
+  });
+
+  it('on a flagged transfer NEVER calls deps.initiatePayment (the hold is decided before the injection seam)', async () => {
+    const h = await harness();
+    const initiatePayment = vi.fn(h.deps.initiatePayment!); // the harness fake flips straight to paid
+    h.deps.initiatePayment = initiatePayment;
+    const id = await mintFlagged(h, DELEGATED, 'idem-hold-2');
+
+    await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(initiatePayment).not.toHaveBeenCalled();
+    expect((await h.store.getTransfer(id))?.status).toBe('in_review');
+  });
+
+  it('a DELEGATED-KYC key holds exactly like an OURS key (sanctions/compliance is untoggleable)', async () => {
+    const h = await harness();
+    await h.deps.partnerStore.savePartner(OURS);
+    // Mint under OURS with the gate off for the mint only (kyc_required would 422 the mint); the HOLD must not care.
+    const id = await mintFlagged(h, { ...OURS, kycMode: 'delegated', requireKycBeforeSend: false }, 'idem-hold-3');
+    const r = await confirmTransaction(h.deps, OURS, 'pk_2', id);
+    expect(r).toMatchObject({ ok: true, status: 200 });
+    if (r.ok) expect((r.data as { status: string }).status).toBe('in_review');
+  });
+
+  it('a replayed confirm on a held transfer is idempotent: 200 in_review, no second message, no review re-entry, no second audit row', async () => {
+    const h = await harness();
+    const id = await mintFlagged(h, DELEGATED, 'idem-hold-4');
+    await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    const paidAt = (await h.store.getTransfer(id))?.paidAt;
+    const before = (await outboxRows(h.db)).length;
+    const auditsBefore = (await h.db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'transaction.confirm'`)) as unknown as { rows: Array<{ n: number }> };
+    expect(auditsBefore.rows[0].n).toBe(1);
+
+    const replay = await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    expect(replay).toMatchObject({ ok: true, status: 200 });
+    if (replay.ok) expect((replay.data as { status: string }).status).toBe('in_review');
+    expect((await outboxRows(h.db)).length).toBe(before);
+    expect((await h.store.getTransfer(id))?.paidAt).toBe(paidAt);
+    const auditsAfter = (await h.db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'transaction.confirm'`)) as unknown as { rows: Array<{ n: number }> };
+    expect(auditsAfter.rows[0].n).toBe(1); // the replay short-circuits above the hold; a hold that loses the race audits nothing either
+  });
+
+  it('still 422s a blocked transfer and still settles a cleared one to paid (regression)', async () => {
+    const h = await harness();
+    const created = await createTransaction(h.deps, DELEGATED, 'pk_1', 'idem-reg-1', txBody());
+    const id = created.ok ? (created.data as { id: string }).id : '';
+    const cur = await h.store.getTransferDecrypted(id);
+    await h.store.saveTransfer({ ...cur!, complianceStatus: 'blocked' });
+    expect(await confirmTransaction(h.deps, DELEGATED, 'pk_1', id)).toMatchObject({ ok: false, status: 422 });
+    expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+
+    const okc = await createTransaction(h.deps, DELEGATED, 'pk_1', 'idem-reg-2', txBody());
+    const okId = okc.ok ? (okc.data as { id: string }).id : '';
+    const r = await confirmTransaction(h.deps, DELEGATED, 'pk_1', okId);
+    if (r.ok) expect((r.data as { status: string }).status).toBe('paid');
+  });
+
+  it('rival partner still gets 404 for a flagged transfer (ownership before any hold read/mutation)', async () => {
+    const h = await harness();
+    const id = await mintFlagged(h, DELEGATED, 'idem-hold-5');
+    expect(await confirmTransaction(h.deps, partner({ id: 'rival' }), 'pk_r', id)).toMatchObject({ ok: false, status: 404 });
+    expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
+    expect(await outboxRows(h.db)).toHaveLength(0);
   });
 });

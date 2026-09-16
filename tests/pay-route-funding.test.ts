@@ -107,20 +107,21 @@ vi.mock('@/lib/providers/funding-provider', async (orig) => {
   };
 });
 
-// Wrap beginSettlement to observe what the LEDGER says at the moment
-// settlement starts — the fundingRef must already be durable by then.
+// Wrap settleOrHold (the route's ONE settlement entry point) to observe what
+// the LEDGER says at the moment settlement/hold starts — the fundingRef must
+// already be durable by then. beginSettlement/beginHold stay real underneath.
 const observed = vi.hoisted(() => ({ fundingRefAtSettle: undefined as string | undefined,
   statusAtSettle: undefined as string | undefined }));
 vi.mock('@/lib/settlement', async (orig) => {
   const real = await orig<typeof import('@/lib/settlement')>();
   return {
     ...real,
-    beginSettlement: async (...args: Parameters<typeof real.beginSettlement>) => {
+    settleOrHold: async (...args: Parameters<typeof real.settleOrHold>) => {
       captured.order.push('settle');
       const t = await store.getTransfer(args[1].id);
       observed.fundingRefAtSettle = t?.fundingRef;
       observed.statusAtSettle = t?.status;
-      return real.beginSettlement(...args);
+      return real.settleOrHold(...args);
     },
   };
 });
@@ -151,6 +152,13 @@ const outboxCount = async () => {
     rows: Array<{ n: number }>;
   };
   return rows.rows[0].n;
+};
+
+const outboxRows = async () => {
+  const rows = (await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`)) as unknown as {
+    rows: Array<{ kind: string; dedupe_key: string | null }>;
+  };
+  return rows.rows;
 };
 
 beforeEach(async () => {
@@ -249,22 +257,30 @@ describe('pay route — funds capture ordering (cleared branch)', () => {
 });
 
 describe('pay route — funds capture ordering (flagged/held branch)', () => {
-  it('flagged transfer: capture runs BEFORE the held message; ends in_review with fundingRef', async () => {
+  it('flagged transfer: capture runs BEFORE the hold; ends in_review with paidAt set, exactly one stage1 outbox row and ZERO rail-effect rows (held message is an outbox row, not a direct sendText)', async () => {
     await store.saveTransfer(makeTransfer({ id: 'f5', complianceStatus: 'flagged' }));
     const res = await post('f5');
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, status: 'in_review' });
 
     expect(capture).toHaveBeenCalledTimes(1);
-    // The held "payment received" message went out AFTER the charge succeeded.
-    expect(captured.order.indexOf('capture')).toBeLessThan(captured.order.indexOf('sendText'));
+    // Capture-before-effect: the hold (via settleOrHold) ran AFTER the charge succeeded,
+    // and the ledger already carried the fundingRef at that moment.
+    expect(captured.order.indexOf('capture')).toBeLessThan(captured.order.indexOf('settle'));
+    expect(observed.fundingRefAtSettle).toBe('fund-abc');
+    expect(observed.statusAtSettle).toBe('awaiting_payment');
 
     const after = await store.getTransfer('f5');
     expect(after?.status).toBe('in_review');
+    expect(after?.paidAt).toBeTruthy();
     expect(after?.fundingRef).toBe('fund-abc');
+
+    // Durable held message, NO rail effect, NO direct send.
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:f5' }]);
+    expect(sendText).not.toHaveBeenCalled();
   });
 
-  it('flagged + capture throw → 402; still awaiting_payment; NO held message sent', async () => {
+  it('flagged + capture throw → 402; still awaiting_payment; NO held message enqueued', async () => {
     capture.mockRejectedValue(new Error('card declined'));
     await store.saveTransfer(makeTransfer({ id: 'f6', complianceStatus: 'flagged' }));
     const res = await post('f6');
@@ -274,6 +290,48 @@ describe('pay route — funds capture ordering (flagged/held branch)', () => {
     const after = await store.getTransfer('f6');
     expect(after?.status).toBe('awaiting_payment');
     expect(after?.fundingRef).toBeUndefined();
+    expect(await outboxCount()).toBe(0);
     expect(sendText).not.toHaveBeenCalled();
+  });
+});
+
+describe('pay route — status guard BEFORE capture (F53: no resurrection, no re-charge)', () => {
+  it('cancelled transfer: POST returns current status and captureFunding is NEVER called', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'f7', status: 'cancelled', adminNote: 'rejected in review' }));
+    const res = await post('f7');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: 'cancelled' });
+    expect(capture).not.toHaveBeenCalled();
+    expect(captured.order).not.toContain('settle');
+    const after = await store.getTransfer('f7');
+    expect(after?.status).toBe('cancelled');
+    expect(after?.fundingRef).toBeUndefined();
+    expect(await outboxCount()).toBe(0);
+  });
+
+  it('in_review transfer: a re-POST does not re-charge, does not re-send the held message and does not re-enter review', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'f8', complianceStatus: 'flagged' }));
+    await post('f8'); // first submit: charged + held
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:f8' }]);
+    const paidAt = (await store.getTransfer('f8'))?.paidAt;
+
+    const replay = await post('f8');
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ ok: true, status: 'in_review' });
+    expect(capture).toHaveBeenCalledTimes(1); // no second charge
+    expect(await outboxRows()).toHaveLength(1); // no second held message
+    expect((await store.getTransfer('f8'))?.paidAt).toBe(paidAt); // no re-entry into review
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('paid / delivered transfer: replay POST returns current truth with no second capture', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'f9', status: 'paid', fundingRef: 'fund-old' }));
+    expect(await (await post('f9')).json()).toEqual({ ok: true, status: 'paid' });
+    await store.saveTransfer(makeTransfer({ id: 'f10', status: 'delivered', fundingRef: 'fund-old' }));
+    expect(await (await post('f10')).json()).toEqual({ ok: true, status: 'delivered' });
+    expect(capture).not.toHaveBeenCalled();
+    expect(await outboxCount()).toBe(0);
+    expect((await store.getTransfer('f9'))?.fundingRef).toBe('fund-old');
   });
 });

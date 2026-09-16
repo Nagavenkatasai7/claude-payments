@@ -62,7 +62,17 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   // verify-gate steps aside (sanctions still always run). Absent/anything-else ⇒
   // 'ours' (default, full SmartRemit KYC). requireKycBeforeSend only matters when
   // delegated (resolveKycMode forces it true under 'ours' regardless).
-  const kycMode: KycMode = formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours';
+  // PLATFORM-GOVERNED (owner decision 2026-09-16): kycMode decides whether a
+  // partner-scoped admin may release a compliance hold (canReleaseHeld), so a
+  // partner admin must not be able to flip it (or the send gate) for their own
+  // tenant — their submitted values are ignored and the stored posture kept.
+  const isPlatform = scopeOf(staff).kind === 'platform';
+  const kycMode: KycMode = isPlatform
+    ? (formData.get('kycMode') === 'delegated' ? 'delegated' : 'ours')
+    : (existing.kycMode ?? 'ours');
+  const requireKycBeforeSend = isPlatform
+    ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
+    : existing.requireKycBeforeSend;
   const updated: Partner = {
     ...existing,
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
@@ -75,7 +85,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
     kycMode,
-    requireKycBeforeSend: formData.get('requireKycBeforeSend') === 'on', // OPT-IN gate, either mode
+    requireKycBeforeSend,
     updatedAt: new Date().toISOString(),
   };
   await ps.savePartner(updated);

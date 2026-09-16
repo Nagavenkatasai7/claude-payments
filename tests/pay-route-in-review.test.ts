@@ -25,6 +25,9 @@ vi.mock('@/lib/whatsapp', () => ({
 }));
 
 import { completePaymentStage1 } from '@/lib/payment';
+import { sql } from 'drizzle-orm';
+import { beginHold } from '@/lib/settlement';
+import { sendText } from '@/lib/whatsapp';
 
 function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -56,22 +59,28 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
 }
 
 describe('pay route logic: flagged transfer → in_review', () => {
-  it('flagged: completePaymentStage1(held=true) sets status=paid; route then saves in_review', async () => {
-    const store = createStore(fakeRedis(), await freshDb());
+  it('flagged: the hold is ONE atomic transition — no intermediate paid state is ever observable, the held message is an outbox row', async () => {
+    const db = await freshDb();
+    const store = createStore(fakeRedis(), db);
     const t = makeTransfer({ id: 'f1', complianceStatus: 'flagged', complianceReasons: ['Large transfer amount.'] });
     await store.saveTransfer(t);
 
-    // Simulate what the route does for flagged:
-    const { transfer: paid, senderMessages } = await completePaymentStage1(store, 'f1', { held: true });
-    // Route then saves in_review:
-    const held = await store.getTransfer('f1');
-    await store.saveTransfer({ ...held!, status: 'in_review' });
+    // What the route does for flagged now: ONE transaction via beginHold.
+    const r = await beginHold(db, t);
+    expect(r).toEqual({ kind: 'held' });
 
     const final = await store.getTransfer('f1');
-    expect(paid.status).toBe('paid');
     expect(final?.status).toBe('in_review');
-    expect(senderMessages[0]).toContain('quick review');
-    expect(senderMessages[0]).not.toContain('within ~10 minutes');
+    expect(final?.paidAt).toBeTruthy(); // the >24h stale-review sweep keys on it
+    // No direct send — the held message is durable (dedupe stage1:<id>), and
+    // there is no rail effect of any kind.
+    expect(sendText).not.toHaveBeenCalled();
+    const rows = (await db.execute(sql`SELECT kind, dedupe_key, payload->>'body' AS body FROM outbox ORDER BY id`)) as unknown as {
+      rows: Array<{ kind: string; dedupe_key: string; body: string }>;
+    };
+    expect(rows.rows.map((x) => [x.kind, x.dedupe_key])).toEqual([['whatsapp.text', 'stage1:f1']]);
+    expect(rows.rows[0].body).toContain('quick review');
+    expect(rows.rows[0].body).not.toContain('within ~10 minutes');
   });
 
   it('flagged: the held message does NOT promise delivery time', async () => {

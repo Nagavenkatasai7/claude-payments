@@ -245,6 +245,33 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
       const transferRepo = createTransferRepo(deps.db);
       const transfer = await transferRepo.getTransfer(transferId, { decrypt: true });
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
+      // DEFENCE IN DEPTH: instruct only money the LEDGER still says is payable.
+      //  • definitively NOT going out (cancelled / delivered, or a refund that
+      //    is pending / completed) ⇒ skip: mark DONE with a log — retrying
+      //    can never help and paying out would move money twice;
+      //  • paid with a refund merely REQUESTED (or a failed refund), or any
+      //    other unexpected status ⇒ THROW (retryable): the row backs off and,
+      //    if it dies, the dead-row ops alert fires. Never silently done — a
+      //    request staff later dismiss must still be paid out.
+      const refund = transfer.refundStatus ?? 'none';
+      if (
+        transfer.status === 'cancelled' ||
+        transfer.status === 'delivered' ||
+        refund === 'pending' ||
+        refund === 'completed'
+      ) {
+        logWarn('outbox.instruct-skipped', 'transfer not payable; instruction not sent', {
+          transferId,
+          status: transfer.status,
+          refundStatus: refund,
+        });
+        return;
+      }
+      if (transfer.status !== 'paid' || refund !== 'none') {
+        throw new Error(
+          `Settlement instruction held: transfer is ${transfer.status} with refund ${refund} — retrying`,
+        );
+      }
       // Best-rate routing: the RAIL is the settlement partner's when routed
       // (settlementPartnerId set) — their endpoint, their signing secret, and
       // their id in the instruction (the rail verifies with the partner_id it
