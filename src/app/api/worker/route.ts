@@ -110,8 +110,10 @@ async function run(req: NextRequest): Promise<NextResponse> {
 
   const workerId = `w_${newTransferId()}`;
   const started = Date.now(); // drain-loop budget clock (after the sweeps)
-  const stopAfter = started + START_CUTOFF_MS;
   const hardStopAt = invocationStart + maxDuration * 1000 - HARD_STOP_MARGIN_MS;
+  // Slow sweeps must not let a money row START so late that its 15s rail deadline
+  // outruns the platform kill: the cutoff is also bounded by hardStopAt.
+  const stopAfter = Math.min(started + START_CUTOFF_MS, hardStopAt - RAIL_TIMEOUT_MS);
   let processed = 0;
   let failed = 0;
   let dead = 0;
