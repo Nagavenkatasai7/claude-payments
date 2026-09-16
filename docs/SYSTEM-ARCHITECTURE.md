@@ -182,8 +182,25 @@ Unconfigured partners share the platform number.
 ```
 
 Compliance outcomes branch at step 5/6: a watchlist hit records a `blocked` row
-(never charged, auditable); a `flagged` transfer charges but holds as `in_review`
-for staff release/reject.
+(never charged, auditable); a `flagged` transfer charges but is **held** as
+`in_review` for staff release/reject. The hold is enforced in ONE place —
+`settleOrHold` → `beginHold` in `src/lib/settlement.ts` — and the ledger claim
+itself (`markPaidIfAwaiting … AND compliance_status = 'cleared'`) refuses to flip
+a non-cleared row, so every settlement caller (pay page, B2B bill page,
+partner-API `/confirm`, the reconcile sweep) inherits it. `beginHold` commits the
+`awaiting_payment → in_review` flip (with `paid_at`) and the held 'payment
+received — under review' message (outbox, dedupe `stage1:{id}`) in one
+transaction; no rail effect exists until staff release. A staff **release is a
+settlement**: `releaseHold` commits `in_review → paid` (`markPaidIfInReview`,
+deliberately no compliance predicate — the audited release IS the decision)
+together with the same rail effect cleared money gets (`instruct:{id}` /
+`mocksettle:{id}`), so the rail is told to pay out and delivery arrives through
+the ordinary callback path. A released transfer keeps
+`compliance_status = 'flagged'` as evidence. Releasing a transfer flagged by
+SmartRemit's own screening (partner `kycMode 'ours'`) requires platform staff;
+a partner-scoped admin may release only a `delegated`-mode partner's hold.
+Sanctions-blocked rows are unholdable and unreleasable
+(`compliance_status <> 'blocked'` in both claims).
 
 ### 5.1 Partner best-rate selection (settlement routing)
 
@@ -264,14 +281,16 @@ rewrite.
 
 **Capture ordering** (the pay route at `https://smartremit.ai/pay/{id}` owns
 it): OTP verification → payout-details validation → compliance screening →
-`capture()` → `setFundingRef` → `beginSettlement()`. `capture()` is
+`capture()` → `setFundingRef` → `settleOrHold()`. `capture()` is
 **idempotent by transfer id** (a crash-retry returns the same charge, never a
 second one) and runs *outside* any DB transaction; `transfers.funding_ref` is
 **write-once** (`setFundingRef` only fills a NULL). A crash between capture and
 settle therefore leaves an `awaiting_payment` row WITH a `fundingRef` — the
 **crash-resume sweep** (`listAwaitingWithFunding`, run by the worker's
 reconcile pass) picks those up past a cutoff and resumes settlement: a charged
-customer's transfer is never lost.
+customer's transfer is never lost. A charged **flagged** row is resumed into
+the hold (`in_review` + held message + a `fundhold:{id}` ops alert), never
+instructed; `listAwaitingWithFunding` carries no compliance predicate on purpose.
 
 **Refund lifecycle** rides beside the forward-only `status` machine in
 `transfers.refund_status`, with every transition guarded in the repo
@@ -371,7 +390,9 @@ deduped WhatsApp ops alert to `OPS_ALERT_PHONE`.
 `pokeWorker()` (a best-effort `after()` fetch) makes the common case drain in seconds.
 
 **Reconciliation sweep** (every worker run): transfers stuck in `paid` >15 min →
-re-instruct the rail once (deduped) + ops alert; `in_review` >24h → ops alert.
+re-instruct the rail once (deduped) + ops alert; `in_review` >24h → ops alert;
+charged-but-flagged rows → held (`fundhold:`); cancelled + charged + unrefunded →
+ops alert (`cancelcharged:`).
 `getOpsSnapshot()` feeds the Operations page.
 
 **Transactional money paths**: `beginSettlement` (§5 step 6) and claim-first minting

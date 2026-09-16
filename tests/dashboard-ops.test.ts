@@ -8,6 +8,8 @@ import {
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
+import { beginHold } from '@/lib/settlement';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import type { Transfer } from '@/lib/types';
 
 let db: Db;
@@ -168,30 +170,32 @@ describe('resendPaymentLink', () => {
 });
 
 describe('releaseTransfer', () => {
-  it('delivers an in_review transfer (sets status delivered, deliveredAt)', async () => {
+  it('release is a SETTLEMENT, not a status flip: in_review → paid + the mock-rail effect (delivery arrives via the mock.settle handler, never here)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel1', status: 'in_review', paidAt: '2026-05-30T00:00:00Z' }));
-    await releaseTransfer(store, 'rel1');
+    await releaseTransfer(store, db, 'rel1');
     const loaded = await store.getTransfer('rel1');
-    expect(loaded?.status).toBe('delivered');
-    expect(loaded?.deliveredAt).toBeTruthy();
+    expect(loaded?.status).toBe('paid');
+    expect(loaded?.deliveredAt).toBeUndefined();
+    expect(loaded?.paymentProviderRef).toBe('mock-rel1');
+    expect(await outboxRows()).toEqual([{ kind: 'mock.settle', dedupe_key: 'mocksettle:rel1' }]);
   });
 
   it('throws when transfer is not found', async () => {
     const store = createStore(fakeRedis(), db);
-    await expect(releaseTransfer(store, 'missing')).rejects.toThrow(/not found/i);
+    await expect(releaseTransfer(store, db, 'missing')).rejects.toThrow(/not found/i);
   });
 
   it('throws when transfer is not in_review (e.g. already delivered)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel2', status: 'delivered' }));
-    await expect(releaseTransfer(store, 'rel2')).rejects.toThrow(/not in_review/i);
+    await expect(releaseTransfer(store, db, 'rel2')).rejects.toThrow(/not in_review/i);
   });
 
   it('throws when transfer is awaiting_payment (not yet charged)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel3', status: 'awaiting_payment' }));
-    await expect(releaseTransfer(store, 'rel3')).rejects.toThrow(/not in_review/i);
+    await expect(releaseTransfer(store, db, 'rel3')).rejects.toThrow(/not in_review/i);
   });
 });
 
@@ -395,5 +399,99 @@ describe('retryRefund (failed → back in flight)', () => {
 
     await store.saveTransfer(makeTransfer({ id: 'rty3', status: 'cancelled', fundingRef: 'f' }));
     await expect(retryRefund(db, 'rty3')).rejects.toThrow(/not in a failed state/i);
+  });
+});
+
+describe('release / reject on a transfer HELD by beginHold (release is a SETTLEMENT — the rail is told; reject refunds)', () => {
+  const simulatorRail = () =>
+    createIntegrationsRepo(db).saveIntegrations('default', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+      whatsapp: {},
+    });
+
+  it('releaseTransfer on a webhook-driven rail: in_review → paid, complianceStatus stays flagged, paidAt kept, and instruct:<id> is ENQUEUED (the rail is told to pay out)', async () => {
+    await simulatorRail();
+    const store = createStore(fakeRedis(), db);
+    const t = makeTransfer({ id: 'rel_hold', complianceStatus: 'flagged', fundingRef: 'mockfund-rel_hold' });
+    await store.saveTransfer(t);
+    expect(await beginHold(db, t)).toEqual({ kind: 'held' });
+    const held = await store.getTransfer('rel_hold');
+    expect(held?.status).toBe('in_review');
+
+    await releaseTransfer(store, db, 'rel_hold');
+    const loaded = await store.getTransfer('rel_hold');
+    expect(loaded?.status).toBe('paid');                 // NOT delivered: delivery is the rail's callback, as for cleared money
+    expect(loaded?.deliveredAt).toBeUndefined();
+    expect(loaded?.paidAt).toBe(held?.paidAt);
+    expect(loaded?.complianceStatus).toBe('flagged');    // release never rewrites compliance
+    expect(await outboxRows()).toEqual([
+      { kind: 'whatsapp.text', dedupe_key: 'stage1:rel_hold' },
+      { kind: 'settlement.instruct', dedupe_key: 'instruct:rel_hold' },
+    ]);
+    // The rail's callback then delivers it exactly like a cleared transfer.
+    expect((await store.updateTransferFromWebhook('rel_hold', 'delivered'))?.status).toBe('delivered');
+  });
+
+  it('releaseTransfer on the MOCK rail: in_review → paid + the delayed mocksettle:<id> row (the worker delivers after DELIVERY_DELAY_MS)', async () => {
+    const store = createStore(fakeRedis(), db); // 'default' has no integrations row ⇒ mock rail
+    const t = makeTransfer({ id: 'rel_mock', complianceStatus: 'flagged', fundingRef: 'mockfund-rel_mock' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+    await releaseTransfer(store, db, 'rel_mock');
+    expect((await store.getTransfer('rel_mock'))?.status).toBe('paid');
+    expect((await store.getTransfer('rel_mock'))?.paymentProviderRef).toBe('mock-rel_mock');
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['stage1:rel_mock', 'mocksettle:rel_mock']);
+  });
+
+  it('releaseTransfer on a B2B ach_pull hold instructs the dual-leg pull (the buyer is only debited on release)', async () => {
+    await simulatorRail();
+    const store = createStore(fakeRedis(), db);
+    const t = makeTransfer({ id: 'rel_b2b', complianceStatus: 'flagged', fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_deadbeef' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+    await releaseTransfer(store, db, 'rel_b2b');
+    expect((await store.getTransfer('rel_b2b'))?.status).toBe('paid');
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('instruct:rel_b2b');
+  });
+
+  it('releaseTransfer still refuses a row that is not in_review, and a double release enqueues nothing twice', async () => {
+    await simulatorRail();
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'rel_x', status: 'awaiting_payment' }));
+    await expect(releaseTransfer(store, db, 'rel_x')).rejects.toThrow(/not in_review/);
+    const t = makeTransfer({ id: 'rel_twice', complianceStatus: 'flagged', fundingRef: 'f' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+    await releaseTransfer(store, db, 'rel_twice');
+    await expect(releaseTransfer(store, db, 'rel_twice')).rejects.toThrow(/not in_review/);
+    expect((await outboxRows()).filter((x) => x.dedupe_key === 'instruct:rel_twice')).toHaveLength(1);
+  });
+
+  it('rejectTransfer auto-refunds a beginHold-held CHARGED transfer (cancelled + refund pending + funding.refund row)', async () => {
+    const store = createStore(fakeRedis(), db);
+    const t = makeTransfer({ id: 'rej_hold', complianceStatus: 'flagged', fundingRef: 'mockfund-rej_hold' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+
+    await rejectTransfer(store, db, 'rej_hold');
+    const loaded = await store.getTransfer('rej_hold');
+    expect(loaded?.status).toBe('cancelled');
+    expect(loaded?.refundStatus).toBe('pending');
+    expect(loaded?.adminNote).toContain('rejected in review');
+    expect(await outboxRows()).toEqual([
+      { kind: 'whatsapp.text', dedupe_key: 'stage1:rej_hold' },
+      { kind: 'funding.refund', dedupe_key: 'refund:rej_hold' },
+    ]);
+  });
+
+  it('a rejected (cancelled) transfer can never be re-held: beginHold is a no-op afterwards', async () => {
+    const store = createStore(fakeRedis(), db);
+    const t = makeTransfer({ id: 'rej_again', complianceStatus: 'flagged', fundingRef: 'mockfund-rej_again' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+    await rejectTransfer(store, db, 'rej_again');
+    expect(await beginHold(db, t)).toEqual({ kind: 'already' });
+    expect((await store.getTransfer('rej_again'))?.status).toBe('cancelled');
   });
 });

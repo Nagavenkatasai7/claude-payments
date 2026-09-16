@@ -97,7 +97,8 @@ export async function resendPaymentLinkAction(
 }
 
 /**
- * Release a held (in_review) transfer — triggers stage-2 delivery.
+ * Release a held (in_review) transfer — a SETTLEMENT (releaseHold: in_review →
+ * paid + the rail effect, one transaction), not a delivery flip.
  * Requires admin role (high-stakes compliance decision) AND partner scope:
  *   (a) requireAdmin — only staff with role:'admin'
  *   (b) getScopedTransfer — the transfer must be in the caller's scope (H2 fix:
@@ -108,7 +109,7 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
-  await releaseTransfer(store, id);
+  await releaseTransfer(store, getDb(), id);
   revalidatePath('/admin-dashboard', 'layout');
 }
 

@@ -3,10 +3,12 @@ import { fakeRedis } from './helpers';
 import { createStore, type Store } from '@/lib/store';
 import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 // pg-backed store rebuilt per test (freshDb truncates); the hoisted mock
 // factory must NOT construct it — getStore closes over the let lazily.
 let store: Store;
+let db: Db;
 
 // Mock auth so we can control who is calling
 const mockRequireAdmin = vi.fn();
@@ -22,6 +24,10 @@ vi.mock('@/lib/store', async () => {
   return { ...actual, getStore: () => store };
 });
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+vi.mock('@/db/client', async (orig) => ({
+  ...(await orig<typeof import('@/db/client')>()),
+  getDb: () => db,
+}));
 
 import { releaseTransferAction, rejectTransferAction } from '@/app/admin-dashboard/actions';
 
@@ -62,19 +68,20 @@ function form(values: Record<string, string>): FormData {
 }
 
 beforeEach(async () => {
-  store = createStore(fakeRedis(), await freshDb());
+  db = await freshDb();
+  store = createStore(fakeRedis(), db);
   mockRequireAdmin.mockReset();
 });
 
 describe('releaseTransferAction', () => {
-  it('delivers an in_review transfer when admin calls it', async () => {
+  it('releases an in_review transfer to paid (a settlement) when admin calls it', async () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     await store.saveTransfer(makeTransfer({ id: 'rr1' }));
 
     await releaseTransferAction(form({ id: 'rr1' }));
 
     const loaded = await store.getTransfer('rr1');
-    expect(loaded?.status).toBe('delivered');
+    expect(loaded?.status).toBe('paid');
   });
 
   it('throws (auth rejected) when requireAdmin throws', async () => {

@@ -1,9 +1,10 @@
 import { env } from './env';
-import { completePaymentStage2 } from './payment';
 import { isPartnerPulled } from './funding-method';
 import { pokeWorker } from './outbox';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { releaseHold } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
 
@@ -97,11 +98,17 @@ export async function resendPaymentLink(
 }
 
 /**
- * Release a held (in_review) transfer: run stage 2 delivery.
- * Called by the compliance dashboard "Release" action.
- * Throws if the transfer is not exactly in_review (guards double-release/wrong-status).
+ * Release a held (in_review) transfer — a SETTLEMENT, not a status flip:
+ * settlement.releaseHold commits in_review → paid AND the rail effect (signed
+ * instruct / delayed mock settle) in ONE transaction, so the partner rail is
+ * actually told to pay out (and to debit a B2B buyer). Rail config follows
+ * the same rule as every settlement caller: the SETTLEMENT partner's when
+ * routed, else the owner's. Throws if the transfer is not exactly in_review
+ * (guards double-release / wrong status) — the status check is re-done by the
+ * guarded claim inside releaseHold, so a race can never release twice.
+ * Called by the compliance dashboard "Release" action (admin-gated, audited).
  */
-export async function releaseTransfer(store: Store, id: string): Promise<void> {
+export async function releaseTransfer(store: Store, db: Db, id: string): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
@@ -109,7 +116,12 @@ export async function releaseTransfer(store: Store, id: string): Promise<void> {
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot release: transfer is not in_review (current status: ${transfer.status})`);
   }
-  await completePaymentStage2(store, id);
+  const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
+  const r = await releaseHold(db, transfer, railIntegrations);
+  if (r.kind === 'already') {
+    throw new Error('Cannot release: transfer is not in_review (it moved concurrently)');
+  }
+  pokeWorker(); // fast path for the rail effect — the heartbeat is the guarantee
 }
 
 /**
