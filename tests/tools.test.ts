@@ -2500,6 +2500,21 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
     expect(r).toEqual({ error: 'Transfer not found.' });
   });
 
+  it('the open-case cap counts ONLY this tenant\'s tickets — another tenant\'s open cases for the same phone never block a recall (review item 4)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis());
+    const repo = createTicketRepo(db);
+    for (let i = 0; i < 5; i++) {
+      await repo.createTicket({
+        id: `tk_acme${i}`, partnerId: 'acme', kind: 'customer',
+        customerPhone: ctx.phone, subject: `acme case ${i}`, body: 'open case',
+      });
+    }
+    const id = await mintDelivered(ctx);
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
+    expect(r.opened).toBe(true);
+  });
+
   it('respects the open-case cap (5) — a 6th recall is refused, no ticket', async () => {
     const ctx = await buildCtx(fakeRedis());
     const repo = createTicketRepo(db);
@@ -3680,6 +3695,21 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       const ticket = (await createTicketRepo(db).listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
       expect(ticket.subject.toLowerCase()).toContain('other');
       expect((await ctx.store.getB2bInvoice(invId))?.status).toBe('disputed');
+    });
+
+    it('the dispute cap counts ONLY this tenant\'s tickets (review item 4)', async () => {
+      await seedPartner(db, 'acme');
+      const ctx = await buildCtx(fakeRedis());
+      const repo = createTicketRepo(db);
+      for (let i = 0; i < 5; i++) {
+        await repo.createTicket({
+          id: `tk_acmeb${i}`, partnerId: 'acme', kind: 'customer',
+          customerPhone: ctx.phone, subject: `acme case ${i}`, body: 'open case',
+        });
+      }
+      await seedUnpaidInvoice(ctx);
+      const r = await executeTool('dispute_bill', { reason: 'other' }, ctx);
+      expect(r.disputed).toBe(true);
     });
 
     it('respects the open-case cap (5) — a 6th dispute is refused, invoice stays unpaid', async () => {

@@ -2190,7 +2190,9 @@ async function openRecallDisputeTool(
 
   // recall_eligible — open the case. Respect the per-customer open-case cap.
   const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
-  const mine = await repo.listByCustomer(ctx.phone);
+  // Count only THIS tenant's cases (fix 1 review): another partner's open tickets
+  // for the same phone must neither block this customer nor leak through the cap.
+  const mine = (await repo.listByCustomer(ctx.phone)).filter((t) => t.partnerId === ctx.partnerId);
   if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
     return {
       error_code: 'too_many_open_cases',
@@ -2477,7 +2479,9 @@ async function disputeBillTool(
 
   // Respect the per-buyer open-case cap (mirrors open_recall_dispute).
   const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
-  const mine = await repo.listByCustomer(ctx.phone);
+  // Count only THIS tenant's cases (fix 1 review): another partner's open tickets
+  // for the same phone must neither block this customer nor leak through the cap.
+  const mine = (await repo.listByCustomer(ctx.phone)).filter((t) => t.partnerId === ctx.partnerId);
   if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
     return {
       error_code: 'too_many_open_cases',
