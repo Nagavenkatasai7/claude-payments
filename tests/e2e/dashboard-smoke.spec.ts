@@ -21,26 +21,20 @@ const SMOKE_PARTNER_NAME = 'E2E Smoke Partner';
 const SMOKE_USERNAME = 'e2e-smoke-partner';
 
 /**
- * Navigate, tolerating Chromium's `net::ERR_ABORTED` — raised when a
- * navigation is superseded mid-flight. The dashboard shell polls
- * /api/dashboard/summary every 5s and calls router.refresh() when the stamp
- * moves (src/app/admin-dashboard/live-refresh.tsx), and this spec itself moves
- * the stamp by creating/removing staff, so a goto issued right after a refresh
- * can be aborted on cold functions (3 consecutive red smokes on 2026-09-15).
- * Retrying is safe: every caller asserts the resulting URL/content afterwards,
- * so nothing is silently skipped.
+ * Navigate to a route that REDIRECTS for the current user, then assert where it
+ * landed. A plain page.goto waits for `load` on the first document; when the
+ * redirect happens after the response has started (Next's in-stream redirect for
+ * a server component, logged as a 200, not a 307), Chromium supersedes that
+ * navigation and page.goto throws net::ERR_ABORTED. Waiting only for `commit`
+ * and then asserting the final URL covers both a 307 and an in-stream redirect.
  */
-async function gotoSettled(page: Page, url: string) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await page.goto(url);
-      return;
-    } catch (err) {
-      if (!/ERR_ABORTED/.test(String(err))) throw err;
-      await page.waitForTimeout(750);
-    }
+async function gotoExpectRedirect(page: Page, url: string, expected: RegExp) {
+  try {
+    await page.goto(url, { waitUntil: 'commit' });
+  } catch (err) {
+    if (!/ERR_ABORTED/.test(String(err))) throw err;
   }
-  await page.goto(url);
+  await expect(page).toHaveURL(expected, { timeout: 15_000 });
 }
 
 async function loginAs(page: Page, username: string, password: string) {
@@ -132,7 +126,7 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
   await expect(page).toHaveURL(/\/admin-dashboard/);
 
   // Find or create the smoke partner; capture its id from the detail link/URL.
-  await gotoSettled(page, '/admin-dashboard/partners');
+  await page.goto('/admin-dashboard/partners');
   const partnerLink = page
     .locator('a[href*="/admin-dashboard/partners/"]')
     .filter({ hasText: SMOKE_PARTNER_NAME })
@@ -144,7 +138,7 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
     // Stage 5c: creation is a 6-step wizard (nothing persists until the final
     // commit). US is pre-checked; walk Continue → Create, then capture the id
     // from the done screen's "Open partner page" link.
-    await gotoSettled(page, '/admin-dashboard/partners/new');
+    await page.goto('/admin-dashboard/partners/new');
     await page.getByPlaceholder('Acme Remit Inc.').fill(SMOKE_PARTNER_NAME);
     for (let i = 0; i < 5; i++) {
       await page.getByRole('button', { name: /continue/i }).click();
@@ -159,21 +153,26 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
   // deleted between runs (e.g. a demo cleanup), which would orphan its scope and
   // break the isolation assertions below. It is recreated fresh, bound to the
   // CURRENT partner, just after.
-  await gotoSettled(page, '/admin-dashboard/team');
+  await page.goto('/admin-dashboard/team');
   const removeBtn = page
     .locator('form')
     .filter({ has: page.locator(`input[name="username"][value="${SMOKE_USERNAME}"]`) })
     .getByRole('button', { name: /^remove$/i });
   if (await removeBtn.count()) {
     await removeBtn.first().click();
-    await expect(page).toHaveURL(/\/admin-dashboard\/team\/?$/);
+    // The Remove server action revalidates in place (no redirect), so the URL
+    // check alone passes before the delete commits. Wait for the row to go, or
+    // the reload below still sees it, skips re-creation, and the agent login fails.
+    await expect(
+      page.locator(`input[name="username"][value="${SMOKE_USERNAME}"]`),
+    ).toHaveCount(0, { timeout: 15_000 });
   }
 
   // Find or create the partner-scoped agent bound to that partner.
-  await gotoSettled(page, '/admin-dashboard/team');
+  await page.goto('/admin-dashboard/team');
   const staffRow = page.locator(`input[name="username"][value="${SMOKE_USERNAME}"]`);
   if ((await staffRow.count()) === 0) {
-    await gotoSettled(page, '/admin-dashboard/team/new');
+    await page.goto('/admin-dashboard/team/new');
     await page.locator('input[name="name"]').fill('E2E Partner Smoke');
     await page.locator('input[name="username"]').fill(SMOKE_USERNAME);
     await page.locator('input[name="password"]').fill(PARTNER_PASSWORD);
@@ -198,10 +197,8 @@ test('partner-scoped staff is restricted to their partner', async ({ page }) => 
   await expect(sidebar.getByRole('link', { name: /my partner/i })).toBeVisible();
 
   // Visiting /admin-dashboard/partners redirects to /admin-dashboard/partners/<id>.
-  await gotoSettled(page, '/admin-dashboard/partners');
-  await expect(page).toHaveURL(new RegExp(`/admin-dashboard/partners/${partnerId}$`));
+  await gotoExpectRedirect(page, '/admin-dashboard/partners', new RegExp(`/admin-dashboard/partners/${partnerId}$`));
 
   // Visiting /admin-dashboard/team redirects to /admin-dashboard.
-  await gotoSettled(page, '/admin-dashboard/team');
-  await expect(page).toHaveURL(/\/admin-dashboard\/?$/);
+  await gotoExpectRedirect(page, '/admin-dashboard/team', /\/admin-dashboard\/?$/);
 });
