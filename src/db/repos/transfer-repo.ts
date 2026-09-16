@@ -359,6 +359,28 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /**
+     * Status-GUARDED staff edit: ONE `UPDATE … WHERE id = $1 AND status =
+     * $expected RETURNING`. Staff actions read the row first (to validate and
+     * to decide), and a full-row saveTransfer of that read would silently
+     * overwrite anything that moved in between — e.g. a concurrent release
+     * that already flipped in_review → paid and instructed the rail. Only the
+     * named columns are written. Null ⇒ the row is missing or no longer in
+     * `expected`; the caller must throw and enqueue nothing.
+     */
+    async updateIfStatus(
+      id: string,
+      expected: TransferStatus,
+      patch: { status?: TransferStatus; adminNote?: string; assignedTo?: string },
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set(patch)
+        .where(and(eq(transfers.id, id), eq(transfers.status, expected)))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
     /** Compliance views: newest-first by compliance_status (indexed-friendly). */
     async listByCompliance(
       complianceStatus: 'flagged' | 'blocked',

@@ -520,3 +520,58 @@ describe('canReleaseHeld — who may release a compliance hold (owner decision 2
     expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' })).toBe(true);
   });
 });
+
+// Money-path review findings 2 + 3: a staff action that read the row BEFORE a
+// concurrent release must never overwrite the now-paid row (stale full-row
+// upsert). Simulated with a store whose getTransfer returns the stale read.
+describe('stale-read races with a release — reject / cancel / assign are status-guarded', () => {
+  type S = ReturnType<typeof createStore>;
+  const staleView = (store: S, stale: Transfer): S => ({ ...store, getTransfer: async () => stale });
+
+  it('reject racing a release (CHARGED): throws, enqueues NO refund, and the row stays paid with refund none', async () => {
+    const store = createStore(fakeRedis(), db);
+    const t = makeTransfer({ id: 'race_rej', complianceStatus: 'flagged', fundingRef: 'mockfund-race_rej' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+    const stale = (await store.getTransfer('race_rej'))!; // in_review
+    await releaseTransfer(store, db, 'race_rej');           // now paid + rail effect
+
+    await expect(rejectTransfer(staleView(store, stale), db, 'race_rej')).rejects.toThrow(/not in_review/i);
+    const loaded = await store.getTransfer('race_rej');
+    expect(loaded?.status).toBe('paid');
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect((await outboxRows()).map((x) => x.kind)).not.toContain('funding.refund');
+  });
+
+  it('reject racing a release (UNCHARGED): throws and the row stays paid', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'race_rej2', status: 'in_review', complianceStatus: 'flagged' }));
+    const stale = (await store.getTransfer('race_rej2'))!;
+    await releaseTransfer(store, db, 'race_rej2');
+
+    await expect(rejectTransfer(staleView(store, stale), db, 'race_rej2')).rejects.toThrow(/not in_review/i);
+    expect((await store.getTransfer('race_rej2'))?.status).toBe('paid');
+  });
+
+  it('cancel racing a release: throws and never overwrites the paid row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'race_can', status: 'in_review', complianceStatus: 'flagged' }));
+    const stale = (await store.getTransfer('race_can'))!;
+    await releaseTransfer(store, db, 'race_can');
+
+    await expect(cancelTransfer(staleView(store, stale), 'race_can')).rejects.toThrow(/changed/i);
+    expect((await store.getTransfer('race_can'))?.status).toBe('paid');
+  });
+
+  it('assign racing a release: throws and never overwrites the paid row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'race_asg', status: 'in_review', complianceStatus: 'flagged' }));
+    const stale = (await store.getTransfer('race_asg'))!;
+    await releaseTransfer(store, db, 'race_asg');
+
+    await expect(assignTransfer(staleView(store, stale), 'race_asg', 'agent1', 'look')).rejects.toThrow(/changed/i);
+    const loaded = await store.getTransfer('race_asg');
+    expect(loaded?.status).toBe('paid');
+    expect(loaded?.assignedTo).toBeUndefined();
+  });
+});

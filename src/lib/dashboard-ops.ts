@@ -28,7 +28,12 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
       'Cannot cancel a paid partner-pulled transfer directly — use Reverse (it instructs the partner to return the debit).',
     );
   }
-  await store.saveTransfer({ ...transfer, status: 'cancelled' });
+  // Status-guarded: a release / settlement that moved the row after the read
+  // above must never be overwritten by a stale full-row save.
+  const cancelled = await store.updateTransferIfStatus(id, transfer.status, { status: 'cancelled' });
+  if (!cancelled) {
+    throw new Error('Cannot cancel: the transfer changed concurrently — reload and try again.');
+  }
 }
 
 /**
@@ -83,7 +88,11 @@ export async function assignTransfer(
   if (!transfer) {
     throw new Error('Transfer not found');
   }
-  await store.saveTransfer({ ...transfer, assignedTo: assignee, adminNote: note });
+  // Status-guarded + column-targeted: never a stale full-row upsert.
+  const assigned = await store.updateTransferIfStatus(id, transfer.status, { assignedTo: assignee, adminNote: note });
+  if (!assigned) {
+    throw new Error('Cannot assign: the transfer changed concurrently — reload and try again.');
+  }
 }
 
 export async function resendPaymentLink(
@@ -162,27 +171,28 @@ export async function rejectTransfer(store: Store, db: Db, id: string): Promise<
   if (transfer.status !== 'in_review') {
     throw new Error(`Cannot reject: transfer is not in_review (current status: ${transfer.status})`);
   }
-  const cancelled = { ...transfer, status: 'cancelled' as const, adminNote: 'rejected in review' };
-  if (!transfer.fundingRef) {
-    // Uncharged legacy rows: cancel-only — there is no charge to return.
-    await store.saveTransfer(cancelled);
-    return;
-  }
-  // CHARGED: the cancel, the refund-pending flip and the durable funding.refund
-  // effect commit in ONE transaction — a crash can never leave a cancelled,
-  // charged, UNREFUNDED transfer (a state no sweep watches). none → pending is
-  // a legal move; a replayed reject is blocked upstream by the in_review check,
-  // and the dedupe key blocks a duplicate effect.
-  await db.transaction(async (tx) => {
+  // The in_review check above is advisory; the GUARDED UPDATE below is the
+  // claim. A concurrent release (in_review → paid + rail instructed) between
+  // the read and here makes it match nothing ⇒ throw, enqueue nothing — never
+  // pay out AND refund. CHARGED: the cancel claim, the refund-pending flip and
+  // the durable funding.refund effect commit in ONE transaction, so a crash
+  // can never leave a cancelled, charged, UNREFUNDED transfer.
+  const refunding = await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
-    await repo.saveTransfer(cancelled);
+    const cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
+    if (!cancelled) {
+      throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+    }
+    if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only
     await repo.updateRefund(id, { refundStatus: 'pending' });
     await createOutboxRepo(tx).enqueue(
       'funding.refund',
       { transferId: id },
       { dedupeKey: `refund:${id}` },
     );
+    return true;
   });
+  if (!refunding) return;
   pokeWorker(); // fast path — the heartbeat is the guarantee
 }
 

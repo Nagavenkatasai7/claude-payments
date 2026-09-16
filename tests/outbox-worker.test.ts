@@ -98,6 +98,24 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
     expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-xyz');
   });
 
+  it('an instruct row for a transfer that is no longer paid (cancelled / rejected) sends NOTHING and is marked done', async () => {
+    await store.saveTransfer({ ...transferFixture(), status: 'cancelled' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const left = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
+    expect(left.rows[0].status).toBe('done');
+  });
+
+  it('an instruct row for a PAID transfer with a refund in flight sends NOTHING (never pay out AND refund)', async () => {
+    await store.saveTransfer({ ...transferFixture(), refundStatus: 'pending' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it('rail failure → retry with backoff; at MAX_ATTEMPTS → dead + EXACTLY ONE ops alert', async () => {
     fetchFn.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' });

@@ -245,6 +245,18 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
       const transferRepo = createTransferRepo(deps.db);
       const transfer = await transferRepo.getTransfer(transferId, { decrypt: true });
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
+      // DEFENCE IN DEPTH: instruct only money the LEDGER still says is paid
+      // with no refund in flight. A row cancelled / rejected / refunding since
+      // the instruct was enqueued must never be paid out as well (a delivered
+      // row needs no instruction either). Done, not failed: retrying cannot help.
+      if (transfer.status !== 'paid' || (transfer.refundStatus ?? 'none') !== 'none') {
+        logWarn('outbox.instruct-skipped', 'transfer not payable; instruction not sent', {
+          transferId,
+          status: transfer.status,
+          refundStatus: transfer.refundStatus ?? 'none',
+        });
+        return;
+      }
       // Best-rate routing: the RAIL is the settlement partner's when routed
       // (settlementPartnerId set) — their endpoint, their signing secret, and
       // their id in the instruction (the rail verifies with the partner_id it
