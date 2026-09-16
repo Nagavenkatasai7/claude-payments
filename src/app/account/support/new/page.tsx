@@ -58,7 +58,7 @@ export default async function NewSupportRequestPage({
   const { error } = await searchParams;
   const errorMsg = error ? ERROR_MSG[error] : undefined;
   // The customer's OWN last 10 transfers — the only ids the select offers.
-  const transfers = await getStore().listTransfersByPhone(customer.senderPhone, 10);
+  const transfers = await getStore().listTransfersByPhone(customer.partnerId, customer.senderPhone, 10);
 
   return (
     <AccountShell active="support" customer={customer}>

@@ -70,7 +70,7 @@ export async function createTicketAction(formData: FormData): Promise<void> {
   // transfers (the exact set the form offered). A forged id belonging to
   // another customer is refused and never persisted.
   if (transferId) {
-    const own = await getStore().listTransfersByPhone(customer.senderPhone, 10);
+    const own = await getStore().listTransfersByPhone(customer.partnerId, customer.senderPhone, 10);
     if (!own.some((t) => t.id === transferId)) redirect('/account/support/new?error=transfer');
   }
 

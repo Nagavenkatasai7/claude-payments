@@ -95,7 +95,7 @@ export async function requestRecallAction(formData: FormData): Promise<void> {
   const transfer = await getStore().getTransfer(transferId);
   // STRICT ownership, 404-never-403: another customer's transfer — or a missing
   // one — is refused identically. We don't leak which.
-  if (!transfer || transfer.phone !== customer.senderPhone) back('ineligible');
+  if (!transfer || transfer.phone !== customer.senderPhone || transfer.partnerId !== customer.partnerId) back('ineligible');
 
   // Server-side eligibility re-check — NEVER trust the client. Only a delivered
   // transfer still inside the 24h recall window qualifies.

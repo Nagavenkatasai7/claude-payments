@@ -12,12 +12,8 @@ import { CUSTOMER_SESSION_COOKIE } from './customer-session-cookie';
 export async function getCurrentCustomer(): Promise<Customer | null> {
   const token = (await cookies()).get(CUSTOMER_SESSION_COOKIE)?.value;
   if (!token) return null;
-  const store = getCustomerAuthStore();
-  const phone = await store.getSession(token);
-  if (!phone) return null;
-  const customer = await store.getCustomer(phone);
-  if (!customer) return null;
-  return customer;
+  // The session carries (tenant, phone) — fix 1: a phone alone is not an identity.
+  return getCustomerAuthStore().resolveSession(token);
 }
 
 export async function requireCustomer(): Promise<Customer> {

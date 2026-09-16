@@ -37,7 +37,7 @@ function formatDate(iso: string): string {
 
 export default async function AccountHistoryPage() {
   const customer = await requireCustomer();
-  const transfers = await getStore().listTransfersByPhone(customer.senderPhone, 50);
+  const transfers = await getStore().listTransfersByPhone(customer.partnerId, customer.senderPhone, 50);
 
   return (
     <AccountShell active="transfers" customer={customer}>

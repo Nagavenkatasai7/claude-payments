@@ -40,6 +40,7 @@ export async function startVerificationAction(): Promise<void> {
   });
 
   await getKycCaseStore(getStore()).applyDelta(
+    customer.partnerId,
     customer.senderPhone,
     {
       kycInquiryId: providerRef,

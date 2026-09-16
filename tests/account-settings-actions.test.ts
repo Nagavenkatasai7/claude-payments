@@ -90,7 +90,7 @@ beforeEach(async () => {
   authStore = createCustomerAuthStore(fakeRedis(), customerStore);
 
   await authStore.registerCustomer({ phone: PHONE, email: 'a@example.com', password: PASSWORD });
-  sessionToken = await authStore.createSession(NORM);
+  sessionToken = await authStore.createSession(NORM, 'default');
   cookieJar.set(CUSTOMER_SESSION_COOKIE, sessionToken);
 });
 
@@ -154,7 +154,7 @@ describe('changePasswordAction', () => {
   });
 
   it('changes the password, revokes other sessions, and re-mints THIS session', async () => {
-    const otherDevice = await authStore.createSession(NORM);
+    const otherDevice = await authStore.createSession(NORM, 'default');
 
     await expect(
       changePasswordAction(form({ currentPassword: PASSWORD, newPassword: NEW_PASSWORD })),

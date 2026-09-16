@@ -210,7 +210,7 @@ export async function loginAction(
     return { step: 'otp', phone, pendingToken, notice: GENERIC_OTP_NOTE };
   }
 
-  const token = await auth.createSession(phone);
+  const token = await auth.createSession(phone, customer.partnerId);
   setSessionCookie(await cookies(), token);
   redirect('/account');
 }
@@ -252,7 +252,7 @@ export async function verifyOtpAction(
   const customer = await authStore.markPhoneVerified(phone);
   if (!customer) return { step: 'login', error: SESSION_EXPIRED };
 
-  const token = await authStore.createSession(phone);
+  const token = await authStore.createSession(phone, customer.partnerId);
   setSessionCookie(await cookies(), token);
   redirect('/account');
 }
@@ -364,7 +364,7 @@ export async function updateEmailAction(formData: FormData): Promise<void> {
     // Re-read inside the action so a concurrent KYC/consent write between the
     // page render and this POST is never clobbered by a stale session copy.
     const customers = getCustomerStore(getStore());
-    const fresh = await customers.getCustomer(customer.senderPhone);
+    const fresh = await customers.getCustomer(customer.partnerId, customer.senderPhone);
     if (!fresh) {
       dest = `${SETTINGS_PATH}?err=email_save`;
     } else {
@@ -418,7 +418,7 @@ export async function changePasswordAction(formData: FormData): Promise<void> {
     } else {
       // setPassword revoked all sessions (every device) — re-mint THIS one so a
       // password change doesn't read as being logged out.
-      const token = await auth.createSession(phone);
+      const token = await auth.createSession(phone, updated.partnerId);
       setSessionCookie(await cookies(), token);
     }
   } catch (err) {
