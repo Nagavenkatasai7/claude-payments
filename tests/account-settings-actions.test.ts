@@ -90,7 +90,7 @@ beforeEach(async () => {
   authStore = createCustomerAuthStore(fakeRedis(), customerStore);
 
   await authStore.registerCustomer({ phone: PHONE, email: 'a@example.com', password: PASSWORD });
-  sessionToken = await authStore.createSession(NORM);
+  sessionToken = await authStore.createSession(NORM, 'default');
   cookieJar.set(CUSTOMER_SESSION_COOKIE, sessionToken);
 });
 
@@ -106,7 +106,7 @@ describe('updateEmailAction', () => {
     await expect(updateEmailAction(form({ email: 'not-an-email' }))).rejects.toThrow(
       'REDIRECT:/account/settings?err=email',
     );
-    const customer = await customerStore.getCustomer(NORM);
+    const customer = await customerStore.getCustomer('default', NORM);
     expect(decryptField(customer!.email!, crypto)).toBe('a@example.com');
   });
 
@@ -114,7 +114,7 @@ describe('updateEmailAction', () => {
     await expect(updateEmailAction(form({ email: '  new@example.com  ' }))).rejects.toThrow(
       'REDIRECT:/account/settings?ok=email',
     );
-    const customer = await customerStore.getCustomer(NORM);
+    const customer = await customerStore.getCustomer('default', NORM);
     // Stored as a field-crypto blob, never plaintext.
     expect(customer!.email).not.toContain('new@example.com');
     expect(decryptField(customer!.email!, crypto)).toBe('new@example.com');
@@ -154,7 +154,7 @@ describe('changePasswordAction', () => {
   });
 
   it('changes the password, revokes other sessions, and re-mints THIS session', async () => {
-    const otherDevice = await authStore.createSession(NORM);
+    const otherDevice = await authStore.createSession(NORM, 'default');
 
     await expect(
       changePasswordAction(form({ currentPassword: PASSWORD, newPassword: NEW_PASSWORD })),

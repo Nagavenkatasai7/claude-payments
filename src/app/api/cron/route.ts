@@ -75,7 +75,7 @@ export async function GET(req: NextRequest) {
       // unchanged, so there is no observable drift until the template goes live.
       // The free-form fallback only delivers in-window; otherwise WhatsApp rejects
       // it with a re-engagement error, which the helper logs and swallows.
-      const senderName = (await customerStore.getCustomer(schedule.phone))?.fullName ?? 'there';
+      const senderName = (await customerStore.getCustomer(schedule.partnerId, schedule.phone))?.fullName ?? 'there';
       const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
       const fallbackText =
         `Your scheduled ${brand} transfer of $${schedule.amountUsd.toFixed(2)} ` +

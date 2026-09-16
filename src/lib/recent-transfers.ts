@@ -82,11 +82,11 @@ function formatLine(transfer: Transfer): string {
  *
  * Read-only. Tenant-blind by construction: surfaces only recipientName +
  * source-currency amount + status label + date (fields the customer already
- * owns). Stage 4: an INDEXED own-phone query (WHERE phone = $1) — this runs
+ * owns). Stage 4: an INDEXED own-customer query (WHERE tenant = $1 AND phone = $2) — this runs
  * on every chat turn and must never scan the ledger.
  */
-export async function getRecentTransfersNote(phone: string, store: Store): Promise<string> {
-  const top = await store.listTransfersByPhone(phone, MAX_RECENT); // newest-first, indexed
+export async function getRecentTransfersNote(tenantId: string, phone: string, store: Store): Promise<string> {
+  const top = await store.listTransfersByPhone(tenantId, phone, MAX_RECENT); // newest-first, indexed, keyed by the customer's own tenant
   if (top.length === 0) return '';                           // history-less ⇒ unchanged behavior
   const lines = top.map(formatLine);
   return (

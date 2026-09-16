@@ -146,10 +146,10 @@ describe('registerAction', () => {
   it('still surfaces an intentional CustomerInputError message verbatim', async () => {
     const spy = vi
       .spyOn(authStore, 'registerCustomer')
-      .mockRejectedValueOnce(new CustomerInputError('An account already exists for this number.'));
+      .mockRejectedValueOnce(new CustomerInputError("We can't set up an account for this number. If you already have one, sign in or reset your password; otherwise contact support."));
     const state = await register();
     expect(state.step).toBe('register');
-    expect(state.error).toMatch(/already exists/i);
+    expect(state.error).toMatch(/can't set up an account for this number/i);
     spy.mockRestore();
   });
 });
@@ -236,6 +236,18 @@ describe('loginAction', () => {
     ).rejects.toThrow('REDIRECT:/account');
     expect(cookieSet).toHaveBeenCalled(); // session cookie set immediately
     expect(sentCodes).toHaveLength(0);    // no code is ever sent for login
+  });
+
+  it('login mints the session under the account row tenant (fix 1, D6)', async () => {
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    cookieJar.clear();
+    cookieSet.mockClear();
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow('REDIRECT:/account');
+    const token = cookieSet.mock.calls[0][1];
+    expect((await authStore.resolveSession(token))?.partnerId).toBe('default');
   });
 
   it('NEVER-VERIFIED account (planted registration) cannot password-login — gets the register OTP step', async () => {

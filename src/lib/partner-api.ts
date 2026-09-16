@@ -6,6 +6,7 @@ import { getStore } from './store';
 import { getPartnerStore } from './partner-store';
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { getMonthlyVolumeStore } from './monthly-volume-store';
+import { getCustomerStore } from './customer-store';
 import { authenticatePartner } from './partner-api-auth';
 import { checkPartnerRateLimit } from './partner-rate-limit';
 import type { PartnerApiDeps, SvcResult } from './partner-api-service';
@@ -47,8 +48,10 @@ export async function guardPartner(
   if (!partner || partner.status !== 'active') {
     return { ok: false, response: NextResponse.json({ error: 'Partner not active.' }, { status: 403 }) };
   }
+  const store = getStore();
   const deps: PartnerApiDeps = {
-    store: getStore(),
+    store,
+    customerStore: getCustomerStore(store), // fix 1 — sender rows are per tenant
     partnerStore,
     monthlyVolumeStore: getMonthlyVolumeStore(),
     integrationsStore: getPartnerIntegrationsStore(), // WL3 — per-partner rail/creds

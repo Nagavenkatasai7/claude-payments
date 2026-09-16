@@ -3,7 +3,9 @@ import { easternDate } from './dates';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo } from '@/db/repos/aux-repos';
-import type { ChatMessage, Transfer, TransferStatus } from './types';
+import { createCustomerRepo } from '@/db/repos/customer-repo';
+import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
+import type { ChatMessage, PartnerId, Transfer, TransferStatus } from './types';
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
 // engine split follows the locked disposition:
@@ -56,19 +58,31 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
   const partnerAppRepo = createPartnerApplicationRepo(db);
   const b2bInvoiceRepo = createB2bInvoiceRepo(db);
   const sellerRepo = createSellerRepo(db);
+  // D9/D10/D12 (fix 1): which tenant may read a pre-fix phone-only Redis key —
+  // the phone's OLDEST customers row (see legacy-tenant.ts). Built once.
+  const legacyTenantOf = legacyTenantResolver(
+    createCustomerRepo(db, (p, ph) => transfersRepo.firstTransferAt(p, ph)),
+  );
 
   return {
-    // ── Conversations (Redis — hot, trimmed, ephemeral) ──────────────────
-    async getConversation(phone: string): Promise<ChatMessage[]> {
-      const raw = await redis.get(`conv:${phone}`);
-      return raw ? (JSON.parse(raw) as ChatMessage[]) : [];
+    /** The D9 legacy-tenant resolver, shared with the volume + KYC-audit stores. */
+    legacyTenantOf,
+
+    // ── Conversations (Redis — hot, trimmed, ephemeral; keyed by TENANT + phone, fix 1 D12) ──
+    // TRANSITIONAL (one 30-day window): a tenant key that does not exist reads
+    // through to the pre-fix `conv:{phone}` ONLY for the phone's pre-fix tenant,
+    // so a customer mid-conversation at deploy time keeps their thread and a
+    // post-fix sibling tenant never sees another tenant's history. Saves always
+    // write the tenant key, so the legacy key is read at most once per thread.
+    async getConversation(partnerId: PartnerId, phone: string): Promise<ChatMessage[]> {
+      const raw = await redis.get(`conv:${partnerId}:${phone}`);
+      if (raw !== null) return JSON.parse(raw) as ChatMessage[];
+      if (!(await legacyKeyAllowed(partnerId, phone, legacyTenantOf))) return [];
+      const legacy = await redis.get(`conv:${phone}`);
+      return legacy ? (JSON.parse(legacy) as ChatMessage[]) : [];
     },
-    async saveConversation(phone: string, messages: ChatMessage[]): Promise<void> {
-      // 30-day TTL (Stage 4): a conversation untouched for a month is dead
-      // weight — every save renews the clock, so active chats never expire.
-      await redis.set(`conv:${phone}`, JSON.stringify(trimHistory(messages)), {
-        ex: 30 * 24 * 3600,
-      });
+    async saveConversation(partnerId: PartnerId, phone: string, messages: ChatMessage[]): Promise<void> {
+      await redis.set(`conv:${partnerId}:${phone}`, JSON.stringify(trimHistory(messages)), { ex: 30 * 24 * 3600 });
     },
 
     // ── Transfer ledger (Postgres) ───────────────────────────────────────
@@ -93,9 +107,9 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async listTransfers(): Promise<Transfer[]> {
       return transfersRepo.listAll();
     },
-    /** Indexed per-customer list (Stage 4) — replaces filter-the-whole-ledger. */
-    async listTransfersByPhone(phone: string, limit = 50): Promise<Transfer[]> {
-      return (await transfersRepo.listByPhone(phone, { limit })).items;
+    /** Indexed per-(tenant, customer) list (Stage 4 + fix 1). */
+    async listTransfersByPhone(partnerId: PartnerId, phone: string, limit = 50): Promise<Transfer[]> {
+      return (await transfersRepo.listByPhone(partnerId, phone, { limit })).items;
     },
     /** Keyset page for staff views (Stage 4). Scope via partnerId. */
     async listTransfersPage(req: {
@@ -121,22 +135,37 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async topVelocityToday(limit: number, partnerId?: import('./types').PartnerId) {
       return transfersRepo.topVelocityToday(limit, partnerId);
     },
-    async getTransferCount(phone: string): Promise<number> {
+    async getTransferCount(partnerId: PartnerId, phone: string): Promise<number> {
       // Derived (blocked rows excluded) — the count:{phone} counter is gone.
-      return transfersRepo.countByPhone(phone);
+      return transfersRepo.countByPhone(partnerId, phone);
     },
-    /** MIN(created_at) for grandfathering — indexed, not a ledger scan. */
-    async firstTransferAt(phone: string): Promise<string | null> {
-      return transfersRepo.firstTransferAt(phone);
+    /** MIN(created_at) for grandfathering — indexed, per tenant. */
+    async firstTransferAt(partnerId: PartnerId, phone: string): Promise<string | null> {
+      return transfersRepo.firstTransferAt(partnerId, phone);
     },
 
-    // ── Today-velocity (Redis counters — date-bucketed, self-expiring use) ─
-    async incrementTodayTransferCount(phone: string): Promise<void> {
-      await redis.incr(`velocity:${phone}:${easternDate(Date.now())}`);
+    // ── Today-velocity (Redis counters — date-bucketed, tenant-scoped) ────
+    // Key shape is OWNED HERE (fix 1) and consumed by fix 10; never rename again.
+    // TRANSITIONAL (delete in fix 10): a tenant key that does not exist yet reads
+    // through to the pre-fix phone-only key ONLY for the phone's pre-fix tenant
+    // (legacyKeyAllowed — the oldest customers row), and the first increment
+    // absorbs it, so an in-flight day's count is never reset to zero by the
+    // rename and a post-fix sibling tenant never inherits another tenant's count.
+    async incrementTodayTransferCount(partnerId: PartnerId, phone: string): Promise<void> {
+      const k = `velocity:${partnerId}:${phone}:${easternDate(Date.now())}`;
+      if ((await redis.exists(k)) === 0 && (await legacyKeyAllowed(partnerId, phone, legacyTenantOf))) {
+        const legacy = Number((await redis.get(`velocity:${phone}:${easternDate(Date.now())}`)) ?? '0');
+        if (legacy > 0) await redis.set(k, String(legacy), { ex: 48 * 3600 });
+      }
+      const n = await redis.incr(k);
+      if (n === 1) await redis.expire(k, 48 * 3600);
     },
-    async getTodayTransferCount(phone: string): Promise<number> {
-      const raw = await redis.get(`velocity:${phone}:${easternDate(Date.now())}`);
-      return raw ? Number(raw) : 0;
+    async getTodayTransferCount(partnerId: PartnerId, phone: string): Promise<number> {
+      const raw = await redis.get(`velocity:${partnerId}:${phone}:${easternDate(Date.now())}`);
+      if (raw !== null) return Number(raw);
+      if (!(await legacyKeyAllowed(partnerId, phone, legacyTenantOf))) return 0;
+      const legacy = await redis.get(`velocity:${phone}:${easternDate(Date.now())}`);
+      return legacy ? Number(legacy) : 0;
     },
 
     // ── Inbound plumbing (Redis) ─────────────────────────────────────────
@@ -188,25 +217,27 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async clearBillInvoiceClaim(key: string): Promise<void> {
       await redis.del(`billclaim:${key}`);
     },
-    async getLastInboundAt(senderPhone: string): Promise<string | null> {
-      return redis.get(`lastmsg:${senderPhone}`);
+    async getLastInboundAt(partnerId: PartnerId, senderPhone: string): Promise<string | null> {
+      return redis.get(`lastmsg:${partnerId}:${senderPhone}`); // no legacy read: a stale null only means "treat as a new conversation" once
     },
-    async recordInboundNow(senderPhone: string): Promise<void> {
-      await redis.set(`lastmsg:${senderPhone}`, new Date().toISOString(), { ex: 86400 });
+    async recordInboundNow(partnerId: PartnerId, senderPhone: string): Promise<void> {
+      await redis.set(`lastmsg:${partnerId}:${senderPhone}`, new Date().toISOString(), { ex: 86400 });
     },
 
-    // ── Saved recipients (Postgres, encrypted payout destinations) ───────
+    // ── Saved recipients (Postgres, encrypted, per (tenant, sender)) ─────
     async upsertRecipient(
+      partnerId: PartnerId,
       senderPhone: string,
       recipient: import('./types').Recipient,
     ): Promise<void> {
-      await recipientsRepo.upsertRecipient(senderPhone, recipient);
+      await recipientsRepo.upsertRecipient(partnerId, senderPhone, recipient);
     },
     async listRecipients(
+      partnerId: PartnerId,
       senderPhone: string,
       limit: number,
     ): Promise<import('./types').Recipient[]> {
-      return recipientsRepo.listRecipients(senderPhone, limit);
+      return recipientsRepo.listRecipients(partnerId, senderPhone, limit);
     },
 
     // ── Corridor demand capture (Postgres) ───────────────────────────────

@@ -5,9 +5,11 @@ import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
 import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
 import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 // Customers live in Postgres now (PGlite per test); the audit hash + event
 // dedup stay on Redis (fakeRedis) — those assertions are unchanged.
+let db: Db;
 let redis: FakeRedis;
 let cs: CustomerStore;
 let store: KycCaseStore;
@@ -27,7 +29,7 @@ const seed = (over: Partial<Customer> = {}) =>
   } as Customer);
 
 beforeEach(async () => {
-  const db = await freshDb();
+  db = await freshDb();
   redis = fakeRedis();
   cs = createCustomerStore(db, createStore(fakeRedis(), db));
   seq = 0;
@@ -42,35 +44,35 @@ describe('kyc-case-store', () => {
 
   it('applyDelta merges fields + appends an audit entry', async () => {
     await seed();
-    await store.applyDelta(PHONE, { kycReviewState: 'pending_review', idLast4: '6789', kycInquiryId: 'inq_1' }, { actor: 'persona', action: 'inquiry.completed' });
-    const c = await cs.getCustomer(PHONE);
+    await store.applyDelta('default', PHONE, { kycReviewState: 'pending_review', idLast4: '6789', kycInquiryId: 'inq_1' }, { actor: 'persona', action: 'inquiry.completed' });
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('pending_review');
     expect(c?.idLast4).toBe('6789');
     expect(c?.kycInquiryId).toBe('inq_1');
-    const audit = await store.getAudit(PHONE);
+    const audit = await store.getAudit('default', PHONE);
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ actor: 'persona', action: 'inquiry.completed' });
   });
 
   it('applyDelta returns null for an unknown customer', async () => {
-    expect(await store.applyDelta('nope', { kycReviewState: 'needs_review' }, { actor: 'x', action: 'y' })).toBeNull();
+    expect(await store.applyDelta('default', 'nope', { kycReviewState: 'needs_review' }, { actor: 'x', action: 'y' })).toBeNull();
   });
 
   it('review(approve) sets verified + approver + audit', async () => {
     await seed({ kycReviewState: 'pending_review' });
-    await store.review(PHONE, 'approve', 'admin', 'docs look good');
-    const c = await cs.getCustomer(PHONE);
+    await store.review('default', PHONE, 'approve', 'admin', 'docs look good');
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycStatus).toBe('verified');
     expect(c?.kycReviewState).toBe('approved');
     expect(c?.kycApprovedBy).toBe('admin');
     expect(c?.kycVerifiedAt).toBeTruthy();
-    expect((await store.getAudit(PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs look good' });
+    expect((await store.getAudit('default', PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs look good' });
   });
 
   it('review(reject) sets rejected + reason', async () => {
     await seed({ kycReviewState: 'needs_review' });
-    await store.review(PHONE, 'reject', 'admin', 'watchlist confirmed');
-    const c = await cs.getCustomer(PHONE);
+    await store.review('default', PHONE, 'reject', 'admin', 'watchlist confirmed');
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycStatus).toBe('rejected');
     expect(c?.kycReviewState).toBe('rejected');
     expect(c?.kycRejectedReason).toBe('watchlist confirmed');
@@ -90,7 +92,7 @@ describe('kyc-case-store', () => {
   });
 
   it('getAudit returns [] for a customer with no audit log', async () => {
-    expect(await store.getAudit('15559990000')).toEqual([]);
+    expect(await store.getAudit('default', '15559990000')).toEqual([]);
   });
 
   it('getAudit parses the FLAT-ARRAY hgetall reply (real Upstash, automaticDeserialization:false)', async () => {
@@ -109,7 +111,7 @@ describe('kyc-case-store', () => {
       },
     } as unknown as Parameters<typeof createKycCaseStore>[0];
     const s = createKycCaseStore(arrayRedis, cs);
-    const audit = await s.getAudit(PHONE);
+    const audit = await s.getAudit('default', PHONE);
     expect(audit).toHaveLength(2);
     expect(audit[0]).toMatchObject({ actor: 'persona', action: 'inquiry.created' });
     expect(audit[1]).toMatchObject({ actor: 'admin', action: 'review.approve', reason: 'ok' });
@@ -127,8 +129,29 @@ describe('kyc-case-store', () => {
       },
     } as unknown as Parameters<typeof createKycCaseStore>[0];
     const s = createKycCaseStore(arrayRedis, cs);
-    const audit = await s.getAudit(PHONE);
+    const audit = await s.getAudit('default', PHONE);
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ actor: 'admin', action: 'review.approve' });
+  });
+
+  it('applyDelta / review / audit are tenant-scoped: acme cannot move the default row and audit trails never cross tenants', async () => {
+    const { seedPartner } = await import('./helpers-db');
+    await seedPartner(db, 'acme'); // the file's own handle, exactly as the D10 test below — never a second freshDb() (it re-truncates the singleton the beforeEach just seeded)
+    await seed();
+    expect(await store.applyDelta('acme', PHONE, { kycReviewState: 'approved' }, { actor: 'x', action: 'a' })).toBeNull();
+    expect((await cs.getCustomer('default', PHONE))!.kycReviewState).toBeUndefined();
+    await store.review('default', PHONE, 'approve', 'staff-1', 'ok');
+    expect((await store.getAudit('default', PHONE)).map((e) => e.action)).toEqual(['review.approve']);
+    expect(await store.getAudit('acme', PHONE)).toEqual([]);
+  });
+
+  it('D10: a legacy phone-only audit trail is visible to the pre-fix (oldest-row) tenant and to NO sibling', async () => {
+    const { seedPartner } = await import('./helpers-db');
+    await seedPartner(db, 'acme');
+    await seed(); // the default row (older)
+    await cs.upsertOnFirstInbound('acme', PHONE); // the post-fix sibling
+    await redis.hset(`kyc_audit:${PHONE}`, { '1': JSON.stringify({ at: '2026-01-01T00:00:00Z', actor: 'persona', action: 'legacy.event' }) });
+    expect((await store.getAudit('default', PHONE)).map((e) => e.action)).toEqual(['legacy.event']);
+    expect(await store.getAudit('acme', PHONE)).toEqual([]);
   });
 });

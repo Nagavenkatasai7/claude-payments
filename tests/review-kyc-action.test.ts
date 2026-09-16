@@ -52,19 +52,19 @@ beforeEach(async () => {
 describe('reviewKycAction', () => {
   it('approve → verified + approver + audit + customer notified', async () => {
     await seed();
-    await reviewKycAction(form({ phone: PHONE, decision: 'approve', reason: 'docs clean' }));
-    const c = await cs.getCustomer(PHONE);
+    await reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'docs clean' }));
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycStatus).toBe('verified');
     expect(c?.kycReviewState).toBe('approved');
     expect(c?.kycApprovedBy).toBe('Main Admin (admin)'); // display name + stable username
-    expect((await kcs.getAudit(PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
+    expect((await kcs.getAudit('default', PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
     expect(notify).toHaveBeenCalledWith(PHONE, 'verified', undefined);
   });
 
   it('reject → rejected + reason + customer notified', async () => {
     await seed({ kycReviewState: 'needs_review' });
-    await reviewKycAction(form({ phone: PHONE, decision: 'reject', reason: 'watchlist confirmed' }));
-    const c = await cs.getCustomer(PHONE);
+    await reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'reject', reason: 'watchlist confirmed' }));
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycStatus).toBe('rejected');
     expect(c?.kycRejectedReason).toBe('watchlist confirmed');
     expect(notify).toHaveBeenCalledWith(PHONE, 'failed', undefined);
@@ -73,26 +73,26 @@ describe('reviewKycAction', () => {
   it('gate OFF ⇒ decision + audit stand but the customer is NOT messaged', async () => {
     partner = { id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active', createdAt: ISO, updatedAt: ISO }; // no requireKycBeforeSend ⇒ gate off
     await seed();
-    await reviewKycAction(form({ phone: PHONE, decision: 'approve', reason: 'docs clean' }));
-    const c = await cs.getCustomer(PHONE);
+    await reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'docs clean' }));
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycStatus).toBe('verified'); // the review outcome is unchanged
     expect(c?.kycReviewState).toBe('approved');
-    expect((await kcs.getAudit(PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
+    expect((await kcs.getAudit('default', PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
     expect(notify).not.toHaveBeenCalled();
   });
 
   it('requires a reason', async () => {
     await seed();
-    await expect(reviewKycAction(form({ phone: PHONE, decision: 'approve', reason: '' }))).rejects.toThrow(/reason/i);
+    await expect(reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: '' }))).rejects.toThrow(/reason/i);
   });
 
   it('rejects an invalid decision', async () => {
     await seed();
-    await expect(reviewKycAction(form({ phone: PHONE, decision: 'maybe', reason: 'x' }))).rejects.toThrow(/decision/i);
+    await expect(reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'maybe', reason: 'x' }))).rejects.toThrow(/decision/i);
   });
 
   it('rejects an out-of-scope customer (partner boundary)', async () => {
     await seed({ partnerId: 'other' });
-    await expect(reviewKycAction(form({ phone: PHONE, decision: 'approve', reason: 'x' }))).rejects.toThrow(/not found/i);
+    await expect(reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'x' }))).rejects.toThrow(/not found/i);
   });
 });

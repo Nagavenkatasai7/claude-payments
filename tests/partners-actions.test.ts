@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
+import { sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 
@@ -70,7 +71,9 @@ import {
   savePricingAction,
   saveSupportConfigAction,
   createPartnerStaffAction,
+  saveWhatsappConfigAction,
 } from '@/app/admin-dashboard/partners/actions';
+import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 
@@ -400,5 +403,68 @@ describe('createPartnerStaffAction roles', () => {
     await expect(createPartnerStaffAction('p1', staffForm('owner'))).rejects.toThrow(/invalid role/i);
     const { getAuthStore } = await import('@/lib/auth-store');
     expect(await getAuthStore().getStaff('newbie')).toBeNull();
+  });
+});
+
+describe('WhatsApp number routing is identity (fix 1, D11)', () => {
+  const staff = (o: { role: 'admin' | 'agent'; partnerId?: string }) => ({ username: 'u', ...o });
+  const form = (values: Record<string, string>): FormData => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(values)) fd.set(k, v);
+    return fd;
+  };
+  let integrations: ReturnType<typeof createPartnerIntegrationsStore>;
+  beforeEach(async () => {
+    await seedPartner(db, 'acme');
+    await seedPartner(db, 'beta'); // 'gamma' is never seeded: the wizard mints its own id and must refuse BEFORE savePartner
+    integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))); // same key as the mocked getPartnerIntegrationsStore
+  });
+
+  it('a partner-scoped admin cannot store the PLATFORM phone_number_id', async () => {
+    currentStaff = staff({ role: 'admin', partnerId: 'acme' });
+    const fd = form({ id: 'acme', phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'pn_platform' });
+    await expect(saveWhatsappConfigAction(fd)).rejects.toThrow('That WhatsApp number cannot be used.');
+    expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBeUndefined();
+  });
+
+  it('a phone_number_id already held by ANOTHER partner is refused with the SAME generic message (no disclosure)', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't' } });
+    currentStaff = staff({ role: 'admin', partnerId: 'beta' });
+    await expect(saveWhatsappConfigAction(form({ id: 'beta', phoneNumberId: 'pn_acme' }))).rejects.toThrow('That WhatsApp number cannot be used.');
+    expect((await integrations.getIntegrations('beta')).whatsapp.phoneNumberId).toBeUndefined();
+    // Re-saving your OWN number is fine (idempotent edit of the same row).
+    currentStaff = staff({ role: 'admin', partnerId: 'acme' });
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: 'pn_acme' }))).resolves.toBeUndefined();
+  });
+
+  it('the wizard applies the same refusal', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't' } });
+    currentStaff = staff({ role: 'admin' }); // platform staff
+    await expect(wizardCreatePartnerAction({ id: 'gamma', name: 'Gamma', countries: ['US'], whatsapp: { phoneNumberId: 'pn_acme', token: 'x' } } as Parameters<typeof wizardCreatePartnerAction>[0]))
+      .rejects.toThrow('That WhatsApp number cannot be used.');
+  });
+
+  it('the unique partial index is the last line: a raw duplicate insert fails', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_dup', token: 't' } });
+    // drizzle wraps the driver error: the constraint text lives on `.cause`.
+    const e = await db
+      .execute(sql`INSERT INTO partner_integrations (partner_id, wa_phone_number_id) VALUES ('beta', 'pn_dup')`)
+      .then(() => null, (err: { cause?: { message?: string; code?: string } }) => err);
+    expect(e?.cause?.code).toBe('23505');
+    expect(e?.cause?.message).toMatch(/partner_integrations_wa_pnid/);
+  });
+
+  it('a RACE on the same pnid leaves no orphan partner: the loser is refused with the generic message and nothing it wrote survives (review item 3)', async () => {
+    currentStaff = staff({ role: 'admin' }); // platform staff
+    const before = (await ps.listPartners()).length;
+    const results = await Promise.allSettled([
+      wizardCreatePartnerAction({ name: 'Racer One', countries: ['US'], whatsapp: { phoneNumberId: 'pn_race', token: 't1' } }),
+      wizardCreatePartnerAction({ name: 'Racer Two', countries: ['US'], whatsapp: { phoneNumberId: 'pn_race', token: 't2' } }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0].reason as Error).message).toBe('That WhatsApp number cannot be used.');
+    expect((await ps.listPartners()).length).toBe(before + 1); // no orphan ACTIVE partner from the loser
   });
 });

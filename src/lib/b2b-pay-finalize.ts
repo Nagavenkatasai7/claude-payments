@@ -149,8 +149,8 @@ export async function finalizeCrossBorderBillPayment(
 
   // ── Buyer (the payer) ─────────────────────────────────────────────────────
   const customer =
-    (await customerStore.getCustomer(invoice.buyerPhone)) ??
-    (await customerStore.upsertOnFirstInbound(invoice.buyerPhone)).customer;
+    (await customerStore.getCustomer(partnerId, invoice.buyerPhone)) ??
+    (await customerStore.upsertOnFirstInbound(partnerId, invoice.buyerPhone)).customer;
   const partner =
     (await partnerStore.getPartner(partnerId)) ??
     (await partnerStore.ensureDefaultPartner());

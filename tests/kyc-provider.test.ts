@@ -22,11 +22,11 @@ describe('MockKycProvider', () => {
   });
 
   it('getStatus reads from the customer record', async () => {
-    await cs.upsertOnFirstInbound(PHONE);
+    await cs.upsertOnFirstInbound('default', PHONE);
     const provider = new MockKycProvider(cs, 'https://example.com');
     expect(await provider.getStatus(`mock-${PHONE}`)).toBe('pending'); // not_started maps to pending
     await cs.saveCustomer({
-      ...(await cs.getCustomer(PHONE))!,
+      ...(await cs.getCustomer('default', PHONE))!,
       kycStatus: 'verified',
     });
     expect(await provider.getStatus(`mock-${PHONE}`)).toBe('verified');

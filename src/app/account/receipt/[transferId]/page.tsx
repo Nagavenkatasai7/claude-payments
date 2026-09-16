@@ -96,7 +96,7 @@ export default async function ReceiptPage({
   const { error } = await searchParams;
   const store = getStore();
   const t = await store.getTransfer(transferId);
-  if (!t || t.phone !== customer.senderPhone) notFound();
+  if (!t || t.phone !== customer.senderPhone || t.partnerId !== customer.partnerId) notFound();
 
   const srcCurrency = t.sourceCurrency ?? 'USD';
   const destCurrency = t.destinationCurrency ?? 'INR';

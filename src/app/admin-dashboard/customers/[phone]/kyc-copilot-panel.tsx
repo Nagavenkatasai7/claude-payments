@@ -22,7 +22,7 @@ const DECISION_LABEL: Record<Suggestion['suggested_decision'], string> = {
   need_more: 'Need more info',
 };
 
-export function KycCopilotPanel({ phone }: { phone: string }) {
+export function KycCopilotPanel({ phone, partnerId }: { phone: string; partnerId: string }) {
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -34,7 +34,7 @@ export function KycCopilotPanel({ phone }: { phone: string }) {
       const res = await fetch('/api/copilot/kyc-review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subjectId: phone }),
+        body: JSON.stringify({ subjectId: phone, partnerId }), // fix 1: the (tenant, phone) row on screen
       });
       const data = (await res.json()) as { ok?: boolean; suggestion?: Suggestion };
       if (!res.ok || !data.ok || !data.suggestion) throw new Error('unavailable');

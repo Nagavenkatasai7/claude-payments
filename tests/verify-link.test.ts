@@ -76,6 +76,7 @@ describe('issueVerifyLink', () => {
     const provider = new MockKycProvider(customerStore, 'https://example.com');
 
     const url = await issueVerifyLink({
+      partnerId: 'default',
       phone: PHONE,
       customer: customer(),
       kycProvider: provider,
@@ -83,7 +84,7 @@ describe('issueVerifyLink', () => {
     });
 
     expect(url).toBe(`https://example.com/admin-dashboard/customers/${PHONE}`);
-    const after = await customerStore.getCustomer(PHONE);
+    const after = await customerStore.getCustomer('default', PHONE);
     expect(after?.kycInquiryId).toBe(`mock-${PHONE}`); // persisted for the next resend
   });
 
@@ -105,7 +106,7 @@ describe('issueVerifyLink', () => {
     };
     const spy = vi.spyOn(customerStore, 'recordKycInquiry');
 
-    const url = await issueVerifyLink({ phone: PHONE, customer: cust, kycProvider: provider, customerStore });
+    const url = await issueVerifyLink({ partnerId: 'default', phone: PHONE, customer: cust, kycProvider: provider, customerStore });
 
     expect(url).toBe('https://persona.example/reused');
     expect(seen).toEqual(['inq_existing']); // reuse path passed the existing id
@@ -130,11 +131,11 @@ describe('issueVerifyLink', () => {
       async handleWebhook() { return null; },
     };
 
-    const url = await issueVerifyLink({ phone: PHONE, customer: cust, kycProvider: provider, customerStore });
+    const url = await issueVerifyLink({ partnerId: 'default', phone: PHONE, customer: cust, kycProvider: provider, customerStore });
 
     expect(url).toBe('https://persona.example/fresh');
     expect(calls).toEqual(['inq_stale', undefined]); // tried reuse, then minted fresh
-    const after = await customerStore.getCustomer(PHONE);
+    const after = await customerStore.getCustomer('default', PHONE);
     expect(after?.kycInquiryId).toBe('inq_fresh'); // fresh id persisted
   });
 
@@ -149,7 +150,7 @@ describe('issueVerifyLink', () => {
       async handleWebhook() { return null; },
     };
 
-    const url = await issueVerifyLink({ phone: PHONE, customer: customer(), kycProvider: provider, customerStore });
+    const url = await issueVerifyLink({ partnerId: 'default', phone: PHONE, customer: customer(), kycProvider: provider, customerStore });
     expect(url).toBeNull();
   });
 });

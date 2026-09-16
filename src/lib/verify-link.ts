@@ -1,4 +1,4 @@
-import type { Customer, KycReviewState } from './types';
+import type { Customer, KycReviewState, PartnerId } from './types';
 import type { KycProvider } from './providers/kyc-provider';
 import type { CustomerStore } from './customer-store';
 
@@ -44,6 +44,7 @@ export function reusableInquiryId(
 }
 
 export interface IssueVerifyLinkDeps {
+  partnerId: PartnerId;
   phone: string;
   customer: Customer | null | undefined;
   kycProvider: KycProvider;
@@ -72,7 +73,7 @@ export async function issueVerifyLink(deps: IssueVerifyLinkDeps): Promise<string
       });
       if (!existingInquiryId) {
         // Newly minted — persist the inquiry id so a later resend reuses it.
-        await deps.customerStore.recordKycInquiry(deps.phone, start.providerRef);
+        await deps.customerStore.recordKycInquiry(deps.partnerId, deps.phone, start.providerRef);
       }
       return start.url;
     } catch (err) {

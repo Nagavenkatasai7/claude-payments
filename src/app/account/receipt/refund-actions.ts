@@ -38,7 +38,7 @@ export async function requestRefundAction(formData: FormData): Promise<void> {
   const transfer = await store.getTransfer(transferId);
   // STRICT ownership, 404-never-403 (mirrors request_refund): another customer's
   // transfer is indistinguishable from a missing one.
-  if (!transfer || transfer.phone !== customer.senderPhone) refuse();
+  if (!transfer || transfer.phone !== customer.senderPhone || transfer.partnerId !== customer.partnerId) refuse();
 
   const refundStatus = transfer!.refundStatus ?? 'none'; // lazy-fill: absent ⇒ 'none'
 

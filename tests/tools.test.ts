@@ -38,7 +38,7 @@ const MOCK_RATE = 85.0;
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
 let db: Db;
 
-async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE) {
+async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE, partnerId = 'default') {
   const store = createStore(redis, db);
   const customerStore = createCustomerStore(db, store);
   const dailyVolumeStore = createDailyVolumeStore(redis);
@@ -52,11 +52,12 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
   const nowIso = new Date().toISOString();
   await customerStore.saveCustomer({
     senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
-    senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+    senderCountry: 'US', partnerId, optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
   });
   return {
     phone,
+    partnerId,
     store,
     scheduleStore: createScheduleStore(db),
     draftStore: createDraftStore(redis),
@@ -397,7 +398,7 @@ describe('executeTool', () => {
     expect(saved?.fundingMethod).toBe('debit_card');
     // recipientPhone should be normalized to digits only
     expect(saved?.recipientPhone).toBe('919876543210');
-    expect(await ctx.store.getTransferCount(PHONE)).toBe(1);
+    expect(await ctx.store.getTransferCount('default', PHONE)).toBe(1);
   });
 
   it('create_transfer with watchlisted recipient returns blocked status', async () => {
@@ -693,7 +694,7 @@ describe('schedule tools', () => {
       amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
       frequency: 'monthly', day_of_month: 2,
-    }, c);
+    }, { ...c, partnerId: 'acme' }); // fix 1: the routed tenant owns the schedule
     const saved = await c.scheduleStore.getSchedule(created.schedule_id as string);
     expect(saved?.partnerId).toBe('acme');
   });
@@ -728,9 +729,9 @@ describe('check_send_limit', () => {
   it('T0 customer over the daily cap (cumulative) returns reason=over_daily_cap', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550001111');
-    await ctx.customerStore.upsertOnFirstInbound('15550001111');
+    await ctx.customerStore.upsertOnFirstInbound('default', '15550001111');
     // Spend down to $200 of headroom, then ask for $300.
-    await ctx.dailyVolumeStore.addCents('15550001111', T0_DAILY_CAP_CENTS - 20_000);
+    await ctx.dailyVolumeStore.addCents('default', '15550001111', T0_DAILY_CAP_CENTS - 20_000);
     const r = await executeTool('check_send_limit', { amount_usd: 300 }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
@@ -760,7 +761,7 @@ describe('check_send_limit', () => {
 
   it('check_send_limit: edd_required:true when cumulative-month + requested >= $3k and SoF/occupation absent', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
-    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000); // $2,500 this month
+    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 250_000); // $2,500 this month
     const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx); // → $3,100
     expect(res.edd_required).toBe(true);
   });
@@ -768,10 +769,10 @@ describe('check_send_limit', () => {
   it('check_send_limit: edd_required:false when the customer already has EDD fields on file (sticky)', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
     await ctx.customerStore.saveCustomer({
-      ...(await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer,
+      ...(await ctx.customerStore.upsertOnFirstInbound('default', ctx.phone)).customer,
       sourceOfFunds: 'employment', occupation: 'salaried', eddCapturedAt: '2026-05-01T00:00:00Z',
     });
-    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000);
+    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 250_000);
     const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx);
     expect(res.edd_required).toBe(false); // sticky profile satisfies it
   });
@@ -804,7 +805,7 @@ describe('create_transfer — daily volume increment', () => {
       payout_destination: 'mom@upi',
       funding_method: 'bank_transfer',
     }, ctx);
-    expect(await ctx.dailyVolumeStore.getTodayCents('15551234567')).toBe(10_000);
+    expect(await ctx.dailyVolumeStore.getTodayCents('default', '15551234567')).toBe(10_000);
   });
 });
 
@@ -838,7 +839,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
       source_of_funds: 'employment',
       occupation: 'salaried',
     }, ctx);
-    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    const customer = await ctx.customerStore.getCustomer('default', ctx.phone);
     expect(customer?.sourceOfFunds).toBe('employment');
     expect(customer?.occupation).toBe('salaried');
     expect(customer?.eddCapturedAt).toBeTruthy();
@@ -849,7 +850,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
     await grandfathered(ctx);
     // $2,500 already this month + $600 → crosses $3k; an invalid SoF must NOT
     // satisfy the EDD requirement, so the transfer must be flagged edd_required.
-    await ctx.monthlyVolumeStore.addCents(ctx.phone, 250_000);
+    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 250_000);
     const r = await executeTool('create_transfer', {
       amount_usd: 600,
       recipient_name: 'Mom',
@@ -863,7 +864,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
     expect(r.compliance_status).toBe('flagged');
     expect(r.compliance_reasons).toContain('edd_required');
     // And nothing invalid leaked onto the Customer.
-    const customer = await ctx.customerStore.getCustomer(ctx.phone);
+    const customer = await ctx.customerStore.getCustomer('default', ctx.phone);
     expect(customer?.sourceOfFunds).toBeUndefined();
     expect(customer?.occupation).toBeUndefined();
   });
@@ -874,6 +875,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
     await grandfathered(base);
     // Seed a draft as if send_approve_picker had been called with Travel-Rule data.
     const draftId = await base.draftStore.createDraft({
+      partnerId: 'default',
       senderPhone: base.phone,
       recipient: {
         name: 'Mom',
@@ -966,7 +968,7 @@ describe('multi-currency dormancy invariant', () => {
     const result = await executeTool(
       'get_quote',
       { amount_usd: 200, funding_method: 'bank_transfer', source_currency: 'GBP' },
-      ctx,
+      { ...ctx, partnerId: 'us-only-test' }, // fix 1: the turn runs under the routed tenant
     );
 
     expect(result.source_currency).toBe('USD'); // GBP request ignored on a single-currency partner
@@ -1060,7 +1062,7 @@ describe('send_approve_picker — cap enforcement', () => {
   it('refuses to send buttons and returns error when over cap', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550002222');
-    await ctx.customerStore.upsertOnFirstInbound('15550002222');
+    await ctx.customerStore.upsertOnFirstInbound('default', '15550002222');
     // Prime the rate cache with the standard stub BEFORE replacing fetch, so
     // resolveCurrencyAndRates doesn't hit the WhatsApp-detection stub.
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
@@ -1087,7 +1089,7 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
   async function buildClearedCtx() {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550003333');
-    await ctx.customerStore.upsertOnFirstInbound('15550003333');
+    await ctx.customerStore.upsertOnFirstInbound('default', '15550003333');
     // Prime rate cache before we replace fetch
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
     return ctx;
@@ -1244,7 +1246,7 @@ describe('cancel_draft — typed cancel via active-draft pointer (Batch 1)', () 
   it('cancels the active draft when there is no Cancel-button tap', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550004444');
-    await ctx.customerStore.upsertOnFirstInbound('15550004444');
+    await ctx.customerStore.upsertOnFirstInbound('default', '15550004444');
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx); // prime rates
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
     const picker = await executeTool('send_approve_picker', {
@@ -1381,7 +1383,7 @@ describe('resolve_recipient — typed-name lookup of saved recipients', () => {
     ctx: Awaited<ReturnType<typeof buildCtx>>,
     over: Partial<{ name: string; recipientPhone: string; payoutMethod: 'upi' | 'bank'; payoutDestination: string }> = {},
   ) => {
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: over.name ?? 'Mom',
       recipientPhone: over.recipientPhone ?? '919876543210',
       payoutMethod: over.payoutMethod ?? 'upi',
@@ -1463,7 +1465,7 @@ describe('maskAccount — exported helper', () => {
 describe('list_saved_recipients — payout_destination masking (Fix #1)', () => {
   it('bank recipient: full account number does NOT appear; last 4 do', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'bank',
@@ -1478,7 +1480,7 @@ describe('list_saved_recipients — payout_destination masking (Fix #1)', () => 
 
   it('UPI recipient: payout_destination returned unchanged', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Dad',
       recipientPhone: '919811111111',
       payoutMethod: 'upi',
@@ -1494,7 +1496,7 @@ describe('list_saved_recipients — payout_destination masking (Fix #1)', () => 
 describe('resolve_recipient — payout_destination masking (Fix #1)', () => {
   it('bank recipient: full account does NOT appear in exact match result', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Priya',
       recipientPhone: '919876543210',
       payoutMethod: 'bank',
@@ -1510,14 +1512,14 @@ describe('resolve_recipient — payout_destination masking (Fix #1)', () => {
 
   it('bank recipient: full account does NOT appear in ambiguous candidates', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'bank',
       payoutDestination: '111222333444 HDFC0001234',
       lastUsedAt: new Date().toISOString(),
     });
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Mom',
       recipientPhone: '919800000000',
       payoutMethod: 'bank',
@@ -1534,7 +1536,7 @@ describe('resolve_recipient — payout_destination masking (Fix #1)', () => {
 
   it('UPI exact match: payout_destination stays unmasked', async () => {
     const ctx = await buildCtx(fakeRedis());
-    await ctx.store.upsertRecipient(ctx.phone, {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Ravi',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',
@@ -1562,7 +1564,7 @@ describe('get_quote cap guard (Bundle D)', () => {
   it('refuses an over-daily amount and reports the remaining', async () => {
     const ctx = await buildCtx(fakeRedis());
     // Leave exactly $100 of headroom, then ask for $200.
-    await ctx.dailyVolumeStore.addCents(PHONE, T0_DAILY_CAP_CENTS - 10_000);
+    await ctx.dailyVolumeStore.addCents('default', PHONE, T0_DAILY_CAP_CENTS - 10_000);
     const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
@@ -1598,7 +1600,7 @@ describe('create_transfer records the sender\'s funding method (Bundle C)', () =
       payout_destination: 'mom@upi',
       funding_method: 'credit_card',
     }, ctx);
-    const c = await ctx.customerStore.getCustomer(ctx.phone);
+    const c = await ctx.customerStore.getCustomer('default', ctx.phone);
     expect(c?.lastFundingMethod).toBe('credit_card');
   });
 });
@@ -1621,12 +1623,12 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
   it('hydrates the last transfer and sends an approve card (a draft, NOT a new transfer)', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedPastTransfer(ctx);
-    const countBefore = await ctx.store.getTransferCount(ctx.phone);
+    const countBefore = await ctx.store.getTransferCount('default', ctx.phone);
     const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
     expect(r.sent).toBe(true);
     expect(typeof r.draft_id).toBe('string');
     // routed through the draft path — no new transfer created yet
-    expect(await ctx.store.getTransferCount(ctx.phone)).toBe(countBefore);
+    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(countBefore);
     const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
     // Repeats must carry the REAL account into the new draft — hydrated from the
     // saved recipient (decrypted), never the masked default ledger read.
@@ -1645,7 +1647,7 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
   it('falls back to the sender\'s remembered funding method when none is given', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedPastTransfer(ctx); // last transfer used bank_transfer + records it as the default
-    await ctx.customerStore.recordFundingMethod(ctx.phone, 'credit_card'); // newer default
+    await ctx.customerStore.recordFundingMethod('default', ctx.phone, 'credit_card'); // newer default
     const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
     const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
     expect(draft?.fundingMethod).toBe('credit_card');
@@ -1662,7 +1664,7 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
     const ctx = await buildCtx(fakeRedis());
     await seedPastTransfer(ctx);
     // push cumulative monthly volume over $3,000 so evaluateEdd trips; customer has no SoF/occupation
-    await ctx.monthlyVolumeStore.addCents(ctx.phone, 300000);
+    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 300000);
     const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100 }, ctx);
     expect(r.needs_edd).toBe(true);
     expect(r.sent).toBeUndefined();
@@ -1727,7 +1729,7 @@ describe('any-to-any corridors — destination_country threading', () => {
     stubAedFetch();
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550099999');
-    await ctx.customerStore.upsertOnFirstInbound('15550099999');
+    await ctx.customerStore.upsertOnFirstInbound('default', '15550099999');
     // Prime the rate cache for USD first
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx);
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -2037,7 +2039,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     const quoted = await executeTool(
       'get_quote',
       { amount_usd: 400, funding_method: 'bank_transfer' },
-      { ...ctx, routeSelector: spy },
+      { ...ctx, partnerId: 'acme', routeSelector: spy },
     );
     expect(spy).not.toHaveBeenCalled();
     expect(quoted.fx_rate).toBe(MOCK_RATE);
@@ -2048,7 +2050,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
       amount_usd: 200, funding_method: 'bank_transfer',
       recipient_name: 'Mom', recipient_phone: '919876543210',
       payout_method: 'upi', payout_destination: 'mom@upi',
-    }, { ...ctx, routeSelector: spy });
+    }, { ...ctx, partnerId: 'acme', routeSelector: spy });
     expect(spy).not.toHaveBeenCalled();
     expect(picker.sent).toBe(true);
     const draft = await ctx.draftStore.consumeDraft(picker.draft_id as string);
@@ -2091,6 +2093,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     const base = await buildCtx(redis, '15550008888');
     await seedPartner(db, 'rail-partner-x');
     const draftId = await base.draftStore.createDraft({
+      partnerId: 'default',
       senderPhone: base.phone,
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
       amountUsd: 200,
@@ -2497,6 +2500,21 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
     expect(r).toEqual({ error: 'Transfer not found.' });
   });
 
+  it('the open-case cap counts ONLY this tenant\'s tickets — another tenant\'s open cases for the same phone never block a recall (review item 4)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis());
+    const repo = createTicketRepo(db);
+    for (let i = 0; i < 5; i++) {
+      await repo.createTicket({
+        id: `tk_acme${i}`, partnerId: 'acme', kind: 'customer',
+        customerPhone: ctx.phone, subject: `acme case ${i}`, body: 'open case',
+      });
+    }
+    const id = await mintDelivered(ctx);
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'other' }, ctx);
+    expect(r.opened).toBe(true);
+  });
+
   it('respects the open-case cap (5) — a 6th recall is refused, no ticket', async () => {
     const ctx = await buildCtx(fakeRedis());
     const repo = createTicketRepo(db);
@@ -2813,7 +2831,7 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
   it('EDD-required repeats degrade to a WhatsApp hand-off (no half-collected answers)', async () => {
     const base = await buildCtx(fakeRedis());
     await seedPast(base);
-    await base.monthlyVolumeStore.addCents(base.phone, 300000); // over the $3k month threshold
+    await base.monthlyVolumeStore.addCents('default', base.phone, 300000); // over the $3k month threshold
     const ctx = { ...base, channel: 'web' as const };
     const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
 
@@ -3584,6 +3602,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
     it('no transfer but an active draft ⇒ discards the draft (nothing charged)', async () => {
       const ctx = await buildCtx(fakeRedis());
       await ctx.draftStore.createDraft({
+        partnerId: 'default',
         senderPhone: PHONE,
         recipient: { name: 'Globex Trading LLC', recipientPhone: '919876543210', payoutMethod: 'bank' },
         amountUsd: 400, amountSource: 400, sourceCurrency: 'USD', fundingMethod: 'ach_pull',
@@ -3596,7 +3615,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(r.cancelled).toBe(true);
       expect(r.action).toBe('draft_discarded');
       expect(String(r.reply_hint).toLowerCase()).toContain('nothing was charged');
-      expect(await ctx.draftStore.getActiveDraftId(PHONE)).toBeNull(); // consumed
+      expect(await ctx.draftStore.getActiveDraftId('default', PHONE)).toBeNull(); // consumed
     });
 
     it('an already-cancelled bill ⇒ nothing to cancel', async () => {
@@ -3678,6 +3697,21 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect((await ctx.store.getB2bInvoice(invId))?.status).toBe('disputed');
     });
 
+    it('the dispute cap counts ONLY this tenant\'s tickets (review item 4)', async () => {
+      await seedPartner(db, 'acme');
+      const ctx = await buildCtx(fakeRedis());
+      const repo = createTicketRepo(db);
+      for (let i = 0; i < 5; i++) {
+        await repo.createTicket({
+          id: `tk_acmeb${i}`, partnerId: 'acme', kind: 'customer',
+          customerPhone: ctx.phone, subject: `acme case ${i}`, body: 'open case',
+        });
+      }
+      await seedUnpaidInvoice(ctx);
+      const r = await executeTool('dispute_bill', { reason: 'other' }, ctx);
+      expect(r.disputed).toBe(true);
+    });
+
     it('respects the open-case cap (5) — a 6th dispute is refused, invoice stays unpaid', async () => {
       const ctx = await buildCtx(fakeRedis());
       const repo = createTicketRepo(db);
@@ -3693,5 +3727,133 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(r.disputed).toBeUndefined();
       expect((await ctx.store.getB2bInvoice(invId))?.status).toBe('unpaid'); // not flipped
     });
+  });
+});
+
+describe('tools are tenant-scoped (fix 1)', () => {
+  it('list_saved_recipients / resolve_recipient under acme never see the default tenant address book for the same phone', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const dflt = await buildCtx(redis);
+    await dflt.store.upsertRecipient('default', PHONE, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    expect(await executeTool('list_saved_recipients', {}, acme)).toEqual({ recipients: [] });
+    // `{ match: 'none' }` is exactly what resolve_recipient returns today for an empty book
+    // (src/lib/tools.ts:2647-2681, both the empty-list and the zero-candidates arms); pin
+    // it with toEqual so a later copy change to that shape is caught here, not in prod.
+    expect(await executeTool('resolve_recipient', { name: 'Mom' }, acme)).toEqual({ match: 'none' });
+    expect((await executeTool('list_saved_recipients', {}, dflt)).recipients).toHaveLength(1);
+  });
+
+  it('list_schedules / cancel_schedule under acme never see or cancel a default-tenant schedule for the same phone (F44 via the signed-inbound forgery)', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const dflt = await buildCtx(redis);
+    const nowIso = new Date().toISOString();
+    await dflt.scheduleStore.saveSchedule({
+      id: 'sch_default_1', phone: PHONE, partnerId: 'default', amountUsd: 200, amountSource: 200, sourceCurrency: 'USD',
+      recipientName: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer', frequency: 'monthly', dayOfMonth: 1, status: 'active', createdAt: nowIso,
+    });
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    expect(await executeTool('list_schedules', {}, acme)).toEqual({ schedules: [] });
+    expect(await executeTool('cancel_schedule', { schedule_id: 'sch_default_1' }, acme)).toEqual({ error: 'Schedule not found.' });
+    expect((await dflt.scheduleStore.getSchedule('sch_default_1'))?.status).toBe('active'); // untouched
+    expect((await executeTool('list_schedules', {}, dflt)).schedules).toHaveLength(1);      // the owner still sees it
+  });
+
+  it('check_payment_status / update_recipient_phone under acme treat a default-tenant transfer id as not found and leave the row unchanged', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const dflt = await buildCtx(redis);
+    const created = await executeTool('create_transfer', {
+      amount_usd: 500, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+    }, dflt);
+    expect(created.error).toBeUndefined();
+    const id = created.transfer_id as string;
+    const before = (await dflt.store.getTransfer(id))!;
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    expect(await executeTool('check_payment_status', { transfer_id: id }, acme)).toEqual({ error: 'Transfer not found.' });
+    expect(await executeTool('update_recipient_phone', { transfer_id: id, recipient_phone: '919999999999' }, acme)).toEqual({ error: 'Transfer not found.' });
+    const after = (await dflt.store.getTransfer(id))!;
+    expect([after.recipientPhone, after.status, after.partnerId]).toEqual([before.recipientPhone, before.status, 'default']);
+    // The owner's own turn still resolves it (same phone, right tenant).
+    expect((await executeTool('check_payment_status', { transfer_id: id }, dflt)).error).toBeUndefined();
+  });
+
+  it('send_approve_picker writes the draft under ctx.partnerId and the active-draft pointer under (partnerId, phone)', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Anita',
+      recipient_phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890', destination_country: 'IN',
+    }, acme);
+    const draftKey = [...redis.dump.keys()].find((k) => k.startsWith('recipient_draft:'))!;
+    expect(JSON.parse(redis.dump.get(draftKey)!).partnerId).toBe('acme');
+    expect(redis.dump.has(`active_draft:acme:${PHONE}`)).toBe(true);   // D12
+    expect(redis.dump.has(`active_draft:${PHONE}`)).toBe(false);
+    expect(await acme.draftStore.getActiveDraftId('default', PHONE)).toBeNull();
+  });
+
+  it('an approve tap under acme NEVER resolves a default-tenant draft for the same phone (hard guard, D12)', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const dflt = await buildCtx(redis);
+    const draftId = await dflt.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+    });
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    const r = await executeTool('create_transfer', {}, { ...acme, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } });
+    expect(r.error).toBeDefined();
+    expect(r.transfer_id).toBeUndefined();
+    expect(await acme.store.listTransfers()).toHaveLength(0);            // nothing minted under acme
+    expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();      // and default's draft was not consumed
+    // Cancel is guarded the same way: acme's "cancel" cannot see default's pointer.
+    expect(await executeTool('cancel_draft', {}, acme)).toEqual({ cancelled: false, reason: 'no_active_draft' });
+    expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();
+  });
+});
+
+describe('verification hand-offs record the inquiry under the TURN tenant (review item 1)', () => {
+  // The Persona webhook binds a completion by kycInquiryId once a phone has rows
+  // under several tenants. Every tool that mints an inquiry must therefore
+  // record it on the (ctx.partnerId, phone) row — never on a sibling's.
+  it.each([
+    ['check_send_limit', {}],
+    ['get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }],
+    ['send_approve_picker', { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi' }],
+    ['create_transfer', { amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi' }],
+  ])('%s under acme records the inquiry on acme\'s row only', async (tool, args) => {
+    const redis = fakeRedis();
+    const dflt = await buildCtx(redis); // verified default-tenant row for PHONE
+    const nowIso = new Date().toISOString();
+    await dflt.partnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active', kycMode: 'ours',
+      requireKycBeforeSend: true, createdAt: nowIso, updatedAt: nowIso,
+    });
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    await acme.customerStore.saveCustomer({
+      ...(await acme.customerStore.getCustomer('acme', PHONE))!, kycStatus: 'not_started',
+    });
+    const ctx = {
+      ...acme,
+      kycProvider: {
+        startVerification: async () => ({ url: 'https://kyc.example/v', providerRef: 'inq_tool_1' }),
+        getStatus: async () => 'pending' as const,
+        handleWebhook: async () => null,
+      },
+    };
+    const r = await executeTool(tool, { ...args, amount_usd: (args as { amount_usd?: number }).amount_usd ?? 100 }, ctx);
+    expect(JSON.stringify(r)).toContain('https://kyc.example/v');
+    expect((await acme.customerStore.getCustomer('acme', PHONE))!.kycInquiryId).toBe('inq_tool_1');
+    expect((await acme.customerStore.getCustomer('default', PHONE))!.kycInquiryId).toBeUndefined();
   });
 });

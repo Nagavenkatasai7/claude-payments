@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
 import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
 import { createStore } from '@/lib/store';
@@ -46,8 +46,9 @@ function signed(body: string) {
 const req = (body: string, header: string) =>
   ({ text: async () => body, headers: { get: (h: string) => (h.toLowerCase() === 'persona-signature' ? header : null) } }) as unknown as Parameters<typeof POST>[0];
 
+let db: Awaited<ReturnType<typeof freshDb>>;
 beforeEach(async () => {
-  const db = await freshDb();
+  db = await freshDb();
   cs = createCustomerStore(db, createStore(fakeRedis(), db));
   kcs = createKycCaseStore(fakeRedis(), cs);
   partner = { id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active', requireKycBeforeSend: true, createdAt: ISO, updatedAt: ISO };
@@ -60,7 +61,7 @@ describe('POST /api/persona-webhook', () => {
     const body = eventBody('inquiry.completed', 'evt_x');
     const res = await POST(req(body, 't=1,v1=bad'));
     expect(res.status).toBe(401);
-    expect((await cs.getCustomer(PHONE))?.kycReviewState).toBeUndefined();
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBeUndefined();
   });
 
   it('200 + moves a clean pass to pending_review (NEVER verified)', async () => {
@@ -68,7 +69,7 @@ describe('POST /api/persona-webhook', () => {
     const body = eventBody('inquiry.completed', 'evt_1');
     const res = await POST(req(body, signed(body)));
     expect(res.status).toBe(200);
-    const c = await cs.getCustomer(PHONE);
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('pending_review');
     expect(c?.kycStatus).toBe('pending'); // gate field untouched
     expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined);
@@ -79,11 +80,11 @@ describe('POST /api/persona-webhook', () => {
     await seed();
     const started = eventBody('inquiry.started', 'evt_off_1');
     await POST(req(started, signed(started)));
-    expect((await cs.getCustomer(PHONE))?.kycReviewState).toBe('inquiry_started'); // Persona stays source of truth
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('inquiry_started'); // Persona stays source of truth
     const completed = eventBody('inquiry.completed', 'evt_off_2');
     const res = await POST(req(completed, signed(completed)));
     expect(res.status).toBe(200);
-    expect((await cs.getCustomer(PHONE))?.kycReviewState).toBe('pending_review');
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('pending_review');
     expect(notify).not.toHaveBeenCalled(); // neither in_progress nor received
   });
 
@@ -101,6 +102,26 @@ describe('POST /api/persona-webhook', () => {
     const res = await POST(req(body, signed(body)));
     const j = await res.json();
     expect(res.status).toBe(200);
+    expect(j.ignored).toBe(true);
+  });
+
+  it('two tenant rows for the phone: the completion binds to the row whose inquiry the TOOL path recorded, never the sibling (review item 1)', async () => {
+    await seedPartner(db, 'acme');
+    await seed({ createdAt: '2026-05-01T00:00:00.000Z' }); // default row, no inquiry
+    await seed({ partnerId: 'acme', kycInquiryId: 'inq_1', kycProviderRef: 'inq_1' }); // tools.ts recorded inq_1 here
+    const body = eventBody('inquiry.completed', 'evt_two_rows');
+    const res = await POST(req(body, signed(body)));
+    expect(res.status).toBe(200);
+    expect((await cs.getCustomer('acme', PHONE))?.kycReviewState).toBe('pending_review');
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBeUndefined();
+  });
+
+  it('two tenant rows and NO recorded inquiry: the event is ignored (never guesses a tenant)', async () => {
+    await seedPartner(db, 'acme');
+    await seed({ createdAt: '2026-05-01T00:00:00.000Z' });
+    await seed({ partnerId: 'acme' });
+    const body = eventBody('inquiry.completed', 'evt_two_rows_none');
+    const j = await (await POST(req(body, signed(body)))).json();
     expect(j.ignored).toBe(true);
   });
 });

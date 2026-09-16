@@ -8,12 +8,13 @@ import type { Customer } from './types';
 // by default on read (sanctions screening needs fullName on the hot path);
 // `email` passes through verbatim (it is ALREADY a field-crypto blob written by
 // customer-auth-store). upsertOnFirstInbound keeps grandfathering + opt-in
-// backfill + WL2 follow-the-number — with the grandfather check now an indexed
-// MIN(created_at) via store.firstTransferAt instead of a full-ledger scan.
+// backfill; the key is (partnerId, phone) and rows never move between tenants
+// (fix 1). The grandfather check is an indexed MIN(created_at) via
+// store.firstTransferAt instead of a full-ledger scan.
 export type { Customer };
 
 export function createCustomerStore(db: DbOrTx, store: Store) {
-  return createCustomerRepo(db, (phone) => store.firstTransferAt(phone));
+  return createCustomerRepo(db, (partnerId, phone) => store.firstTransferAt(partnerId, phone));
 }
 
 export type CustomerStore = ReturnType<typeof createCustomerStore>;

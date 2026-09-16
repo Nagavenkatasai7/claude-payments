@@ -35,7 +35,7 @@ function toolCall(id: string, name: string, args: object): ChatMessage {
   };
 }
 
-function buildHarness(redis: FakeRedis) {
+function buildHarness(redis: FakeRedis, partnerId = 'default') {
   const store = createStore(redis, db);
   const customerStore = createCustomerStore(db, store);
   const scheduleStore = createScheduleStore(db);
@@ -52,7 +52,7 @@ function buildHarness(redis: FakeRedis) {
 
   const agent = createAgent({
     store, scheduleStore, draftStore, customerStore, dailyVolumeStore,
-    monthlyVolumeStore, kycProvider, partnerStore,
+    monthlyVolumeStore, kycProvider, partnerStore, partnerId,
     async chat(messages) {
       systemSnapshots.push(
         messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n'),
@@ -89,7 +89,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
   it('brands the prompt, skips the KYC gate for an UNVERIFIED sender, and delivers', async () => {
     const redis = fakeRedis();
-    const h = buildHarness(redis);
+    const h = buildHarness(redis, 'acme');
     // A fully-provisioned delegated partner + an UNVERIFIED customer under it.
     await h.partnerStore.savePartner(partnerRecord({ id: 'acme', displayName: 'Acme Pay', kycMode: 'delegated', requireKycBeforeSend: false }));
     await h.customerStore.saveCustomer({
@@ -141,7 +141,7 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
 
   it('SANCTIONS SURVIVE DELEGATION: a watchlisted recipient is still blocked through the agent', async () => {
     const redis = fakeRedis();
-    const h = buildHarness(redis);
+    const h = buildHarness(redis, 'acme');
     await h.partnerStore.savePartner(partnerRecord({ id: 'acme', displayName: 'Acme Pay', kycMode: 'delegated', requireKycBeforeSend: false }));
     await h.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',

@@ -130,11 +130,11 @@ export default async function CustomersPage({
               rows={rows.map(({ c, life }) => {
                 const tier = deriveTier(c, now, sendGateActive(partnerById[c.partnerId]));
                 return {
-                  key: c.senderPhone,
+                  key: `${c.partnerId}:${c.senderPhone}`,
                   label: `+${c.senderPhone}`,
                   cells: [
                     <Link
-                      href={`/admin-dashboard/customers/${c.senderPhone}`}
+                      href={`/admin-dashboard/customers/${c.senderPhone}?partner=${encodeURIComponent(c.partnerId)}`}
                       className="text-primary underline-offset-2 hover:underline"
                       key="phone"
                     >

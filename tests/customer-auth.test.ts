@@ -78,14 +78,14 @@ describe('getCurrentCustomer', () => {
 
   it('returns the Customer for a valid session', async () => {
     await seedCustomer();
-    const token = await getCustomerAuthStore().createSession(NORM);
+    const token = await getCustomerAuthStore().createSession(NORM, 'default');
     cookieJar.set(CUSTOMER_SESSION_COOKIE, token);
     const c = await getCurrentCustomer();
     expect(c?.senderPhone).toBe(NORM);
   });
 
   it('returns null when the session resolves but the Customer record is gone', async () => {
-    const token = await getCustomerAuthStore().createSession(NORM);
+    const token = await getCustomerAuthStore().createSession(NORM, 'default');
     cookieJar.set(CUSTOMER_SESSION_COOKIE, token);
     // no customer record seeded
     expect(await getCurrentCustomer()).toBeNull();
@@ -99,7 +99,7 @@ describe('requireCustomer', () => {
 
   it('returns the customer when authenticated', async () => {
     await seedCustomer();
-    const token = await getCustomerAuthStore().createSession(NORM);
+    const token = await getCustomerAuthStore().createSession(NORM, 'default');
     cookieJar.set(CUSTOMER_SESSION_COOKIE, token);
     const c = await requireCustomer();
     expect(c.senderPhone).toBe(NORM);

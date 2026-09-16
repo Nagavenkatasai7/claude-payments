@@ -24,10 +24,12 @@ export class MockKycProvider implements KycProvider {
   }
 
   async getStatus(providerRef: string): Promise<KycStatus> {
-    // Extract phone from providerRef "mock-<phone>"
+    // providerRef is "mock-<phone>". A phone may have a row per tenant (fix 1):
+    // bind by the ref the row recorded, else the single unambiguous row.
     const phone = providerRef.startsWith('mock-') ? providerRef.slice('mock-'.length) : null;
     if (!phone) return 'pending';
-    const customer = await this.customerStore.getCustomer(phone);
+    const rows = await this.customerStore.findByPhone(phone);
+    const customer = rows.find((c) => c.kycProviderRef === providerRef) ?? (rows.length === 1 ? rows[0] : null);
     if (!customer) return 'pending';
     if (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered') return 'verified';
     if (customer.kycStatus === 'rejected') return 'rejected';

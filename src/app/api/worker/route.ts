@@ -24,6 +24,7 @@ import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
 import { getPartnerStore } from '@/lib/partner-store';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 export const maxDuration = 60;
 
@@ -71,6 +72,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
     listStaff: () => getAuthStore().listStaff(),
     runAgentTurn: async (phone, message, turn, waCreds, opts) => {
+      const routedPartnerId = opts?.routedPartnerId ?? null;
       const customerStore = getCustomerStore(store);
       const agent = createAgent({
         chat,
@@ -83,6 +85,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
         kycProvider: getKycProvider(customerStore, env.appBaseUrl),
         partnerStore: getPartnerStore(),
         waCreds, // WL2: interactive sends + replies leave from the partner's number
+        partnerId: routedPartnerId ?? DEFAULT_PARTNER_ID, // fix 1: the turn runs under the routed tenant
       });
       // Fix 7: the worker's cooperative row deadline stops the turn between tool rounds.
       return agent.runAgentTurn(phone, message, turn, { signal: opts?.signal });

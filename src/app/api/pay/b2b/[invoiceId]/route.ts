@@ -167,7 +167,7 @@ export async function POST(
     // ── KYB gate (friendly UX before the mint; createTransfer backstops) ──────
     const customerStore = getCustomerStore(store);
     const partnerStore = getPartnerStore();
-    const owner = await customerStore.getCustomer(buyerPhone);
+    const owner = await customerStore.getCustomer(invoice.partnerId, buyerPhone);
     const owningPartner =
       (await partnerStore.getPartner(invoice.partnerId)) ?? (await partnerStore.ensureDefaultPartner());
     if (sendGateActive(owningPartner) && !isB2bSendVerified(owner)) {

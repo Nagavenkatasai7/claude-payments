@@ -68,28 +68,28 @@ describe('webThreadStore', () => {
   it('reads/writes conversations at conv:web:<phone>, leaving conv:<phone> untouched', async () => {
     const { redis, store } = buildDeps();
     // A live WhatsApp thread at the plain key.
-    await store.saveConversation(PHONE, [{ role: 'user', content: 'wa message' }]);
+    await store.saveConversation('default', PHONE, [{ role: 'user', content: 'wa message' }]);
 
     const web = webThreadStore(store);
-    await web.saveConversation(PHONE, [{ role: 'user', content: 'web message' }]);
+    await web.saveConversation('default', PHONE, [{ role: 'user', content: 'web message' }]);
 
-    expect(redis.dump.has(`conv:${PHONE}`)).toBe(true);
-    expect(redis.dump.has(`conv:web:${PHONE}`)).toBe(true);
+    expect(redis.dump.has(`conv:default:${PHONE}`)).toBe(true);
+    expect(redis.dump.has(`conv:default:web:${PHONE}`)).toBe(true);
     // The WhatsApp thread is byte-for-byte untouched.
-    expect(JSON.parse(redis.dump.get(`conv:${PHONE}`)!)).toEqual([
+    expect(JSON.parse(redis.dump.get(`conv:default:${PHONE}`)!)).toEqual([
       { role: 'user', content: 'wa message' },
     ]);
-    expect(await web.getConversation(PHONE)).toEqual([{ role: 'user', content: 'web message' }]);
+    expect(await web.getConversation('default', PHONE)).toEqual([{ role: 'user', content: 'web message' }]);
     // …and the plain read still sees only the WhatsApp thread.
-    expect(await store.getConversation(PHONE)).toEqual([{ role: 'user', content: 'wa message' }]);
+    expect(await store.getConversation('default', PHONE)).toEqual([{ role: 'user', content: 'wa message' }]);
   });
 
   it('saves with the same 30-day TTL as WhatsApp threads', async () => {
     const { redis, store } = buildDeps();
     const setSpy = vi.spyOn(redis, 'set');
-    await webThreadStore(store).saveConversation(PHONE, [{ role: 'user', content: 'hi' }]);
+    await webThreadStore(store).saveConversation('default', PHONE, [{ role: 'user', content: 'hi' }]);
     expect(setSpy).toHaveBeenCalledWith(
-      `conv:web:${PHONE}`,
+      `conv:default:web:${PHONE}`,
       expect.any(String),
       { ex: 30 * 24 * 3600 },
     );
@@ -102,8 +102,8 @@ describe('webThreadStore', () => {
     for (let i = 0; i < 45; i++) {
       long.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `m${i}` });
     }
-    await web.saveConversation(PHONE, long);
-    const back = await web.getConversation(PHONE);
+    await web.saveConversation('default', PHONE, long);
+    const back = await web.getConversation('default', PHONE);
     expect(back.length).toBeLessThanOrEqual(40);
     expect(back[0].role).toBe('user'); // trim re-anchors on a user message
     expect(back[back.length - 1].content).toBe('m44'); // newest kept
@@ -112,19 +112,19 @@ describe('webThreadStore', () => {
   it('delegates non-conversation methods to the same underlying ledger', async () => {
     const { store } = buildDeps();
     const web = webThreadStore(store);
-    await web.upsertRecipient(PHONE, {
+    await web.upsertRecipient('default', PHONE, {
       name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi',
       payoutDestination: 'mom@upi', lastUsedAt: new Date().toISOString(),
     });
     // Visible through the base store — one ledger, no key-space fork.
-    expect((await store.listRecipients(PHONE, 5)).map((r) => r.name)).toEqual(['Mom']);
+    expect((await store.listRecipients('default', PHONE, 5)).map((r) => r.name)).toEqual(['Mom']);
   });
 });
 
 describe('createWebChat', () => {
   it('runs a turn on the web thread; the WhatsApp thread never changes', async () => {
     const deps = buildDeps();
-    await deps.store.saveConversation(PHONE, [{ role: 'user', content: 'wa history' }]);
+    await deps.store.saveConversation('default', PHONE, [{ role: 'user', content: 'wa history' }]);
 
     const webChat = createWebChat({
       ...deps,
@@ -134,10 +134,10 @@ describe('createWebChat', () => {
     expect(reply).toBe('Hello from the dashboard!');
 
     // Web thread persisted under its own key…
-    const webConv = JSON.parse(deps.redis.dump.get(`conv:web:${PHONE}`)!) as ChatMessage[];
+    const webConv = JSON.parse(deps.redis.dump.get(`conv:default:web:${PHONE}`)!) as ChatMessage[];
     expect(webConv.some((m) => m.role === 'user' && m.content === 'hi there')).toBe(true);
     // …while the WhatsApp thread is untouched.
-    expect(await deps.store.getConversation(PHONE)).toEqual([
+    expect(await deps.store.getConversation('default', PHONE)).toEqual([
       { role: 'user', content: 'wa history' },
     ]);
   });
@@ -162,7 +162,7 @@ describe('createWebChat', () => {
 
   it('a pre-existing WhatsApp thread does NOT suppress the web [NEW CONVERSATION]', async () => {
     const deps = buildDeps();
-    await deps.store.saveConversation(PHONE, [
+    await deps.store.saveConversation('default', PHONE, [
       { role: 'user', content: 'old wa chat' },
       { role: 'assistant', content: 'old wa reply' },
     ]);
@@ -200,7 +200,7 @@ describe('createWebChat', () => {
     expect(reply).toBe('I cannot do that from here.');
     expect(createDraft).not.toHaveBeenCalled();
     // The dispatch-level refusal is what the model saw.
-    const conv = JSON.parse(deps.redis.dump.get(`conv:web:${PHONE}`)!) as ChatMessage[];
+    const conv = JSON.parse(deps.redis.dump.get(`conv:default:web:${PHONE}`)!) as ChatMessage[];
     expect(conv.find((m) => m.role === 'tool')!.content).toContain('not available here');
   });
 

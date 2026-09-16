@@ -3,7 +3,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { RedisLike } from './store';
 import { getStore } from './store';
 import { getCustomerStore, type CustomerStore } from './customer-store';
-import type { Customer } from './types';
+import type { Customer, PartnerId } from './types';
+import { logWarn } from './log';
 import { normalizePhone, isValidPhone } from './phone';
 import { countryForPhone } from './partner-currency';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from './defaults';
@@ -70,9 +71,19 @@ function sha256hex(s: string): string {
 
 interface SessionRecord {
   phone: string;
+  partnerId?: PartnerId; // absent only on pre-fix-1 records ⇒ resolves to nothing (re-login)
   createdAtMs: number;
   lastSeenMs: number;
 }
+
+export interface SessionIdentity {
+  phone: string;
+  partnerId: PartnerId;
+}
+
+/** The ONE register refusal shown to the browser (D6): never says whether the number exists or under how many tenants. */
+const REGISTER_UNAVAILABLE =
+  "We can't set up an account for this number. If you already have one, sign in or reset your password; otherwise contact support.";
 
 export interface RegisterInput {
   phone: string;
@@ -102,8 +113,14 @@ export function createCustomerAuthStore(
   // Stage 2a: customer RECORDS live in Postgres now — these helpers delegate
   // to the injected customer store. Sessions / reset tokens / throttles below
   // stay on Redis (hot, TTL'd, exactly where they belong).
-  async function loadCustomer(phone: string): Promise<Customer | null> {
-    return customers.getCustomer(phone);
+  // Customer RECORDS live in Postgres. A phone may have a row per tenant (fix 1);
+  // the portal binds to the ONE account-bearing row (the row holding
+  // password_hash). Two account-bearing rows ⇒ ambiguous ⇒ null: the portal
+  // fails CLOSED rather than logging someone into the wrong tenant's history.
+  async function loadAccountRow(phone: string): Promise<Customer | null> {
+    const rows = await customers.findByPhone(phone);
+    const withAccount = rows.filter((c) => Boolean(c.passwordHash));
+    return withAccount.length === 1 ? withAccount[0] : null;
   }
 
   async function saveCustomer(customer: Customer): Promise<void> {
@@ -111,9 +128,9 @@ export function createCustomerAuthStore(
   }
 
   return {
-    /** Read-only Customer lookup by raw/normalized phone (used by customer-auth). */
+    /** The account-bearing Customer for a phone, or null (missing OR ambiguous). Used by password reset. */
     async getCustomer(phoneRaw: string): Promise<Customer | null> {
-      return loadCustomer(normalizePhone(phoneRaw));
+      return loadAccountRow(normalizePhone(phoneRaw));
     },
 
     /**
@@ -132,11 +149,26 @@ export function createCustomerAuthStore(
       }
 
       // Collision-before-create: never silently overwrite/hijack an existing
-      // account. saveCustomer is an unconditional SET, so this guard is mandatory.
-      const existing = await loadCustomer(phone);
-      if (existing?.passwordHash) {
-        throw new CustomerInputError('An account already exists for this number.');
+      // account. saveCustomer is an unconditional upsert, so this guard is mandatory.
+      const rows = await customers.findByPhone(phone);
+      // ONE generic message for BOTH refusals below. This is an unauthenticated
+      // form: "an account already exists" is an existence oracle for any phone
+      // and "linked to more than one service" is a multi-tenancy oracle (it
+      // tells a caller the number is a customer of >1 partner). The distinction
+      // lives only in a logWarn field — ids/reasons, never the phone — exactly
+      // like the login / reset / verify ambiguity paths, which return a generic
+      // null already.
+      if (rows.some((c) => c.passwordHash)) {
+        logWarn('portal.register_refused', 'account exists', { reason: 'exists' });
+        throw new CustomerInputError(REGISTER_UNAVAILABLE);
       }
+      // Fail closed on an ambiguous phone (a row under more than one tenant, none
+      // with an account): the portal never picks a tenant on the customer's behalf.
+      if (rows.length > 1) {
+        logWarn('portal.register_refused', 'ambiguous tenant', { reason: 'ambiguous', tenants: rows.length });
+        throw new CustomerInputError(REGISTER_UNAVAILABLE);
+      }
+      const existing = rows[0] ?? null;
 
       // Password policy (no composition rules; just length bounds + breach check).
       const { password } = input;
@@ -169,7 +201,8 @@ export function createCustomerAuthStore(
 
       let customer: Customer;
       if (existing) {
-        // Attach to the existing record without clobbering its KYC/consent fields.
+        // Attach to the existing record (whatever tenant it is under) without
+        // clobbering its KYC/consent fields.
         customer = {
           ...existing,
           email: encryptedEmail,
@@ -178,7 +211,7 @@ export function createCustomerAuthStore(
           updatedAt: nowIso,
         };
       } else {
-        // Lazy-create a fresh Customer (mirrors customer-store defaults).
+        // Lazy-create a fresh Customer under the default tenant (mirrors customer-store defaults).
         const senderCountry = countryForPhone(phone) ?? DEFAULT_SENDER_COUNTRY;
         customer = {
           senderPhone: phone,
@@ -209,7 +242,7 @@ export function createCustomerAuthStore(
       password: string,
     ): Promise<Customer | null> {
       const phone = normalizePhone(phoneRaw);
-      const customer = await loadCustomer(phone);
+      const customer = await loadAccountRow(phone);
       if (!customer?.passwordHash) return null;
 
       const ok = await verifyPassword(password, customer.passwordHash);
@@ -242,7 +275,7 @@ export function createCustomerAuthStore(
       regOpts: RegisterOptions = {},
     ): Promise<Customer | null> {
       const phone = normalizePhone(phoneRaw);
-      const customer = await loadCustomer(phone);
+      const customer = await loadAccountRow(phone);
       if (!customer?.passwordHash) return null;
 
       if (newPassword.length < PASSWORD_MIN || newPassword.length > PASSWORD_MAX) {
@@ -293,7 +326,7 @@ export function createCustomerAuthStore(
      */
     async markPhoneVerified(phoneRaw: string): Promise<Customer | null> {
       const phone = normalizePhone(phoneRaw);
-      const customer = await loadCustomer(phone);
+      const customer = await loadAccountRow(phone);
       if (!customer) return null;
       if (customer.phoneVerifiedAt) return customer; // first verify wins; no churn
       const nowIso = new Date(now()).toISOString();
@@ -308,27 +341,22 @@ export function createCustomerAuthStore(
 
     // ── Sessions (256-bit opaque token; Redis key = sha256(token)) ──
 
-    async createSession(phone: string): Promise<string> {
+    async createSession(phone: string, partnerId: PartnerId): Promise<string> {
       const token = randomBytes(32).toString('hex');
       const ts = now();
-      const record: SessionRecord = {
-        phone,
-        createdAtMs: ts,
-        lastSeenMs: ts,
-      };
-      await redis.set(sessionKey(sha256hex(token)), JSON.stringify(record), {
-        ex: SESSION_IDLE_SECONDS,
-      });
+      const record: SessionRecord = { phone, partnerId, createdAtMs: ts, lastSeenMs: ts };
+      await redis.set(sessionKey(sha256hex(token)), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
       await redis.sadd(sessionIndexKey(phone), token);
       return token;
     },
 
     /**
-     * Resolve a session token to its phone, enforcing the AAL2 lifetimes in code
-     * (Redis TTL is only a belt-and-suspenders backstop). On a live session,
-     * refresh `lastSeenMs` (sliding idle window) and re-arm the Redis TTL.
+     * Resolve a session token to its (phone, tenant), enforcing the AAL2 lifetimes
+     * in code (Redis TTL is only a belt-and-suspenders backstop). On a live
+     * session, refresh `lastSeenMs` (sliding idle window) and re-arm the TTL.
+     * A record without a tenant (pre-fix-1) is treated as expired.
      */
-    async getSession(token: string): Promise<string | null> {
+    async getSessionIdentity(token: string): Promise<SessionIdentity | null> {
       const keyHash = sha256hex(token);
       const raw = await redis.get(sessionKey(keyHash));
       if (!raw) return null;
@@ -338,15 +366,25 @@ export function createCustomerAuthStore(
       } catch {
         return null;
       }
+      if (!record.partnerId) return null;
       const ts = now();
       if (ts - record.createdAtMs > ABSOLUTE_MS) return null; // 12-h absolute
       if (ts - record.lastSeenMs > IDLE_MS) return null; //      30-min idle
-
       record.lastSeenMs = ts;
-      await redis.set(sessionKey(keyHash), JSON.stringify(record), {
-        ex: SESSION_IDLE_SECONDS,
-      });
-      return record.phone;
+      await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
+      return { phone: record.phone, partnerId: record.partnerId };
+    },
+
+    /** Phone-only view of getSessionIdentity (kept for existing callers/tests). */
+    async getSession(token: string): Promise<string | null> {
+      return (await this.getSessionIdentity(token))?.phone ?? null;
+    },
+
+    /** The Customer a live session belongs to — the (tenant, phone) row, never a phone-only guess. */
+    async resolveSession(token: string): Promise<Customer | null> {
+      const identity = await this.getSessionIdentity(token);
+      if (!identity) return null;
+      return customers.getCustomer(identity.partnerId, identity.phone);
     },
 
     async deleteSession(token: string): Promise<void> {

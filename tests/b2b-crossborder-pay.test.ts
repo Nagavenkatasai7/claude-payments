@@ -74,7 +74,7 @@ async function seedInvoice(stores: Stores, id = 'inv_xb'): Promise<string> {
 }
 
 async function seedBuyer(stores: Stores, fullName = 'Buyer Person') {
-  const { customer } = await stores.customerStore.upsertOnFirstInbound(BUYER_PHONE);
+  const { customer } = await stores.customerStore.upsertOnFirstInbound(DEFAULT_PARTNER_ID, BUYER_PHONE);
   await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName });
 }
 
@@ -241,7 +241,7 @@ describe('finalizeCrossBorderBillPayment — the cross-border mint', () => {
     await seedActiveSeller(stores);
     // A verified buyer (passes the KYB gate) but with NO legal name on file —
     // screenTransfer would skip the buyer screen, so we must refuse the mint.
-    const { customer } = await stores.customerStore.upsertOnFirstInbound(BUYER_PHONE);
+    const { customer } = await stores.customerStore.upsertOnFirstInbound(DEFAULT_PARTNER_ID, BUYER_PHONE);
     await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: '' });
     const invoiceId = await seedInvoice(stores);
 

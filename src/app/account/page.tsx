@@ -15,7 +15,7 @@ import {
 import { maskAccount } from '@/lib/tools';
 import { easternMonth } from '@/lib/dates';
 import { waLink, WA_MESSAGES } from '@/app/landing/wa';
-import type { Transfer } from '@/lib/types';
+import type { Customer, Transfer } from '@/lib/types';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -90,8 +90,11 @@ function monthlyBuckets(
  * (buildDeterministicSummary). The "AI-generated" disclaimer is shown ONLY on
  * the real-AI path — the deterministic card never claims to be AI.
  */
-async function SmartSummaryCard({ phone }: { phone: string }) {
-  const summary = await getCustomerSummary(phone);
+async function SmartSummaryCard({ customer: sessionCustomer }: { customer: Customer }) {
+  // Fix 1: every read is keyed by the session's (tenant, phone).
+  const phone = sessionCustomer.senderPhone;
+  const partnerId = sessionCustomer.partnerId;
+  const summary = await getCustomerSummary(partnerId, phone);
   if (summary) {
     return (
       <Card>
@@ -115,9 +118,9 @@ async function SmartSummaryCard({ phone }: { phone: string }) {
   try {
     const store = getStore();
     const [customer, transfers, todayUsedCents] = await Promise.all([
-      getCustomerStore(store).getCustomer(phone),
-      store.listTransfersByPhone(phone, 5),
-      getDailyVolumeStore().getTodayCents(phone),
+      getCustomerStore(store).getCustomer(partnerId, phone),
+      store.listTransfersByPhone(partnerId, phone, 5),
+      getDailyVolumeStore().getTodayCents(partnerId, phone),
     ]);
     if (customer) {
       const partnerRow = await getPartnerStore().getPartner(customer.partnerId);
@@ -175,9 +178,9 @@ export default async function AccountHomePage() {
   const store = getStore();
   const [partnerRow, transfers, todayUsedCents, recipients] = await Promise.all([
     getPartnerStore().getPartner(customer.partnerId),
-    store.listTransfersByPhone(customer.senderPhone, 200),
-    getDailyVolumeStore().getTodayCents(customer.senderPhone),
-    store.listRecipients(customer.senderPhone, 6),
+    store.listTransfersByPhone(customer.partnerId, customer.senderPhone, 200),
+    getDailyVolumeStore().getTodayCents(customer.partnerId, customer.senderPhone),
+    store.listRecipients(customer.partnerId, customer.senderPhone, 6),
   ]);
   const partner = partnerRow ?? (await getPartnerStore().ensureDefaultPartner());
   const gateActive = sendGateActive(partner);
@@ -369,7 +372,7 @@ export default async function AccountHomePage() {
           ) : null}
 
           <Suspense fallback={<SummarySkeleton />}>
-            <SmartSummaryCard phone={customer.senderPhone} />
+            <SmartSummaryCard customer={customer} />
           </Suspense>
         </div>
       </div>

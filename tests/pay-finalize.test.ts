@@ -33,12 +33,13 @@ async function makeDraft(
   payoutDestination: string | undefined = 'mom@upi',
   payoutMethod: 'upi' | 'bank' = 'upi',
 ) {
-  const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+  const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
   // Phase 3: these existing-behavior tests exercise the success path, so the
   // sender must be verified (upsertOnFirstInbound defaults to 'not_started').
   await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
   return stores.draftStore.createDraft({
     senderPhone: PHONE,
+    partnerId: 'default',
     recipient: {
       name: recipientName,
       recipientPhone: '919876543210',
@@ -85,7 +86,7 @@ describe('finalizeDraftPayment', () => {
     expect(draft).toBeNull();
 
     // Transfer count incremented
-    expect(await stores.store.getTransferCount(PHONE)).toBe(1);
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
   });
 
   it('Phase 3: an unverified owner → { ok:false, error:"kyc_required" }, draft NOT consumed, no transfer', async () => {
@@ -94,7 +95,7 @@ describe('finalizeDraftPayment', () => {
     // Gate is partner OPT-IN now — configure it, then make the owner unverified.
     const dflt = await stores.partnerStore.ensureDefaultPartner();
     await stores.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
-    const c = await stores.customerStore.getCustomer(PHONE);
+    const c = await stores.customerStore.getCustomer('default', PHONE);
     await stores.customerStore.saveCustomer({ ...c!, kycStatus: 'grandfathered' });
 
     const result = await finalizeDraftPayment(stores, draftId);
@@ -104,7 +105,7 @@ describe('finalizeDraftPayment', () => {
     expect(result.error).toBe('kyc_required');
     // Draft preserved (peek-before-consume) and no transfer minted.
     expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
-    expect(await stores.store.getTransferCount(PHONE)).toBe(0);
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
   });
 
   it('unknown/expired draftId → { ok:false, error:"expired_or_used" }', async () => {
@@ -123,7 +124,7 @@ describe('finalizeDraftPayment', () => {
 
     // Exhaust the T0 daily cap (read from the constant so a cap change
     // can never silently turn this into a no-op assertion).
-    await stores.dailyVolumeStore.addCents(PHONE, T0_DAILY_CAP_CENTS);
+    await stores.dailyVolumeStore.addCents('default', PHONE, T0_DAILY_CAP_CENTS);
 
     const result = await finalizeDraftPayment(stores, draftId);
 
@@ -155,7 +156,7 @@ describe('finalizeDraftPayment', () => {
     const result = await finalizeDraftPayment(stores, draftId);
     expect(result.ok).toBe(true);
 
-    const customer = await stores.customerStore.getCustomer(PHONE);
+    const customer = await stores.customerStore.getCustomer('default', PHONE);
     expect(customer?.lastFundingMethod).toBe('bank_transfer');
   });
 
@@ -230,8 +231,8 @@ describe('finalizeDraftPayment', () => {
     expect(second.transferId).toBe(first.transferId);
 
     // No duplicate mint, no double accrual.
-    expect(await stores.store.getTransferCount(PHONE)).toBe(1);
-    expect(await stores.dailyVolumeStore.getTodayCents(PHONE)).toBe(20_000);
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
+    expect(await stores.dailyVolumeStore.getTodayCents('default', PHONE)).toBe(20_000);
   });
 
   it('REPLAY preserves blocked semantics: a blocked transfer replays as blocked, same id', async () => {
@@ -272,7 +273,7 @@ describe('finalizeDraftPayment', () => {
       partnerId: 'default',
       senderKycStatus: 'verified',
     });
-    expect(await stores.store.getTransferCount(PHONE)).toBe(1);
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
 
     const result = await finalizeDraftPayment(stores, draftId);
     expect(result.ok).toBe(true);
@@ -322,7 +323,7 @@ describe('finalizeDraftPayment', () => {
 
   it('U7: a legacy non-USD draft missing feeSource/totalChargeSource falls back to the re-quote and mints', async () => {
     const stores = await buildStores();
-    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
     await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
 
     // Live GBP rates differ from the draft's stored quote — the re-quote must win
@@ -335,6 +336,7 @@ describe('finalizeDraftPayment', () => {
 
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE,
+      partnerId: 'default',
       recipient: {
         name: 'Mom',
         recipientPhone: '919876543210',
@@ -367,10 +369,11 @@ describe('finalizeDraftPayment', () => {
   it('routing: mints with the draft settlementPartnerId + the WINNING fxRate/amountInr — never surfaced beyond the row', async () => {
     const stores = await buildStores();
     await seedPartner(stores.db, 'rail-partner-x');
-    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
     await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE,
+      partnerId: 'default',
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
       amountUsd: 200,
       amountSource: 200,
@@ -410,7 +413,7 @@ describe('finalizeDraftPayment', () => {
   it('routing: the legacy non-USD fallback (re-quote at mid) drops BOTH the override AND the route', async () => {
     const stores = await buildStores();
     await seedPartner(stores.db, 'rail-partner-x');
-    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
     await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
 
     resetRateCacheForTests();
@@ -421,6 +424,7 @@ describe('finalizeDraftPayment', () => {
 
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE,
+      partnerId: 'default',
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
       amountUsd: 254,
       amountSource: 200,
@@ -465,10 +469,11 @@ describe('finalizeDraftPayment', () => {
 describe('finalizeDraftPayment — B2B (business-to-business) mint threads business fields', () => {
   it('a B2B draft mints a b2b transfer with discriminators, business names, invoice link (never b2c)', async () => {
     const stores = await buildStores();
-    const { customer } = await stores.customerStore.upsertOnFirstInbound(PHONE);
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
     await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE,
+      partnerId: 'default',
       recipient: { name: 'Globex Trading LLC', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
       amountUsd: 400,                       // within the T0 $500/day cap
       amountSource: 400,
@@ -510,5 +515,47 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
     expect(saved?.senderEntityType).toBe('individual');
     expect(saved?.senderBusinessName).toBeUndefined();
     expect(saved?.invoiceId).toBeUndefined();
+  });
+
+  it('mints under the DRAFT tenant, not the default one (fix 1)', async () => {
+    const stores = await buildStores();
+    await seedPartner(stores.db, 'acme');
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('acme', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'acme',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+    });
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect((await stores.store.getTransfer(result.transferId))!.partnerId).toBe('acme');
+    expect(await stores.store.listRecipients('acme', PHONE, 5)).toHaveLength(1);
+    expect(await stores.store.listRecipients('default', PHONE, 5)).toEqual([]);
+    expect((await stores.customerStore.getCustomer('acme', PHONE))!.lastFundingMethod).toBe('bank_transfer');
+  });
+
+  it('a PRE-DEPLOY draft (no partnerId) finalizes under the phone\'s pre-fix tenant and never creates a stray default row (review item 2)', async () => {
+    const stores = await buildStores();
+    await seedPartner(stores.db, 'acme');
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('acme', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    // Simulate an in-flight legacy draft: written before fix 1, so no partnerId.
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'acme',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+    });
+    const legacy = { ...(await stores.draftStore.getDraft(draftId))! };
+    delete legacy.partnerId;
+    await stores.draftStore.restoreDraft(legacy, draftId);
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect((await stores.store.getTransfer(result.transferId))!.partnerId).toBe('acme');
+    expect(await stores.customerStore.getCustomer('default', PHONE)).toBeNull();
   });
 });

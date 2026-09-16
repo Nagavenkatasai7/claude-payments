@@ -2,7 +2,8 @@ import { getRedis } from './redis';
 import type { RedisLike, Store } from './store';
 import type { CustomerStore } from './customer-store';
 import { getCustomerStore } from './customer-store';
-import type { Customer } from './types';
+import type { Customer, PartnerId } from './types';
+import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { KycDelta } from './kyc-state-machine';
 
 /**
@@ -17,7 +18,9 @@ import type { KycDelta } from './kyc-state-machine';
 
 const EVT_TTL = 30 * 24 * 60 * 60; // 30d replay-dedup window
 const evtKey = (id: string) => `sr_kyc_evt:${id}`;
-const auditKey = (phone: string) => `kyc_audit:${phone}`;
+const auditKey = (partnerId: PartnerId, phone: string) => `kyc_audit:${partnerId}:${phone}`;
+/** Pre-fix-1 phone-only trail — read-only fallback for the phone's pre-fix tenant (D10). */
+const legacyAuditKey = (phone: string) => `kyc_audit:${phone}`;
 
 export interface AuditMeta {
   actor: string;
@@ -33,8 +36,8 @@ export function createKycCaseStore(
   customers: CustomerStore,
   now: () => number = () => Date.now(),
 ) {
-  async function appendAudit(phone: string, entry: AuditEntry): Promise<void> {
-    const existing = await redis.hgetall(auditKey(phone));
+  async function appendAudit(partnerId: PartnerId, phone: string, entry: AuditEntry): Promise<void> {
+    const existing = await redis.hgetall(auditKey(partnerId, phone));
     // HGETALL is a FLAT [field0, value0, ...] array under
     // automaticDeserialization:false (see getAudit) — so the entry count is
     // length/2, not Object.keys().length (which would double it on the real client).
@@ -42,7 +45,7 @@ export function createKycCaseStore(
       ? Math.floor(existing.length / 2)
       : Object.keys(existing ?? {}).length;
     // Field = `<iso>#<seq>` so entries sort chronologically and never collide.
-    await redis.hset(auditKey(phone), { [`${entry.at}#${String(seq).padStart(6, '0')}`]: JSON.stringify(entry) });
+    await redis.hset(auditKey(partnerId, phone), { [`${entry.at}#${String(seq).padStart(6, '0')}`]: JSON.stringify(entry) });
   }
 
   return {
@@ -52,23 +55,24 @@ export function createKycCaseStore(
       return r !== null;
     },
 
-    async applyDelta(phone: string, delta: KycDelta, meta: AuditMeta): Promise<Customer | null> {
-      const c = await customers.getCustomer(phone);
+    async applyDelta(partnerId: PartnerId, phone: string, delta: KycDelta, meta: AuditMeta): Promise<Customer | null> {
+      const c = await customers.getCustomer(partnerId, phone);
       if (!c) return null;
       const nowIso = new Date(now()).toISOString();
       const updated: Customer = { ...c, ...delta, updatedAt: nowIso };
       await customers.saveCustomer(updated);
-      await appendAudit(phone, { ...meta, at: nowIso });
+      await appendAudit(partnerId, phone, { ...meta, at: nowIso });
       return updated;
     },
 
     async review(
+      partnerId: PartnerId,
       phone: string,
       decision: 'approve' | 'reject',
       reviewer: string,
       reason: string,
     ): Promise<Customer | null> {
-      const c = await customers.getCustomer(phone);
+      const c = await customers.getCustomer(partnerId, phone);
       if (!c) return null;
       const nowIso = new Date(now()).toISOString();
       const updated: Customer =
@@ -92,12 +96,20 @@ export function createKycCaseStore(
               updatedAt: nowIso,
             };
       await customers.saveCustomer(updated);
-      await appendAudit(phone, { actor: reviewer, action: `review.${decision}`, reason, at: nowIso });
+      await appendAudit(partnerId, phone, { actor: reviewer, action: `review.${decision}`, reason, at: nowIso });
       return updated;
     },
 
-    async getAudit(phone: string): Promise<AuditEntry[]> {
-      const raw = await redis.hgetall(auditKey(phone));
+    async getAudit(partnerId: PartnerId, phone: string): Promise<AuditEntry[]> {
+      // Tenant-scoped since fix 1. TRANSITIONAL (D10): an empty scoped trail
+      // falls back to the pre-fix phone-only key ONLY for the phone's pre-fix
+      // (oldest-row) tenant — legacyKeyAllowed, the same D9 helper — so a
+      // post-fix sibling tenant's staff never read another tenant's KYC events.
+      let raw = await redis.hgetall(auditKey(partnerId, phone));
+      const empty = !raw || (Array.isArray(raw) ? raw.length === 0 : Object.keys(raw).length === 0);
+      if (empty && (await legacyKeyAllowed(partnerId, phone, legacyTenantResolver(customers)))) {
+        raw = await redis.hgetall(legacyAuditKey(phone));
+      }
       if (!raw) return [];
       // The real Upstash client is built with `automaticDeserialization:false`,
       // so HGETALL returns a FLAT [field0, value0, field1, value1, ...] array —
@@ -124,10 +136,10 @@ export function createKycCaseStore(
         .filter((e): e is AuditEntry => e !== null);
     },
 
-    async listNeedsReview(): Promise<Customer[]> {
+    async listNeedsReview(partnerId?: PartnerId): Promise<Customer[]> {
       // Stage 2a: customers live in Postgres now — the Redis phones-set walk is
       // gone. (Stage 4 narrows this to a WHERE kyc_review_state IN (...) query.)
-      const all = await customers.listCustomers();
+      const all = await customers.listCustomers(partnerId);
       return all.filter(
         (c) => c.kycReviewState === 'pending_review' || c.kycReviewState === 'needs_review',
       );

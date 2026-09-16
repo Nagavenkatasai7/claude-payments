@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { scryptSync, randomBytes } from 'node:crypto';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
-import { createCustomerAuthStore } from '@/lib/customer-auth-store';
+import { freshDb, seedPartner } from './helpers-db';
+import { createCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
 import { EnvKeyProvider, decryptField } from '@/lib/field-crypto';
@@ -29,7 +29,7 @@ async function mkAuth(redis = fakeRedis(), now?: () => number) {
   const db = await freshDb();
   const customers = createCustomerStore(db, createStore(fakeRedis(), db));
   const s = createCustomerAuthStore(redis, customers, now ? { now } : {});
-  return { s, customers };
+  return { s, customers, db };
 }
 
 function neverPwned() {
@@ -56,7 +56,7 @@ describe('registerCustomer', () => {
     expect(await verifyPassword('correct horse battery', c.passwordHash!)).toBe(true);
 
     // persisted in the customer store
-    const persisted = await customers.getCustomer(NORM);
+    const persisted = await customers.getCustomer('default', NORM);
     expect(persisted).toBeTruthy();
     expect(persisted!.passwordHash).toBe(c.passwordHash);
   });
@@ -95,7 +95,7 @@ describe('registerCustomer', () => {
         { phone: PHONE, email: 'a@example.com', password: 'second password ok' },
         { pwnedCheck: neverPwned(), cryptoProvider: crypto },
       ),
-    ).rejects.toThrow(/already exists/i);
+    ).rejects.toThrow(/can't set up an account for this number/i);
   });
 
   it('throws on an invalid phone', async () => {
@@ -198,7 +198,7 @@ describe('verifyCustomerPassword', () => {
 
     const c = await s.verifyCustomerPassword(PHONE, 'legacy secret pw');
     expect(c).not.toBeNull();
-    const persisted = (await customers.getCustomer(NORM))!;
+    const persisted = (await customers.getCustomer('default', NORM))!;
     expect(persisted.passwordHash?.startsWith('$argon2id$')).toBe(true);
     // still verifies after the upgrade
     expect(await verifyPassword('legacy secret pw', persisted.passwordHash!)).toBe(true);
@@ -208,7 +208,7 @@ describe('verifyCustomerPassword', () => {
 describe('sessions', () => {
   it('creates a session and resolves it back to the phone', async () => {
     const { s } = await mkAuth();
-    const token = await s.createSession(NORM);
+    const token = await s.createSession(NORM, 'default');
     expect(typeof token).toBe('string');
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(await s.getSession(token)).toBe(NORM);
@@ -217,13 +217,13 @@ describe('sessions', () => {
   it('does not store the raw token as a key (hashed at rest)', async () => {
     const redis = fakeRedis();
     const { s } = await mkAuth(redis);
-    const token = await s.createSession(NORM);
+    const token = await s.createSession(NORM, 'default');
     expect([...redis.dump.keys()].some((k) => k.includes(token))).toBe(false);
   });
 
   it('deletes a session', async () => {
     const { s } = await mkAuth();
-    const token = await s.createSession(NORM);
+    const token = await s.createSession(NORM, 'default');
     await s.deleteSession(token);
     expect(await s.getSession(token)).toBeNull();
   });
@@ -231,7 +231,7 @@ describe('sessions', () => {
   it('rejects after the 30-minute idle window', async () => {
     let now = 1_000_000;
     const { s } = await mkAuth(fakeRedis(), () => now);
-    const token = await s.createSession(NORM);
+    const token = await s.createSession(NORM, 'default');
     now += 31 * 60 * 1000; // 31 min idle
     expect(await s.getSession(token)).toBeNull();
   });
@@ -239,7 +239,7 @@ describe('sessions', () => {
   it('refreshes lastSeen on access so steady activity keeps a session alive past 30 min', async () => {
     let now = 1_000_000;
     const { s } = await mkAuth(fakeRedis(), () => now);
-    const token = await s.createSession(NORM);
+    const token = await s.createSession(NORM, 'default');
     now += 20 * 60 * 1000;
     expect(await s.getSession(token)).toBe(NORM); // refresh
     now += 20 * 60 * 1000; // 20 more, but idle since refresh is only 20
@@ -249,7 +249,7 @@ describe('sessions', () => {
   it('rejects after the 12-hour absolute window even with continuous activity', async () => {
     let now = 1_000_000;
     const { s } = await mkAuth(fakeRedis(), () => now);
-    const token = await s.createSession(NORM);
+    const token = await s.createSession(NORM, 'default');
     // keep refreshing every 10 min for >12h
     for (let i = 0; i < 80; i++) {
       now += 10 * 60 * 1000;
@@ -261,9 +261,9 @@ describe('sessions', () => {
 
   it('deleteAllSessions revokes every live session for the phone but not others', async () => {
     const { s } = await mkAuth();
-    const t1 = await s.createSession(NORM);
-    const t2 = await s.createSession(NORM);
-    const tOther = await s.createSession('19998887777');
+    const t1 = await s.createSession(NORM, 'default');
+    const t2 = await s.createSession(NORM, 'default');
+    const tOther = await s.createSession('19998887777', 'default');
     await s.deleteAllSessions(NORM);
     expect(await s.getSession(t1)).toBeNull();
     expect(await s.getSession(t2)).toBeNull();
@@ -291,5 +291,55 @@ describe('reset tokens', () => {
     const { s } = await mkAuth(redis);
     const token = await s.createResetToken(NORM);
     expect([...redis.dump.keys()].some((k) => k.includes(token))).toBe(false);
+  });
+});
+
+describe('tenant binding (fix 1, D6)', () => {
+  it('a session carries the tenant and resolveSession returns THAT row', async () => {
+    const { s, customers, db } = await mkAuth();
+    await seedPartner(db, 'acme');
+    await s.registerCustomer({ phone: PHONE, email: 'a@example.com', password: 'correct horse battery' }, { pwnedCheck: neverPwned(), cryptoProvider: crypto });
+    // a sibling acme row for the same number (bot-only, no account)
+    await customers.upsertOnFirstInbound('acme', NORM);
+    const token = await s.createSession(NORM, 'default');
+    expect(await s.getSession(token)).toBe(NORM);
+    expect((await s.resolveSession(token))?.partnerId).toBe('default');
+    expect((await s.resolveSession(token))?.passwordHash).toBeTruthy();
+  });
+
+  it('a pre-fix session record without partnerId resolves to nothing (forces re-login)', async () => {
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis);
+    const token = 'a'.repeat(64);
+    const { createHash } = await import('node:crypto');
+    await redis.set(`sr_sess:${createHash('sha256').update(token).digest('hex')}`, JSON.stringify({ phone: NORM, createdAtMs: Date.now(), lastSeenMs: Date.now() }));
+    expect(await s.resolveSession(token)).toBeNull();
+  });
+
+  it('login resolves exactly one account-bearing row and fails CLOSED when the phone has accounts under two partners', async () => {
+    const { s, customers, db } = await mkAuth();
+    await seedPartner(db, 'acme');
+    const c = await s.registerCustomer({ phone: PHONE, email: 'a@example.com', password: 'correct horse battery' }, { pwnedCheck: neverPwned(), cryptoProvider: crypto });
+    expect(c.partnerId).toBe('default');
+    expect((await s.verifyCustomerPassword(PHONE, 'correct horse battery'))?.partnerId).toBe('default');
+    // A second account-bearing row appears under acme (e.g. an admin import) ⇒ ambiguous ⇒ null, never a guess.
+    await customers.saveCustomer({ ...c, partnerId: 'acme' });
+    expect(await s.verifyCustomerPassword(PHONE, 'correct horse battery')).toBeNull();
+    expect(await s.markPhoneVerified(PHONE)).toBeNull();
+    expect(await s.setPassword(PHONE, 'another good one!!', { pwnedCheck: neverPwned() })).toBeNull();
+  });
+
+  it('registerCustomer attaches to the single existing row (any tenant) and refuses when the phone exists under two', async () => {
+    const { s, customers, db } = await mkAuth();
+    await seedPartner(db, 'acme');
+    await customers.upsertOnFirstInbound('acme', NORM); // bot-only acme customer registers on the portal
+    const c = await s.registerCustomer({ phone: PHONE, email: 'a@example.com', password: 'correct horse battery' }, { pwnedCheck: neverPwned(), cryptoProvider: crypto });
+    expect(c.partnerId).toBe('acme');
+    expect(await customers.getCustomer('default', NORM)).toBeNull(); // no stray default row
+    await customers.upsertOnFirstInbound('default', '15550102031');
+    await customers.upsertOnFirstInbound('acme', '15550102031');
+    await expect(
+      s.registerCustomer({ phone: '15550102031', email: 'b@example.com', password: 'correct horse battery' }, { pwnedCheck: neverPwned(), cryptoProvider: crypto }),
+    ).rejects.toBeInstanceOf(CustomerInputError);
   });
 });

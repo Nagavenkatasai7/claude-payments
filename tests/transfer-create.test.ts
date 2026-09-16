@@ -43,6 +43,20 @@ const base = {
 };
 
 describe('createTransfer', () => {
+  it('upserts the recipient and bumps velocity + monthly volume under input.partnerId only (F45/F47)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'acme');
+    await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
+    expect(await store.listRecipients('acme', base.phone, 5)).toHaveLength(1);
+    expect(await store.listRecipients('default', base.phone, 5)).toEqual([]);
+    expect(await store.getTodayTransferCount('acme', base.phone)).toBe(1);
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(0);
+    expect(await mvs.getMonthCents('acme', base.phone)).toBe(20_000);
+    expect(await mvs.getMonthCents('default', base.phone)).toBe(0);
+    expect(await store.getTransferCount('acme', base.phone)).toBe(1);
+    expect(await store.getTransferCount('default', base.phone)).toBe(0);
+  });
+
   it('creates a cleared transfer in awaiting_payment', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     const t = await createTransfer(store, partnerStore, mvs, base);
@@ -68,8 +82,8 @@ describe('createTransfer', () => {
   it('increments the all-time and today counters', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await createTransfer(store, partnerStore, mvs, base);
-    expect(await store.getTransferCount(base.phone)).toBe(1);
-    expect(await store.getTodayTransferCount(base.phone)).toBe(1);
+    expect(await store.getTransferCount('default', base.phone)).toBe(1);
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(1);
   });
 });
 
@@ -192,7 +206,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC: a $3k-cumulative send with missing EDD fields → flagged + edd_required (NOT blocked)', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('15551230001', 250_000);  // $2,500 already this month
+    await mvs.addCents('default', '15551230001', 250_000);  // $2,500 already this month
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230001', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
@@ -207,7 +221,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC: $3k send WITH EDD fields present → no EDD flag', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('15551230002', 250_000);
+    await mvs.addCents('default', '15551230002', 250_000);
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230002', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
@@ -220,7 +234,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   it('KYC precedence: a watchlist hit still BLOCKS even when EDD would flag', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('15551230003', 250_000);
+    await mvs.addCents('default', '15551230003', 250_000);
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230003', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'John Doe',  // on WATCHLIST
@@ -239,7 +253,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'asha@upi', fundingMethod: 'bank_transfer', senderKycStatus: 'verified' as const,
     });
-    expect(await mvs.getMonthCents('15551230004')).toBe(Math.round(t.amountUsd * 100));
+    expect(await mvs.getMonthCents('default', '15551230004')).toBe(Math.round(t.amountUsd * 100));
   });
 
   it('KYC: Travel-Rule fields are written onto the Transfer when supplied', async () => {
@@ -388,7 +402,7 @@ describe('createTransfer U7: draft-quote override', () => {
   it('EDD threshold reads the OVERRIDE amountUsd, not a re-quote of amountSource', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('15559990001', 250_000); // $2,500 used this month
+    await mvs.addCents('default', '15559990001', 250_000); // $2,500 used this month
     // amountSource 600 would re-quote to $600 (cumulative $3,100 → EDD flag);
     // the override pins the USD-equivalent at $100 (cumulative $2,600 → no flag).
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -403,13 +417,13 @@ describe('createTransfer U7: draft-quote override', () => {
     expect(t.complianceReasons).not.toContain('edd_required');
     expect(t.eddRequired).toBeFalsy();
     // The monthly accrual also uses the override's USD-equivalent.
-    expect(await mvs.getMonthCents('15559990001')).toBe(250_000 + 10_000);
+    expect(await mvs.getMonthCents('default', '15559990001')).toBe(250_000 + 10_000);
   });
 
   it('EDD still flags when the override amountUsd crosses the cumulative threshold', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('15559990002', 250_000);
+    await mvs.addCents('default', '15559990002', 250_000);
     const t = await createTransfer(store, partnerStore, mvs, {
       ...base,
       phone: '15559990002',
@@ -562,15 +576,15 @@ describe('recordBlockedAttempt', () => {
     const { store, mvs } = await makeStores();
     await recordBlockedAttempt(store, blockedInput);
     // Derived count excludes blocked rows — the blocked attempt never counts.
-    expect(await store.getTransferCount(blockedInput.phone)).toBe(0);
-    expect(await store.getTodayTransferCount(blockedInput.phone)).toBe(0);
-    expect(await mvs.getMonthCents(blockedInput.phone)).toBe(0);
+    expect(await store.getTransferCount('default', blockedInput.phone)).toBe(0);
+    expect(await store.getTodayTransferCount('default', blockedInput.phone)).toBe(0);
+    expect(await mvs.getMonthCents('default', blockedInput.phone)).toBe(0);
   });
 
   it('does NOT add the watchlisted recipient to the saved list', async () => {
     const { store } = await makeStores();
     await recordBlockedAttempt(store, blockedInput);
-    const recipients = await store.listRecipients(blockedInput.phone, 25);
+    const recipients = await store.listRecipients('default', blockedInput.phone, 25);
     expect(recipients).toHaveLength(0);
   });
 });

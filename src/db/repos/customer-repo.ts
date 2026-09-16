@@ -1,4 +1,4 @@
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -13,6 +13,7 @@ import type {
   KycReviewState,
   KycStatus,
   Occupation,
+  PartnerId,
   SourceOfFunds,
 } from '@/lib/types';
 
@@ -24,10 +25,13 @@ import type {
 // customer-auth-store, so it passes through email_enc verbatim — no double
 // encryption.)
 //
-// upsertOnFirstInbound keeps its exact semantics (grandfathering, opt-in
-// backfill, WL2 follow-the-number) but the grandfather check is now an indexed
-// MIN(created_at) lookup injected as `firstTransferAt` — the full-ledger scan
-// is gone.
+// TENANT IDENTITY (fix 1 / F44): the key is (partner_id, phone). Every read and
+// write takes partnerId FIRST and carries it in the WHERE; a phone alone never
+// selects a row. The one cross-tenant read is findByPhone, used by portal auth,
+// the platform-staff detail page and the Persona webhook only. upsertOnFirstInbound
+// NEVER moves a row between tenants — a partner-signed inbound for a phone that
+// exists under another partner creates that partner's OWN sibling row. The
+// grandfather check is the indexed MIN(created_at) for (partner, phone).
 
 type CustomerRow = typeof customers.$inferSelect;
 
@@ -35,7 +39,7 @@ const isoOpt = (d: Date | null): string | undefined => (d ? d.toISOString() : un
 
 export function createCustomerRepo(
   db: DbOrTx,
-  firstTransferAt: (phone: string) => Promise<string | null>,
+  firstTransferAt: (partnerId: PartnerId, phone: string) => Promise<string | null>,
   provider: EncryptionKeyProvider = defaultProvider(),
 ) {
   function rowToCustomer(row: CustomerRow): Customer {
@@ -129,101 +133,146 @@ export function createCustomerRepo(
     };
   }
 
+  // The tenant key — the WHERE of every scoped read/write below.
+  const tenantKey = (partnerId: PartnerId, phone: string) =>
+    and(eq(customers.partnerId, partnerId), eq(customers.phone, phone));
+
+  function freshCustomer(
+    partnerId: PartnerId,
+    senderPhone: string,
+    nowIso: string,
+    minAt: string | null,
+    optIn: boolean,
+  ): Customer {
+    const inferredCountry = countryForPhone(senderPhone) ?? DEFAULT_SENDER_COUNTRY;
+    // createdAt is NEVER backdated (D9 invariant): the grandfather branch keeps
+    // firstSeenAt = minAt (the tenant's earliest transfer) but stamps
+    // createdAt = nowIso, so every row created after fix 1 sorts strictly AFTER
+    // every pre-fix row in findByPhone — legacy-tenant.ts's "oldest row is the
+    // pre-fix owner" rule depends on it. (Pre-fix the partner API minted without
+    // a customers row, so a sibling backdated to its first transfer could sort
+    // before — or tie with — the real pre-fix owner and inherit its legacy
+    // kyc_audit / conv / counters.) Safe: tier-rules, kyc-gate, compliance and
+    // customer-summary never read createdAt, and no test asserts a grandfathered
+    // row's createdAt.
+    const base: Customer = minAt
+      ? {
+          senderPhone,
+          firstSeenAt: minAt,
+          kycStatus: 'grandfathered',
+          kycVerifiedAt: nowIso,
+          senderCountry: inferredCountry,
+          partnerId,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        }
+      : {
+          senderPhone,
+          firstSeenAt: nowIso,
+          kycStatus: 'not_started',
+          senderCountry: inferredCountry,
+          partnerId,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+    return optIn ? { ...base, optInAt: nowIso } : base;
+  }
+
   return {
-    async getCustomer(senderPhone: string): Promise<Customer | null> {
-      const rows = await db.select().from(customers).where(eq(customers.phone, senderPhone)).limit(1);
+    async getCustomer(partnerId: PartnerId, senderPhone: string): Promise<Customer | null> {
+      const rows = await db.select().from(customers).where(tenantKey(partnerId, senderPhone)).limit(1);
       return rows[0] ? rowToCustomer(rows[0]) : null;
+    },
+
+    /**
+     * Every tenant's row for a phone (oldest first). The ONLY phone-alone read;
+     * callers must resolve exactly one row themselves and fail closed otherwise.
+     */
+    async findByPhone(senderPhone: string): Promise<Customer[]> {
+      const rows = await db
+        .select()
+        .from(customers)
+        .where(eq(customers.phone, senderPhone))
+        .orderBy(asc(customers.createdAt), asc(customers.partnerId));
+      return rows.map(rowToCustomer);
     },
 
     async saveCustomer(customer: Customer): Promise<void> {
       const row = customerToRow(customer);
-      await db.insert(customers).values(row).onConflictDoUpdate({ target: customers.phone, set: row });
+      await db
+        .insert(customers)
+        .values(row)
+        .onConflictDoUpdate({ target: [customers.partnerId, customers.phone], set: row });
+    },
+
+    /**
+     * Resolve-or-create WITHOUT implying WhatsApp consent (no optInAt). The
+     * partner API mints for senders who never messaged anyone; opt-in is a
+     * channel fact recorded only by the inbound webhook (upsertOnFirstInbound).
+     */
+    async ensureCustomer(partnerId: PartnerId, senderPhone: string): Promise<Customer> {
+      const existing = await this.getCustomer(partnerId, senderPhone);
+      if (existing) return existing;
+      const nowIso = new Date().toISOString();
+      const minAt = await firstTransferAt(partnerId, senderPhone);
+      const customer = freshCustomer(partnerId, senderPhone, nowIso, minAt, false);
+      await db.insert(customers).values(customerToRow(customer)).onConflictDoNothing();
+      return (await this.getCustomer(partnerId, senderPhone)) ?? customer;
     },
 
     async upsertOnFirstInbound(
+      partnerId: PartnerId,
       senderPhone: string,
-      routedPartnerId?: string,
     ): Promise<{ customer: Customer; wasCreated: boolean }> {
-      const existing = await this.getCustomer(senderPhone);
+      const existing = await this.getCustomer(partnerId, senderPhone);
       if (existing) {
-        // Opt-in backfill (first-contact-wins) + WL2 follow-the-number: the
-        // partner OWNS the channel — same semantics as the Redis store.
-        const needsOptIn = !existing.optInAt;
-        const needsRoute = Boolean(routedPartnerId) && existing.partnerId !== routedPartnerId;
-        if (needsOptIn || needsRoute) {
+        // Opt-in backfill (first-contact-wins). NO partner_id rewrite: the
+        // tenant is fixed by the key; another tenant's row is invisible here.
+        if (!existing.optInAt) {
           const nowIso = new Date().toISOString();
-          const updated: Customer = {
-            ...existing,
-            ...(needsOptIn ? { optInAt: nowIso } : {}),
-            ...(needsRoute ? { partnerId: routedPartnerId! } : {}),
-            updatedAt: nowIso,
-          };
+          const updated: Customer = { ...existing, optInAt: nowIso, updatedAt: nowIso };
           await this.saveCustomer(updated);
           return { customer: updated, wasCreated: false };
         }
         return { customer: existing, wasCreated: false };
       }
-
-      const inferredCountry = countryForPhone(senderPhone) ?? DEFAULT_SENDER_COUNTRY;
-      // Grandfathering check is an indexed MIN() lookup now — not a ledger scan.
-      const minAt = await firstTransferAt(senderPhone);
       const nowIso = new Date().toISOString();
-      const partnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
-      const customer: Customer = minAt
-        ? {
-            senderPhone,
-            firstSeenAt: minAt,
-            kycStatus: 'grandfathered',
-            kycVerifiedAt: nowIso,
-            senderCountry: inferredCountry,
-            partnerId,
-            optInAt: nowIso,
-            createdAt: minAt,
-            updatedAt: nowIso,
-          }
-        : {
-            senderPhone,
-            firstSeenAt: nowIso,
-            kycStatus: 'not_started',
-            senderCountry: inferredCountry,
-            partnerId,
-            optInAt: nowIso,
-            createdAt: nowIso,
-            updatedAt: nowIso,
-          };
+      // Grandfathering is per tenant: only THIS partner's ledger history counts.
+      const minAt = await firstTransferAt(partnerId, senderPhone);
+      const customer = freshCustomer(partnerId, senderPhone, nowIso, minAt, true);
       await this.saveCustomer(customer);
       return { customer, wasCreated: !minAt };
     },
 
-    async setOptedIn(senderPhone: string): Promise<void> {
+    async setOptedIn(partnerId: PartnerId, senderPhone: string): Promise<void> {
       await db
         .update(customers)
         .set({ optInAt: sql`COALESCE(${customers.optInAt}, now())`, updatedAt: new Date() })
-        .where(eq(customers.phone, senderPhone));
+        .where(tenantKey(partnerId, senderPhone));
     },
 
-    async setOptedOut(senderPhone: string): Promise<void> {
+    async setOptedOut(partnerId: PartnerId, senderPhone: string): Promise<void> {
       await db
         .update(customers)
         .set({ optedOutAt: new Date(), updatedAt: new Date() })
-        .where(eq(customers.phone, senderPhone));
+        .where(tenantKey(partnerId, senderPhone));
     },
 
-    async clearOptedOut(senderPhone: string): Promise<void> {
+    async clearOptedOut(partnerId: PartnerId, senderPhone: string): Promise<void> {
       await db
         .update(customers)
         .set({ optedOutAt: null, updatedAt: new Date() })
-        .where(eq(customers.phone, senderPhone));
+        .where(tenantKey(partnerId, senderPhone));
     },
 
-    async recordFundingMethod(senderPhone: string, method: FundingMethod): Promise<void> {
+    async recordFundingMethod(partnerId: PartnerId, senderPhone: string, method: FundingMethod): Promise<void> {
       await db
         .update(customers)
         .set({ lastFundingMethod: method, lastFundingMethodAt: new Date(), updatedAt: new Date() })
-        .where(eq(customers.phone, senderPhone));
+        .where(tenantKey(partnerId, senderPhone));
     },
 
-    async recordKycInquiry(senderPhone: string, inquiryId: string): Promise<void> {
+    async recordKycInquiry(partnerId: PartnerId, senderPhone: string, inquiryId: string): Promise<void> {
       await db
         .update(customers)
         .set({
@@ -232,11 +281,14 @@ export function createCustomerRepo(
           kycSubmittedAt: sql`COALESCE(${customers.kycSubmittedAt}, now())`,
           updatedAt: new Date(),
         })
-        .where(eq(customers.phone, senderPhone));
+        .where(tenantKey(partnerId, senderPhone));
     },
 
-    async listCustomers(): Promise<Customer[]> {
-      const rows = await db.select().from(customers).orderBy(asc(customers.createdAt));
+    /** Platform-wide when partnerId is absent; tenant-scoped at the WHERE otherwise. */
+    async listCustomers(partnerId?: PartnerId): Promise<Customer[]> {
+      const rows = partnerId
+        ? await db.select().from(customers).where(eq(customers.partnerId, partnerId)).orderBy(asc(customers.createdAt))
+        : await db.select().from(customers).orderBy(asc(customers.createdAt));
       return rows.map(rowToCustomer);
     },
   };

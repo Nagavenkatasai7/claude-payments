@@ -192,11 +192,11 @@ describe('buildDeterministicSummary', () => {
 describe('getCustomerSummary', () => {
   it('serves the cached summary and never calls the model (cache hit)', async () => {
     const redis = fakeRedis();
-    await redis.set(`summary:${PHONE}`, 'cached summary', { ex: 86400 });
+    await redis.set(`summary:default:${PHONE}`, 'cached summary', { ex: 86400 });
     const chatFn = vi.fn();
     const s = createCustomerSummarizer(deps({ redis, chatFn }));
 
-    expect(await s.getCustomerSummary(PHONE)).toBe('cached summary');
+    expect(await s.getCustomerSummary('default', PHONE)).toBe('cached summary');
     expect(chatFn).not.toHaveBeenCalled();
   });
 
@@ -210,7 +210,7 @@ describe('getCustomerSummary', () => {
     );
     const s = createCustomerSummarizer(deps({ redis, chatFn }));
 
-    const out = await s.getCustomerSummary(PHONE);
+    const out = await s.getCustomerSummary('default', PHONE);
     expect(out).toBe('You sent 100 USD to Mom and it was delivered.');
     expect(chatFn).toHaveBeenCalledTimes(1);
 
@@ -222,9 +222,9 @@ describe('getCustomerSummary', () => {
     expect(messages[1].content).not.toContain('rail-secret-partner');
 
     // Cached as a PLAIN STRING (automaticDeserialization:false contract) …
-    expect(await redis.get(`summary:${PHONE}`)).toBe(out);
+    expect(await redis.get(`summary:default:${PHONE}`)).toBe(out);
     // … so the next call never re-hits the model.
-    await s.getCustomerSummary(PHONE);
+    await s.getCustomerSummary('default', PHONE);
     expect(chatFn).toHaveBeenCalledTimes(1);
   });
 
@@ -235,20 +235,20 @@ describe('getCustomerSummary', () => {
     });
     const s = createCustomerSummarizer(deps({ redis, chatFn }));
 
-    expect(await s.getCustomerSummary(PHONE)).toBeNull();
-    expect(await redis.get(`summary:${PHONE}`)).toBeNull();
+    expect(await s.getCustomerSummary('default', PHONE)).toBeNull();
+    expect(await redis.get(`summary:default:${PHONE}`)).toBeNull();
   });
 
   it('returns null when the model hangs past the timeout', async () => {
     const chatFn = vi.fn(() => new Promise<ChatMessage>(() => {})); // never settles
     const s = createCustomerSummarizer(deps({ chatFn, timeoutMs: 25 }));
-    expect(await s.getCustomerSummary(PHONE)).toBeNull();
+    expect(await s.getCustomerSummary('default', PHONE)).toBeNull();
   });
 
   it('returns null on an empty/None model reply', async () => {
     const chatFn = vi.fn(async (): Promise<ChatMessage> => ({ role: 'assistant', content: null }));
     const s = createCustomerSummarizer(deps({ chatFn }));
-    expect(await s.getCustomerSummary(PHONE)).toBeNull();
+    expect(await s.getCustomerSummary('default', PHONE)).toBeNull();
   });
 
   it('returns null for an unknown customer without calling the model', async () => {
@@ -256,7 +256,7 @@ describe('getCustomerSummary', () => {
     const s = createCustomerSummarizer(
       deps({ customers: { getCustomer: async () => null }, chatFn }),
     );
-    expect(await s.getCustomerSummary(PHONE)).toBeNull();
+    expect(await s.getCustomerSummary('default', PHONE)).toBeNull();
     expect(chatFn).not.toHaveBeenCalled();
   });
 });

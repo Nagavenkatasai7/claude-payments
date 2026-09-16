@@ -11,6 +11,7 @@ const redis = fakeRedis();
 let currentStaff: Staff;
 // Customers/transfers live in Postgres now — stores are rebuilt per test in
 // beforeEach (vi.mock factories are hoisted/sync; they close over these lets).
+let db: Awaited<ReturnType<typeof freshDb>>;
 let store: ReturnType<typeof createStore>;
 let cs: ReturnType<typeof createCustomerStore>;
 
@@ -68,7 +69,7 @@ function form(values: Record<string, string>): FormData {
 
 beforeEach(async () => {
   redis.dump.clear();
-  const db = await freshDb();
+  db = await freshDb();
   // Customers carry a REAL FK to partners — seed the two tenants used below.
   await seedPartner(db, 'A');
   await seedPartner(db, 'B');
@@ -80,24 +81,39 @@ describe('markCustomerVerifiedAction partner scope (H3)', () => {
   it('rejects a partner-admin verifying another partner’s customer', async () => {
     await cs.saveCustomer(makeCustomer('15551112222', 'A'));
     currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await expect(markCustomerVerifiedAction(form({ phone: '15551112222' }))).rejects.toThrow(
+    await expect(markCustomerVerifiedAction(form({ phone: '15551112222', partnerId: 'A' }))).rejects.toThrow(
       /not found/i,
     );
-    expect((await cs.getCustomer('15551112222'))?.kycStatus).toBe('not_started'); // untouched
+    expect((await cs.getCustomer('A', '15551112222'))?.kycStatus).toBe('not_started'); // untouched
   });
 
   it('lets a partner-admin verify their OWN customer', async () => {
     await cs.saveCustomer(makeCustomer('15553334444', 'B'));
     currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await markCustomerVerifiedAction(form({ phone: '15553334444' }));
-    expect((await cs.getCustomer('15553334444'))?.kycStatus).toBe('verified');
+    await markCustomerVerifiedAction(form({ phone: '15553334444', partnerId: 'B' }));
+    expect((await cs.getCustomer('B', '15553334444'))?.kycStatus).toBe('verified');
   });
 
   it('lets a platform admin verify any customer', async () => {
     await cs.saveCustomer(makeCustomer('15555556666', 'A'));
     currentStaff = staff({ username: 'plat' });
-    await markCustomerVerifiedAction(form({ phone: '15555556666' }));
-    expect((await cs.getCustomer('15555556666'))?.kycStatus).toBe('verified');
+    await markCustomerVerifiedAction(form({ phone: '15555556666', partnerId: 'A' }));
+    expect((await cs.getCustomer('A', '15555556666'))?.kycStatus).toBe('verified');
+  });
+
+  it('a partner-admin is PINNED to their tenant: a hostile partnerId field cannot reach another tenant\'s row', async () => {
+    await seedPartner(db, 'acme'); await seedPartner(db, 'beta');
+    await cs.saveCustomer(makeCustomer('15559990000', 'beta'));
+    currentStaff = staff({ partnerId: 'acme' });
+    await expect(markCustomerVerifiedAction(form({ phone: '15559990000', partnerId: 'beta' }))).rejects.toThrow(/not found/i);
+    expect((await cs.getCustomer('beta', '15559990000'))!.kycStatus).toBe('not_started');
+  });
+
+  it('platform staff MUST name the tenant: a form without partnerId is refused and the row is untouched', async () => {
+    await cs.saveCustomer(makeCustomer('15559991111', 'A'));
+    currentStaff = staff({ username: 'plat' });
+    await expect(markCustomerVerifiedAction(form({ phone: '15559991111' }))).rejects.toThrow('Partner is required.');
+    expect((await cs.getCustomer('A', '15559991111'))!.kycStatus).toBe('not_started');
   });
 });
 
@@ -105,7 +121,7 @@ describe('markCustomerRejectedAction (H3 + L3)', () => {
   it('rejects a partner-admin rejecting another partner’s customer', async () => {
     await cs.saveCustomer(makeCustomer('15557778888', 'A'));
     currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await expect(markCustomerRejectedAction(form({ phone: '15557778888' }))).rejects.toThrow(
+    await expect(markCustomerRejectedAction(form({ phone: '15557778888', partnerId: 'A' }))).rejects.toThrow(
       /not found/i,
     );
   });
@@ -113,7 +129,7 @@ describe('markCustomerRejectedAction (H3 + L3)', () => {
   it('caps the stored rejection reason at 500 chars (L3)', async () => {
     await cs.saveCustomer(makeCustomer('15559990000', 'A'));
     currentStaff = staff({ username: 'plat' });
-    await markCustomerRejectedAction(form({ phone: '15559990000', reason: 'y'.repeat(900) }));
-    expect((await cs.getCustomer('15559990000'))?.kycRejectedReason?.length).toBe(500);
+    await markCustomerRejectedAction(form({ phone: '15559990000', partnerId: 'A', reason: 'y'.repeat(900) }));
+    expect((await cs.getCustomer('A', '15559990000'))?.kycRejectedReason?.length).toBe(500);
   });
 });

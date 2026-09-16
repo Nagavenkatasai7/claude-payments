@@ -327,6 +327,10 @@ export interface PartnerSupportConfig {
 
 export interface Draft {
   senderPhone: string;
+  // The tenant the draft was created under (fix 1). Optional ONLY so in-flight
+  // legacy drafts drain their 30-min TTL; every new draft sets it and readers
+  // use `draft.partnerId ?? DEFAULT_PARTNER_ID`.
+  partnerId?: PartnerId;
   recipient: {
     name: string;
     recipientPhone: string;

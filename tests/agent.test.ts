@@ -210,7 +210,7 @@ describe('createAgent', () => {
     expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?");
     // History (the inbound message) must be saved so the customer can resend
     // without losing context — not dropped by the error path.
-    const saved = await store.getConversation(PHONE);
+    const saved = await store.getConversation('default', PHONE);
     expect(saved.some((m) => m.role === 'user' && m.content === 'hello')).toBe(true);
   });
 
@@ -321,7 +321,7 @@ describe('createAgent', () => {
     const reply = await agent.runAgentTurn(PHONE, 'send $500 via upi');
     expect(reply).toBe('You send $500, they get a lot of INR.');
 
-    const conv = await store.getConversation(PHONE);
+    const conv = await store.getConversation('default', PHONE);
     expect(conv.some((m) => m.role === 'tool')).toBe(true);
   });
 
@@ -336,7 +336,7 @@ describe('createAgent', () => {
       chat: async () => ({ role: 'assistant', content: 'noted' }),
     });
     await agent.runAgentTurn(PHONE, 'remember this');
-    const conv = await store.getConversation(PHONE);
+    const conv = await store.getConversation('default', PHONE);
     expect(conv[0]).toEqual({ role: 'user', content: 'remember this' });
   });
 
@@ -477,7 +477,7 @@ describe('createAgent', () => {
     await agent.runAgentTurn(PHONE, 'pay now');
 
     // The conversation history should keep the raw (unsanitized) assistant message
-    const conv = await store.getConversation(PHONE);
+    const conv = await store.getConversation('default', PHONE);
     const assistantMessages = conv.filter((m) => m.role === 'assistant');
     const lastAssistant = assistantMessages[assistantMessages.length - 1];
     expect(lastAssistant.content).toBe(rawModelContent);
@@ -651,6 +651,7 @@ describe('createAgent — TurnContext', () => {
     const draftStore = createDraftStore(redis);
     // Seed a draft as if send_approve_picker had been called earlier.
     const draftId = await draftStore.createDraft({
+      partnerId: 'default',
       senderPhone: '15551234567',
       recipient: {
         name: 'Mom',
@@ -707,6 +708,7 @@ describe('replay safety', () => {
     const draftStore = createDraftStore(redis);
     // Seed a draft as if a real picker had been sent.
     const draftId = await draftStore.createDraft({
+      partnerId: 'default',
       senderPhone: '15551234567',
       recipient: {
         name: 'Mom',
@@ -849,6 +851,7 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
       monthlyVolumeStore: b.monthlyVolumeStore,
       kycProvider: b.kycProvider,
       partnerStore: b.partnerStore,
+      partnerId: 'us-only', // fix 1: the turn runs under the routed tenant
       chat: async (messages) => {
         seen.push(messages);
         return { role: 'assistant', content: 'hi' };
@@ -951,7 +954,7 @@ describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
     chat.mockResolvedValue({ role: 'assistant', content: 'ok' });
 
     await agent.runAgentTurn('+15551230000', 'turn one');
-    const persisted = await store.getConversation('+15551230000');
+    const persisted = await store.getConversation('default', '+15551230000');
     expect(persisted.some((m) => (m.content ?? '').includes('[RECENT TRANSFERS]'))).toBe(false);
   });
 
@@ -1076,7 +1079,7 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
   it('injects [RECIPIENT SELECTED] with full details on a recipient button tap', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
-    await store.upsertRecipient(PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
+    await store.upsertRecipient('default', PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
@@ -1094,7 +1097,7 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
   it('suppresses the trailing text when a tool sent an interactive (no double message)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
-    await store.upsertRecipient(PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
+    await store.upsertRecipient('default', PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
     let round = 0;
     const agent = createAgent({
       store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
@@ -1158,7 +1161,7 @@ describe('best-rate routing wiring (B2)', () => {
       expect.anything(), expect.anything(), 'USD', 'INR', 85.2,
     );
     // The tool result the model saw quotes the WINNING rate — and leaks no partner id.
-    const history = await store.getConversation(PHONE);
+    const history = await store.getConversation('default', PHONE);
     const toolMsg = history.find((m) => m.role === 'tool');
     expect(toolMsg).toBeDefined();
     const result = JSON.parse(toolMsg!.content!) as Record<string, unknown>;
@@ -1177,11 +1180,11 @@ describe('best-rate routing wiring (B2)', () => {
     const script = quoteScript();
     const agent = createAgent({
       store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
-      ...deps, chat: async () => script.next(),
+      ...deps, partnerId: 'acme', chat: async () => script.next(), // fix 1: routed tenant
     });
     await agent.runAgentTurn(PHONE, 'how much to send $100?');
     expect(vi.mocked(selectSettlementRoute)).not.toHaveBeenCalled();
-    const history = await store.getConversation(PHONE);
+    const history = await store.getConversation('acme', PHONE);
     const toolMsg = history.find((m) => m.role === 'tool');
     const result = JSON.parse(toolMsg!.content!) as Record<string, unknown>;
     expect(result.fx_rate).toBe(85.2); // pinned to the partner at mid
@@ -1298,7 +1301,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     const reply = await agent.runAgentTurn(PHONE, 'send $100 to Mom');
     expect(reply).toContain("can't do that here");
     // The blocked attempt fed the model a flat error and performed NO side effect.
-    const conv = await store.getConversation(PHONE);
+    const conv = await store.getConversation('default', PHONE);
     const toolMsg = conv.find((m) => m.role === 'tool');
     expect(toolMsg!.content).toContain('not available here');
     expect(createDraft).not.toHaveBeenCalled();
@@ -1320,7 +1323,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       destinationCountry: 'IN', destinationCurrency: 'INR', partnerId: 'default',
       amountSource: 200, feeSource: 1.99, totalChargeSource: 201.99,
     });
-    await store.upsertRecipient(PHONE, {
+    await store.upsertRecipient('default', PHONE, {
       name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi',
       payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString(),
     });
@@ -1413,9 +1416,26 @@ describe('row deadline (fix 7)', () => {
     expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?"); // FALLBACK_REPLY (agent.ts:25-26)
     expect(await store.listTransfers()).toHaveLength(1); // round 0 minted EXACTLY once and is never re-run
     expect(chat).toHaveBeenCalledTimes(2); // no chatWithRetry second call after the abort
-    const saved = await store.getConversation(PHONE); // history preserved by runAgentTurn's catch
+    const saved = await store.getConversation('default', PHONE); // history preserved by runAgentTurn's catch
     expect(saved.some((m) => m.role === 'user' && m.content === 'send $50 to Mom')).toBe(true);
     expect(saved.some((m) => m.role === 'assistant' && (m.tool_calls?.length ?? 0) > 0)).toBe(true);
     expect(saved.some((m) => m.role === 'tool')).toBe(true); // the round-0 tool result
+  });
+
+  it('conversation history is per (tenant, phone): an acme turn for a phone with default history starts EMPTY', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await store.saveConversation('default', PHONE, [{ role: 'user', content: 'send $900 to Zubeida' }, { role: 'assistant', content: 'Sure — Zubeida it is.' }]);
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
+      partnerId: 'acme',
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'hi' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'hello');
+    expect(JSON.stringify(seen[0])).not.toContain('Zubeida');
+    expect(await store.getConversation('acme', PHONE)).toHaveLength(2); // its OWN thread: user + assistant
+    expect((await store.getConversation('default', PHONE))[0].content).toBe('send $900 to Zubeida'); // untouched
   });
 });

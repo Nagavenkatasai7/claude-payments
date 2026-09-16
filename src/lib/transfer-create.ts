@@ -150,19 +150,19 @@ export async function createTransfer(
   if (input.quote) {
     q = input.quote;
   } else {
-    const transferCount = await store.getTransferCount(input.phone);
+    const transferCount = await store.getTransferCount(input.partnerId, input.phone);
     const rates = await getFxRates(input.sourceCurrency);
     // Fetch dest rates for the cross-rate. For INR this returns {toInr:1,toUsd:0.0118}
     // and quote() takes the INR branch (rates.toInr) — identical to the pre-any-to-any behavior.
     const destRates = await getFxRates(destinationCurrency);
     q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates.toUsd);
   }
-  const transfersToday = await store.getTodayTransferCount(input.phone);
+  const transfersToday = await store.getTodayTransferCount(input.partnerId, input.phone);
 
   const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
   const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
   const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
-  const monthUsedCents = await monthlyVolumeStore.getMonthCents(input.phone);   // NEW (KYC)
+  const monthUsedCents = await monthlyVolumeStore.getMonthCents(input.partnerId, input.phone);   // NEW (KYC)
   const compliance = await screenTransfer({                         // P5: corridor-aware
     amountUsd: q.amountUsd,            // USD-equivalent — UNCHANGED
     recipientName: input.recipientName,
@@ -231,11 +231,14 @@ export async function createTransfer(
   };
   await store.saveTransfer(transfer);
   // (transfer count is now DERIVED from the ledger — no counter to bump)
-  await store.incrementTodayTransferCount(input.phone);
-  await monthlyVolumeStore.addCents(input.phone, Math.round(transfer.amountUsd * 100));   // NEW (KYC)
+  // Accruals and the address book are keyed by the transfer's TENANT (fix 1 /
+  // F45, F47): a partner-API mint for a number can never touch another tenant's
+  // saved destinations or compliance counters for that same number.
+  await store.incrementTodayTransferCount(input.partnerId, input.phone);
+  await monthlyVolumeStore.addCents(input.partnerId, input.phone, Math.round(transfer.amountUsd * 100));   // NEW (KYC)
 
   try {
-    await store.upsertRecipient(input.phone, {
+    await store.upsertRecipient(input.partnerId, input.phone, {
       name: input.recipientName,
       recipientPhone: input.recipientPhone,
       payoutMethod: input.payoutMethod,

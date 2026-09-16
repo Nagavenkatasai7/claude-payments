@@ -48,9 +48,13 @@ export async function POST(req: NextRequest) {
 
   // subjectId is the customer phone. The panel sends {subjectId}.
   let phone = '';
+  let partnerHint: string | undefined;
   try {
-    const body = (await req.json()) as { subjectId?: unknown };
+    const body = (await req.json()) as { subjectId?: unknown; partnerId?: unknown };
     if (typeof body.subjectId === 'string') phone = body.subjectId;
+    // Tenant hint (fix 1): honoured for platform staff only — scoped-store pins
+    // partner staff to their own tenant regardless.
+    if (typeof body.partnerId === 'string' && body.partnerId) partnerHint = body.partnerId;
   } catch {
     /* malformed body falls through to the 404 below */
   }
@@ -61,13 +65,13 @@ export async function POST(req: NextRequest) {
   // staffer who can't see this customer gets the 404, never a 403.
   const store = getStore();
   const scoped = createScopedStore(staff);
-  const customer = await scoped.getCustomer(phone);
+  const customer = await scoped.getCustomer(phone, { partnerId: partnerHint });
   if (!customer) return NextResponse.json({ ok: false }, { status: 404 });
 
   // Non-critical audit trail: degrade to an empty trail on transport failure,
   // exactly as the page does — a store hiccup must not 502 the copilot.
   const audit = await getKycCaseStore(store)
-    .getAudit(phone)
+    .getAudit(customer.partnerId, phone)
     .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>);
 
   try {

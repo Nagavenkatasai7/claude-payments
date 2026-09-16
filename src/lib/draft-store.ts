@@ -1,13 +1,16 @@
 import { getRedis } from './redis';
 import { newTransferId } from './id';
 import type { RedisLike } from './store';
-import type { Draft } from './types';
+import { DEFAULT_PARTNER_ID } from './defaults';
+import type { Draft, PartnerId } from './types';
 
 const DRAFT_TTL_SECONDS = 1800; // 30 minutes
 
 export function createDraftStore(redis: RedisLike) {
   return {
-    async createDraft(input: Omit<Draft, 'createdAt'>): Promise<string> {
+    // D12 (fix 1): the active-draft pointer is keyed (tenant, phone); a new
+    // draft MUST carry its tenant.
+    async createDraft(input: Omit<Draft, 'createdAt'> & { partnerId: PartnerId }): Promise<string> {
       const draftId = newTransferId();
       const draft: Draft = {
         ...input,
@@ -16,7 +19,7 @@ export function createDraftStore(redis: RedisLike) {
       await redis.set(`recipient_draft:${draftId}`, JSON.stringify(draft), {
         ex: DRAFT_TTL_SECONDS,
       });
-      await redis.set(`active_draft:${input.senderPhone}`, draftId, {
+      await redis.set(`active_draft:${input.partnerId}:${input.senderPhone}`, draftId, {
         ex: DRAFT_TTL_SECONDS,
       });
       return draftId;
@@ -25,16 +28,30 @@ export function createDraftStore(redis: RedisLike) {
       const raw = await redis.get(`recipient_draft:${draftId}`);
       return raw ? (JSON.parse(raw) as Draft) : null;
     },
-    async getActiveDraftId(phone: string): Promise<string | null> {
-      return redis.get(`active_draft:${phone}`);
+    async getActiveDraftId(partnerId: PartnerId, phone: string): Promise<string | null> {
+      return redis.get(`active_draft:${partnerId}:${phone}`);
     },
     async consumeDraft(draftId: string): Promise<Draft | null> {
       const raw = await redis.getdel(`recipient_draft:${draftId}`);
       if (!raw) return null;
       const draft = JSON.parse(raw) as Draft;
-      const ptr = await redis.get(`active_draft:${draft.senderPhone}`);
-      if (ptr === draftId) await redis.del(`active_draft:${draft.senderPhone}`);
+      // A legacy in-flight draft (no partnerId) had a phone-only pointer; it
+      // simply expires with its TTL — nothing reads the old key after fix 1.
+      const ptrKey = `active_draft:${draft.partnerId ?? DEFAULT_PARTNER_ID}:${draft.senderPhone}`;
+      const ptr = await redis.get(ptrKey);
+      if (ptr === draftId) await redis.del(ptrKey);
       return draft;
+    },
+    /**
+     * Put a consumed draft back (row + pointer under ITS OWN tenant) — used when
+     * a tap is refused on a tenant mismatch, so the legitimate tenant's draft is
+     * never destroyed by someone else's turn (fix 1, D12).
+     */
+    async restoreDraft(draft: Draft, draftId: string): Promise<void> {
+      await redis.set(`recipient_draft:${draftId}`, JSON.stringify(draft), { ex: DRAFT_TTL_SECONDS });
+      await redis.set(`active_draft:${draft.partnerId ?? DEFAULT_PARTNER_ID}:${draft.senderPhone}`, draftId, {
+        ex: DRAFT_TTL_SECONDS,
+      });
     },
   };
 }

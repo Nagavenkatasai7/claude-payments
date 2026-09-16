@@ -125,8 +125,11 @@ export interface TransactionsTabsProps {
   transfers: Transfer[];
   staff: Staff[];
   staffByUsername: Record<string, string>;
+  /** Keyed `${partnerId}:${phone}` (fix 1). */
   tierByPhone: Record<string, Tier>;
+  /** Keyed `${partnerId}:${phone}` (fix 1). */
   kycByPhone: Record<string, KycInfo>;
+  /** Keyed `${partnerId}:${phone}` (fix 1). */
   senderNames: Record<string, string>;
   partnerById: Record<string, Partner>;
   canCancel: boolean;
@@ -191,7 +194,12 @@ export function TransactionsTabs({
       <ExpandableTable
         columns={TRANSACTION_COLUMNS}
         empty={<>No transactions in this view.</>}
-        rows={visible.map((t) => ({
+        rows={visible.map((t) => {
+          // Badge/name maps are keyed by (tenant, phone) — the transfer's OWN tenant
+          // (fix 1). Same shape as lib/sender-names senderNameKey, inlined because
+          // this is a client component and sender-names is a server (drizzle) module.
+          const senderKey = `${t.partnerId}:${t.phone}`;
+          return ({
           key: t.id,
           label: t.recipientName,
           cells: [
@@ -203,17 +211,17 @@ export function TransactionsTabs({
                 payoutDestination={t.payoutDestination}
               />
             </div>,
-            <SenderCell key="sender" name={senderNames[t.phone]} phone={t.phone} />,
+            <SenderCell key="sender" name={senderNames[senderKey]} phone={t.phone} partnerId={t.partnerId} />,
             <span key="country">{t.sourceCountry} → {t.destinationCountry}</span>,
             partnerById[t.partnerId]?.name ?? t.partnerId,
-            tierByPhone[t.phone] ? (
-              <span key="tier" className={tierBadgeClass(tierByPhone[t.phone])}>
-                {tierByPhone[t.phone]}
+            tierByPhone[senderKey] ? (
+              <span key="tier" className={tierBadgeClass(tierByPhone[senderKey])}>
+                {tierByPhone[senderKey]}
               </span>
             ) : (
               <span key="tier" className={SUB_TEXT}>—</span>
             ),
-            <KycBadge key="kyc" kyc={kycByPhone[t.phone]} />,
+            <KycBadge key="kyc" kyc={kycByPhone[senderKey]} />,
             <div key="amount">
               <div className="font-semibold tabular-nums">{money(t.amountSource, t.sourceCurrency)}</div>
               {t.sourceCurrency !== 'USD' && (
@@ -271,7 +279,8 @@ export function TransactionsTabs({
               )}
             </div>,
           ],
-        }))}
+        });
+        })}
       />
     </>
   );

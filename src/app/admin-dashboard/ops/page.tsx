@@ -16,7 +16,7 @@ import {
 import { DiagnosePanel } from './diagnose-panel';
 import { approveRefundAction, dismissRefundAction, retryRefundAction } from '../actions';
 import { SenderCell, FundingRefs } from '../sender-cell';
-import { resolveSenderNames } from '@/lib/sender-names';
+import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import type { Transfer } from '@/lib/types';
 
 // /admin-dashboard/ops — the money-state safety surface (Stage 5, fed by the
@@ -50,7 +50,7 @@ export default async function OpsPage() {
       ...snap.refundsRequested,
       ...snap.refundsFailed,
       ...snap.staleReviews,
-    ].map((t) => t.phone),
+    ],
   );
   const refundsTotal =
     snap.refundsRequested.length + snap.refundsPending.length + snap.refundsFailed.length;
@@ -238,7 +238,7 @@ export default async function OpsPage() {
                         </Link>
                       </TableCell>
                       <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                      <TableCell><SenderCell name={senderNames.get(t.phone)} phone={t.phone} /></TableCell>
+                      <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
                       <TableCell>{age(t.paidAt)} ago</TableCell>
                       <TableCell className="text-right">
@@ -291,7 +291,7 @@ export default async function OpsPage() {
                         <TableRow key={t.id}>
                           <TableCell>{t.id}</TableCell>
                           <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                          <TableCell><SenderCell name={senderNames.get(t.phone)} phone={t.phone} /></TableCell>
+                          <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                           <TableCell><FundingRefs fundingMethod={t.fundingMethod} fundingRef={t.fundingRef} refundRef={t.refundRef} /></TableCell>
                           <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                           <TableCell>{age(t.createdAt)} ago</TableCell>
@@ -342,7 +342,7 @@ export default async function OpsPage() {
                         <TableRow key={t.id}>
                           <TableCell>{t.id}</TableCell>
                           <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                          <TableCell><SenderCell name={senderNames.get(t.phone)} phone={t.phone} /></TableCell>
+                          <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                           <TableCell><FundingRefs fundingMethod={t.fundingMethod} fundingRef={t.fundingRef} refundRef={t.refundRef} /></TableCell>
                           <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                           <TableCell>{age(t.createdAt)} ago</TableCell>
@@ -386,7 +386,7 @@ export default async function OpsPage() {
                     <TableRow key={t.id}>
                       <TableCell>{t.id}</TableCell>
                       <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
-                      <TableCell><SenderCell name={senderNames.get(t.phone)} phone={t.phone} /></TableCell>
+                      <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
                       <TableCell>{age(t.paidAt)} ago</TableCell>
                       <TableCell className="text-right">

@@ -156,7 +156,7 @@ export function buildDeterministicSummary(context: SummaryContext): string {
 const SUMMARY_TTL_SECONDS = 24 * 60 * 60; // 24h — the card is a digest, not live data
 const DEFAULT_TIMEOUT_MS = 12_000;
 
-const cacheKey = (phone: string) => `summary:${phone}`;
+const cacheKey = (partnerId: PartnerId, phone: string) => `summary:${partnerId}:${phone}`;
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -179,13 +179,13 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 export interface CustomerSummarizerDeps {
   redis: RedisLike;
-  store: { listTransfersByPhone(phone: string, limit?: number): Promise<Transfer[]> };
-  customers: { getCustomer(phone: string): Promise<Customer | null> };
+  store: { listTransfersByPhone(partnerId: PartnerId, phone: string, limit?: number): Promise<Transfer[]> };
+  customers: { getCustomer(partnerId: PartnerId, phone: string): Promise<Customer | null> };
   partners: {
     getPartner(id: PartnerId): Promise<Partner | null>;
     ensureDefaultPartner(): Promise<Partner>;
   };
-  dailyVolume: { getTodayCents(phone: string): Promise<number> };
+  dailyVolume: { getTodayCents(partnerId: PartnerId, phone: string): Promise<number> };
   /** Injectable model seam (defaults to the shared Ollama client). */
   chatFn?: (messages: ChatMessage[], tools: ChatTool[]) => Promise<ChatMessage>;
   timeoutMs?: number;
@@ -197,19 +197,19 @@ export function createCustomerSummarizer(deps: CustomerSummarizerDeps) {
 
   return {
     /**
-     * The customer's smart summary, from cache when fresh (`summary:<phone>`,
+     * The customer's smart summary, from cache when fresh (`summary:<partnerId>:<phone>`,
      * 24h TTL, plain string — `automaticDeserialization:false` everywhere).
      * Returns null on ANY failure so the dashboard card simply doesn't render.
      */
-    async getCustomerSummary(phone: string): Promise<string | null> {
+    async getCustomerSummary(partnerId: PartnerId, phone: string): Promise<string | null> {
       try {
-        const cached = await deps.redis.get(cacheKey(phone));
+        const cached = await deps.redis.get(cacheKey(partnerId, phone));
         if (cached) return cached;
 
         const [customer, transfers, todayUsedCents] = await Promise.all([
-          deps.customers.getCustomer(phone),
-          deps.store.listTransfersByPhone(phone, 5),
-          deps.dailyVolume.getTodayCents(phone),
+          deps.customers.getCustomer(partnerId, phone),
+          deps.store.listTransfersByPhone(partnerId, phone, 5),
+          deps.dailyVolume.getTodayCents(partnerId, phone),
         ]);
         if (!customer) return null;
         const partner =
@@ -235,7 +235,7 @@ export function createCustomerSummarizer(deps: CustomerSummarizerDeps) {
         const text = typeof reply.content === 'string' ? reply.content.trim() : '';
         if (!text) return null;
 
-        await deps.redis.set(cacheKey(phone), text, { ex: SUMMARY_TTL_SECONDS });
+        await deps.redis.set(cacheKey(partnerId, phone), text, { ex: SUMMARY_TTL_SECONDS });
         return text;
       } catch (err) {
         // Scrubbed log only — never the raw error (provider bodies can echo PII).
@@ -264,6 +264,6 @@ function summarizer(): CustomerSummarizer {
 }
 
 /** Dashboard entry point: the customer's AI summary, or null (card hidden). */
-export function getCustomerSummary(phone: string): Promise<string | null> {
-  return summarizer().getCustomerSummary(phone);
+export function getCustomerSummary(partnerId: PartnerId, phone: string): Promise<string | null> {
+  return summarizer().getCustomerSummary(partnerId, phone);
 }

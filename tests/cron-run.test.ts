@@ -252,5 +252,8 @@ describe('runDueSchedules', () => {
     const saved = await scheduleStore.getSchedule('unverified');
     expect(saved?.status).toBe('active');           // stays active — resumes once verified
     expect(saved?.lastRunAt).toBeUndefined();        // not bumped
+    // Review item 1: the minted inquiry is recorded on the schedule's (tenant, phone) row
+    // so the Persona completion can bind to it once the phone has sibling rows.
+    expect((await customerStore.getCustomer('default', '15551234567'))?.kycInquiryId).toBe('ref_1');
   });
 });

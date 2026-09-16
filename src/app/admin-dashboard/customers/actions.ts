@@ -17,15 +17,30 @@ import type { CountryCode, KycStatus, PartnerId } from '@/lib/types';
 
 const VALID_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
 
+/**
+ * The tenant an admin action targets (fix 1): partner staff are PINNED to their
+ * own (the form field is ignored — an identity pin, never an input); platform
+ * staff MUST name one. No silent default: a stale or hand-crafted form without
+ * a partnerId must never act on the default tenant's row for a multi-tenant
+ * phone (the detail page always posts the hidden field).
+ */
+function targetPartnerId(staff: { partnerId?: string }, formData: FormData): PartnerId {
+  if (staff.partnerId) return staff.partnerId;
+  const requested = String(formData.get('partnerId') ?? '').trim();
+  if (!requested) throw new Error('Partner is required.');
+  return requested;
+}
+
 export async function markCustomerVerifiedAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const phone = String(formData.get('phone') ?? '').trim();
   if (!phone) throw new Error('Phone is required.');
 
+  const partnerId = targetPartnerId(staff, formData);
   const cs = getCustomerStore(getStore());
-  const customer = await cs.getCustomer(phone);
-  // H3 fix: the customer key is global (customer:<phone>), so an unscoped lookup
-  // lets a partner-admin flip another tenant's customer. Reject out-of-scope.
+  const customer = await cs.getCustomer(partnerId, phone);
+  // H3 fix + fix 1: the read is keyed (tenant, phone) with partner staff pinned;
+  // canSee stays as defence-in-depth. Out-of-scope ⇒ not found.
   if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
     throw new Error('Customer not found.');
   }
@@ -58,8 +73,9 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   if (decision !== 'approve' && decision !== 'reject') throw new Error('Invalid decision.');
   if (!reason) throw new Error('A review reason is required.');
 
+  const partnerId = targetPartnerId(staff, formData);
   const cs = getCustomerStore(getStore());
-  const customer = await cs.getCustomer(phone);
+  const customer = await cs.getCustomer(partnerId, phone);
   if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
     throw new Error('Customer not found.');
   }
@@ -67,7 +83,7 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   // Attribute the reviewer by display name + stable username, e.g. "Main Admin (forextransfer)".
   const reviewer =
     staff.name && staff.name !== staff.username ? `${staff.name} (${staff.username})` : staff.username;
-  await getKycCaseStore(getStore()).review(phone, decision, reviewer, reason);
+  await getKycCaseStore(getStore()).review(partnerId, phone, decision, reviewer, reason);
   // KYC is partner OPT-IN: the decision + audit above stand regardless, but the
   // customer-facing WhatsApp notify only fires when the partner's
   // verify-before-send gate is ON. Fail-soft — a notify hiccup never voids the review.
@@ -105,11 +121,6 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
     throw new Error('Phone must be 10–15 digits, including country code.');
   }
 
-  const cs = getCustomerStore(getStore());
-  if (await cs.getCustomer(normalized)) {
-    throw new Error('A customer with that phone already exists.');
-  }
-
   // Partner scope: partner-admin → own partner (identity authoritative, form ignored);
   // platform-admin → form choice, verified to exist.
   let partnerId: PartnerId = DEFAULT_PARTNER_ID;
@@ -122,6 +133,13 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
       if (!partner) throw new Error('Selected partner not found.');
       partnerId = requested;
     }
+  }
+
+  // Collision check is per (tenant, phone) since fix 1 — the same number may
+  // legitimately exist under another partner.
+  const cs = getCustomerStore(getStore());
+  if (await cs.getCustomer(partnerId, normalized)) {
+    throw new Error('A customer with that phone already exists.');
   }
 
   const picked = String(formData.get('senderCountry') ?? '').trim().toUpperCase();
@@ -153,7 +171,7 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
   });
 
   revalidatePath('/admin-dashboard/customers');
-  redirect(`/admin-dashboard/customers/${normalized}`);
+  redirect(`/admin-dashboard/customers/${normalized}?partner=${encodeURIComponent(partnerId)}`);
 }
 
 export async function markCustomerRejectedAction(formData: FormData): Promise<void> {
@@ -163,8 +181,9 @@ export async function markCustomerRejectedAction(formData: FormData): Promise<vo
     String(formData.get('reason') ?? '').trim().slice(0, 500) || 'Manual rejection by staff';
   if (!phone) throw new Error('Phone is required.');
 
+  const partnerId = targetPartnerId(staff, formData);
   const cs = getCustomerStore(getStore());
-  const customer = await cs.getCustomer(phone);
+  const customer = await cs.getCustomer(partnerId, phone);
   // H3 fix (see markCustomerVerifiedAction): reject out-of-scope.
   if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
     throw new Error('Customer not found.');

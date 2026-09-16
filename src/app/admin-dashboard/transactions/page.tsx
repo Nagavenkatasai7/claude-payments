@@ -6,6 +6,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
+import { senderNameKey } from '@/lib/sender-names';
 import { hasPermission } from '@/lib/permissions';
 import { deriveTier } from '@/lib/tier-rules';
 import { sendGateActive } from '@/lib/kyc-gate';
@@ -51,31 +52,31 @@ export default async function TransactionsPage({
   const partnerById: Record<string, Partner> = {};
   for (const p of partners) partnerById[p.id] = p;
 
-  // Badge maps for ONLY the phones on this page (indexed PK reads). Tier
-  // display is gate-aware: where the owning partner doesn't require KYC, an
-  // unverified customer is T1, not Suspended (matches enforcement).
+  // Badge maps for ONLY the senders on this page (indexed PK reads), keyed by
+  // (tenant, phone) — the transfer's own tenant, so a row never borrows another
+  // tenant's KYC/tier/name (fix 1). Tier display is gate-aware: where the owning
+  // partner doesn't require KYC, an unverified customer is T1, not Suspended.
+  // Sender legal names reuse these reads (customer-repo decrypts fullName by
+  // default) instead of a second resolveSenderNames lookup.
   const customerStore = getCustomerStore(getStore());
-  const phones = [...new Set(transfers.map((t) => t.phone))];
+  const senderKeys = [...new Map(transfers.map((t) => [senderNameKey(t.partnerId, t.phone), t])).values()];
   const customers = (
-    await Promise.all(phones.map((p) => customerStore.getCustomer(p)))
+    await Promise.all(senderKeys.map((t) => customerStore.getCustomer(t.partnerId, t.phone)))
   ).filter((c): c is NonNullable<typeof c> => c !== null);
   const now = new Date();
   const tierByPhone: Record<string, Tier> = {};
   const kycByPhone: Record<string, KycInfo> = {};
-  // Sender legal names for the list — the customer reads above already decrypt
-  // fullName (customer-repo defaults to decrypted PII), so we reuse them here
-  // instead of a second resolveSenderNames lookup. Absent name ⇒ omitted ⇒
-  // SenderCell falls back to the phone.
   const senderNames: Record<string, string> = {};
   for (const c of customers) {
-    tierByPhone[c.senderPhone] = deriveTier(c, now, sendGateActive(partnerById[c.partnerId]));
-    kycByPhone[c.senderPhone] = {
+    const k = senderNameKey(c.partnerId, c.senderPhone);
+    tierByPhone[k] = deriveTier(c, now, sendGateActive(partnerById[c.partnerId]));
+    kycByPhone[k] = {
       kycStatus: c.kycStatus,
       kycReviewState: c.kycReviewState,
       watchlistHit: c.watchlistHit,
       pepHit: c.pepHit,
     };
-    if (c.fullName) senderNames[c.senderPhone] = c.fullName;
+    if (c.fullName) senderNames[k] = c.fullName;
   }
 
   // Pager hrefs preserve the partner filter (search/phone are window-local).

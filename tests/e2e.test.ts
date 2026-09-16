@@ -137,7 +137,7 @@ describe('end-to-end happy path', () => {
     const transfers = await store.listTransfers();
     expect(transfers).toHaveLength(1);
     const transferId = transfers[0].id;
-    expect(await store.getTransferCount(PHONE)).toBe(1);
+    expect(await store.getTransferCount('default', PHONE)).toBe(1);
 
     // Completing payment: stage 1 marks paid, stage 2 delivers.
     const stage1 = await completePaymentStage1(store, transferId);
@@ -163,7 +163,7 @@ describe('end-to-end returning customer', () => {
     await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
     // Pre-seed: Mom is a saved recipient from a previous (mock) transfer.
-    await store.upsertRecipient(PHONE, {
+    await store.upsertRecipient('default', PHONE, {
       name: 'Mom',
       recipientPhone: '919876543210',
       payoutMethod: 'upi',
@@ -287,7 +287,7 @@ describe('end-to-end returning customer', () => {
     expect(await draftStore.getDraft(draftId)).toBeNull();
 
     // The recipient's lastUsedAt must have advanced past the seed.
-    const recipients = await store.listRecipients(PHONE, 3);
+    const recipients = await store.listRecipients('default', PHONE, 3);
     expect(recipients).toHaveLength(1);
     expect(recipients[0].lastUsedAt > '2026-05-01T00:00:00Z').toBe(true);
   });
@@ -362,7 +362,7 @@ describe('end-to-end new customer with cap', () => {
     // Turn 1: NEW CUSTOMER
     active = [...scripts[idx++]];
     await agent.runAgentTurn(PHONE, 'hi', { isNewConversation: true, isNewCustomer: true });
-    const customerAfterT1 = await customerStore.getCustomer(PHONE);
+    const customerAfterT1 = await customerStore.getCustomer('default', PHONE);
     expect(customerAfterT1?.kycStatus).toBe('verified'); // Phase 3: seeded verified so the send path passes the gate
 
     // Turn 2: over-cap
@@ -388,11 +388,11 @@ describe('end-to-end new customer with cap', () => {
     // Transfer must exist (Postgres ledger)
     expect(await store.listTransfers()).toHaveLength(1);
     // Daily volume must be 40000 cents
-    expect(await dailyVolumeStore.getTodayCents(PHONE)).toBe(40_000);
+    expect(await dailyVolumeStore.getTodayCents('default', PHONE)).toBe(40_000);
 
     // Now mark verified mid-window — the T0 cap stays put (observation invariant)
     await customerStore.saveCustomer({
-      ...(await customerStore.getCustomer(PHONE))!,
+      ...(await customerStore.getCustomer('default', PHONE))!,
       kycStatus: 'verified',
       kycVerifiedAt: new Date().toISOString(),
     });
@@ -400,15 +400,15 @@ describe('end-to-end new customer with cap', () => {
     // Drive today's usage to $100 short of the T0 cap, so the $200 request
     // below overshoots it. Written against the constant, not a literal, so
     // raising the cap cannot quietly turn this into a passing no-op.
-    await dailyVolumeStore.addCents(PHONE, T0_DAILY_CAP_CENTS - 40_000 - 10_000);
+    await dailyVolumeStore.addCents('default', PHONE, T0_DAILY_CAP_CENTS - 40_000 - 10_000);
 
     // used = cap − $100, + $200 requested → over_daily_cap.
     // (Verifies the observation invariant: KYC verified mid-window does NOT
     //  lift the cap — the tier stays T0 and its cap still binds.)
     const ev = evaluateCap(
-      (await customerStore.getCustomer(PHONE))!,
+      (await customerStore.getCustomer('default', PHONE))!,
       new Date(),
-      await dailyVolumeStore.getTodayCents(PHONE),
+      await dailyVolumeStore.getTodayCents('default', PHONE),
       20_000,
     );
     expect(ev.tier).toBe('T0'); // still in window despite verification
@@ -417,9 +417,9 @@ describe('end-to-end new customer with cap', () => {
 
     // Asking for $100 (exactly the $100 remaining of the T0 cap) → within
     const within = evaluateCap(
-      (await customerStore.getCustomer(PHONE))!,
+      (await customerStore.getCustomer('default', PHONE))!,
       new Date(),
-      await dailyVolumeStore.getTodayCents(PHONE),
+      await dailyVolumeStore.getTodayCents('default', PHONE),
       10_000,
     );
     expect(within.withinCap).toBe(true);

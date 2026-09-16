@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getDb } from '@/db/client';
-import { resolveSenderNames } from '@/lib/sender-names';
+import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import Link from 'next/link';
 import { schedulesDueInRange } from '@/lib/dashboard';
 import type { Schedule, Transfer } from '@/lib/types';
@@ -67,7 +67,7 @@ export default async function DashboardPage() {
     scoped.recentTransfers(5),
     scoped.listSchedules(),
   ]);
-  const senderNames = await resolveSenderNames(getDb(), recent.map((t) => t.phone));
+  const senderNames = await resolveSenderNames(getDb(), recent);
   const now = Date.now();
   const attentionCount = summary.needsAttention;
   const nextDue = schedulesDueInRange(
@@ -154,7 +154,7 @@ export default async function DashboardPage() {
               label: t.recipientName,
               cells: [
                 <div className="font-semibold" key="r">{t.recipientName}</div>,
-                <SenderCell key="sender" name={senderNames.get(t.phone)} phone={t.phone} />,
+                <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />,
                 <div key="a">
                   <div className="font-semibold tabular-nums">{money(t.amountSource, t.sourceCurrency)}</div>
                   {t.sourceCurrency !== 'USD' && (

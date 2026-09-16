@@ -60,7 +60,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
     await createTransfer(store, partnerStore, monthlyVolumeStore, {
-      phone, amountSource: 100, sourceCurrency: 'USD', partnerId: 'default',
+      phone, amountSource: 100, sourceCurrency: 'USD', partnerId, // minted under the customer's own tenant (fix 1)
       recipientName: 'Mom', recipientPhone: '919876543210',
       payoutMethod: 'upi', payoutDestination: 'mom@upi',
       fundingMethod: 'bank_transfer',
@@ -78,13 +78,6 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
       amountSource: 50,
     });
   }
-  // Pass partnerId explicitly, then re-save with the partner-specific id to
-  // simulate records assigned to a non-default partner.
-  for (const t of await store.listTransfers()) {
-    const c = await customerStore.getCustomer(t.phone);
-    await store.saveTransfer({ ...t, partnerId: c?.partnerId ?? 'default' });
-  }
-
   return { redis, store, customerStore, partnerStore, scheduleStore };
 }
 
@@ -132,7 +125,7 @@ describe('createScopedStore', () => {
     expect(await scoped.getTransfer(otherTransfer.id)).toBeNull();
   });
 
-  it('partner staff getCustomer returns null for another partner\'s customer', async () => {
+  it('partner staff getCustomer is PINNED at the query: null for another partner\'s customer, even when that phone also exists under their own tenant after a forged inbound', async () => {
     const env = await seedTwoPartnersData();
     const scoped = createScopedStore(partnerStaff('acme'), {
       store: env.store, customerStore: env.customerStore,
@@ -140,6 +133,26 @@ describe('createScopedStore', () => {
     });
     expect(await scoped.getCustomer('15553333333')).toBeNull();   // beta's
     expect(await scoped.getCustomer('15551111111')).not.toBeNull(); // acme's
+    // A partner-B-signed inbound created acme's OWN row for beta's phone: acme sees ITS row, never beta's.
+    await env.customerStore.upsertOnFirstInbound('acme', '15553333333');
+    const seen = await scoped.getCustomer('15553333333', { partnerId: 'beta' }); // hostile hint is ignored
+    expect(seen?.partnerId).toBe('acme');
+    expect(seen?.kycStatus).toBe('not_started');
+    expect((await env.customerStore.getCustomer('beta', '15553333333'))!.kycStatus).toBe('verified'); // beta untouched
+  });
+
+  it('platform staff getCustomer: explicit partner hint wins; without it a multi-tenant phone resolves to the newest row and lists siblings', async () => {
+    const env = await seedTwoPartnersData();
+    await env.customerStore.upsertOnFirstInbound('acme', '15553333333');
+    const scoped = createScopedStore(platformAdmin(), {
+      store: env.store, customerStore: env.customerStore,
+      partnerStore: env.partnerStore, scheduleStore: env.scheduleStore,
+    });
+    expect((await scoped.getCustomer('15553333333', { partnerId: 'beta' }))?.partnerId).toBe('beta');
+    expect((await scoped.getCustomer('15553333333', { partnerId: 'acme' }))?.partnerId).toBe('acme');
+    expect(await scoped.getCustomer('15553333333', { partnerId: 'ghost' })).toBeNull();
+    const siblings = await scoped.customerTenants('15553333333');
+    expect(siblings.sort()).toEqual(['acme', 'beta']);
   });
 
   it('partner staff getPartner returns null for another partner\'s id', async () => {

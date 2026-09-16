@@ -3,9 +3,10 @@ import { createDraftStore } from '@/lib/draft-store';
 import { fakeRedis } from './helpers';
 import type { Draft } from '@/lib/types';
 
-function sampleDraft(): Omit<Draft, 'createdAt'> {
+function sampleDraft(): Omit<Draft, 'createdAt'> & { partnerId: string } {
   return {
     senderPhone: '15551234567',
+    partnerId: 'default',
     recipient: {
       name: 'Mom',
       recipientPhone: '919876543210',
@@ -60,6 +61,7 @@ describe('draft store', () => {
   it('P4: round-trips source-currency fields on a draft', async () => {
     const store = createDraftStore(fakeRedis());
     const id = await store.createDraft({
+      partnerId: 'default',
       senderPhone: '15551230000',
       recipient: { name: 'Asha', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'asha@upi' },
       amountUsd: 254,
@@ -78,7 +80,7 @@ describe('draft store', () => {
   it('createDraft writes an active-draft pointer for the sender phone', async () => {
     const ds = createDraftStore(fakeRedis());
     const draftId = await ds.createDraft(sampleDraft());
-    const ptr = await ds.getActiveDraftId('15551234567');
+    const ptr = await ds.getActiveDraftId('default', '15551234567');
     expect(ptr).toBe(draftId);
   });
 
@@ -86,13 +88,13 @@ describe('draft store', () => {
     const ds = createDraftStore(fakeRedis());
     const draftId = await ds.createDraft(sampleDraft());
     await ds.consumeDraft(draftId);
-    const ptr = await ds.getActiveDraftId('15551234567');
+    const ptr = await ds.getActiveDraftId('default', '15551234567');
     expect(ptr).toBeNull();
   });
 
   it('getActiveDraftId returns null for a phone with no draft', async () => {
     const ds = createDraftStore(fakeRedis());
-    expect(await ds.getActiveDraftId('19999999999')).toBeNull();
+    expect(await ds.getActiveDraftId('default', '19999999999')).toBeNull();
   });
 
   it('second createDraft for same phone updates pointer to the newer draftId', async () => {
@@ -100,7 +102,7 @@ describe('draft store', () => {
     const olderDraftId = await ds.createDraft(sampleDraft());
     const newerDraftId = await ds.createDraft(sampleDraft());
     expect(olderDraftId).not.toBe(newerDraftId);
-    const ptr = await ds.getActiveDraftId('15551234567');
+    const ptr = await ds.getActiveDraftId('default', '15551234567');
     expect(ptr).toBe(newerDraftId);
   });
 
@@ -110,13 +112,13 @@ describe('draft store', () => {
     const newerDraftId = await ds.createDraft(sampleDraft());
     // consume the older one — pointer now points to newer, so it must not be cleared
     await ds.consumeDraft(olderDraftId);
-    const ptr = await ds.getActiveDraftId('15551234567');
+    const ptr = await ds.getActiveDraftId('default', '15551234567');
     expect(ptr).toBe(newerDraftId);
   });
 
   it('draft quote accepts optional enriched fields without breaking existing creation', async () => {
     const ds = createDraftStore(fakeRedis());
-    const enrichedInput: Omit<Draft, 'createdAt'> = {
+    const enrichedInput: Omit<Draft, 'createdAt'> & { partnerId: string } = {
       ...sampleDraft(),
       quote: {
         feeUsd: 1.99,
@@ -132,5 +134,18 @@ describe('draft store', () => {
     expect(fetched?.quote.feeSource).toBe(1.57);
     expect(fetched?.quote.totalChargeSource).toBe(301.57);
     expect(fetched?.quote.totalChargeUsd).toBe(301.99);
+  });
+
+  it('keys the active-draft pointer by (partnerId, phone) and restoreDraft puts a consumed draft back under ITS tenant (fix 1, D12)', async () => {
+    const redis = fakeRedis();
+    const ds = createDraftStore(redis);
+    const id = await ds.createDraft({ ...sampleDraft(), partnerId: 'acme' });
+    expect(redis.dump.has('active_draft:acme:15551234567')).toBe(true);
+    expect(await ds.getActiveDraftId('default', '15551234567')).toBeNull();
+    const consumed = (await ds.consumeDraft(id))!;
+    expect(await ds.getActiveDraftId('acme', '15551234567')).toBeNull();
+    await ds.restoreDraft(consumed, id);
+    expect(await ds.getActiveDraftId('acme', '15551234567')).toBe(id);
+    expect((await ds.getDraft(id))?.partnerId).toBe('acme');
   });
 });

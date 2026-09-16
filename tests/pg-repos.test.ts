@@ -126,44 +126,77 @@ describe('customer-repo', () => {
     expect(row.full_name_enc).not.toContain('Asha');
     expect(row.full_name_enc.startsWith('v1.')).toBe(true);
     expect(row.gov_id_number_enc).not.toContain('P1234567');
-    const back = await r.getCustomer('15551230000');
+    const back = await r.getCustomer('default', '15551230000');
     expect(back!.fullName).toBe('Asha Patel');
     expect(back!.govIdNumber).toBe('P1234567');
   });
 
-  it('upsertOnFirstInbound: create → grandfather via firstTransferAt → follow-the-number', async () => {
+  it('upsertOnFirstInbound: create → grandfather via firstTransferAt → sibling row per tenant, never a re-home', async () => {
     await seedPartner(db, 'acme');
     const r = repo();
-    // grandfathered path: prior transfer exists
+    // grandfathered path: prior transfer exists (under this tenant)
     firstAt.value = '2026-01-01T00:00:00.000Z';
-    const g = await r.upsertOnFirstInbound('15550001111');
+    const g = await r.upsertOnFirstInbound('default', '15550001111');
     expect(g.wasCreated).toBe(false);
     expect(g.customer.kycStatus).toBe('grandfathered');
     expect(g.customer.firstSeenAt).toBe('2026-01-01T00:00:00.000Z');
     // brand-new path under a routed partner
     firstAt.value = null;
-    const n = await r.upsertOnFirstInbound('15550002222', 'acme');
+    const n = await r.upsertOnFirstInbound('acme', '15550002222');
     expect(n.wasCreated).toBe(true);
     expect(n.customer.partnerId).toBe('acme');
-    // follow-the-number: existing default customer moves to the channel owner
-    const moved = await r.upsertOnFirstInbound('15550001111', 'acme');
-    expect(moved.customer.partnerId).toBe('acme');
-    expect((await r.getCustomer('15550001111'))!.partnerId).toBe('acme');
+    // F44: a partner-signed inbound for a phone that already belongs to 'default'
+    // creates acme's OWN row and leaves the default row exactly as it was.
+    const sibling = await r.upsertOnFirstInbound('acme', '15550001111');
+    expect(sibling.wasCreated).toBe(true);
+    expect(sibling.customer.partnerId).toBe('acme');
+    expect(sibling.customer.kycStatus).toBe('not_started');
+    expect((await r.getCustomer('default', '15550001111'))!.partnerId).toBe('default');
+    expect((await r.getCustomer('default', '15550001111'))!.kycStatus).toBe('grandfathered');
+    expect((await r.findByPhone('15550001111')).map((c) => c.partnerId).sort()).toEqual(['acme', 'default']);
+  });
+
+  it('saveCustomer conflicts on (partner_id, phone), so two partners hold the same phone independently', async () => {
+    await seedPartner(db, 'acme');
+    const r = repo();
+    const base: Customer = {
+      senderPhone: '15550009999', firstSeenAt: now, kycStatus: 'verified', senderCountry: 'US',
+      partnerId: 'default', fullName: 'Asha Patel', passwordHash: 'pw', createdAt: now, updatedAt: now,
+    };
+    await r.saveCustomer(base);
+    await r.saveCustomer({ ...base, partnerId: 'acme', kycStatus: 'not_started', fullName: undefined, passwordHash: undefined });
+    const d = (await r.getCustomer('default', '15550009999'))!;
+    const a = (await r.getCustomer('acme', '15550009999'))!;
+    expect([d.kycStatus, d.fullName, d.passwordHash]).toEqual(['verified', 'Asha Patel', 'pw']);
+    expect([a.kycStatus, a.fullName, a.passwordHash]).toEqual(['not_started', undefined, undefined]);
+    expect(await r.getCustomer('globex', '15550009999')).toBeNull();
+    expect((await r.listCustomers('acme')).map((c) => c.partnerId)).toEqual(['acme']);
+    expect((await r.listCustomers()).length).toBe(2);
+  });
+
+  it('ensureCustomer creates a row WITHOUT WhatsApp opt-in (API-minted senders never consent by side effect)', async () => {
+    await seedPartner(db, 'acme');
+    const r = repo();
+    firstAt.value = null;
+    const c = await r.ensureCustomer('acme', '15550004444');
+    expect(c.partnerId).toBe('acme');
+    expect(c.optInAt).toBeUndefined();
+    expect((await r.ensureCustomer('acme', '15550004444')).createdAt).toBe(c.createdAt); // idempotent
   });
 
   it('consent + sticky funding + kyc inquiry mutations behave like the Redis store', async () => {
     firstAt.value = null;
     const r = repo();
-    await r.upsertOnFirstInbound('15550003333');
-    await r.setOptedOut('15550003333');
-    expect((await r.getCustomer('15550003333'))!.optedOutAt).toBeTruthy();
-    await r.clearOptedOut('15550003333');
-    expect((await r.getCustomer('15550003333'))!.optedOutAt).toBeUndefined();
-    await r.recordFundingMethod('15550003333', 'bank_transfer');
-    expect((await r.getCustomer('15550003333'))!.lastFundingMethod).toBe('bank_transfer');
-    await r.recordKycInquiry('15550003333', 'inq_1');
-    await r.recordKycInquiry('15550003333', 'inq_2');
-    const c = await r.getCustomer('15550003333');
+    await r.upsertOnFirstInbound('default', '15550003333');
+    await r.setOptedOut('default', '15550003333');
+    expect((await r.getCustomer('default', '15550003333'))!.optedOutAt).toBeTruthy();
+    await r.clearOptedOut('default', '15550003333');
+    expect((await r.getCustomer('default', '15550003333'))!.optedOutAt).toBeUndefined();
+    await r.recordFundingMethod('default', '15550003333', 'bank_transfer');
+    expect((await r.getCustomer('default', '15550003333'))!.lastFundingMethod).toBe('bank_transfer');
+    await r.recordKycInquiry('default', '15550003333', 'inq_1');
+    await r.recordKycInquiry('default', '15550003333', 'inq_2');
+    const c = await r.getCustomer('default', '15550003333');
     expect(c!.kycInquiryId).toBe('inq_2');
     expect(c!.kycSubmittedAt).toBeTruthy();
   });
@@ -185,14 +218,20 @@ describe('schedule-repo + aux repos', () => {
     expect((await r.listActiveSchedules()).map((x) => x.id)).toEqual(['sch_1']);
   });
 
-  it('recipients: encrypted, sorted by lastUsedAt, limited', async () => {
+  it('recipients: encrypted, sorted by lastUsedAt, limited, and TENANT-SCOPED', async () => {
+    await seedPartner(db, 'acme');
     const r = createRecipientRepo(db, provider);
-    await r.upsertRecipient('15551230000', { name: 'A', recipientPhone: '91A', payoutMethod: 'bank', payoutDestination: '111122223333', lastUsedAt: '2026-06-01T00:00:00.000Z' });
-    await r.upsertRecipient('15551230000', { name: 'B', recipientPhone: '91B', payoutMethod: 'bank', payoutDestination: '444455556666', lastUsedAt: '2026-06-05T00:00:00.000Z' });
-    const list = await r.listRecipients('15551230000', 1);
+    await r.upsertRecipient('default', '15551230000', { name: 'A', recipientPhone: '91A', payoutMethod: 'bank', payoutDestination: '111122223333', lastUsedAt: '2026-06-01T00:00:00.000Z' });
+    await r.upsertRecipient('default', '15551230000', { name: 'B', recipientPhone: '91B', payoutMethod: 'bank', payoutDestination: '444455556666', lastUsedAt: '2026-06-05T00:00:00.000Z' });
+    const list = await r.listRecipients('default', '15551230000', 1);
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe('B');
     expect(list[0].payoutDestination).toBe('444455556666');
+    // F45/F47: partner B cannot overwrite or read partner A's saved destination for the same sender + recipient.
+    await r.upsertRecipient('acme', '15551230000', { name: 'B', recipientPhone: '91B', payoutMethod: 'bank', payoutDestination: '999999999999', lastUsedAt: '2026-06-06T00:00:00.000Z' });
+    expect((await r.listRecipients('default', '15551230000', 5)).find((x) => x.recipientPhone === '91B')!.payoutDestination).toBe('444455556666');
+    expect((await r.listRecipients('acme', '15551230000', 5)).map((x) => x.payoutDestination)).toEqual(['999999999999']);
+    expect(await r.listRecipients('globex', '15551230000', 5)).toEqual([]);
   });
 
   it('beneficiaries are partner-scoped (404-never-403 contract at the repo)', async () => {

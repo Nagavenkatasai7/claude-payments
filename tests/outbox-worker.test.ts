@@ -7,6 +7,7 @@ import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
@@ -242,7 +243,7 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     expect(r.processed).toBe(1);
     expect(runAgentTurn).toHaveBeenCalledWith(
       '15551230000', 'send $200 to mom', { isNewConversation: true }, undefined,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      expect.objectContaining({ routedPartnerId: null, signal: expect.any(AbortSignal) }),
     );
     expect(sendText).toHaveBeenCalledWith('15551230000', 'Here is your quote!', undefined);
   });
@@ -263,6 +264,30 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     const creds = (runAgentTurn.mock.calls[0] as unknown[])[3];
     expect(creds).toMatchObject({ phoneNumberId: 'pn_acme' });
     expect(sendText).toHaveBeenCalledWith('15551230000', 'hola', creds);
+    expect(((runAgentTurn.mock.calls[0] as unknown[])[4] as { routedPartnerId: string }).routedPartnerId).toBe('acme'); // the routed tenant reaches the agent
+  });
+
+  it('a routedPartnerId that names NO partner runs NO turn (fail closed — never under another tenant) and raises one deduped ops alert', async () => {
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'hi', turn: {}, routedPartnerId: 'ghost_partner' }, { dedupeKey: 'wamid:ghost1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(runAgentTurn).not.toHaveBeenCalled(); // never falls back to the default tenant
+    expect(sendText).not.toHaveBeenCalled();
+    const alerts = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
+    expect(alerts.rows.map((a) => a.dedupe_key)).toEqual([expect.stringMatching(/^badtenant:\d+$/)]);
+  });
+
+  it('a routedPartnerId naming a SUSPENDED partner is treated the same: no turn, no reply, one deduped badtenant alert (its still-valid app secret must not drive turns under ANY tenant)', async () => {
+    await seedPartner(db, 'dormant');
+    const repo = createPartnerRepo(db);
+    await repo.savePartner({ ...(await repo.getPartner('dormant'))!, status: 'suspended', updatedAt: new Date().toISOString() }); // the non-active value Partner['status'] allows — check src/lib/types.ts
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'hi', turn: {}, routedPartnerId: 'dormant' }, { dedupeKey: 'wamid:dormant1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    const alerts = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
+    expect(alerts.rows.map((a) => a.dedupe_key)).toEqual([expect.stringMatching(/^badtenant:\d+$/)]);
   });
 
   it('an empty reply sends nothing; an agent failure retries instead of eating the message', async () => {

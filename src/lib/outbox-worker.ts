@@ -23,7 +23,7 @@ import { env } from '@/lib/env';
 import { logWarn } from '@/lib/log';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
-import type { Staff, TurnContext } from '@/lib/types';
+import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
 // outbox row written transactionally with the state change that implies it;
@@ -65,8 +65,12 @@ export interface WorkerDeps {
     message: string,
     turn: TurnContext,
     waCreds?: WaCreds,
-    /** Cooperative row deadline (fix 7) — the agent stops between tool rounds when it fires. Task 1 adds `routedPartnerId` here. */
-    opts?: { signal?: AbortSignal },
+    opts?: {
+      /** Cooperative row deadline (fix 7) — the agent stops between tool rounds when it fires. */
+      signal?: AbortSignal;
+      /** The tenant that owns the receiving number (null ⇒ the shared/default number) — fix 1. */
+      routedPartnerId?: PartnerId | null;
+    },
   ) => Promise<string>;
   /**
    * The funds-capture seam for refunds (DI'd like the other effects; absent ⇒
@@ -445,7 +449,29 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
     // ── One durable agent turn (was the webhook's best-effort after()) ──────
     case 'agent.turn': {
       const phone = str(p.phone);
-      const routedPartnerId = str(p.routedPartnerId);
+      const requested = str(p.routedPartnerId);
+      // The payload's routedPartnerId is an IDENTITY input (fix 1, D4): assert
+      // it names an existing AND ACTIVE partner before a turn runs under it.
+      // FAIL CLOSED: an unknown or inactive (e.g. suspended) partner still holds
+      // a valid Meta app secret, so its signed webhook could name ANY `from`
+      // phone — running that turn under the default tenant would let it act as
+      // (and inject history into) another tenant's customer. The row is
+      // finished with NO agent run and NO reply, and ONE deduped ops alert is
+      // raised (keyed on the row id, so retries never re-alert).
+      let routedPartnerId: PartnerId | null = null;
+      if (requested) {
+        const known = await createPartnerRepo(deps.db).getPartner(requested);
+        if (!known || known.status !== 'active') {
+          logWarn('worker.agent', 'agent.turn routedPartnerId names no ACTIVE partner — turn dropped', { id: row.id, kind: row.kind });
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            { message: `⚠️ SmartRemit ops: outbox #${row.id} (agent.turn) carried an unknown or inactive routedPartnerId; the turn was dropped. Check the inbound routing config.` },
+            { dedupeKey: `badtenant:${row.id}` },
+          );
+          return;
+        }
+        routedPartnerId = requested;
+      }
       // Re-resolve the routing partner's outbound creds at RUN time (the
       // payload never carries tokens; rotation is picked up automatically).
       const waCreds = routedPartnerId
@@ -456,7 +482,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
         str(p.messageText),
         (p.turn ?? {}) as TurnContext,
         waCreds,
-        { signal },
+        { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
       );
       // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
       // and the row is already dead — never send its late reply (a second
