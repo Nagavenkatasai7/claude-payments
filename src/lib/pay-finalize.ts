@@ -1,6 +1,7 @@
 import { createTransfer, quoteOverrideFromDraft } from './transfer-create';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
+import { draftTenant } from './legacy-tenant';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
@@ -75,9 +76,9 @@ export async function finalizeDraftPayment(
     return { ok: false, error: 'expired_or_used' };
   }
 
-  // The draft's tenant (fix 1). Legacy in-flight drafts (no partnerId) drain
-  // under the default tenant for their 30-min TTL.
-  const partnerId = draft.partnerId ?? DEFAULT_PARTNER_ID;
+  // The draft's tenant (fix 1). A pre-deploy in-flight draft (no partnerId)
+  // resolves to the phone's pre-fix (oldest-row) tenant, else default.
+  const partnerId = await draftTenant(draft, store.legacyTenantOf);
   const customer =
     (await customerStore.getCustomer(partnerId, draft.senderPhone)) ??
     (await customerStore.upsertOnFirstInbound(partnerId, draft.senderPhone)).customer;

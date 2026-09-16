@@ -1,4 +1,5 @@
 import type { Customer, PartnerId } from './types';
+import { DEFAULT_PARTNER_ID } from './defaults';
 
 // legacy-tenant (fix 1, D9/D10/D12) — the ONE encoding of "which tenant may
 // read a pre-fix, phone-only Redis key". Before fix 1 a phone had exactly one
@@ -28,4 +29,19 @@ export function legacyTenantResolver(customers: { findByPhone(phone: string): Pr
 export async function legacyKeyAllowed(partnerId: PartnerId, phone: string, legacyTenantOf: LegacyTenantOf | undefined): Promise<boolean> {
   if (!legacyTenantOf) return false;
   return (await legacyTenantOf(phone)) === partnerId;
+}
+
+/**
+ * The tenant a draft finalizes / brands under. Every draft written after fix 1
+ * carries partnerId; a PRE-DEPLOY in-flight draft (30-min TTL) does not, and
+ * resolves by the same oldest-row rule (the phone's pre-fix owner), else the
+ * default tenant when the phone has no row at all — so it never mints under, or
+ * creates a stray row for, a tenant the customer does not belong to.
+ */
+export async function draftTenant(
+  draft: { senderPhone: string; partnerId?: PartnerId },
+  legacyTenantOf: LegacyTenantOf,
+): Promise<PartnerId> {
+  if (draft.partnerId) return draft.partnerId;
+  return (await legacyTenantOf(draft.senderPhone)) ?? DEFAULT_PARTNER_ID;
 }

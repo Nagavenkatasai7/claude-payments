@@ -24,7 +24,7 @@ import { sendText, sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
-import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { draftTenant } from '@/lib/legacy-tenant';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -250,9 +250,9 @@ export async function POST(
         // WL2: the code arrives from the number the customer is mid-payment with.
         let otpCreds: WaCreds | undefined;
         try {
-          // The draft carries its tenant (fix 1); legacy in-flight drafts ⇒ default.
+          // The draft carries its tenant (fix 1); a pre-deploy draft resolves by the oldest-row rule.
           const otpPartnerId = otpDraft
-            ? (otpDraft.partnerId ?? DEFAULT_PARTNER_ID)
+            ? await draftTenant(otpDraft, store.legacyTenantOf)
             : (await store.getTransfer(transferId))?.partnerId;
           if (otpPartnerId) {
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));

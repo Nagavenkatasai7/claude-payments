@@ -536,4 +536,26 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
     expect(await stores.store.listRecipients('default', PHONE, 5)).toEqual([]);
     expect((await stores.customerStore.getCustomer('acme', PHONE))!.lastFundingMethod).toBe('bank_transfer');
   });
+
+  it('a PRE-DEPLOY draft (no partnerId) finalizes under the phone\'s pre-fix tenant and never creates a stray default row (review item 2)', async () => {
+    const stores = await buildStores();
+    await seedPartner(stores.db, 'acme');
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('acme', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    // Simulate an in-flight legacy draft: written before fix 1, so no partnerId.
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'acme',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+    });
+    const legacy = { ...(await stores.draftStore.getDraft(draftId))! };
+    delete legacy.partnerId;
+    await stores.draftStore.restoreDraft(legacy, draftId);
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect((await stores.store.getTransfer(result.transferId))!.partnerId).toBe('acme');
+    expect(await stores.customerStore.getCustomer('default', PHONE)).toBeNull();
+  });
 });
