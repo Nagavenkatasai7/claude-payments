@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { issueRefundAction } from '../../actions';
 import { RefundConfirmButton } from '../refund-confirm-button';
 import { SenderCell, FundingRefs } from '../../sender-cell';
-import { resolveSenderNames } from '@/lib/sender-names';
+import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
 import type { RefundStatus } from '@/lib/types';
 
@@ -57,9 +57,9 @@ export default async function TransactionDetailPage({
   const [owningPartner, settlingPartner, senderNames] = await Promise.all([
     scoped.getPartner(t.partnerId),
     t.settlementPartnerId ? scoped.getPartner(t.settlementPartnerId) : Promise.resolve(null),
-    resolveSenderNames(getDb(), [t.phone]),
+    resolveSenderNames(getDb(), [t]),
   ]);
-  const senderName = senderNames.get(t.phone);
+  const senderName = senderNames.get(senderNameKey(t.partnerId, t.phone));
   const routed = !!t.settlementPartnerId && t.settlementPartnerId !== t.partnerId;
   const charged = !!t.fundingRef;
   const refundStatus = (t.refundStatus ?? 'none') as RefundStatus;

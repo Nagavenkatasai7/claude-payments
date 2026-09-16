@@ -28,7 +28,7 @@ import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
 import { newTransferId } from './id';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
-import { resolveSenderNames } from './sender-names';
+import { resolveSenderNames, senderNameKey } from './sender-names';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -98,8 +98,9 @@ function transferView(t: Transfer, senderName: string | null = null) {
 // the create/confirm/get call sites await it (the list path resolves names in a
 // batch and calls transferView directly with the pre-resolved name).
 async function transferViewWithName(deps: PartnerApiDeps, t: Transfer) {
-  const names = await resolveSenderNames(deps.db, [t.phone]);
-  return transferView(t, names.get(t.phone) ?? null);
+  // Tenant-keyed (F50/F52): only the caller's OWN customer row can supply a name.
+  const names = await resolveSenderNames(deps.db, [t]);
+  return transferView(t, names.get(senderNameKey(t.partnerId, t.phone)) ?? null);
 }
 
 // The supported destination set + its home currency — derived from the single
@@ -342,9 +343,9 @@ export async function listTransactions(
     partnerId, // authoritative: from the API key, never the query
   });
   // Resolve ALL sender names in ONE query (not N+1 per row), then project.
-  const names = await resolveSenderNames(deps.db, page.items.map((t) => t.phone));
+  const names = await resolveSenderNames(deps.db, page.items);
   return ok(200, {
-    transactions: page.items.map((t) => transferView(t, names.get(t.phone) ?? null)),
+    transactions: page.items.map((t) => transferView(t, names.get(senderNameKey(t.partnerId, t.phone)) ?? null)),
     next_cursor: page.nextCursor ?? null,
   });
 }

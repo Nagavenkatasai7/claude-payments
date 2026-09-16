@@ -12,7 +12,7 @@ import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { env } from '@/lib/env';
 import { Sidebar } from '../../sidebar';
 import { SenderCell } from '../../sender-cell';
-import { resolveSenderNames } from '@/lib/sender-names';
+import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
@@ -151,7 +151,7 @@ export default async function PartnerDetailPage({
   // SenderCell (U7): batch-resolve the decrypted sender names for the recents
   // in ONE query, so each row shows name + phone (linked to the profile)
   // instead of a bare phone — phones with no captured name fall back to phone.
-  const senderNames = await resolveSenderNames(getDb(), recents.map((t) => t.phone));
+  const senderNames = await resolveSenderNames(getDb(), recents);
   const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
   // Support tab: the absent-config default (portal ON) interpreted ONCE for
   // both the badge and the checkbox.
@@ -327,7 +327,7 @@ export default async function PartnerDetailPage({
                     label: t.id,
                     cells: [
                       t.id,
-                      <SenderCell key="sender" name={senderNames.get(t.phone)} phone={t.phone} />,
+                      <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} />,
                       <div key="amount" className="font-medium tabular-nums">${t.amountUsd.toFixed(2)}</div>,
                       t.status,
                       new Date(t.createdAt).toLocaleString(),

@@ -4,7 +4,7 @@ import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
-import { resolveSenderNames } from '@/lib/sender-names';
+import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
 import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
@@ -84,7 +84,7 @@ function transferCells(t: Transfer, senderNames: Map<string, string>) {
       )}
     </span>,
     new Date(t.createdAt).toLocaleString(),
-    <SenderCell key="sender" name={senderNames.get(t.phone)} phone={t.phone} />,
+    <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} />,
   ];
 }
 
@@ -102,7 +102,7 @@ export default async function CompliancePage() {
   // the phone inside SenderCell.
   const senderNames = await resolveSenderNames(
     getDb(),
-    [...inReview, ...flagged, ...blocked].map((t) => t.phone),
+    [...inReview, ...flagged, ...blocked],
   );
 
   const partners = await scoped.listPartners();
