@@ -68,8 +68,9 @@ function recipientLabel(transfer: Transfer): string {
 
 /**
  * The customer-facing stage-1 ("payment received") message — pure, so the
- * transactional settlement path (Stage 2c) can enqueue the EXACT text that
- * completePaymentStage1 would have sent.
+ * transactional settlement AND hold paths (settlement.ts beginSettlement /
+ * beginHold) can enqueue the EXACT text that completePaymentStage1 would have
+ * sent.
  *
  * B2B / ACH-pull (`transferType==='b2b'` or `fundingMethod==='ach_pull'`) gets
  * "debited from your business account" wording; the consumer (b2c) shape is
