@@ -1,6 +1,6 @@
 ---
 name: post-merge-check
-description: After a PR merges to main, gate on pending migrations, then watch the production deploy's post-deploy smoke.yml run for that SHA and report green/red with the failing job. Use right after any merge to main, or when asked "did the deploy go through?". Read-only (gh reads).
+description: After a PR merges to main, gate on pending migrations, then watch the production deploy's post-deploy smoke.yml run for that SHA and report green/red with the failing job. Use right after any merge to main, or when asked "did the deploy go through?". Read-only on GitHub (gh reads); finishes with /tracker-sync.
 argument-hint: "[PR number | merge SHA]"
 ---
 # /post-merge-check — verify a merge to main landed safely
@@ -29,5 +29,8 @@ until an entry has `headSha == <sha>`. The run is created by Vercel's `deploymen
 - success → report green with the run URL.
 - failure → `gh run view <databaseId> --log-failed | tail -80`, name the failing step/spec and the assertion, and stop. Do not merge anything else on top until it is fixed (propose the fix as a new PR).
 
-## 5. Report
-SHA · migration gate result · smoke run URL + conclusion · failing spec (if red).
+## 5. Update the Program Ledger
+Run `/tracker-sync` (green or red): the merge, the smoke result and any fix-status change go to the ledger artifact. A red smoke is recorded as an `incident` event.
+
+## 6. Report
+SHA · migration gate result · smoke run URL + conclusion · failing spec (if red) · ledger synced.
