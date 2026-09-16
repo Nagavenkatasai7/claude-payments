@@ -128,15 +128,21 @@ export function createOutboxRepo(db: DbOrTx) {
      * Returns the resulting status so the worker can fire the ops alert on
      * death — or 'lost' when `owner` no longer holds the lease (the new owner's
      * outcome wins; nothing was written).
+     *
+     * `minBackoffSec` floors the retry delay. The worker passes LEASE_MS/1000 on
+     * a row-deadline failure: the abandoned handler may still be running inside
+     * the live invocation (up to maxDuration), so the row must not become
+     * claimable by another worker before that invocation is certainly gone.
      */
     async markFailed(
       id: number,
       attempts: number,
       error: string,
       owner?: string,
+      opts: { minBackoffSec?: number } = {},
     ): Promise<'failed' | 'dead' | 'lost'> {
       const status = attempts >= MAX_ATTEMPTS ? 'dead' : 'failed';
-      const backoffSec = Math.min(2 ** attempts, 3600);
+      const backoffSec = Math.max(Math.min(2 ** attempts, 3600), opts.minBackoffSec ?? 0);
       const rows = await db
         .update(outbox)
         .set({

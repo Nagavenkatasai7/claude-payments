@@ -1,5 +1,5 @@
 import type { Db } from '@/db/client';
-import { createOutboxRepo, MAX_ATTEMPTS, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, LEASE_MS, MAX_ATTEMPTS, type OutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
@@ -102,7 +102,7 @@ export interface WorkerDeps {
  * race timer below gives up on the row. Must stay under TIME_BUDGET_MS (45s)
  * and maxDuration (60s) in src/app/api/worker/route.ts.
  *
- * A RowDeadlineError is RETRYABLE (markFailed + 2^attempts backoff) for every
+ * A RowDeadlineError is RETRYABLE (markFailed, backoff floored at LEASE_MS) for every
  * kind EXCEPT agent.turn, where it is TERMINAL (dead + the deduped dead:<id>
  * alert). Reason: withRowDeadline ABANDONS the handler promise, and an agent
  * turn is not idempotent — send_approve_picker creates a draft + sends a
@@ -550,8 +550,19 @@ export async function drainOnce(
       // TERMINAL deadline: an abandoned non-idempotent handler (agent.turn) must
       // never be retried beside its own ghost — force the dead ceiling so the
       // ordinary dead-letter path (one deduped dead:<id> alert) handles it.
-      const terminal = err instanceof RowDeadlineError && TERMINAL_ON_DEADLINE.has(row.kind);
-      const status = await outbox.markFailed(row.id, terminal ? MAX_ATTEMPTS : row.attempts, message, workerId);
+      const deadline = err instanceof RowDeadlineError;
+      const terminal = deadline && TERMINAL_ON_DEADLINE.has(row.kind);
+      // A RETRYABLE deadline: the abandoned handler may still be running in this
+      // invocation (withRowDeadline cannot cancel it). Park the row for a full
+      // LEASE_MS — past maxDuration — so no other worker runs it concurrently
+      // (duplicate send, double mock.settle, double refund).
+      const status = await outbox.markFailed(
+        row.id,
+        terminal ? MAX_ATTEMPTS : row.attempts,
+        message,
+        workerId,
+        deadline ? { minBackoffSec: Math.ceil(LEASE_MS / 1000) } : {},
+      );
       if (status === 'lost') {
         logWarn('worker.lease', 'markFailed refused: lease no longer ours', { id: row.id, kind: row.kind });
         continue;

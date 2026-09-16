@@ -326,6 +326,18 @@ describe('outbox-repo (durability backbone)', () => {
     expect(await r.markDone(dead.id)).toBe(true);
   });
 
+  it('markFailed minBackoffSec parks the row at least that long (deadline failures: past any abandoned handler)', async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('whatsapp.text', { to: 'x' });
+    const [row] = await r.claimBatch(1, 'w1');
+    expect(await r.markFailed(row.id, row.attempts, 'row deadline', 'w1', { minBackoffSec: LEASE_MS / 1000 })).toBe('failed');
+    const res = await db.execute(
+      sql`SELECT extract(epoch FROM (next_attempt_at - now()))::float AS wait_s FROM outbox WHERE id = ${row.id}`,
+    );
+    const [{ wait_s }] = (res as unknown as { rows: Array<{ wait_s: number }> }).rows;
+    expect(wait_s).toBeGreaterThan(LEASE_MS / 1000 - 10);
+  });
+
   it("releaseUnstarted hands back only the OWNER's untouched rows and refunds the claim's attempt", async () => {
     const r = createOutboxRepo(db);
     await r.enqueue('whatsapp.text', { to: 'a' });

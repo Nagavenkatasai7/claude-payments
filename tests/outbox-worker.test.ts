@@ -4,7 +4,7 @@ import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { sql } from 'drizzle-orm';
-import { createOutboxRepo, MAX_ATTEMPTS } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
@@ -508,6 +508,57 @@ describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
     expect(status).toBe('failed');
     expect(last_error).toMatch(/row deadline/);
     expect(ROW_DEADLINE_MS).toBeLessThan(45_000); // under TIME_BUDGET_MS (route.ts:36) and maxDuration
+  });
+
+  it('a deadline-failed row is NOT re-claimable while its abandoned handler may still run (backoff ≥ LEASE_MS)', async () => {
+    // The abandoned send keeps running inside the live invocation (up to maxDuration);
+    // a second worker must not be able to run the same row beside it.
+    sendText.mockImplementationOnce(() => new Promise<void>(() => {})); // never resolves
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'slow' });
+    const r = await drainOnce(deps(), 'w1', 10, { rowDeadlineMs: 50 });
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+
+    // Immediately: nothing to re-run.
+    await drainOnce(deps(), 'w2');
+    expect(sendText).toHaveBeenCalledTimes(1);
+    // Even a few seconds later (past the ordinary 2^1 = 2s backoff) it stays parked.
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = next_attempt_at - interval '5 seconds' WHERE payload->>'body' = 'slow'`);
+    await drainOnce(deps(), 'w3');
+    expect(sendText).toHaveBeenCalledTimes(1);
+    const res = await db.execute(
+      sql`SELECT extract(epoch FROM (next_attempt_at - now()))::float AS wait_s FROM outbox WHERE payload->>'body' = 'slow'`,
+    );
+    const [{ wait_s }] = (res as unknown as { rows: Array<{ wait_s: number }> }).rows;
+    expect(wait_s).toBeGreaterThan(LEASE_MS / 1000 - 10); // ≥ ~5 min, past maxDuration
+  });
+
+  it('markDone is owner-checked: a handler whose lease was taken mid-run does not mark the row done', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi' });
+    sendText.mockImplementationOnce(async () => {
+      await db.execute(sql`UPDATE outbox SET lease_owner = 'w_new' WHERE kind = 'whatsapp.text'`);
+    });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 0 });
+    const res = await db.execute(sql`SELECT status, lease_owner FROM outbox WHERE kind = 'whatsapp.text'`);
+    const [{ status, lease_owner }] = (res as unknown as { rows: Array<{ status: string; lease_owner: string }> }).rows;
+    expect(status).toBe('processing');
+    expect(lease_owner).toBe('w_new');
+  });
+
+  it('markFailed is owner-checked: a throwing handler whose lease was taken mid-run is \'lost\' — no failed/dead count', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi' });
+    sendText.mockImplementationOnce(async () => {
+      await db.execute(sql`UPDATE outbox SET lease_owner = 'w_new' WHERE kind = 'whatsapp.text'`);
+      throw new Error('graph 500');
+    });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 0 });
+    const res = await db.execute(sql`SELECT status, lease_owner, last_error FROM outbox WHERE kind = 'whatsapp.text'`);
+    const [{ status, lease_owner, last_error }] =
+      (res as unknown as { rows: Array<{ status: string; lease_owner: string; last_error: string | null }> }).rows;
+    expect(status).toBe('processing');
+    expect(lease_owner).toBe('w_new');
+    expect(last_error).toBeNull();
   });
 
   it('agent.turn receives an AbortSignal that fires BEFORE the row deadline (COOP_GRACE_MS), and a turn that honours it (fallback reply) is marked DONE with its reply SENT', async () => {
