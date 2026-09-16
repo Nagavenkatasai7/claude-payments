@@ -13,6 +13,8 @@ Ledger: https://claude.ai/artifact/7wD2psZ6fndztDjwZC3oNZ (private to the owner)
 - Never mark `done` from a PR title or description alone. Never lower a `done` without writing an `incident` event that says why.
 - No secrets, tokens or unmasked phone numbers/names in any document.
 
+**Always run the snapshot (step 2), even after a hand-written fix or event update.** Only the snapshot refreshes `meta/state` (main SHA, CI, smoke, deploy); skipping it leaves the status strip and the "Needs attention" list stale (2026-09-16: a 'smoke pending' incident stayed up for 3 hours after it went green).
+
 ## 1. Read the ledger
 ArtifactData, url = the ledger:
 - `list` collection `prs` (limit 200), `fixes` (limit 100), both with `out_dir: <scratch>/ledger-db`

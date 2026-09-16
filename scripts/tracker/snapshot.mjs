@@ -83,6 +83,20 @@ const fixProposals = [...proposals.values()].map((p) => {
 }).filter((p) => p.changed);
 writeFileSync(join(OUT, 'fix-proposals.json'), JSON.stringify(fixProposals, null, 1));
 
+// Production deploy status for the main SHA, from GitHub's deployment records (Vercel posts them).
+function prodDeployState() {
+  try {
+    const sha = git('rev-parse', 'origin/main');
+    const deps = gh('api', `repos/${REPO}/deployments?sha=${sha}&environment=Production&per_page=1`);
+    if (!deps.length) return `${mainSha}: no production deployment recorded yet`;
+    const st = gh('api', `repos/${REPO}/deployments/${deps[0].id}/statuses?per_page=1`);
+    const state = st[0]?.state ?? 'pending';
+    return `${mainSha}: production deploy ${state === 'success' ? 'READY' : state}`;
+  } catch {
+    return `${mainSha}: production deploy status unavailable`;
+  }
+}
+
 const statePath = join(DB, 'meta', 'state.json');
 const prevState = existsSync(statePath) ? unwrap(JSON.parse(readFileSync(statePath, 'utf8'))) : null;
 if (smokeMain && prevState && prevState.smokeMain !== smokeMain.conclusion && smokeMain.conclusion) {
@@ -93,7 +107,8 @@ put('meta', 'state', {
   smokeMain: smokeMain?.conclusion || (smokeMain ? smokeMain.status : 'pending'),
   smokeNote: smokeMain ? smokeMain.url : smokeLatest ? `No smoke run for ${mainSha} yet; latest was ${smokeLatest.conclusion} on ${smokeLatest.headSha.slice(0, 7)}.` : 'No smoke runs found.',
   syncedAt: now, syncedBy: 'Claude Code /tracker-sync', program: 'SmartRemit upgrade program 2026-09',
-  ...(prevState ? { currentPhase: prevState.currentPhase, prodDeploy: prevState.prodDeploy } : {}),
+  prodDeploy: prodDeployState(),
+  ...(prevState ? { currentPhase: prevState.currentPhase } : {}),
 });
 for (const e of events) {
   const id = `${e.at.replace(/[-:]/g, '').slice(0, 15)}-${createHash('sha1').update(e.title + e.at).digest('hex').slice(0, 8)}`;
