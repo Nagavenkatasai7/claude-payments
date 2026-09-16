@@ -75,12 +75,15 @@ export async function finalizeDraftPayment(
     return { ok: false, error: 'expired_or_used' };
   }
 
+  // The draft's tenant (fix 1). Legacy in-flight drafts (no partnerId) drain
+  // under the default tenant for their 30-min TTL.
+  const partnerId = draft.partnerId ?? DEFAULT_PARTNER_ID;
   const customer =
-    (await customerStore.getCustomer(draft.senderPhone)) ??
-    (await customerStore.upsertOnFirstInbound(draft.senderPhone)).customer;
+    (await customerStore.getCustomer(partnerId, draft.senderPhone)) ??
+    (await customerStore.upsertOnFirstInbound(partnerId, draft.senderPhone)).customer;
   // WL1: resolve the owning partner — drives the gate toggle + requiresKyc.
   const partner =
-    (await partnerStore.getPartner(customer.partnerId)) ??
+    (await partnerStore.getPartner(partnerId)) ??
     (await partnerStore.ensureDefaultPartner());
 
   // Phase 3 verify-before-send gate — refuse BEFORE claiming/consuming so an
@@ -92,7 +95,7 @@ export async function finalizeDraftPayment(
   if (sendGateActive(partner) && !payVerified) return { ok: false, error: 'kyc_required' };
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
-  const todayUsedCents = await dailyVolumeStore.getTodayCents(draft.senderPhone);
+  const todayUsedCents = await dailyVolumeStore.getTodayCents(partnerId, draft.senderPhone);
   const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100), sendGateActive(partner));
   if (!ev.withinCap) return { ok: false, error: 'cap' };
 
@@ -158,7 +161,7 @@ export async function finalizeDraftPayment(
     sourceCurrency: draft.sourceCurrency,
     destinationCountry: draft.destinationCountry,
     destinationCurrency: draft.destinationCurrency,
-    partnerId: customer.partnerId ?? DEFAULT_PARTNER_ID,
+    partnerId,
     recipientLegalName: draft.recipientLegalName,
     relationship: draft.relationship,
     purpose: draft.purpose,
@@ -194,7 +197,7 @@ export async function finalizeDraftPayment(
 
   // Parity with createTransferTool: daily-cents, then sticky EDD (BEFORE funding so
   // recordFundingMethod's read-modify-write composes without clobbering it), then funding.
-  await dailyVolumeStore.addCents(draft.senderPhone, Math.round(transfer.amountUsd * 100));
+  await dailyVolumeStore.addCents(partnerId, draft.senderPhone, Math.round(transfer.amountUsd * 100));
   if (
     draft.sourceOfFunds && draft.occupation &&
     (customer.sourceOfFunds !== draft.sourceOfFunds || customer.occupation !== draft.occupation)
@@ -205,7 +208,7 @@ export async function finalizeDraftPayment(
       eddCapturedAt: nowIso, updatedAt: nowIso,
     });
   }
-  await customerStore.recordFundingMethod(draft.senderPhone, draft.fundingMethod);
+  await customerStore.recordFundingMethod(partnerId, draft.senderPhone, draft.fundingMethod);
 
   return { ok: true, transferId: transfer.id };
 }

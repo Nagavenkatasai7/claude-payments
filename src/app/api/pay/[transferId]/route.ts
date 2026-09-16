@@ -24,6 +24,7 @@ import { sendText, sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -249,8 +250,9 @@ export async function POST(
         // WL2: the code arrives from the number the customer is mid-payment with.
         let otpCreds: WaCreds | undefined;
         try {
+          // The draft carries its tenant (fix 1); legacy in-flight drafts ⇒ default.
           const otpPartnerId = otpDraft
-            ? (await getCustomerStore(store).getCustomer(otpDraft.senderPhone))?.partnerId
+            ? (otpDraft.partnerId ?? DEFAULT_PARTNER_ID)
             : (await store.getTransfer(transferId))?.partnerId;
           if (otpPartnerId) {
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
@@ -309,7 +311,7 @@ export async function POST(
       // ── Existing transfer branch ──────────────────────────────────────
       // Phase 3 verify-before-send gate — covers scheduled/cron transfers paid
       // on this page. Refuse BEFORE any charge if the owner isn't verified.
-      const owner = await getCustomerStore(store).getCustomer(transfer.phone);
+      const owner = await getCustomerStore(store).getCustomer(transfer.partnerId, transfer.phone);
       // WL1: skipped for a 'delegated' partner (they run KYC on their side).
       const owningPartner =
         (await getPartnerStore().getPartner(transfer.partnerId)) ??

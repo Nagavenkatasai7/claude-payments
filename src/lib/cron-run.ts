@@ -51,7 +51,7 @@ export async function runDueSchedules(
     // Item 4: a business-initiated send to an opted-out customer is not allowed.
     // Skip silently — do NOT count as fired, do NOT touch lastRunAt (the schedule
     // stays active so it resumes if the customer re-subscribes with START).
-    const owner = await deps.customerStore.getCustomer(schedule.phone);
+    const owner = await deps.customerStore.getCustomer(schedule.partnerId, schedule.phone);
     if (owner?.optedOutAt) continue;
     // WL1: resolve the schedule's partner — drives the gate toggle + requiresKyc.
     const partner =

@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
   // Non-critical audit trail: degrade to an empty trail on transport failure,
   // exactly as the page does — a store hiccup must not 502 the copilot.
   const audit = await getKycCaseStore(store)
-    .getAudit(phone)
+    .getAudit(customer.partnerId, phone)
     .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>);
 
   try {

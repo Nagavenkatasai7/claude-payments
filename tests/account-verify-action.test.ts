@@ -55,20 +55,20 @@ describe('startVerificationAction', () => {
   it('gate on: starts an inquiry, records inquiry_started, redirects to the hosted-flow URL', async () => {
     await expect(startVerificationAction()).rejects.toThrow('REDIRECT:https://withpersona.com/verify?code=abc');
     expect(startVerification).toHaveBeenCalledTimes(1);
-    const c = await cs.getCustomer(PHONE);
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('inquiry_started');
     expect(c?.kycInquiryId).toBe('inq_1');
     expect(c?.kycSubmittedAt).toBeTruthy();
-    expect((await kcs.getAudit(PHONE)).at(-1)).toMatchObject({ action: 'kyc.start' });
+    expect((await kcs.getAudit('default', PHONE)).at(-1)).toMatchObject({ action: 'kyc.start' });
   });
 
   it('gate off: redirects to /account WITHOUT creating a Persona inquiry or recording anything', async () => {
     await setGate(false);
     await expect(startVerificationAction()).rejects.toThrow('REDIRECT:/account');
     expect(startVerification).not.toHaveBeenCalled();
-    const c = await cs.getCustomer(PHONE);
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBeUndefined();
     expect(c?.kycInquiryId).toBeUndefined();
-    expect(await kcs.getAudit(PHONE)).toEqual([]);
+    expect(await kcs.getAudit('default', PHONE)).toEqual([]);
   });
 });

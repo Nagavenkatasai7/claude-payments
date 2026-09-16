@@ -4,6 +4,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-config';
 import type { CountryCode } from '@/lib/types';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { PayForm } from './pay-form';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
@@ -134,9 +135,8 @@ export default async function PayPage({
     // Dual-lookup: treat the segment as a draftId
     const draft = await getDraftStore().getDraft(transferId);
     if (draft) {
-      // Drafts carry no partnerId — resolve the brand from the owning customer.
-      const owner = await getCustomerStore(getStore()).getCustomer(draft.senderPhone);
-      brandPartnerId = owner?.partnerId ?? null;
+      // The draft carries its tenant (fix 1); legacy in-flight drafts brand as default.
+      brandPartnerId = draft.partnerId ?? DEFAULT_PARTNER_ID;
       const destCurrency: string = draft.quote.destinationCurrency ?? draft.destinationCurrency ?? 'INR';
       const sourceCurrency: string = draft.sourceCurrency ?? 'USD';
       const feeSource = draft.quote.feeSource ?? draft.quote.feeUsd;

@@ -60,7 +60,7 @@ describe('POST /api/persona-webhook', () => {
     const body = eventBody('inquiry.completed', 'evt_x');
     const res = await POST(req(body, 't=1,v1=bad'));
     expect(res.status).toBe(401);
-    expect((await cs.getCustomer(PHONE))?.kycReviewState).toBeUndefined();
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBeUndefined();
   });
 
   it('200 + moves a clean pass to pending_review (NEVER verified)', async () => {
@@ -68,7 +68,7 @@ describe('POST /api/persona-webhook', () => {
     const body = eventBody('inquiry.completed', 'evt_1');
     const res = await POST(req(body, signed(body)));
     expect(res.status).toBe(200);
-    const c = await cs.getCustomer(PHONE);
+    const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('pending_review');
     expect(c?.kycStatus).toBe('pending'); // gate field untouched
     expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined);
@@ -79,11 +79,11 @@ describe('POST /api/persona-webhook', () => {
     await seed();
     const started = eventBody('inquiry.started', 'evt_off_1');
     await POST(req(started, signed(started)));
-    expect((await cs.getCustomer(PHONE))?.kycReviewState).toBe('inquiry_started'); // Persona stays source of truth
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('inquiry_started'); // Persona stays source of truth
     const completed = eventBody('inquiry.completed', 'evt_off_2');
     const res = await POST(req(completed, signed(completed)));
     expect(res.status).toBe(200);
-    expect((await cs.getCustomer(PHONE))?.kycReviewState).toBe('pending_review');
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('pending_review');
     expect(notify).not.toHaveBeenCalled(); // neither in_progress nor received
   });
 

@@ -49,13 +49,20 @@ export async function POST(req: NextRequest) {
   const phone = event.referenceId;
   if (!phone) return NextResponse.json({ ok: true, ignored: true });
 
-  const customer = await getCustomerStore(getStore()).getCustomer(phone);
+  // Tenant resolution (fix 1, D7): the Persona reference-id is the phone
+  // (persona-kyc-provider.ts:47) and a phone may have a row under several
+  // partners. Bind by the inquiry id the row recorded when verification started;
+  // fall back to the single row only when the phone is unambiguous. Never guess.
+  const rows = await getCustomerStore(getStore()).findByPhone(phone);
+  const customer =
+    rows.find((c) => Boolean(event.inquiryId) && c.kycInquiryId === event.inquiryId) ??
+    (rows.length === 1 ? rows[0] : null);
   if (!customer) return NextResponse.json({ ok: true, ignored: true });
 
   const delta = applyKycEvent(customer, event);
   let nextState = customer.kycReviewState;
   if (Object.keys(delta).length > 0) {
-    const updated = await cases.applyDelta(phone, delta, { actor: 'persona', action: event.name });
+    const updated = await cases.applyDelta(customer.partnerId, phone, delta, { actor: 'persona', action: event.name });
     nextState = updated?.kycReviewState ?? nextState;
   }
 
