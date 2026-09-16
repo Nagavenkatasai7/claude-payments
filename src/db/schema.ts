@@ -509,14 +509,24 @@ export const outbox = pgTable(
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
     lockedAt: timestamp('locked_at', { withTimezone: true }),
     lockedBy: text('locked_by'),
+    // Lease (Phase 1 fix 7): a 'processing' row is owned by lease_owner until
+    // lease_until; past that, claimBatch may RECLAIM it (the owner died mid-row).
+    // markDone/markFailed compare-and-set on lease_owner so a resurrected old
+    // worker can never overwrite the new owner's outcome.
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    leaseOwner: text('lease_owner'),
     lastError: text('last_error'),
     dedupeKey: text('dedupe_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('outbox_dedupe').on(t.dedupeKey).where(sql`${t.dedupeKey} IS NOT NULL`),
+    // 'processing' is IN the predicate now: an expired lease must be reachable
+    // by the drain query (the old two-state predicate is exactly why a row
+    // interrupted by the 60s ceiling was stranded forever — money-03).
     index('outbox_drain')
       .on(t.status, t.nextAttemptAt)
-      .where(sql`${t.status} IN ('pending','failed')`),
+      .where(sql`${t.status} IN ('pending','failed','processing')`),
+    index('outbox_lease').on(t.leaseUntil).where(sql`${t.status} = 'processing'`),
   ],
 );
