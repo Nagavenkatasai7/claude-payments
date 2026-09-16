@@ -10,6 +10,7 @@ import {
   sendTemplateOrText,
   RECIPIENT_TEMPLATE_NAME,
   RECIPIENT_TEMPLATE_LANG,
+  META_TIMEOUT_MS,
 } from '@/lib/whatsapp';
 
 afterEach(() => {
@@ -676,5 +677,63 @@ describe('parseIncoming — list_reply collapses to the existing button shape', 
       }] } }] }],
     });
     expect(msg).toEqual({ kind: 'button', from: '15551230000', buttonId: 'recipient:new', messageId: 'wamid.3' });
+  });
+});
+
+describe('outbound deadlines (META_TIMEOUT_MS — whatsapp-06)', () => {
+  const timeoutError = () =>
+    Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+
+  it('sendText and sendTemplate pass a signal on the Graph POST', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendText('15551234567', 'hi');
+    await sendTemplate('15551234567', RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG, ['a']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const [, init] = call as unknown as [string, RequestInit];
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
+    expect(META_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it('sendInteractive and sendCtaUrl pass a signal', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendInteractive('15551234567', 'pick', [{ id: 'recipient:new', title: 'New' }]);
+    await sendCtaUrl('15551234567', 'Body', { displayText: 'Go', url: 'https://example.com/x' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      const [, init] = call as unknown as [string, RequestInit];
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it('an aborted Graph POST throws so the outbox retries — it does not silently fall back to sendText', async () => {
+    const fetchMock = vi.fn(async () => { throw timeoutError(); });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(sendText('1', 'hi')).rejects.toThrow(/aborted/);
+    await expect(sendInteractive('1', 'pick', [{ id: 'x', title: 'X' }])).rejects.toThrow(/aborted/);
+    await expect(sendCtaUrl('1', 'Body', { displayText: 'Go', url: 'https://example.com/x' })).rejects.toThrow(/aborted/);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // one fetch each: no fallback text attempted
+  });
+
+  it('each rate-limit retry gets a FRESH signal (a signal baked into init would be expired by the retry)', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 429, text: async () => 'slow down' })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const p = sendText('15551230000', 'hi');
+    await vi.runAllTimersAsync();
+    await expect(p).resolves.toBeUndefined();
+    const [, a] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const [, b] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(a.signal).toBeInstanceOf(AbortSignal);
+    expect(b.signal).toBeInstanceOf(AbortSignal);
+    expect(a.signal).not.toBe(b.signal);
+    vi.useRealTimers();
   });
 });
