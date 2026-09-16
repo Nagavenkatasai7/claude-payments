@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import {
   cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
-  issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement,
+  issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
 } from '@/lib/dashboard-ops';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -493,5 +493,30 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     await rejectTransfer(store, db, 'rej_again');
     expect(await beginHold(db, t)).toEqual({ kind: 'already' });
     expect((await store.getTransfer('rej_again'))?.status).toBe('cancelled');
+  });
+});
+
+describe('canReleaseHeld — who may release a compliance hold (owner decision 2026-09-16)', () => {
+  const PLATFORM = { kind: 'platform' } as const;
+  const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
+
+  it("platform staff may release any hold (ours, delegated, or an unknown partner)", () => {
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' })).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' })).toBe(true);
+    expect(canReleaseHeld(PLATFORM, null)).toBe(true);
+  });
+
+  it("a partner-scoped admin may NOT release a hold SmartRemit's own screening flagged (kycMode 'ours', or unset ⇒ 'ours')", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' })).toBe(false);
+    expect(canReleaseHeld(PARTNER, {})).toBe(false); // absent kycMode defaults to 'ours'
+  });
+
+  it('fails CLOSED for a partner-scoped admin when the owning partner row is missing', () => {
+    expect(canReleaseHeld(PARTNER, null)).toBe(false);
+    expect(canReleaseHeld(PARTNER, undefined)).toBe(false);
+  });
+
+  it("a partner-scoped admin may release a kycMode 'delegated' partner's hold", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' })).toBe(true);
   });
 });

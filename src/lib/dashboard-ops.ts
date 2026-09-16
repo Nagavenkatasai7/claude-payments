@@ -7,6 +7,8 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { releaseHold } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
+import type { Scope } from './staff-scope';
+import type { Partner } from './types';
 
 export async function cancelTransfer(store: Store, id: string): Promise<void> {
   const transfer = await store.getTransfer(id);
@@ -95,6 +97,25 @@ export async function resendPaymentLink(
   }
   const url = `${env.appBaseUrl}/pay/${id}`;
   await sendText(transfer.phone, `Here is your secure payment link again: ${url}`);
+}
+
+/**
+ * WHO may release a compliance hold. OWNER DECISION (2026-09-16): releasing a
+ * transfer that SmartRemit's OWN screening flagged — owning partner kycMode
+ * 'ours', which is also the default when kycMode is unset — requires PLATFORM
+ * staff. A partner-scoped admin may release only a 'delegated'-mode partner's
+ * hold. A missing partner row fails CLOSED for partner-scoped staff.
+ * Sanctions-blocked rows stay unreleasable for everyone regardless of this
+ * (markPaidIfInReview carries compliance_status <> 'blocked').
+ * Pure: the server action (authoritative gate) and the compliance page (which
+ * hides the Release button) both call it, so the UI can never drift from it.
+ */
+export function canReleaseHeld(
+  scope: Scope,
+  owner: Pick<Partner, 'kycMode'> | null | undefined,
+): boolean {
+  if (scope.kind === 'platform') return true;
+  return owner?.kycMode === 'delegated';
 }
 
 /**

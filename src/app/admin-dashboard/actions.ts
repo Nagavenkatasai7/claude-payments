@@ -14,7 +14,9 @@ import {
   approveRefund,
   dismissRefund,
   retryRefund,
+  canReleaseHeld,
 } from '@/lib/dashboard-ops';
+import { getPartnerStore } from '@/lib/partner-store';
 import { requireStaff, requireAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { scopeOf, canSee } from '@/lib/staff-scope';
@@ -103,12 +105,21 @@ export async function resendPaymentLinkAction(
  *   (a) requireAdmin — only staff with role:'admin'
  *   (b) getScopedTransfer — the transfer must be in the caller's scope (H2 fix:
  *       a partner-admin can no longer release another tenant's held transfer)
- *   (c) releaseTransfer re-verifies status === 'in_review'
+ *   (c) canReleaseHeld — a hold flagged by SmartRemit's own screening (owning
+ *       partner kycMode 'ours') needs PLATFORM staff (owner decision 2026-09-16)
+ *   (d) releaseTransfer re-verifies status === 'in_review'
  */
 export async function releaseTransferAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
-  const { store } = await getScopedTransfer(staff, id);
+  const { store, transfer } = await getScopedTransfer(staff, id);
+  // Owner decision (2026-09-16): a hold SmartRemit's own screening flagged
+  // (kycMode 'ours') is released by PLATFORM staff only — refused BEFORE any
+  // mutation, with the same generic permission copy as the other actions.
+  const owner = await getPartnerStore().getPartner(transfer.partnerId);
+  if (!canReleaseHeld(scopeOf(staff), owner)) {
+    throw new Error('You do not have permission to perform this action.');
+  }
   await releaseTransfer(store, getDb(), id);
   revalidatePath('/admin-dashboard', 'layout');
 }

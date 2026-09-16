@@ -10,6 +10,7 @@ import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
 import { MaskedDestination } from '../masked-destination';
+import { canReleaseHeld } from '@/lib/dashboard-ops';
 import {
   releaseTransferAction,
   rejectTransferAction,
@@ -106,6 +107,12 @@ export default async function CompliancePage() {
   );
 
   const partners = await scoped.listPartners();
+  // Mirrors releaseTransferAction's gate (the server action is the authority):
+  // a hold SmartRemit's own screening flagged (kycMode 'ours') is released by
+  // PLATFORM staff only, so partner-scoped admins don't see a Release that
+  // would refuse. Owner decision 2026-09-16.
+  const partnersById = new Map(partners.map((p) => [p.id, p]));
+  const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId));
   const corridorRows = partners.flatMap((p) =>
     (p.countries ?? [])
       .filter((c) => c !== 'IN')
@@ -155,10 +162,21 @@ export default async function CompliancePage() {
                   ...transferCells(t, senderNames),
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
-                      <form action={releaseTransferAction}>
-                        <input type="hidden" name="id" value={t.id} />
-                        <Button type="submit" size="sm">Release</Button>
-                      </form>
+                      {canRelease(t) ? (
+                        <form action={releaseTransferAction}>
+                          <input type="hidden" name="id" value={t.id} />
+                          <Button type="submit" size="sm">Release</Button>
+                        </form>
+                      ) : (
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled
+                          title="Flagged by SmartRemit screening — release requires SmartRemit platform staff"
+                        >
+                          Release
+                        </Button>
+                      )}
                       <form action={rejectTransferAction}>
                         <input type="hidden" name="id" value={t.id} />
                         <Button
