@@ -108,12 +108,44 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
     expect(left.rows[0].status).toBe('done');
   });
 
-  it('an instruct row for a PAID transfer with a refund in flight sends NOTHING (never pay out AND refund)', async () => {
+  const rowStatus = async (key: string) =>
+    ((await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = ${key}`)) as unknown as { rows: Array<{ status: string }> }).rows[0].status;
+
+  it('an instruct row for a PAID transfer with a refund in flight (pending) sends NOTHING and is done (never pay out AND refund)', async () => {
     await store.saveTransfer({ ...transferFixture(), refundStatus: 'pending' });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
     expect(fetchFn).not.toHaveBeenCalled();
+    expect(await rowStatus('reinstruct:wk_t1')).toBe('done');
+  });
+
+  it('an instruct row for a DELIVERED transfer sends nothing and is done (already paid out)', async () => {
+    await store.saveTransfer({ ...transferFixture(), status: 'delivered' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await rowStatus('instruct:wk_t1')).toBe('done');
+  });
+
+  it("a PAID transfer whose refund is only REQUESTED keeps its instruct row RETRYABLE (not done): a dismissed request must still pay out", async () => {
+    await store.saveTransfer({ ...transferFixture(), refundStatus: 'requested' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(0);
+    expect(r.failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await rowStatus('instruct:wk_t1')).toBe('failed');
+
+    // Staff dismiss the request (refund back to none) → the retry sends.
+    await store.saveTransfer({ ...transferFixture(), refundStatus: 'none' });
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE dedupe_key = 'instruct:wk_t1'`);
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-late' }) });
+    const retry = await drainOnce(deps(), 'w1');
+    expect(retry.processed).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(await rowStatus('instruct:wk_t1')).toBe('done');
   });
 
   it('rail failure → retry with backoff; at MAX_ATTEMPTS → dead + EXACTLY ONE ops alert', async () => {
