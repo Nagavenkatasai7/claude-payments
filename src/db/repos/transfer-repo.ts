@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -277,14 +277,77 @@ export function createTransferRepo(
     /**
      * Atomically claim the awaiting_payment → paid transition (Stage 2c). Used
      * inside the settlement transaction so the status flip + outbox rows commit
-     * together. Null ⇒ the transfer was already past awaiting_payment (double
-     * submit / replay) — the caller treats it as an idempotent no-op.
+     * together. COMPLIANCE GATE (Phase 1 Task 3): only a 'cleared' row can ever
+     * flip to paid — the predicate lives IN the UPDATE so the ledger, not the
+     * caller's possibly-stale Transfer object, decides. Null ⇒ either already
+     * past awaiting_payment (double submit / replay) OR not cleared; the caller
+     * re-reads inside the same transaction to tell the two apart.
      */
     async markPaidIfAwaiting(id: string): Promise<Transfer | null> {
       const rows = await db
         .update(transfers)
         .set({ status: 'paid', paidAt: sql`COALESCE(${transfers.paidAt}, now())` })
-        .where(and(eq(transfers.id, id), eq(transfers.status, 'awaiting_payment')))
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.status, 'awaiting_payment'),
+          eq(transfers.complianceStatus, 'cleared'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Atomically claim the awaiting_payment → in_review transition — the
+     * COMPLIANCE HOLD. Mirrors markPaidIfAwaiting: one guarded UPDATE inside
+     * the hold transaction (settlement.beginHold), so the status flip and the
+     * held stage-1 outbox row commit together. paid_at marks WHEN THE HOLD
+     * BEGAN (COALESCE): for a card/bank_transfer hold the customer was charged
+     * at that moment; for a partner-pulled (ach_pull / bank_pull) hold nothing
+     * has been pulled yet, but findInReviewOlderThan selects on paid_at, so a
+     * NULL here would silently disable the >24h stale-review ops alert for
+     * every held transfer. BLOCKED is excluded structurally: a sanctions hit
+     * always lands as status 'blocked' today, but beginHold is directly
+     * callable (partner-API confirmTransaction, reconcile fundhold) and the
+     * predicate belongs in the UPDATE, not in the caller. Null ⇒ not
+     * awaiting_payment anymore (already held / paid / cancelled) or blocked —
+     * an idempotent no-op that never resurrects a terminal row.
+     */
+    async markInReviewIfAwaiting(id: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ status: 'in_review', paidAt: sql`COALESCE(${transfers.paidAt}, now())` })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.status, 'awaiting_payment'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Atomically claim the in_review → paid transition — the STAFF RELEASE.
+     * Deliberately NO 'cleared' predicate: a released transfer keeps
+     * compliance_status = 'flagged' forever (the evidence is never rewritten),
+     * and the admin-gated, audited release action IS the compliance decision.
+     * BLOCKED is still excluded: the release path is reachable by a
+     * PARTNER-scoped admin (releaseTransferAction = requireAdmin + canSee), so
+     * sanctions-blocked money must be unreleasable in the UPDATE itself, even
+     * if a future writer ever puts a blocked row in in_review. Used only
+     * inside settlement.releaseHold, which enqueues the rail effect in the
+     * same transaction — a release is a settlement, never a bare flip. Null ⇒
+     * not in_review (never held / already released / rejected) or blocked —
+     * an idempotent no-op that never resurrects a cancelled row.
+     */
+    async markPaidIfInReview(id: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ status: 'paid', paidAt: sql`COALESCE(${transfers.paidAt}, now())` })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.status, 'in_review'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
     },

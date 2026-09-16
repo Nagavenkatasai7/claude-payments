@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { beginSettlement } from '@/lib/settlement';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -102,5 +103,69 @@ describe('beginSettlement — mock rail (default partner sandbox)', () => {
       sql`SELECT next_attempt_at > now() + interval '60 seconds' AS delayed FROM outbox WHERE kind = 'mock.settle'`,
     );
     expect((due as unknown as { rows: Array<{ delayed: boolean }> }).rows[0].delayed).toBe(true);
+  });
+});
+
+describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3)', () => {
+  it('markInReviewIfAwaiting: ONE guarded UPDATE flips awaiting_payment → in_review and sets paidAt', async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    const held = await createTransferRepo(db).markInReviewIfAwaiting('st_t1');
+    // The RETURNING row IS the post-claim state: in_review with paidAt, in one statement —
+    // there is no intermediate 'paid' state for anyone to observe.
+    expect(held?.status).toBe('in_review');
+    expect(held?.paidAt).toBeTruthy();
+    expect((await store.getTransfer('st_t1'))?.status).toBe('in_review');
+  });
+
+  it('markInReviewIfAwaiting is a no-op (null) once the row is not awaiting_payment — never resurrects', async () => {
+    const repo = createTransferRepo(db);
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    expect(await repo.markInReviewIfAwaiting('st_t1')).not.toBeNull();
+    expect(await repo.markInReviewIfAwaiting('st_t1')).toBeNull(); // already held
+    await store.saveTransfer({ ...fixture(), id: 'st_c1', status: 'cancelled' });
+    expect(await repo.markInReviewIfAwaiting('st_c1')).toBeNull();
+    expect((await store.getTransfer('st_c1'))?.status).toBe('cancelled');
+    await store.saveTransfer({ ...fixture(), id: 'st_p1', status: 'paid' });
+    expect(await repo.markInReviewIfAwaiting('st_p1')).toBeNull();
+    expect((await store.getTransfer('st_p1'))?.status).toBe('paid');
+  });
+
+  it('markPaidIfAwaiting REFUSES (null, row untouched) unless compliance_status is cleared — the ledger decides', async () => {
+    const repo = createTransferRepo(db);
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    expect(await repo.markPaidIfAwaiting('st_t1')).toBeNull();
+    expect((await store.getTransfer('st_t1'))?.status).toBe('awaiting_payment');
+    await store.saveTransfer({ ...fixture(), id: 'st_b1', complianceStatus: 'blocked' });
+    expect(await repo.markPaidIfAwaiting('st_b1')).toBeNull();
+    expect((await store.getTransfer('st_b1'))?.status).toBe('awaiting_payment');
+    // Regression: a cleared row still flips.
+    await store.saveTransfer({ ...fixture(), id: 'st_ok' });
+    expect((await repo.markPaidIfAwaiting('st_ok'))?.status).toBe('paid');
+  });
+
+  it('a BLOCKED row is never held and never released: markInReviewIfAwaiting and markPaidIfInReview both refuse it (sanctions-blocked money is structurally unreleasable, even if a future writer puts a blocked row in in_review)', async () => {
+    const repo = createTransferRepo(db);
+    await store.saveTransfer({ ...fixture(), id: 'st_bh', complianceStatus: 'blocked' });
+    expect(await repo.markInReviewIfAwaiting('st_bh')).toBeNull();
+    expect((await store.getTransfer('st_bh'))?.status).toBe('awaiting_payment');
+    await store.saveTransfer({ ...fixture(), id: 'st_br', status: 'in_review', complianceStatus: 'blocked' });
+    expect(await repo.markPaidIfInReview('st_br')).toBeNull();
+    expect((await store.getTransfer('st_br'))?.status).toBe('in_review');
+  });
+
+  it("markPaidIfInReview: ONE guarded UPDATE flips in_review → paid with NO 'cleared' predicate (the staff release IS the decision — a released row stays flagged) but NEVER for a blocked row; a no-op from any other status", async () => {
+    const repo = createTransferRepo(db);
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    expect(await repo.markPaidIfInReview('st_t1')).toBeNull(); // awaiting_payment is NOT releasable
+    expect((await repo.markInReviewIfAwaiting('st_t1'))?.status).toBe('in_review');
+    const paidAtHeld = (await store.getTransfer('st_t1'))?.paidAt;
+    const released = await repo.markPaidIfInReview('st_t1');
+    expect(released?.status).toBe('paid');
+    expect(released?.complianceStatus).toBe('flagged'); // never rewritten
+    expect(released?.paidAt).toBe(paidAtHeld);          // COALESCE — the charge time is kept
+    expect(await repo.markPaidIfInReview('st_t1')).toBeNull(); // idempotent
+    await store.saveTransfer({ ...fixture(), id: 'st_c1', status: 'cancelled' });
+    expect(await repo.markPaidIfInReview('st_c1')).toBeNull();
+    expect((await store.getTransfer('st_c1'))?.status).toBe('cancelled');
   });
 });
