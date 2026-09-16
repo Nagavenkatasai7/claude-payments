@@ -38,7 +38,7 @@ async function storeWith(...transfers: Transfer[]) {
 // the Stage-4 indexed query (WHERE phone = $1, newest-first, LIMIT n).
 function stubStore(...transfers: Transfer[]): Store {
   return {
-    listTransfersByPhone: async (phone: string, limit: number) =>
+    listTransfersByPhone: async (_tenantId: string, phone: string, limit: number) =>
       transfers.filter((t) => (t.phone ?? '') === phone).slice(0, limit),
   } as unknown as Store;
 }
@@ -46,10 +46,10 @@ function stubStore(...transfers: Transfer[]): Store {
 describe('getRecentTransfersNote — empty-history invariant', () => {
   it('returns "" when the customer has no transfers (inject nothing)', async () => {
     const store = await storeWith(mk({ phone: '+1999', id: 'other' }));
-    expect(await getRecentTransfersNote('+15551230000', store)).toBe('');
+    expect(await getRecentTransfersNote('default', '+15551230000', store)).toBe('');
   });
   it('returns "" for a totally empty store', async () => {
-    expect(await getRecentTransfersNote('+15551230000', createStore(fakeRedis(), db))).toBe('');
+    expect(await getRecentTransfersNote('default', '+15551230000', createStore(fakeRedis(), db))).toBe('');
   });
 });
 
@@ -59,7 +59,7 @@ describe('getRecentTransfersNote — own transfers only (strict phone filter)', 
       mk({ id: 'mine', recipientName: 'Mom' }),
       mk({ id: 'theirs', phone: '+1999', recipientName: 'Stranger' }),
     );
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('Mom');
     expect(note).not.toContain('Stranger');
   });
@@ -68,7 +68,7 @@ describe('getRecentTransfersNote — own transfers only (strict phone filter)', 
       mk({ id: 'mine', recipientName: 'Mom' }),
       mk({ id: 'legacy', recipientName: 'Ghost', phone: undefined as unknown as string }),
     );
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('Mom');
     expect(note).not.toContain('Ghost');
   });
@@ -80,7 +80,7 @@ describe('getRecentTransfersNote — caps at the newest 5', () => {
       mk({ id: `c_${i}`, recipientName: `R${i}`, createdAt: `2026-05-2${i}T00:00:00.000Z` }),
     );
     const store = await storeWith(...seven);
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     const lines = note.split('\n').slice(1); // drop the preamble line
     expect(lines).toHaveLength(5);
     expect(lines[0]).toContain('R6'); // newest (2026-05-26) first
@@ -95,7 +95,7 @@ describe('getRecentTransfersNote — per-line content', () => {
       mk({ id: 'abc123', recipientName: 'Mom', amountSource: 500, sourceCurrency: 'USD', status: 'delivered',
            createdAt: '2026-05-28T12:00:00.000Z' }),
     );
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('#abc123');   // short transfer ref so the bot can name a specific send
     expect(note).toContain('5/28/2026'); // easternDate(Date.parse(createdAt)) in ET
     expect(note).toContain('Mom');
@@ -106,12 +106,12 @@ describe('getRecentTransfersNote — per-line content', () => {
     const store = await storeWith(
       mk({ recipientName: 'Dad', amountSource: 300, sourceCurrency: 'GBP', status: 'paid' }),
     );
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('£300.00');
   });
   it('maps blocked → "on hold" and NEVER the raw token', async () => {
     const store = await storeWith(mk({ recipientName: 'Ravi', status: 'blocked' }));
-    const note = (await getRecentTransfersNote('+15551230000', store)).toLowerCase();
+    const note = (await getRecentTransfersNote('default', '+15551230000', store)).toLowerCase();
     expect(note).toContain('on hold');
     expect(note).not.toContain('blocked');
   });
@@ -120,7 +120,7 @@ describe('getRecentTransfersNote — per-line content', () => {
       mk({ id: 'a', recipientName: 'A', status: 'awaiting_payment', createdAt: '2026-05-28T05:00:00.000Z' }),
       mk({ id: 'c', recipientName: 'C', status: 'cancelled',        createdAt: '2026-05-28T04:00:00.000Z' }),
     );
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('awaiting payment');
     expect(note).toContain('cancelled');
   });
@@ -133,7 +133,7 @@ describe('getRecentTransfersNote — defensive on missing fields', () => {
            sourceCurrency: undefined as unknown as Transfer['sourceCurrency'],
            amountSource: undefined as unknown as number }),
     );
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('[RECENT TRANSFERS]'); // rendered, did not throw
     expect(note).toContain('a recipient');        // recipientName fallback
   });
@@ -146,7 +146,7 @@ describe('getRecentTransfersNote — token budget', () => {
            createdAt: `2026-05-2${i}T00:00:00.000Z` }),
     );
     const store = await storeWith(...long);
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note.split('\n')).toHaveLength(6); // 1 preamble + 5 lines (cap holds)
     expect(note.length).toBeLessThan(600);
   });
@@ -155,28 +155,28 @@ describe('getRecentTransfersNote — token budget', () => {
 describe('getRecentTransfersNote — refund-aware labels', () => {
   it("refundStatus 'requested' replaces the base label with 'refund requested'", async () => {
     const store = await storeWith(mk({ recipientName: 'Mom', status: 'paid', refundStatus: 'requested' }));
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('refund requested');
     expect(note).not.toMatch(/· paid/);
   });
 
   it("refundStatus 'pending' renders 'refund on the way'", async () => {
     const store = await storeWith(mk({ status: 'paid', refundStatus: 'pending' }));
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('refund on the way');
     expect(note).not.toMatch(/· paid/);
   });
 
   it("refundStatus 'completed' renders 'refunded' — even over a cancelled base status", async () => {
     const store = await storeWith(mk({ status: 'cancelled', refundStatus: 'completed' }));
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('refunded');
     expect(note).not.toContain('cancelled');
   });
 
   it("refundStatus 'failed' is ops-internal — the customer keeps seeing the prior state", async () => {
     const store = await storeWith(mk({ status: 'paid', refundStatus: 'failed' }));
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toMatch(/· paid/);
     expect(note.toLowerCase()).not.toContain('refund');
     expect(note.toLowerCase()).not.toContain('failed');
@@ -184,7 +184,7 @@ describe('getRecentTransfersNote — refund-aware labels', () => {
 
   it("an absent refundStatus behaves as 'none' — base labels untouched", async () => {
     const store = stubStore(mk({ status: 'delivered', refundStatus: undefined }));
-    const note = await getRecentTransfersNote('+15551230000', store);
+    const note = await getRecentTransfersNote('default', '+15551230000', store);
     expect(note).toContain('delivered');
     expect(note.toLowerCase()).not.toContain('refund');
   });

@@ -118,7 +118,7 @@ describe('transfer-memory: recent-transfers module + rendered note stay partner-
     await store.saveTransfer({ ...base, id: 'g2', recipientName: 'Ravi', status: 'blocked',
       createdAt: '2026-05-27T12:00:00Z' } as never);
 
-    const note = (await getRecentTransfersNote('+1555', store)).toLowerCase();
+    const note = (await getRecentTransfersNote('default', '+1555', store)).toLowerCase();
     for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'blocked', 'compliance', 'partnerid'])
       expect(note).not.toContain(term);
     expect(note).toContain('mom');     // customer-owned data IS present

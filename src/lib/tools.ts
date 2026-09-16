@@ -783,6 +783,9 @@ export const toolSchemas: ChatTool[] = [
 
 export interface ToolContext {
   phone: string;
+  // The tenant the turn runs under (fix 1). Every customer / recipient / ledger /
+  // velocity read in a tool is keyed (partnerId, phone); a phone alone is not an identity.
+  partnerId: PartnerId;
   store: Store;
   scheduleStore: ScheduleStore;
   draftStore: DraftStore;
@@ -845,10 +848,10 @@ async function resolveCurrencyAndRates(
   destToUsd: number;
 }> {
   const customer =
-    (await ctx.customerStore.getCustomer(ctx.phone)) ??
-    (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+    (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
+    (await ctx.customerStore.upsertOnFirstInbound(ctx.partnerId, ctx.phone)).customer;
   const partner =
-    (await ctx.partnerStore.getPartner(customer.partnerId)) ??
+    (await ctx.partnerStore.getPartner(ctx.partnerId)) ??
     (await ctx.partnerStore.ensureDefaultPartner());
   const sourceCurrency = resolveSendCurrency(
     partner,
@@ -1004,7 +1007,7 @@ async function getQuoteTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   try {
-    const transferCount = await ctx.store.getTransferCount(ctx.phone);
+    const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
     const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
       await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
 
@@ -1040,7 +1043,7 @@ async function getQuoteTool(
     // finite — a missing/NaN amount falls through to quote()'s "valid amount" error.
     const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
     if (Number.isFinite(amountUsd)) {
-      const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+      const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
       const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner));
       if (!ev.withinCap) {
         // kyc_url (and the Persona inquiry behind it) only exists when the
@@ -1169,15 +1172,23 @@ async function createTransferTool(
           'That quote was already approved or has expired. Please request a fresh quote.',
       };
     }
+    // D12 (fix 1): a draft id is a capability the model can echo; it must only
+    // ever act under the tenant that created it. A mismatch is refused (and the
+    // draft is put back untouched) — never minted under this tenant.
+    if ((draft.partnerId ?? DEFAULT_PARTNER_ID) !== ctx.partnerId) {
+      await ctx.draftStore.restoreDraft(draft, ctxDraftId); // re-set the row + pointer under ITS tenant
+      logWarn('draft.tenant_mismatch', 'draft resolved under another tenant', { draftId: ctxDraftId });
+      return { error: 'That approval is not valid here. Ask the customer to start the send again.' };
+    }
     // Re-check cap at the moment of approval (cap state may have changed since picker).
     // Fetch customer ONCE — reuse for both the cap check and partnerId.
     const customer =
-      (await ctx.customerStore.getCustomer(ctx.phone)) ??
-      (await ctx.customerStore.upsertOnFirstInbound(ctx.phone)).customer;
+      (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
+      (await ctx.customerStore.upsertOnFirstInbound(ctx.partnerId, ctx.phone)).customer;
     // WL1: resolve the owning partner once (drives both the gate toggle below and
     // requiresKyc into createTransfer). Default/'ours' ⇒ gate ON (unchanged).
     const partner =
-      (await ctx.partnerStore.getPartner(customer.partnerId)) ??
+      (await ctx.partnerStore.getPartner(ctx.partnerId)) ??
       (await ctx.partnerStore.ensureDefaultPartner());
     // Phase 3 verify-before-send gate (last bot chokepoint before mint). B2B
     // drafts use the B2B-aware KYB predicate (isB2bSendVerified === isSendVerified
@@ -1190,7 +1201,7 @@ async function createTransferTool(
       return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
     }
     {
-      const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+      const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
       const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
       if (!ev.withinCap) {
@@ -1220,7 +1231,7 @@ async function createTransferTool(
         sourceCurrency: draft.sourceCurrency,
         destinationCountry: draft.destinationCountry,
         destinationCurrency: draft.destinationCurrency,
-        partnerId: customer.partnerId ?? DEFAULT_PARTNER_ID,
+        partnerId: ctx.partnerId,
         recipientName: draft.recipient.name,
         recipientPhone: draft.recipient.recipientPhone,
         payoutMethod: draft.recipient.payoutMethod,
@@ -1246,9 +1257,9 @@ async function createTransferTool(
         recipientBusinessName: draft.recipientBusinessName,
         invoiceId: draft.invoiceId,
       });
-      await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
+      await ctx.dailyVolumeStore.addCents(ctx.partnerId, ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
-      await ctx.customerStore.recordFundingMethod(ctx.phone, draft.fundingMethod);
+      await ctx.customerStore.recordFundingMethod(ctx.partnerId, ctx.phone, draft.fundingMethod);
       return {
         transfer_id: transfer.id,
         status: transfer.status,
@@ -1295,7 +1306,7 @@ async function createTransferTool(
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap check on the legacy path (cron-fired or no-button cold-start)
   {
-    const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+    const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
     const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents, sendGateActive(legacyPartner));
     if (!ev.withinCap) {
@@ -1314,7 +1325,7 @@ async function createTransferTool(
       sourceCurrency,
       destinationCountry: legacyDestCountry,
       destinationCurrency: legacyDestCurrency,
-      partnerId: legacyCustomer.partnerId ?? DEFAULT_PARTNER_ID,
+      partnerId: ctx.partnerId,
       recipientName: String(args.recipient_name),
       recipientPhone,
       payoutMethod: (args.payout_method as PayoutMethod | undefined) ?? 'bank',
@@ -1340,9 +1351,9 @@ async function createTransferTool(
       recipientBusinessName: legacyB2b?.recipientBusinessName ?? (legacyB2b ? String(args.recipient_name) : undefined),
       invoiceId: legacyB2b?.invoiceId,
     });
-    await ctx.dailyVolumeStore.addCents(ctx.phone, Math.round(transfer.amountUsd * 100));
+    await ctx.dailyVolumeStore.addCents(ctx.partnerId, ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
-    await ctx.customerStore.recordFundingMethod(ctx.phone, args.funding_method as FundingMethod);
+    await ctx.customerStore.recordFundingMethod(ctx.partnerId, ctx.phone, args.funding_method as FundingMethod);
     return {
       transfer_id: transfer.id,
       status: transfer.status,
@@ -1378,8 +1389,7 @@ async function presentBillTool(
     // bot this buyer is talking to (their customer's partner), never another
     // tenant's seller. Fail closed to the default partner when no customer row
     // exists yet (the demo's single-number case).
-    const customer = await ctx.customerStore.getCustomer(ctx.phone);
-    const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+    const partnerId = ctx.partnerId;
     invoice = await ctx.store.getUnpaidInvoiceByBuyer(ctx.phone, partnerId);
   } catch (err) {
     console.warn('present_bill getUnpaidInvoiceByBuyer failed:', err);
@@ -1436,8 +1446,7 @@ async function registerSellerTool(
   // Tenant scope: pin the seller to the partner whose bot they're talking to
   // (present_bill's own-phone resolver). Fail closed to the default partner when
   // no customer row exists yet (the demo's single-number case).
-  const customer = await ctx.customerStore.getCustomer(ctx.phone);
-  const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+  const partnerId = ctx.partnerId;
 
   // Country + currency are DERIVED from the seller's own number — never guessed.
   const country = countryForPhone(ctx.phone);
@@ -1590,8 +1599,7 @@ async function createInvoiceTool(
   // Tenant scope: pin the bill to the partner whose bot the seller is talking to
   // (same own-phone resolver as register_seller). Fail closed to the default
   // partner when no customer row exists yet (the demo's single-number case).
-  const customer = await ctx.customerStore.getCustomer(ctx.phone);
-  const partnerId = customer?.partnerId ?? DEFAULT_PARTNER_ID;
+  const partnerId = ctx.partnerId;
 
   // The seller is resolved BY ctx.phone — implicit + unforgeable. Only an ACTIVE
   // seller (payout set + sanctions clear) may issue bills; anything else is
@@ -1824,7 +1832,7 @@ async function generatePaymentLinkTool(
   // STRICT ownership, 404-never-403 (mirrors request_refund): another
   // customer's transfer is indistinguishable from a missing one — this tool
   // must never mint a pay link for a transfer the caller doesn't own.
-  if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
+  if (!transfer || transfer.phone !== ctx.phone || transfer.partnerId !== ctx.partnerId) return { error: 'Transfer not found.' };
   if (transfer.status === 'blocked') {
     return {
       error: 'This transfer did not pass compliance and cannot be paid.',
@@ -1840,7 +1848,7 @@ async function checkPaymentStatusTool(
   const transfer = await ctx.store.getTransfer(normalizeTransferId(args.transfer_id));
   // STRICT ownership, 404-never-403 (mirrors request_refund): no status oracle
   // over other customers' transfer ids.
-  if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
+  if (!transfer || transfer.phone !== ctx.phone || transfer.partnerId !== ctx.partnerId) return { error: 'Transfer not found.' };
   return { transfer_id: transfer.id, status: transfer.status };
 }
 
@@ -1860,7 +1868,7 @@ function clampLimit(raw: unknown, def: number, max: number): number {
 /**
  * Lists the customer's OWN recent transfers (newest first), optionally filtered
  * to a recipient they name (web-only — see WEB_ONLY_TOOLS). Ownership is implicit
- * and unforgeable: listTransfersByPhone(ctx.phone) is an INDEXED own-phone query
+ * and unforgeable: listTransfersByPhone(ctx.partnerId, ctx.phone) is an INDEXED own-customer query
  * and the tool takes no transfer_id, so it can never surface another customer's
  * data — there is nothing to 404 on. Each row is shaped by the shared
  * customer-safe formatter (transferSummaryFields): recipient name + source-currency
@@ -1875,7 +1883,7 @@ async function listRecentTransfersTool(
   const historyUrl = `${env.appBaseUrl}/account/history`;
   let rows: import('./types').Transfer[];
   try {
-    rows = await ctx.store.listTransfersByPhone(ctx.phone, RECENT_SCAN); // newest-first, indexed
+    rows = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, RECENT_SCAN); // newest-first, indexed
   } catch (err) {
     console.warn('list_recent_transfers listTransfersByPhone failed:', err);
     return { transfers: [], count: 0, history_url: historyUrl };
@@ -1940,7 +1948,7 @@ async function resolveRefundTarget(
     const transfer = await ctx.store.getTransfer(id);
     // STRICT ownership, 404-never-403: another customer's (or a missing)
     // transfer is indistinguishable.
-    if (!transfer || transfer.phone !== ctx.phone) return { transfer: null, notFound: true };
+    if (!transfer || transfer.phone !== ctx.phone || transfer.partnerId !== ctx.partnerId) return { transfer: null, notFound: true };
     return { transfer };
   }
 
@@ -1948,7 +1956,7 @@ async function resolveRefundTarget(
   // own-phone query, newest first). Prefer the most recent that the customer
   // can actually act on; otherwise the most recent overall so we can explain
   // its current state.
-  const recent = await ctx.store.listTransfersByPhone(ctx.phone, REFUND_LOOKBACK);
+  const recent = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, REFUND_LOOKBACK);
   if (recent.length === 0) return { transfer: null };
   const match = recent.find((t) => refundDisposition(t, now).kind === prefer);
   return { transfer: match ?? recent[0] };
@@ -2231,11 +2239,11 @@ function formatRecallAmount(transfer: import('./types').Transfer): string {
 // request_refund uses; a human approves before any debit is returned. We NEVER
 // call reverseB2bSettlement or cancelTransfer here (those are staff-only).
 //
-// Every resolution is own-phone and unforgeable: listTransfersByPhone(ctx.phone)
+// Every resolution is own-customer and unforgeable: listTransfersByPhone(ctx.partnerId, ctx.phone)
 // and getUnpaidInvoiceByBuyer(ctx.phone, …) are indexed own-phone reads, and the
 // tools take no transfer/invoice id from the model, so they can never surface or
 // touch another buyer's row. Partner-scoped store calls take the buyer's own
-// partnerId (customer.partnerId ?? DEFAULT_PARTNER_ID), the present_bill resolver.
+// partnerId (the turn's routed tenant, ctx.partnerId — fix 1), the present_bill resolver.
 
 // How many of the buyer's most-recent transfers we scan to find their B2B ones.
 const B2B_LOOKBACK = 25;
@@ -2270,13 +2278,14 @@ const B2B_DISPUTE_REASON_LABEL: Record<string, string> = {
 // The buyer's own partner (present_bill's resolver): tenant-scopes every B2B store
 // call. Falls back to the default tenant for the demo's single-number case.
 async function resolveBuyerPartnerId(ctx: ToolContext): Promise<PartnerId> {
-  const customer = await ctx.customerStore.getCustomer(ctx.phone);
-  return customer?.partnerId ?? DEFAULT_PARTNER_ID;
+  // Fix 1: the turn's routed tenant IS the buyer's tenant — never a fallback to
+  // the default tenant for a phone that has no row under this one.
+  return ctx.partnerId;
 }
 
 // The buyer's B2B transfers, newest-first. Own-phone by construction.
 async function listOwnB2bTransfers(ctx: ToolContext): Promise<import('./types').Transfer[]> {
-  const rows = await ctx.store.listTransfersByPhone(ctx.phone, B2B_LOOKBACK); // newest-first, indexed
+  const rows = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, B2B_LOOKBACK); // newest-first, indexed
   return rows.filter((t) => t.transferType === 'b2b');
 }
 
@@ -2503,7 +2512,7 @@ async function updateRecipientPhoneTool(
   const transfer = await ctx.store.getTransfer(normalizeTransferId(args.transfer_id));
   // STRICT ownership, 404-never-403 (mirrors request_refund): this tool
   // MUTATES the transfer, so it must never touch one the caller doesn't own.
-  if (!transfer || transfer.phone !== ctx.phone) return { error: 'Transfer not found.' };
+  if (!transfer || transfer.phone !== ctx.phone || transfer.partnerId !== ctx.partnerId) return { error: 'Transfer not found.' };
 
   const recipientPhone = normalizePhone(args.recipient_phone);
   if (!isValidPhone(recipientPhone)) {
@@ -2545,9 +2554,9 @@ async function createScheduleTool(
       return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
     }
   }
-  // Resolve currency and reuse customer for partnerId (P4 wiring).
-  const { customer: owner, sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
-  const partnerId = owner.partnerId ?? DEFAULT_PARTNER_ID;
+  // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
+  const { sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  const partnerId = ctx.partnerId;
   const amountSource = Number(args.amount_source ?? args.amount_usd);
   // Validate optional end_date: must be a parseable ISO date string; ignore if not.
   let endDate: string | undefined;
@@ -2592,7 +2601,7 @@ async function listSchedulesTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const all = await ctx.scheduleStore.listActiveSchedules();
-  const mine = all.filter((s) => s.phone === ctx.phone);
+  const mine = all.filter((s) => s.phone === ctx.phone && s.partnerId === ctx.partnerId);
   return {
     schedules: mine.map((s) => ({
       schedule_id: s.id,
@@ -2610,7 +2619,7 @@ async function cancelScheduleTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   const schedule = await ctx.scheduleStore.getSchedule(String(args.schedule_id));
-  if (!schedule || schedule.phone !== ctx.phone) {
+  if (!schedule || schedule.phone !== ctx.phone || schedule.partnerId !== ctx.partnerId) {
     return { error: 'Schedule not found.' };
   }
   schedule.status = 'cancelled';
@@ -2623,7 +2632,7 @@ async function listSavedRecipientsTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   try {
-    const recipients = await ctx.store.listRecipients(ctx.phone, 2);
+    const recipients = await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 2);
     return {
       recipients: recipients.map((r) => ({
         name: r.name,
@@ -2648,7 +2657,7 @@ async function resolveRecipientTool(
 
   let all: import('./types').Recipient[];
   try {
-    all = await ctx.store.listRecipients(ctx.phone, 25); // generous cap; own-phone only
+    all = await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 25); // generous cap; own-phone only
   } catch (err) {
     console.warn('resolve_recipient listRecipients failed:', err);
     return { match: 'none' };
@@ -2758,7 +2767,7 @@ async function sendApprovePickerTool(
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
   {
-    const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+    const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
     const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
     if (!ev.withinCap) {
@@ -2776,9 +2785,9 @@ async function sendApprovePickerTool(
   }
   // Screen at card-show (read-only) BEFORE creating the draft. Quote first so a
   // blocked attempt is recorded with real figures.
-  const transfersToday = await ctx.store.getTodayTransferCount(ctx.phone);
+  const transfersToday = await ctx.store.getTodayTransferCount(ctx.partnerId, ctx.phone);
   try {
-    const transferCount = await ctx.store.getTransferCount(ctx.phone);
+    const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
     let q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
 
     // Best-rate routing (default tenant only): the card, the draft, and the
@@ -2824,7 +2833,7 @@ async function sendApprovePickerTool(
           totalChargeSource: q.totalChargeSource,
           destinationCountry,
           destinationCurrency,
-          partnerId: customer.partnerId,
+          partnerId: ctx.partnerId,
           reasons: screen.reasons,
         });
       } catch (err) {
@@ -2839,6 +2848,7 @@ async function sendApprovePickerTool(
 
     const draftId = await ctx.draftStore.createDraft({
       senderPhone: ctx.phone,
+      partnerId: ctx.partnerId,
       recipient: {
         name: String(args.recipient_name),
         recipientPhone,
@@ -2951,7 +2961,7 @@ async function repeatTransferTool(
 
   // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
   // Stage 4: indexed per-phone page, then a small in-JS recipient filter.
-  const mine = (await ctx.store.listTransfersByPhone(ctx.phone, 100)).filter(
+  const mine = (await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, 100)).filter(
     (t) => t.recipientPhone === recipientPhone,
   );
   const last = mine[0];
@@ -2962,7 +2972,7 @@ async function repeatTransferTool(
   // The default ledger read MASKS payout destinations (****last4) — a repeat
   // must carry the REAL account into the new draft. Hydrate it from the saved
   // recipient (decrypted), else a decrypted read of that exact transfer.
-  const savedRecipient = (await ctx.store.listRecipients(ctx.phone, 25)).find(
+  const savedRecipient = (await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 25)).find(
     (r) => normalizePhone(r.recipientPhone) === recipientPhone,
   );
   const realPayoutDestination =
@@ -2976,7 +2986,7 @@ async function repeatTransferTool(
     Number.isFinite(overrideAmount) && overrideAmount > 0
       ? overrideAmount
       : last.amountSource ?? last.amountUsd;
-  const customer = await ctx.customerStore.getCustomer(ctx.phone);
+  const customer = await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone);
   const fundingMethod =
     (args.funding_method as FundingMethod | undefined) ??
     customer?.lastFundingMethod ??
@@ -3044,13 +3054,20 @@ async function cancelDraftTool(
   const draftId =
     ctx.turn.buttonTap?.kind === 'cancel'
       ? ctx.turn.buttonTap.draftId
-      : await ctx.draftStore.getActiveDraftId(ctx.phone);
+      : await ctx.draftStore.getActiveDraftId(ctx.partnerId, ctx.phone);
   if (!draftId) {
     return { cancelled: false, reason: 'no_active_draft' };
   }
   const draft = await ctx.draftStore.consumeDraft(draftId);
   if (!draft) {
     return { cancelled: false, reason: 'draft_not_found_or_expired' };
+  }
+  // D12 (fix 1): same hard tenant guard as the approve tap — put another
+  // tenant's draft back untouched and answer exactly like "no pointer".
+  if ((draft.partnerId ?? DEFAULT_PARTNER_ID) !== ctx.partnerId) {
+    await ctx.draftStore.restoreDraft(draft, draftId);
+    logWarn('draft.tenant_mismatch', 'draft resolved under another tenant', { draftId });
+    return { cancelled: false, reason: 'no_active_draft' };
   }
   return { cancelled: true };
 }
@@ -3110,10 +3127,10 @@ async function checkSendLimitTool(
   // Convert to USD-equivalent for the cap evaluation (for USD partners toUsd===1).
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   const requestedCents = Math.round(amountUsd * 100);
-  const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.phone);
+  const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
   const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
 
-  const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.phone);   // NEW (KYC)
+  const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.partnerId, ctx.phone);   // NEW (KYC)
   const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)
   const eddFieldsPresent = Boolean(customer.sourceOfFunds && customer.occupation); // NEW (KYC)
 

@@ -1,6 +1,7 @@
 import { buildSystemPrompt } from './prompt';
 import { toolSchemasForChannel, executeTool, type AgentChannel } from './tools';
-import type { ChatMessage, ChatTool, TurnContext } from './types';
+import type { ChatMessage, ChatTool, PartnerId, TurnContext } from './types';
+import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Store } from './store';
 import type { ScheduleStore } from './schedule-store';
 import type { DraftStore } from './draft-store';
@@ -36,6 +37,11 @@ export interface AgentDeps {
   kycProvider: KycProvider;
   partnerStore: PartnerStore; // NEW (P4)
   waCreds?: WaCreds; // WL2 — partner's outbound WhatsApp creds (absent ⇒ shared env number)
+  // The tenant this agent runs under (fix 1): the partner that owns the WhatsApp
+  // number the turn arrived on, or the portal customer's partner for web chat.
+  // Absent ⇒ DEFAULT_PARTNER_ID (the shared number). Every customer, recipient,
+  // ledger and counter read inside the turn is keyed by (partnerId, phone).
+  partnerId?: PartnerId;
   // Channel seam (B5): 'web' filters the tool schemas the model sees AND the
   // executeTool dispatch to WEB_TOOL_ALLOWLIST, and injects the web-channel
   // system note. Absent ⇒ 'whatsapp' — every existing call site is unchanged.
@@ -70,6 +76,7 @@ export function sanitizeReply(reply: string, paymentLinks: string[]): string {
 }
 
 export function createAgent(deps: AgentDeps) {
+  const partnerId: PartnerId = deps.partnerId ?? DEFAULT_PARTNER_ID;
   // One retry on a transient chat() failure (Ollama Cloud 5xx / timeout / a
   // momentarily malformed response). A throw means history.push(assistant) never
   // ran, so the retry re-sends the identical messages cleanly.
@@ -95,7 +102,7 @@ export function createAgent(deps: AgentDeps) {
     turn: TurnContext = { isNewConversation: false },
     opts: { signal?: AbortSignal } = {},
   ): Promise<string> {
-    const history = await deps.store.getConversation(phone);
+    const history = await deps.store.getConversation(partnerId, phone);
     history.push({ role: 'user', content: incomingText });
 
     // A throw anywhere below (Ollama after its retry, a Redis blip mid-turn, …)
@@ -107,7 +114,7 @@ export function createAgent(deps: AgentDeps) {
     } catch (err) {
       console.error('runAgentTurn failed — returning fallback:', err);
       try {
-        await deps.store.saveConversation(phone, history);
+        await deps.store.saveConversation(partnerId, phone, history);
       } catch (saveErr) {
         console.error('saveConversation after failure also failed:', saveErr);
       }
@@ -128,10 +135,10 @@ export function createAgent(deps: AgentDeps) {
     // Resolve the partner's allowed send currencies ONCE before the round loop.
     // Use distinct names (noteCustomer / notePartner) to avoid shadowing any
     // variables introduced by tool calls later in the same scope.
-    const noteCustomer = await deps.customerStore.getCustomer(phone);
-    const notePartner = noteCustomer
-      ? (await deps.partnerStore.getPartner(noteCustomer.partnerId)) ?? (await deps.partnerStore.ensureDefaultPartner())
-      : await deps.partnerStore.ensureDefaultPartner();
+    const noteCustomer = await deps.customerStore.getCustomer(partnerId, phone);
+    // The ROUTED tenant decides brand + KYC posture — not the customer row (D4).
+    const notePartner =
+      (await deps.partnerStore.getPartner(partnerId)) ?? (await deps.partnerStore.ensureDefaultPartner());
     const sendCurrencies = allowedSendCurrencies(notePartner);
 
     // WL1 white-label: resolve the partner's brand + KYC posture ONCE. The
@@ -146,7 +153,7 @@ export function createAgent(deps: AgentDeps) {
     // Recent-transfer memory: the customer's OWN recent sends, surfaced once at
     // round 0 so the model can reference "you sent Mom $500 yesterday". '' when
     // the customer has no history ⇒ nothing is injected (behavior unchanged).
-    const recentNote = await getRecentTransfersNote(phone, deps.store);
+    const recentNote = await getRecentTransfersNote(partnerId, phone, deps.store);
 
     // Sticky funding default (Bundle C): surfaced once at round 0 so the bot can
     // default the funding method instead of re-asking. '' (no injection) for new /
@@ -193,7 +200,7 @@ export function createAgent(deps: AgentDeps) {
       if (round === 0 && turn.buttonTap?.kind === 'recipient') {
         try {
           const norm = normalizePhone(turn.buttonTap.recipientPhone);
-          const found = (await deps.store.listRecipients(phone, 25)).find(
+          const found = (await deps.store.listRecipients(partnerId, phone, 25)).find(
             (r) => normalizePhone(r.recipientPhone) === norm,
           );
           if (found) {
@@ -289,6 +296,7 @@ export function createAgent(deps: AgentDeps) {
           try {
             result = await executeTool(call.function.name, args, {
               phone,
+              partnerId,
               store: deps.store,
               scheduleStore: deps.scheduleStore,
               draftStore: deps.draftStore,
@@ -379,6 +387,7 @@ export function createAgent(deps: AgentDeps) {
       looksLikeVerifyHandoff(reply)
     ) {
       const url = await issueVerifyLink({
+        partnerId,
         phone,
         customer: noteCustomer,
         kycProvider: deps.kycProvider,
@@ -397,13 +406,13 @@ export function createAgent(deps: AgentDeps) {
     // reply — return '' so the webhook sends no redundant trailing text. Otherwise
     // an empty reply means something genuinely went wrong → the fallback line.
     if (interactiveSent) {
-      await deps.store.saveConversation(phone, history);
+      await deps.store.saveConversation(partnerId, phone, history);
       return '';
     }
     if (!reply) reply = FALLBACK_REPLY;
     // Sanitize: strip model-emitted URLs, append canonical link if present.
     reply = sanitizeReply(reply, paymentLinks);
-    await deps.store.saveConversation(phone, history);
+    await deps.store.saveConversation(partnerId, phone, history);
     return reply;
   }
 
