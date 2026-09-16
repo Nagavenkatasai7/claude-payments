@@ -50,6 +50,7 @@ Listed in `.env.example`. Production refuses to boot if the money-grade ones are
 - **Plan first, get approval, then build** (`superpowers:brainstorming` → `writing-plans` → `subagent-driven-development` for meaningful changes).
 - **No direct pushes to `main`.** GitHub branch protection (PR required, `ci / ci` check, enforce_admins) is the real gate; `guard-git-main.sh` is a local convenience guard that regex-matches and can be bypassed by quoting. Merge auto-deploys prod; then **verify the post-deploy `smoke.yml` run went green**.
 - Branches: `main` deploys (GitHub `Nagavenkatasai7/claude-payments`); old `master` archived as `archive/initial-scaffold`.
+- **Program Ledger** (private artifact https://claude.ai/artifact/7wD2psZ6fndztDjwZC3oNZ): progress of the 2026-09 upgrade program against the audit, with a cited assistant. Put `Program-Fix: <n>` (manifest fix number) on its own line in every fix PR body; run `/tracker-sync` after every merge (`/post-merge-check` does it), after verification runs and plan approvals. A fix is `done` only when merged + smoke green + verified.
 - See `docs/ROADMAP.md` for feature inventory and the path to production; memory file `sendhome-total-platform-program` tracks the staged program history.
 
 ## Claude Code tooling
