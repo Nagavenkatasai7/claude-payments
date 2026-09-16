@@ -26,9 +26,14 @@ async function harness() {
   await seedPartner(db, 'acme');
   await seedPartner(db, 'globex');
   const store = createStore(redis, db);
+  // Customer store shares the same default field-crypto key as resolveSenderNames
+  // (tests/setup.ts pins FIELD_ENCRYPTION_KEY to 32×0x07 = Buffer.alloc(32, 7)),
+  // so a name sealed here decrypts on the partner-API read.
+  const customerStore = createCustomerStore(db, store);
   let n = 0;
   const deps: PartnerApiDeps = {
     store,
+    customerStore, // fix 1 — sender rows are per tenant
     partnerStore: createPartnerStore(db),
     monthlyVolumeStore: createMonthlyVolumeStore(redis),
     integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
@@ -43,10 +48,6 @@ async function harness() {
       if (cur) await store.saveTransfer({ ...cur, status: 'paid', paidAt: NOW });
     },
   };
-  // Customer store shares the same default field-crypto key as resolveSenderNames
-  // (tests/setup.ts pins FIELD_ENCRYPTION_KEY to 32×0x07 = Buffer.alloc(32, 7)),
-  // so a name sealed here decrypts on the partner-API read.
-  const customerStore = createCustomerStore(db, store);
   return { redis, store, deps, db, customerStore };
 }
 
@@ -371,5 +372,86 @@ describe('partner-api-service: GET /transactions list (Stage 4 keyset)', () => {
     expect((await listTransactions(deps, 'acme', { limit: '999999', cursor: null })).ok).toBe(true);
     expect((await listTransactions(deps, 'acme', { limit: '-5', cursor: null })).ok).toBe(true);
     expect((await listTransactions(deps, 'acme', { limit: null, cursor: null })).ok).toBe(true);
+  });
+});
+
+describe('partner-api-service: sender.phone is bound to the calling tenant (fix 1)', () => {
+  const OTHER_TENANT_PHONE = '15551230000';
+
+  async function seedDefaultTenantCustomer(customerStore: ReturnType<typeof createCustomerStore>, store: ReturnType<typeof createStore>) {
+    // The same number is a fully KYC'd DEFAULT-tenant customer with a saved payout destination.
+    await customerStore.saveCustomer({
+      senderPhone: OTHER_TENANT_PHONE, fullName: 'Default Owner', firstSeenAt: NOW, kycStatus: 'verified',
+      senderCountry: 'US', partnerId: 'default', passwordHash: 'pw', createdAt: NOW, updatedAt: NOW,
+    } as Parameters<typeof customerStore.saveCustomer>[0]);
+    await store.upsertRecipient('default', OTHER_TENANT_PHONE, {
+      name: 'Anita', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: 'REAL-ACCOUNT-0001', lastUsedAt: NOW,
+    });
+  }
+
+  it('minting for an unknown phone creates the customer under the CALLING partner, not default, with no WhatsApp opt-in', async () => {
+    const { deps, customerStore } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-t1', txBody({ sender: { phone: '15557770000', kyc_status: 'not_started' } }));
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    const acme = await customerStore.getCustomer('acme', '15557770000');
+    expect(acme).not.toBeNull();
+    expect(acme!.optInAt).toBeUndefined();
+    expect(await customerStore.getCustomer('default', '15557770000')).toBeNull();
+  });
+
+  it('a phone owned by another tenant: no ledger/recipient/velocity/PII side effect on that tenant, and the response is shaped exactly like an unknown phone', async () => {
+    const { deps, store, customerStore } = await harness();
+    await seedDefaultTenantCustomer(customerStore, store);
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-t2', txBody({
+      beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: 'PLANTED-9999' },
+    }));
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (!r.ok) throw new Error('unexpected');
+    expect((r.data as { sender_name: string | null }).sender_name).toBeNull(); // F50/F52: default's decrypted name never leaves
+    // F45/F47: default's address book + counters untouched; acme has its own.
+    expect((await store.listRecipients('default', OTHER_TENANT_PHONE, 5))[0].payoutDestination).toBe('REAL-ACCOUNT-0001');
+    expect((await store.listRecipients('acme', OTHER_TENANT_PHONE, 5))[0].payoutDestination).toBe('PLANTED-9999');
+    expect(await store.getTodayTransferCount('default', OTHER_TENANT_PHONE)).toBe(0);
+    expect(await store.getTodayTransferCount('acme', OTHER_TENANT_PHONE)).toBe(1);
+    expect(await deps.monthlyVolumeStore.getMonthCents('default', OTHER_TENANT_PHONE)).toBe(0);
+    // F44 at the API: the default row is byte-identical (partner_id, kyc, PII, password).
+    const dflt = (await customerStore.getCustomer('default', OTHER_TENANT_PHONE))!;
+    expect([dflt.partnerId, dflt.kycStatus, dflt.fullName, dflt.passwordHash]).toEqual(['default', 'verified', 'Default Owner', 'pw']);
+    const acmeRow = (await customerStore.getCustomer('acme', OTHER_TENANT_PHONE))!;
+    expect([acmeRow.kycStatus, acmeRow.fullName, acmeRow.passwordHash]).toEqual(['not_started', undefined, undefined]);
+    // Every transfer for this key belongs to acme.
+    expect((await store.listTransfers()).every((t) => t.partnerId === 'acme')).toBe(true);
+  });
+
+  it('GET /transactions and GET /transactions/:id never return another tenant\'s sender_name', async () => {
+    const { deps, store, customerStore } = await harness();
+    await seedDefaultTenantCustomer(customerStore, store);
+    const created = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-t3', txBody());
+    if (!created.ok) throw new Error('unexpected');
+    const id = (created.data as { id: string }).id;
+    const got = await getTransaction(deps, 'acme', id);
+    expect(got.ok && (got.data as { sender_name: string | null }).sender_name).toBeNull();
+    const page = await listTransactions(deps, 'acme', { limit: '10', cursor: null });
+    expect(page.ok && (page.data as { transactions: { sender_name: string | null }[] }).transactions[0].sender_name).toBeNull();
+    // …and acme's OWN captured name does resolve.
+    await seedNamedCustomer(customerStore, '15551230000', 'Acme Owner');
+    const again = await getTransaction(deps, 'acme', id);
+    expect(again.ok && (again.data as { sender_name: string | null }).sender_name).toBe('Acme Owner');
+  });
+
+  it('the customer is resolved BEFORE the idempotency claim and AFTER every body check: a 400/404 never binds the key and never writes a customer row', async () => {
+    const { deps, customerStore } = await harness();
+    const bad = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-t4', txBody({ amount_source: -1 }));
+    expect(bad).toMatchObject({ ok: false, status: 400 });
+    const { createIdempotencyRepo } = await import('@/db/repos/aux-repos');
+    // The key is bound only by the claim; the claim runs after every body check and the sender resolution.
+    expect(await createIdempotencyRepo(deps.db).find('acme', 'idem-t4')).toBeNull();
+    // A rejected BENEFICIARY (404) must not have created the sender row either —
+    // otherwise an API-keyed caller could mint unbounded customer rows under its
+    // tenant with rejected bodies (the beneficiary block runs ABOVE ensureCustomer).
+    const missing = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-t5', txBody({ sender: { phone: '15557770001', kyc_status: 'not_started' }, beneficiary_id: 'ben_nope' }));
+    expect(missing).toMatchObject({ ok: false, status: 404 });
+    expect(await createIdempotencyRepo(deps.db).find('acme', 'idem-t5')).toBeNull();
+    expect(await customerStore.getCustomer('acme', '15557770001')).toBeNull();
   });
 });

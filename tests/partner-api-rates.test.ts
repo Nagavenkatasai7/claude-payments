@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createStore } from '@/lib/store';
+import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
@@ -22,8 +23,10 @@ async function harness() {
   await seedPartner(db, 'acme');
   await seedPartner(db, 'globex');
   let n = 0;
+  const store = createStore(redis, db);
   const deps: PartnerApiDeps = {
-    store: createStore(redis, db),
+    store,
+    customerStore: createCustomerStore(db, store),
     partnerStore: createPartnerStore(db),
     monthlyVolumeStore: createMonthlyVolumeStore(redis),
     integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),

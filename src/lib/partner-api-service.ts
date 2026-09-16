@@ -29,6 +29,7 @@ import type { Db } from '@/db/client';
 import { newTransferId } from './id';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 import { resolveSenderNames, senderNameKey } from './sender-names';
+import type { CustomerStore } from './customer-store';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -48,6 +49,7 @@ export interface PartnerApiDeps {
   partnerStore: PartnerStore;
   monthlyVolumeStore: MonthlyVolumeStore;
   integrationsStore: PartnerIntegrationsStore; // WL3 — per-partner rail + WhatsApp creds
+  customerStore: CustomerStore; // fix 1 — sender rows are per tenant
   db: DbOrTx; // beneficiaries / idempotency keys / api audit (Stage 2a-3)
   // Injectable so the route uses the real provider while tests stub settlement
   // (the mock provider sends WhatsApp + arms a timer we don't want in unit tests).
@@ -246,20 +248,11 @@ export async function createTransaction(
 ): Promise<SvcResult<unknown>> {
   if (!idempotencyKey) return err(400, 'Idempotency-Key header is required.');
 
-  // CLAIM-FIRST idempotency (Stage 2c): pre-generate the transfer id and bind
-  // the key BEFORE minting. PK(partner_id, key) means exactly one id can ever
-  // own this key — a concurrent duplicate or crash-replay deterministically
-  // converges on the winner, and a crash after the claim re-mints the SAME id.
-  const idem = createIdempotencyRepo(deps.db);
-  const candidateId = (deps.genId ?? newTransferId)();
-  const reservedId = await idem.claim(partner.id, idempotencyKey, candidateId);
-  if (reservedId !== candidateId) {
-    // The key was already bound — replay. (A bound-but-unminted id means a
-    // prior attempt crashed mid-mint; fall through and mint THAT id.)
-    const t = await deps.store.getTransfer(reservedId);
-    if (t && t.partnerId === partner.id) return ok(200, await transferViewWithName(deps, t));
-  }
-
+  // Body validation + TENANT BINDING run BEFORE the idempotency claim (fix 1):
+  // a refusal here never binds the key to a half-minted id. sender.phone is
+  // resolved under partner.id ONLY — another tenant's row for the same number
+  // is structurally unreachable, so the response for "someone else's customer"
+  // is identical to "unknown phone" (no enumeration oracle; 404-never-403 spirit).
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
 
@@ -267,7 +260,10 @@ export async function createTransaction(
   const senderPhone = str(sender.phone);
   if (!senderPhone) return err(400, 'sender.phone is required.');
 
-  // Beneficiary: by reference (partner-scoped) or inline.
+  // Beneficiary: by reference (partner-scoped) or inline. MOVED ABOVE the
+  // customer write and the claim (on main it sits below both, :269-284): a
+  // 404 / 400 here must leave NO customer row behind, or an API-keyed caller
+  // could create unbounded customer rows under its tenant with rejected bodies.
   let benName = '', benPhone = '', payoutMethod: PayoutMethod = 'bank', payoutDestination = '';
   const benId = str(body.beneficiary_id);
   if (benId) {
@@ -282,6 +278,26 @@ export async function createTransaction(
     benPhone = str(ben.phone);
     payoutMethod = (str(ben.payout_method) as PayoutMethod) || 'bank';
     payoutDestination = str(ben.payout_destination);
+  }
+
+  // The LAST step before the claim, AFTER every body check (Task 2 Step 28
+  // later inserts its beneficiary name / destination edge validation ABOVE this
+  // line — never below it). No WhatsApp opt-in is implied by an API mint
+  // (ensureCustomer, not upsertOnFirstInbound).
+  await deps.customerStore.ensureCustomer(partner.id, senderPhone);
+
+  // CLAIM-FIRST idempotency (Stage 2c): pre-generate the transfer id and bind
+  // the key BEFORE minting. PK(partner_id, key) means exactly one id can ever
+  // own this key — a concurrent duplicate or crash-replay deterministically
+  // converges on the winner, and a crash after the claim re-mints the SAME id.
+  const idem = createIdempotencyRepo(deps.db);
+  const candidateId = (deps.genId ?? newTransferId)();
+  const reservedId = await idem.claim(partner.id, idempotencyKey, candidateId);
+  if (reservedId !== candidateId) {
+    // The key was already bound — replay. (A bound-but-unminted id means a
+    // prior attempt crashed mid-mint; fall through and mint THAT id.)
+    const t = await deps.store.getTransfer(reservedId);
+    if (t && t.partnerId === partner.id) return ok(200, await transferViewWithName(deps, t));
   }
 
   // senderPhone is required here (validated above), so an Indian sender with no
