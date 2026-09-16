@@ -7,6 +7,7 @@ the ledger database is the source of truth for status; /tracker-sync updates it.
 Passes text through scrub(): masks phone numbers (except +1555 test numbers), non-org emails, tokens."""
 import json, re, os, sys, pathlib, hashlib
 REPO = pathlib.Path(sys.argv[1]); OUT = pathlib.Path(sys.argv[2]); EXTRA_PLANS = [pathlib.Path(p) for p in sys.argv[3:]]
+VERSIONS = json.load(open(os.environ['LEDGER_VERSIONS'])) if os.environ.get('LEDGER_VERSIONS') else {}
 OUT.mkdir(parents=True, exist_ok=True)
 for f in OUT.glob('*.json'): f.unlink()
 
@@ -87,6 +88,26 @@ for key, label, path in DOCS:
     text = scrub(path.read_text())
     c = chunk_md(key, label, text); chunks += c
     docmeta.append({'key': key, 'label': label, 'source': str(path.relative_to(REPO)) if str(path).startswith(str(REPO)) else 'scratchpad (uncommitted draft)', 'chunks': len(c), 'bytes': len(text)})
+# Merged program PR descriptions (what changed, why, proof, review changes) so the assistant knows every merge.
+def pr_notes():
+    import subprocess
+    try:
+        out = subprocess.run(['gh', 'pr', 'list', '-R', 'Nagavenkatasai7/claude-payments', '--state', 'merged', '--limit', '200',
+                              '--search', 'created:>=2026-09-07', '--json', 'number,title,body,mergedAt,headRefName'],
+                             capture_output=True, text=True, check=True).stdout
+    except Exception as e:
+        print('PR notes skipped:', e); return None
+    prs = [x for x in json.loads(out) if x['number'] >= 237 and not re.match(r'^(dependabot|loop)/', x['headRefName'])]
+    prs.sort(key=lambda x: x['number'])
+    md = '# Merged program PRs\n\n' + '\n\n'.join(f"## PR #{x['number']}: {x['title']} (merged {x['mergedAt'][:10]})\n\n{x['body'] or ''}" for x in prs)
+    return md
+
+notes = pr_notes()
+if notes:
+    text = scrub(notes)
+    c = chunk_md('prs', 'Merged PR descriptions', text); chunks += c
+    docmeta.append({'key': 'prs', 'label': 'Merged PR descriptions', 'source': 'GitHub PR bodies (program PRs #237+)', 'chunks': len(c), 'bytes': len(text)})
+
 bp = blueprint_chunks(); bp = [dict(x, t=scrub(x['t'])) for x in bp]; chunks += bp
 docmeta.append({'key': 'blueprint', 'label': 'SmartRemit Blueprint (architecture data)', 'source': 'docs/architecture/smartremit-blueprint-data.json', 'chunks': len(bp), 'bytes': sum(len(x['t']) for x in bp)})
 
@@ -95,7 +116,9 @@ def put(coll, doc_id, body):
     s = json.dumps(body, ensure_ascii=False)
     assert len(s.encode()) < 240_000, (coll, doc_id, len(s))
     fn = OUT / f'{coll.replace("/", "_")}__{doc_id}.json'; fn.write_text(s)
-    writes.append({'op': 'set', 'collection': coll, 'doc_id': doc_id, 'file_path': str(fn)})
+    w = {'op': 'set', 'collection': coll, 'doc_id': doc_id, 'file_path': str(fn)}
+    if VERSIONS.get(f'{coll}/{doc_id}'): w['if_version'] = VERSIONS[f'{coll}/{doc_id}']
+    writes.append(w)
 
 part, cur, size = 0, [], 0
 for c in chunks:
