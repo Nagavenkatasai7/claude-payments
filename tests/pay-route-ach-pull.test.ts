@@ -113,12 +113,12 @@ vi.mock('@/lib/settlement', async (orig) => {
   const real = await orig<typeof import('@/lib/settlement')>();
   return {
     ...real,
-    beginSettlement: async (...args: Parameters<typeof real.beginSettlement>) => {
+    settleOrHold: async (...args: Parameters<typeof real.settleOrHold>) => {
       captured.order.push('settle');
       const t = await store.getTransfer(args[1].id);
       observed.statusAtSettle = t?.status;
       observed.achTokenRefAtSettle = t?.achTokenRef;
-      return real.beginSettlement(...args);
+      return real.settleOrHold(...args);
     },
   };
 });
@@ -156,6 +156,13 @@ const outboxCount = async () => {
     rows: Array<{ n: number }>;
   };
   return rows.rows[0].n;
+};
+
+const outboxRows = async () => {
+  const rows = (await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`)) as unknown as {
+    rows: Array<{ kind: string; dedupe_key: string | null }>;
+  };
+  return rows.rows;
 };
 
 beforeEach(async () => {
@@ -267,5 +274,20 @@ describe('pay route — B2B ACH-pull (non-custodial: NO funds capture)', () => {
     expect((await store.getTransfer('b6'))?.achTokenRef).toBe(first);
     // Still never captured.
     expect(capture).not.toHaveBeenCalled();
+  });
+
+  it('flagged B2B ach_pull bill payment is HELD, not instructed (no signed dual-leg instruction enqueued)', async () => {
+    await store.saveTransfer(makeB2bTransfer({ id: 'b7', complianceStatus: 'flagged' }));
+    const res = await postAch('b7');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: 'in_review' });
+
+    expect(capture).not.toHaveBeenCalled(); // still non-custodial
+    const after = await store.getTransfer('b7');
+    expect(after?.status).toBe('in_review');
+    expect(after?.paidAt).toBeTruthy();
+    expect(after?.achTokenRef).toMatch(/^ach_[0-9a-f]+$/); // mandate bound, unused until release
+    expect(await outboxRows()).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'stage1:b7' }]);
+    expect(sendText).not.toHaveBeenCalled();
   });
 });

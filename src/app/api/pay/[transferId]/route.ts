@@ -16,11 +16,10 @@ import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError } from '@/lib/log';
-import { beginSettlement } from '@/lib/settlement';
+import { settleOrHold } from '@/lib/settlement';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
-import { completePaymentStage1 } from '@/lib/payment';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
-import { sendText, sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
+import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
@@ -36,8 +35,8 @@ export const maxDuration = 300;
 /**
  * Charge the sender via the funding provider, then persist the charge ref
  * write-once. THE ORDER IS THE INVARIANT (funding-provider.ts contract):
- * OTP → payout validation → compliance → capture → setFundingRef →
- * stage-1 message / beginSettlement. Capture is idempotent by transfer id
+ * OTP → payout validation → status guard + compliance → capture →
+ * setFundingRef → settleOrHold (settle or hold). Capture is idempotent by transfer id
  * (a replay re-presents the same charge, never a second one) and runs
  * OUTSIDE any DB transaction; the durable fundingRef is what makes the
  * capture→settle gap crash-safe (reconcile sweep resumes charged-but-
@@ -50,11 +49,46 @@ async function captureFunding(transfer: Transfer): Promise<void> {
 }
 
 /**
- * Process payment for a resolved transfer, branching on complianceStatus:
- *  - blocked  → hard stop (no charge)
- *  - flagged  → charge via stage 1 (held message), set status in_review, no delivery
+ * F53 refusal gate — the FIRST thing both the existing-transfer branch and
+ * processTransferPayment run, BEFORE any saveTransfer, any capture and any
+ * effect. A sender holding a valid per-transaction OTP must not be able to
+ * (a) re-charge or re-hold a transfer that already moved (paid / delivered /
+ * in_review), or (b) resurrect one staff cancelled / admin rejected. Anything
+ * that is not a live awaiting_payment row reports CURRENT TRUTH in the same
+ * shape the settlement replay branch uses (200 + status) — never a second
+ * capture, a second stage-1 message or a second review entry. Blocked keeps
+ * its 400 (a blocked transfer is never charged). Null ⇒ proceed.
+ */
+function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
+  if (transfer.complianceStatus === 'blocked' || transfer.status === 'blocked') {
+    return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
+  }
+  if (transfer.status !== 'awaiting_payment') {
+    return NextResponse.json({ ok: true, status: transfer.status });
+  }
+  return null;
+}
+
+/**
+ * Process payment for a resolved, LIVE (awaiting_payment) transfer.
+ *
+ * REFUSAL GATES — every one returns BEFORE captureFunding. THE ORDER IS THE
+ * CONTRACT (ruling 7, route.ts half); every gate refuses before any charge:
+ *   1. status guard + blocked (refuseUnlessAwaiting — F53)
+ *   2. rail fail-closed (routed rail must be webhook-driven; fix 12 adds the
+ *      settlement-URL predicate for the routed AND owner rail)
+ * The masked-destination (fix 6), FX-unavailable (fix 9) and send-cap (fix 10)
+ * guards do NOT live here: they are pay-finalize.ts's pre-claim contract
+ * (kyc → masked destination → FX → cap → idem.claim) and run before a draft is
+ * ever minted into the transfer this function receives. Never add a second
+ * copy of any of them to this list.
+ * Then: capture (skipped for partner-pulled B2B) → settleOrHold, which is the
+ * ONE compliance decision (settlement.ts):
  *  - cleared  → beginSettlement: ONE transaction flips paid + enqueues the
  *               stage-1 message and the rail effect (Stage 2c — atomic).
+ *  - flagged  → beginHold: ONE transaction flips in_review (paidAt set) +
+ *               enqueues the held "under review" message; NO rail effect.
+ *               Staff release (admin dashboard) is the only way forward.
  * Both charging branches capture funds FIRST — nothing messages "payment
  * received" or flips status before the charge succeeds.
  *
@@ -62,18 +96,16 @@ async function captureFunding(transfer: Transfer): Promise<void> {
  * captures NO funds — the licensed partner ACH-debits the payer's business bank
  * via the signed settlement instruction (which already carries the opaque
  * `achTokenRef` mandate). The capture step is SKIPPED entirely; the compliance
- * branching + beginSettlement are otherwise identical. The b2c card/bank_transfer
- * path is unchanged. The skip is derived from the TRANSFER (`fundingMethod ===
- * 'ach_pull'`), NOT a caller flag — so the non-custodial invariant holds no
- * matter which call site (existing-transfer or finalized-draft) reaches here.
+ * branching is otherwise identical. The skip is derived from the TRANSFER
+ * (`fundingMethod === 'ach_pull'`), NOT a caller flag — so the non-custodial
+ * invariant holds no matter which call site reaches here.
  */
 async function processTransferPayment(
   store: ReturnType<typeof getStore>,
   transfer: Transfer,
 ): Promise<NextResponse> {
-  if (transfer.complianceStatus === 'blocked') {
-    return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
-  }
+  const refused = refuseUnlessAwaiting(transfer);
+  if (refused) return refused;
 
   // WL2/WL3 + best-rate routing: RAIL-side config (settlement URL/secret/
   // providerType) resolves via the ROUTED settlement partner when set; the
@@ -97,10 +129,10 @@ async function processTransferPayment(
   // settlement endpoint: the same pair quote-time eligibility requires),
   // refuse BEFORE any charge rather than silently falling into the mock
   // branch (a fake delivery the owning partner never opted into) or charging
-  // into an instruct that can only dead-letter. Scoped to awaiting_payment so
-  // a replay POST for already-moved money still reports current truth via the
-  // 'already' branch below instead of a spurious 400.
-  if (transfer.settlementPartnerId && transfer.status === 'awaiting_payment') {
+  // into an instruct that can only dead-letter. (The status guard above
+  // already returned current truth for a replay, so this only ever sees
+  // money that can still be charged.)
+  if (transfer.settlementPartnerId) {
     const railProviderType = railIntegrations.payment.providerType;
     const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
     if (!railWebhookDriven || !railIntegrations.payment.credentials?.settlementUrl) {
@@ -114,16 +146,15 @@ async function processTransferPayment(
   }
 
   // ── FUNDS CAPTURE — after every refusal gate, before any effect ──────────
-  // The blocked 400 and the routed-rail fail-closed 400 above both return
-  // BEFORE this point (those transfers are never charged). A capture failure
-  // mutates nothing: no status change, no charge recorded, no message — a
-  // clean 402 and the link stays retryable. Idempotent capture + write-once
-  // setFundingRef make a replay POST (the 'already' branch below) harmless.
+  // Every gate above returns BEFORE this point (those transfers are never
+  // charged). A capture failure mutates nothing: no status change, no charge
+  // recorded, no message — a clean 402 and the link stays retryable.
+  // Idempotent capture + write-once setFundingRef make a crash-retry harmless
+  // (and the reconcile sweep resumes a charged-but-unsettled row).
   //
   // NON-CUSTODIAL B2B pull (ach_pull / bank_pull): SmartRemit captures NOTHING —
   // the partner pulls via the signed instruction. Skip the funding provider
-  // entirely (derived from the transfer, so this holds for EVERY call site) and
-  // proceed straight to the compliance branch + beginSettlement.
+  // entirely (derived from the transfer, so this holds for EVERY call site).
   if (!isPartnerPulled(transfer.fundingMethod)) {
     try {
       await captureFunding(transfer);
@@ -133,41 +164,51 @@ async function processTransferPayment(
     }
   }
 
-  if (transfer.complianceStatus === 'flagged') {
-    // Funds captured above; hold for manual review — do NOT deliver.
-    const { transfer: paid, senderMessages } = await completePaymentStage1(
-      store, transfer.id, { held: true },
-    );
-    for (const msg of senderMessages) await sendText(paid.phone, msg, waCreds);
-
-    // Re-read after stage1 write (paidAt is now set) then update to in_review.
-    const afterPay = await store.getTransfer(transfer.id);
-    if (afterPay) {
-      await store.saveTransfer({ ...afterPay, status: 'in_review' });
+  // The ONE compliance decision: settle (cleared) or hold (flagged) — each an
+  // atomic transaction whose effects are dedupe-keyed outbox rows. settleOrHold
+  // decides the rail purely from the PASSED integrations — hand it the RAIL
+  // partner's config, message with the OWNER's creds.
+  const result = await settleOrHold(getDb(), transfer, railIntegrations, waCreds);
+  pokeWorker(); // fast-path drain (the stage-1 / held message is READY now)
+  switch (result.kind) {
+    case 'held':
+      return NextResponse.json({ ok: true, status: 'in_review' });
+    case 'already': {
+      // Double submit / replay — the first settlement won; report current truth.
+      const current = await store.getTransfer(transfer.id);
+      // A charged row that is NOT awaiting_payment and NOT paid/in_review is the
+      // capture↔cancel race (captureFunding = provider.capture THEN
+      // setFundingRef, so a staff cancel landing after the status guard above
+      // leaves a cancelled row that WAS charged — fix 5's planned
+      // `funding_ref IS NULL` cancel guard cannot see that window either). Say
+      // so loudly — the reconcile sweep's cancelcharged:<id> alert is the
+      // durable signal; this log is the fast one.
+      if (current?.fundingRef && current.status === 'cancelled' && (current.refundStatus ?? 'none') === 'none') {
+        logError('pay.charged-but-cancelled', new Error('customer charged on a cancelled transfer'), { transferId: transfer.id });
+      }
+      return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
     }
-    return NextResponse.json({ ok: true, status: 'in_review' });
+    case 'refused':
+      // Unreachable after refuseUnlessAwaiting (kept exhaustive on purpose: a
+      // refusal must never read as success). The charge, if any, is visible
+      // on the ledger via fundingRef; the reconcile sweep raises the
+      // fundblocked:<id> alert, whose remedy is a change-ticket ledger edit
+      // (no dashboard action applies to a charged blocked row).
+      logError('pay.settle-refused', new Error('settlement refused by compliance after capture'), {
+        transferId: transfer.id,
+      });
+      return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
+    case 'started':
+      if (!result.webhookDriven) {
+        // Mock rail: the delivered confirmation is a DELAYED outbox row
+        // (DELIVERY_DELAY_MS) that the immediate poke above can't see — schedule
+        // a best-effort second poke for just after the delay elapses so the
+        // customer isn't waiting on the 5-minute heartbeat. Real rails are
+        // webhook-driven (the callback pokes).
+        pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);
+      }
+      return NextResponse.json({ ok: true, status: result.webhookDriven ? 'processing' : 'paid' });
   }
-
-  // cleared: the atomic settlement transaction (status flip + stage-1 message +
-  // rail effect commit together; every effect dedupe-keyed; worker delivers).
-  // beginSettlement decides the rail purely from the PASSED integrations —
-  // hand it the RAIL partner's config, message with the OWNER's creds.
-  const result = await beginSettlement(getDb(), transfer, railIntegrations, waCreds);
-  pokeWorker(); // fast-path drain (stage-1 "payment received" is READY now)
-  if (result.kind === 'already') {
-    // Double submit / replay — the first settlement won; report current truth.
-    const current = await store.getTransfer(transfer.id);
-    return NextResponse.json({ ok: true, status: current?.status ?? 'paid' });
-  }
-  if (!result.webhookDriven) {
-    // Mock rail: the delivered confirmation is a DELAYED outbox row
-    // (DELIVERY_DELAY_MS) that the immediate poke above can't see — schedule a
-    // best-effort second poke for just after the delay elapses so the customer
-    // isn't waiting on the 5-minute heartbeat. Real rails are webhook-driven
-    // (the callback pokes); replays ('already') changed nothing to drain.
-    pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);
-  }
-  return NextResponse.json({ ok: true, status: result.webhookDriven ? 'processing' : 'paid' });
 }
 
 const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
@@ -308,6 +349,12 @@ export async function POST(
     const transfer = await store.getTransfer(transferId);
 
     if (transfer) {
+      // F53: refuse BEFORE the KYC gate and before any saveTransfer below can
+      // write bank details / an ACH mandate token onto a row that already
+      // moved or was cancelled. Same gate runs again inside
+      // processTransferPayment (chokepoint for the draft branch too).
+      const refused = refuseUnlessAwaiting(transfer);
+      if (refused) return refused;
       // ── Existing transfer branch ──────────────────────────────────────
       // Phase 3 verify-before-send gate — covers scheduled/cron transfers paid
       // on this page. Refuse BEFORE any charge if the owner isn't verified.
@@ -341,9 +388,9 @@ export async function POST(
         // Bind the opaque mandate token. Idempotent: a replay POST whose transfer
         // already carries an achTokenRef keeps the FIRST token (we only mint when
         // absent), so a crash-then-retry re-settles with the same mandate. The
-        // transfer stays awaiting_payment until beginSettlement commits, so a
+        // transfer stays awaiting_payment until settleOrHold commits, so a
         // crash in that narrow window is self-healed by the payer re-submitting
-        // (achTokenRef already bound ⇒ beginSettlement resumes cleanly).
+        // (achTokenRef already bound ⇒ settleOrHold resumes cleanly).
         const withToken: Transfer =
           (transfer.achTokenRef ?? '').trim() !== ''
             ? transfer
