@@ -183,6 +183,29 @@ describe('updatePartnerAction', () => {
   });
 });
 
+describe('updatePartnerAction — KYC posture is platform-governed (owner decision 2026-09-16)', () => {
+  it("a PARTNER-scoped admin cannot flip their own kycMode / requireKycBeforeSend (it would bypass the platform-staff release gate); branding still saves", async () => {
+    await ps.savePartner({
+      id: 'p4', name: 'Cee', countries: ['US'], status: 'active',
+      kycMode: 'ours', requireKycBeforeSend: true,
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    currentStaff = { username: 'padmin', role: 'admin', partnerId: 'p4' };
+    const fd = new FormData();
+    fd.set('id', 'p4');
+    fd.set('name', 'Cee');
+    fd.append('countries', 'US');
+    fd.set('displayName', 'Cee Pay');
+    fd.set('kycMode', 'delegated');
+    // requireKycBeforeSend omitted (would read as "off")
+    await updatePartnerAction(fd);
+    const got = await ps.getPartner('p4');
+    expect(got?.displayName).toBe('Cee Pay');
+    expect(got?.kycMode).toBe('ours');
+    expect(got?.requireKycBeforeSend).toBe(true);
+  });
+});
+
 describe('setPartnerStatusAction', () => {
   it('flips active to suspended', async () => {
     await ps.savePartner({
