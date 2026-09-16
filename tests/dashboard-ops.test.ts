@@ -410,7 +410,7 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
       whatsapp: {},
     });
 
-  it('releaseTransfer on a webhook-driven rail: in_review → paid, complianceStatus stays flagged, paidAt kept, and instruct:<id> is ENQUEUED (the rail is told to pay out)', async () => {
+  it('releaseTransfer on a webhook-driven rail: in_review → paid, complianceStatus stays flagged, paidAt restarts at release, and instruct:<id> is ENQUEUED (the rail is told to pay out)', async () => {
     await simulatorRail();
     const store = createStore(fakeRedis(), db);
     const t = makeTransfer({ id: 'rel_hold', complianceStatus: 'flagged', fundingRef: 'mockfund-rel_hold' });
@@ -423,7 +423,7 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     const loaded = await store.getTransfer('rel_hold');
     expect(loaded?.status).toBe('paid');                 // NOT delivered: delivery is the rail's callback, as for cleared money
     expect(loaded?.deliveredAt).toBeUndefined();
-    expect(loaded?.paidAt).toBe(held?.paidAt);
+    expect(Date.parse(loaded!.paidAt!)).toBeGreaterThanOrEqual(Date.parse(held!.paidAt!)); // paid_at = release time
     expect(loaded?.complianceStatus).toBe('flagged');    // release never rewrites compliance
     expect(await outboxRows()).toEqual([
       { kind: 'whatsapp.text', dedupe_key: 'stage1:rel_hold' },

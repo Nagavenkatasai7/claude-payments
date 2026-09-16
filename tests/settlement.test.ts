@@ -158,11 +158,15 @@ describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     expect(await repo.markPaidIfInReview('st_t1')).toBeNull(); // awaiting_payment is NOT releasable
     expect((await repo.markInReviewIfAwaiting('st_t1'))?.status).toBe('in_review');
-    const paidAtHeld = (await store.getTransfer('st_t1'))?.paidAt;
+    // Backdate the hold an hour: the release must RESTART the paid_at clock
+    // (findStuckPaid keys on it — a kept hold-time paid_at would make the next
+    // sweep re-instruct a freshly released transfer).
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '1 hour' WHERE id = 'st_t1'`);
+    const paidAtHeld = (await store.getTransfer('st_t1'))!.paidAt!;
     const released = await repo.markPaidIfInReview('st_t1');
     expect(released?.status).toBe('paid');
     expect(released?.complianceStatus).toBe('flagged'); // never rewritten
-    expect(released?.paidAt).toBe(paidAtHeld);          // COALESCE — the charge time is kept
+    expect(Date.parse(released!.paidAt!)).toBeGreaterThan(Date.parse(paidAtHeld) + 30 * 60_000); // paid_at = release time
     expect(await repo.markPaidIfInReview('st_t1')).toBeNull(); // idempotent
     await store.saveTransfer({ ...fixture(), id: 'st_c1', status: 'cancelled' });
     expect(await repo.markPaidIfInReview('st_c1')).toBeNull();
@@ -279,16 +283,17 @@ describe('settleOrHold — the ONE decision every settlement caller goes through
 });
 
 describe('releaseHold — the staff release IS a settlement (in_review → paid + the rail effect, one transaction)', () => {
-  it('webhook-driven rail: flips in_review → paid, keeps complianceStatus flagged + paidAt, enqueues instruct:<id> and NO second stage-1 message', async () => {
+  it('webhook-driven rail: flips in_review → paid, keeps complianceStatus flagged, restarts paidAt at the release, enqueues instruct:<id> and NO second stage-1 message', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '1 hour' WHERE id = 'st_t1'`);
     const held = (await store.getTransfer('st_t1'))!;
     const r = await releaseHold(db, held, SIMULATOR);
     expect(r).toEqual({ kind: 'released', webhookDriven: true });
     const after = await store.getTransfer('st_t1');
     expect(after?.status).toBe('paid');
     expect(after?.complianceStatus).toBe('flagged'); // release never rewrites compliance
-    expect(after?.paidAt).toBe(held.paidAt);
+    expect(Date.parse(after!.paidAt!)).toBeGreaterThan(Date.parse(held.paidAt!) + 30 * 60_000); // clock restarts at release
     expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['stage1:st_t1', 'instruct:st_t1']); // stage1 deduped, the rail IS told
   });
 

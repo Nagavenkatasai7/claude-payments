@@ -4,6 +4,7 @@ import { createStore } from '@/lib/store';
 import { reconcileSweep, getOpsSnapshot, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { beginHold, releaseHold } from '@/lib/settlement';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -70,6 +71,21 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     expect(second.stuckPaid).toBe(1);
     expect(second.reinstructed).toBe(0); // dedupe blocked the duplicate
     expect(await outboxRows()).toHaveLength(2);
+  });
+
+  it('a RELEASED hour-old compliance hold is NOT stuck: the first sweep after release re-instructs nothing and raises no recon alert', async () => {
+    const t = fixture({ id: 'rc_rel', status: 'awaiting_payment', complianceStatus: 'flagged', paidAt: undefined });
+    await store.saveTransfer(t);
+    expect(await beginHold(db, t)).toEqual({ kind: 'held' });
+    // The hold began an hour ago (beginHold set paid_at then).
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '1 hour' WHERE id = 'rc_rel'`);
+    const integrations = await createIntegrationsRepo(db, provider).getIntegrations('acme');
+    expect(await releaseHold(db, (await store.getTransfer('rc_rel'))!, integrations)).toEqual({ kind: 'released', webhookDriven: true });
+
+    const r = await reconcileSweep(db);
+    expect(r.reinstructed).toBe(0);
+    expect(r.stuckPaid).toBe(0);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['stage1:rc_rel', 'instruct:rc_rel']);
   });
 
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {

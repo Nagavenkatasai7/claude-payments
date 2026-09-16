@@ -338,11 +338,18 @@ export function createTransferRepo(
      * same transaction — a release is a settlement, never a bare flip. Null ⇒
      * not in_review (never held / already released / rejected) or blocked —
      * an idempotent no-op that never resurrects a cancelled row.
+     *
+     * paid_at is RESET to now(): for a released hold paid_at means "released —
+     * settlement started", not "charged" (beginHold stamped the hold start).
+     * findStuckPaid keys its 15-minute clock on paid_at, so keeping the
+     * hold-time value would make the first sweep after releasing any hold
+     * older than 15 min enqueue reinstruct:<id> next to instruct:<id> and raise
+     * a false recon: alert. No migration: transfers has no updated_at column.
      */
     async markPaidIfInReview(id: string): Promise<Transfer | null> {
       const rows = await db
         .update(transfers)
-        .set({ status: 'paid', paidAt: sql`COALESCE(${transfers.paidAt}, now())` })
+        .set({ status: 'paid', paidAt: sql`now()` })
         .where(and(
           eq(transfers.id, id),
           eq(transfers.status, 'in_review'),
