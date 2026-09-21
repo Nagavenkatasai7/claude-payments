@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { NextRequest } from 'next/server';
-import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
@@ -44,6 +44,13 @@ describe('POST /api/pay/[transferId] — fx_unavailable (Task 9)', () => {
     const res = await post();
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, error: FX_UNAVAILABLE_MESSAGE, reason: 'fx_unavailable' });
+  });
+
+  it('a stale stored quote → the same 503 + reason, but the EXPIRED-quote message (retrying can never succeed)', async () => {
+    finalizeDraftPayment.mockResolvedValueOnce({ ok: false, error: 'fx_unavailable', quoteExpired: true });
+    const res = await post();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, error: FX_QUOTE_EXPIRED_MESSAGE, reason: 'fx_unavailable' });
   });
 
   it('the other refusal arms keep their 400 (regression)', async () => {

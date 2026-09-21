@@ -37,7 +37,22 @@ export interface FinalizeStores {
 
 export type FinalizeResult =
   | { ok: true; transferId: string }
-  | { ok: false; error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'; transferId?: string };
+  | {
+      ok: false;
+      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable';
+      transferId?: string;
+      // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
+      // quote aged past the ceiling — a retry can never succeed (the customer
+      // needs a fresh quote), so the route answers the expired-quote message.
+      quoteExpired?: true;
+    };
+
+/** Task 9: a RateUnavailableError → the fx_unavailable arm (same shape pre- and post-claim). */
+function fxRefused(err: RateUnavailableError): FinalizeResult {
+  return err.reason === 'stale_quote'
+    ? { ok: false, error: 'fx_unavailable', quoteExpired: true }
+    : { ok: false, error: 'fx_unavailable' };
+}
 
 /**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
@@ -121,7 +136,7 @@ export async function finalizeDraftPayment(
         await getDestinationRates(draft.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY);
       }
     } catch (err) {
-      if (err instanceof RateUnavailableError) return { ok: false, error: 'fx_unavailable' };
+      if (err instanceof RateUnavailableError) return fxRefused(err);
       throw err;
     }
   }
@@ -181,42 +196,55 @@ export async function finalizeDraftPayment(
   // achTokenRef is bound by the rail at pay/settlement time (U2), never here. ──
   const isB2bDraft = draft.transferType === 'b2b';
 
-  const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
-    id: reservedId, // the claimed id — crash-replay re-mints the SAME row
-    phone: draft.senderPhone,
-    recipientName: draft.recipient.name,
-    recipientPhone: draft.recipient.recipientPhone,
-    payoutMethod,
-    payoutDestination,
-    fundingMethod: draft.fundingMethod,
-    amountSource: draft.amountSource,
-    sourceCurrency: draft.sourceCurrency,
-    destinationCountry: draft.destinationCountry,
-    destinationCurrency: draft.destinationCurrency,
-    partnerId,
-    recipientLegalName: draft.recipientLegalName,
-    relationship: draft.relationship,
-    purpose: draft.purpose,
-    sourceOfFunds: draft.sourceOfFunds,
-    occupation: draft.occupation,
-    // For B2B, screen the PAYER business name (else the individual sender name).
-    senderName: (isB2bDraft ? draft.senderBusinessName : undefined) ?? customer.fullName,
-    senderKycStatus: customer.kycStatus,
-    requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
-    quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
-    // Best-rate routing: the winning partner's rail settles this transfer —
-    // but ONLY at the rate it offered (the draft's quote). The legacy fallback
-    // above re-quotes at mid, so it must drop the route too (never a
-    // partner-routed transfer at a platform rate).
-    settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
-    // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
-    transferType: draft.transferType,
-    senderEntityType: draft.senderEntityType,
-    recipientEntityType: draft.recipientEntityType,
-    senderBusinessName: draft.senderBusinessName,
-    recipientBusinessName: draft.recipientBusinessName,
-    invoiceId: draft.invoiceId,
-  });
+  // Task 9 (review): the FX gate above ran moments ago, but the stored quote's
+  // rate — or a legacy re-quote's live rate — can still cross the 60-min
+  // ceiling between the gate and this mint. createTransfer refuses BEFORE any
+  // write, so map it exactly like the pre-claim gate: the claimed id stays
+  // bound-but-UNMINTED and the draft is not consumed, so a retry of the same
+  // link falls through the claim's replay branch and mints THAT id (the
+  // existing crash-replay shape). Never the route's generic 400.
+  let transfer: Awaited<ReturnType<typeof createTransfer>>;
+  try {
+    transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
+      id: reservedId, // the claimed id — crash-replay re-mints the SAME row
+      phone: draft.senderPhone,
+      recipientName: draft.recipient.name,
+      recipientPhone: draft.recipient.recipientPhone,
+      payoutMethod,
+      payoutDestination,
+      fundingMethod: draft.fundingMethod,
+      amountSource: draft.amountSource,
+      sourceCurrency: draft.sourceCurrency,
+      destinationCountry: draft.destinationCountry,
+      destinationCurrency: draft.destinationCurrency,
+      partnerId,
+      recipientLegalName: draft.recipientLegalName,
+      relationship: draft.relationship,
+      purpose: draft.purpose,
+      sourceOfFunds: draft.sourceOfFunds,
+      occupation: draft.occupation,
+      // For B2B, screen the PAYER business name (else the individual sender name).
+      senderName: (isB2bDraft ? draft.senderBusinessName : undefined) ?? customer.fullName,
+      senderKycStatus: customer.kycStatus,
+      requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
+      quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
+      // Best-rate routing: the winning partner's rail settles this transfer —
+      // but ONLY at the rate it offered (the draft's quote). The legacy fallback
+      // above re-quotes at mid, so it must drop the route too (never a
+      // partner-routed transfer at a platform rate).
+      settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
+      // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
+      transferType: draft.transferType,
+      senderEntityType: draft.senderEntityType,
+      recipientEntityType: draft.recipientEntityType,
+      senderBusinessName: draft.senderBusinessName,
+      recipientBusinessName: draft.recipientBusinessName,
+      invoiceId: draft.invoiceId,
+    });
+  } catch (err) {
+    if (err instanceof RateUnavailableError) return fxRefused(err);
+    throw err;
+  }
 
   // Consume AFTER the mint: the transfer now exists, so losing the draft here
   // costs nothing (the claim replays it); losing the transfer there was fatal.
