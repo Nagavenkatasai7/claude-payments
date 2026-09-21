@@ -26,7 +26,7 @@ Merge order is fixed: **9 → 6 → 5 → 11** (rulings 13, 14, 16, 17, 20, 21 o
 - **Owner production steps (the only ones Claude cannot run):**
   - Tasks 9, 6, 5: none beyond the post-merge smoke; Claude verifies behaviour in Chrome against smartremit.ai.
   - Task 6, before merge: a read-only count of partner-API transfers minted with a `draft:`/`b2binvoice:` key (the only rows the new edit guard cannot tell apart). Expect 0. After merge: the dry-run of the schedule-blanking script, then `--apply` only if you approve the count.
-  - Task 11: after the deploy is Ready, **wait at least 5 minutes** (old lambdas drain their in-flight rows), check Vercel Skew Protection, confirm `scripts/outbox-status.ts` shows no pending WhatsApp rows, then `/migrate-prod` for `0016` (treated as destructive: it rewrites payloads). The task section has the exact commands and the verification query.
+  - Task 11: after the rolling release has reached 100% (smoke's "Wait for the rolling release to reach 100%" step passed, or `/api/version?vcrrForceStable=true` reports the merge SHA), **wait at least 5 more minutes** (old lambdas drain their in-flight rows), check Vercel Skew Protection, confirm `scripts/outbox-status.ts` shows no pending WhatsApp rows, then `/migrate-prod` for `0016` (treated as destructive: it rewrites payloads). The task section has the exact commands and the verification query.
 
 ## Review round (2026-09-21)
 
@@ -6911,7 +6911,7 @@ Sites 1 and 2 are reached from five settlement callers: `src/app/api/pay/[transf
 3. It redacts legacy cleartext invite links **only** on `done`/`dead` rows. Redacting an unsent invite would email "[redacted…]" to the applicant.
 
 What a too-early run leaves behind is visible in the counts-only `SECRETS AT REST` section of `scripts/outbox-status.ts`. So the runbook has two layers of protection, with the migration's own conditions as the fallback:
-- **Timing** (Steps 11.3-11.4): wait at least 5 minutes after the deploy is Ready (the pay route's `maxDuration` is 300 s), and confirm Skew Protection is off or its window has passed.
+- **Timing** (Steps 11.3-11.4): wait until the rolling release has reached 100%, then at least 5 more minutes (the pay route's `maxDuration` is 300 s), and confirm Skew Protection is off or its window has passed.
 - **Gate** (Step 11.5): before `/migrate-prod`, every row that still holds a secret must be `done` or `dead`.
 
 After 0016 is applied, the shim is unreachable and Task 8 deletes it.
@@ -9406,7 +9406,7 @@ Ruling 19 and the Migration Gate apply: this is the one migration deliberately r
 
 2. Run `/post-merge-check` with the merged PR's number. Its migration gate says "run /migrate-prod NOW". For **this** merge, hold it until step 6. 0016 changes no column, so nothing selects a missing column while it is pending, and the shim drains any legacy row correctly. Let the skill watch `smoke.yml` for the merge SHA to green.
 
-3. **Old-code drain time.** Wait until the production deployment of the merge SHA is Ready (the smoke run for the SHA has started), **plus at least 5 minutes**. This is the longest function lifetime:
+3. **Old-code drain time.** Wait until the rolling release of the merge SHA has reached 100%: the smoke run's "Wait for the rolling release to reach 100%" step passed, or `curl -s 'https://smartremit.ai/api/version?vcrrForceStable=true'` reports the merge SHA's first 7 chars. Until then the previous deployment still takes new requests (90% of traffic for the first 5 minutes). Then wait **at least 5 more minutes**. This is the longest function lifetime:
    - `src/app/api/pay/[transferId]/route.ts:33` — `maxDuration = 300`;
    - `src/app/api/cron/route.ts:21` — `maxDuration = 300`;
    - `src/app/api/worker/route.ts:29` — `60`.
