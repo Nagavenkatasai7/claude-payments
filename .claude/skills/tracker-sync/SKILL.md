@@ -13,13 +13,19 @@ Ledger: https://claude.ai/artifact/7wD2psZ6fndztDjwZC3oNZ (private to the owner)
 - Never mark `done` from a PR title or description alone. Never lower a `done` without writing an `incident` event that says why.
 - No secrets, tokens or unmasked phone numbers/names in any document.
 
+**The ledger is the program's system of record (owner direction 2026-09-21).**
+- Record every action in `events`, agent runs included. When you start an agent, write one row. When its result comes back, write another with what it found or changed.
+- Record every owner decision and every approval. Approvals are given in chat and recorded at once: who, when, and which plan version or PR.
+- Every plan lives in `plans` (schema: `scripts/tracker/PLAN-SCHEMA.md`) and is updated whenever the plan changes.
+- Write in the same turn as the action. Never batch it up for later.
+
 **Always run the snapshot (step 2), even after a hand-written fix or event update.** Only the snapshot refreshes `meta/state` (main SHA, CI, smoke, deploy); skipping it leaves the status strip and the "Needs attention" list stale (2026-09-16: a 'smoke pending' incident stayed up for 3 hours after it went green).
 
 ## 1. Read the ledger
 ArtifactData, url = the ledger:
-- `list` collection `prs` (limit 200), `fixes` (limit 100), both with `out_dir: <scratch>/ledger-db`
+- `list` collection `prs` (limit 200), `fixes` (limit 100), `plans` (limit 50), each with `out_dir: <scratch>/ledger-db`
 - `get` meta/state with the same `out_dir`
-- The results list each document's `version`. Write them to `<scratch>/ledger-db/versions.json` as `{"prs/pr-237": 2, "fixes/fix-04": 1, "meta/state": 7}`. The database refuses to overwrite an existing document without its version.
+- The results list each document's `version` (the saved files do NOT contain it; copy it from the listing). Write them to `<scratch>/ledger-db/versions.json` as `{"prs/pr-237": 2, "fixes/fix-04": 1, "meta/state": 7}`. The database refuses to overwrite an existing document without its version.
 
 ## 2. Snapshot GitHub
 ```
@@ -35,6 +41,21 @@ It prints `{mainSha, ciMain, smokeMain, prWrites, events, fixProposals, batches}
 - Backlog items (`backlog/<key>`): set `status: "done"` when closed, with a one-line `detail`.
 
 If a batch fails with `version_mismatch`, someone wrote in between: re-read that document, rebuild, resend. Never drop `if_version` to force it.
+
+## 3a. Journal row shape (`events/<yyyymmddThhmmss>-<slug>`)
+`{at, kind, actor, title, detail, model?, refs?, result?}`
+- `kind`: decision | approval | agent | plan | review | pr | merge | deploy | migration | owner-step | verify | milestone | incident | security.
+- `actor`: owner | claude | agent | github | ci.
+- `model`: for agent rows, e.g. "Opus 5".
+- `refs`: `{fix: [n], pr: [n], plan: "p1-w2", sha: "abc1234"}`.
+- `result`: ok | blocked | failed | running | info.
+- Titles are plain and specific ("Fix 10 re-check: 1 gap left"). No secrets, phone numbers or names.
+
+## 3b. Plans (`plans/<id>`: p0, p1-w1…p1-wN, p2, p3, p4)
+- When a plan is written or revised, update its doc (`planVersion` +1, `updatedAt`, items) and write a `plan` event.
+- On approval: set `approval: {state: "approved", at, by: "owner", ref}` and `status: "approved"`, and write an `approval` event.
+- When a fix in a plan opens a PR, merges or is verified, update that item's `status` together with the fix doc.
+- Working copies: `~/dev/program-ledger/plans/*.json`. Every write is pinned with `if_version`.
 
 ## 4. Library refresh (only with `--corpus`, or when a doc it indexes changed: the audit, security results, spec, phase plans, verification records, COMPONENTS/architecture docs, blueprint data)
 ```
