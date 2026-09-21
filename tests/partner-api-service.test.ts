@@ -598,3 +598,20 @@ describe('partner-api-service: FX unavailable is a 503 (retryable), never a 400 
     expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-ok', txBody())).toMatchObject({ ok: true, status: 200 });
   });
 });
+
+describe('partner-api-service: createQuote validates destination_currency at the edge (Task 9 security review)', () => {
+  it('an unsupported destination_currency is a 400 and never reaches the FX provider', async () => {
+    const { deps } = await harness();
+    const r = await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: 'EUR&to=JPY' });
+    expect(r).toMatchObject({ ok: false, status: 400 });
+    const urls = vi.mocked(global.fetch).mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes('EUR'))).toBe(false);
+  });
+
+  it('a supported destination_currency still quotes', async () => {
+    const { deps } = await harness();
+    expect(await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: 'GBP' })).toMatchObject({
+      ok: true, status: 200,
+    });
+  });
+});

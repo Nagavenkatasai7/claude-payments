@@ -4,6 +4,7 @@ import {
   FALLBACK_FX_RATE, FALLBACK_FX_RATES, FX_MAX_AGE_MS, AED_PER_USD,
   FRANKFURTER_BASE_URL, FX_UNAVAILABLE_MESSAGE, RateUnavailableError,
 } from '@/lib/rate';
+import type { CurrencyCode } from '@/lib/types';
 
 // Task 9 (fail-closed FX). Fake timers only where a test ages the cache; every
 // advance is RELATIVE (never a hard-coded date — CLAUDE.md fixture rule).
@@ -236,5 +237,36 @@ describe('FALLBACK_FX_RATES — display-only, structurally unquotable', () => {
     for (const r of Object.values(FALLBACK_FX_RATES)) expect(r.source).toBe('fallback');
     expect(FALLBACK_FX_RATE).toBe(FALLBACK_FX_RATES.USD.toInr);
     expect(FALLBACK_FX_RATE).toBe(95.82); // was 85 (−11%)
+  });
+});
+
+describe('getFxRates — only the typed currency table is ever dialed (Task 9 security review)', () => {
+  it('refuses a code outside CurrencyCode without dialing the provider', async () => {
+    mockFetch(95.82);
+    await expect(getFxRates('EUR' as CurrencyCode)).rejects.toMatchObject({
+      name: 'RateUnavailableError', reason: 'unsupported_currency', message: FX_UNAVAILABLE_MESSAGE,
+    });
+    await expect(getFxRates('USD&to=EUR' as CurrencyCode)).rejects.toBeInstanceOf(RateUnavailableError);
+    await expect(getDestinationRates('aed' as CurrencyCode)).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+  });
+});
+
+describe('getFxRates — asOf is a validated ISO date (it is printed on the public landing page)', () => {
+  it('drops a provider date that is not YYYY-MM-DD; the rate itself is still live', async () => {
+    mockFetch(95.82, 'Rates <b>guaranteed</b> forever');
+    const r = await getFxRates('USD');
+    expect(r).toMatchObject({ toInr: 95.82, source: 'live' });
+    expect(r.asOf).toBeUndefined();
+  });
+
+  it('drops a non-ISO asOf read back from the fleet L2 too', async () => {
+    const l2 = fakeL2();
+    setFxL2ForTests(l2);
+    l2.store.set('fx:USD', JSON.stringify({ toInr: 95.5, toUsd: 1, fetchedAt: Date.now(), source: 'live', asOf: 'x'.repeat(500) }));
+    mockFetchFailure();
+    const r = await getFxRates('USD');
+    expect(r).toMatchObject({ toInr: 95.5, source: 'live' });
+    expect(r.asOf).toBeUndefined();
   });
 });

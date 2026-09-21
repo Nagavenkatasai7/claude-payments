@@ -171,6 +171,11 @@ export async function createQuote(
   const destCountryReq = str(body.destination_country);
   const destByCountry = destCountryReq ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryReq.toUpperCase() as CountryCode] : undefined;
   const destinationCurrency = (destByCountry || str(body.destination_currency) || 'INR') as CurrencyCode;
+  // Validated at the edge (Task 9 security review): an unsupported code is the
+  // caller's error (400), never an FX-provider call or a misleading 503.
+  if (!SUPPORTED_CURRENCIES.has(destinationCurrency)) {
+    return err(400, `destination_currency must be one of: ${SUPPORTED_CURRENCIES_LIST}.`);
+  }
   try {
     const rates = await getFxRates(sourceCurrency);
     const destRates = await getDestinationRates(destinationCurrency);

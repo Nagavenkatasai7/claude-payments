@@ -62,7 +62,8 @@ export type FxUnavailableReason =
   | 'malformed_rates'
   | 'stale'
   | 'fallback_table'
-  | 'stale_quote';
+  | 'stale_quote'
+  | 'unsupported_currency';
 
 /**
  * No rate of acceptable provenance and age exists. Deliberately NOT a
@@ -143,6 +144,11 @@ async function l2Client(): Promise<FxL2 | null> {
 const isPositiveFinite = (n: unknown): n is number =>
   typeof n === 'number' && Number.isFinite(n) && n > 0;
 
+/** The provider fixing date is printed on the public landing page: keep it
+ *  only when it is a plain YYYY-MM-DD (never free text from the wire / L2). */
+const isoDateOrUndefined = (d: unknown): string | undefined =>
+  typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : undefined;
+
 async function l2Get(source: CurrencyCode): Promise<StampedFxRates | null> {
   try {
     const l2 = await l2Client();
@@ -159,7 +165,7 @@ async function l2Get(source: CurrencyCode): Promise<StampedFxRates | null> {
       toUsd: parsed.toUsd,
       fetchedAt: parsed.fetchedAt,
       source: 'live',
-      asOf: typeof parsed.asOf === 'string' ? parsed.asOf : undefined,
+      asOf: isoDateOrUndefined(parsed.asOf),
     };
   } catch {
     return null; // fail-open: no L2 just means one more upstream call
@@ -225,7 +231,7 @@ async function fetchFromProvider(
       toUsd: usd,
       fetchedAt: now,
       source: 'live',
-      asOf: typeof data.date === 'string' ? data.date : undefined,
+      asOf: isoDateOrUndefined(data.date),
     };
   } catch (err) {
     return err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'fetch_failed';
@@ -233,6 +239,13 @@ async function fetchFromProvider(
 }
 
 export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
+  // Only the typed corridor table is ever dialed (Task 9 security review): a
+  // code from an unvalidated caller never reaches the provider URL, the
+  // per-instance maps or the fleet L2 — under fail-closed FX, an upstream rate
+  // limit tripped by junk codes would refuse every quote platform-wide.
+  if (!Object.prototype.hasOwnProperty.call(FALLBACK_FX_RATES, source)) {
+    throw new RateUnavailableError('unsupported_currency', source);
+  }
   if (source === 'AED') {
     const usd = await getFxRates('USD');
     // Derived, never fresher than its USD leg (same fetchedAt / source / asOf).
