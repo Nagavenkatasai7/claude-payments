@@ -46,6 +46,22 @@ describe('parsePersonaEvent', () => {
     expect(e?.referenceId).toBe('15551230000');
   });
 
+  it('flags a PEP match with pepMatched=true [regression]', () => {
+    const pep = {
+      data: {
+        type: 'event', id: 'evt_pep',
+        attributes: {
+          name: 'report/pep.matched', 'created-at': '2026-06-02T21:00:00Z',
+          payload: { data: { id: 'rpt_1', attributes: { 'reference-id': '15551230000' } } },
+        },
+      },
+    };
+    const e = parsePersonaEvent(pep);
+    expect(e?.name).toBe('report/pep.matched');
+    expect(e?.pepMatched).toBe(true);
+    expect(e?.referenceId).toBe('15551230000');
+  });
+
   it('returns null for an unparseable body', () => {
     expect(parsePersonaEvent({ nonsense: true })).toBeNull();
     expect(parsePersonaEvent(null)).toBeNull();

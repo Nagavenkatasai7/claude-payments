@@ -42,6 +42,19 @@ describe('normalizePhone', () => {
   });
 });
 
+describe('normalizePhone — never-throws invariant (regression)', () => {
+  it('returns "" when toString() throws on the input', () => {
+    const evil = { toString() { throw new TypeError('boom'); } };
+    expect(() => normalizePhone(evil)).not.toThrow();
+    expect(normalizePhone(evil)).toBe('');
+  });
+  it('returns "" for a null-prototype object (no toString method at all)', () => {
+    const noProto = Object.create(null) as unknown;
+    expect(() => normalizePhone(noProto)).not.toThrow();
+    expect(normalizePhone(noProto)).toBe('');
+  });
+});
+
 describe('isValidPhone', () => {
   it('returns true for a 10-digit number', () => {
     expect(isValidPhone('9876543210')).toBe(true);

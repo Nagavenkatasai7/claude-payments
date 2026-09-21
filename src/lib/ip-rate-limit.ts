@@ -25,7 +25,7 @@ export async function checkIpRateLimit(
   ip: string,
   opts: { limit: number; windowSec?: number; now?: number },
 ): Promise<IpRateLimitResult> {
-  const windowSec = opts.windowSec ?? 60;
+  const windowSec = Math.max(1, opts.windowSec ?? 60);
   const window = Math.floor((opts.now ?? Date.now()) / (windowSec * 1000));
   // Delimit with '|', not ':' — ':' is valid in both scope names and IPv6
   // addresses, so a ':'-joined key could collide (scope='a:b',ip='c' would key
