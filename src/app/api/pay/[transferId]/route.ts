@@ -24,6 +24,7 @@ import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-forma
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
 import { draftTenant } from '@/lib/legacy-tenant';
+import { FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -447,6 +448,15 @@ export async function POST(
         return NextResponse.json(
           { ok: false, error: 'Please verify your identity before sending.', kyc_required: true },
           { status: 403 },
+        );
+      }
+      if (result.error === 'fx_unavailable') {
+        // Task 9: retryable — the FX provider is down or the quote's rate aged
+        // past the ceiling. Nothing was claimed, minted or charged; the draft
+        // (and its link) is untouched.
+        return NextResponse.json(
+          { ok: false, error: FX_UNAVAILABLE_MESSAGE, reason: 'fx_unavailable' },
+          { status: 503 },
         );
       }
       const msg =
