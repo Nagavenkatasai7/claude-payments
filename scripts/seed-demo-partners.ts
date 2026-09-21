@@ -93,8 +93,9 @@ async function main() {
   const apiKeyStore = getPartnerApiKeyStore();
   const rates = createPartnerRateRepo(getDb());
 
-  // Live mid for the winner's strictly-better pushed rate (real Frankfurter when
-  // run against a deployment with egress; falls back to 85 offline).
+  // Live mid for the winner's strictly-better pushed rate (real Frankfurter).
+  // getFxRates THROWS when no rate inside the ceiling exists (Task 9) — the
+  // seed fails loudly via main().catch instead of pushing rates off a constant.
   const usdMid = (await getFxRates('USD')).toInr;
   const winnerPushedRate = Math.round((usdMid + 2) * 100) / 100; // strictly > mid
   const in24h = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();

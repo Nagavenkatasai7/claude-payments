@@ -17,7 +17,7 @@ const windowDots = (
 );
 
 /** (a) The WhatsApp conversation — quote → pay link → delivered. */
-export function ChatMock({ liveRate }: { liveRate: number }) {
+export function ChatMock({ rate }: { rate: number }) {
   return (
     <div
       className={`${shell} mx-auto w-full max-w-[400px] overflow-hidden`}
@@ -39,10 +39,10 @@ export function ChatMock({ liveRate }: { liveRate: number }) {
           Send $500 to my brother in India
         </div>
         <div className="max-w-[88%] self-start rounded-[14px] rounded-bl-[4px] border border-[rgba(37,211,102,0.35)] bg-[#0b0e12] px-3 py-2.5 text-[13.5px] leading-snug text-[#f5f7f8]">
-          <span className="text-[15px] font-bold text-[#25d366]">$500 → {inr(500 * liveRate)}</span>
+          <span className="text-[15px] font-bold text-[#25d366]">$500 → {inr(500 * rate)}</span>
           <br />
           <span className="text-[#8b94a0]">
-            1 USD = ₹{liveRate.toFixed(2)} · fee $0 first transfer
+            1 USD = ₹{rate.toFixed(2)} · fee $0 first transfer
           </span>
         </div>
         <div className="max-w-[88%] self-start rounded-[14px] rounded-bl-[4px] bg-[#13181f] px-3 py-2.5 text-[13.5px] leading-snug text-[#f5f7f8]">
@@ -51,7 +51,7 @@ export function ChatMock({ liveRate }: { liveRate: number }) {
           <span className="font-mono text-[12px] text-[#22d3ee]">smartremit.ai/pay/tr_8f3k</span>
         </div>
         <div className="max-w-[88%] self-start rounded-[14px] rounded-bl-[4px] bg-[#13181f] px-3 py-2.5 text-[13.5px] font-semibold leading-snug text-[#25d366]">
-          Delivered ✓ — {inr(500 * liveRate)} to Arjun
+          Delivered ✓ — {inr(500 * rate)} to Arjun
         </div>
       </div>
     </div>

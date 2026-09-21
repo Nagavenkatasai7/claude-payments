@@ -6,7 +6,7 @@ import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import { effectiveRateFor } from '@/lib/partner-rates';
-import { getFxRates, type FxRates } from '@/lib/rate';
+import { getFxRates, RateUnavailableError, type FxRates } from '@/lib/rate';
 import type { CurrencyCode, PartnerRate } from '@/lib/types';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
@@ -25,7 +25,7 @@ const RATE_COLUMNS: ExpandableColumn[] = [
 
 // src→dest mid, mirroring quote()'s cross-rate: INR destinations use the
 // source's toInr directly; everything else pivots through USD.
-function midFor(rate: PartnerRate, fx: Map<CurrencyCode, FxRates>): number | null {
+function midFor(rate: PartnerRate, fx: Map<CurrencyCode, FxRates | null>): number | null {
   const src = fx.get(rate.sourceCurrency);
   if (!src) return null;
   if (rate.destinationCurrency === 'INR') {
@@ -66,13 +66,24 @@ export default async function RatesPage() {
   ]);
   const partnerName = new Map(partners.map((p) => [p.id, p.name]));
 
-  // One live mid fetch per distinct currency involved (L1/L2-cached; fail-open
-  // to built-in fallbacks) — fine on a force-dynamic admin page.
+  // One live mid fetch per distinct currency involved (L1/L2-cached) — fine on
+  // a force-dynamic admin page. Task 9: a currency the platform FX refuses
+  // (provider down / no rate inside the ceiling) renders as "—" with a notice
+  // instead of 500-ing the page; a stale-cache mid is flagged.
   const currencies = [...new Set(rates.flatMap((r) => [r.sourceCurrency, r.destinationCurrency]))];
   const fxEntries = await Promise.all(
-    currencies.map(async (c) => [c, await getFxRates(c)] as const),
+    currencies.map(async (c) => {
+      try {
+        return [c, await getFxRates(c)] as const;
+      } catch (err) {
+        if (err instanceof RateUnavailableError) return [c, null] as const;
+        throw err;
+      }
+    }),
   );
-  const fx = new Map<CurrencyCode, FxRates>(fxEntries);
+  const fx = new Map<CurrencyCode, FxRates | null>(fxEntries);
+  const fxDown = currencies.filter((c) => fx.get(c) === null);
+  const fxStale = currencies.filter((c) => fx.get(c)?.source === 'cache');
   const now = new Date();
   const nowMs = now.getTime();
 
@@ -87,6 +98,12 @@ export default async function RatesPage() {
               Every partner&apos;s corridor pricing — pushed rates, margins, and what each
               would offer against the live mid-market rate right now.
             </div>
+            {(fxDown.length > 0 || fxStale.length > 0) && (
+              <p className="mt-2 text-sm text-destructive">
+                {fxDown.length > 0 && `Platform FX unavailable for ${fxDown.join(', ')}: mids show —, quotes are refused. `}
+                {fxStale.length > 0 && `Platform FX for ${fxStale.join(', ')} is a cached rate (under 60 min old).`}
+              </p>
+            )}
           </div>
         </div>
 

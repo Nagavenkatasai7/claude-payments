@@ -9,8 +9,10 @@ import type { CSSProperties, ReactNode } from 'react';
 import { inr } from './format';
 
 interface Props {
-  /** Server-passed live USD→INR rate (already fallback-guarded). */
-  liveRate: number;
+  /** USD→INR figure for the illustration (the live mid, or an illustrative one). */
+  rate: number;
+  /** true only when `rate` was fetched live — otherwise it is labelled illustrative (ui-08). */
+  live: boolean;
 }
 
 const STAGE_GAP_S = 1.05; // seconds between stage activations
@@ -73,14 +75,15 @@ function Connector({ index }: { index: number }) {
   );
 }
 
-export default function HeroPipeline({ liveRate }: Props) {
-  const payout = inr(200 * liveRate);
-  const rate = '₹' + liveRate.toFixed(2);
+export default function HeroPipeline({ rate, live }: Props) {
+  const payout = inr(200 * rate);
+  const rateText = '₹' + rate.toFixed(2);
+  const rateLabel = live ? 'live mid-market' : 'illustrative rate';
 
   return (
     <div
       role="img"
-      aria-label={`A live transfer flowing through SmartRemit: a WhatsApp message "Send $200 to Mom" becomes an AI quote of ${payout} at the live rate of 1 USD = ${rate}, a secure hosted pay page, a signed settlement instruction to the partner's rail, and ${payout} delivered to Mom's bank account.`}
+      aria-label={`A live transfer flowing through SmartRemit: a WhatsApp message "Send $200 to Mom" becomes an AI quote of ${payout} at ${live ? 'the live rate' : 'an illustrative rate'} of 1 USD = ${rateText}, a secure hosted pay page, a signed settlement instruction to the partner's rail, and ${payout} delivered to Mom's bank account.`}
       className="mx-auto w-full max-w-[1180px]"
     >
       <div
@@ -102,7 +105,7 @@ export default function HeroPipeline({ liveRate }: Props) {
             $200 → {payout}
           </p>
           <p className="mt-1.5 text-[11.5px] leading-relaxed text-[#8b94a0]">
-            1 USD = {rate} · live mid-market
+            1 USD = {rateText} · {rateLabel}
             <br />
             fee $0 on your first transfer
           </p>
