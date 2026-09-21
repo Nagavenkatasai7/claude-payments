@@ -5,7 +5,7 @@ import type {
   CountryCode, CurrencyCode, KycStatus, Partner, PartnerId, PayoutMethod, Transfer,
 } from './types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
-import { getDestinationRates, getFxRates } from './rate';
+import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
 import { validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
@@ -186,6 +186,10 @@ export async function createQuote(
       fx_rate: q.fxRate,
     });
   } catch (e) {
+    // Task 9: the FX provider is down / beyond the ceiling ⇒ 503 (retryable).
+    // A QuoteError is the caller's request being invalid ⇒ 400. The two are
+    // sibling classes — RateUnavailableError is NOT a QuoteError.
+    if (e instanceof RateUnavailableError) return err(503, e.message);
     if (e instanceof QuoteError) return err(400, e.message);
     throw e;
   }
@@ -330,6 +334,11 @@ export async function createTransaction(
       destinationCurrency: destination.currency,
     });
   } catch (e) {
+    // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing
+    // was minted — exactly the crash-replay shape above: a retry with the SAME
+    // Idempotency-Key falls through and mints THAT id once FX is back, and a
+    // replay of an already-minted key never reaches this point (200 above).
+    if (e instanceof RateUnavailableError) return err(503, e.message);
     if (e instanceof QuoteError) return err(400, e.message);
     if (e instanceof Error && e.message === 'kyc_required') {
       return err(422, 'Sender identity verification required (this partner runs SmartRemit KYC).');

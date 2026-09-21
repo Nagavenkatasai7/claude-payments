@@ -8,7 +8,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { FX_UNAVAILABLE_MESSAGE, resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
   createTransaction, getTransaction, confirmTransaction, listTransactions,
@@ -564,5 +564,37 @@ describe('partner-api-service: confirmTransaction enforces the compliance hold (
     expect(await confirmTransaction(h.deps, partner({ id: 'rival' }), 'pk_r', id)).toMatchObject({ ok: false, status: 404 });
     expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
     expect(await outboxRows(h.db)).toHaveLength(0);
+  });
+});
+
+describe('partner-api-service: FX unavailable is a 503 (retryable), never a 400 (Task 9)', () => {
+  it('createQuote → 503 with the customer-safe message when Frankfurter is down and nothing is cached', async () => {
+    const { deps } = await harness();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    expect(await createQuote(deps, DELEGATED, { amount_source: 500 })).toEqual({
+      ok: false, status: 503, error: FX_UNAVAILABLE_MESSAGE,
+    });
+  });
+
+  it('createTransaction → 503, nothing minted; a retry with the SAME key mints once FX is back', async () => {
+    const { deps, store } = await harness();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-fx', txBody())).toMatchObject({ ok: false, status: 503 });
+    expect(await store.listTransfers()).toHaveLength(0);
+
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => frankfurterStub(url)));
+    const retry = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-fx', txBody());
+    expect(retry).toMatchObject({ ok: true, status: 201 }); // the bound-but-unminted id is minted now
+    expect(await store.listTransfers()).toHaveLength(1);
+  });
+
+  it('a replay of an ALREADY-minted key still returns 200 during an FX outage (the replay never re-prices)', async () => {
+    const { deps } = await harness();
+    const first = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-ok', txBody());
+    expect(first).toMatchObject({ ok: true, status: 201 });
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-ok', txBody())).toMatchObject({ ok: true, status: 200 });
   });
 });
