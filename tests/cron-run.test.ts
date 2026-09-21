@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { runDueSchedules } from '@/lib/cron-run';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
@@ -64,19 +65,19 @@ async function makeDeps() {
   const monthlyVolumeStore = createMonthlyVolumeStore(redis);
   const customerStore = createCustomerStore(db, store);
   const scheduleStore = createScheduleStore(db);
-  return { redis, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore };
+  return { redis, db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore };
 }
 
 describe('runDueSchedules', () => {
   it('fires a due schedule: creates a transfer, notifies, records lastRunAt', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     await scheduleStore.saveSchedule(sched('due', 21));
     await scheduleStore.saveSchedule(sched('notdue', 5));
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -89,7 +90,7 @@ describe('runDueSchedules', () => {
   });
 
   it('does not notify when the created transfer is compliance-blocked', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     const blocked = sched('b', 21);
     blocked.recipientName = 'John Doe'; // on the watchlist
@@ -97,7 +98,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -106,7 +107,7 @@ describe('runDueSchedules', () => {
   });
 
   it('endDate in the PAST: does NOT fire the schedule and marks it cancelled', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     // Schedule is due today (day 21) but its endDate is yesterday
     const pastEnded: Schedule = {
@@ -118,7 +119,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -130,7 +131,7 @@ describe('runDueSchedules', () => {
   });
 
   it('endDate in the FUTURE: schedule still fires when due', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     // Due today with an end date well in the future
     const futureEnded: Schedule = {
@@ -141,7 +142,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -153,14 +154,14 @@ describe('runDueSchedules', () => {
   });
 
   it('no endDate (absent): schedule fires as usual when due', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await seedVerified(customerStore); // Phase 3: verified owner so the verify-before-send gate passes
     // sched() helper does not set endDate — plain active schedule
     await scheduleStore.saveSchedule(sched('no-end', 21));
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -171,7 +172,7 @@ describe('runDueSchedules', () => {
   });
 
   it('Item 4: SKIPS a due schedule whose owning customer is opted-out (not fired, lastRunAt untouched, still active)', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await scheduleStore.saveSchedule(sched('opted-out', 21));
     // Save the owning customer with optedOutAt set
     await customerStore.saveCustomer({
@@ -187,7 +188,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -200,7 +201,7 @@ describe('runDueSchedules', () => {
   });
 
   it('Item 4: an owner who is NOT opted-out (no optedOutAt) still fires', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await scheduleStore.saveSchedule(sched('opted-in', 21));
     await customerStore.saveCustomer({
       senderPhone: '15551234567',
@@ -215,7 +216,7 @@ describe('runDueSchedules', () => {
     const notified: string[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
     });
 
@@ -224,7 +225,7 @@ describe('runDueSchedules', () => {
   });
 
   it('Phase 3: SKIPS a due schedule whose owner is unverified — no transfer, lastRunAt untouched, sendScheduledSkipped called once', async () => {
-    const { store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     // The gate is partner OPT-IN now — configure it so the skip path applies.
     const dflt = await partnerStore.ensureDefaultPartner();
     await partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
@@ -238,7 +239,7 @@ describe('runDueSchedules', () => {
     const skipped: { id: string; url: string }[] = [];
 
     const result = await runDueSchedules({
-      store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
       sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
       sendScheduledSkipped: async (s, _owner, url) => { skipped.push({ id: s.id, url }); },
     });
@@ -255,5 +256,68 @@ describe('runDueSchedules', () => {
     // Review item 1: the minted inquiry is recorded on the schedule's (tenant, phone) row
     // so the Persona completion can bind to it once the phone has sibling rows.
     expect((await customerStore.getCustomer('default', '15551234567'))?.kycInquiryId).toBe('ref_1');
+  });
+});
+
+describe('runDueSchedules — a refused scheduled send is loud (Task 9)', () => {
+  // The daily cron (vercel.json "0 13 * * *") has no catch-up — isScheduleDueToday
+  // matches the day exactly — so a refused run must page ops, not just log.
+  async function opsAlerts(db: Awaited<ReturnType<typeof makeDeps>>['db']) {
+    const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> }).rows;
+  }
+
+  it('FX unavailable ⇒ not fired, counted, logged (scrubbed), ONE ops.alert keyed schedule-refused:<id>:<day>; lastRunAt untouched', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notified: string[] = [];
+
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(notified).toHaveLength(0);
+    expect(await store.getTransferCount('default', '15551234567')).toBe(0);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    const lines = errors.mock.calls.map(([l]) => String(l));
+    expect(lines.some((l) => l.includes('"scope":"cron.schedule-run"') && l.includes('"reason":"fetch_failed"'))).toBe(true);
+    const alerts = await opsAlerts(db);
+    expect(alerts.map((a) => a.dedupe_key)).toEqual(['schedule-refused:due:2026-05-21']); // NOW, Eastern day
+    expect(alerts[0].payload.message).toContain('due');
+    expect(alerts[0].payload.message).toContain('fetch_failed');
+    expect(alerts[0].payload.message).not.toMatch(/\d{7,}/); // never the customer's phone
+  });
+
+  it('a same-day re-run that is refused again adds NO second alert (dedupe) but is still counted', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    };
+
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    expect(await opsAlerts(db)).toHaveLength(1);
+  });
+
+  it('a clean run reports failed: 0 and raises no alert (the result shape is { fired, failed })', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(result).toEqual({ fired: 1, failed: 0 });
+    expect(await opsAlerts(db)).toHaveLength(0);
   });
 });
