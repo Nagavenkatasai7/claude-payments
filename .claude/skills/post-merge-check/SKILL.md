@@ -26,8 +26,11 @@ until an entry has `headSha == <sha>`. The run is created by Vercel's `deploymen
 
 ## 4. Watch to completion
 `gh run watch <databaseId> --exit-status`.
-- success → report green with the run URL.
-- failure → `gh run view <databaseId> --log-failed | tail -80`, name the failing step/spec and the assertion, and stop. Do not merge anything else on top until it is fixed (propose the fix as a new PR).
+
+Production uses Vercel **Rolling Releases** (10% for 5 min, then auto 100%). The run starts when the deployment is Ready, i.e. at the START of the rollout, so its step "Wait for the rolling release to reach 100%" polls `https://smartremit.ai/api/version?vcrrForceStable=true` until 12 consecutive polls report the merge SHA, and only then runs Playwright. **Expect a run of up to ~10 min** (about 6–7 min waiting, then the tests). Don't read a long run as a hang.
+- success → report green with the run URL. A green run now also means the rollout reached 100%.
+- failure at **"Wait for the rolling release to reach 100%"** (its error is titled "Rolling release did not reach 100%", after 15 min) → Playwright never ran, so this is **not** a test failure and **not** proof the code works. Production did not serve this SHA to every client. The rollout is paused, aborted or rolled back, or another production deployment is queued ahead of it or replaced it. Check Vercel → Deployments → Rolling Release. Once this SHA serves 100%, re-run the job with `gh run rerun <databaseId>`. If a newer merge replaced it, that SHA's smoke run is the one that counts. Report it as "rollout incomplete", not "smoke red".
+- failure at any other step → `gh run view <databaseId> --log-failed | tail -80`, name the failing step/spec and the assertion, and stop. Do not merge anything else on top until it is fixed (propose the fix as a new PR).
 
 ## 5. Update the Program Ledger
 Run `/tracker-sync` (green or red): the merge, the smoke result and any fix-status change go to the ledger artifact. A red smoke is recorded as an `incident` event.

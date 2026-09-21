@@ -7,7 +7,9 @@ jobs:
   smoke:
     if: github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Up to 15 min waiting for the rolling release (below) + the ~5 min the
+    # install and Playwright run have always needed.
+    timeout-minutes: 22
 
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +23,91 @@ jobs:
 
       - name: Setup Playwright (cached)
         uses: ./.github/actions/setup-playwright
+
+      - name: Wait for the rolling release to reach 100%
+        # Vercel Rolling Releases is on for production: a new deployment gets
+        # 10% of traffic for 5 min, then auto-promotes to 100%. This workflow
+        # fires when the deployment is Ready, i.e. at the START of that window,
+        # so testing straight away would mostly exercise the OLD deployment
+        # and "smoke green on SHA X" would not prove X works.
+        #
+        # Poll GET /api/version (src/app/api/version/route.ts) until it reports
+        # this deployment's short SHA on REQUIRED_STREAK consecutive polls.
+        # Vercel buckets clients STICKILY (hashed from client info such as the
+        # IP: https://vercel.com/docs/rolling-releases#understanding-rolling-releases),
+        # so plain polls from one runner could sit in the 10% canary bucket and
+        # pass early. `vcrrForceStable=true` pins a request to the BASE release
+        # while the rollout is below 100% (same page,
+        # #setting-the-rolling-release-cookie), so the target SHA appears only
+        # once the rollout is complete. Each poll uses a fresh cookie jar and
+        # follows redirects, so it works whether Vercel answers the param
+        # directly or through a cookie-setting redirect. No Vercel token.
+        #
+        # Any other SHA, a 404 (an older deployment without the route), any
+        # non-200 or a network error resets the streak. Event fields reach the
+        # script through env only, never as inline expressions in `run:`.
+        timeout-minutes: 17
+        shell: bash
+        env:
+          TARGET_SHA: ${{ github.event.deployment.sha }}
+          VERSION_URL: https://smartremit.ai/api/version
+          REQUIRED_STREAK: '12'
+          POLL_INTERVAL_SECONDS: '5'
+          MAX_WAIT_SECONDS: '900'
+        run: |
+          set -u
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "::error title=Rollout wait::github.event.deployment.sha is not a hex commit SHA; cannot tell which build to wait for."
+            exit 1
+          fi
+          target="$(printf '%s' "${TARGET_SHA:0:7}" | tr 'A-F' 'a-f')"
+
+          body_file="$(mktemp)"
+          jar="$(mktemp)"
+          trap 'rm -f "$body_file" "$jar"' EXIT
+
+          streak=0
+          polls=0
+          last="none"
+          start="$(date +%s)"
+          deadline=$(( start + MAX_WAIT_SECONDS ))
+          echo "Waiting for ${VERSION_URL} (forced-stable) to report ${target} on ${REQUIRED_STREAK} consecutive polls, every ${POLL_INTERVAL_SECONDS}s, for up to $(( MAX_WAIT_SECONDS / 60 )) min."
+
+          while true; do
+            polls=$(( polls + 1 ))
+            : > "$body_file"
+            : > "$jar"
+            code="$(curl -sS -L --max-redirs 3 --max-time 10 \
+                -b "$jar" -c "$jar" \
+                -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+                -o "$body_file" -w '%{http_code}' \
+                "${VERSION_URL}?vcrrForceStable=true&cb=$(date +%s)-${polls}-${RANDOM}")" || code="error"
+
+            seen="-"
+            if [[ "$code" == "200" ]]; then
+              raw="$(jq -r '.sha // empty' "$body_file" 2>/dev/null || true)"
+              if [[ "$raw" =~ ^([0-9a-f]{7}|unknown)$ ]]; then seen="$raw"; else seen="unrecognized"; fi
+            fi
+
+            if [[ "$code" == "200" && "$seen" == "$target" ]]; then
+              streak=$(( streak + 1 ))
+            else
+              streak=0
+            fi
+            last="HTTP ${code}, sha=${seen}"
+            elapsed=$(( $(date +%s) - start ))
+            echo "poll ${polls} (+${elapsed}s): ${last} -> streak ${streak}/${REQUIRED_STREAK}"
+
+            if (( streak >= REQUIRED_STREAK )); then
+              echo "Rolling release complete: production serves ${target} (${REQUIRED_STREAK} consecutive polls, ${elapsed}s after the wait began)."
+              exit 0
+            fi
+            if (( $(date +%s) >= deadline )); then
+              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: the rollout is paused, aborted or rolled back, or another production deployment is queued ahead of or replaced it. Check Vercel > Deployments > Rolling Release, then re-run this job once the rollout is complete."
+              exit 1
+            fi
+            sleep "$POLL_INTERVAL_SECONDS"
+          done
 
       - name: Smoke test
         # Target the canonical production domain, not target_url. The
