@@ -1,38 +1,195 @@
 name: Smoke
+# The title carries the commit under test: for a workflow_dispatch run,
+# `headSha` in `gh run list` is the dispatching branch's head, not `inputs.sha`.
+run-name: Smoke ${{ inputs.sha || github.event.deployment.sha || github.sha }} (${{ github.event_name }})
+
+# Post-deploy smoke of production (https://smartremit.ai) for one commit.
+#
+# Triggers:
+# - push to main: the primary trigger. The run starts at merge time, and its
+#   "Wait for the rolling release to reach 100%" step covers the Vercel build
+#   AND the rolling release. With Rolling Releases on, Vercel no longer posts a
+#   GitHub deployment / deployment_status for production builds (only Preview
+#   records exist after 6269fda), so a deployment_status-only smoke never ran
+#   for 2365627. No paths filter: vercel.json's ignoreCommand skips only
+#   component/* branches, so every push to main deploys.
+# - workflow_dispatch: re-run for a commit on main,
+#   `gh workflow run smoke.yml -f sha=<sha>` (7-40 hex chars; empty = the head
+#   of the dispatching branch).
+# - deployment_status: kept as a fallback for a Production deployment that no
+#   push produced. Production success only. When a push-triggered run exists
+#   for the same commit, it runs no test and reports that run's verdict (see
+#   "Defer to the push-triggered run for this commit").
 
 on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit on main to smoke-test (7-40 hex chars). Empty = the head of the branch you dispatch from.
+        required: false
+        type: string
+        default: ''
   deployment_status:
 
+permissions:
+  contents: read # checkout, commits and compare API
+  actions: read # list this workflow's runs (deployment_status de-duplication)
+
 jobs:
-  smoke:
-    if: github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production'
+  target:
+    name: Resolve the target commit
+    if: >-
+      github.event_name != 'deployment_status' ||
+      (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production')
     runs-on: ubuntu-latest
-    # Up to 15 min waiting for the rolling release (below) + the ~5 min the
-    # install and Playwright run have always needed.
-    timeout-minutes: 22
+    timeout-minutes: 3
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      short: ${{ steps.resolve.outputs.short }}
+    steps:
+      - name: Resolve and validate the commit under test
+        id: resolve
+        # Target = inputs.sha || github.event.deployment.sha || github.sha.
+        # Event fields reach the script through env only, never as inline
+        # expressions in `run:`. The API call turns a short SHA into the full
+        # one, so a push run and a dispatch run of the same commit share the
+        # concurrency group below.
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.sha }}
+          DEPLOYMENT_SHA: ${{ github.event.deployment.sha }}
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -u
+          requested="${INPUT_SHA:-${DEPLOYMENT_SHA:-$EVENT_SHA}}"
+          if [[ ! "$requested" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "::error title=Smoke target::The commit to test must be 7-40 hex characters of a commit on main."
+            exit 1
+          fi
+
+          full="$(gh api "repos/${GH_REPO}/commits/${requested}" --jq '.sha')" || full=""
+          if [[ ! "$full" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Smoke target::No commit ${requested} in ${GH_REPO}."
+            exit 1
+          fi
+
+          # Production only ever serves main, so a dispatched SHA must be on it.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            relation="$(gh api "repos/${GH_REPO}/compare/main...${full}" --jq '.status')" || relation="error"
+            if [[ "$relation" != "identical" && "$relation" != "behind" ]]; then
+              echo "::error title=Smoke target::Commit ${full:0:7} is not on main (compare status: ${relation}). Production only serves commits on main."
+              exit 1
+            fi
+          fi
+
+          echo "sha=${full}" >> "$GITHUB_OUTPUT"
+          echo "short=${full:0:7}" >> "$GITHUB_OUTPUT"
+          echo "Smoke target: ${full} (event: ${EVENT_NAME})."
+
+  smoke:
+    needs: target
+    runs-on: ubuntu-latest
+    # Up to 25 min waiting for the build + rolling release (below), plus the
+    # few minutes the install and Playwright run need.
+    timeout-minutes: 32
+    # One smoke per commit at a time. A second run for the same commit (a
+    # deployment_status event, or a dispatch while the push run is going)
+    # waits instead of racing it. GitHub keeps at most ONE waiting job per
+    # group: if a third arrives, the waiting one is cancelled and replaced.
+    # The group key is the full SHA from `target`, so a short dispatched SHA
+    # still lands in the same group as the push run.
+    concurrency:
+      group: smoke-${{ needs.target.outputs.sha }}
+      cancel-in-progress: false
 
     steps:
+      - name: Defer to the push-triggered run for this commit
+        id: dedupe
+        # deployment_status only. A push to main already started a smoke run
+        # for this commit at merge time, and the concurrency group above holds
+        # this job until that run's job ends. This run then tests nothing and
+        # reports that run's verdict, so the newest run for a SHA never shows a
+        # green it did not earn. No push run (a redeploy or promotion that no
+        # push produced): test here as usual.
+        if: github.event_name == 'deployment_status'
+        timeout-minutes: 12
+        shell: bash
+        env:
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WAIT_SECONDS: '600'
+        run: |
+          set -u
+          push_run="$(gh api "repos/${GH_REPO}/actions/workflows/smoke.yml/runs?event=push&head_sha=${TARGET_SHA}&per_page=20" \
+            --jq '.workflow_runs | sort_by(.created_at) | last | .id // empty')"
+          if [[ -z "$push_run" ]]; then
+            echo "No push-triggered smoke run for ${TARGET_SHA:0:7}; this run tests the deployment."
+            echo "covered=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! "$push_run" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Smoke de-duplication::Unexpected run id from the Actions API."
+            exit 1
+          fi
+          # From here on this run tests nothing: every later step is skipped.
+          echo "covered=true" >> "$GITHUB_OUTPUT"
+
+          deadline=$(( $(date +%s) + WAIT_SECONDS ))
+          while true; do
+            info="$(gh api "repos/${GH_REPO}/actions/runs/${push_run}" \
+              --jq '[.status, (.conclusion // "none"), .html_url] | join(" ")')" || info="unknown none -"
+            read -r status conclusion url <<< "$info"
+            if [[ "$status" == "completed" ]]; then break; fi
+            if (( $(date +%s) >= deadline )); then
+              echo "::error title=Smoke de-duplication::Push-triggered smoke run ${url} for ${TARGET_SHA:0:7} is still ${status} after $(( WAIT_SECONDS / 60 )) min. Its verdict is the one that counts; watch it instead."
+              exit 1
+            fi
+            echo "Push-triggered run ${url} is ${status}; checking again in 15s."
+            sleep 15
+          done
+
+          if [[ "$conclusion" == "success" ]]; then
+            echo "::notice title=Smoke covered by the push run::${url} tested ${TARGET_SHA:0:7} and passed. This deployment_status run tests nothing."
+            exit 0
+          fi
+          echo "::error title=Smoke covered by the push run::${url} tested ${TARGET_SHA:0:7} and concluded ${conclusion}. This deployment_status run does not re-test. Once production serves this commit (or after a fix), re-run with: gh workflow run smoke.yml -f sha=${TARGET_SHA}"
+          exit 1
+
       - uses: actions/checkout@v4
+        if: steps.dedupe.outputs.covered != 'true'
+        with:
+          ref: ${{ needs.target.outputs.sha }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
+        if: steps.dedupe.outputs.covered != 'true'
         with:
           node-version: '24'
           cache: 'npm'
 
       - run: npm ci
+        if: steps.dedupe.outputs.covered != 'true'
 
       - name: Setup Playwright (cached)
+        if: steps.dedupe.outputs.covered != 'true'
         uses: ./.github/actions/setup-playwright
 
       - name: Wait for the rolling release to reach 100%
-        # Vercel Rolling Releases is on for production: a new deployment gets
-        # 10% of traffic for 5 min, then auto-promotes to 100%. This workflow
-        # fires when the deployment is Ready, i.e. at the START of that window,
-        # so testing straight away would mostly exercise the OLD deployment
-        # and "smoke green on SHA X" would not prove X works.
+        if: steps.dedupe.outputs.covered != 'true'
+        # A push-triggered run starts at merge time, so this wait covers the
+        # Vercel production build (~3-6 min) AND the rolling release: a new
+        # deployment gets 10% of traffic for 5 min, then auto-promotes to 100%.
+        # Testing before that would mostly exercise the OLD deployment, and
+        # "smoke green on SHA X" would not prove X works.
         #
         # Poll GET /api/version (src/app/api/version/route.ts) until it reports
-        # this deployment's short SHA on REQUIRED_STREAK consecutive polls.
+        # the target's short SHA on REQUIRED_STREAK consecutive polls.
         # Vercel buckets clients STICKILY (hashed from client info such as the
         # IP: https://vercel.com/docs/rolling-releases#understanding-rolling-releases),
         # so plain polls from one runner could sit in the 10% canary bucket and
@@ -46,18 +203,18 @@ jobs:
         # Any other SHA, a 404 (an older deployment without the route), any
         # non-200 or a network error resets the streak. Event fields reach the
         # script through env only, never as inline expressions in `run:`.
-        timeout-minutes: 17
+        timeout-minutes: 27
         shell: bash
         env:
-          TARGET_SHA: ${{ github.event.deployment.sha }}
+          TARGET_SHA: ${{ needs.target.outputs.sha }}
           VERSION_URL: https://smartremit.ai/api/version
           REQUIRED_STREAK: '12'
           POLL_INTERVAL_SECONDS: '5'
-          MAX_WAIT_SECONDS: '900'
+          MAX_WAIT_SECONDS: '1500'
         run: |
           set -u
           if [[ ! "$TARGET_SHA" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-            echo "::error title=Rollout wait::github.event.deployment.sha is not a hex commit SHA; cannot tell which build to wait for."
+            echo "::error title=Rollout wait::The resolved target is not a hex commit SHA; cannot tell which build to wait for."
             exit 1
           fi
           target="$(printf '%s' "${TARGET_SHA:0:7}" | tr 'A-F' 'a-f')"
@@ -71,7 +228,7 @@ jobs:
           last="none"
           start="$(date +%s)"
           deadline=$(( start + MAX_WAIT_SECONDS ))
-          echo "Waiting for ${VERSION_URL} (forced-stable) to report ${target} on ${REQUIRED_STREAK} consecutive polls, every ${POLL_INTERVAL_SECONDS}s, for up to $(( MAX_WAIT_SECONDS / 60 )) min."
+          echo "Waiting for ${VERSION_URL} (forced-stable) to report ${target} on ${REQUIRED_STREAK} consecutive polls, every ${POLL_INTERVAL_SECONDS}s, for up to $(( MAX_WAIT_SECONDS / 60 )) min (Vercel build + rolling release)."
 
           while true; do
             polls=$(( polls + 1 ))
@@ -103,13 +260,14 @@ jobs:
               exit 0
             fi
             if (( $(date +%s) >= deadline )); then
-              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: an earlier rolling release may still be active, so this deploy was not promoted (Vercel starts no new rollout until the active one resolves; promote it from the Deployments page or wait); or the rollout is paused, aborted or rolled back; or a newer production deployment replaced it. Check Vercel > Deployments > Rolling Release, then re-run this job once the rollout is complete."
+              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: an earlier rolling release may still be active, so this deploy was not promoted (Vercel starts no new rollout until the active one resolves; promote it from the Deployments page or wait); or the Vercel production build failed or is still queued; or the rollout is paused, aborted or rolled back; or a newer production deployment replaced it. Check Vercel > Deployments and its Rolling Release, then re-run once production serves this commit: gh workflow run smoke.yml -f sha=${target}"
               exit 1
             fi
             sleep "$POLL_INTERVAL_SECONDS"
           done
 
       - name: Smoke test
+        if: steps.dedupe.outputs.covered != 'true'
         # Target the canonical production domain, not target_url. The
         # per-deployment URL (claude-payments-<hash>-<team>.vercel.app) is
         # behind Vercel deployment protection by default, so Playwright would
@@ -126,7 +284,7 @@ jobs:
         run: npm run e2e
 
       - name: Upload trace on failure
-        if: failure()
+        if: failure() && steps.dedupe.outputs.covered != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-trace

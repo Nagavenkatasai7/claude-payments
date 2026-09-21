@@ -19,21 +19,27 @@ git fetch -q origin; git diff --name-only <sha>~1..<sha> -- drizzle/ src/db/sche
 ```
 Non-empty → tell the user to run `/migrate-prod` NOW (it is user-invoked) and wait for it. Until then the deploy serves code that selects columns prod does not have.
 
-## 3. Wait for the smoke run for that SHA
-Poll every 30 s, up to 15 min:
+## 3. Find the smoke run for that SHA
+The push to main creates the run **immediately** (within seconds of the merge), so look it up straight away:
 ```
-gh run list --workflow=smoke.yml --branch main --limit 10 --json databaseId,headSha,status,conclusion,url,createdAt
+gh run list --workflow=smoke.yml --branch main --event push --limit 10 --json databaseId,headSha,status,conclusion,url,createdAt
 ```
-until an entry has `headSha == <sha>`. The run is created by Vercel's `deployment_status` event, so nothing for the first 3–5 min is normal. After 15 min with no run → stop and report "smoke never triggered"; check whether Vercel deployed at all: `gh api "repos/Nagavenkatasai7/claude-payments/deployments?sha=<sha>"`.
+and take the entry with `headSha == <sha>`. Poll every 30 s for up to 2 min. Still no run → stop and report "smoke never triggered". Check the Actions tab for a disabled workflow or an outage, and check whether the merge commit message holds `[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]` or a `skip-checks: true` trailer: GitHub then skips push-triggered runs. Start it by hand with `gh workflow run smoke.yml -f sha=<sha>`.
+
+Since Rolling Releases were enabled (2026-09-21), Vercel posts no GitHub `deployment` / `deployment_status` records for production builds: `gh api repos/Nagavenkatasai7/claude-payments/deployments` lists only Preview records after 6269fda, although production serves 2365627. Do not wait for a `deployment_status` run, and do not treat a missing production deployment record as "Vercel did not deploy". To check what production serves, use `curl -s 'https://smartremit.ai/api/version?vcrrForceStable=true'`.
+
+Other runs you may see for the same SHA:
+- `deployment_status` (fallback; fires only if Vercel posts a Production deployment event): it waits behind the push run, then runs no test and repeats the push run's verdict. The push run is the one to read.
+- `workflow_dispatch` (a manual re-run): in `gh run list`, its `headSha` is the head of the branch it was dispatched from, **not** its `sha` input. Its run title reads `Smoke <sha> (workflow_dispatch)`.
 
 ## 4. Watch to completion
 `gh run watch <databaseId> --exit-status`.
 
-Production uses Vercel **Rolling Releases** (10% for 5 min, then auto 100%). The run starts when the deployment is Ready, i.e. at the START of the rollout, so its step "Wait for the rolling release to reach 100%" polls `https://smartremit.ai/api/version?vcrrForceStable=true` until 12 consecutive polls report the merge SHA, and only then runs Playwright. **Expect a run of up to ~10 min** (about 6–7 min waiting, then the tests). Don't read a long run as a hang.
-- success → report green with the run URL. A green run now also means the rollout reached 100%.
-- failure at **"Wait for the rolling release to reach 100%"** (its error is titled "Rolling release did not reach 100%", after 15 min) → Playwright never ran, so this is **not** a test failure and **not** proof the code works. Production did not serve this SHA to every client. The rollout is paused, aborted or rolled back, or another production deployment is queued ahead of it or replaced it. **The most common cause: an earlier rolling release was still active, so this deploy was built but not promoted.** Check Vercel → Deployments → Rolling Release. Report it as "rollout incomplete", not "smoke red".
+The run starts at merge time. Its step "Wait for the rolling release to reach 100%" covers the Vercel production build (~3–6 min) AND the Rolling Release (10% for 5 min, then auto 100%). It polls `https://smartremit.ai/api/version?vcrrForceStable=true` until 12 consecutive polls report the merge SHA, and only then runs Playwright. **Expect a run of ~10–15 min**: about 1 min of install, 9–12 min of waiting, then the tests. It gives up after 25 min (job timeout 32 min). Don't read a long run as a hang.
+- success → report green with the run URL. A green run also means the rollout reached 100%.
+- failure at **"Wait for the rolling release to reach 100%"** (its error is titled "Rolling release did not reach 100%", after 25 min) → Playwright never ran, so this is **not** a test failure and **not** proof the code works. Production did not serve this SHA to every client. The causes: the Vercel build failed or is still queued; the rollout is paused, aborted or rolled back; or another production deployment is queued ahead of it or replaced it. **The most common cause: an earlier rolling release was still active, so this deploy was built but not promoted.** Check Vercel → Deployments (build state) → Rolling Release. Report it as "rollout incomplete", not "smoke red".
   - **Deploy not promoted** (this SHA is Ready but is not the canary or current production): the owner either promotes it from the Deployments page (Promote), which starts its own rolling release, or merges nothing until the active rollout resolves. Don't stack another merge on top.
-  - Once this SHA serves 100%, re-run the job with `gh run rerun <databaseId>`. If a newer merge replaced it, that SHA's smoke run is the one that counts.
+  - Once this SHA serves 100%, re-run with `gh workflow run smoke.yml -f sha=<sha>` (then find it with `gh run list --workflow=smoke.yml --event workflow_dispatch --limit 3`), or with `gh run rerun <databaseId>`. If a newer merge replaced it, that SHA's smoke run is the one that counts.
 - failure at any other step → `gh run view <databaseId> --log-failed | tail -80`, name the failing step/spec and the assertion, and stop. Do not merge anything else on top until it is fixed (propose the fix as a new PR).
 
 ## 5. Update the Program Ledger
