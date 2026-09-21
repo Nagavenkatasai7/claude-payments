@@ -43,6 +43,10 @@ export const FX_MAX_AGE_MS = 3_600_000;
 /** After a failed upstream call, do not re-dial for this long: an outage must
  *  not cost FX_FETCH_TIMEOUT_MS on every quote. Serve cache / refuse instead. */
 const FAILURE_BACKOFF_MS = 30_000;
+/** An L2 row stamped further in the future than this is not trusted: its age
+ *  would read as negative and pass every freshness / ceiling check. The
+ *  margin only absorbs ordinary clock skew between instances. */
+const L2_MAX_FUTURE_SKEW_MS = 120_000;
 
 /** The dirham has been pegged at 3.6725 per USD since 1997. Frankfurter does
  *  not serve AED at all (HTTP 404, verified 2026-09-21), so AED is DERIVED from
@@ -149,7 +153,7 @@ const isPositiveFinite = (n: unknown): n is number =>
 const isoDateOrUndefined = (d: unknown): string | undefined =>
   typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : undefined;
 
-async function l2Get(source: CurrencyCode): Promise<StampedFxRates | null> {
+async function l2Get(source: CurrencyCode, now: number): Promise<StampedFxRates | null> {
   try {
     const l2 = await l2Client();
     if (!l2) return null;
@@ -160,6 +164,7 @@ async function l2Get(source: CurrencyCode): Promise<StampedFxRates | null> {
     // Redis TTL drains it) rather than guess its age.
     if (!isPositiveFinite(parsed.toInr) || !isPositiveFinite(parsed.toUsd)) return null;
     if (typeof parsed.fetchedAt !== 'number' || !Number.isFinite(parsed.fetchedAt)) return null;
+    if (parsed.fetchedAt > now + L2_MAX_FUTURE_SKEW_MS) return null;
     return {
       toInr: parsed.toInr,
       toUsd: parsed.toUsd,
@@ -258,7 +263,7 @@ export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
 
   // Shared L2 before the upstream call — one Frankfurter fetch per soft TTL
   // across the whole fleet, not per instance.
-  const shared = await l2Get(source);
+  const shared = await l2Get(source, now);
   if (shared && now - shared.fetchedAt < CACHE_TTL_MS) {
     cache.set(source, shared);
     return shared;

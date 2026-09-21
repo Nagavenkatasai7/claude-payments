@@ -270,3 +270,22 @@ describe('getFxRates — asOf is a validated ISO date (it is printed on the publ
     expect(r.asOf).toBeUndefined();
   });
 });
+
+describe('getFxRates — a future-dated L2 row is not "fresh" (Task 9 review)', () => {
+  it('ignores an L2 row whose fetchedAt is more than 2 min ahead of now (it would otherwise pass every age check)', async () => {
+    const l2 = fakeL2();
+    setFxL2ForTests(l2);
+    l2.store.set('fx:USD', JSON.stringify({ toInr: 95.5, toUsd: 1, fetchedAt: Date.now() + 180_000, source: 'live' }));
+    mockFetchFailure();
+    await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
+  });
+
+  it('tolerates ordinary clock skew between instances (≤ 2 min ahead is still served)', async () => {
+    const l2 = fakeL2();
+    setFxL2ForTests(l2);
+    l2.store.set('fx:USD', JSON.stringify({ toInr: 95.5, toUsd: 1, fetchedAt: Date.now() + 60_000, source: 'live' }));
+    mockFetchFailure();
+    expect(await getFxRates('USD')).toMatchObject({ toInr: 95.5, source: 'live' });
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+  });
+});
