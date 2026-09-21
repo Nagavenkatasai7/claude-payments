@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { sourceForInr, sourceForDest, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd } from '@/lib/fx';
-import type { FxRates } from '@/lib/rate';
+import {
+  sourceForInr, sourceForDest, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd,
+  usdPivotCrossRate, assertRatesUsable,
+} from '@/lib/fx';
+import { FALLBACK_FX_RATES, FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from '@/lib/rate';
 
 const USD: FxRates = { toInr: 85, toUsd: 1 };
 const GBP: FxRates = { toInr: 108, toUsd: 1.27 };
@@ -215,5 +218,62 @@ describe('quote — any-to-any cross-currency destination', () => {
     const q = quote(500, 'USD', USD2, 'bank_transfer', 1, 'INR', 0.0118);
     expect(q.amountInr).toBe(42500); // INR branch uses rates.toInr, ignores destToUsd
     expect(q.fxRate).toBe(85);
+  });
+});
+
+describe('Task 9 / prs-04: a destination USD rate of 0 is a refusal, never a silent INR-branch quote', () => {
+  it('quote(100, USD, {85,1}, …, AED, 0) throws (audit repro: returned fxRate 85 / amountInr 8500 labelled AED)', () => {
+    expect(() => quote(100, 'USD', USD, 'bank_transfer', 0, 'AED', 0)).toThrow(QuoteError);
+    expect(() => quote(100, 'USD', USD, 'bank_transfer', 0, 'AED', 0)).toThrow('Invalid exchange rate; please try again.');
+  });
+
+  it('sourceForDest with destToUsd 0 throws (audit repro: returned 2.94 — 250 ÷ toInr)', () => {
+    expect(() => sourceForDest(250, USD, 'AED', 0)).toThrow(QuoteError);
+  });
+
+  it('usdPivotCrossRate: null/undefined keeps the INR branch; 0, NaN and negatives throw', () => {
+    expect(usdPivotCrossRate(USD, 'INR', undefined)).toBe(85);
+    expect(usdPivotCrossRate(USD, 'INR', 0)).toBe(85); // INR destination never reads destToUsd
+    expect(() => usdPivotCrossRate(USD, 'AED', 0)).toThrow(QuoteError);
+    expect(() => usdPivotCrossRate(USD, 'AED', Number.NaN)).toThrow(QuoteError);
+    expect(() => usdPivotCrossRate(USD, 'AED', -1)).toThrow(QuoteError);
+    expect(usdPivotCrossRate(USD, 'AED', 1 / 3.6725)).toBeCloseTo(3.6725, 10);
+  });
+});
+
+describe('Task 9 / money-07: the provenance gate — never price off the display table or a rate beyond the ceiling', () => {
+  const stale = (): FxRates => ({ toInr: 85, toUsd: 1, fetchedAt: Date.now() - FX_MAX_AGE_MS - 1, source: 'cache' });
+  const fresh = (): FxRates => ({ toInr: 95.82, toUsd: 1, fetchedAt: Date.now(), source: 'live' });
+
+  it('quote() refuses a rate whose fetchedAt is beyond FX_MAX_AGE_MS', () => {
+    expect(() => quote(100, 'USD', stale(), 'bank_transfer', 0)).toThrow(RateUnavailableError);
+  });
+
+  it('quote() refuses the static display table unconditionally (source: fallback)', () => {
+    expect(() => quote(100, 'USD', FALLBACK_FX_RATES.USD, 'bank_transfer', 0)).toThrow(RateUnavailableError);
+  });
+
+  it('sourceForDest() and sourceForInr() apply the same gate', () => {
+    expect(() => sourceForDest(8500, stale())).toThrow(RateUnavailableError);
+    expect(() => sourceForInr(8500, FALLBACK_FX_RATES.USD)).toThrow(RateUnavailableError);
+  });
+
+  it('RateUnavailableError is NOT a QuoteError (every QuoteError arm needs a sibling arm)', () => {
+    let caught: unknown;
+    try { quote(100, 'USD', stale(), 'bank_transfer', 0); } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(RateUnavailableError);
+    expect(caught).not.toBeInstanceOf(QuoteError);
+  });
+
+  it('a fresh live rate and a provenance-less literal both still quote', () => {
+    expect(quote(100, 'USD', fresh(), 'bank_transfer', 0).amountInr).toBe(9582);
+    expect(quote(100, 'USD', USD, 'bank_transfer', 0).amountInr).toBe(8500);
+  });
+
+  it('assertRatesUsable: reason fallback_table / stale; exactly at the ceiling is still usable', () => {
+    const now = Date.now();
+    expect(() => assertRatesUsable(FALLBACK_FX_RATES.GBP, now)).toThrow(expect.objectContaining({ reason: 'fallback_table' }));
+    expect(() => assertRatesUsable({ ...fresh(), fetchedAt: now - FX_MAX_AGE_MS - 1 }, now)).toThrow(expect.objectContaining({ reason: 'stale' }));
+    expect(() => assertRatesUsable({ ...fresh(), fetchedAt: now - FX_MAX_AGE_MS }, now)).not.toThrow();
   });
 });

@@ -1,5 +1,5 @@
 import type { CurrencyCode, FundingMethod, Quote } from './types';
-import type { FxRates } from './rate';
+import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
 
 export const MIN_USD = 10;
 export const MAX_USD = 999999;
@@ -16,19 +16,37 @@ const round2 = (x: number) => Math.round(x * 100) / 100;
 /**
  * The source→destination cross-rate via the USD pivot — the single source of the
  * FX cross-rate used by BOTH the forward quote() and the inverse sourceForDest().
- * For an INR destination (or when no dest USD rate is supplied) this is the live
- * source→INR rate (rates.toInr) — byte-for-byte the pre-any-to-any behavior;
- * otherwise it pivots through USD: src->dest = src.toUsd / dest.toUsd. NOT
- * validated here (callers guard finiteness/positivity where it matters).
+ * For an INR destination, or when NO destination USD rate is supplied
+ * (null/undefined — the INR-only callers), this is the source→INR rate
+ * (rates.toInr); otherwise it pivots through USD: src->dest = src.toUsd / dest.toUsd.
+ *
+ * prs-04: a SUPPLIED destToUsd must be finite and > 0. The old `!destToUsd` test
+ * let a 0 fall into the INR branch, so quote(100,'USD',…,'AED',0) returned
+ * fxRate 85 / amountInr 8500 labelled AED — now a QuoteError.
  */
 export function usdPivotCrossRate(
   rates: FxRates,
   destinationCurrency: CurrencyCode = 'INR',
   destToUsd?: number,
 ): number {
-  return destinationCurrency === 'INR' || !destToUsd || !Number.isFinite(destToUsd)
-    ? rates.toInr
-    : rates.toUsd / destToUsd;
+  if (destinationCurrency === 'INR' || destToUsd == null) return rates.toInr;
+  if (!Number.isFinite(destToUsd) || destToUsd <= 0) {
+    throw new QuoteError('Invalid exchange rate; please try again.');
+  }
+  return rates.toUsd / destToUsd;
+}
+
+/**
+ * The provenance gate (money-07). A quoted rate becomes a BINDING payout
+ * instruction, so nothing from the static display table and nothing older than
+ * FX_MAX_AGE_MS may price a transfer. getFxRates ALWAYS stamps real rates;
+ * provenance-less literals (tests, injected fakes) pass.
+ */
+export function assertRatesUsable(rates: FxRates, now: number = Date.now()): void {
+  if (rates.source === 'fallback') throw new RateUnavailableError('fallback_table');
+  if (rates.fetchedAt !== undefined && now - rates.fetchedAt > FX_MAX_AGE_MS) {
+    throw new RateUnavailableError('stale');
+  }
 }
 
 /** Format a whole amount in the given ISO-4217 currency ($, ₹, £, AED, …). */
@@ -67,6 +85,7 @@ export function quote(
   destinationCurrency: CurrencyCode = 'INR',  // NEW (any-to-any) — defaults to INR (back-compat)
   destToUsd?: number,                          // NEW — destination currency's USD rate (for the cross-rate via USD pivot)
 ): Quote {
+  assertRatesUsable(rates);
   if (!Number.isFinite(amountSource)) {
     throw new QuoteError('Please give a valid amount.');
   }
@@ -173,6 +192,7 @@ export function sourceForDest(
   if (!Number.isFinite(amountDest) || amountDest <= 0) {
     throw new QuoteError('Please give a valid amount.');
   }
+  assertRatesUsable(rates);
   const crossRate = usdPivotCrossRate(rates, destinationCurrency, destToUsd);
   if (!Number.isFinite(crossRate) || crossRate <= 0) {
     throw new QuoteError('Invalid exchange rate; please try again.');
