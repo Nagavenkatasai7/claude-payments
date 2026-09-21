@@ -103,7 +103,7 @@ jobs:
               exit 0
             fi
             if (( $(date +%s) >= deadline )); then
-              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: the rollout is paused, aborted or rolled back, or another production deployment is queued ahead of or replaced it. Check Vercel > Deployments > Rolling Release, then re-run this job once the rollout is complete."
+              echo "::error title=Rolling release did not reach 100%::Production did not serve ${target} on ${REQUIRED_STREAK} consecutive polls within $(( MAX_WAIT_SECONDS / 60 )) min (last poll: ${last}). Smoke did NOT test this deployment. Likely: an earlier rolling release may still be active, so this deploy was not promoted (Vercel starts no new rollout until the active one resolves; promote it from the Deployments page or wait); or the rollout is paused, aborted or rolled back; or a newer production deployment replaced it. Check Vercel > Deployments > Rolling Release, then re-run this job once the rollout is complete."
               exit 1
             fi
             sleep "$POLL_INTERVAL_SECONDS"
