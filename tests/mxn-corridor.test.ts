@@ -19,9 +19,10 @@ describe('MXN / Mexico is a first-class corridor', () => {
     expect(countryForCurrency('MXN')).toBe('MX');
   });
 
-  it('has an offline fallback rate (MXN ≈ 18.5/USD)', () => {
+  it('has a display-only table rate (MXN ≈ 17.19/USD, measured 2026-09-21) that is never priced', () => {
     expect(FALLBACK_FX_RATES.MXN).toBeDefined();
-    expect(FALLBACK_FX_RATES.MXN.toUsd).toBeCloseTo(0.054, 3);
+    expect(FALLBACK_FX_RATES.MXN.toUsd).toBeCloseTo(0.0582, 4);
+    expect(FALLBACK_FX_RATES.MXN.source).toBe('fallback'); // fx.ts refuses to quote it (Task 9)
   });
 
   it('defines MX bank fields (the single 18-digit CLABE, marked as the account)', () => {

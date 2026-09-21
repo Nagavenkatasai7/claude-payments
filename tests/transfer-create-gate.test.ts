@@ -5,7 +5,7 @@ import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createTransfer, type CreateTransferInput } from '@/lib/transfer-create';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { RateUnavailableError, resetRateCacheForTests } from '@/lib/rate';
 
 // Stub FX — createTransfer calls getFxRates; a real network fetch here makes
 // the test flaky (and rate-limited) under repeated runs.
@@ -89,5 +89,21 @@ describe('createTransfer WL1 delegated-KYC gate (requiresKyc)', () => {
     );
     expect(t.complianceStatus).toBe('blocked');
     expect(t.status).toBe('blocked');
+  });
+});
+
+describe('Task 9: createTransfer refuses when FX is unavailable', () => {
+  it('re-quote path: Frankfurter down + nothing cached ⇒ RateUnavailableError, nothing minted', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    const [s, p, m] = await stores();
+    await expect(createTransfer(s, p, m, baseInput())).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(await s.getTransferCount('default', '15551230000')).toBe(0);
+  });
+
+  it('an INR destination never fetches the unused INR→USD leg', async () => {
+    const [s, p, m] = await stores();
+    await createTransfer(s, p, m, baseInput());
+    const urls = vi.mocked(global.fetch).mock.calls.map(([u]) => String(u));
+    expect(urls).toEqual(['https://api.frankfurter.dev/v1/latest?from=USD&to=INR']);
   });
 });

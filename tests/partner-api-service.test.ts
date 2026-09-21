@@ -82,12 +82,18 @@ const txBody = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// A realistic Frankfurter stub: a USD base echoes INR only; any other base
+// echoes BOTH legs (Task 9: a non-USD response missing its USD leg is now a
+// refusal, never a static-table substitution).
+function frankfurterStub(url: string) {
+  const rates = String(url).includes('from=USD') ? { INR: 85.2 } : { USD: 1.27, INR: 108.2 };
+  return { ok: true, json: async () => ({ rates }), text: async () => '' };
+}
+
 beforeEach(() => {
   resetRateCacheForTests();
   vi.mocked(pokeWorker).mockClear();
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
-  }));
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => frankfurterStub(url)));
 });
 afterEach(() => vi.restoreAllMocks());
 

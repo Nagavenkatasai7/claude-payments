@@ -1,106 +1,240 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getFxRate, getFxRates, resetRateCacheForTests, FALLBACK_FX_RATE } from '@/lib/rate';
+import {
+  getFxRate, getFxRates, getDestinationRates, resetRateCacheForTests, setFxL2ForTests,
+  FALLBACK_FX_RATE, FALLBACK_FX_RATES, FX_MAX_AGE_MS, AED_PER_USD,
+  FRANKFURTER_BASE_URL, FX_UNAVAILABLE_MESSAGE, RateUnavailableError,
+} from '@/lib/rate';
+
+// Task 9 (fail-closed FX). Fake timers only where a test ages the cache; every
+// advance is RELATIVE (never a hard-coded date — CLAUDE.md fixture rule).
 
 beforeEach(() => {
   resetRateCacheForTests();
+  setFxL2ForTests(undefined);
   vi.restoreAllMocks();
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  setFxL2ForTests(undefined);
   vi.restoreAllMocks();
 });
 
-function mockFetch(rateINR: number) {
+function mockFetch(rateINR: number, date = '2026-09-21') {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ rates: { INR: rateINR } }),
-    }),
+    vi.fn().mockResolvedValue({ ok: true, json: async () => ({ date, rates: { INR: rateINR } }) }),
   );
 }
 
 function mockFetchFailure() {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn().mockRejectedValue(new Error('Network error')),
-  );
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
 }
 
-function mockFetchNonOk() {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn().mockResolvedValue({
-      ok: false,
-      json: async () => ({}),
-    }),
-  );
+function mockFetchNonOk(status = 503) {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status, json: async () => ({}) }));
 }
 
-describe('getFxRates(INR) — any-to-any source (Frankfurter omits the base currency)', () => {
-  it('uses identity toInr=1 and the LIVE toUsd when the INR base is omitted from rates', async () => {
-    // from=INR&to=USD,INR → Frankfurter returns ONLY USD (no INR key for the base).
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ rates: { USD: 0.0106 } }),
-    }));
-    const r = await getFxRates('INR');
-    expect(r.toInr).toBe(1);        // INR→INR identity (not the static 1, but derived)
-    expect(r.toUsd).toBe(0.0106);   // LIVE INR→USD — NOT the static 0.0118 fallback
+/** A Map-backed stand-in for the shared Redis L2 (the real one is VITEST-skipped). */
+function fakeL2() {
+  const m = new Map<string, string>();
+  return {
+    store: m,
+    async get(key: string) { return m.get(key) ?? null; },
+    async set(key: string, value: string) { m.set(key, value); return 'OK'; },
+  };
+}
+
+describe('getFxRates — upstream contract (live-03)', () => {
+  it('calls api.frankfurter.dev/v1 directly, never the 301-redirecting .app host', async () => {
+    mockFetch(95.82);
+    await getFxRates('USD');
+    const url = String(vi.mocked(global.fetch).mock.calls[0][0]);
+    expect(FRANKFURTER_BASE_URL).toBe('https://api.frankfurter.dev/v1');
+    expect(url).toBe('https://api.frankfurter.dev/v1/latest?from=USD&to=INR');
   });
 
-  it('falls back to the static INR rate only when the fetch fails', async () => {
-    mockFetchFailure();
-    const r = await getFxRates('INR');
-    expect(r.toUsd).toBe(0.0118); // static fallback
+  it('passes an AbortSignal (the per-request timeout) to fetch', async () => {
+    mockFetch(95.82);
+    await getFxRates('USD');
+    const init = vi.mocked(global.fetch).mock.calls[0][1] as RequestInit | undefined;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('stamps fetchedAt, source: live and the provider fixing date on a successful fetch', async () => {
+    mockFetch(95.82, '2026-09-21');
+    const before = Date.now();
+    const r = await getFxRates('USD');
+    expect(r).toMatchObject({ toInr: 95.82, toUsd: 1, source: 'live', asOf: '2026-09-21' });
+    expect(r.fetchedAt).toBeGreaterThanOrEqual(before);
   });
 });
 
-describe('getFxRate', () => {
-  it('returns the parsed INR rate on successful fetch', async () => {
-    mockFetch(87.5);
-    const rate = await getFxRate();
-    expect(rate).toBe(87.5);
+describe('getFxRates — never a silent constant (money-07 / obs-08)', () => {
+  it('throws RateUnavailableError on a fetch failure with nothing cached', async () => {
+    mockFetchFailure();
+    await expect(getFxRate()).rejects.toBeInstanceOf(RateUnavailableError);
   });
 
-  it('caches the rate — second call does not fetch again', async () => {
+  it('carries the customer-safe message, the reason and the currency', async () => {
+    mockFetchNonOk(502);
+    await expect(getFxRates('USD')).rejects.toMatchObject({
+      name: 'RateUnavailableError', reason: 'http_502', currency: 'USD', message: FX_UNAVAILABLE_MESSAGE,
+    });
+  });
+
+  it('refuses a 200 carrying INR: 0 (prs-04: a zero rate is never cached or served)', async () => {
+    mockFetch(0);
+    await expect(getFxRates('USD')).rejects.toMatchObject({ reason: 'malformed_rates' });
+  });
+
+  it('refuses a non-USD 200 whose USD leg is missing (no static toUsd substitution)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 128.35 } }) }));
+    await expect(getFxRates('GBP')).rejects.toMatchObject({ reason: 'malformed_rates', currency: 'GBP' });
+  });
+
+  it('refuses a non-USD 200 whose USD leg is 0', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 128.35, USD: 0 } }) }));
+    await expect(getFxRates('GBP')).rejects.toMatchObject({ reason: 'malformed_rates' });
+  });
+});
+
+describe('getFxRates — the cache ceiling', () => {
+  it('within the ceiling, a failed re-fetch serves the last good rate marked source: cache', async () => {
+    vi.useFakeTimers();
+    mockFetch(88);
+    expect(await getFxRate()).toBe(88); // live
+    vi.advanceTimersByTime(300_001); // past the 5-min soft TTL ⇒ a re-fetch is attempted
+    mockFetchFailure();
+    const stale = await getFxRates('USD');
+    expect(stale).toMatchObject({ toInr: 88, source: 'cache' });
+    expect(Date.now() - (stale.fetchedAt as number)).toBe(300_001);
+  });
+
+  it('beyond the ceiling, a failed re-fetch THROWS instead of serving an unbounded cache', async () => {
+    vi.useFakeTimers();
+    mockFetch(88);
+    await getFxRate();
+    vi.advanceTimersByTime(FX_MAX_AGE_MS + 1);
+    mockFetchFailure();
+    await expect(getFxRates('USD')).rejects.toMatchObject({ name: 'RateUnavailableError', currency: 'USD' });
+  });
+
+  it('backs off for 30s after a failure (no re-dial on every quote), then retries', async () => {
+    vi.useFakeTimers();
+    mockFetchFailure();
+    await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
+    await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(30_001);
+    mockFetch(95.82);
+    expect((await getFxRates('USD')).toInr).toBe(95.82);
+  });
+
+  it('a COLD instance serves the fleet L2 copy inside the ceiling when the provider is down', async () => {
+    vi.useFakeTimers();
+    const l2 = fakeL2();
+    setFxL2ForTests(l2);
+    mockFetch(95.82);
+    await getFxRates('USD'); // warm: writes L1 + L2
+    expect(l2.store.has('fx:USD')).toBe(true);
+    resetRateCacheForTests(); // a different (cold) instance: empty L1
+    vi.advanceTimersByTime(600_000); // L2 copy is 10 min old — past the soft TTL
+    mockFetchFailure();
+    expect(await getFxRates('USD')).toMatchObject({ toInr: 95.82, source: 'cache' });
+  });
+
+  it('a fresh L2 copy is served as live without dialing the provider', async () => {
+    const l2 = fakeL2();
+    setFxL2ForTests(l2);
+    l2.store.set('fx:USD', JSON.stringify({ toInr: 95.5, toUsd: 1, fetchedAt: Date.now(), source: 'live' }));
+    mockFetchFailure();
+    expect(await getFxRates('USD')).toMatchObject({ toInr: 95.5, source: 'live' });
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+  });
+
+  it('ignores a pre-deploy L2 row with no fetchedAt (its age is unknowable)', async () => {
+    const l2 = fakeL2();
+    setFxL2ForTests(l2);
+    l2.store.set('fx:USD', JSON.stringify({ toInr: 85, toUsd: 1 }));
+    mockFetchFailure();
+    await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
+  });
+});
+
+describe('getFxRates(INR) — any-to-any source (Frankfurter omits the base currency)', () => {
+  it('uses identity toInr=1 and the LIVE toUsd when the INR base is omitted from rates', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 0.01044 } }) }));
+    const r = await getFxRates('INR');
+    expect(r).toMatchObject({ toInr: 1, toUsd: 0.01044, source: 'live' });
+  });
+
+  it('refuses (no static INR rate) when the fetch fails and nothing is cached', async () => {
+    mockFetchFailure();
+    await expect(getFxRates('INR')).rejects.toBeInstanceOf(RateUnavailableError);
+  });
+});
+
+describe('getFxRates(AED) — derived from the USD peg (obs-08: Frankfurter 404s on AED)', () => {
+  it('never fetches AED; derives both legs from the live USD leg', async () => {
+    mockFetch(95.82);
+    const r = await getFxRates('AED');
+    const urls = vi.mocked(global.fetch).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes('from=AED'))).toBe(false);
+    expect(r.toUsd).toBeCloseTo(1 / AED_PER_USD, 10);
+    expect(r.toInr).toBeCloseTo(95.82 / AED_PER_USD, 10);
+    expect(r.source).toBe('live');
+  });
+
+  it('inherits the USD leg provenance — a derived rate is never fresher than its base', async () => {
+    vi.useFakeTimers();
+    mockFetch(95.82);
+    await getFxRates('USD');
+    vi.advanceTimersByTime(300_001);
+    mockFetchFailure();
+    expect((await getFxRates('AED')).source).toBe('cache');
+  });
+
+  it('refuses AED when the USD leg is unavailable', async () => {
+    mockFetchFailure();
+    await expect(getFxRates('AED')).rejects.toBeInstanceOf(RateUnavailableError);
+  });
+});
+
+describe('getDestinationRates — the quote destination leg', () => {
+  it('returns undefined for INR WITHOUT dialing (quote() prices INR off the source leg)', async () => {
+    mockFetchFailure();
+    expect(await getDestinationRates('INR')).toBeUndefined();
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+  });
+
+  it('returns the destination rates otherwise, and throws like getFxRates', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.3395, INR: 128.35 } }) }));
+    expect(await getDestinationRates('GBP')).toMatchObject({ toUsd: 1.3395, source: 'live' });
+    resetRateCacheForTests();
+    mockFetchFailure();
+    await expect(getDestinationRates('GBP')).rejects.toBeInstanceOf(RateUnavailableError);
+  });
+});
+
+describe('getFxRate (USD→INR wrapper)', () => {
+  it('returns the parsed INR rate on a successful fetch', async () => {
+    mockFetch(87.5);
+    expect(await getFxRate()).toBe(87.5);
+  });
+
+  it('caches the rate — a second call does not fetch again', async () => {
     mockFetch(87.5);
     await getFxRate();
     await getFxRate();
     expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1);
   });
+});
 
-  it('returns FALLBACK_FX_RATE on fetch failure with no cache', async () => {
-    mockFetchFailure();
-    const rate = await getFxRate();
-    expect(rate).toBe(FALLBACK_FX_RATE);
-  });
-
-  it('returns FALLBACK_FX_RATE on non-ok response with no cache', async () => {
-    mockFetchNonOk();
-    const rate = await getFxRate();
-    expect(rate).toBe(FALLBACK_FX_RATE);
-  });
-
-  it('returns the last cached rate when a re-fetch fails after TTL expiry', async () => {
-    vi.useFakeTimers();
-    try {
-      mockFetch(88.0);
-      expect(await getFxRate()).toBe(88.0); // populates the cache
-
-      // advance past the 1-hour TTL so the next call attempts a re-fetch
-      vi.advanceTimersByTime(3_600_001);
-      mockFetchFailure();
-
-      const stale = await getFxRate();
-      expect(stale).toBe(88.0); // serves the stale cache, not the fallback
-      expect(stale).not.toBe(FALLBACK_FX_RATE);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('FALLBACK_FX_RATE is 85', () => {
-    expect(FALLBACK_FX_RATE).toBe(85);
+describe('FALLBACK_FX_RATES — display-only, structurally unquotable', () => {
+  it('every entry is tagged source: fallback; FALLBACK_FX_RATE mirrors the USD entry (measured 2026-09-21)', () => {
+    for (const r of Object.values(FALLBACK_FX_RATES)) expect(r.source).toBe('fallback');
+    expect(FALLBACK_FX_RATE).toBe(FALLBACK_FX_RATES.USD.toInr);
+    expect(FALLBACK_FX_RATE).toBe(95.82); // was 85 (−11%)
   });
 });

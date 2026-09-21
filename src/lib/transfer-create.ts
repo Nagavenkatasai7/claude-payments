@@ -1,5 +1,5 @@
 import { quote } from './fx';
-import { getFxRates } from './rate';
+import { getDestinationRates, getFxRates } from './rate';
 import { screenTransfer } from './compliance';
 import { resolveCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
@@ -152,10 +152,12 @@ export async function createTransfer(
   } else {
     const transferCount = await store.getTransferCount(input.partnerId, input.phone);
     const rates = await getFxRates(input.sourceCurrency);
-    // Fetch dest rates for the cross-rate. For INR this returns {toInr:1,toUsd:0.0118}
-    // and quote() takes the INR branch (rates.toInr) — identical to the pre-any-to-any behavior.
-    const destRates = await getFxRates(destinationCurrency);
-    q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates.toUsd);
+    // The destination leg for the USD-pivot cross-rate (undefined for INR —
+    // quote() prices INR off rates.toInr). Both legs THROW RateUnavailableError
+    // when no rate inside the ceiling exists: it propagates as a clean refusal
+    // that every mint caller maps (503 / friendly tool error / fx_unavailable).
+    const destRates = await getDestinationRates(destinationCurrency);
+    q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd);
   }
   const transfersToday = await store.getTodayTransferCount(input.partnerId, input.phone);
 

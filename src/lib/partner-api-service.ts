@@ -5,7 +5,7 @@ import type {
   CountryCode, CurrencyCode, KycStatus, Partner, PartnerId, PayoutMethod, Transfer,
 } from './types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
-import { getFxRates } from './rate';
+import { getDestinationRates, getFxRates } from './rate';
 import { quote, QuoteError } from './fx';
 import { validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
@@ -173,9 +173,9 @@ export async function createQuote(
   const destinationCurrency = (destByCountry || str(body.destination_currency) || 'INR') as CurrencyCode;
   try {
     const rates = await getFxRates(sourceCurrency);
-    const destRates = await getFxRates(destinationCurrency);
+    const destRates = await getDestinationRates(destinationCurrency);
     // transferCount drives the fee tier; a partner-API quote uses standard pricing.
-    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates.toUsd);
+    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd);
     return ok(200, {
       amount_source: q.amountSource,
       source_currency: sourceCurrency,

@@ -1,5 +1,5 @@
 import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
-import { getFxRates, type FxRates } from './rate';
+import { getDestinationRates, getFxRates, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
@@ -864,7 +864,7 @@ async function resolveCurrencyAndRates(
   rates: FxRates;
   destinationCountry: CountryCode;
   destinationCurrency: CurrencyCode;
-  destToUsd: number;
+  destToUsd: number | undefined;
 }> {
   const customer =
     (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
@@ -886,9 +886,10 @@ async function resolveCurrencyAndRates(
       ? (destinationCountryArg.toUpperCase() as CountryCode)
       : 'IN';
   const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
-  const destRates = await getFxRates(destinationCurrency);
+  // undefined for INR: quote() prices an INR destination off rates.toInr.
+  const destRates = await getDestinationRates(destinationCurrency);
 
-  return { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd: destRates.toUsd };
+  return { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd: destRates?.toUsd };
 }
 
 // Mirrors fx.ts's private round2 (used for the receive-first back-solve).

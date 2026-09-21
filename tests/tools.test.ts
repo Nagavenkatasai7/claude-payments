@@ -21,7 +21,7 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { resetRateCacheForTests, AED_PER_USD } from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -1673,10 +1673,10 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
 });
 
 describe('any-to-any corridors — destination_country threading', () => {
-  // AED fallback rate: 1 USD = 1/0.27 ≈ 3.703 AED (from FALLBACK_FX_RATES.AED.toUsd = 0.27).
-  // USD→AED cross rate = USD.toUsd / AED.toUsd = 1 / 0.27 ≈ 3.703.
-  // For $500 USD: amountInr (= AED dest) = Math.round(500 * (1/0.27)) = Math.round(500 * 3.7037) = 1852.
-  // Note: getFxRates('AED') for INR destination will return FALLBACK; for source USD it's already cached.
+  // Task 9 (obs-08): AED is DERIVED from the USD peg (AED_PER_USD = 3.6725) —
+  // Frankfurter 404s on AED, so it is never fetched. USD→AED cross =
+  // 1 / (1 / 3.6725) = 3.6725; for $500: Math.round(500 × 3.6725) = 1836.
+  // The from=AED branch in stubAedFetch is kept only to PROVE it is never hit.
 
   function stubAedFetch() {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -1706,11 +1706,11 @@ describe('any-to-any corridors — destination_country threading', () => {
     // amount_dest == amount_inr (same value, clearer alias for non-India)
     expect(r.amount_dest).toBe(r.amount_inr);
     // AED amount should NOT equal the INR amount for the same $500 send
-    // INR: Math.round(500 * 85) = 42500; AED: Math.round(500 / 0.27) ≈ 1852
-    expect(r.amount_inr).toBeLessThan(10000); // AED is much smaller than INR
-    expect(r.amount_inr).toBeGreaterThan(0);
-    // The rate is the cross-rate USD→AED ≈ 3.7
-    expect((r.fx_rate as number)).toBeCloseTo(1 / 0.27, 1);
+    // INR: Math.round(500 * 85) = 42500; AED: Math.round(500 * 3.6725) = 1836
+    expect(r.amount_inr).toBe(1836);
+    // The rate is the USD→AED peg, and AED was never fetched.
+    expect(r.fx_rate as number).toBeCloseTo(AED_PER_USD, 10);
+    expect(vi.mocked(global.fetch).mock.calls.some(([u]) => String(u).includes('from=AED'))).toBe(false);
   });
 
   it('get_quote with NO destination_country defaults to India (INR, back-compat)', async () => {
@@ -1981,9 +1981,9 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
   it('receive-first on a non-INR corridor back-solves via the cross-rate (recipient gets the target DEST amount, not rupees)', async () => {
     // any-to-any fix: amount_inr=1000 with an AE destination means AED 1000 the
     // RECIPIENT receives (the destination currency), NOT ₹1000. sourceForDest
-    // back-solves via the USD-pivot cross-rate (USD→AED ≈ 3.7037), so the mid
-    // send ≈ $270 and the recipient gets exactly AED 1000. A better route (3.8)
-    // yields a SMALLER send (≈ $263.16 ≤ the cap-checked $270), so it applies.
+    // back-solves via the USD-pivot cross-rate (USD→AED = 3.6725, the peg), so the
+    // mid send ≈ $272.29 and the recipient gets exactly AED 1000. A better route
+    // (3.8) yields a SMALLER send (≈ $263.16 ≤ the cap-checked $272.29), so it applies.
     resetRateCacheForTests();
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (String(url).includes('from=AED')) {
