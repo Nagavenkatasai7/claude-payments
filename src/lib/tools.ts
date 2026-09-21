@@ -1,5 +1,5 @@
 import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
-import { getDestinationRates, getFxRates, type FxRates } from './rate';
+import { getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
@@ -825,6 +825,19 @@ export interface ToolContext {
 
 type ToolResult = Record<string, unknown>;
 
+/**
+ * Task 9: a RateUnavailableError (FX provider down, a rate beyond the ceiling,
+ * or a stale approved quote) becomes the customer-safe refusal — logged
+ * (scrubbed), never a thrown agent turn. null ⇒ not an FX refusal; the caller
+ * rethrows. RateUnavailableError is NOT a QuoteError, so every QuoteError arm
+ * in this file sits next to one of these.
+ */
+function fxRefusal(err: unknown, scope: string): ToolResult | null {
+  if (!(err instanceof RateUnavailableError)) return null;
+  logWarn(`${scope}.fx-unavailable`, err.reason, { currency: err.currency ?? '' });
+  return { error: err.message };
+}
+
 // Valid CountryCode set for runtime validation (must match the union in types.ts).
 const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
   'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
@@ -853,6 +866,29 @@ async function startVerificationForTurn(ctx: ToolContext) {
   return start;
 }
 
+/** The turn's customer, owning partner and send currency — no FX involved. */
+async function resolveSender(
+  ctx: ToolContext,
+  requested: unknown,
+): Promise<{ customer: Customer; partner: Partner; sourceCurrency: CurrencyCode }> {
+  const customer =
+    (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
+    (await ctx.customerStore.upsertOnFirstInbound(ctx.partnerId, ctx.phone)).customer;
+  const partner =
+    (await ctx.partnerStore.getPartner(ctx.partnerId)) ??
+    (await ctx.partnerStore.ensureDefaultPartner());
+  const sourceCurrency = resolveSendCurrency(
+    partner,
+    typeof requested === 'string' ? requested : undefined,
+    ctx.phone,
+  );
+  return { customer, partner, sourceCurrency };
+}
+
+/**
+ * Sender + live FX for a quote. THROWS RateUnavailableError (Task 9) when a
+ * leg has no rate inside FX_MAX_AGE_MS — every caller maps it via fxRefusal.
+ */
 async function resolveCurrencyAndRates(
   ctx: ToolContext,
   requested: unknown,
@@ -865,18 +901,9 @@ async function resolveCurrencyAndRates(
   destinationCountry: CountryCode;
   destinationCurrency: CurrencyCode;
   destToUsd: number | undefined;
+  fxFetchedAt: number | undefined;
 }> {
-  const customer =
-    (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
-    (await ctx.customerStore.upsertOnFirstInbound(ctx.partnerId, ctx.phone)).customer;
-  const partner =
-    (await ctx.partnerStore.getPartner(ctx.partnerId)) ??
-    (await ctx.partnerStore.ensureDefaultPartner());
-  const sourceCurrency = resolveSendCurrency(
-    partner,
-    typeof requested === 'string' ? requested : undefined,
-    ctx.phone,
-  );
+  const { customer, partner, sourceCurrency } = await resolveSender(ctx, requested);
   const rates = await getFxRates(sourceCurrency);
 
   // Destination resolution — validated; unknown country code → 'IN' (back-compat).
@@ -888,8 +915,14 @@ async function resolveCurrencyAndRates(
   const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
   // undefined for INR: quote() prices an INR destination off rates.toInr.
   const destRates = await getDestinationRates(destinationCurrency);
+  // The OLDEST leg's fetch time — a stored draft quote's age is measured from it.
+  const stamps = [rates.fetchedAt, destRates?.fetchedAt].filter((t): t is number => t !== undefined);
+  const fxFetchedAt = stamps.length > 0 ? Math.min(...stamps) : undefined;
 
-  return { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd: destRates?.toUsd };
+  return {
+    customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency,
+    destToUsd: destRates?.toUsd, fxFetchedAt,
+  };
 }
 
 // Mirrors fx.ts's private round2 (used for the receive-first back-solve).
@@ -1151,6 +1184,8 @@ async function getQuoteTool(
       delivery_estimate: q.deliveryEstimate,
     };
   } catch (err) {
+    const refusal = fxRefusal(err, 'get_quote');
+    if (refusal) return refusal;
     if (err instanceof QuoteError) {
       // Observability: a QuoteError is returned to the model (not thrown), so it
       // never reached a server log before — corridor/amount failures were
@@ -1284,6 +1319,10 @@ async function createTransferTool(
         recipient_name: transfer.recipientName,
       };
     } catch (err) {
+      // A stale approved quote (FX_QUOTE_EXPIRED_MESSAGE) or, for a legacy draft
+      // that re-quotes, an FX outage — the customer asks for a fresh quote.
+      const refusal = fxRefusal(err, 'create_transfer');
+      if (refusal) return refusal;
       if (err instanceof QuoteError) return { error: err.message };
       throw err;
     }
@@ -1298,11 +1337,15 @@ async function createTransferTool(
     };
   }
   // Resolve currency + rates and reuse customer for cap check + partnerId.
-  const { customer: legacyCustomer, partner: legacyPartner, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = await resolveCurrencyAndRates(
-    ctx,
-    args.source_currency,
-    args.destination_country,
-  );
+  let legacyResolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
+  try {
+    legacyResolved = await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
+  } catch (err) {
+    const refusal = fxRefusal(err, 'create_transfer');
+    if (refusal) return refusal;
+    throw err;
+  }
+  const { customer: legacyCustomer, partner: legacyPartner, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = legacyResolved;
   // B2B (business-to-business): parsed once; null ⇒ a normal consumer send (every
   // b2c line below is byte-for-byte unchanged). For B2B the recipient_name is the
   // PAYEE business legal name and senderName becomes the PAYER business name so
@@ -1378,6 +1421,8 @@ async function createTransferTool(
       recipient_name: transfer.recipientName,
     };
   } catch (err) {
+    const refusal = fxRefusal(err, 'create_transfer');
+    if (refusal) return refusal;
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
@@ -1702,8 +1747,9 @@ async function createInvoiceTool(
 
   // USD-equivalent snapshot for the NOT-NULL amountUsd column (back-compat display
   // ONLY — the authoritative obligation is invoicedAmount/invoicedCurrency). A USD
-  // bill is exactly 1 (skip the FX hit); for any other denomination getFxRates falls
-  // back to static rates internally, so this rarely moves and never blocks creation.
+  // bill is exactly 1 (skip the FX hit). getFxRates THROWS when no rate inside the
+  // ceiling exists (Task 9); this snapshot is not a price and never reaches a payout
+  // instruction, so the catch below keeps it best-effort (it never blocks creation).
   let amountUsd = amount;
   if (invoicedCurrency !== 'USD') {
     try {
@@ -2573,7 +2619,9 @@ async function createScheduleTool(
     }
   }
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
-  const { sourceCurrency } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  // No FX here (Task 9): a schedule prices at RUN time, so a provider outage must
+  // not stop the customer from setting one up.
+  const { sourceCurrency } = await resolveSender(ctx, args.source_currency);
   const partnerId = ctx.partnerId;
   const amountSource = Number(args.amount_source ?? args.amount_usd);
   // Validate optional end_date: must be a parseable ISO date string; ignore if not.
@@ -2768,8 +2816,16 @@ async function sendApprovePickerTool(
   // is the PAYEE business legal name (the model passes it as recipient_name too).
   const b2b = parseB2bArgs(args);
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
-  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd } =
-    await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
+  let resolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
+  try {
+    resolved = await resolveCurrencyAndRates(ctx, args.source_currency, args.destination_country);
+  } catch (err) {
+    const refusal = fxRefusal(err, 'send_approve_picker');
+    if (refusal) return refusal;
+    throw err;
+  }
+  const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt } =
+    resolved;
   // Phase 3 verify-before-send gate — refuse to build the approval card / draft
   // for an unverified sender; hand off the kyc_url instead. The B2B KYB gate
   // reuses the same verify machine (isB2bSendVerified === isSendVerified for the
@@ -2893,6 +2949,7 @@ async function sendApprovePickerTool(
         totalChargeSource: q.totalChargeSource,
         totalChargeUsd: q.totalChargeUsd,
         destinationCurrency: q.destinationCurrency,
+        fxFetchedAt, // Task 9: the mint refuses this quote once its rate is older than FX_MAX_AGE_MS
       },
       // Best-rate routing: which partner's rail settles this draft's transfer
       // (internal — the customer only ever sees the better fxRate above).
@@ -2963,6 +3020,8 @@ async function sendApprovePickerTool(
     }
     return { sent: true, draft_id: draftId };
   } catch (err) {
+    const refusal = fxRefusal(err, 'send_approve_picker');
+    if (refusal) return refusal;
     if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
@@ -3133,7 +3192,15 @@ async function checkSendLimitTool(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   // Resolve currency+rates and reuse `customer` — no second getCustomer.
-  const { customer, partner, rates } = await resolveCurrencyAndRates(ctx, args.source_currency);
+  let resolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
+  try {
+    resolved = await resolveCurrencyAndRates(ctx, args.source_currency);
+  } catch (err) {
+    const refusal = fxRefusal(err, 'check_send_limit');
+    if (refusal) return refusal;
+    throw err;
+  }
+  const { customer, partner, rates } = resolved;
   // Phase 3 verify-before-send gate — direct the customer to verify BEFORE the
   // cap/EDD logic. A NEW condition on kycStatus, independent of the T0/Suspended
   // branch below (which is left intact). WL1: skipped for a 'delegated' partner.

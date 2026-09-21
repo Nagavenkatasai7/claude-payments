@@ -21,7 +21,9 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { resetRateCacheForTests, AED_PER_USD } from '@/lib/rate';
+import {
+  resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
+} from '@/lib/rate';
 import { selectSettlementRoute } from '@/lib/partner-rates';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
@@ -3855,5 +3857,87 @@ describe('verification hand-offs record the inquiry under the TURN tenant (revie
     expect(JSON.stringify(r)).toContain('https://kyc.example/v');
     expect((await acme.customerStore.getCustomer('acme', PHONE))!.kycInquiryId).toBe('inq_tool_1');
     expect((await acme.customerStore.getCustomer('default', PHONE))!.kycInquiryId).toBeUndefined();
+  });
+});
+
+describe('Task 9 — FX unavailable is a friendly refusal, never a thrown agent turn', () => {
+  const fxDown = () => {
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+  };
+
+  it('get_quote returns { error: FX_UNAVAILABLE_MESSAGE } and no figures', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    fxDown();
+    const r = await executeTool('get_quote', { amount_usd: 500, funding_method: 'bank_transfer' }, ctx);
+    expect(r).toEqual({ error: FX_UNAVAILABLE_MESSAGE });
+  });
+
+  it('send_approve_picker refuses the same way and creates NO draft', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    fxDown();
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210',
+    }, ctx);
+    expect(r).toEqual({ error: FX_UNAVAILABLE_MESSAGE });
+    expect(await ctx.draftStore.getActiveDraftId('default', PHONE)).toBeNull();
+  });
+
+  it('create_transfer (legacy explicit-args path) refuses and mints nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    fxDown();
+    const r = await executeTool('create_transfer', {
+      amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'mom@upi',
+    }, ctx);
+    expect(r).toEqual({ error: FX_UNAVAILABLE_MESSAGE });
+    expect(await ctx.store.getTransferCount('default', PHONE)).toBe(0);
+  });
+
+  it('check_send_limit refuses rather than evaluating the cap on an unknown USD rate', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    fxDown();
+    expect(await executeTool('check_send_limit', { amount_usd: 100 }, ctx)).toEqual({ error: FX_UNAVAILABLE_MESSAGE });
+  });
+
+  it('create_schedule needs no FX — an outage never blocks setting one up (it prices at run time)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    fxDown();
+    const r = await executeTool('create_schedule', {
+      amount_usd: 150, recipient_name: 'Mom', recipient_phone: '919133001840',
+      frequency: 'monthly', day_of_month: 10,
+    }, ctx);
+    expect(r.schedule_id).toBeTruthy();
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+  });
+
+  it('send_approve_picker stamps the draft quote with the rate fetch time (quote.fxFetchedAt)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const before = Date.now();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) =>
+      String(url).includes('graph.facebook.com')
+        ? { ok: true, json: async () => ({}), text: async () => '' }
+        : { ok: true, json: async () => ({ rates: { INR: MOCK_RATE } }) }));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210',
+    }, ctx);
+    expect(r.error).toBeUndefined();
+    const draft = await ctx.draftStore.getDraft(r.draft_id as string);
+    expect(draft?.quote.fxFetchedAt).toBeGreaterThanOrEqual(before);
+    expect(draft?.quote.fxFetchedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('an approve tap on a draft whose rate is older than the ceiling is refused (fresh quote needed), nothing minted', async () => {
+    const base = await buildCtx(fakeRedis());
+    const draftId = await base.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8500, fxFetchedAt: Date.now() - FX_MAX_AGE_MS - 1 },
+    });
+    const ctx = { ...base, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } };
+    const r = await executeTool('create_transfer', {}, ctx);
+    expect(r).toEqual({ error: FX_QUOTE_EXPIRED_MESSAGE });
+    expect(await ctx.store.getTransferCount('default', PHONE)).toBe(0);
   });
 });
