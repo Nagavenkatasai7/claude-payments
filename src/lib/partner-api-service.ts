@@ -170,7 +170,8 @@ export async function createQuote(
   // (default INR) is unchanged.
   const destCountryReq = str(body.destination_country);
   const destByCountry = destCountryReq ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryReq.toUpperCase() as CountryCode] : undefined;
-  const destinationCurrency = (destByCountry || str(body.destination_currency) || 'INR') as CurrencyCode;
+  // str() trims; upper-cased like pushPartnerRate so "gbp" quotes exactly like "GBP".
+  const destinationCurrency = (destByCountry || str(body.destination_currency).toUpperCase() || 'INR') as CurrencyCode;
   // Validated at the edge (Task 9 security review): an unsupported code is the
   // caller's error (400), never an FX-provider call or a misleading 503.
   if (!SUPPORTED_CURRENCIES.has(destinationCurrency)) {

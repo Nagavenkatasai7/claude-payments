@@ -614,4 +614,13 @@ describe('partner-api-service: createQuote validates destination_currency at the
       ok: true, status: 200,
     });
   });
+
+  it('destination_currency is case- and whitespace-insensitive (parity with pushPartnerRate): " gbp " quotes exactly like "GBP"', async () => {
+    const { deps } = await harness();
+    const upper = await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: 'GBP' });
+    const lower = await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: ' gbp ' });
+    expect(lower).toMatchObject({ ok: true, status: 200 });
+    expect(lower).toEqual(upper);
+    expect((lower as { data: { destination_currency: string } }).data.destination_currency).toBe('GBP');
+  });
 });
