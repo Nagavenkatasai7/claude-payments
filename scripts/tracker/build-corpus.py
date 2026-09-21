@@ -36,8 +36,9 @@ DOCS = [
   ('roadmap', 'Roadmap', REPO/'docs/ROADMAP.md'),
 ]
 for n, p in enumerate(EXTRA_PLANS, start=1):
-    m = re.search(r'phase(\d)', p.name)
-    key = f'plan-p{m.group(1)}' if m else f'plan-x{n}'
+    m = re.search(r'phase(\d)(?:-wave(\d))?', p.name)
+    # Wave 1 keeps the historical key plan-p1; later waves get plan-p<phase>-w<wave> so they never collide.
+    key = (f'plan-p{m.group(1)}' + (f'-w{m.group(2)}' if m.group(2) and m.group(2) != '1' else '')) if m else f'plan-x{n}'
     DOCS.append((key, f'Plan: {p.stem}' + ('' if str(p).startswith(str(REPO/"docs")) else ' (DRAFT, uncommitted)'), p))
 MAXC = 1800
 def chunk_md(key, label, text):
