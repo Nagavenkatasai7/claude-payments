@@ -1,5 +1,5 @@
 import { quote } from './fx';
-import { getDestinationRates, getFxRates } from './rate';
+import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer } from './compliance';
 import { resolveCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
@@ -57,6 +57,9 @@ export interface CreateTransferInput {
     amountSource: number;
     feeSource: number;
     totalChargeSource: number;
+    // Task 9: when the rate behind these figures was fetched (the draft's
+    // quote.fxFetchedAt). Beyond FX_MAX_AGE_MS the mint refuses; absent ⇒ no check.
+    fxFetchedAt?: number;
   };
   // Best-rate routing (internal — never customer/partner-API visible): the
   // partner whose RAIL settles this transfer because its rate won the corridor
@@ -103,6 +106,7 @@ export function quoteOverrideFromDraft(
       amountSource: draft.amountUsd,
       feeSource: dq.feeUsd,
       totalChargeSource: totalChargeUsd,
+      fxFetchedAt: dq.fxFetchedAt,
     };
   }
   if (dq.feeSource !== undefined && dq.totalChargeSource !== undefined) {
@@ -115,9 +119,26 @@ export function quoteOverrideFromDraft(
       amountSource: draft.amountSource,
       feeSource: dq.feeSource,
       totalChargeSource: dq.totalChargeSource,
+      fxFetchedAt: dq.fxFetchedAt,
     };
   }
   return undefined;
+}
+
+/**
+ * Task 9: an approved quote is honored VERBATIM (claim-first re-mints must
+ * never re-price), so the only admissible check is the age of the rate behind
+ * it. Beyond FX_MAX_AGE_MS the mint REFUSES — it never silently re-quotes.
+ * An override without fxFetchedAt (a pre-Task-9 draft, the B2B locked quote)
+ * passes unchanged.
+ */
+export function assertQuoteOverrideFresh(
+  q: Pick<NonNullable<CreateTransferInput['quote']>, 'fxFetchedAt'>,
+  now: number = Date.now(),
+): void {
+  if (q.fxFetchedAt !== undefined && now - q.fxFetchedAt > FX_MAX_AGE_MS) {
+    throw new RateUnavailableError('stale_quote');
+  }
 }
 
 export async function createTransfer(
@@ -148,6 +169,7 @@ export async function createTransfer(
   // and the monthly accrual uses q.amountUsd (via transfer.amountUsd).
   let q: NonNullable<CreateTransferInput['quote']>;
   if (input.quote) {
+    assertQuoteOverrideFresh(input.quote);
     q = input.quote;
   } else {
     const transferCount = await store.getTransferCount(input.partnerId, input.phone);

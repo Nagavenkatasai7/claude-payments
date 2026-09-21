@@ -361,6 +361,10 @@ export interface Draft {
     totalChargeSource?: number;
     totalChargeUsd?: number;
     destinationCurrency?: CurrencyCode; // NEW (any-to-any)
+    // Task 9: epoch ms of the OLDEST FX leg this quote was priced on. The mint
+    // refuses the quote once that rate is older than FX_MAX_AGE_MS (it never
+    // re-quotes). Absent on drafts created before Task 9 (honored as before).
+    fxFetchedAt?: number;
   };
   // Best-rate routing: the partner whose rail settles this draft's transfer
   // when its rate won the corridor at quote time (default-tenant only).
