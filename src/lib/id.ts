@@ -1,12 +1,11 @@
 export function newTransferId(): string {
   let id = '';
   while (id.length < 8) {
-    // Math.random() can legally return 0 per the ECMAScript spec.
-    // (0).toString(36).slice(2) === "" — an empty chunk that would cause an
-    // infinite loop since nothing is appended to id.  Skip empty chunks so the
-    // loop always makes forward progress toward the 8-character target.
+    // (0).toString(36) = "0"; "0".slice(2) = "" — the empty string is falsy, so
+    // without the fallback the loop would spin forever when Math.random() returns 0.
+    // '0' is a valid base-36 char, so the fallback always makes forward progress.
     const chunk = Math.random().toString(36).slice(2);
-    if (chunk) id += chunk;
+    id += chunk || '0';
   }
   return id.slice(0, 8);
 }

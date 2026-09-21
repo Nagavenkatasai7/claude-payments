@@ -34,6 +34,27 @@ describe('MockSanctionsScreener', () => {
   });
 });
 
+describe('MockSanctionsScreener — internal whitespace normalisation (regression: bypass via extra spaces)', () => {
+  it('matches a watchlisted name with doubled spaces (two spaces between words)', async () => {
+    const s = new MockSanctionsScreener(['John Doe']);
+    const hit = await s.screen({ name: 'John  Doe', sourceCountry: 'US' });
+    expect(hit.matched).toBe(true);
+    expect(hit.listSource).toBe('mock-watchlist');
+  });
+
+  it('matches a watchlisted name with a tab character between words', async () => {
+    const s = new MockSanctionsScreener(['John Doe']);
+    const hit = await s.screen({ name: 'John\tDoe', sourceCountry: 'US' });
+    expect(hit.matched).toBe(true);
+  });
+
+  it('matches when the watchlist entry itself has extra internal spaces', async () => {
+    const s = new MockSanctionsScreener(['John  Doe']);
+    const hit = await s.screen({ name: 'John Doe', sourceCountry: 'US' });
+    expect(hit.matched).toBe(true);
+  });
+});
+
 describe('getSanctionsScreener', () => {
   it('builds a MockSanctionsScreener over the supplied base list', async () => {
     const s = getSanctionsScreener(['test blocked']);

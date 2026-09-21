@@ -27,9 +27,11 @@ export class MockSanctionsScreener implements SanctionsScreener {
   constructor(private readonly baseList: string[]) {}
 
   async screen(input: { name: string; sourceCountry: CountryCode }): Promise<SanctionsHit> {
-    const name = (input.name ?? '').trim().toLowerCase();          // defensive ?? '' (untrusted)
+    // Collapse internal whitespace (double-spaces, tabs, non-breaking spaces …) so
+    // 'John  Doe' and 'John\tDoe' both normalise to 'john doe' and match the list.
+    const name = (input.name ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
     if (name === '') return { matched: false };
-    const list = (this.baseList ?? []).map((n) => (n ?? '').trim().toLowerCase());
+    const list = (this.baseList ?? []).map((n) => (n ?? '').trim().replace(/\s+/g, ' ').toLowerCase());
     return list.includes(name)
       ? { matched: true, matchedName: name, listSource: 'mock-watchlist' }
       : { matched: false };

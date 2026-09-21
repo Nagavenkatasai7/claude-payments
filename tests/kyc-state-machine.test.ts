@@ -57,6 +57,20 @@ describe('applyKycEvent (human-review-only)', () => {
     expect(d.kycReviewState).toBe('inquiry_started');
   });
 
+  it('does NOT stamp kycSubmittedAt when customer is already at pending_review and a late inquiry.started arrives (out-of-order Persona delivery)', () => {
+    // Scenario: inquiry.completed arrived before inquiry.started (out-of-order webhook).
+    // The customer is at pending_review; kycSubmittedAt was never set.
+    // A backward inquiry.started event must NOT corrupt kycSubmittedAt with the
+    // late-processing timestamp (which is a month after the real inquiry-start time).
+    const pendingReview = { ...base, kycReviewState: 'pending_review' as const } as Customer;
+    const d = applyKycEvent(
+      pendingReview,
+      ev({ name: 'inquiry.started', status: 'started' }),
+      '2026-07-03T12:00:00Z',
+    );
+    expect(d.kycSubmittedAt).toBeUndefined();
+  });
+
   it('does NOT downgrade an already human-approved customer on a late event', () => {
     const approved = { ...base, kycStatus: 'verified', kycReviewState: 'approved' } as Customer;
     const d = applyKycEvent(approved, ev({ name: 'inquiry.completed', status: 'completed' }));
