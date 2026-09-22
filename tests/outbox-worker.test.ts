@@ -407,14 +407,99 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
     for (const call of sendText.mock.calls) expect((call as unknown[])[2]).toEqual(ACME_WA);
   });
 
-  // Legacy rows are INSERTed raw: they are what the PREVIOUS release wrote, and
+  // Legacy rows are INSERTed raw: they are what a PRE-fix-11 release wrote, and
   // outbox-repo.enqueue's test-only tripwire (fix 11) refuses a creds payload.
-  it('TRANSITION SHIM: a legacy row (previous release) with creds and no partnerId still sends on the persisted number', async () => {
-    await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES
-      ('whatsapp.text', '{"to":"15551230000","body":"legacy","creds":{"phoneNumberId":"111","token":"t"}}'::jsonb)`);
+  // Program-Fix 12 (second PR) removed the fix 18 transition shim that honoured
+  // them: a payload never carries send credentials, so such a row FAILS CLOSED
+  // — it is never sent on the persisted number and never on the shared number.
+  const LEGACY_TOKEN = 'tok_FAKE_LEGACY_ONLY';
+  async function insertLegacyRow(kind: 'whatsapp.text' | 'whatsapp.template', extra = '') {
+    const body = kind === 'whatsapp.text' ? '"body":"legacy"' : '"template":"transfer_delivered","lang":"en","params":["a"]';
+    const payload = `{"to":"15551230000",${body}${extra},"creds":{"phoneNumberId":"111","token":"${LEGACY_TOKEN}"}}`;
+    await db.execute(sql`INSERT INTO outbox (kind, payload, dedupe_key) VALUES
+      (${kind}, ${payload}::jsonb, ${`legacy:${kind}`})`);
+  }
+  async function legacyRows() {
+    const row = (await db.execute(
+      sql`SELECT status, attempts, last_error FROM outbox WHERE dedupe_key LIKE 'legacy:%'`,
+    )) as unknown as { rows: Array<{ status: string; attempts: number; last_error: string | null }> };
+    return row.rows;
+  }
+
+  it('NO SHIM (fix 12b): a legacy row with creds and no partnerId throws legacy_creds_payload — never sent, RETRIED with backoff, no token in last_error', async () => {
+    await insertLegacyRow('whatsapp.text');
+    await insertLegacyRow('whatsapp.template');
     const r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
-    expect(sendText).toHaveBeenCalledWith('15551230000', 'legacy', { phoneNumberId: '111', token: 't' });
+    expect(r).toMatchObject({ processed: 0, failed: 2, dead: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+    const rows = await legacyRows();
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.status).toBe('failed');
+      expect(row.last_error).toBe('legacy_creds_payload');
+      expect(row.last_error).not.toMatch(/111|tok_/);
+    }
+  });
+
+  it('NO SHIM (fix 12b): partnerId null / "" with creds is NOT a resolvable partner — fails closed exactly like a missing partnerId', async () => {
+    await insertLegacyRow('whatsapp.text', ',"partnerId":null');
+    await insertLegacyRow('whatsapp.template', ',"partnerId":""');
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 2, dead: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+    for (const row of await legacyRows()) expect(row.last_error).toBe('legacy_creds_payload');
+  });
+
+  it('NO SHIM (fix 12b): at the attempt ceiling a legacy row is DEAD with exactly one dead:<id> alert, and neither last_error nor the alert carries the token', async () => {
+    await insertLegacyRow('whatsapp.text');
+    await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1} WHERE dedupe_key = 'legacy:whatsapp.text'`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1 });
+    expect(sendText).not.toHaveBeenCalled();
+    const [row] = await legacyRows();
+    expect(row.status).toBe('dead');
+    expect(row.attempts).toBe(MAX_ATTEMPTS);
+    expect(row.last_error).toBe('legacy_creds_payload');
+    expect(row.last_error).not.toMatch(new RegExp(LEGACY_TOKEN));
+    const alerts = (await db.execute(
+      sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`,
+    )) as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> };
+    expect(alerts.rows).toHaveLength(1);
+    expect(alerts.rows[0].dedupe_key).toMatch(/^dead:\d+$/);
+    expect(alerts.rows[0].payload.message).toContain('legacy_creds_payload');
+    expect(JSON.stringify(alerts.rows[0].payload)).not.toMatch(new RegExp(LEGACY_TOKEN));
+    // The dead row keeps its payload: listSecretsAtRest (the regression detector) still counts it.
+    expect(await outbox.listSecretsAtRest()).toEqual([{ kind: 'whatsapp.text', status: 'dead', n: 1 }]);
+  });
+
+  // Review follow-up (PR #286): the guard is `!= null`, deliberately WIDER than
+  // listSecretsAtRest's jsonb_typeof = 'object' detector. Pin every non-object
+  // shape so nobody narrows it to an object check later.
+  it.each([
+    ['"abc"', '"abc"'],
+    ['[]', '[]'],
+    ['0', '0'],
+    ['false', 'false'],
+    ['{}', '{}'],
+  ])('NO SHIM (fix 12b): a non-object "creds": %s with no partnerId still fails closed', async (_label, json) => {
+    const payload = `{"to":"15551230000","body":"odd","creds":${json}}`;
+    await db.execute(sql`INSERT INTO outbox (kind, payload, dedupe_key) VALUES ('whatsapp.text', ${payload}::jsonb, 'legacy:odd')`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    const [row] = await legacyRows();
+    expect(row.status).toBe('failed');
+    expect(row.last_error).toBe('legacy_creds_payload');
+  });
+
+  it('"creds": null holds nothing (same reading as listSecretsAtRest / 0016): no partnerId ⇒ the shared number', async () => {
+    await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES
+      ('whatsapp.text', '{"to":"15551230000","body":"nullcreds","creds":null}'::jsonb)`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'nullcreds', undefined);
   });
 
   it('partnerId WINS over a persisted creds object — a stale or foreign token can never be pinned by a payload', async () => {
@@ -423,6 +508,19 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
       ('whatsapp.text', '{"to":"15551230000","body":"both","partnerId":"acme","creds":{"phoneNumberId":"pn_stale","token":"tok_stale"}}'::jsonb)`);
     await drainOnce(deps(), 'w1');
     expect(sendText).toHaveBeenCalledWith('15551230000', 'both', { phoneNumberId: 'pn_acme', token: 'tok_live' });
+  });
+
+  // Review follow-up (PR #286): a partnerId that resolves to NO creds (ghost
+  // partner) still wins over a persisted creds object — the row degrades to
+  // the shared number like any ghost-partner row, and the payload token is
+  // never used. Pins the check order: partnerId first, then the creds guard.
+  it('a GHOST partnerId beside a persisted creds object sends on the shared number — never on the persisted token', async () => {
+    await insertLegacyRow('whatsapp.text', ',"partnerId":"never_seeded"');
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'legacy', undefined);
+    expect(JSON.stringify(sendText.mock.calls)).not.toMatch(new RegExp(LEGACY_TOKEN));
   });
 
   it('an unknown kind dead-letters instead of looping forever', async () => {
