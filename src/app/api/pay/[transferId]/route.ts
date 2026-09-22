@@ -235,8 +235,9 @@ async function processTransferPayment(
       // A charged row that is NOT awaiting_payment and NOT paid/in_review is the
       // capture↔cancel race (captureFunding = provider.capture THEN
       // setFundingRef, so a staff cancel landing after the status guard above
-      // leaves a cancelled row that WAS charged — fix 5's planned
-      // `funding_ref IS NULL` cancel guard cannot see that window either). Say
+      // leaves a cancelled row that WAS charged — fix 5's staff cancel claim,
+      // transfer-repo.cancelIfCancellable (`funding_ref IS NULL`), cannot see
+      // that window either). Say
       // so loudly — the reconcile sweep's cancelcharged:<id> alert is the
       // durable signal; this log is the fast one.
       if (current?.fundingRef && current.status === 'cancelled' && (current.refundStatus ?? 'none') === 'none') {

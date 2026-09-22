@@ -3728,6 +3728,70 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(after?.status).toBe('paid');
       expect(after?.refundStatus ?? 'none').toBe('none');
     });
+
+    // ── Phase 1 Task 5 (money-05 class): the void is the guarded claim, never a full-row upsert ──
+    it('awaiting_payment but already CHARGED (card-funded bill, fundingRef set) ⇒ NOT cancelled; customer-safe reply; the charged row stays for the resume sweep', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      const t = (await ctx.store.getTransfer(id))!;
+      await ctx.store.saveTransfer({ ...t, fundingMethod: 'credit_card' }); // a B2B bill paid by card (pay-finalize.ts)
+      await createTransferRepo(db).setFundingRef(id, `mockfund-${id}`);   // the capture landed; settlement has not run yet
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(false);
+      expect(r.error_code).toBe('payment_processing');
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint).toLowerCase()).toContain('already being processed');
+      expect(String(r.reply_hint)).not.toMatch(/mockfund|partner|blocked|reversed/i); // no internal tokens, no promise
+      const after = await ctx.store.getTransfer(id);
+      expect(after?.status).toBe('awaiting_payment');
+      expect(after?.fundingRef).toBe(`mockfund-${id}`);
+      expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+
+    it('a bill that SETTLES between the read and the cancel is never overwritten (the old full-row upsert wrote cancelled over paid)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      let raced = false;
+      const racyStore: typeof ctx.store = {
+        ...ctx.store,
+        async listTransfersByPhone(partnerId, phone, limit) {
+          const snapshot = await ctx.store.listTransfersByPhone(partnerId, phone, limit); // sees awaiting_payment
+          if (!raced) {
+            raced = true;
+            await ctx.store.updateTransferFromWebhook(id, 'paid'); // the settlement wins after the read
+          }
+          return snapshot;
+        },
+      };
+      const r = await executeTool('cancel_bill', {}, { ...ctx, store: racyStore });
+      expect(r.cancelled).toBe(false);
+      expect(r.error_code).toBe('payment_processing');
+      const after = await ctx.store.getTransfer(id);
+      expect(after?.status).toBe('paid');                 // the instructed row stands
+      expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+
+    it('a bill cancelled concurrently (e.g. by staff) answers "already cancelled" without writing again', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      let raced = false;
+      const racyStore: typeof ctx.store = {
+        ...ctx.store,
+        async listTransfersByPhone(partnerId, phone, limit) {
+          const snapshot = await ctx.store.listTransfersByPhone(partnerId, phone, limit);
+          if (!raced) {
+            raced = true;
+            expect(await ctx.store.cancelTransferIfUnfunded(id, ctx.partnerId)).not.toBeNull(); // a staff Cancel lands first
+          }
+          return snapshot;
+        },
+      };
+      const r = await executeTool('cancel_bill', {}, { ...ctx, store: racyStore });
+      expect(r.cancelled).toBe(true);
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint).toLowerCase()).toContain('already cancelled');
+      expect((await ctx.store.getTransfer(id))?.status).toBe('cancelled');
+    });
   });
 
   // ── dispute_bill (opens a case + flips the invoice; no money) ──

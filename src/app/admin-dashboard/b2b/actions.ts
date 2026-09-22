@@ -92,11 +92,18 @@ export async function seedDemoInvoiceAction(formData: FormData): Promise<void> {
 }
 
 /**
- * Cancel an UNPAID B2B transfer (awaiting_payment or in_review). Non-custodial
- * and safe: nothing has been pulled, so this is a clean status flip via
- * cancelTransfer (the in_review uncharged branch is automatic). A *paid*
- * ach_pull is explicitly steered to Reverse — cancelTransfer would throw there,
- * but we reject earlier with a clear message so staff never see a raw error.
+ * Cancel an UNFUNDED B2B transfer: awaiting_payment with no fundingRef. The
+ * rule is dashboard-cancel-policy.decideStaffCancel, enforced by cancelTransfer:
+ *   • a partner-pulled (ach_pull / bank_pull) awaiting row never carries a
+ *     fundingRef, so it is always a clean void;
+ *   • an in_review HOLD, charged or not, is REFUSED: ending a hold is a
+ *     compliance decision, so an admin Rejects or Releases it on the Compliance
+ *     page (Task 5, Wave 2 review). The pre-check below still admits in_review
+ *     so staff get the Reject copy from the guard;
+ *   • a CARD-funded bill that was already charged (pay-finalize.ts) is REFUSED
+ *     too; the reconcile sweep resumes it.
+ * A *paid* ach_pull is steered to Reverse here first so staff see the
+ * B2B-specific copy.
  */
 export async function cancelB2bTransferAction(formData: FormData): Promise<void> {
   const staff = await requirePlatformStaff();
