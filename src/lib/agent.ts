@@ -292,7 +292,9 @@ export function createAgent(deps: AgentDeps) {
         messages.push(
           {
             role: 'assistant',
-            content: null,
+            // '' not null: nothing on this transport has ever sent null content,
+            // and a strict OpenAI-compatible proxy may reject it.
+            content: '',
             tool_calls: [
               { id: CONTEXT_CALL_ID, type: 'function', function: { name: 'get_customer_context', arguments: '{}' } },
             ],

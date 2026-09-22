@@ -1562,9 +1562,13 @@ describe('fix 5 (F43): outsider-written text never reaches the system role; cont
     const [user, call, result] = r0.slice(-3);
     expect(user).toEqual({ role: 'user', content: 'hi again' });
     expect(call).toEqual({
-      role: 'assistant', content: null,
+      role: 'assistant', content: '',
       tool_calls: [{ id: 'ctx_r0', type: 'function', function: { name: 'get_customer_context', arguments: '{}' } }],
     });
+    // Review follow-up: never null content on this transport — a strict
+    // OpenAI-compatible proxy may reject it, which would degrade every
+    // returning customer's turn to the fallback reply.
+    expect(typeof call.content).toBe('string');
     expect(result.role).toBe('tool');
     expect(result.tool_call_id).toBe(call.tool_calls![0].id);
     // Round 1 rebuilds from history: the synthetic pair is gone.
