@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
+import { bearerMatches } from '@/lib/cron-auth';
 import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
@@ -68,11 +69,9 @@ async function run(req: NextRequest): Promise<NextResponse> {
   // The platform's kill clock starts at invocation, not after the sweeps —
   // hardStopAt below must be derived from THIS instant.
   const invocationStart = Date.now();
-  if (env.cronSecret) {
-    const auth = req.headers.get('authorization');
-    if (auth !== `Bearer ${env.cronSecret}`) {
-      return new NextResponse('Unauthorized', { status: 401 });
-    }
+  // Constant-time, fail-closed (src/lib/cron-auth.ts).
+  if (env.cronSecret && !bearerMatches(req.headers.get('authorization'), env.cronSecret)) {
+    return new NextResponse('Unauthorized', { status: 401 });
   }
 
   // Cadence (Program-Fix 12). ONE clock instant for every gate and dedupe

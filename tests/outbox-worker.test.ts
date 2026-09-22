@@ -949,3 +949,43 @@ describe('drainOnce — poison rows dead-letter on reclaim (Program-Fix 12 / Tas
     expect(sendText).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('drainOnce — the poison guard runs before the budget and hard-stop releases (Program-Fix 12 review follow-up)', () => {
+  // Pins deviation 6: the guard sits before the stopAfter release and the
+  // TERMINAL_ON_DEADLINE hard-stop release. A poison row released instead would
+  // get one attempt refunded and be reclaimed again next drain, forever.
+  async function alertKeys(): Promise<string[]> {
+    const r = await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string }> }).rows.map((x) => x.dedupe_key);
+  }
+
+  it('with stopAfter already passed, a poison whatsapp.text row is dead-lettered, not released', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', text: 'poison' });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    const r = await drainOnce(deps(), 'w_next', 10, { stopAfter: 0 });
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1, released: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    const after = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE id = ${row.id}`)) as unknown as {
+      rows: Array<{ status: string; attempts: number }>;
+    };
+    expect(after.rows[0]).toEqual({ status: 'dead', attempts: MAX_ATTEMPTS + 1 });
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+  });
+
+  it('with a hardStopAt too tight for an agent.turn, a poison agent.turn row is dead-lettered, not released', async () => {
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'poison', turn: {} });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    // hardStopAt = now: any TERMINAL_ON_DEADLINE row that is NOT poison would be released here.
+    const r = await drainOnce(deps(), 'w_next', 10, { hardStopAt: Date.now() });
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1, released: 0 });
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+  });
+});

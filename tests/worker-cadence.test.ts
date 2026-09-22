@@ -140,18 +140,30 @@ describe('checkCronQuiet (test 6)', () => {
     db = await freshDb();
   });
 
-  it('a marker 11 min old raises ONE cronquiet alert per hour bucket', async () => {
+  it('a marker 11 min old raises ONE cronquiet alert per hour OF QUIETNESS, keyed on the outage, not the wall clock', async () => {
     const redis = fakeRedis();
-    const now = new Date('2026-09-22T10:30:00Z');
-    await recordCronRun(redis, new Date(now.getTime() - 11 * 60_000));
-    const first = await checkCronQuiet(db, redis, now);
+    // The outage starts at 10:44; the heartbeat checks at 10:55 and again at
+    // 11:05 — across a wall-clock hour boundary. One outage, one alert.
+    const lastCron = new Date('2026-09-22T10:44:00Z');
+    await recordCronRun(redis, lastCron);
+    const first = await checkCronQuiet(db, redis, new Date('2026-09-22T10:55:00Z'));
     expect(first).toMatchObject({ breached: true, alerted: true });
-    expect(first.lastCronAt?.toISOString()).toBe('2026-09-22T10:19:00.000Z');
-    const bucket = Math.floor(now.getTime() / 3_600_000);
-    expect(await alertKeys(db)).toEqual([`cronquiet:${bucket}`]);
-    const second = await checkCronQuiet(db, redis, new Date(now.getTime() + 60_000));
+    expect(first.lastCronAt?.toISOString()).toBe(lastCron.toISOString());
+    expect(await alertKeys(db)).toEqual([`cronquiet:${lastCron.getTime()}:0`]);
+    const second = await checkCronQuiet(db, redis, new Date('2026-09-22T11:05:00Z'));
     expect(second).toMatchObject({ breached: true, alerted: false });
     expect(await alertKeys(db)).toHaveLength(1);
+    // The second hour of the SAME outage re-alerts once.
+    const third = await checkCronQuiet(db, redis, new Date('2026-09-22T11:50:00Z'));
+    expect(third).toMatchObject({ breached: true, alerted: true });
+    expect(await alertKeys(db)).toEqual([`cronquiet:${lastCron.getTime()}:0`, `cronquiet:${lastCron.getTime()}:1`]);
+    // The cron resumes, then stops again: a new outage has a new key.
+    const resumed = new Date('2026-09-22T12:00:00Z');
+    await recordCronRun(redis, resumed);
+    const fourth = await checkCronQuiet(db, redis, new Date('2026-09-22T12:20:00Z'));
+    expect(fourth).toMatchObject({ breached: true, alerted: true });
+    expect(await alertKeys(db)).toHaveLength(3);
+    expect((await alertKeys(db))[2]).toBe(`cronquiet:${resumed.getTime()}:0`);
   });
 
   it('a marker 2 min old raises nothing', async () => {
@@ -242,6 +254,10 @@ describe('no stale cadence promise in code or docs (test 10)', () => {
   // minus docs/AUDIT-2026-09-14.md (a dated audit record) and the rendered
   // diagram images (*.svg, *.png): the repo has no mermaid renderer, so the
   // .mmd sources are corrected here and the renders stay until regenerated.
+  // Under this pattern BOTH renders are stale today:
+  //   docs/diagrams/architecture-L2-containers.svg ("wakes the worker every 5 minutes")
+  //   docs/diagrams/architecture-L3-flaws.svg      ("delivery guarantee")
+  // Regenerating them from the corrected .mmd (mermaid.live) clears both.
   const STALE = /5-minute heartbeat|5-min heartbeat|delivery guarantee|heartbeat is the|every 5 minutes/i;
   const TEXT = new Set(['.ts', '.tsx', '.md', '.mmd', '.yml', '.yaml', '.json', '.mjs', '.sh']);
 

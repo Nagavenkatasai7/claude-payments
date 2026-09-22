@@ -29,7 +29,7 @@ import type { RedisLike } from '@/lib/store';
 export const WORKER_CRON_PERIOD_MIN = 1;
 /** A claimable row older than this raises `draingap:<hourBucket>`. */
 export const DRAIN_SLA_MINUTES = 10;
-/** A last-cron marker older than this raises `cronquiet:<hourBucket>`. */
+/** A last-cron marker older than this raises `cronquiet:<markerMs>:<hourOfQuiet>`. */
 export const CRON_QUIET_MINUTES = 10;
 /** Redis key holding the ISO instant of the last cron-sourced invocation. */
 export const CRON_MARKER_KEY = 'worker:last-cron';
@@ -99,7 +99,7 @@ export interface CronQuietResult {
   lastCronAt: Date | null;
   /** The marker exists and is older than CRON_QUIET_MINUTES. */
   breached: boolean;
-  /** A NEW cronquiet alert row was enqueued by this call (deduped per hour bucket). */
+  /** A NEW cronquiet alert row was enqueued by this call (deduped per outage and hour of quietness). */
   alerted: boolean;
 }
 
@@ -119,7 +119,10 @@ export async function checkCronQuiet(db: Db, redis: MarkerRedis, now: Date): Pro
         `⚠️ SmartRemit ops: the Vercel per-minute worker cron has been quiet for ${ageMin}m ` +
         `(threshold ${CRON_QUIET_MINUTES}m) — check the Vercel cron (Settings → Cron Jobs) and the GitHub heartbeat.`,
     },
-    { dedupeKey: `cronquiet:${hourBucket(now)}` },
+    // Keyed on THIS outage (the marker instant) and the hour of quietness, not
+    // the wall-clock hour: one outage straddling :00 raises one alert, and each
+    // further hour of the same outage re-alerts once.
+    { dedupeKey: `cronquiet:${lastCronAt.getTime()}:${Math.floor(ageMin / 60)}` },
   );
   return { lastCronAt, breached: true, alerted };
 }
@@ -170,9 +173,15 @@ export async function getCadenceSnapshot(db: Db, redis: MarkerRedis): Promise<Ca
 
 let cached: MarkerRedis | null = null;
 /**
- * The marker client: NO retries (like ip-rate-limit.ts's limiterRedis — the
- * default client retries ~4 s a call in an outage) and a per-call abort. The
- * signal is the FUNCTION form (@upstash/redis error-8y4qG0W2.d.ts:132,
+ * The marker client. `retry: false` is NOT zero retries: the runtime maps it
+ * to `{ attempts: 1, backoff: () => 0 }` (@upstash/redis 1.38.1
+ * chunk-S6LIPXJD.mjs:125-131), and the request loop runs `i <= attempts`, so
+ * an outage costs at most TWO fetches with no backoff — versus the default
+ * client's 5 retries and ~4 s (ip-rate-limit.ts's limiterRedis makes the same
+ * choice). Both fetches share ONE abort signal, resolved once per request
+ * (chunk:142-151), so the 2 s cap bounds the pair, and an aborted function-
+ * form signal throws instead of retrying (chunk:173-174). The signal is the
+ * FUNCTION form (@upstash/redis error-8y4qG0W2.d.ts:132,
  * `signal?: AbortSignal | (() => AbortSignal)`): one shared AbortSignal on a
  * cached client would fire once and pre-abort every later call.
  */

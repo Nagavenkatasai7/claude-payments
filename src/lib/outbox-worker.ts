@@ -664,12 +664,12 @@ export async function drainOnce(
       const status = await outbox.markFailed(
         row.id,
         row.attempts,
-        'reclaimed past MAX_ATTEMPTS: worker died on every attempt',
+        'reclaimed past MAX_ATTEMPTS: killed on every recorded attempt (the last run may have completed) — check the effect before retrying',
         workerId,
       );
       if (status === 'dead') {
         result.dead++;
-        await alertDead(outbox, row, `DEAD after ${row.attempts} claims (reclaimed: the worker died on every attempt)`);
+        await alertDead(outbox, row, `DEAD after ${row.attempts} claims — reclaimed past MAX_ATTEMPTS: killed on every recorded attempt (the last run may have completed) — check the effect before retrying`);
       } else {
         logWarn('worker.lease', 'poison reclaim: markFailed refused, lease no longer ours', { id: row.id, kind: row.kind, status });
       }
