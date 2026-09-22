@@ -248,6 +248,31 @@ export function createOutboxRepo(db: DbOrTx) {
         .limit(limit);
     },
 
+    /**
+     * fix 11: rows that still HOLD a secret a pre-fix release copied into the
+     * payload — an object `creds` (WhatsApp bearer token) or a cleartext
+     * partner-application link on an unsealed invite. COUNTS by kind/status
+     * only; no payload is ever selected. The drizzle 0016 runbook gate
+     * (scripts/outbox-status.ts "SECRETS AT REST"): before /migrate-prod every
+     * row here must be done/dead; after the apply this must be empty. Tests a
+     * VALUE, not a key: `"creds": null` holds nothing and is not counted
+     * (jsonb_typeof, same predicates as drizzle/0016_scrub_outbox_secrets.sql).
+     */
+    async listSecretsAtRest(): Promise<Array<{ kind: string; status: string; n: number }>> {
+      return db
+        .select({ kind: outbox.kind, status: outbox.status, n: sql<number>`count(*)::int`.mapWith(Number) })
+        .from(outbox)
+        .where(
+          sql`jsonb_typeof(${outbox.payload} -> 'creds') = 'object'
+            OR (${outbox.kind} = 'email.send'
+                AND starts_with(${outbox.dedupeKey}, 'partner_app_invite:')
+                AND jsonb_typeof(${outbox.payload} -> 'sealed') IS DISTINCT FROM 'object'
+                AND ${outbox.payload} ->> 'text' LIKE '%/partners/apply/%')`,
+        )
+        .groupBy(outbox.kind, outbox.status)
+        .orderBy(outbox.kind, outbox.status);
+    },
+
     /** Dead letters for the ops page (+ manual retry). */
     async listDead(limit = 100): Promise<OutboxRow[]> {
       return db.select().from(outbox).where(eq(outbox.status, 'dead')).limit(limit);

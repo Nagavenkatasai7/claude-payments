@@ -227,12 +227,15 @@ export function memoizedPartnerContext(deps: WorkerDeps): PartnerResolver {
  * from `to`); its creds are resolved NOW, so a DB dump holds no bearer token
  * and a rotated token needs no re-enqueue. No partnerId ⇒ shared env number.
  *
- * TRANSITION SHIM — remove in the first outbox-worker PR after
- * drizzle/0016_scrub_outbox_secrets is applied to prod (Task 8, wave 4): a row
- * the PREVIOUS release enqueued carries `creds` and no `partnerId`; honour it
- * so the deploy→migrate window drains on the right number. 0016 strips every
- * `creds` key (backfilling partnerId from the phone number id), after which
- * this branch is unreachable.
+ * TRANSITION SHIM (Task 8, wave 4, deletes it): a row the PREVIOUS release
+ * enqueued carries `creds` and no `partnerId`; honour it so the deploy→migrate
+ * window drains on the right number. drizzle/0016_scrub_outbox_secrets
+ * back-fills partnerId from the phone number id and strips creds where that is
+ * safe — but it deliberately LEAVES an UNSENT row whose number matches no
+ * current partner (stripping it would move the send to the shared number), and
+ * a stale old-deployment writer can add rows after it runs. So applying 0016
+ * alone does NOT make this branch unreachable: remove it only once
+ * `scripts/outbox-status.ts` "SECRETS AT REST" prints `none` on prod.
  */
 async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<WaCreds | undefined> {
   const partnerId = str(p.partnerId);

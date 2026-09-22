@@ -9,7 +9,7 @@
 import { getDb } from '@/db/client';
 import { sql } from 'drizzle-orm';
 import { STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STUCK_REFUND_MINUTES, STALE_LOCK_MINUTES } from '@/lib/reconcile';
-import { LEASE_MS } from '@/db/repos/outbox-repo';
+import { LEASE_MS, createOutboxRepo } from '@/db/repos/outbox-repo';
 
 type Row = Record<string, unknown>;
 
@@ -107,14 +107,10 @@ async function main() {
   // the payload itself is never selected. The 0016 gate: before /migrate-prod
   // every row here must be done or dead (0016 leaves an UNSENT legacy row
   // untouched so it still sends correctly — it would survive the scrub); after
-  // the apply this must print "none".
-  const secretsAtRest = await q(sql`
-    SELECT kind, status, count(*)::int AS n
-    FROM outbox
-    WHERE (payload -> 'creds') IS NOT NULL
-       OR (kind = 'email.send' AND starts_with(dedupe_key, 'partner_app_invite:')
-           AND (payload -> 'sealed') IS NULL AND payload ->> 'text' LIKE '%/partners/apply/%')
-    GROUP BY kind, status ORDER BY kind, status`);
+  // the apply this must print "none". The query is the PGlite-tested
+  // outboxRepo.listSecretsAtRest (tests/outbox-payload-secrets.test.ts): it tests
+  // a VALUE, not a key, so a `"creds": null` row never blocks the gate.
+  const secretsAtRest: Row[] = await createOutboxRepo(db).listSecretsAtRest();
   section('SECRETS AT REST (fix 11: legacy creds / cleartext invite links — must be none once drizzle 0016 is applied)', secretsAtRest);
 
   const needsHuman =

@@ -245,6 +245,14 @@ describe('STATIC: no enqueue payload under src/ carries creds / tokens / secrets
     // The scan must actually see the producers (36 at bf4b083; 38 once Task 9's
     // sweepFxHealth + schedule-refused ops.alert sites land — both scanned here
     // like every other src file) — a rename that makes it scan nothing must fail.
+    // Why the floor is 30 and not the exact 38: this is a liveness check, not a
+    // census. An exact count would fail every PR that legitimately adds or
+    // removes an enqueue site (and parallel waves do both), training people to
+    // bump the number blindly. What it must catch is the scan going vacuous: a
+    // `.enqueue(` rename, a tsconfig/include change or a file filter that drops
+    // most of src/. 30 sits below today's 38 with room for consolidation, yet far
+    // above what any such breakage leaves (0 or a handful). Coverage of each
+    // site is enforced by `findings` below, not by this number.
     expect(sites).toBeGreaterThanOrEqual(30);
     expect(findings).toEqual([]);
   }, 120_000);
@@ -376,5 +384,63 @@ describe('drizzle/0016_scrub_outbox_secrets (data-only) — scrubs legacy rows w
 
     await runMigration(); // idempotent
     expect(await payloads()).toEqual(by);
+  });
+
+  // Review of PR #272: the checks must test whether a key has a VALUE, not
+  // whether it is present. `"partnerId": null` / `""` is NOT a partner the
+  // worker can resolve (str() ⇒ '' ⇒ the legacy creds shim), and
+  // `"creds": null` is not a secret.
+  it('a null/empty partnerId is NOT a resolvable partner: it is back-filled when matched and never lets an unsent row lose its creds', async () => {
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, dedupe_key) VALUES
+      ('whatsapp.text', '{"to":"1","body":"e","partnerId":null,"creds":{"phoneNumberId":"pn_gone","token":"KEEP5"}}'::jsonb, 'pending', 'stage1:null_pid_unknown_pending'),
+      ('whatsapp.text', '{"to":"1","body":"f","partnerId":"","creds":{"phoneNumberId":"pn_gone","token":"KEEP6"}}'::jsonb, 'failed', 'stage1:empty_pid_unknown_failed'),
+      ('whatsapp.text', '{"to":"1","body":"g","partnerId":null,"creds":{"phoneNumberId":"pn_acme","token":"LEAKED7"}}'::jsonb, 'pending', 'stage1:null_pid_known_pending'),
+      ('whatsapp.template', '{"to":"1","template":"t","partnerId":"","creds":{"phoneNumberId":"pn_acme","token":"LEAKED8"}}'::jsonb, 'pending', 'stage1:empty_pid_known_pending'),
+      ('whatsapp.text', '{"to":"1","body":"h","creds":null}'::jsonb, 'pending', 'stage1:null_creds_pending'),
+      ('whatsapp.text', '{"to":"1","body":"i","partnerId":"acme","creds":null}'::jsonb, 'pending', 'stage1:null_creds_with_pid')`);
+
+    await runMigration();
+    const by = await payloads();
+    // Unsent + unresolvable ⇒ untouched: the shim still sends from the persisted number.
+    expect(by['stage1:null_pid_unknown_pending']).toEqual({
+      to: '1', body: 'e', partnerId: null, creds: { phoneNumberId: 'pn_gone', token: 'KEEP5' },
+    });
+    expect(by['stage1:empty_pid_unknown_failed']).toEqual({
+      to: '1', body: 'f', partnerId: '', creds: { phoneNumberId: 'pn_gone', token: 'KEEP6' },
+    });
+    // Matched ⇒ the null/empty partnerId is REPLACED by the owner, then creds are stripped.
+    expect(by['stage1:null_pid_known_pending']).toEqual({ to: '1', body: 'g', partnerId: 'acme' });
+    expect(by['stage1:empty_pid_known_pending']).toEqual({ to: '1', template: 't', partnerId: 'acme' });
+    // A null creds key carries nothing and changes no send: it is dropped, whatever the status.
+    expect(by['stage1:null_creds_pending']).toEqual({ to: '1', body: 'h' });
+    expect(by['stage1:null_creds_with_pid']).toEqual({ to: '1', body: 'i', partnerId: 'acme' });
+    expect(JSON.stringify(by)).not.toMatch(/LEAKED/);
+
+    await runMigration(); // idempotent
+    expect(await payloads()).toEqual(by);
+  });
+});
+
+describe('SECRETS AT REST (scripts/outbox-status.ts gate) — counts rows that still HOLD a secret, never a null key', () => {
+  let db: Db;
+  beforeEach(async () => { db = await freshDb(); });
+
+  it('counts object creds and cleartext legacy invites by kind/status; ignores "creds": null, partnerId-only rows and sealed invites', async () => {
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, dedupe_key) VALUES
+      ('whatsapp.text', '{"to":"1","body":"a","creds":{"phoneNumberId":"pn_x","token":"FAKE1"}}'::jsonb, 'pending', 'stage1:a'),
+      ('whatsapp.text', '{"to":"1","body":"b","creds":{"phoneNumberId":"pn_x","token":"FAKE2"}}'::jsonb, 'done', 'stage1:b'),
+      ('whatsapp.text', '{"to":"1","body":"c","creds":null}'::jsonb, 'pending', 'stage1:c'),
+      ('whatsapp.text', '{"to":"1","body":"d","partnerId":"acme"}'::jsonb, 'pending', 'stage1:d'),
+      ('email.send', '{"to":["a@b.c"],"subject":"s","text":"link: https://x/partners/apply/0123"}'::jsonb, 'done', 'partner_app_invite:p1'),
+      ('email.send', '{"to":["a@b.c"],"subject":"s","text":"{{apply_link}}","sealed":{"apply_link":"v1.a.b.c.d"}}'::jsonb, 'pending', 'partner_app_invite:p2')`);
+    expect(await createOutboxRepo(db).listSecretsAtRest()).toEqual([
+      { kind: 'email.send', status: 'done', n: 1 },
+      { kind: 'whatsapp.text', status: 'done', n: 1 },
+      { kind: 'whatsapp.text', status: 'pending', n: 1 },
+    ]);
+  });
+
+  it('prints none on an outbox with no secrets', async () => {
+    expect(await createOutboxRepo(db).listSecretsAtRest()).toEqual([]);
   });
 });
