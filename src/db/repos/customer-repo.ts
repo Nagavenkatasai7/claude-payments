@@ -14,6 +14,7 @@ import type {
   KycStatus,
   Occupation,
   PartnerId,
+  SendLimitOverride,
   SourceOfFunds,
 } from '@/lib/types';
 
@@ -68,6 +69,12 @@ export function createCustomerRepo(
     set('sourceOfFunds', (row.sourceOfFunds ?? undefined) as SourceOfFunds | undefined);
     set('occupation', (row.occupation ?? undefined) as Occupation | undefined);
     set('eddCapturedAt', isoOpt(row.eddCapturedAt));
+    // Program fix 16: READ-ONLY here (not in customerToRow — saveCustomer's
+    // full-row upsert must never rewrite it; fix 16b's setSendLimitOverride is
+    // the single-column writer). Nothing evaluates it until fix 16b.
+    if (row.sendLimitOverride && typeof row.sendLimitOverride === 'object') {
+      c.sendLimitOverride = row.sendLimitOverride as SendLimitOverride;
+    }
     set('lastFundingMethod', (row.lastFundingMethod ?? undefined) as FundingMethod | undefined);
     set('lastFundingMethodAt', isoOpt(row.lastFundingMethodAt));
     set('optInAt', isoOpt(row.optInAt));

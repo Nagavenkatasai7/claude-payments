@@ -458,6 +458,10 @@ export interface Customer {
   sourceOfFunds?: SourceOfFunds;
   occupation?: Occupation;
   eddCapturedAt?: string;        // ISO — when EDD enums were last supplied
+  // Program fix 16: read-only here (mapped in rowToCustomer only, NEVER in
+  // customerToRow — saveCustomer's full-row upsert must not rewrite it). Fix 16b
+  // writes it through a single-column UPDATE and reads it in the resolver.
+  sendLimitOverride?: SendLimitOverride;
   // ── Sticky funding (Bundle C) — the sender's last-used funding method ──
   lastFundingMethod?: FundingMethod;
   lastFundingMethodAt?: string;   // ISO-8601; powers the 90-day staleness check
@@ -504,6 +508,34 @@ export interface CapEvaluation {
   todayRemainingCents: number;
   reason?: CapReason;
   dayOfWindow?: number;   // 1, 2, or 3 — present only when tier === 'T0'
+}
+
+// ── Send limits (Program fix 16 / Task 10) ────────────────────────────────
+//
+// The RESOLVED ladder a mint is evaluated against (send-limits.ts). Every
+// field is in USD cents except maxUsd (the whole-dollar quote ceiling).
+export interface SendLimits {
+  t0DailyCapCents: number;      // daily cap during the 3-day observation window
+  t1DailyCapCents: number;      // daily cap once verified and past the window
+  perTransferCapCents: number;  // a separate per-transfer ceiling
+  maxUsd: number;               // the quote ceiling (floor(perTransferCapCents / 100), <= platform)
+}
+
+// A stored override (partners.send_limits / customers.send_limit_override —
+// both jsonb, added in 0018). All fields optional; a partial object tightens
+// only the fields it names. In fix 16 a stored value can only TIGHTEN the
+// platform ladder; fix 16b turns these into audited raises up to a hard
+// ceiling, keyed by expiresAt/setBy/setAt. Never PII — a dollar limit.
+export interface SendLimitOverride {
+  t1DailyCapCents?: number;
+  perTransferCapCents?: number;
+  expiresAt?: string;   // ISO — lapses at read; absent ⇒ no expiry
+  setBy?: string;       // staff username (fix 16b)
+  setAt?: string;       // ISO (fix 16b)
+}
+/** The partner-level shape additionally carries the T0 (observation-window) cap. */
+export interface PartnerSendLimits extends SendLimitOverride {
+  t0DailyCapCents?: number;
 }
 
 // ── Phase 1 country + currency types (P1) ─────────────────────────────
@@ -576,6 +608,11 @@ export interface Partner {
   kycMode?: KycMode;
   requireKycBeforeSend?: boolean;     // only consulted when kycMode==='delegated' (absent ⇒ false = skip our gate)
   corridorCompliance?: Partial<Record<CountryCode, CorridorComplianceRule>>;  // NEW (P5) — optional override map (default partner never gets it)
+  // Program fix 16: a partner's send-limit override (tighten-only in fix 16).
+  // Mapped in rowToPartner only, NEVER in partnerToRow — updatePartnerAction's
+  // full-row savePartner must not rewrite it. Fix 16b's setSendLimits is the
+  // single-column writer.
+  sendLimits?: PartnerSendLimits;
   supportConfig?: PartnerSupportConfig; // admin-controlled support behavior (absent ⇒ defaults)
   createdAt: string;
   updatedAt: string;

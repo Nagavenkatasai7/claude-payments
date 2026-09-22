@@ -2,7 +2,7 @@ import type { CurrencyCode, FundingMethod, Quote } from './types';
 import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
 
 export const MIN_USD = 10;
-export const MAX_USD = 999999;
+export const MAX_USD = 2999; // pinned to PLATFORM_SEND_LIMITS.maxUsd (send-limits.ts) — ruling 12: this line only
 
 export class QuoteError extends Error {
   constructor(message: string) {
