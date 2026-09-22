@@ -3,47 +3,49 @@ import Link from 'next/link';
 import { Inter } from 'next/font/google';
 import { waLink } from '../landing/wa';
 import WhatsAppIcon from '../landing/WhatsAppIcon';
+import BrandLogo from '../landing/BrandLogo';
 
-// Public /about page — the story + a product-walkthrough video. Styled with the
-// SAME inline-Tailwind dark conventions as the landing (no shared .lp class
-// system; the tokens are literal hex). Copy is adversarially fact-checked: it
+// Public /about page — the story, how a send works, and the partner platform.
+// Styled with the SAME inline-Tailwind light brand conventions as the landing
+// (no shared .lp class system; the tokens are literal hex: #f5f9ff page,
+// #0b1b3f navy text, #475569 slate secondary, #047857 green for small text). Copy is adversarially fact-checked: it
 // must NEVER imply SmartRemit is itself a licensed money transmitter or bank,
 // never overclaim custody/sanctions/delivery, and must carry the honest
 // demonstration-status note (money rails are simulated today).
 
 const inter = Inter({ subsets: ['latin'], display: 'swap' });
 
-// The explainer video. Same-origin /public today; swap to a Vercel Blob https
-// URL later (the CSP media-src already allows that host) — one-line change.
-const ABOUT_VIDEO_SRC = '/about-demo.mp4';
-const ABOUT_VIDEO_POSTER = '/about-poster.svg';
+// The product-walkthrough video is ON HOLD: /about-demo.mp4 was never
+// published, so the old <video> block only ever showed its (dark) poster over a
+// 404 source. It returns with the finished cut; the CSP media-src still allows
+// same-origin and the Vercel Blob host, so re-adding it needs no header change.
 
 const WA_HREF = waLink('Hi! I would like to send money home with SmartRemit.');
 
 export const metadata: Metadata = {
   title: 'About SmartRemit — non-custodial remittance infrastructure',
   description:
-    'SmartRemit is non-custodial technology that lets people send money home by chatting on WhatsApp, while licensed partners move the funds. Watch how one transfer works, start to finish.',
+    'SmartRemit is non-custodial technology that lets people send money home by chatting on WhatsApp, while licensed partners move the funds. See how one transfer works, start to finish.',
 };
 
 const ROOT =
-  `${inter.className} min-h-svh overflow-x-hidden bg-[#050607] leading-[1.6] text-[#f5f7f8] antialiased ` +
-  '[--lp-text-100:#f5f7f8] [--lp-text-300:#8b94a0] ' +
-  '[&_:focus-visible]:rounded-[6px] [&_:focus-visible]:[outline-offset:3px] [&_:focus-visible]:[outline:2px_solid_#25d366]';
+  `${inter.className} min-h-svh overflow-x-hidden bg-[#f5f9ff] leading-[1.6] text-[#0b1b3f] antialiased ` +
+  '[--lp-text-100:#0b1b3f] [--lp-text-300:#475569] ' +
+  '[&_:focus-visible]:rounded-[6px] [&_:focus-visible]:[outline-offset:3px] [&_:focus-visible]:[outline:2px_solid_#0c5bd2]';
 
 const SECTION = 'mx-auto w-full max-w-[1000px] px-5';
-const KICKER = 'text-[13px] font-semibold uppercase tracking-[0.14em] text-[#25d366]';
-const CARD = 'rounded-2xl border border-white/10 bg-[#0b0e12] p-6';
+const KICKER = 'text-[13px] font-semibold uppercase tracking-[0.14em] text-[#047857]';
+const CARD = 'rounded-2xl border border-[#dbe4f0] bg-white p-6';
 
 function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
   return (
     <li className="flex gap-4">
-      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/[0.03] text-[14px] font-bold text-[#25d366] tabular-nums">
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-[#dbe4f0] bg-white text-[14px] font-bold text-[#047857] tabular-nums">
         {n}
       </span>
       <div>
-        <div className="text-[16px] font-semibold text-[#f5f7f8]">{title}</div>
-        <p className="mt-1 text-[15px] text-[#aeb6c0]">{children}</p>
+        <div className="text-[16px] font-semibold text-[#0b1b3f]">{title}</div>
+        <p className="mt-1 text-[15px] text-[#475569]">{children}</p>
       </div>
     </li>
   );
@@ -52,8 +54,8 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 function Pillar({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className={CARD}>
-      <div className="text-[16px] font-semibold text-[#f5f7f8]">{title}</div>
-      <p className="mt-2 text-[15px] text-[#aeb6c0]">{children}</p>
+      <div className="text-[16px] font-semibold text-[#0b1b3f]">{title}</div>
+      <p className="mt-2 text-[15px] text-[#475569]">{children}</p>
     </div>
   );
 }
@@ -62,12 +64,12 @@ export default function AboutPage() {
   return (
     <div className={ROOT}>
       {/* Top bar */}
-      <header className="sticky top-0 z-30 border-b border-white/[0.07] bg-[#050607]/85 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-[#dbe4f0] bg-[#f5f9ff]/85 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1180px] items-center gap-4 px-5 py-3.5">
-          <Link href="/" className="text-[17px] font-semibold tracking-[-0.02em]">
-            Smart<span className="text-[#25d366]">Remit</span>
+          <Link href="/" className="inline-flex shrink-0 items-center">
+            <BrandLogo height={32} eager />
           </Link>
-          <Link href="/" className="ml-auto text-[14px] text-[#8b94a0] transition-colors hover:text-[#f5f7f8]">
+          <Link href="/" className="ml-auto text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f]">
             ← Back to home
           </Link>
           <a
@@ -90,37 +92,17 @@ export default function AboutPage() {
             <h1 className="mt-3 text-balance text-[clamp(34px,5.5vw,60px)] font-semibold leading-[1.06] tracking-[-0.03em]">
               Money home, in a message.
             </h1>
-            <p className="mt-5 max-w-[680px] text-[clamp(16px,2.2vw,20px)] text-[#aeb6c0]">
+            <p className="mt-5 max-w-[680px] text-[clamp(16px,2.2vw,20px)] text-[#475569]">
               {`Sending money to family across borders should feel as simple as texting them. SmartRemit makes the whole thing happen inside a WhatsApp conversation — no app to install, no forms to wrestle with.`}
             </p>
-            <p className="mt-4 max-w-[680px] text-[16px] text-[#8b94a0]">
+            <p className="mt-4 max-w-[680px] text-[16px] text-[#475569]">
               {`SmartRemit is non-custodial technology infrastructure — not a bank and not a money transmitter. We orchestrate the conversation, the quote, the compliance checks and the secure pay page; licensed money-transmitter partners are the ones who actually move and settle the funds on their own regulated rails. We never hold your money.`}
             </p>
           </div>
         </section>
 
-        {/* Video */}
-        <section className="px-5 pb-[clamp(40px,6vw,72px)]">
-          <div className="mx-auto w-full max-w-[1000px]">
-            <p className="text-[15px] font-medium text-[#8b94a0]">See it in two minutes.</p>
-            <div className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.02]">
-              <video
-                controls
-                preload="metadata"
-                poster={ABOUT_VIDEO_POSTER}
-                className="aspect-video h-auto w-full"
-                aria-label="SmartRemit product walkthrough"
-              >
-                <source src={ABOUT_VIDEO_SRC} type="video/mp4" />
-                Your browser does not support the video tag. You can still read how it works below.
-              </video>
-            </div>
-            <p className="mt-3 text-[14px] text-[#5b6470]">How one transfer works, start to finish.</p>
-          </div>
-        </section>
-
         {/* How it works */}
-        <section className="border-t border-white/[0.07] py-[clamp(48px,7vw,96px)]">
+        <section className="border-t border-[#dbe4f0] py-[clamp(48px,7vw,96px)]">
           <div className={SECTION}>
             <span className={KICKER}>How it works</span>
             <h2 className="mt-3 text-[clamp(26px,3.6vw,40px)] font-semibold tracking-[-0.02em]">
@@ -150,13 +132,13 @@ export default function AboutPage() {
         </section>
 
         {/* The platform (partners) */}
-        <section className="border-t border-white/[0.07] py-[clamp(48px,7vw,96px)]">
+        <section className="border-t border-[#dbe4f0] py-[clamp(48px,7vw,96px)]">
           <div className={SECTION}>
             <span className={KICKER}>For partners</span>
             <h2 className="mt-3 text-[clamp(26px,3.6vw,40px)] font-semibold tracking-[-0.02em]">
               White-label rails for the licensed transmitter.
             </h2>
-            <p className="mt-5 max-w-[760px] text-[17px] text-[#aeb6c0]">
+            <p className="mt-5 max-w-[760px] text-[17px] text-[#475569]">
               {`SmartRemit is multi-tenant infrastructure: one platform serves many partners, each with its own brand, WhatsApp number, settlement rail, rates and isolated dashboard. The licensed partner keeps the license and the funds flow — SmartRemit orchestrates everything around the money.`}
             </p>
             <div className="mt-8 grid gap-5 sm:grid-cols-2">
@@ -175,7 +157,7 @@ export default function AboutPage() {
             </div>
             <Link
               href="/#partner-with-us"
-              className="mt-8 inline-flex min-h-11 items-center rounded-full border border-white/15 px-5 text-[14px] font-semibold text-[#f5f7f8] transition-[border-color,background-color] duration-150 hover:border-white/40 hover:bg-white/[0.04]"
+              className="mt-8 inline-flex min-h-11 items-center rounded-full border border-[#c5d3e6] px-5 text-[14px] font-semibold text-[#0b1b3f] transition-[border-color,background-color] duration-150 hover:border-[#0c5bd2]/50 hover:bg-white"
             >
               Partner with us →
             </Link>
@@ -183,7 +165,7 @@ export default function AboutPage() {
         </section>
 
         {/* Trust & compliance */}
-        <section className="border-t border-white/[0.07] py-[clamp(48px,7vw,96px)]">
+        <section className="border-t border-[#dbe4f0] py-[clamp(48px,7vw,96px)]">
           <div className={SECTION}>
             <span className={KICKER}>Trust &amp; compliance</span>
             <h2 className="mt-3 text-[clamp(26px,3.6vw,40px)] font-semibold tracking-[-0.02em]">
@@ -215,9 +197,9 @@ export default function AboutPage() {
         {/* Honest status note */}
         <section className="px-5 py-[clamp(32px,5vw,56px)]">
           <div className="mx-auto w-full max-w-[1000px]">
-            <div className="rounded-2xl border border-[#22d3ee]/25 bg-[#22d3ee]/[0.06] p-6">
-              <div className="text-[15px] font-semibold text-[#f5f7f8]">A note on where we are today</div>
-              <p className="mt-2 text-[15px] text-[#aeb6c0]">
+            <div className="rounded-2xl border border-[#bfe0ea] bg-[#eaf6fa] p-6">
+              <div className="text-[15px] font-semibold text-[#0b1b3f]">A note on where we are today</div>
+              <p className="mt-2 text-[15px] text-[#475569]">
                 {`SmartRemit is a working demonstration of production-grade remittance infrastructure. The AI conversation, live FX quoting, signed instruction-and-callback loop, durable processing, dashboards and WhatsApp notifications are real. Actual fund movement, the production identity-verification vendor, a commercial sanctions feed, and a live payout rail are simulated today — a reference "simulator" rail runs the exact signed loop a production rail would. We'll only describe those as live once they are.`}
               </p>
             </div>
@@ -225,7 +207,7 @@ export default function AboutPage() {
         </section>
 
         {/* Closing CTA */}
-        <section className="border-t border-white/[0.07] px-5 py-[clamp(48px,7vw,96px)]">
+        <section className="border-t border-[#dbe4f0] px-5 py-[clamp(48px,7vw,96px)]">
           <div className="mx-auto w-full max-w-[1000px] text-center">
             <h2 className="text-[clamp(26px,3.6vw,42px)] font-semibold tracking-[-0.02em]">
               Your family is one message away.
@@ -242,7 +224,7 @@ export default function AboutPage() {
               </a>
               <Link
                 href="/"
-                className="inline-flex min-h-12 items-center rounded-full border border-white/15 px-6 text-[15px] font-semibold text-[#f5f7f8] transition-[border-color,background-color] duration-150 hover:border-white/40 hover:bg-white/[0.04]"
+                className="inline-flex min-h-12 items-center rounded-full border border-[#c5d3e6] px-6 text-[15px] font-semibold text-[#0b1b3f] transition-[border-color,background-color] duration-150 hover:border-[#0c5bd2]/50 hover:bg-white"
               >
                 Back to home
               </Link>
@@ -251,10 +233,11 @@ export default function AboutPage() {
         </section>
       </main>
 
-      <footer className="border-t border-white/10 bg-[#07090b] py-8">
-        <div className="mx-auto flex w-full max-w-[1180px] flex-wrap items-center justify-between gap-3 px-5 text-[13px] text-[#5b6470]">
-          <span>
-            Smart<span className="text-[#8b94a0]">Remit</span> — non-custodial remittance infrastructure.
+      <footer className="border-t border-[#dbe4f0] bg-white py-8">
+        <div className="mx-auto flex w-full max-w-[1180px] flex-wrap items-center justify-between gap-3 px-5 text-[13px] text-[#52607a]">
+          <span className="flex flex-wrap items-center gap-3">
+            <BrandLogo height={32} />
+            <span>Non-custodial remittance infrastructure.</span>
           </span>
           <span>[Placeholder: licensing &amp; regulatory disclosures]</span>
         </div>

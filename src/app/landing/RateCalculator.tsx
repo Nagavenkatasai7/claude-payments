@@ -20,12 +20,14 @@ function formatUsd(n: number): string {
   return '$' + n.toLocaleString('en-US');
 }
 
-// Tailwind recipes (B7 rebuild — flat near-black card chrome to match the
-// new landing; the landing root re-declares the --lp-* palette these consume).
+// Tailwind recipes (light brand theme — a white card on the #f5f9ff page; the
+// landing root declares the --lp-* palette these consume). The "they get"
+// figure uses --lp-green-text (#047857, 5.5:1 on white): the WhatsApp green
+// itself is only 1.9:1 on white, so it stays on the button (dark label, 8.4:1).
 const tier2Card =
-  'rounded-2xl border border-white/10 bg-white/[.04] [box-shadow:0_24px_60px_-30px_rgba(0,0,0,.9)]';
+  'rounded-2xl border border-[#dbe4f0] bg-white [box-shadow:0_24px_60px_-32px_rgba(11,27,63,.35)]';
 const btnWaBlock =
-  'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border-0 bg-[var(--lp-wa)] px-[22px] py-[13px] min-h-12 text-base leading-normal font-bold text-[#04231A] [box-shadow:0_10px_26px_-10px_rgba(37,211,102,.6)] [transition:background_.18s_ease,transform_.18s_ease,box-shadow_.18s_ease] hover:bg-[var(--lp-wa-deep)] hover:text-[#F5F8FF] hover:-translate-y-px';
+  'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border-0 bg-[var(--lp-wa)] px-[22px] py-[13px] min-h-12 text-base leading-normal font-bold text-[#04231A] [box-shadow:0_10px_26px_-10px_rgba(37,211,102,.6)] [transition:background_.18s_ease,transform_.18s_ease,box-shadow_.18s_ease] hover:bg-[var(--lp-wa-deep)] hover:-translate-y-px';
 
 /**
  * Live rate calculator. Progressive enhancement: the SSR baseline (this same
@@ -58,7 +60,7 @@ export default function RateCalculator({ rate, live, asOf }: Props) {
       <div className="flex items-end gap-3.5">
         <label className="flex flex-1 flex-col gap-1.5">
           <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">You send</span>
-          <span className="flex items-center rounded-xl border border-[var(--lp-border)] bg-[var(--lp-bg-900)] px-3">
+          <span className="flex items-center rounded-xl border border-[var(--lp-border)] bg-[var(--lp-bg-900)] px-3 focus-within:border-[#0c5bd2] focus-within:ring-2 focus-within:ring-[#0c5bd2]/25">
             <span className="text-lg leading-normal text-[var(--lp-text-300)]">$</span>
             <input
               className="min-w-0 flex-1 border-none bg-transparent py-[9px] pl-1.5 text-lg leading-normal font-bold text-[var(--lp-text-100)] focus:outline-none"
@@ -80,7 +82,7 @@ export default function RateCalculator({ rate, live, asOf }: Props) {
 
         <div className="flex flex-1 flex-col gap-1.5">
           <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">They get</span>
-          <span className="py-[9px] text-[22px] leading-normal font-extrabold text-[var(--lp-wa)]" aria-live="polite">
+          <span className="py-[9px] text-[22px] leading-normal font-extrabold text-[var(--lp-green-text)]" aria-live="polite">
             {theyGet === null ? '—' : hasAmount ? formatInr(theyGet) : '₹0'}
           </span>
         </div>
