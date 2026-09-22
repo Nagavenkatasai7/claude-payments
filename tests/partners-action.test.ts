@@ -3,6 +3,10 @@ import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
+import { createStore } from '@/lib/store';
+import { decryptField } from '@/lib/field-crypto';
+import { hashApplicationToken } from '@/lib/partner-application-token';
+import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 
 /**
  * U1 — the public "Partner with us" lead form server action.
@@ -81,15 +85,15 @@ async function partnerRequestRows(): Promise<
   }));
 }
 
-async function emailOutboxRows(): Promise<
-  { dedupeKey: string; payload: { to: string[]; subject: string; text: string } }[]
-> {
+type EmailPayload = { to: string[]; subject: string; text: string; sealed?: Record<string, string> };
+
+async function emailOutboxRows(): Promise<{ dedupeKey: string; payload: EmailPayload }[]> {
   const res = await db.execute(
     sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'email.send' ORDER BY id`,
   );
   return (
     res as unknown as {
-      rows: { dedupe_key: string; payload: { to: string[]; subject: string; text: string } }[];
+      rows: { dedupe_key: string; payload: EmailPayload }[];
     }
   ).rows.map((r) => ({ dedupeKey: r.dedupe_key, payload: r.payload }));
 }
@@ -143,7 +147,9 @@ describe('submitPartnerRequestAction', () => {
     expect(invite).toBeDefined();
     expect(invite!.payload.subject).toBe('Complete your SmartRemit partner application');
     expect(invite!.payload.to).toEqual(['partners@acme.com']);
-    expect(invite!.payload.text).toContain('/partners/apply/');
+    // The link is a placeholder rendered from a field-crypto blob at send time (fix 11 / F66).
+    expect(invite!.payload.text).toContain('{{apply_link}}');
+    expect(invite!.payload.text).not.toContain('/partners/apply/');
 
     expect(pokeWorkerMock).toHaveBeenCalledTimes(1);
   });
@@ -206,5 +212,66 @@ describe('submitPartnerRequestAction', () => {
     );
     // Only the 5 allowed leads persisted; the rate-limited one did not.
     expect(await partnerRequestRows()).toHaveLength(5);
+  });
+});
+
+describe('the partner-invite email never persists the raw capability token (fix 11 / F66)', () => {
+  function workerDeps(sent: { to: string[]; subject: string; text: string }[]): WorkerDeps {
+    return {
+      db,
+      store: createStore(redis, db),
+      sendText: async () => {},
+      sendTemplate: async () => {},
+      fetchFn: (() => { throw new Error('no network in this test'); }) as unknown as typeof fetch,
+      recipientTemplateName: 'transfer_delivered',
+      recipientTemplateLang: 'en',
+      listStaff: async () => [],
+      runAgentTurn: async () => '',
+      sendEmail: async (m) => { sent.push(m); },
+    };
+  }
+
+  async function submitAndGetInvite() {
+    await expect(submitPartnerRequestAction(form(VALID))).rejects.toThrow('REDIRECT:/?partner=ok#partner-with-us');
+    const [lead] = await partnerRequestRows();
+    const invite = (await emailOutboxRows()).find((e) => e.dedupeKey === `partner_app_invite:${lead.id}`)!;
+    return { lead, invite };
+  }
+
+  it('the email.send payload holds a field-crypto blob, never the raw token or the apply link', async () => {
+    const { invite } = await submitAndGetInvite();
+    const raw = JSON.stringify(invite.payload);
+    expect(raw).not.toMatch(/\/partners\/apply\//);
+    expect(raw).not.toMatch(/[0-9a-f]{64}/);
+    expect(invite.payload.sealed?.apply_link).toMatch(/^v1\./);
+  });
+
+  it('the sealed link decrypts to /partners/apply/<token> whose HASH is on the lead row, and the worker delivers it rendered', async () => {
+    const { lead, invite } = await submitAndGetInvite();
+    const link = decryptField(invite.payload.sealed!.apply_link);
+    expect(link).toMatch(/^https:\/\/smartremit\.test\/partners\/apply\/[0-9a-f]{64}$/);
+    // The apply page resolves getByTokenHash(hashApplicationToken(token)).
+    expect(hashApplicationToken(link.split('/partners/apply/')[1])).toBe(lead.applicationTokenHash);
+
+    const sent: { to: string[]; subject: string; text: string }[] = [];
+    const r = await drainOnce(workerDeps(sent), 'w1');
+    expect(r.processed).toBe(2); // team notification + invite
+    const delivered = sent.find((m) => m.to[0] === 'partners@acme.com')!;
+    expect(delivered.text).toContain(link);
+    expect(delivered.text).not.toContain('{{apply_link}}');
+  });
+
+  it('a redelivered invite does NOT re-mint: the same link twice, application_token_hash unchanged', async () => {
+    const { lead: before } = await submitAndGetInvite();
+    const sent: { to: string[]; subject: string; text: string }[] = [];
+    await drainOnce(workerDeps(sent), 'w1');
+    // "Delivered but not acked": the machinery re-runs the row.
+    await db.execute(sql`UPDATE outbox SET status = 'pending', next_attempt_at = now() WHERE dedupe_key = ${`partner_app_invite:${before.id}`}`);
+    await drainOnce(workerDeps(sent), 'w1');
+    const invites = sent.filter((m) => m.to[0] === 'partners@acme.com');
+    expect(invites).toHaveLength(2);
+    expect(invites[1].text).toBe(invites[0].text);
+    const [after] = await partnerRequestRows();
+    expect(after.applicationTokenHash).toBe(before.applicationTokenHash);
   });
 });

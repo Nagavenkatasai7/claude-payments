@@ -6,6 +6,7 @@ import { getDb } from '@/db/client';
 import { createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { env } from '@/lib/env';
+import { encryptField } from '@/lib/field-crypto';
 import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
@@ -87,10 +88,15 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
     });
 
     // Mint a 30-day, single-use capability token for the detailed application
-    // form and persist only its HASH on the lead row. The raw token lives ONLY in
-    // the partner-facing email link below.
+    // form and persist only its HASH on the lead row. The raw token's one durable
+    // copy — the emailed link — is SEALED with field-crypto (fix 11 / F66): the
+    // outbox row holds ciphertext and the worker opens it at send time
+    // (src/lib/sealed-text.ts). Minted ONCE here, never per send attempt: a
+    // re-mint on redelivery would overwrite the hash and kill a delivered link.
+    // encryptField is CPU-only — the transaction gains no I/O.
     const { token, hash, expiresAt } = issueApplicationToken();
     await requests.setApplicationToken(id, hash, expiresAt);
+    const sealedApplyLink = encryptField(`${env.appBaseUrl}/partners/apply/${token}`);
 
     // Team notification — internal lead alert.
     await outbox.enqueue(
@@ -111,7 +117,8 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
     );
 
     // Partner invite — the unique link to the detailed application form. Goes to
-    // the email the partner submitted (NOT the internal lead list).
+    // the email the partner submitted (NOT the internal lead list). The link is
+    // the {{apply_link}} placeholder, rendered from `sealed` at send time.
     await outbox.enqueue(
       'email.send',
       {
@@ -120,9 +127,10 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
         text:
           `Hi,\n\n` +
           `Thanks for your interest in partnering with SmartRemit. Please complete your detailed application here:\n\n` +
-          `${env.appBaseUrl}/partners/apply/${token}\n\n` +
+          `{{apply_link}}\n\n` +
           `This secure link is unique to you and expires in 30 days.\n\n` +
           `— The SmartRemit team`,
+        sealed: { apply_link: sealedApplyLink },
       },
       { dedupeKey: `partner_app_invite:${id}` },
     );
