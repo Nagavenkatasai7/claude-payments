@@ -42,7 +42,9 @@ export async function cancelTransfer(store: Store, id: string): Promise<void> {
   const decision = decideStaffCancel(transfer);
   if (decision.kind === 'noop') return;
   if (decision.kind === 'refuse') throw new Error(decision.reason);
-  if (await store.cancelTransferIfUnfunded(id)) return;
+  // Tenant-scoped claim: the row's own partner (the action already enforced the
+  // caller's scope via getScopedTransfer / platform scope before calling here).
+  if (await store.cancelTransferIfUnfunded(id, transfer.partnerId)) return;
   const fresh = await store.getTransfer(id);
   const again = fresh ? decideStaffCancel(fresh) : null;
   throw new Error(again?.kind === 'refuse' ? again.reason : CANCEL_REFUSAL.changed);

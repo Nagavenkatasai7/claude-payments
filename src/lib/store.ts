@@ -107,12 +107,13 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
       return transfersRepo.updateIfStatus(id, expected, patch);
     },
     /** Atomic VOID of an unfunded draft (awaiting_payment with no fundingRef;
-     *  never an in_review hold) → cancelled: transfer-repo.cancelIfCancellable. Callers:
-     *  dashboard-ops.cancelTransfer (staff) and tools.ts cancel_bill (customer
-     *  chat). Null ⇒ not voidable now; the caller refuses and never falls back
-     *  to saveTransfer. */
-    async cancelTransferIfUnfunded(id: string): Promise<Transfer | null> {
-      return transfersRepo.cancelIfCancellable(id);
+     *  never an in_review hold) → cancelled: transfer-repo.cancelIfCancellable,
+     *  tenant-scoped by partnerId in the WHERE. Callers: dashboard-ops.cancelTransfer
+     *  (staff) and tools.ts cancel_bill (customer chat). Null ⇒ not voidable now
+     *  (or not this tenant's row); the caller refuses and never falls back to
+     *  saveTransfer. */
+    async cancelTransferIfUnfunded(id: string, partnerId: PartnerId): Promise<Transfer | null> {
+      return transfersRepo.cancelIfCancellable(id, partnerId);
     },
     async updateTransferFromWebhook(
       transferId: string,

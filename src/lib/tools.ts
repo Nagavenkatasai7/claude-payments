@@ -2436,7 +2436,7 @@ async function cancelBillTool(
           // upsert of the row read above. It voids only an UNFUNDED bill; a
           // charged one is left for the funding-resume sweep, and a bill that
           // settled after the read is never overwritten.
-          const voided = await ctx.store.cancelTransferIfUnfunded(active.id);
+          const voided = await ctx.store.cancelTransferIfUnfunded(active.id, ctx.partnerId); // tenant-scoped claim
           if (voided) {
             return {
               cancelled: true,

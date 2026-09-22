@@ -294,7 +294,7 @@ describe('transfer-repo: compliance views + velocity leaderboard (Stage 5e scan 
 describe('transfer-repo: cancelIfCancellable — atomic VOID of an unfunded draft (Phase 1 Task 5 / money-05)', () => {
   it('voids an UNCHARGED awaiting_payment row; RETURNING is the masked read; only status is written', async () => {
     await repo.saveTransfer(fixture({ id: 'cc_await' }));
-    const res = await repo.cancelIfCancellable('cc_await');
+    const res = await repo.cancelIfCancellable('cc_await', 'default');
     expect(res?.status).toBe('cancelled');
     expect(res?.payoutDestination).toBe('****1234'); // masked, like every default read
     const after = await repo.getTransfer('cc_await', { decrypt: true });
@@ -302,13 +302,23 @@ describe('transfer-repo: cancelIfCancellable — atomic VOID of an unfunded draf
     expect(after!.payoutDestination).toBe('123456789012|HDFC0001234'); // column-targeted: ciphertext untouched
   });
 
+  it('is TENANT-SCOPED: another tenant’s id is a no-op (null) and the row is untouched; its own tenant voids it', async () => {
+    await seedPartner(db, 'acme');
+    await repo.saveTransfer(fixture({ id: 'cc_tenant', partnerId: 'default' }));
+    expect(await repo.cancelIfCancellable('cc_tenant', 'acme')).toBeNull();
+    const untouched = await repo.getTransfer('cc_tenant', { decrypt: true });
+    expect(untouched).toMatchObject({ status: 'awaiting_payment', partnerId: 'default', payoutDestination: '123456789012|HDFC0001234' });
+    expect(untouched!.fundingRef ?? null).toBeNull();
+    expect((await repo.cancelIfCancellable('cc_tenant', 'default'))?.status).toBe('cancelled'); // control: the right tenant still voids
+  });
+
   it('returns null for an in_review hold, charged OR NOT: a hold leaves in_review only via Release or Reject (admin)', async () => {
     await repo.saveTransfer(fixture({ id: 'cc_review', status: 'in_review', complianceStatus: 'flagged' }));
     await repo.saveTransfer(
       fixture({ id: 'cc_review_chg', status: 'in_review', complianceStatus: 'flagged', fundingRef: 'mockfund-cc_review_chg' }),
     );
-    expect(await repo.cancelIfCancellable('cc_review')).toBeNull();
-    expect(await repo.cancelIfCancellable('cc_review_chg')).toBeNull();
+    expect(await repo.cancelIfCancellable('cc_review', 'default')).toBeNull();
+    expect(await repo.cancelIfCancellable('cc_review_chg', 'default')).toBeNull();
     expect((await repo.getTransfer('cc_review'))!.status).toBe('in_review');
     expect((await repo.getTransfer('cc_review_chg'))!.status).toBe('in_review');
   });
@@ -325,21 +335,21 @@ describe('transfer-repo: cancelIfCancellable — atomic VOID of an unfunded draf
           complianceStatus: status === 'blocked' ? 'blocked' : 'cleared',
         }),
       );
-      expect(await repo.cancelIfCancellable(id)).toBeNull();
+      expect(await repo.cancelIfCancellable(id, 'default')).toBeNull();
       expect((await repo.getTransfer(id))!.status).toBe(status);
     }
   });
 
   it('returns null for a CHARGED awaiting_payment row (fundingRef set): the resume sweep owns it', async () => {
     await repo.saveTransfer(fixture({ id: 'cc_chg_await', fundingRef: 'mockfund-cc_chg_await' }));
-    expect(await repo.cancelIfCancellable('cc_chg_await')).toBeNull();
+    expect(await repo.cancelIfCancellable('cc_chg_await', 'default')).toBeNull();
     expect((await repo.getTransfer('cc_chg_await'))!.status).toBe('awaiting_payment');
   });
 
   it('a capture that lands first (setFundingRef) makes the void miss, and the charged row stays visible to the resume sweep', async () => {
     await repo.saveTransfer(fixture({ id: 'cc_cap' }));
     await repo.setFundingRef('cc_cap', 'mockfund-cc_cap');
-    expect(await repo.cancelIfCancellable('cc_cap')).toBeNull();
+    expect(await repo.cancelIfCancellable('cc_cap', 'default')).toBeNull();
     const resumable = await repo.listAwaitingWithFunding(0, new Date(Date.now() + 60_000));
     expect(resumable.map((t) => t.id)).toContain('cc_cap');
   });
@@ -347,7 +357,7 @@ describe('transfer-repo: cancelIfCancellable — atomic VOID of an unfunded draf
   it('a paid flip that lands first makes the void miss and leaves paid (the claim decides, not the read)', async () => {
     await repo.saveTransfer(fixture({ id: 'cc_late' }));
     expect((await repo.markPaidIfAwaiting('cc_late'))?.status).toBe('paid');
-    expect(await repo.cancelIfCancellable('cc_late')).toBeNull();
+    expect(await repo.cancelIfCancellable('cc_late', 'default')).toBeNull();
     expect((await repo.getTransfer('cc_late'))!.status).toBe('paid');
   });
 
@@ -355,7 +365,7 @@ describe('transfer-repo: cancelIfCancellable — atomic VOID of an unfunded draf
     await repo.saveTransfer(fixture({ id: 'cc_race' }));
     const [paid, voided] = await Promise.all([
       repo.markPaidIfAwaiting('cc_race'),
-      repo.cancelIfCancellable('cc_race'),
+      repo.cancelIfCancellable('cc_race', 'default'),
     ]);
     expect([paid, voided].filter((r) => r !== null)).toHaveLength(1);
     expect((await repo.getTransfer('cc_race'))!.status).toBe(paid ? 'paid' : 'cancelled');

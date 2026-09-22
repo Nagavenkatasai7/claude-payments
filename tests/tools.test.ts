@@ -3702,7 +3702,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
           const snapshot = await ctx.store.listTransfersByPhone(partnerId, phone, limit);
           if (!raced) {
             raced = true;
-            expect(await ctx.store.cancelTransferIfUnfunded(id)).not.toBeNull(); // a staff Cancel lands first
+            expect(await ctx.store.cancelTransferIfUnfunded(id, ctx.partnerId)).not.toBeNull(); // a staff Cancel lands first
           }
           return snapshot;
         },

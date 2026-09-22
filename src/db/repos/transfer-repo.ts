@@ -387,7 +387,10 @@ export function createTransferRepo(
      * (tools.ts), both via store.cancelTransferIfUnfunded (Phase 1 Task 5 /
      * Program-Fix 9 / money-05; ruling 22's "awaiting_payment only"). ONE
      * guarded UPDATE:
-     *   WHERE id = $1 AND status = 'awaiting_payment' AND funding_ref IS NULL
+     *   WHERE id = $1 AND partner_id = $2
+     *     AND status = 'awaiting_payment' AND funding_ref IS NULL
+     * • partner_id = $2 is the tenant scope: another tenant's id is a no-op
+     *   (null, row untouched), so a caller can never void outside its tenant.
      * • funding_ref IS NULL means "never charged". The capture seam writes it
      *   (write-once, setFundingRef) BEFORE any settlement claim. A charged
      *   awaiting_payment row is still resumed by listAwaitingWithFunding.
@@ -408,12 +411,13 @@ export function createTransferRepo(
      * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:43,143,166;
      * isNull — node_modules/drizzle-orm/sql/expressions/conditions.d.ts:206.
      */
-    async cancelIfCancellable(id: string): Promise<Transfer | null> {
+    async cancelIfCancellable(id: string, partnerId: PartnerId): Promise<Transfer | null> {
       const rows = await db
         .update(transfers)
         .set({ status: 'cancelled' })
         .where(and(
           eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
           eq(transfers.status, 'awaiting_payment'),
           isNull(transfers.fundingRef),
         ))
