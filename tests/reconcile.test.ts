@@ -190,7 +190,7 @@ describe('reconcileSweep — crash-resume (charged but never settled)', () => {
     expect(await outboxRows()).toHaveLength(keys.length);
   });
 
-  it("routed victim: rail config resolves via the SETTLEMENT partner; stage-1 creds via the OWNER", async () => {
+  it("routed victim: rail config resolves via the SETTLEMENT partner; the stage-1 row names the OWNER and holds no creds (fix 11)", async () => {
     await seedPartner(db, 'railp');
     const repo = createIntegrationsRepo(db, provider);
     // Owner 'acme' has NO rail of its own — only a BYO WhatsApp number.
@@ -213,12 +213,15 @@ describe('reconcileSweep — crash-resume (charged but never settled)', () => {
     expect(r.fundingResumed).toBe(1);
     // Rail-side: railp is webhook-driven ⇒ a settlement.instruct row exists.
     expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('instruct:rc_fund1');
-    // Brand-side: the stage-1 message rides the OWNER's number.
+    // Brand-side: the stage-1 message names the OWNER (its creds resolve at
+    // drain time) — the row holds neither partner's token nor the rail's number.
     const stage1 = (await db.execute(sql`
-      SELECT payload->'creds'->>'phoneNumberId' AS pn FROM outbox
-      WHERE dedupe_key = 'stage1:rc_fund1'
-    `)) as unknown as { rows: Array<{ pn: string | null }> };
-    expect(stage1.rows[0].pn).toBe('pn_acme');
+      SELECT payload->>'partnerId' AS pid, (payload -> 'creds') IS NOT NULL AS has_creds, payload::text AS raw
+      FROM outbox WHERE dedupe_key = 'stage1:rc_fund1'
+    `)) as unknown as { rows: Array<{ pid: string | null; has_creds: boolean; raw: string }> };
+    expect(stage1.rows[0].pid).toBe('acme');
+    expect(stage1.rows[0].has_creds).toBe(false);
+    expect(stage1.rows[0].raw).not.toMatch(/tok_acme|tok_railp|pn_railp/);
   });
 
   it('a FRESH charge still inside the grace window is left alone', async () => {

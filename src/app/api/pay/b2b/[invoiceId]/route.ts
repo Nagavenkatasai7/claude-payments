@@ -251,16 +251,12 @@ export async function POST(
     // settleOrHold is the ONE compliance decision: cleared → beginSettlement
     // (signed instruct); flagged → beginHold (in_review + held message, NO
     // instruction — the partner never debits the buyer until staff release).
+    // Rail config is the SETTLEMENT partner's when routed; the held/stage-1
+    // message names the OWNING partner and its creds resolve at drain (fix 11).
     const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
-    const integrationsStore = getPartnerIntegrationsStore();
-    const railIntegrations = await integrationsStore.getIntegrations(railPartnerId);
-    const brandIntegrations =
-      railPartnerId === transfer.partnerId
-        ? railIntegrations
-        : await integrationsStore.getIntegrations(transfer.partnerId);
-    const waCreds = waCredsFrom(brandIntegrations);
+    const railIntegrations = await getPartnerIntegrationsStore().getIntegrations(railPartnerId);
 
-    const result = await settleOrHold(getDb(), transfer, railIntegrations, waCreds);
+    const result = await settleOrHold(getDb(), transfer, railIntegrations);
     pokeWorker();
     switch (result.kind) {
       case 'held':
