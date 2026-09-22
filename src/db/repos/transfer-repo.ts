@@ -381,6 +381,46 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /**
+     * Atomically VOID an UNFUNDED draft: the ONLY cancel write, used by staff
+     * Cancel (dashboard-ops.cancelTransfer) and the customer chat cancel_bill
+     * (tools.ts), both via store.cancelTransferIfUnfunded (Phase 1 Task 5 /
+     * Program-Fix 9 / money-05; ruling 22's "awaiting_payment only"). ONE
+     * guarded UPDATE:
+     *   WHERE id = $1 AND status = 'awaiting_payment' AND funding_ref IS NULL
+     * • funding_ref IS NULL means "never charged". The capture seam writes it
+     *   (write-once, setFundingRef) BEFORE any settlement claim. A charged
+     *   awaiting_payment row is still resumed by listAwaitingWithFunding.
+     * • in_review NEVER matches, charged or not. Ending a compliance hold is
+     *   the compliance decision, so it leaves in_review only via Release or
+     *   Reject (both requireAdmin). This predicate enforces that for every
+     *   Cancel path (Wave 2 review).
+     * • paid / delivered / blocked / cancelled never match. Cancel commits NO
+     *   refund or reversal effect, so it may never touch a row with money
+     *   behind it.
+     * Column-targeted (status only): encrypted columns are never rewritten.
+     * Null ⇒ not voidable NOW (a concurrent paid flip, hold or capture won).
+     * The caller re-reads and refuses; it must NEVER fall back to saveTransfer.
+     * Residual (alerted, not closed here): a PSP capture that has charged but
+     * not yet written funding_ref is invisible to this predicate. reconcile's
+     * cancelcharged:<id> alert (findCancelledCharged) is the net for it.
+     * Drizzle 0.45.2: update().set().where().returning() —
+     * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:43,143,166;
+     * isNull — node_modules/drizzle-orm/sql/expressions/conditions.d.ts:206.
+     */
+    async cancelIfCancellable(id: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ status: 'cancelled' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.fundingRef),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
     /** Compliance views: newest-first by compliance_status (indexed-friendly). */
     async listByCompliance(
       complianceStatus: 'flagged' | 'blocked',

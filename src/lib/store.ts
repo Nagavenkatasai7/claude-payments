@@ -97,13 +97,22 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     async saveTransfer(transfer: Transfer): Promise<void> {
       await transfersRepo.saveTransfer(transfer);
     },
-    /** Status-guarded staff edit (reject / cancel / assign) — see transfer-repo.updateIfStatus. */
+    /** Status-guarded staff edit (assign) — see transfer-repo.updateIfStatus. Cancel
+     *  uses cancelTransferIfUnfunded; reject claims inside its own transaction. */
     async updateTransferIfStatus(
       id: string,
       expected: TransferStatus,
       patch: { status?: TransferStatus; adminNote?: string; assignedTo?: string },
     ): Promise<Transfer | null> {
       return transfersRepo.updateIfStatus(id, expected, patch);
+    },
+    /** Atomic VOID of an unfunded draft (awaiting_payment with no fundingRef;
+     *  never an in_review hold) → cancelled: transfer-repo.cancelIfCancellable. Callers:
+     *  dashboard-ops.cancelTransfer (staff) and tools.ts cancel_bill (customer
+     *  chat). Null ⇒ not voidable now; the caller refuses and never falls back
+     *  to saveTransfer. */
+    async cancelTransferIfUnfunded(id: string): Promise<Transfer | null> {
+      return transfersRepo.cancelIfCancellable(id);
     },
     async updateTransferFromWebhook(
       transferId: string,
