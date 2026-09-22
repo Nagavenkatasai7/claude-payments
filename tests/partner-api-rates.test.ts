@@ -28,7 +28,7 @@ async function harness() {
     store,
     customerStore: createCustomerStore(db, store),
     partnerStore: createPartnerStore(db),
-    monthlyVolumeStore: createMonthlyVolumeStore(redis),
+    monthlyVolumeStore: createMonthlyVolumeStore(store),
     integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
     db,
     now: () => NOW,

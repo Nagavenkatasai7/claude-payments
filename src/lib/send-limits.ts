@@ -1,5 +1,7 @@
 import type { CapEvaluation, PartnerSendLimits, SendLimits } from './types';
 
+export type { SendLimits, PartnerSendLimits, SendLimitOverride } from './types';
+
 // send-limits (Program fix 16 / Task 10) — the platform send ladder and the
 // per-partner resolver. PURE and types-only in its imports on purpose: the
 // landing calculator ('use client', src/app/landing/RateCalculator.tsx) reads

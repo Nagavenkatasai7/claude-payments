@@ -1,6 +1,7 @@
 import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft } from './transfer-create';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
+import { resolveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
 import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
@@ -46,7 +47,11 @@ export type FinalizeResult =
       // 'bank_details_required' (fix 6 / ctx-01): the resolved payout destination
       // is a masked placeholder, or '' on anything but a B2B ach_pull draft.
       // Nothing was claimed or consumed; the route answers 400. Never a 500.
-      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable' | 'bank_details_required';
+      // 'busy' (Program fix 16): the per-sender mint lock timed out (another
+      // send for this customer is in flight). Retryable — the draft and its
+      // claim are untouched (a bound-but-unminted id replays); the route
+      // answers 503 "Please try again."
+      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable' | 'bank_details_required' | 'busy';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -65,7 +70,7 @@ function fxRefused(err: RateUnavailableError): FinalizeResult {
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
  * Transfer at the moment of payment (create-at-pay). Mirrors the createTransferTool
  * button-tap parity: peek → kyc → payout destination (fix 6) → FX (Task 9) → cap →
- * CLAIM-FIRST mint → consume → accruals. Returns the new transferId for the
+ * CLAIM-FIRST mint (the cap re-runs under the sender lock, fix 16) → consume. Returns the new transferId for the
  * caller to run the payment path.
  *
  * Stage 2c crash-safety: the idempotency key `draft:<draftId>` is bound to a
@@ -185,10 +190,19 @@ export async function finalizeDraftPayment(
     }
   }
 
-  // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
-  const todayUsedCents = await dailyVolumeStore.getTodayCents(partnerId, draft.senderPhone);
-  const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100), sendGateActive(partner));
-  if (!ev.withinCap) return { ok: false, error: 'cap' };
+  // Defense-in-depth cap re-check at pay time (the card-show check may be
+  // stale), the LAST pre-claim gate (ruling 7), on LEDGER totals and the
+  // partner's resolved limits (Program fix 16). The authoritative check runs
+  // again inside createTransfer's sender lock. SKIPPED when the draft already
+  // minted: the minted row would count itself and refuse its own replay.
+  if (!alreadyMinted) {
+    const todayUsedCents = await dailyVolumeStore.getTodayCents(partnerId, draft.senderPhone);
+    const ev = evaluateCap(
+      customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100),
+      sendGateActive(partner), resolveSendLimits(partner),
+    );
+    if (!ev.withinCap) return { ok: false, error: 'cap' };
+  }
 
   // CLAIM-FIRST: bind `draft:<draftId>` to a pre-generated id before minting.
   // PK(partner_id, key) means exactly one id can ever own this draft — a double
@@ -274,6 +288,12 @@ export async function finalizeDraftPayment(
     });
   } catch (err) {
     if (err instanceof RateUnavailableError) return fxRefused(err);
+    // Program fix 16: the in-lock cap refusal (a concurrent send took the
+    // headroom between the pre-claim check and the lock) and the lock timeout.
+    // Both leave the claimed id bound-but-UNMINTED and the draft unconsumed —
+    // the same crash-replay shape as an FX refusal.
+    if (err instanceof SendCapError) return { ok: false, error: 'cap' };
+    if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
     throw err;
   }
 
@@ -286,9 +306,9 @@ export async function finalizeDraftPayment(
     return { ok: false, error: 'blocked', transferId: transfer.id };
   }
 
-  // Parity with createTransferTool: daily-cents, then sticky EDD (BEFORE funding so
-  // recordFundingMethod's read-modify-write composes without clobbering it), then funding.
-  await dailyVolumeStore.addCents(partnerId, draft.senderPhone, Math.round(transfer.amountUsd * 100));
+  // Parity with createTransferTool: sticky EDD (BEFORE funding so
+  // recordFundingMethod's read-modify-write composes without clobbering it),
+  // then funding. (Today's spend is the ledger row itself — fix 16.)
   if (
     draft.sourceOfFunds && draft.occupation &&
     (customer.sourceOfFunds !== draft.sourceOfFunds || customer.occupation !== draft.occupation)

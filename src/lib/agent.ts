@@ -1,4 +1,5 @@
 import { buildSystemPrompt } from './prompt';
+import { resolveSendLimits } from './send-limits';
 import { toolSchemasForChannel, executeTool, type AgentChannel } from './tools';
 import type { ChatMessage, ChatTool, PartnerId, TurnContext } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
@@ -149,6 +150,10 @@ export function createAgent(deps: AgentDeps) {
     // (Sanctions are unaffected and still run inside createTransfer.)
     const branding = resolvePartnerBranding(notePartner);
     const gateActive = sendGateActive(notePartner);
+    // Program fix 16: the limits the bot STATES are the routed tenant's resolved
+    // ladder — the same figures its tools refuse on. Never a literal.
+    const sendLimits = resolveSendLimits(notePartner);
+    const t0CapTxt = `$${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}`;
 
     // Recent-transfer memory: the customer's OWN recent sends, surfaced once at
     // round 0 so the model can reference "you sent Mom $500 yesterday". '' when
@@ -181,7 +186,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive }) },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, limits: sendLimits }) },
       ];
       // Web channel: injected EVERY round (not just round 0) so the model still
       // knows the channel's limits after tool results arrive. Never persisted.
@@ -230,7 +235,7 @@ export function createAgent(deps: AgentDeps) {
           messages.push({
             role: 'system',
             content:
-              '[NEW CUSTOMER] This is the first message ever from this phone. Greet warmly, explain they must verify their identity before their first send, call check_send_limit({amount_usd: 0}) to fetch the kyc_url, and share that URL asking them to verify first. You may mention they can send up to $500/day for their first 3 days once verified. Do NOT ask how much they want to send until they are verified.',
+              `[NEW CUSTOMER] This is the first message ever from this phone. Greet warmly, explain they must verify their identity before their first send, call check_send_limit({amount_usd: 0}) to fetch the kyc_url, and share that URL asking them to verify first. You may mention they can send up to ${t0CapTxt}/day for their first 3 days once verified. Do NOT ask how much they want to send until they are verified.`,
           });
         } else if (turn.tierReminderDayOfWindow) {
           messages.push({

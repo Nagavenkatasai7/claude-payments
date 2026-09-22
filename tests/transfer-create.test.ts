@@ -1,20 +1,48 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
+import { SendBusyError, SendCapError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 
-beforeEach(() => {
-  resetRateCacheForTests();
+function stubFetch85() {
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 85 } }) }),
   );
+}
+
+beforeEach(() => {
+  resetRateCacheForTests();
+  stubFetch85();
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+// Program fix 16: a sender with no customers row is T0 ($500/day). Tests that
+// mint above that (large-amount flags, the $3k EDD ladder) seed a verified
+// sender past the 3-day window (T1, $2,999/day) — relative dates only.
+async function t1(db: Awaited<ReturnType<typeof freshDb>>, phone: string, partnerId = 'default') {
+  await seedSender(db, { partnerId, phone, firstSeenDaysAgo: 10, kycStatus: 'verified' });
+}
+
+// EDD fixtures: $2,500 spent EARLIER this month (never today — same-day it
+// would trip the T1 daily cap before EDD). The clock is pinned mid-month so
+// "yesterday" is always this ET month; freshDb() runs BEFORE the fake clock.
+async function eddStores(phone: string) {
+  const s = await makeStores();
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-06-15T16:00:00.000Z'));
+  await t1(s.db, phone);
+  await seedLedgerSpend(s.db, { partnerId: 'default', phone, amountUsd: 2500, status: 'paid', createdAt: new Date(Date.now() - 86_400_000) });
+  return s;
+}
 
 // One fresh Postgres handle per test, shared by every pg-backed store in it
 // (freshDb truncates per call and reseeds the 'default' partner).
@@ -25,7 +53,7 @@ async function makeStores() {
     db,
     store: createStore(redis, db),
     partnerStore: createPartnerStore(db),
-    mvs: createMonthlyVolumeStore(redis),
+    mvs: createMonthlyVolumeStore(createStore(redis, db)),
   };
 }
 
@@ -43,7 +71,7 @@ const base = {
 };
 
 describe('createTransfer', () => {
-  it('upserts the recipient and bumps velocity + monthly volume under input.partnerId only (F45/F47)', async () => {
+  it('upserts the recipient; velocity + monthly volume are ledger totals under input.partnerId only (F45/F47)', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await seedPartner(db, 'acme');
     await createTransfer(store, partnerStore, mvs, { ...base, partnerId: 'acme' });
@@ -73,13 +101,14 @@ describe('createTransfer', () => {
   });
 
   it('flags a large amount but stays awaiting_payment', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await t1(db, base.phone);
     const t = await createTransfer(store, partnerStore, mvs, { ...base, amountSource: 1500 });
     expect(t.complianceStatus).toBe('flagged');
     expect(t.status).toBe('awaiting_payment');
   });
 
-  it('increments the all-time and today counters', async () => {
+  it('the all-time and today counts derive from the minted row', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await createTransfer(store, partnerStore, mvs, base);
     expect(await store.getTransferCount('default', base.phone)).toBe(1);
@@ -154,8 +183,9 @@ describe('createTransfer P4: source-currency fields', () => {
 
 describe('createTransfer P5: corridor-aware compliance', () => {
   it('P5 regression: default/USD path produces today\'s compliance result', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
+    const { db, store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner(); // countries: ['US'], no corridorCompliance
+    await t1(db, '15551230000');
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230000',
       amountSource: 1500, sourceCurrency: 'USD', partnerId: 'default',
@@ -167,12 +197,13 @@ describe('createTransfer P5: corridor-aware compliance', () => {
   });
 
   it('P5: a corridor override raises the threshold so a flagged-today amount clears', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
+    const { db, store, partnerStore, mvs } = await makeStores();
     await partnerStore.savePartner({
       id: 'gb-co', name: 'GB Co', countries: ['US', 'GB'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
       corridorCompliance: { GB: { largeAmountUsd: 5000 } },
     });
+    await t1(db, '15551239999', 'gb-co');
     // Override fetch to return GBP rates (USD + INR) for this test
     vi.stubGlobal(
       'fetch',
@@ -204,9 +235,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   });
 
   it('KYC: a $3k-cumulative send with missing EDD fields → flagged + edd_required (NOT blocked)', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
-    await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('default', '15551230001', 250_000);  // $2,500 already this month
+    const { store, partnerStore, mvs } = await eddStores('15551230001'); // $2,500 paid yesterday (ledger)
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230001', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
@@ -219,9 +248,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   });
 
   it('KYC: $3k send WITH EDD fields present → no EDD flag', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
-    await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('default', '15551230002', 250_000);
+    const { store, partnerStore, mvs } = await eddStores('15551230002'); // $2,500 paid yesterday (ledger)
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230002', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'Mom', recipientPhone: '919876543210',
@@ -232,9 +259,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
   });
 
   it('KYC precedence: a watchlist hit still BLOCKS even when EDD would flag', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
-    await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('default', '15551230003', 250_000);
+    const { store, partnerStore, mvs } = await eddStores('15551230003'); // $2,500 paid yesterday (ledger)
     const t = await createTransfer(store, partnerStore, mvs, {
       phone: '15551230003', amountSource: 600, sourceCurrency: 'USD', partnerId: 'default',
       recipientName: 'John Doe',  // on WATCHLIST
@@ -245,7 +270,7 @@ describe('createTransfer KYC: EDD merge + Travel-Rule + monthly accrual', () => 
     expect(t.complianceReasons).not.toContain('edd_required');
   });
 
-  it('KYC: monthlyVolumeStore.addCents called with USD-equivalent cents after save', async () => {
+  it('KYC: getMonthCents reflects the minted row (the ledger IS the accrual)', async () => {
     const { store, partnerStore, mvs } = await makeStores();
     await partnerStore.ensureDefaultPartner();
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -316,7 +341,7 @@ describe('createTransfer any-to-any corridors', () => {
   });
 
   it('any-to-any: an INR-source transfer to a US recipient is INR→USD', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
+    const { db, store, partnerStore, mvs } = await makeStores();
     // from=INR → {USD:0.0118, INR:1}; from=USD (destination) → {INR:85} (toUsd identity 1)
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const u = String(url);
@@ -325,6 +350,7 @@ describe('createTransfer any-to-any corridors', () => {
       }
       return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
     }));
+    await t1(db, '919876543210');
     const t = await createTransfer(store, partnerStore, mvs, {
       ...base,
       phone: '919876543210',        // Indian sender
@@ -400,9 +426,7 @@ describe('createTransfer U7: draft-quote override', () => {
   });
 
   it('EDD threshold reads the OVERRIDE amountUsd, not a re-quote of amountSource', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
-    await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('default', '15559990001', 250_000); // $2,500 used this month
+    const { store, partnerStore, mvs } = await eddStores('15559990001'); // $2,500 paid yesterday (ledger)
     // amountSource 600 would re-quote to $600 (cumulative $3,100 → EDD flag);
     // the override pins the USD-equivalent at $100 (cumulative $2,600 → no flag).
     const t = await createTransfer(store, partnerStore, mvs, {
@@ -421,9 +445,7 @@ describe('createTransfer U7: draft-quote override', () => {
   });
 
   it('EDD still flags when the override amountUsd crosses the cumulative threshold', async () => {
-    const { store, partnerStore, mvs } = await makeStores();
-    await partnerStore.ensureDefaultPartner();
-    await mvs.addCents('default', '15559990002', 250_000);
+    const { store, partnerStore, mvs } = await eddStores('15559990002'); // $2,500 paid yesterday (ledger)
     const t = await createTransfer(store, partnerStore, mvs, {
       ...base,
       phone: '15559990002',
@@ -677,5 +699,188 @@ describe('createTransfer — ctx-01 chokepoint (fix 6)', () => {
       senderBusinessName: 'Acme Imports Ltd', recipientBusinessName: 'Globex Trading LLC',
     });
     expect(await store.listRecipients('default', base.phone, 5)).toEqual([]);
+  });
+});
+
+// ── Program fix 16 (Task 10): send caps enforced from the ledger, under the
+// per-sender lock, on EVERY mint path (createTransfer is the chokepoint). ──
+describe('createTransfer — send caps from the ledger (Program fix 16)', () => {
+  const T0_PHONE = '15550160001'; // no customers row ⇒ firstSeenAt = now ⇒ T0 ($500/day)
+  const T1_PHONE = '15550160002';
+
+  async function t1Stores() {
+    const s = await makeStores();
+    await seedSender(s.db, { partnerId: 'default', phone: T1_PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
+    return s;
+  }
+
+  it('test 6: $450 minted today + $100 requested for a T0 sender ⇒ SendCapError(over_daily_cap), no row, no recipient, count unchanged', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedLedgerSpend(db, { partnerId: 'default', phone: T0_PHONE, amountUsd: 450 });
+    const before = await store.senderTotals('default', T0_PHONE);
+    let caught: unknown;
+    try {
+      await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 100 });
+    } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(SendCapError);
+    const ev = (caught as SendCapError).evaluation;
+    expect(ev.reason).toBe('over_daily_cap');
+    expect(ev.tier).toBe('T0');
+    expect(ev.todayUsedCents).toBe(45_000);
+    expect(ev.todayRemainingCents).toBe(5_000);
+    expect((caught as Error).message).toBe('send_cap_exceeded'); // no figures in the message
+    expect(await store.senderTotals('default', T0_PHONE)).toEqual(before);
+    expect(await store.listRecipients('default', T0_PHONE, 5)).toEqual([]);
+    expect(await store.getTransferCount('default', T0_PHONE)).toBe(1);
+  });
+
+  it('per-transfer: a T0 sender asking for $600 is over_per_transfer_cap even with no spend', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 600 }))
+      .rejects.toMatchObject({ name: 'SendCapError', evaluation: { reason: 'over_per_transfer_cap', tier: 'T0' } });
+    expect(await store.getTransferCount('default', T0_PHONE)).toBe(0);
+  });
+
+  it('test 7a: two $300 T0 mints — the second is refused on the ledger total of the first', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const first = await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 300 });
+    expect(first.status).toBe('awaiting_payment');
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 300 }))
+      .rejects.toBeInstanceOf(SendCapError);
+    expect(await store.getTransferCount('default', T0_PHONE)).toBe(1);
+    expect((await store.senderTotals('default', T0_PHONE)).todayUsdCents).toBe(30_000);
+  });
+
+  it('test 7b: EDD reads the ledger month — $1,500 yesterday + 2×$800 today: the 2nd is flagged edd_required, neither hits the daily cap', async () => {
+    const { db, store, partnerStore, mvs } = await t1Stores(); // freshDb() BEFORE the fake clock
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-06-15T16:00:00.000Z')); // noon ET, mid-month
+      await seedSender(db, { partnerId: 'default', phone: T1_PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
+      await seedLedgerSpend(db, { partnerId: 'default', phone: T1_PHONE, amountUsd: 1500, status: 'paid', createdAt: new Date(Date.now() - 86_400_000) });
+      const a = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 800 });
+      expect(a.complianceReasons).not.toContain('edd_required');
+      expect(a.eddRequired).toBe(false);
+      const b = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 800 });
+      expect(b.complianceStatus).toBe('flagged');
+      expect(b.complianceReasons).toContain('edd_required');
+      expect(b.eddRequired).toBe(true);
+      expect(b.status).toBe('awaiting_payment');
+      const t = await store.senderTotals('default', T1_PHONE);
+      expect(t.todayUsdCents).toBe(160_000);
+      expect(t.monthUsdCents).toBe(310_000);
+      // EDD fields present ⇒ no flag, but the month total still accrues.
+      const c = await createTransfer(store, partnerStore, mvs, {
+        ...base, phone: T1_PHONE, amountSource: 100, sourceOfFunds: 'employment', occupation: 'salaried',
+      });
+      expect(c.complianceReasons).not.toContain('edd_required');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('test 8: the sender lock is taken FIRST inside a READ COMMITTED transaction, before any transfers statement', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const txSpy = vi.spyOn(db, 'transaction');
+    const stop = captureQueries();
+    await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE });
+    const log = stop().map((q) => q.sql.toLowerCase());
+    expect(txSpy).toHaveBeenCalledTimes(1);
+    expect(txSpy.mock.calls[0][1]).toEqual({ isolationLevel: 'read committed' });
+    const iso = log.findIndex((q) => q.includes('set transaction isolation level read committed'));
+    expect(iso).toBeGreaterThanOrEqual(0);
+    expect(log[iso + 1]).toContain("set local lock_timeout = '5s'");
+    expect(log[iso + 2]).toContain('pg_advisory_xact_lock(hashtext($1))');
+    // Nothing inside the transaction touches transfers before the lock.
+    const inTx = log.slice(iso, iso + 3);
+    expect(inTx.some((q) => /\btransfers\b/.test(q))).toBe(false);
+    // And the totals + the insert come after it, inside the same transaction.
+    const afterLock = log.slice(iso + 3);
+    expect(afterLock.some((q) => q.includes('from "transfers"') || q.includes('from transfers'))).toBe(true);
+    expect(afterLock.some((q) => q.startsWith('insert into "transfers"'))).toBe(true);
+  });
+
+  it('test 9: a lock timeout (55P03) surfaces as SendBusyError with NO row; the same id then mints once', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const timeout = Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+    vi.spyOn(db, 'transaction').mockRejectedValueOnce(timeout);
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, id: 'busy_1', phone: T0_PHONE }))
+      .rejects.toBeInstanceOf(SendBusyError);
+    expect(await store.getTransfer('busy_1')).toBeNull();
+    expect(await store.listRecipients('default', T0_PHONE, 5)).toEqual([]);
+    vi.restoreAllMocks();
+    stubFetch85();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, id: 'busy_1', phone: T0_PHONE });
+    expect(t.id).toBe('busy_1');
+    expect(await store.getTransferCount('default', T0_PHONE)).toBe(1);
+  });
+
+  it('test 11: minting the same input.id again returns the first row, counts once, is never re-capped, and never touches the address book', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const first = await createTransfer(store, partnerStore, mvs, { ...base, id: 'replay_1', phone: T0_PHONE, amountSource: 400 });
+    expect(first.id).toBe('replay_1');
+    const book = await store.listRecipients('default', T0_PHONE, 5);
+    expect(book).toHaveLength(1);
+    // Fill the day so a fresh cap check WOULD refuse, then replay.
+    await seedLedgerSpend(db, { partnerId: 'default', phone: T0_PHONE, amountUsd: 100 });
+    const again = await createTransfer(store, partnerStore, mvs, { ...base, id: 'replay_1', phone: T0_PHONE, amountSource: 400, payoutDestination: 'someone-else@upi' });
+    expect(again.id).toBe('replay_1');
+    expect(again.amountUsd).toBe(400);
+    expect(await store.getTransferCount('default', T0_PHONE)).toBe(2); // the mint + the seeded row, nothing new
+    // The replay is a MASKED read: it must never be written into the sender's saved recipients.
+    expect(await store.listRecipients('default', T0_PHONE, 5)).toEqual(book);
+  });
+
+  it('test 12: sanctions run first — a watchlisted recipient for a sender AT cap leaves a blocked row, not SendCapError, and the sums are unchanged', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedLedgerSpend(db, { partnerId: 'default', phone: T0_PHONE, amountUsd: 500 });
+    const before = await store.senderTotals('default', T0_PHONE);
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 100, recipientName: 'John Doe' });
+    expect(t.status).toBe('blocked');
+    expect((await store.getTransfer(t.id))?.status).toBe('blocked');
+    expect(await store.senderTotals('default', T0_PHONE)).toEqual(before); // blocked never consumes cap
+    expect(await store.listRecipients('default', T0_PHONE, 5)).toEqual([]);
+  });
+
+  it('test 17: a $400 T0 row voided by cancelIfCancellable frees the headroom for a new $400 send', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const a = await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 400 });
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 400 }))
+      .rejects.toBeInstanceOf(SendCapError);
+    expect((await store.cancelTransferIfUnfunded(a.id, 'default'))?.status).toBe('cancelled');
+    const b = await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 400 });
+    expect(b.status).toBe('awaiting_payment');
+    // A cancelled row still counts for velocity (like countByPhone), but not for spend.
+    const t = await store.senderTotals('default', T0_PHONE);
+    expect(t.todayUsdCents).toBe(40_000);
+    expect(t.todayCount).toBe(2);
+  });
+
+  it('a partner row can only TIGHTEN: per-transfer $100 refuses a $150 T1 send; a $900,000 T1 cap stays $2,999', async () => {
+    const { db, store, partnerStore, mvs } = await t1Stores();
+    await db.execute(sql`UPDATE partners SET send_limits = '{"perTransferCapCents":10000,"t1DailyCapCents":90000000}'::jsonb WHERE id = 'default'`);
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 150 }))
+      .rejects.toMatchObject({ evaluation: { reason: 'over_per_transfer_cap', perTransferCapCents: 10_000, dailyCapCents: 299_900 } });
+    const ok = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 90 });
+    expect(ok.status).toBe('awaiting_payment');
+  });
+
+  it('T1 can send $2,999 once; $2,999.01 hits the quote ceiling and $3,000 in a day hits the daily cap', async () => {
+    const { store, partnerStore, mvs } = await t1Stores();
+    // $2,999.01 is refused by the quote ceiling (MAX_USD 2999, ruling 12) before the cap runs.
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 2999.01 }))
+      .rejects.toThrow('Transfers must be between $10 and $2999.');
+    const a = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 2999 });
+    expect(a.complianceStatus).toBe('flagged'); // Large transfer amount (>= $1,000) — flags, never blocks
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 10 })) // $10 is the quote floor
+      .rejects.toMatchObject({ evaluation: { reason: 'over_daily_cap', tier: 'T1', todayRemainingCents: 0 } });
+  });
+
+  it('a sender in another tenant does not consume this tenant\'s headroom', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'acme');
+    await seedLedgerSpend(db, { partnerId: 'acme', phone: T0_PHONE, amountUsd: 500 });
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 300 });
+    expect(t.status).toBe('awaiting_payment');
   });
 });

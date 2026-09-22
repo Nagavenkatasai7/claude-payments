@@ -13,6 +13,7 @@ import { env } from '@/lib/env';
 import { Sidebar } from '../../sidebar';
 import { SenderCell } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
+import { resolveSendLimits } from '@/lib/send-limits';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
@@ -135,6 +136,7 @@ export default async function PartnerDetailPage({
   const scoped = createScopedStore(staff);
   const partner = await scoped.getPartner(id);
   if (!partner) notFound();
+  const sendLimits = resolveSendLimits(partner); // Program fix 16: the effective ladder (read-only here)
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).
@@ -295,6 +297,14 @@ export default async function PartnerDetailPage({
                   <dt>Countries</dt><dd>{partner.countries.join(', ')}</dd>
                   <dt>KYC mode</dt>
                   <dd>{partner.kycMode === 'delegated' ? 'partner-run (delegated)' : 'SmartRemit-run'}</dd>
+                  {/* Program fix 16: the EFFECTIVE ladder, read-only (raises are fix 16b's audited action). */}
+                  <dt>Send limits</dt>
+                  <dd>
+                    ${(sendLimits.perTransferCapCents / 100).toLocaleString('en-US')} per transfer ·{' '}
+                    ${(sendLimits.t1DailyCapCents / 100).toLocaleString('en-US')}/day verified ·{' '}
+                    ${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}/day first 3 days
+                    {partner.sendLimits ? ' (tightened for this partner)' : ' (platform default)'}
+                  </dd>
                   <dt>Primary color</dt>
                   <dd>
                     {partner.primaryColor ? (

@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { finalizeDraftPayment } from '@/lib/pay-finalize';
 import { createTransfer } from '@/lib/transfer-create';
@@ -7,11 +8,11 @@ import { createDraftStore } from '@/lib/draft-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
-import { T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
 import { FX_MAX_AGE_MS, resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import { SendBusyError } from '@/lib/send-limits';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 const PHONE = '15551234567';
@@ -23,8 +24,8 @@ async function buildStores() {
   const customerStore = createCustomerStore(db, store);
   const draftStore = createDraftStore(redis);
   const partnerStore = createPartnerStore(db);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
-  const dailyVolumeStore = createDailyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
+  const dailyVolumeStore = createDailyVolumeStore(store);
   return { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db };
 }
 
@@ -124,9 +125,8 @@ describe('finalizeDraftPayment', () => {
     const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
 
-    // Exhaust the T0 daily cap (read from the constant so a cap change
-    // can never silently turn this into a no-op assertion).
-    await stores.dailyVolumeStore.addCents('default', PHONE, T0_DAILY_CAP_CENTS);
+    // Exhaust the T0 daily cap ($500) in the LEDGER (fix 16: no Redis counter).
+    await seedLedgerSpend(stores.db, { partnerId: 'default', phone: PHONE, amountUsd: 500 });
 
     const result = await finalizeDraftPayment(stores, draftId);
 
@@ -800,5 +800,86 @@ describe('fix 6 (ctx-01): the payout destination is settled BEFORE idem.claim �
     await stores.customerStore.saveCustomer({ ...c!, kycStatus: 'grandfathered' });
     expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'kyc_required' });
     expect(await claimFor(stores, draftId)).toBeNull();
+  });
+});
+
+// ── Program fix 16 (Task 10, tests 15 + 16): ruling-7 guard order and the replay skip ──
+describe('finalizeDraftPayment — cap from the ledger (Program fix 16)', () => {
+  async function untouched(stores: Awaited<ReturnType<typeof buildStores>>, draftId: string) {
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`)).toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1); // the seeded row only
+  }
+  const staleQuote = () => ({ feeUsd: 0, fxRate: 85, amountInr: 17_000, fxFetchedAt: Date.now() - FX_MAX_AGE_MS - 1 });
+  async function draftWith(stores: Awaited<ReturnType<typeof buildStores>>, over: { payoutDestination?: string; stale?: boolean }) {
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    return stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: over.payoutDestination ?? 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: over.stale ? staleQuote() : { feeUsd: 0, fxRate: 85, amountInr: 17_000 },
+    });
+  }
+
+  it('test 15: masked + stale FX + over cap ⇒ bank_details_required; stale FX + over cap ⇒ fx_unavailable; over cap alone ⇒ cap — each leaves the draft and its key untouched', async () => {
+    const stores = await buildStores();
+    await seedLedgerSpend(stores.db, { partnerId: 'default', phone: PHONE, amountUsd: 500 }); // T0 cap exhausted
+    const a = await draftWith(stores, { payoutDestination: '****9012', stale: true });
+    expect(await finalizeDraftPayment(stores, a)).toEqual({ ok: false, error: 'bank_details_required' });
+    await untouched(stores, a);
+    const b = await draftWith(stores, { stale: true });
+    expect(await finalizeDraftPayment(stores, b)).toEqual({ ok: false, error: 'fx_unavailable', quoteExpired: true });
+    await untouched(stores, b);
+    const c = await draftWith(stores, {});
+    expect(await finalizeDraftPayment(stores, c)).toEqual({ ok: false, error: 'cap' });
+    await untouched(stores, c);
+  });
+
+  it('the cap uses the tenant\'s RESOLVED limits: a $100 per-transfer tenant refuses a $200 draft', async () => {
+    const stores = await buildStores();
+    await stores.db.execute(sql`UPDATE partners SET send_limits = '{"perTransferCapCents":10000}'::jsonb WHERE id = 'default'`);
+    const d = await draftWith(stores, {});
+    expect(await finalizeDraftPayment(stores, d)).toEqual({ ok: false, error: 'cap' });
+    expect(await stores.draftStore.getDraft(d)).not.toBeNull();
+  });
+
+  it('test 16: a minted draft whose own amount fills the cap, POSTed again (crash before consume), replays { ok:true } with the same id — never re-capped', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 500); // exactly the T0 day
+    vi.spyOn(stores.draftStore, 'consumeDraft').mockResolvedValueOnce(null); // simulate: died after the mint, before consume
+    const first = await finalizeDraftPayment(stores, draftId);
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error('unexpected');
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull(); // still there, as after a crash
+    expect(await stores.dailyVolumeStore.getTodayCents('default', PHONE)).toBe(50_000);
+    const again = await finalizeDraftPayment(stores, draftId);
+    expect(again).toEqual({ ok: true, transferId: first.transferId });
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
+    // (The claim's replay branch returns before consumeDraft — pre-existing
+    // behavior; the un-consumed draft expires by TTL and can only ever replay.)
+  });
+
+  it('a busy sender lock ⇒ { ok:false, error:"busy" }; the draft and the bound id survive and the retry mints that id', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    vi.spyOn(stores.store, 'mintUnderSenderLock').mockRejectedValueOnce(new SendBusyError());
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'busy' });
+    const bound = await createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
+    expect(bound).not.toBeNull();
+    expect(await stores.store.getTransfer(bound!)).toBeNull();
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    const r = await finalizeDraftPayment(stores, draftId);
+    expect(r).toEqual({ ok: true, transferId: bound });
+  });
+
+  it('a race that consumed the headroom between the pre-claim check and the lock ⇒ cap (the lock is authoritative)', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    await seedLedgerSpend(stores.db, { partnerId: 'default', phone: PHONE, amountUsd: 400 });
+    vi.spyOn(stores.dailyVolumeStore, 'getTodayCents').mockResolvedValueOnce(0); // stale pre-check
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'cap' });
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
   });
 });

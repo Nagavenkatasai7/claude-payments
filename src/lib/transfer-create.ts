@@ -1,21 +1,24 @@
 import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer } from './compliance';
-import { resolveCorridorRules } from './compliance-config';
+import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
+import { sendGateActive } from './kyc-gate';
 import { logWarn } from './log';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
-import { evaluateEddForTransfer } from './tier-rules';
+import { resolveSendLimits, SendCapError } from './send-limits';
+import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
-import type { Store } from './store';
+import type { SenderLedgerOps, Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type {
   CountryCode, CurrencyCode, Draft, FundingMethod, PartnerId, PayoutMethod, Transfer,
   SenderRecipientRelationship, TransferPurpose, SourceOfFunds, Occupation,   // NEW (KYC)
   KycStatus,                                                                 // NEW (Phase 3 gate)
   EntityType,                                                                // NEW (B2B)
+  SendLimits,                                                                // Program fix 16
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
@@ -170,7 +173,10 @@ export class PartnerPulledConsumerError extends Error {
 export async function createTransfer(
   store: Store,
   partnerStore: PartnerStore,           // NEW (P5): to resolve corridor rules
-  monthlyVolumeStore: MonthlyVolumeStore,   // NEW (KYC) — cumulative-month accrual + EDD trigger
+  // Program fix 16: UNUSED. The rolling-month EDD total is read from the
+  // ledger INSIDE the sender lock (SenderLedgerOps.totals). The parameter is
+  // kept so the six mint call sites keep their signature.
+  _monthlyVolumeStore: MonthlyVolumeStore,
   input: CreateTransferInput,
 ): Promise<Transfer> {
   // Phase 3 backstop: the chokepoint refuses to mint a transfer for an unverified
@@ -198,7 +204,7 @@ export async function createTransfer(
   // draft's stored quote), honor it verbatim — NO re-quote. Otherwise quote from
   // current state exactly as before. Everything downstream reads from `q`:
   // sanctions + EDD use q.amountUsd, the Transfer row takes all eight figures,
-  // and the monthly accrual uses q.amountUsd (via transfer.amountUsd).
+  // and the cap check uses q.amountUsd.
   let q: NonNullable<CreateTransferInput['quote']>;
   if (input.quote) {
     assertQuoteOverrideFresh(input.quote);
@@ -213,112 +219,46 @@ export async function createTransfer(
     const destRates = await getDestinationRates(destinationCurrency);
     q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd);
   }
-  const transfersToday = await store.getTodayTransferCount(input.partnerId, input.phone);
 
+  // ── Root-handle reads, ALL ABOVE the sender lock (Program fix 16) ────────
+  // Nothing below the lock may touch the store / partner store: the locked
+  // body receives tx-bound SenderLedgerOps only (see mintLocked).
   const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
   const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
   const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
-  const monthUsedCents = await monthlyVolumeStore.getMonthCents(input.partnerId, input.phone);   // NEW (KYC)
-  const compliance = await screenTransfer({                         // P5: corridor-aware
-    amountUsd: q.amountUsd,            // USD-equivalent — UNCHANGED
-    recipientName: input.recipientName,
-    transfersToday,
-    sourceCountry,                     // NEW (P5)
-    rules,                             // NEW (P5)
-    senderName: input.senderName,      // NEW (KYC) — screened via the same seam (undefined ⇒ no-op)
-  });
-
-  // EDD merge: a watchlist BLOCK always wins; EDD only ever ADDS a flag.
-  const eddFieldsPresent = Boolean(input.sourceOfFunds && input.occupation);
-  const eddCheck = evaluateEddForTransfer({
-    monthUsedCents,
-    requestedCents: Math.round(q.amountUsd * 100),
-    eddFieldsPresent,
-  });
-  let complianceStatus = compliance.status;
-  let complianceReasons = compliance.reasons;
-  if (complianceStatus !== 'blocked' && eddCheck.flagReason) {
-    complianceStatus = 'flagged';
-    complianceReasons = [...complianceReasons, eddCheck.flagReason];
-  }
+  // The tier subject (firstSeenAt from the customers row / first transfer /
+  // now; kycStatus = the attestation the backstop above already trusts) and
+  // the RESOLVED limits (min(partner, platform) in fix 16; 16b swaps this one
+  // call for resolveEffectiveSendLimits).
+  const subject = await store.capSubject(input.partnerId, input.phone, input.senderKycStatus);
+  const limits = resolveSendLimits(partner);
+  const kycGateActive = sendGateActive(partner);
   // Best-rate routing: a route is only ever honored together with the quote it
   // priced. If the quote override is absent we re-quoted at the CURRENT mid
   // above — settling that through the winning partner's rail would pay out at
   // a rate that partner never offered, so the route is dropped with the stale
   // rate (platform settle via the customer's own partnerId).
   const settlementPartnerId = input.quote ? input.settlementPartnerId : undefined;
-  const transfer: Transfer = {
-    id: input.id ?? newTransferId(),
-    phone: input.phone,
-    amountUsd: q.amountUsd,
-    feeUsd: q.feeUsd,
-    totalChargeUsd: q.totalChargeUsd,
-    fxRate: q.fxRate,
-    amountInr: q.amountInr,
-    recipientName: input.recipientName,
-    recipientPhone: input.recipientPhone,
-    payoutMethod: input.payoutMethod,
-    payoutDestination: input.payoutDestination,
-    fundingMethod: input.fundingMethod,
-    complianceStatus,
-    complianceReasons,
-    status: complianceStatus === 'blocked' ? 'blocked' : 'awaiting_payment',
-    createdAt: new Date().toISOString(),
-    sourceCountry,
-    sourceCurrency: input.sourceCurrency,
-    destinationCountry,
-    destinationCurrency,
-    partnerId: input.partnerId,
-    settlementPartnerId,                             // best-rate routing (internal)
-    amountSource: q.amountSource,
-    feeSource: q.feeSource,
-    totalChargeSource: q.totalChargeSource,
-    recipientLegalName: input.recipientLegalName,   // NEW (KYC)
-    relationship: input.relationship,               // NEW (KYC)
-    purpose: input.purpose,                          // NEW (KYC)
-    eddRequired: eddCheck.eddRequired,               // NEW (KYC)
-    transferType: input.transferType ?? 'b2c',       // NEW (B2B)
-    senderEntityType: input.senderEntityType ?? 'individual',
-    recipientEntityType: input.recipientEntityType ?? 'individual',
-    senderBusinessName: input.senderBusinessName,
-    recipientBusinessName: input.recipientBusinessName,
-    achTokenRef: input.achTokenRef,
-    invoiceId: input.invoiceId,
-  };
-  // ── Blocked-row early return (fix 6 / ctx-01) ─────────────────────────────
-  // complianceStatus is FINAL here (screenTransfer + the EDD merge above). A
-  // watchlist hit is an auditable, never-charged, never-instructed row and
-  // NOTHING else: no velocity / monthly accrual and no address-book write — the
-  // contract recordBlockedAttempt (below) has always documented. Its destination
-  // is evidence only, so a display placeholder is scrubbed to '' (a blocked row
-  // is saved with an empty or a real destination, never a mask). It sits ABOVE
-  // the placeholder refusal on purpose: sanctions always run and leave their row.
-  if (complianceStatus === 'blocked') {
-    const blockedRow: Transfer = isMaskedDestination(transfer.payoutDestination)
-      ? { ...transfer, payoutDestination: '' }
-      : transfer;
-    await store.saveTransfer(blockedRow);
-    return blockedRow;
-  }
 
-  // ── Placeholder refusal (fix 6 / ctx-01) ──────────────────────────────────
-  // "****9012" / "account on file" is what a MASKED read renders, never an
-  // account. Refuse BEFORE the insert, any counter and any recipient write. ''
-  // is NOT refused: a cron, approve-tap, legacy or B2B ach_pull mint legitimately
-  // starts with none; the pay route collects it and pay-finalize refuses a
-  // bodyless '' on any draft but a B2B ach_pull one. (Task 10 later adds its cap
-  // check between this refusal and the insert.)
-  if (isMaskedDestination(transfer.payoutDestination)) {
-    throw new MaskedDestinationError();
-  }
-
-  await store.saveTransfer(transfer);
-  // (transfer count is now DERIVED from the ledger — no counter to bump)
-  // Accruals and the address book are keyed by the transfer's TENANT (fix 1 /
-  // F45, F47): a partner-API mint for a number can never touch another tenant's
-  // saved destinations or compliance counters for that same number.
-  await store.incrementTodayTransferCount(input.partnerId, input.phone);
-  await monthlyVolumeStore.addCents(input.partnerId, input.phone, Math.round(transfer.amountUsd * 100));   // NEW (KYC)
+  // ── ONE locked mint per (partner, phone) ──────────────────────────────────
+  // Sanctions → EDD → blocked row / placeholder refusal → cap → insert, all
+  // on ledger totals read under the lock, so two concurrent mints can never
+  // both spend the same headroom. A SendCapError / MaskedDestinationError
+  // throws out of the transaction (nothing written); a lock wait past 5 s is
+  // the retryable SendBusyError (store.mintUnderSenderLock).
+  const minted = await store.mintUnderSenderLock(input.partnerId, input.phone, (ops) =>
+    mintLocked(ops, {
+      input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
+      subject, limits, kycGateActive, settlementPartnerId,
+    }),
+  );
+  const transfer = minted.transfer;
+  // A same-id replay is a MASKED read of the existing row and a blocked row is
+  // evidence only: neither reaches the address-book write below (a replay
+  // must never write ****last4 into the sender's saved recipients — ctx-01).
+  if (minted.replayed || transfer.status === 'blocked') return transfer;
+  // (transfer count, today's spend and the month total are DERIVED from the
+  // ledger — no counter to bump: the minted row IS the accrual.)
 
   // Refresh the sender's PERSONAL address book only with a real consumer
   // destination (fix 6): a '' mint must never erase a saved account, and a B2B
@@ -338,6 +278,145 @@ export async function createTransfer(
   }
 
   return transfer;
+}
+
+/** Everything the locked body needs, read on the root handle BEFORE the lock. */
+interface PreparedMint {
+  input: CreateTransferInput;
+  q: NonNullable<CreateTransferInput['quote']>;
+  sourceCountry: CountryCode;
+  destinationCountry: CountryCode;
+  destinationCurrency: CurrencyCode;
+  rules: ResolvedCorridorRules;
+  subject: CapSubject;
+  limits: SendLimits;
+  kycGateActive: boolean;
+  settlementPartnerId?: PartnerId;
+}
+
+/**
+ * The locked mint body (Program fix 16). MODULE-LEVEL and given ONLY the
+ * tx-bound SenderLedgerOps on purpose: a store / partner store / volume store
+ * call in here cannot compile, so no root-handle statement can run inside the
+ * lock (it would deadlock PGlite's single connection and hold a second Neon
+ * pool connection per mint). Order:
+ *   1. same-id replay (claim-first callers) → return the existing row, no
+ *      second insert and no cap check;
+ *   2. ledger totals → sanctions (velocity) + EDD (month used);
+ *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
+ *   4. a display placeholder throws (rolls back);
+ *   5. evaluateCap on today's ledger spend → SendCapError (rolls back);
+ *   6. insert.
+ */
+async function mintLocked(
+  ops: SenderLedgerOps,
+  p: PreparedMint,
+): Promise<{ transfer: Transfer; replayed: boolean }> {
+  const { input, q } = p;
+  if (input.id) {
+    const existing = await ops.getTransfer(input.id);
+    if (existing) return { transfer: existing, replayed: true };
+  }
+  const now = new Date();
+  const totals = await ops.totals(now);
+  const compliance = await screenTransfer({                         // P5: corridor-aware
+    amountUsd: q.amountUsd,            // USD-equivalent — UNCHANGED
+    recipientName: input.recipientName,
+    transfersToday: totals.todayCount, // ledger velocity (blocked excluded)
+    sourceCountry: p.sourceCountry,    // NEW (P5)
+    rules: p.rules,                    // NEW (P5)
+    senderName: input.senderName,      // NEW (KYC) — screened via the same seam (undefined ⇒ no-op)
+  });
+
+  // EDD merge: a watchlist BLOCK always wins; EDD only ever ADDS a flag.
+  const eddFieldsPresent = Boolean(input.sourceOfFunds && input.occupation);
+  const requestedCents = Math.round(q.amountUsd * 100);
+  const eddCheck = evaluateEddForTransfer({
+    monthUsedCents: totals.monthUsdCents, // ledger month (blocked + cancelled excluded)
+    requestedCents,
+    eddFieldsPresent,
+  });
+  let complianceStatus = compliance.status;
+  let complianceReasons = compliance.reasons;
+  if (complianceStatus !== 'blocked' && eddCheck.flagReason) {
+    complianceStatus = 'flagged';
+    complianceReasons = [...complianceReasons, eddCheck.flagReason];
+  }
+  const transfer: Transfer = {
+    id: input.id ?? newTransferId(),
+    phone: input.phone,
+    amountUsd: q.amountUsd,
+    feeUsd: q.feeUsd,
+    totalChargeUsd: q.totalChargeUsd,
+    fxRate: q.fxRate,
+    amountInr: q.amountInr,
+    recipientName: input.recipientName,
+    recipientPhone: input.recipientPhone,
+    payoutMethod: input.payoutMethod,
+    payoutDestination: input.payoutDestination,
+    fundingMethod: input.fundingMethod,
+    complianceStatus,
+    complianceReasons,
+    status: complianceStatus === 'blocked' ? 'blocked' : 'awaiting_payment',
+    createdAt: now.toISOString(),
+    sourceCountry: p.sourceCountry,
+    sourceCurrency: input.sourceCurrency,
+    destinationCountry: p.destinationCountry,
+    destinationCurrency: p.destinationCurrency,
+    partnerId: input.partnerId,
+    settlementPartnerId: p.settlementPartnerId,      // best-rate routing (internal)
+    amountSource: q.amountSource,
+    feeSource: q.feeSource,
+    totalChargeSource: q.totalChargeSource,
+    recipientLegalName: input.recipientLegalName,   // NEW (KYC)
+    relationship: input.relationship,               // NEW (KYC)
+    purpose: input.purpose,                          // NEW (KYC)
+    eddRequired: eddCheck.eddRequired,               // NEW (KYC)
+    transferType: input.transferType ?? 'b2c',       // NEW (B2B)
+    senderEntityType: input.senderEntityType ?? 'individual',
+    recipientEntityType: input.recipientEntityType ?? 'individual',
+    senderBusinessName: input.senderBusinessName,
+    recipientBusinessName: input.recipientBusinessName,
+    achTokenRef: input.achTokenRef,
+    invoiceId: input.invoiceId,
+  };
+  // ── Blocked-row early return (fix 6 / ctx-01) ─────────────────────────────
+  // complianceStatus is FINAL here (screenTransfer + the EDD merge above). A
+  // watchlist hit is an auditable, never-charged, never-instructed row and
+  // NOTHING else: no cap consumed (the sums exclude blocked) and no address-book
+  // write — the contract recordBlockedAttempt (below) has always documented. Its
+  // destination is evidence only, so a display placeholder is scrubbed to '' (a
+  // blocked row is saved with an empty or a real destination, never a mask). It
+  // sits ABOVE the placeholder refusal AND the cap check on purpose: sanctions
+  // always run first and leave their row.
+  if (complianceStatus === 'blocked') {
+    const blockedRow: Transfer = isMaskedDestination(transfer.payoutDestination)
+      ? { ...transfer, payoutDestination: '' }
+      : transfer;
+    await ops.insertTransfer(blockedRow);
+    return { transfer: blockedRow, replayed: false };
+  }
+
+  // ── Placeholder refusal (fix 6 / ctx-01) ──────────────────────────────────
+  // "****9012" / "account on file" is what a MASKED read renders, never an
+  // account. Refuse BEFORE the insert and any recipient write. '' is NOT
+  // refused: a cron, approve-tap, legacy or B2B ach_pull mint legitimately
+  // starts with none; the pay route collects it and pay-finalize refuses a
+  // bodyless '' on any draft but a B2B ach_pull one.
+  if (isMaskedDestination(transfer.payoutDestination)) {
+    throw new MaskedDestinationError();
+  }
+
+  // ── Send cap (Program fix 16 / Task 10) ───────────────────────────────────
+  // The LAST gate before the insert, on today's LEDGER spend read under this
+  // lock: T0 $500/day for 3 days, T1 $2,999/day, $2,999 per transfer, or the
+  // partner's tighter figures. Every mint path (chat tools, pay page, partner
+  // API, cron, B2B) runs through here. A refusal rolls the transaction back.
+  const ev = evaluateCap(p.subject, now, totals.todayUsdCents, requestedCents, p.kycGateActive, p.limits);
+  if (!ev.withinCap) throw new SendCapError(ev);
+
+  await ops.insertTransfer(transfer);
+  return { transfer, replayed: false };
 }
 
 export interface BlockedAttemptInput {
@@ -367,10 +446,10 @@ export interface BlockedAttemptInput {
  * row (status='blocked'), so blocked attempts are visible in the ledger and
  * compliance views instead of vanishing silently.
  *
- * Like createTransfer's blocked branch (early return since fix 6), this writes ONLY the row: it does NOT
- * increment the all-time / today velocity counters, does NOT accrue monthly
- * volume, and does NOT upsert the (watchlisted) recipient. A blocked attempt
- * must never advance the customer's caps, EDD volume, or saved-recipient list.
+ * Like createTransfer's blocked branch (early return since fix 6), this writes ONLY the row: the
+ * ledger totals (fix 16) exclude blocked rows, so it never advances the
+ * customer's caps or EDD volume, and it does NOT upsert the (watchlisted)
+ * recipient. A blocked attempt must never advance the saved-recipient list.
  */
 export async function recordBlockedAttempt(
   store: Store,

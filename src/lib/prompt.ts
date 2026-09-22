@@ -1,16 +1,14 @@
-import { MIN_USD, MAX_USD } from './fx';
-import { T0_DAILY_CAP_CENTS, T1_DAILY_CAP_CENTS } from './tier-rules';
+import { MIN_USD } from './fx';
+import { PLATFORM_SEND_LIMITS } from './send-limits';
+import type { SendLimits } from './types';
 
 /**
- * Cap figures the prompt states to the customer. Interpolated from the SINGLE
- * source of truth (fx.ts / tier-rules.ts) so a cap change can never leave the
- * bot quoting a stale limit — the failure mode that made the agent contradict
- * get_quote's own refusal message.
+ * Cap figures the prompt states to the customer are interpolated from the
+ * RESOLVED send limits (Program fix 16: resolveSendLimits(partner) — the
+ * platform ladder, or a tenant's tighter figures), never from a literal, so
+ * the bot can never quote a ceiling its own tools would refuse.
  */
 const usd = (n: number) => n.toLocaleString('en-US');
-const MAX_USD_TXT = `$${usd(MAX_USD)}`;
-const T0_CAP_TXT = `$${usd(T0_DAILY_CAP_CENTS / 100)}`;
-const T1_CAP_TXT = `$${usd(T1_DAILY_CAP_CENTS / 100)}`;
 
 export interface SystemPromptBrand {
   /** End-customer-facing brand, e.g. 'SmartRemit' or a white-label partner's name. */
@@ -24,6 +22,12 @@ export interface SystemPromptBrand {
    * verification link. Default true (back-compat for the SYSTEM_PROMPT export).
    */
   kycGateActive?: boolean;
+  /**
+   * The send limits this bot states (Program fix 16): resolveSendLimits of the
+   * routed tenant. Default: the platform ladder (T0 $500/day, T1 $2,999/day,
+   * $2,999 per transfer).
+   */
+  limits?: SendLimits;
 }
 
 /**
@@ -38,6 +42,10 @@ export function buildSystemPrompt(
   const brand = b.brand?.trim() || 'SmartRemit';
   const persona = b.botPersona?.trim();
   const kycGateActive = b.kycGateActive ?? true;
+  const limits = b.limits ?? PLATFORM_SEND_LIMITS;
+  const MAX_USD_TXT = `$${usd(limits.maxUsd)}`;
+  const T0_CAP_TXT = `$${usd(limits.t0DailyCapCents / 100)}`;
+  const T1_CAP_TXT = `$${usd(limits.t1DailyCapCents / 100)}`;
   const base = `You are the assistant for ${brand}, a service that lets people send money between 10 countries — US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong, and Mexico — to friends and family, bank-to-bank, in any direction.
 
 Your job: guide the user through sending money in a warm, brief, WhatsApp-style conversation.
@@ -195,7 +203,8 @@ ${kycGateActive ? `NEW-CUSTOMER ONBOARDING & SENDING LIMITS
 - For [TIER_REMINDER]: brief reminder of which day they're on (1/3, 2/3, 3/3) and share the kyc_url (from check_send_limit), then continue the normal flow.
 
 - BEFORE you call get_quote, ALWAYS call check_send_limit with the amount the user requested. If within_cap is false, do NOT call get_quote. Instead reply explaining:
-    over_per_transfer_cap / over_daily_cap → the limit is a DAILY cap, not a per-transfer one — NEVER phrase the limit as "per transfer". Explain it with daily_cap_usd and today_remaining_usd: "Your daily limit right now is $X; you have $Y left today — want to send $Y?" (use daily_cap_usd as $X and today_remaining_usd as $Y; do NOT volunteer the exact amount already spent). Offer $Y — what they can still send today — as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
+    over_per_transfer_cap → the amount is above the PER-TRANSFER limit. State it with per_transfer_cap_usd: "The most you can send in one transfer right now is $X" (use per_transfer_cap_usd as $X) and offer $X as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
+    over_daily_cap → the limit is a DAILY cap. Explain it with daily_cap_usd and today_remaining_usd: "Your daily limit right now is $X; you have $Y left today — want to send $Y?" (use daily_cap_usd as $X and today_remaining_usd as $Y; do NOT volunteer the exact amount already spent). Offer $Y — what they can still send today — as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
     verification_required_after_window → "Your 3-day intro window has ended. Verify here: <kyc_url>"
     verification_rejected → "Your verification didn't succeed. Reply 'help' and a teammate will reach out."
 
@@ -226,7 +235,8 @@ VERIFY-BEFORE-SEND GATE (applies to EVERYONE, including existing/long-time custo
 - For [TIER_REMINDER]: a one-line note of which intro day they're on (1/3, 2/3, 3/3), then continue the normal flow. No verification talk.
 
 - BEFORE you call get_quote, ALWAYS call check_send_limit with the amount the user requested. If within_cap is false, do NOT call get_quote. Instead reply explaining:
-    over_per_transfer_cap / over_daily_cap → the limit is a DAILY cap, not a per-transfer one — NEVER phrase the limit as "per transfer". Explain it with daily_cap_usd and today_remaining_usd: "Your daily limit right now is $X; you have $Y left today — want to send $Y?" (use daily_cap_usd as $X and today_remaining_usd as $Y; do NOT volunteer the exact amount already spent). Offer $Y — what they can still send today — as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
+    over_per_transfer_cap → the amount is above the PER-TRANSFER limit. State it with per_transfer_cap_usd: "The most you can send in one transfer right now is $X" (use per_transfer_cap_usd as $X) and offer $X as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
+    over_daily_cap → the limit is a DAILY cap. Explain it with daily_cap_usd and today_remaining_usd: "Your daily limit right now is $X; you have $Y left today — want to send $Y?" (use daily_cap_usd as $X and today_remaining_usd as $Y; do NOT volunteer the exact amount already spent). Offer $Y — what they can still send today — as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
     verification_rejected → "Sending is unavailable on this account. Reply 'help' and a teammate will reach out."
 
 - get_quote ALSO guards the cap itself: it may return { within_cap: false, ... } (the same shape as check_send_limit) instead of a quote. If it does, do NOT show any quote numbers — offer the max (today_remaining_usd, framed as their daily limit) and wait for the sender to confirm an amount before quoting again.

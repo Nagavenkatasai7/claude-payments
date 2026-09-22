@@ -5,6 +5,7 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
+import { resolveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
@@ -978,6 +979,28 @@ async function resolveSender(
 }
 
 /**
+ * Program fix 16: createTransfer's in-lock cap refusal, rendered exactly like
+ * the tools' own pre-check refusal so the model reads one shape (cap_eval).
+ */
+function capRefusal(err: SendCapError): ToolResult {
+  const ev = err.evaluation;
+  return {
+    error: 'Cap exceeded for this transfer.',
+    cap_eval: {
+      tier: ev.tier,
+      reason: ev.reason,
+      today_used_usd: ev.todayUsedCents / 100,
+      today_remaining_usd: ev.todayRemainingCents / 100,
+      daily_cap_usd: ev.dailyCapCents / 100,
+      per_transfer_cap_usd: ev.perTransferCapCents / 100,
+      day_of_window: ev.dayOfWindow,
+    },
+  };
+}
+/** Program fix 16: the per-sender mint lock timed out — retryable, nothing written. */
+const SEND_BUSY_MESSAGE = 'Another send for this customer is still being processed. Please try again in a moment.';
+
+/**
  * Sender + live FX for a quote. THROWS RateUnavailableError (Task 9) when a
  * leg has no rate inside FX_MAX_AGE_MS — every caller maps it via fxRefusal.
  */
@@ -1186,7 +1209,7 @@ async function getQuoteTool(
     const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
     if (Number.isFinite(amountUsd)) {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
-      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner));
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner), resolveSendLimits(partner));
       if (!ev.withinCap) {
         // kyc_url (and the Persona inquiry behind it) only exists when the
         // partner's verify-before-send gate is ON — gate-off customers get the
@@ -1344,7 +1367,7 @@ async function createTransferTool(
     {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
-      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveSendLimits(partner));
       if (!ev.withinCap) {
         return {
           error: 'That quote would exceed your current sending cap. Please request a fresh quote.',
@@ -1398,7 +1421,6 @@ async function createTransferTool(
         recipientBusinessName: draft.recipientBusinessName,
         invoiceId: draft.invoiceId,
       });
-      await ctx.dailyVolumeStore.addCents(ctx.partnerId, ctx.phone, Math.round(transfer.amountUsd * 100));
       await persistEddProfile(ctx, customer, draft.sourceOfFunds, draft.occupation);
       await ctx.customerStore.recordFundingMethod(ctx.partnerId, ctx.phone, draft.fundingMethod);
       return {
@@ -1429,6 +1451,15 @@ async function createTransferTool(
       if (err instanceof PartnerPulledConsumerError) {
         // fix 6: a pre-fix consumer draft carrying a partner-pulled method — dead.
         return { error: 'That approval is no longer valid. Ask the customer to start the send again.' };
+      }
+      // Program fix 16: the in-lock cap refusal (the ledger moved between the
+      // pre-check above and the lock) — a real refusal, same shape as the
+      // pre-check's. A lock timeout is retryable: put the draft back so the
+      // customer's next tap replays it.
+      if (err instanceof SendCapError) return capRefusal(err);
+      if (err instanceof SendBusyError) {
+        await ctx.draftStore.restoreDraft(draft, ctxDraftId);
+        return { error: SEND_BUSY_MESSAGE };
       }
       throw err;
     }
@@ -1479,7 +1510,7 @@ async function createTransferTool(
   {
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
-    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents, sendGateActive(legacyPartner));
+    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents, sendGateActive(legacyPartner), resolveSendLimits(legacyPartner));
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -1524,7 +1555,6 @@ async function createTransferTool(
       recipientBusinessName: legacyB2b?.recipientBusinessName ?? (legacyB2b ? String(args.recipient_name) : undefined),
       invoiceId: legacyB2b?.invoiceId,
     });
-    await ctx.dailyVolumeStore.addCents(ctx.partnerId, ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
     await ctx.customerStore.recordFundingMethod(ctx.partnerId, ctx.phone, legacyFunding);
     return {
@@ -1540,6 +1570,8 @@ async function createTransferTool(
     const refusal = fxRefusal(err, 'create_transfer');
     if (refusal) return refusal;
     if (err instanceof QuoteError) return { error: err.message };
+    if (err instanceof SendCapError) return capRefusal(err);     // Program fix 16
+    if (err instanceof SendBusyError) return { error: SEND_BUSY_MESSAGE };
     throw err;
   }
 }
@@ -3007,7 +3039,7 @@ async function sendApprovePickerTool(
   {
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
-    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
+    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveSendLimits(partner));
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -3383,7 +3415,7 @@ async function checkSendLimitTool(
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   const requestedCents = Math.round(amountUsd * 100);
   const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
-  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner));
+  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveSendLimits(partner));
 
   const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.partnerId, ctx.phone);   // NEW (KYC)
   const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)

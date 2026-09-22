@@ -10,6 +10,7 @@ import { quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
 import { createTransfer } from './transfer-create';
+import { SendBusyError, SendCapError } from './send-limits';
 import { sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
@@ -371,6 +372,12 @@ export async function createTransaction(
     if (e instanceof Error && e.message === 'kyc_required') {
       return err(422, 'Sender identity verification required (this partner runs SmartRemit KYC).');
     }
+    // Program fix 16: every partner-API mint is capped from the ledger. No
+    // figures in the response (the caps are policy, not a per-sender oracle).
+    // The key stays bound-but-unminted, so the same Idempotency-Key mints once
+    // there is headroom / the lock is free.
+    if (e instanceof SendCapError) return err(422, "This transfer exceeds the sender's current sending limit.");
+    if (e instanceof SendBusyError) return err(503, 'Another transfer for this sender is in progress. Please retry.');
     throw e;
   }
 

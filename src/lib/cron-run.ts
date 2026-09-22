@@ -1,5 +1,6 @@
 import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
+import { SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { env } from './env';
 import { logError } from './log';
@@ -112,7 +113,11 @@ export async function runDueSchedules(
       // cron has no next-day catch-up (isScheduleDueToday matches the day), so
       // without the alert this cycle's send would silently disappear.
       failed++;
-      const reason = err instanceof RateUnavailableError ? err.reason : 'error';
+      const reason =
+        err instanceof RateUnavailableError ? err.reason
+        : err instanceof SendCapError ? 'send_cap'   // Program fix 16: the schedule owner is at their cap today
+        : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out (a same-day re-run retries)
+        : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
       // YYYY-MM-DD for the same Eastern day isScheduleDueToday matches.
       const day = new Date(deps.now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });

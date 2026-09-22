@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createAgent, sanitizeReply } from '@/lib/agent';
 import { createStore } from '@/lib/store';
@@ -34,8 +35,8 @@ let db: Db;
 
 function extraDeps(redis = fakeRedis(), store = createStore(redis, db)) {
   const customerStore = createCustomerStore(db, store);
-  const dailyVolumeStore = createDailyVolumeStore(redis);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  const dailyVolumeStore = createDailyVolumeStore(store);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
   const partnerStore = createPartnerStore(db);
   return { customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
@@ -766,8 +767,8 @@ describe('createAgent — P4 [SEND CURRENCIES] note', () => {
   function buildWithRedis(redis = fakeRedis()) {
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
-    const dailyVolumeStore = createDailyVolumeStore(redis);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const dailyVolumeStore = createDailyVolumeStore(store);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const partnerStore = createPartnerStore(db);
     return { redis, store, customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
@@ -873,8 +874,8 @@ describe('transfer-memory: [RECENT TRANSFERS] round-0 injection', () => {
   function makeAgent(redis = fakeRedis()) {
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
-    const dailyVolumeStore = createDailyVolumeStore(redis);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const dailyVolumeStore = createDailyVolumeStore(store);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const partnerStore = createPartnerStore(db);
     const chat = vi.fn<(messages: ChatMessage[], tools: import('@/lib/types').ChatTool[]) => Promise<ChatMessage>>();
@@ -977,8 +978,8 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
   function build(redis = fakeRedis()) {
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
-    const dailyVolumeStore = createDailyVolumeStore(redis);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const dailyVolumeStore = createDailyVolumeStore(store);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const partnerStore = createPartnerStore(db);
     return { redis, store, customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider, partnerStore };
@@ -1002,7 +1003,36 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     });
     await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: true, isNewCustomer: true });
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content);
-    expect(sys.some((s) => typeof s === 'string' && s.includes('first message ever from this phone'))).toBe(true);
+    const note = sys.find((s) => typeof s === 'string' && s.includes('first message ever from this phone')) as string | undefined;
+    expect(note).toBeDefined();
+    // Program fix 16: the figure is the RESOLVED T0 cap (platform $500), never a literal.
+    expect(note).toContain('$500/day');
+    expect(sys.join('\n')).not.toContain('999,999');
+  });
+
+  it('[NEW CUSTOMER] and the system prompt state a tenant\'s tighter T0 cap ($200) — fix 16', async () => {
+    const b = build();
+    const dflt = await b.partnerStore.ensureDefaultPartner();
+    await b.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
+    // The override column is written by fix 16b's single-column UPDATE; savePartner never touches it.
+    await db.execute(sql`UPDATE partners SET send_limits = '{"t0DailyCapCents":20000}'::jsonb WHERE id = 'default'`);
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: freshScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
+      kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'hi', { isNewConversation: true, isNewCustomer: true });
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => String(m.content));
+    expect(sys.find((s) => s.includes('first message ever from this phone'))).toContain('$200/day');
+    expect(sys[0]).toContain('$200/day'); // the system prompt's own T0 figure
+    expect(sys.join('\n')).not.toContain('$500/day');
   });
 
   it('prepends [TIER_REMINDER day 2/3] when turn.tierReminderDayOfWindow is 2', async () => {
