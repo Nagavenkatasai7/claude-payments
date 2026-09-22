@@ -10,6 +10,7 @@ import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { beginHold } from '@/lib/settlement';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
 
 let db: Db;
@@ -51,37 +52,53 @@ function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   };
 }
 
-describe('cancelTransfer', () => {
-  it('sets status to cancelled for awaiting_payment', async () => {
+describe('cancelTransfer — staff Cancel VOIDS an unfunded draft and nothing else (Phase 1 Task 5 / money-05)', () => {
+  // ── The legal void: unfunded drafts ────────────────────────────────────
+  it('voids an uncharged awaiting_payment transfer and enqueues nothing', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'c1', status: 'awaiting_payment' }));
     await cancelTransfer(store, 'c1');
-    const loaded = await store.getTransfer('c1');
-    expect(loaded?.status).toBe('cancelled');
+    expect((await store.getTransfer('c1'))?.status).toBe('cancelled');
+    expect(await outboxRows()).toHaveLength(0);
   });
 
-  it('sets status to cancelled for paid', async () => {
+  it('still voids an AWAITING_PAYMENT ach_pull transfer (no instruction posted yet — safe void)', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(makeTransfer({ id: 'c2', status: 'paid' }));
-    await cancelTransfer(store, 'c2');
-    const loaded = await store.getTransfer('c2');
-    expect(loaded?.status).toBe('cancelled');
+    await store.saveTransfer(makeTransfer({ id: 'c6', status: 'awaiting_payment', fundingMethod: 'ach_pull', transferType: 'b2b' }));
+    await cancelTransfer(store, 'c6');
+    expect((await store.getTransfer('c6'))?.status).toBe('cancelled');
   });
 
+  // ── Holds: a compliance decision, never a Cancel (Wave 2 review) ────────
+  it('REFUSES an UNCHARGED in_review hold (B2B bank_pull), and Reject (admin) is the path that ends it', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(
+      makeTransfer({ id: 'c7', status: 'in_review', complianceStatus: 'flagged', fundingMethod: 'bank_pull', transferType: 'b2b' }),
+    );
+    await expect(cancelTransfer(store, 'c7')).rejects.toThrow(/use Reject/i);
+    expect((await store.getTransfer('c7'))?.status).toBe('in_review');
+    // The routed path: rejectTransfer is cancel-only for an uncharged hold, with no refund and no outbox row.
+    await rejectTransfer(store, db, 'c7');
+    const loaded = await store.getTransfer('c7');
+    expect(loaded?.status).toBe('cancelled');
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect(loaded?.adminNote).toContain('rejected in review');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  // ── Idempotent no-ops ───────────────────────────────────────────────────
   it('is a no-op for delivered transfers', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(makeTransfer({ id: 'c3', status: 'delivered' }));
+    await store.saveTransfer(makeTransfer({ id: 'c3', status: 'delivered', fundingRef: 'mockfund-c3' }));
     await cancelTransfer(store, 'c3');
-    const loaded = await store.getTransfer('c3');
-    expect(loaded?.status).toBe('delivered');
+    expect((await store.getTransfer('c3'))?.status).toBe('delivered');
   });
 
-  it('is a no-op for already cancelled transfers', async () => {
+  it('is a no-op for already cancelled transfers (a second click is silent)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'c4', status: 'cancelled' }));
     await cancelTransfer(store, 'c4');
-    const loaded = await store.getTransfer('c4');
-    expect(loaded?.status).toBe('cancelled');
+    expect((await store.getTransfer('c4'))?.status).toBe('cancelled');
   });
 
   it('throws for a missing transfer', async () => {
@@ -89,19 +106,138 @@ describe('cancelTransfer', () => {
     await expect(cancelTransfer(store, 'missing')).rejects.toThrow('Transfer not found');
   });
 
+  // ── INVERTED. This used to be 'sets status to cancelled for paid' (:63-69)
+  //    and ASSERTED money-05: a charged sender, a cancelled row, no refund,
+  //    and issueRefund locked out (it accepts paid|delivered only). ──────────
+  it('REFUSES a PAID card transfer (charged): steers to Refund and mutates NOTHING', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c2', status: 'paid', fundingRef: 'mockfund-c2', adminNote: 'keep me' }));
+    await expect(cancelTransfer(store, 'c2')).rejects.toThrow(/use Refund/i);
+    const loaded = await store.getTransfer('c2');
+    expect(loaded?.status).toBe('paid');
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect(loaded?.adminNote).toBe('keep me');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('REFUSES a PAID custodial transfer with no fundingRef too: paid means the rail was told', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c2b', status: 'paid', fundingMethod: 'bank_transfer' }));
+    await expect(cancelTransfer(store, 'c2b')).rejects.toThrow(/use Refund/i);
+    expect((await store.getTransfer('c2b'))?.status).toBe('paid');
+  });
+
   it('REFUSES to bare-cancel a PAID ach_pull transfer (non-custodial guard — must use Reverse)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'c5', status: 'paid', fundingMethod: 'ach_pull', transferType: 'b2b' }));
     await expect(cancelTransfer(store, 'c5')).rejects.toThrow(/use Reverse/i);
-    // Status is untouched — the partner instruction is still live.
+    // Status is untouched: the partner instruction is still live.
     expect((await store.getTransfer('c5'))?.status).toBe('paid');
   });
 
-  it('still cancels an AWAITING_PAYMENT ach_pull transfer (no instruction posted yet — safe void)', async () => {
+  it('REFUSES a PAID bank_pull transfer too (both partner-pulled methods steer to Reverse)', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(makeTransfer({ id: 'c6', status: 'awaiting_payment', fundingMethod: 'ach_pull', transferType: 'b2b' }));
-    await cancelTransfer(store, 'c6');
-    expect((await store.getTransfer('c6'))?.status).toBe('cancelled');
+    await store.saveTransfer(makeTransfer({ id: 'c9', status: 'paid', fundingMethod: 'bank_pull', transferType: 'b2b' }));
+    await expect(cancelTransfer(store, 'c9')).rejects.toThrow(/use Reverse/i);
+    expect((await store.getTransfer('c9'))?.status).toBe('paid');
+  });
+
+  it('REFUSES a CHARGED in_review transfer: Reject is the auto-refunding path', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c10', status: 'in_review', complianceStatus: 'flagged', fundingRef: 'mockfund-c10' }));
+    await expect(cancelTransfer(store, 'c10')).rejects.toThrow(/use Reject/i);
+    const loaded = await store.getTransfer('c10');
+    expect(loaded?.status).toBe('in_review');
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('REFUSES a CHARGED card-funded B2B hold (the B2B page Cancel used to void it with no refund)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(
+      makeTransfer({ id: 'c10b', status: 'in_review', complianceStatus: 'flagged', transferType: 'b2b', fundingMethod: 'credit_card', fundingRef: 'mockfund-c10b' }),
+    );
+    await expect(cancelTransfer(store, 'c10b')).rejects.toThrow(/use Reject/i);
+    expect((await store.getTransfer('c10b'))?.status).toBe('in_review');
+  });
+
+  it('REFUSES a CHARGED awaiting_payment transfer, which stays visible to the funding-resume sweep', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c11', status: 'awaiting_payment', fundingRef: 'mockfund-c11' }));
+    await expect(cancelTransfer(store, 'c11')).rejects.toThrow(/already been charged/i);
+    expect((await store.getTransfer('c11'))?.status).toBe('awaiting_payment');
+    const resumable = await createTransferRepo(db).listAwaitingWithFunding(0, new Date(Date.now() + 60_000));
+    expect(resumable.map((t) => t.id)).toContain('c11');
+  });
+
+  it('REFUSES blocked: never rewrites a terminal compliance state', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c12', status: 'blocked', complianceStatus: 'blocked' }));
+    await expect(cancelTransfer(store, 'c12')).rejects.toThrow(/blocked/i);
+    expect((await store.getTransfer('c12'))?.status).toBe('blocked');
+  });
+
+  // ── Races: the read is advisory, the guarded claim decides ──────────────
+  it('a cancel whose read raced the PAID flip refuses from the FRESH row (Refund) and never clobbers paid', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c13', status: 'awaiting_payment' }));
+    let raced = false;
+    const racy: typeof store = {
+      ...store,
+      async getTransfer(id: string) {
+        const snapshot = await store.getTransfer(id);
+        if (!raced) {
+          raced = true;
+          await store.updateTransferFromWebhook(id, 'paid'); // settlement wins between the read and the claim
+        }
+        return snapshot;
+      },
+    };
+    await expect(cancelTransfer(racy, 'c13')).rejects.toThrow(/use Refund/i);
+    const loaded = await store.getTransfer('c13');
+    expect(loaded?.status).toBe('paid');
+    expect(loaded?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('a cancel whose read raced the CAPTURE (fundingRef written) refuses and leaves the charged row for the resume sweep', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c14', status: 'awaiting_payment' }));
+    let raced = false;
+    const racy: typeof store = {
+      ...store,
+      async getTransfer(id: string) {
+        const snapshot = await store.getTransfer(id);
+        if (!raced) {
+          raced = true;
+          await createTransferRepo(db).setFundingRef(id, 'mockfund-c14'); // the capture seam lands between the read and the claim
+        }
+        return snapshot;
+      },
+    };
+    await expect(cancelTransfer(racy, 'c14')).rejects.toThrow(/already been charged/i);
+    const loaded = await store.getTransfer('c14');
+    expect(loaded?.status).toBe('awaiting_payment');
+    expect(loaded?.fundingRef).toBe('mockfund-c14');
+  });
+
+  it('a double click racing itself: the second claim misses on the now-cancelled row and throws "changed concurrently" (no second write)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'c15', status: 'awaiting_payment' }));
+    let raced = false;
+    const racy: typeof store = {
+      ...store,
+      async getTransfer(id: string) {
+        const snapshot = await store.getTransfer(id);
+        if (!raced) {
+          raced = true;
+          await cancelTransfer(store, id); // the first click lands between this click's read and its claim
+        }
+        return snapshot;
+      },
+    };
+    await expect(cancelTransfer(racy, 'c15')).rejects.toThrow(/changed concurrently/i);
+    expect((await store.getTransfer('c15'))?.status).toBe('cancelled');
   });
 });
 
@@ -559,7 +695,7 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     const stale = (await store.getTransfer('race_can'))!;
     await releaseTransfer(store, db, 'race_can');
 
-    await expect(cancelTransfer(staleView(store, stale), 'race_can')).rejects.toThrow(/changed/i);
+    await expect(cancelTransfer(staleView(store, stale), 'race_can')).rejects.toThrow(/use Reject/i); // a hold is refused at the decision (Task 5)
     expect((await store.getTransfer('race_can'))?.status).toBe('paid');
   });
 

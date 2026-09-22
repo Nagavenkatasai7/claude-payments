@@ -122,6 +122,47 @@ describe('cancelTransferAction partner scope (H1)', () => {
   });
 });
 
+describe('cancelTransferAction — the public POST endpoint refuses money-05 (Phase 1 Task 5)', () => {
+  it('refuses a PAID charged transfer even for a platform admin: steers to Refund, ledger untouched', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'm1', partnerId: 'A', status: 'paid', fundingRef: 'mockfund-m1' }));
+    currentStaff = staff({ username: 'plat' });
+    await expect(cancelTransferAction(form({ id: 'm1' }))).rejects.toThrow(/use Refund/i);
+    const t = await store.getTransfer('m1');
+    expect(t?.status).toBe('paid');
+    expect(t?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('refuses a CHARGED in_review transfer POSTed directly (the list never renders Cancel there): steers to Reject', async () => {
+    await store.saveTransfer(
+      makeTransfer({ id: 'm2', partnerId: 'B', status: 'in_review', complianceStatus: 'flagged', fundingRef: 'mockfund-m2' }),
+    );
+    currentStaff = staff({ username: 'pb', partnerId: 'B' });
+    await expect(cancelTransferAction(form({ id: 'm2' }))).rejects.toThrow(/use Reject/i);
+    expect((await store.getTransfer('m2'))?.status).toBe('in_review');
+  });
+
+  it('scope still runs FIRST: another tenant’s paid row answers the generic not-found, never the money refusal', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'm3', partnerId: 'A', status: 'paid', fundingRef: 'mockfund-m3' }));
+    currentStaff = staff({ username: 'pb', partnerId: 'B' });
+    await expect(cancelTransferAction(form({ id: 'm3' }))).rejects.toThrow(/^Transfer not found$/);
+    expect((await store.getTransfer('m3'))?.status).toBe('paid');
+  });
+
+  it('a NON-admin agent with canCancel cannot end an UNCHARGED compliance hold: the hold is refused and stays in_review', async () => {
+    await store.saveTransfer(
+      makeTransfer({ id: 'm4', partnerId: 'A', status: 'in_review', complianceStatus: 'flagged', fundingMethod: 'bank_pull', transferType: 'b2b' }),
+    );
+    currentStaff = staff({
+      username: 'agentA',
+      role: 'agent',
+      partnerId: 'A',
+      permissions: { canCancel: true, canResend: false, canAssign: false },
+    });
+    await expect(cancelTransferAction(form({ id: 'm4' }))).rejects.toThrow(/use Reject/i);
+    expect((await store.getTransfer('m4'))?.status).toBe('in_review');
+  });
+});
+
 describe('releaseTransferAction partner scope (H2)', () => {
   it('rejects a partner-admin releasing another partner’s held transfer', async () => {
     await store.saveTransfer(makeTransfer({ id: 'r1', partnerId: 'A', status: 'in_review' }));
