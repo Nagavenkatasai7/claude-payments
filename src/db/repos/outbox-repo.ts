@@ -34,6 +34,34 @@ export type OutboxKind =
 
 export type OutboxRow = typeof outbox.$inferSelect;
 
+// Keys that only a secret-bearing shape carries: WaCreds ({ phoneNumberId, token }),
+// the PartnerIntegrations sub-configs (apiKey, webhookSecret, credentials,
+// verifyToken, appSecret) and the pre-fix-11 `creds` envelope.
+const SECRET_SHAPE_KEYS: ReadonlySet<string> = new Set([
+  'creds', 'token', 'verifytoken', 'appsecret', 'apikey', 'webhooksecret',
+  'credentials', 'signingsecret', 'secret', 'password',
+]);
+
+/**
+ * Paths (never values) at which `value` carries a secret-bearing shape: a
+ * secret-named key anywhere, or a { kyc, payment, whatsapp } PartnerIntegrations
+ * object. Pure; used by enqueue's test-only tripwire (fix 11).
+ */
+export function secretShapePaths(value: unknown, path = '$', depth = 0, out: string[] = []): string[] {
+  if (depth > 6 || value === null || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => secretShapePaths(v, `${path}[${i}]`, depth + 1, out));
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  if ('kyc' in obj && 'payment' in obj && 'whatsapp' in obj) out.push(`${path} (PartnerIntegrations shape)`);
+  for (const [k, v] of Object.entries(obj)) {
+    if (SECRET_SHAPE_KEYS.has(k.toLowerCase())) out.push(`${path}.${k}`);
+    secretShapePaths(v, `${path}.${k}`, depth + 1, out);
+  }
+  return out;
+}
+
 export const MAX_ATTEMPTS = 8;
 /**
  * Lease length for a claimed row. 5× the worker's hard ceiling (maxDuration =
@@ -57,6 +85,17 @@ export function createOutboxRepo(db: DbOrTx) {
       payload: Record<string, unknown>,
       opts: { delayMs?: number; dedupeKey?: string } = {},
     ): Promise<boolean> {
+      // TEST-ONLY tripwire (fix 11): a payload must never carry a secret-bearing
+      // shape — creds resolve at drain time, capabilities are sealed. Under
+      // vitest every producer the suite exercises is checked at runtime; in
+      // production this is a no-op (a new throw inside money transactions is not
+      // worth it — tests/outbox-payload-secrets.test.ts is the build gate).
+      if (process.env.VITEST) {
+        const paths = secretShapePaths(payload);
+        if (paths.length > 0) {
+          throw new Error(`outbox payload for ${kind} carries a secret-bearing shape at ${paths.join(', ')} (fix 11)`);
+        }
+      }
       const rows = await db
         .insert(outbox)
         .values({
