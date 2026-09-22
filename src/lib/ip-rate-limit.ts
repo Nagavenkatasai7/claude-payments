@@ -96,3 +96,52 @@ export async function enforceIpRateLimit(
     return null; // fail-open
   }
 }
+
+// ── Program-Fix 23: the hosted pay-page guard ────────────────────────────────
+// /pay/<id> and /pay/b2b/<id> are unauthenticated GETs that read the ledger and
+// render the recipient, amounts and fee. The POST routes are limited (scope
+// 'pay'); the PAGES were not, so one address could enumerate ids against the
+// database at wire speed. This guard runs BEFORE any data read.
+
+/** Scope for the hosted pay-page GETs. Separate from the POST 'pay' scope so a burst of reloads never eats the payment budget. */
+export const PAY_PAGE_SCOPE = 'paypage';
+/** Per-IP page renders per window. Generous on purpose: reloads, double renders, link previews. */
+export const PAY_PAGE_IP_LIMIT = 60;
+
+export interface IpGuardDeps {
+  redis?: RedisLike;
+  now?: () => number;
+}
+
+/**
+ * Page-facing guard: `true` ⇒ over budget, render the generic sheet; `false` ⇒
+ * render normally. It FAILS OPEN and NEVER THROWS: any limiter error, a Redis
+ * outage, or an unknown client IP (no forwarded header — one shared bucket
+ * would lock out everyone behind a header-stripping proxy) all yield `false`.
+ * Nothing is logged here: the guard must not leak the id or the decision.
+ *
+ * `headers` is the Fetch `Headers` shape; Next's `await headers()` returns a
+ * `ReadonlyHeaders` (next/dist/server/request/headers.d.ts:11) that satisfies
+ * it, exactly as `clientIpFrom(await headers())` does in waitlist-action.ts.
+ * `deps` lets tests inject a fake Redis and a fixed clock.
+ */
+export async function isIpRateLimited(
+  headers: Headers,
+  scope: string,
+  limit: number,
+  windowSec = 60,
+  deps: IpGuardDeps = {},
+): Promise<boolean> {
+  try {
+    const ip = clientIpFrom(headers);
+    if (ip === 'unknown') return false;
+    const result = await checkIpRateLimit(deps.redis ?? limiterRedis(), scope, ip, {
+      limit,
+      windowSec,
+      now: deps.now ? deps.now() : Date.now(),
+    });
+    return !result.allowed;
+  } catch {
+    return false; // fail-open: availability wins on a money page
+  }
+}

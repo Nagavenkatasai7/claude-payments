@@ -9,6 +9,35 @@ import {
   parseButtonId,
   BUTTON_LABEL_MAX,
 } from '@/lib/whatsapp-buttons';
+import { newTransferId } from '@/lib/id';
+
+describe('parseButtonId round-trips a newTransferId() draft id (Program-Fix 23)', () => {
+  it('approve:<fresh id> and cancel:<fresh id> parse back to the same id', () => {
+    for (let i = 0; i < 20; i++) {
+      const draftId = newTransferId();
+      expect(parseButtonId(approveButtonId(draftId))).toEqual({ kind: 'approve', draftId });
+      expect(parseButtonId(cancelButtonId(draftId))).toEqual({ kind: 'cancel', draftId });
+    }
+  });
+
+  it('a fixed base64url id containing both "_" and "-" parses (pins the charset)', () => {
+    const draftId = 'Ab_9-Cd_E-fG0hIjKlMnOp'; // 22 chars, both legal non-alphanumerics
+    expect(draftId).toHaveLength(22);
+    expect(parseButtonId(`approve:${draftId}`)).toEqual({ kind: 'approve', draftId });
+    expect(parseButtonId(`cancel:${draftId}`)).toEqual({ kind: 'cancel', draftId });
+  });
+
+  it('a legacy 8-char base36 draft id still parses', () => {
+    expect(parseButtonId('approve:k3j9x2q1')).toEqual({ kind: 'approve', draftId: 'k3j9x2q1' });
+  });
+
+  it('still rejects delimiters and whitespace inside the id', () => {
+    expect(parseButtonId('approve:ab:cd')).toBeNull();
+    expect(parseButtonId('approve:ab|cd')).toBeNull();
+    expect(parseButtonId('approve:ab cd')).toBeNull();
+    expect(parseButtonId('approve:ab=cd')).toBeNull();
+  });
+});
 
 describe('truncateLabel', () => {
   it('returns short labels untouched', () => {
