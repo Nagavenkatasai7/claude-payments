@@ -48,9 +48,11 @@ export type ParsedButtonId =
   | { kind: 'approve'; draftId: string }
   | { kind: 'cancel'; draftId: string };
 
-// Allow only safe characters in payload portions.
+// Allow only safe characters in payload portions. A draft id is newTransferId()
+// output (Program-Fix 23: 22 chars of base64url, so `_` and `-` are legal);
+// legacy 8-char base36 ids fit the same class.
 const PHONE_RE = /^\d{6,20}$/;
-const DRAFT_RE = /^[A-Za-z0-9]{4,32}$/;
+const DRAFT_RE = /^[A-Za-z0-9_-]{4,32}$/;
 
 export function parseButtonId(id: string): ParsedButtonId | null {
   if (!id || id.includes('\n') || id.includes('\r')) return null;

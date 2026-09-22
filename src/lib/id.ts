@@ -1,12 +1,34 @@
+import { randomBytes } from 'node:crypto';
+
+/**
+ * Mint an opaque id (Program-Fix 23: authz-02 / crypto-13 / money-08 / F48).
+ *
+ * The value is a CAPABILITY: it is the unauthenticated `/pay/<id>` link, the
+ * draft id, the rail reference, the funding-webhook key and the body of every
+ * prefixed id (`inv_`, `s_`, `tk_`, `pk_`, …). So it comes from the OS CSPRNG
+ * (`randomBytes`, `node:crypto` — @types/node crypto.d.ts:1896) and carries
+ * 128 bits: 16 bytes as unpadded base64url, 22 characters of `[A-Za-z0-9_-]`
+ * (`'base64url'` is a BufferEncoding — @types/node buffer.d.ts:256). No `:`,
+ * `|` or `=`, so Redis keys (`recipient_draft:<id>`, `iprl|…`) and WhatsApp
+ * button ids (`approve:<id>`) stay unambiguous, and the id needs no URL encoding.
+ *
+ * Compatibility: ids are opaque `text` primary keys. Pre-fix 8-character base36
+ * ids resolve forever — no read path checks length or charset, and no CHECK
+ * constraint is ever added. This is the one place the shape is decided.
+ *
+ * WhatsApp safety (review S2): the bot sends `/pay/<id>` as plain text and a
+ * LEADING `_` can read as an italic marker, so an id whose first character is
+ * `_` or `-` is re-drawn. Rejection probability 2/64; entropy cost
+ * -log2(62/64) ≈ 0.046 bits, so the id keeps ~127.95 bits. A TRAILING `_`/`-`
+ * cannot occur: 128 bits = 21 sextets + 2 bits, so the 22nd character is
+ * always one of `A`, `Q`, `g`, `w`.
+ *
+ * Node.js runtime only (`node:crypto`): never import from `src/middleware.ts`.
+ */
 export function newTransferId(): string {
-  let id = '';
-  while (id.length < 8) {
-    // Math.random() can legally return 0 per the ECMAScript spec.
-    // (0).toString(36).slice(2) === "" — an empty chunk that would cause an
-    // infinite loop since nothing is appended to id.  Skip empty chunks so the
-    // loop always makes forward progress toward the 8-character target.
-    const chunk = Math.random().toString(36).slice(2);
-    if (chunk) id += chunk;
-  }
-  return id.slice(0, 8);
+  let id: string;
+  do {
+    id = randomBytes(16).toString('base64url');
+  } while (id[0] === '_' || id[0] === '-');
+  return id;
 }

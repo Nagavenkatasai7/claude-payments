@@ -13,14 +13,14 @@ its own `component/<name>` branch on GitHub and a path map in `.claude/hooks/com
 | partner-api | `partner-api*.ts` `partner-config.ts` `partner-integrations*.ts` `partner-store.ts` · `api/partner/` `api/partner-application/` · dashboard partners/api-keys/partner-requests · `src/app/onboard/` · demo-partner scripts | `component/partner-api` |
 | admin-dashboard | `src/app/admin-dashboard/**` (minus the pages owned above) · `src/app/login/` · `api/dashboard/` · `auth*.ts` `staff-scope.ts` `permissions.ts` `dashboard*.ts` `analytics.ts` `ticket-*.ts` | `component/admin-dashboard` |
 | customer-portal | `src/app/account/` `api/account/` · `customer-*.ts` `otp-store.ts` `verify-link.ts` | `component/customer-portal` |
-| pay-page | `src/app/pay/` (hosted pay page UI; the finalize route is money-paths) | `component/pay-page` |
+| pay-page | `src/app/pay/` (hosted pay page UI; the finalize route is money-paths). Both `/pay/[id]` and `/pay/b2b/[id]` open with the fail-open per-IP page guard `isIpRateLimited` (`ip-rate-limit.ts`, platform-security, fix 23) before any read, and every dead link renders one generic default-branded sheet | `component/pay-page` |
 | b2b | `b2b-*.ts` · `src/app/pay/b2b/` `api/pay/b2b/` · dashboard b2b | `component/b2b` |
 | corridors-fx | `rate.ts` `fx.ts` `partner-rates.ts` `partner-currency.ts` `payout-format.ts` `corridor-*.ts` · dashboard corridors/rates · rate scripts | `component/corridors-fx` |
 | landing-docs | `src/app/page.tsx` `landing/` `about/` `docs/` `partners/` · `public/` | `component/landing-docs` |
 | platform-security | `middleware.ts` `boot-assert.ts` `field-crypto.ts` `ip-rate-limit.ts` `redis.ts` `store.ts` · `settlement-url.ts` `safe-fetch.ts` (fix 22: the settlement-URL rule + the only rail client) · `scripts/audit-settlement-urls.ts` · `next.config` · `.github/` · `tests/e2e/` | `component/platform-security` |
 | db-layer | `src/db/**` `drizzle/**` `drizzle.config.ts` (schema + migrations are *shared*: editing them never warns, but the migration-reminder hook fires) | `component/db-layer` |
 
-**Shared** (never flagged): `types.ts` `env.ts` `utils.ts` `dates.ts` `phone.ts` `defaults.ts` `log.ts` `layout.tsx` `tailwind.css` `schema.ts` `drizzle/` `docs/` `.claude/`.
+**Shared** (never flagged): `types.ts` `env.ts` `utils.ts` `dates.ts` `phone.ts` `defaults.ts` `log.ts` `layout.tsx` `tailwind.css` `schema.ts` `drizzle/` `docs/` `.claude/`. Also `id.ts` (fix 23): `newTransferId()` is 16 CSPRNG bytes as 22 base64url chars, used by every transfer, draft and prefixed id; ids are opaque text PKs, old 8-char ids stay valid, and no read path or CHECK constraint ever checks the format.
 
 ## The branch model
 

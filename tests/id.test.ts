@@ -1,46 +1,80 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { newTransferId } from '@/lib/id';
 
-describe('newTransferId', () => {
+// Program-Fix 23: the id is an unauthenticated capability (/pay/<id>), the draft
+// id, the rail reference and every prefixed id. It must come from a CSPRNG and
+// carry 128 bits. Legacy 8-character ids stay valid — nothing checks the shape
+// on a read path, so these tests only pin what a FRESH id looks like.
+
+const ID_RE = /^[A-Za-z0-9_-]{22}$/;
+
+describe('newTransferId — shape', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('returns an 8-character alphanumeric id', () => {
-    const id = newTransferId();
-    expect(id).toMatch(/^[a-z0-9]{8}$/);
+  it('is 22 unpadded base64url characters that decode to exactly 16 bytes', () => {
+    for (let i = 0; i < 50; i++) {
+      const id = newTransferId();
+      expect(id).toMatch(ID_RE);
+      expect(Buffer.from(id, 'base64url')).toHaveLength(16);
+      // Round-trip: the 22 characters are the canonical encoding of those bytes.
+      expect(Buffer.from(id, 'base64url').toString('base64url')).toBe(id);
+    }
+  });
+});
+
+describe('newTransferId — no PRNG', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('returns different ids on repeated calls', () => {
-    expect(newTransferId()).not.toBe(newTransferId());
+  it('never calls Math.random (100 ids)', () => {
+    const spy = vi.spyOn(Math, 'random');
+    for (let i = 0; i < 100; i++) newTransferId();
+    expect(spy).not.toHaveBeenCalled();
   });
 
-  it('does not hang when Math.random() returns 0 (regression: infinite loop)', () => {
-    // (0).toString(36) === "0", "0".slice(2) === "" — empty chunk caused an
-    // infinite loop because nothing was appended to id on each iteration.
-    // Math.random() CAN legally return 0 per the ECMAScript spec.
-    let callCount = 0;
-    vi.spyOn(Math, 'random').mockImplementation(() => {
-      callCount++;
-      // Return 0 for the first 10 calls, then normal values so the test terminates
-      if (callCount <= 10) return 0;
-      return 0.5; // "i".repeat... → produces chars
-    });
-    const id = newTransferId();
-    expect(id).toMatch(/^[a-z0-9]{8}$/);
+  it('the source uses randomBytes(16).toString("base64url") and nothing else', () => {
+    const src = readFileSync(new URL('../src/lib/id.ts', import.meta.url), 'utf8');
+    expect(src).toContain("randomBytes(16).toString('base64url')");
+    expect(src).not.toContain('Math.random');
+    expect(src).not.toContain('getRandomValues');
+  });
+});
+
+describe('newTransferId — distinct and URL/Redis-safe', () => {
+  it('100,000 ids are all unique', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 100_000; i++) seen.add(newTransferId());
+    expect(seen.size).toBe(100_000);
   });
 
-  it('returns a valid id even when Math.random() always returns 0 (pure-zero guard)', () => {
-    // With the fix, 0.toString(36).slice(2) === "" should be skipped so
-    // the loop can still make forward progress using the fallback "0" character.
-    // We simulate a short burst of zeros then normal output.
-    let calls = 0;
-    vi.spyOn(Math, 'random').mockImplementation(() => {
-      calls++;
-      return calls <= 5 ? 0 : 0.123456789; // zeros then normal
-    });
-    const id = newTransferId();
-    expect(id).toHaveLength(8);
-    expect(id).toMatch(/^[a-z0-9]{8}$/);
+  it('needs no URL encoding and contains no Redis/button delimiter', () => {
+    for (let i = 0; i < 200; i++) {
+      const id = newTransferId();
+      expect(encodeURIComponent(id)).toBe(id);
+      expect(id).not.toMatch(/[:|=]/);
+    }
+  });
+});
+
+describe('newTransferId — WhatsApp-safe first character (review S2)', () => {
+  // The bot sends /pay/<id> as plain text and WhatsApp can read a leading `_`
+  // as an italic marker. The 22nd character is always one of A/Q/g/w (128 bits
+  // = 21 sextets + 2 bits, so the last sextet is bb0000), so only the FIRST
+  // character can be `_` or `-`; the mint rejects those (2/64, ~0.046 bits).
+  it('5,000 ids: none starts with "_" or "-", every one is 22 chars', () => {
+    for (let i = 0; i < 5_000; i++) {
+      const id = newTransferId();
+      expect(id).toHaveLength(22);
+      expect(id[0]).not.toMatch(/[_-]/);
+      expect(id).toMatch(ID_RE);
+    }
+  });
+
+  it('the last character is always A, Q, g or w (so a trailing "_"/"-" is impossible)', () => {
+    for (let i = 0; i < 2_000; i++) expect(newTransferId()[21]).toMatch(/^[AQgw]$/);
   });
 });
