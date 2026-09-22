@@ -18,9 +18,10 @@ import type { RedisLike } from './store';
  *  - `txotp:att:<sha(txId)>` — compares per issued code (≤ MAX_ATTEMPTS). Reset
  *    only by `issue()`; a lock deletes the code record but leaves this counter
  *    to its TTL so a late request can never restart it at 1.
- *  - `txotp:fail:<sha(txId)>:<day>` — wrong guesses per transaction per UTC-day
- *    bucket (≤ TXOTP_MAX_FAILS_PER_DAY), however many codes are issued. At the
- *    ceiling both `verify()` and `issue()` refuse with `locked`.
+ *  - `txotp:fail:<sha(txId)>:<day>` — verify attempts per transaction per UTC-day
+ *    bucket (≤ TXOTP_MAX_FAILS_PER_DAY), however many codes are issued; also a
+ *    reservation (a success consumes one). At the ceiling both `verify()` and
+ *    `issue()` refuse with `locked`.
  */
 const TTL_S = 10 * 60;
 const COOLDOWN_S = 30;
@@ -38,8 +39,8 @@ const failKey = (txId: string, t: number) => `txotp:fail:${sha(txId)}:${Math.flo
 interface Rec {
   codeHash: string;
   phoneHash: string;
-  /** Legacy per-code counter: no longer written (the `txotp:att:` key is authoritative); read harmlessly from old records. */
-  attempts?: number;
+  /** Legacy per-code counter. Always written as 0 so a pre-fix-19 build reads a number during a rolling release; the `txotp:att:` key is authoritative. */
+  attempts: number;
   expiresAt: number;
 }
 
@@ -71,11 +72,14 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
   return {
     async issue(txId: string, phone: string): Promise<IssueResult> {
       const t = now();
-      // Cooldown is judged in code off the injectable clock (the Redis TTL is a backstop).
+      // Cooldown is judged in code off the injectable clock (the Redis TTL is a
+      // backstop). A pre-fix-19 build wrote the marker '1' (TTL 30 s): still in cooldown.
       const cdRaw = await redis.get(cdKey(txId));
       if (cdRaw) {
         const elapsed = t - Number(cdRaw);
-        if (elapsed >= 0 && elapsed < COOLDOWN_S * 1000) return { ok: false, reason: 'cooldown' };
+        if (cdRaw === '1' || (elapsed >= 0 && elapsed < COOLDOWN_S * 1000)) {
+          return { ok: false, reason: 'cooldown' };
+        }
       }
       if ((await readCounter(failKey(txId, t))) >= TXOTP_MAX_FAILS_PER_DAY) {
         return { ok: false, reason: 'locked' };
@@ -84,6 +88,7 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       const rec: Rec = {
         codeHash: sha(code),
         phoneHash: sha(phone),
+        attempts: 0,
         expiresAt: t + TTL_S * 1000,
       };
       // Fresh code ⇒ fresh per-code budget. The counter is cleared BEFORE the
@@ -115,8 +120,14 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
         await redis.del(key(txId));
         return { ok: false, reason: 'expired' };
       }
-      // 3. Reserve this attempt atomically BEFORE the compare. Past the cap the
-      //    record is burned; the counter is left to its TTL (see header).
+      // 3. Reserve this attempt atomically BEFORE the compare: the daily ceiling
+      //    first (it survives re-issues), then the per-code budget. Past a cap the
+      //    record is burned; the per-code counter is left to its TTL (see header).
+      const dayN = await bump(failKey(txId, t), FAIL_BUCKET_TTL_S);
+      if (dayN > TXOTP_MAX_FAILS_PER_DAY) {
+        await redis.del(key(txId));
+        return { ok: false, reason: 'locked' };
+      }
       const n = await bump(attKey(txId), TTL_S);
       if (n > MAX_ATTEMPTS) {
         await redis.del(key(txId));
@@ -132,8 +143,7 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
         await redis.del(attKey(txId));
         return { ok: true };
       }
-      await bump(failKey(txId, t), FAIL_BUCKET_TTL_S); // every miss counts toward the daily ceiling
-      return { ok: false, reason: 'wrong' };
+      return { ok: false, reason: 'wrong' }; // the reservations above already counted it
     },
   };
 }

@@ -52,8 +52,8 @@ const ALLOWED_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'A
 
 export interface OtpRecord {
   hash: string; // sha256hex(code)
-  /** Legacy per-code counter: no longer written (the `otp:att:` key is authoritative); read harmlessly from old records. */
-  attempts?: number;
+  /** Legacy per-code counter. Always written as 0 so a pre-fix-19 build reads a number during a rolling release; the `otp:att:` key is authoritative. */
+  attempts: number;
   expMs: number; // absolute expiry (ms epoch)
 }
 
@@ -140,7 +140,7 @@ export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
       }
 
       const code = String(randomInt(1_000_000)).padStart(6, '0');
-      const record: OtpRecord = { hash: sha256hex(code), expMs: t + CODE_TTL_MS };
+      const record: OtpRecord = { hash: sha256hex(code), attempts: 0, expMs: t + CODE_TTL_MS };
       // Fresh code ⇒ fresh per-code budget, cleared BEFORE the record lands so a
       // reservation racing this issue counts against the new code, not nothing.
       await redis.del(attKey(purpose, phoneHash));

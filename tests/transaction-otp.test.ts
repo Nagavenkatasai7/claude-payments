@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { fakeRedis } from './helpers';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
+
+const cdKeyFor = (txId: string) => `txotp:cd:${createHash('sha256').update(txId).digest('hex')}`;
 
 const redis = fakeRedis();
 let nowMs = 1_700_000_000_000;
@@ -96,6 +99,35 @@ describe('transaction-otp — atomic attempt caps (fix 19)', () => {
     const again = await store.issue(TX, PHONE);
     expect(again.ok).toBe(true);
     expect(await store.verify(TX, PHONE, '123456')).toEqual({ ok: true });
+  });
+
+  it('the daily ceiling is reserved too: a burst at 14 misses gets at most 1 more compare', async () => {
+    // 3 issues, 5 + 5 + 4 wrong ⇒ 14 misses on the day.
+    const plan = [5, 5, 4];
+    for (let round = 0; round < plan.length; round++) {
+      if (round > 0) nowMs += 31_000;
+      expect((await store.issue(TX, PHONE)).ok).toBe(true);
+      for (let i = 0; i < plan[round]; i++) await store.verify(TX, PHONE, '000000');
+    }
+    nowMs += 31_000;
+    expect((await store.issue(TX, PHONE)).ok).toBe(true); // 14 < 15: allowed
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => store.verify(TX, PHONE, '000000')),
+    );
+    const rs = reasons(results);
+    expect(rs.filter((r) => r === 'wrong').length).toBeLessThanOrEqual(1);
+    expect(rs.filter((r) => r === 'locked').length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('an old-build cooldown marker ("1") still counts as in-cooldown during the rolling release', async () => {
+    await redis.set(cdKeyFor(TX), '1', { ex: 30 });
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'cooldown' });
+  });
+
+  it('keeps writing attempts:0 so the old build reads a number during the rolling release', async () => {
+    await store.issue(TX, PHONE);
+    const rec = [...redis.dump.entries()].find(([k]) => k.startsWith('txotp:') && !k.startsWith('txotp:cd:'));
+    expect(JSON.parse(rec![1]).attempts).toBe(0);
   });
 
   it('never stores the code, only hashes, in any counter key or value', async () => {
