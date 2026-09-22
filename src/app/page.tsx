@@ -4,7 +4,8 @@ import { getFxRates, FALLBACK_FX_RATE } from '@/lib/rate';
 import { waLink, WA_MESSAGES, corridorMessage } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
 import BrandLogo from './landing/BrandLogo';
-import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon } from './landing/TrustIcons';
+import SocialLinks from './landing/SocialLinks';
+import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon, BoltIcon, GlobeIcon } from './landing/TrustIcons';
 import RateCalculator from './landing/RateCalculator';
 import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
@@ -75,7 +76,7 @@ const BTN_PRIMARY =
   'inline-flex min-h-[50px] items-center justify-center rounded-full bg-[#0c5bd2] px-7 text-[15px] font-bold text-white shadow-[0_10px_26px_-12px_rgba(12,91,210,0.7)] transition-[background-color,transform] duration-150 hover:bg-[#0a4fb8] hover:[transform:translateY(-1px)]';
 
 // Repeated type recipes (showcase rows + footer columns).
-const EYEBROW = 'mb-3 text-[13px] font-semibold uppercase tracking-[0.16em]';
+const EYEBROW = 'mb-3 text-[14px] font-semibold tracking-[-0.005em]';
 const SHOWCASE_H3 = 'text-[clamp(24px,3.2vw,38px)] font-semibold leading-[1.12] tracking-[-0.02em]';
 const SHOWCASE_COPY = 'mt-4 max-w-[46ch] text-[16px] leading-relaxed text-[#475569]';
 const FOOT_HEAD = 'mb-4 block text-[12px] font-bold uppercase tracking-[0.1em] text-[#475569]';
@@ -222,30 +223,62 @@ export default async function LandingPage({
       </nav>
 
       <main id="top">
-        {/* ============ HERO — the animated money pipeline ============ */}
-        <section className="relative overflow-hidden px-5 pt-[clamp(56px,9vw,120px)] pb-[clamp(48px,7vw,96px)]">
-          <div
-            className="pointer-events-none absolute -inset-[30%] z-0 bg-[radial-gradient(38%_38%_at_30%_20%,rgba(72,179,245,0.20),transparent_70%),radial-gradient(42%_42%_at_75%_30%,rgba(52,211,153,0.14),transparent_70%)] blur-[12px] motion-safe:[animation-direction:alternate] motion-safe:[animation-duration:28s] motion-safe:[animation-iteration-count:infinite] motion-safe:[animation-name:lp-aurora] motion-safe:[animation-timing-function:ease-in-out]"
-            aria-hidden="true"
-          />
-          <div className="relative z-[1] mx-auto w-full max-w-[1180px]">
-            <div className="mx-auto max-w-[840px] text-center">
-              <p className="mb-6 inline-flex items-center gap-2 rounded-full border border-[#dbe4f0] bg-white px-4 py-1.5 text-[12.5px] font-medium text-[#475569]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#34d399]" aria-hidden="true" />
-                Non-custodial remittance infrastructure · WhatsApp-native
-              </p>
-              <h1 className="text-balance text-[clamp(38px,7vw,76px)] font-semibold leading-[1.05] tracking-[-0.03em]">
-                Send money by chatting.{' '}
-                <span className="bg-[linear-gradient(95deg,#0e7490,#0d9488_45%,#059669)] bg-clip-text text-transparent">
-                  Watch it arrive.
+        {/* ============ HERO — customer first: the promise + the live chat ============ */}
+        <section
+          className="relative overflow-hidden px-5 pt-[clamp(40px,6vw,88px)] pb-[clamp(56px,7vw,104px)]"
+          aria-labelledby="hero-h"
+        >
+          {/* Backdrop (decorative): soft sky/green light and a dotted "globe"
+              field behind the phone, echoing the launch poster. */}
+          <div className="pointer-events-none absolute inset-0 z-0" aria-hidden="true">
+            <div className="absolute -top-[25%] -right-[15%] h-[85%] w-[70%] bg-[radial-gradient(closest-side,rgba(72,179,245,0.24),transparent)]" />
+            <div className="absolute -bottom-[30%] -left-[15%] h-[70%] w-[60%] bg-[radial-gradient(closest-side,rgba(52,211,153,0.16),transparent)]" />
+            <div className="absolute inset-y-0 right-0 w-full bg-[radial-gradient(circle,rgba(12,91,210,0.20)_1.1px,transparent_1.6px)] [background-size:13px_13px] [mask-image:radial-gradient(ellipse_48%_52%_at_76%_42%,#000_20%,transparent_75%)] lg:w-[62%] lg:[mask-image:radial-gradient(ellipse_60%_55%_at_55%_45%,#000_25%,transparent_78%)]" />
+          </div>
+
+          <div className="relative z-[1] mx-auto grid w-full max-w-[1180px] items-center gap-14 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)] lg:gap-10">
+            <div>
+              <h1
+                id="hero-h"
+                className="text-[clamp(40px,6.2vw,74px)] font-extrabold leading-[1.03] tracking-[-0.038em] text-[#0b1b3f]"
+              >
+                Global money transfers,{' '}
+                {/* AA-large on #f5f9ff at every stop: #0e7490 5.1, #0d9488 3.5, #059669 3.6. */}
+                <span className="inline-block bg-[linear-gradient(95deg,#0e7490,#0d9488_45%,#059669)] bg-clip-text pb-[0.08em] text-transparent">
+                  made simpler.
                 </span>
               </h1>
-              <p className="mx-auto mt-6 max-w-[56ch] text-[clamp(16px,2vw,19px)] leading-relaxed text-[#475569]">
+              <span
+                className="mt-5 block h-[5px] w-16 rounded-full bg-[linear-gradient(90deg,#0c5bd2,#48b3f5,#34d399)]"
+                aria-hidden="true"
+              />
+              <p className="mt-6 text-[clamp(20px,2.3vw,26px)] font-medium tracking-[-0.01em] text-[#0b1b3f]">
+                Powered through <strong className="font-bold">WhatsApp.</strong>
+              </p>
+              <p className="mt-3 max-w-[52ch] text-[16.5px] leading-relaxed text-[#475569]">
                 An AI agent quotes the live mid-market rate in WhatsApp, a hosted page takes
                 payment, and a licensed partner settles — every step signed, screened, and
                 audited.
               </p>
-              <div className="mt-9 flex flex-wrap items-center justify-center gap-3.5">
+
+              <ul className="mt-8 grid max-w-[560px] gap-3 sm:grid-cols-3">
+                {[
+                  { icon: <BoltIcon />, label: 'Familiar and easy' },
+                  { icon: <ShieldIcon />, label: 'Safe and secure' },
+                  { icon: <GlobeIcon />, label: 'Built for a borderless world' },
+                ].map((b) => (
+                  <li key={b.label} className="flex items-center gap-3">
+                    <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-[#e3f6ee] text-[#047857] ring-1 ring-[#bfe8d3]">
+                      {b.icon}
+                    </span>
+                    <span className="text-[14.5px] font-semibold leading-snug text-[#0b1b3f]">
+                      {b.label}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              <div className="mt-9 flex flex-wrap items-center gap-3.5">
                 <a
                   className={`${BTN_WA} max-[480px]:w-full`}
                   href={genericHref}
@@ -261,8 +294,26 @@ export default async function LandingPage({
               </div>
             </div>
 
-            <div className={`mt-[clamp(44px,6vw,80px)] ${RISE}`}>
-              <HeroPipeline rate={illustrativeRate} live={fxLive} />
+            <div className="relative">
+              {/* Dashed routes + pins around the phone (decorative, desktop only). */}
+              <svg
+                className="pointer-events-none absolute top-1/2 left-1/2 hidden h-[640px] w-[500px] -translate-x-1/2 -translate-y-1/2 lg:block"
+                viewBox="0 0 500 640"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path d="M40 150 C 120 40, 330 20, 450 110" stroke="#11a1c6" strokeWidth="2" strokeDasharray="6 8" strokeLinecap="round" opacity="0.7" />
+                <path d="M470 380 C 500 470, 430 560, 330 600" stroke="#34d399" strokeWidth="2" strokeDasharray="6 8" strokeLinecap="round" opacity="0.8" />
+                <g fill="#0c5bd2">
+                  <circle cx="40" cy="150" r="7" />
+                  <circle cx="450" cy="110" r="7" />
+                </g>
+                <circle cx="40" cy="150" r="14" fill="#0c5bd2" opacity="0.14" />
+                <circle cx="450" cy="110" r="14" fill="#0c5bd2" opacity="0.14" />
+                <circle cx="470" cy="380" r="6" fill="#047857" />
+                <circle cx="470" cy="380" r="13" fill="#34d399" opacity="0.22" />
+              </svg>
+              <ChatMock rate={illustrativeRate} />
             </div>
           </div>
         </section>
@@ -272,20 +323,25 @@ export default async function LandingPage({
           aria-label="Why you can trust SmartRemit"
           className="border-y border-[#dbe4f0] bg-white"
         >
-          <ul className="mx-auto flex w-full max-w-[1180px] flex-wrap items-center justify-center gap-x-10 gap-y-3 px-5 py-5 text-[13.5px] text-[#475569]">
-            <li className="inline-flex items-center gap-2.5">
-              <BankIcon /> Non-custodial by design
-            </li>
-            <li className="inline-flex items-center gap-2.5">
-              <BadgeIcon /> Licensed-partner settled
-            </li>
-            <li className="inline-flex items-center gap-2.5">
-              <ShieldIcon /> Sanctions screening on every transfer
-            </li>
-            <li className="inline-flex items-center gap-2.5">
-              <AuditIcon /> Full audit trail
-            </li>
-          </ul>
+          <div className="mx-auto flex w-full max-w-[1180px] flex-col items-center gap-3.5 px-5 py-6">
+            <p className="text-center text-[14px] font-semibold text-[#0b1b3f]">
+              Non-custodial remittance infrastructure
+            </p>
+            <ul className="flex flex-wrap items-center justify-center gap-x-10 gap-y-3 text-[13.5px] text-[#475569]">
+              <li className="inline-flex items-center gap-2.5">
+                <BankIcon /> Non-custodial by design
+              </li>
+              <li className="inline-flex items-center gap-2.5">
+                <BadgeIcon /> Licensed-partner settled
+              </li>
+              <li className="inline-flex items-center gap-2.5">
+                <ShieldIcon /> Sanctions screening on every transfer
+              </li>
+              <li className="inline-flex items-center gap-2.5">
+                <AuditIcon /> Full audit trail
+              </li>
+            </ul>
+          </div>
         </section>
 
         {/* ============ WHAT'S INSIDE — product showcase ============ */}
@@ -304,12 +360,11 @@ export default async function LandingPage({
             </div>
 
             <div className="mt-[clamp(48px,6vw,88px)] flex flex-col gap-[clamp(64px,8vw,120px)]">
-              {/* (a) The conversation */}
-              <div className={`grid items-center gap-10 lg:grid-cols-2 lg:gap-20 ${RISE}`}>
-                <div>
-                  <p className={`${EYEBROW} text-[#047857]`}>
-                    01 — The conversation
-                  </p>
+              {/* (a) The conversation — the whole transfer, stage by stage (the
+                  chat itself is the hero's phone). */}
+              <div className={`flex flex-col gap-10 lg:gap-14 ${RISE}`}>
+                <div className="max-w-[720px]">
+                  <p className={`${EYEBROW} text-[#047857]`}>The conversation</p>
                   <h3 className={SHOWCASE_H3}>
                     An agent that speaks money.
                   </h3>
@@ -319,15 +374,13 @@ export default async function LandingPage({
                     your funds.
                   </p>
                 </div>
-                <ChatMock rate={illustrativeRate} />
+                <HeroPipeline rate={illustrativeRate} live={fxLive} />
               </div>
 
               {/* (b) The ops dashboard */}
               <div className={`grid items-center gap-10 lg:grid-cols-2 lg:gap-20 ${RISE}`}>
                 <div className="lg:order-2">
-                  <p className={`${EYEBROW} text-[#0e7490]`}>
-                    02 — The ops dashboard
-                  </p>
+                  <p className={`${EYEBROW} text-[#0e7490]`}>The ops dashboard</p>
                   <h3 className={SHOWCASE_H3}>
                     Every transfer, observable.
                   </h3>
@@ -345,9 +398,7 @@ export default async function LandingPage({
               {/* (c) The partner rail */}
               <div className={`grid items-center gap-10 lg:grid-cols-2 lg:gap-20 ${RISE}`}>
                 <div>
-                  <p className={`${EYEBROW} text-[#047857]`}>
-                    03 — The partner rail
-                  </p>
+                  <p className={`${EYEBROW} text-[#047857]`}>The partner rail</p>
                   <h3 className={SHOWCASE_H3}>
                     Your rail. Our orchestration.
                   </h3>
@@ -363,9 +414,7 @@ export default async function LandingPage({
               {/* (d) The AI layer */}
               <div className={`grid items-center gap-10 lg:grid-cols-2 lg:gap-20 ${RISE}`}>
                 <div className="lg:order-2">
-                  <p className={`${EYEBROW} text-[#0e7490]`}>
-                    04 — The AI layer
-                  </p>
+                  <p className={`${EYEBROW} text-[#0e7490]`}>The AI layer</p>
                   <h3 className={SHOWCASE_H3}>
                     One AI layer, two sides.
                   </h3>
@@ -686,6 +735,15 @@ export default async function LandingPage({
 
       {/* ============ FOOTER ============ */}
       <footer className="border-t border-[#dbe4f0] bg-white pt-[clamp(40px,6vw,64px)] pb-8">
+        <div className="mx-auto mb-10 flex w-full max-w-[1180px] flex-wrap items-center justify-between gap-6 px-5">
+          <div className="flex flex-col gap-3">
+            <BrandLogo height={32} />
+            <p className="text-[14px] text-[#475569]">Global money transfers, made simpler.</p>
+          </div>
+          <nav aria-label="SmartRemit on social media">
+            <SocialLinks />
+          </nav>
+        </div>
         <div className="mx-auto grid w-full max-w-[1180px] grid-cols-4 gap-8 px-5 max-[760px]:grid-cols-2">
           <div>
             <span className={FOOT_HEAD}>
@@ -779,8 +837,13 @@ export default async function LandingPage({
                 </a>
               </li>
               <li>
+                <a className="hover:text-[#0b1b3f]" href="mailto:hello@smartremit.ai">
+                  Email: hello@smartremit.ai
+                </a>
+              </li>
+              <li>
                 <a className="hover:text-[#0b1b3f]" href="mailto:support@smartremit.ai">
-                  Email: support@smartremit.ai
+                  Support: support@smartremit.ai
                 </a>
               </li>
             </ul>
@@ -793,10 +856,6 @@ export default async function LandingPage({
             transmitters and settle all funds on their own rails; SmartRemit never holds,
             receives, or disburses customer money. Exchange rates are indicative and locked
             when you confirm a transfer.
-          </p>
-          <p className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-2 text-[13.5px] text-[#475569]">
-            <BrandLogo height={32} />
-            <span>smartremit.ai — Send money by chatting. Watch it arrive.</span>
           </p>
         </div>
       </footer>

@@ -7,6 +7,7 @@
 // slate (#475569 / #52607a) secondary. Brand green is too light for text on
 // white (#34d399 = 1.9:1), so figures use #047857 (5.5:1 on white).
 
+import Image from 'next/image';
 import { inr } from './format';
 
 const shell =
@@ -20,42 +21,97 @@ const windowDots = (
   </span>
 );
 
-/** (a) The WhatsApp conversation — quote → pay link → delivered. */
+/** (a) The WhatsApp conversation — quote → pay link → delivered, inside a
+ *  phone frame (the hero visual). Light WhatsApp chrome: #efeae2 wallpaper,
+ *  #d9fdd3 outgoing bubbles, white incoming; navy text on both (15:1+). */
 export function ChatMock({ rate }: { rate: number }) {
+  const bubbleIn =
+    'relative max-w-[86%] self-start rounded-[14px] rounded-tl-[4px] bg-white px-3 pt-2 pb-4 text-[13.5px] leading-snug text-[#0b1b3f] shadow-[0_1px_1px_rgba(11,27,63,0.08)]';
+  const stamp = 'absolute right-2.5 bottom-1 text-[10px] text-[#52607a]';
   return (
     <div
-      className={`${shell} mx-auto w-full max-w-[400px] overflow-hidden`}
+      className="relative mx-auto w-full max-w-[340px]"
       role="img"
       aria-label="The SmartRemit WhatsApp conversation: a customer asks to send $500 to India, the assistant quotes the live rate, locks it behind a secure pay link, and confirms delivery."
     >
-      <div className="flex items-center gap-2.5 border-b border-[#dbe4f0] bg-white px-4 py-3">
-        <span
-          className="grid h-8 w-8 place-items-center rounded-full bg-[#25d366] text-[14px] text-[#04231a]"
-          aria-hidden="true"
-        >
-          ◈
-        </span>
-        <span className="text-[14px] font-bold text-[#0b1b3f]">SmartRemit</span>
-        <span className="ml-auto text-[11.5px] font-medium text-[#047857]">online</span>
-      </div>
-      <div aria-hidden="true" className="flex flex-col gap-2.5 bg-[#efeae2] px-4 py-4">
-        <div className="max-w-[85%] self-end rounded-[14px] rounded-br-[4px] bg-[#d9fdd3] px-3 py-2 text-[13.5px] leading-snug text-[#0b1b3f]">
-          Send $500 to my brother in India
-        </div>
-        <div className="max-w-[88%] self-start rounded-[14px] rounded-bl-[4px] bg-white px-3 py-2.5 text-[13.5px] leading-snug text-[#0b1b3f]">
-          <span className="text-[15px] font-bold text-[#047857]">$500 → {inr(500 * rate)}</span>
-          <br />
-          <span className="text-[#52607a]">
-            1 USD = ₹{rate.toFixed(2)} · fee $0 first transfer
-          </span>
-        </div>
-        <div className="max-w-[88%] self-start rounded-[14px] rounded-bl-[4px] bg-white px-3 py-2.5 text-[13.5px] leading-snug text-[#0b1b3f]">
-          Rate locked. Pay securely here:
-          <br />
-          <span className="font-mono text-[12px] text-[#0c5bd2]">smartremit.ai/pay/tr_8f3k</span>
-        </div>
-        <div className="max-w-[88%] self-start rounded-[14px] rounded-bl-[4px] bg-white px-3 py-2.5 text-[13.5px] font-semibold leading-snug text-[#047857]">
-          Delivered ✓ — {inr(500 * rate)} to Arjun
+      <div
+        aria-hidden="true"
+        className="rounded-[50px] bg-[#0b1b3f] p-[10px] shadow-[0_50px_90px_-40px_rgba(11,27,63,0.6),0_18px_40px_-24px_rgba(12,91,210,0.45)]"
+      >
+        <div className="relative overflow-hidden rounded-[40px] bg-[#efeae2]">
+          {/* Status bar + dynamic island */}
+          <div className="relative flex h-11 items-center justify-between bg-white px-7 text-[12.5px] font-semibold text-[#0b1b3f]">
+            <span>9:41</span>
+            <span className="absolute top-2.5 left-1/2 h-[24px] w-[92px] -translate-x-1/2 rounded-full bg-[#0b1b3f]" />
+            <span className="flex items-center gap-1">
+              <svg width="16" height="11" viewBox="0 0 16 11" fill="currentColor">
+                <rect x="0" y="7" width="3" height="4" rx="1" />
+                <rect x="4.3" y="5" width="3" height="6" rx="1" />
+                <rect x="8.6" y="2.5" width="3" height="8.5" rx="1" />
+                <rect x="12.9" y="0" width="3" height="11" rx="1" />
+              </svg>
+              <span className="ml-1 inline-block h-[11px] w-[22px] rounded-[3px] border border-[#0b1b3f]/60 p-[1.5px]">
+                <span className="block h-full w-[75%] rounded-[1.5px] bg-[#0b1b3f]" />
+              </span>
+            </span>
+          </div>
+
+          {/* Chat header */}
+          <div className="flex items-center gap-3 border-b border-[#e6edf6] bg-white px-4 pt-1 pb-3">
+            <svg width="10" height="16" viewBox="0 0 10 16" fill="none" stroke="#0c5bd2" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 2L2 8l6 6" />
+            </svg>
+            <span className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-full bg-white ring-1 ring-[#dbe4f0]">
+              <Image src="/brand/smartremit-mark.png" alt="" width={28} height={28} />
+            </span>
+            <span className="flex min-w-0 flex-col leading-tight">
+              <span className="text-[14.5px] font-bold text-[#0b1b3f]">SmartRemit</span>
+              <span className="text-[11.5px] font-medium text-[#047857]">online</span>
+            </span>
+          </div>
+
+          {/* Messages */}
+          <div className="flex flex-col gap-2.5 px-3.5 pt-4 pb-5">
+            <span className="self-center rounded-md bg-white/80 px-2.5 py-0.5 text-[10.5px] font-medium text-[#475569]">
+              Today
+            </span>
+            <div className="relative max-w-[82%] self-end rounded-[14px] rounded-tr-[4px] bg-[#d9fdd3] px-3 pt-2 pb-4 text-[13.5px] leading-snug text-[#0b1b3f] shadow-[0_1px_1px_rgba(11,27,63,0.08)]">
+              Send $500 to my brother in India
+              <span className={stamp}>
+                10:24 <span className="text-[#0c5bd2]">✓✓</span>
+              </span>
+            </div>
+            <div className={bubbleIn}>
+              <span className="text-[15.5px] font-bold text-[#047857]">$500 → {inr(500 * rate)}</span>
+              <br />
+              <span className="text-[#52607a]">
+                1 USD = ₹{rate.toFixed(2)} · fee $0 first transfer
+              </span>
+              <span className={stamp}>10:24</span>
+            </div>
+            <div className={bubbleIn}>
+              Rate locked. Pay securely here:
+              <br />
+              <span className="font-mono text-[12px] text-[#0c5bd2]">smartremit.ai/pay/tr_8f3k</span>
+              <span className={stamp}>10:25</span>
+            </div>
+            <div className={`${bubbleIn} font-semibold text-[#047857]`}>
+              Delivered ✓ — {inr(500 * rate)} to Arjun
+              <span className={`${stamp} font-normal`}>10:31</span>
+            </div>
+          </div>
+
+          {/* Composer */}
+          <div className="flex items-center gap-2 px-3 pb-5">
+            <span className="flex h-10 flex-1 items-center rounded-full bg-white px-4 text-[13px] text-[#667085] shadow-[0_1px_1px_rgba(11,27,63,0.08)]">
+              Type a message
+            </span>
+            <span className="grid h-10 w-10 place-items-center rounded-full bg-[#25d366] text-[#04231a]">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
+              </svg>
+            </span>
+          </div>
         </div>
       </div>
     </div>

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 
 /**
- * Monochrome inline-SVG icons for the landing trust bar.
+ * Monochrome inline-SVG icons for the landing trust bar and hero chips.
  *
  * These replace the previous emoji (🔒 📈 🌐 🏦). Emoji are rendered by the OS,
  * so they look different on Windows / macOS / Android — and some glyphs (notably
@@ -61,6 +61,26 @@ export function BadgeIcon() {
     <Icon>
       <circle cx="12" cy="9" r="5" />
       <path d="M8.5 13.5L7 21l5-2.5L17 21l-1.5-7.5" />
+    </Icon>
+  );
+}
+
+// Hero benefit chips (launch poster): "Familiar and easy", "Built for a
+// borderless world". The shield chip reuses ShieldIcon above.
+export function BoltIcon() {
+  return (
+    <Icon>
+      <path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" />
+    </Icon>
+  );
+}
+
+export function GlobeIcon() {
+  return (
+    <Icon>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z" />
     </Icon>
   );
 }
