@@ -702,6 +702,24 @@ describe('createTransfer — ctx-01 chokepoint (fix 6)', () => {
   });
 });
 
+describe('createTransfer — saveRecipient (fix 5: partner-API mints never write the chat address book)', () => {
+  it('saveRecipient: false mints and accrues but leaves the address book untouched', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, saveRecipient: false });
+    expect(t.status).toBe('awaiting_payment');
+    expect(await store.listRecipients('default', base.phone, 5)).toEqual([]);
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(1);
+    expect(await mvs.getMonthCents('default', base.phone)).toBe(20_000);
+  });
+
+  it('a chat mint (flag absent) still refreshes the address book', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    await createTransfer(store, partnerStore, mvs, base);
+    const [saved] = await store.listRecipients('default', base.phone, 5);
+    expect(saved).toMatchObject({ name: 'Mom', recipientPhone: base.recipientPhone, payoutDestination: 'mom@upi' });
+  });
+});
+
 // ── Program fix 16 (Task 10): send caps enforced from the ledger, under the
 // per-sender lock, on EVERY mint path (createTransfer is the chokepoint). ──
 describe('createTransfer — send caps from the ledger (Program fix 16)', () => {

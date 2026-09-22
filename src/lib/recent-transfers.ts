@@ -1,6 +1,7 @@
 import type { Store } from './store';
 import type { Transfer, TransferStatus } from './types';
 import { easternDate } from './dates';
+import { boundUntrustedText, ID_MAX, NAME_MAX } from './untrusted-text';
 
 const MAX_RECENT = 5; // last 5 of the already-newest-first list (fixed token cost)
 
@@ -41,24 +42,28 @@ function formatAmount(transfer: Transfer): string {
 export interface TransferSummaryFields {
   id: string; // the customer's own short id (no PII); '' when absent
   date: string; // Eastern date, or 'recently' when missing
-  recipientName: string; // recipientName, or 'a recipient' when blank
+  recipientName: string; // recipientName (clamped), or 'a recipient' when blank
   amount: string; // source-currency, customer-visible
   status: string; // customer-facing label (never the raw 'blocked' token)
 }
 
 /**
- * The ONE customer-safe per-transfer shape, shared by the round-0 [RECENT
- * TRANSFERS] note (formatLine) and the list_recent_transfers tool. Surfaces only
+ * The ONE customer-safe per-transfer shape, shared by the round-0
+ * get_customer_context result and the list_recent_transfers tool. Surfaces only
  * fields the customer already owns — recipientName + source-currency amount +
  * status label + date + their own short id — NEVER a payout account, an internal
  * screening reason, or a tenant field. bot-content-guard scans this file, so a
  * single formatter keeps both surfaces leak-safe and in lockstep.
+ *
+ * fix 5 (F43): the recipient name may have been written by an outsider (an
+ * external API caller, pre-fix), so it is clamped here — no control character,
+ * line separator or []{}<> marker, at most 80 characters — and the id too.
  */
 export function transferSummaryFields(transfer: Transfer): TransferSummaryFields {
   return {
-    id: (transfer.id ?? '').trim(),
+    id: boundUntrustedText(transfer.id ?? '', ID_MAX),
     date: transfer.createdAt ? easternDate(Date.parse(transfer.createdAt)) : 'recently',
-    recipientName: (transfer.recipientName ?? '').trim() || 'a recipient',
+    recipientName: boundUntrustedText(transfer.recipientName ?? '', NAME_MAX) || 'a recipient',
     amount: formatAmount(transfer),
     status:
       REFUND_LABEL[transfer.refundStatus ?? 'none'] ??
@@ -67,30 +72,21 @@ export function transferSummaryFields(transfer: Transfer): TransferSummaryFields
   };
 }
 
-function formatLine(transfer: Transfer): string {
-  // Short transfer ref so the bot can name a SPECIFIC transfer (e.g. when the
-  // customer asks for a refund) without echoing the full id. The id is the
-  // customer's own and carries no PII — leak-safe.
-  const f = transferSummaryFields(transfer);
-  const ref = f.id ? `#${f.id} · ` : '';
-  return `${ref}${f.date} · ${f.recipientName} · ${f.amount} · ${f.status}`;
-}
-
 /**
- * A compact, round-0 system note of the customer's OWN most-recent transfers.
- * Returns '' (inject nothing) when the customer has no transfer history.
+ * The customer's OWN most-recent transfers (newest first, at most 5) as DATA
+ * for the round-0 get_customer_context result (fix 5 — never a system note).
+ * Returns [] when the customer has no transfer history ⇒ nothing is injected.
  *
- * Read-only. Tenant-blind by construction: surfaces only recipientName +
- * source-currency amount + status label + date (fields the customer already
- * owns). Stage 4: an INDEXED own-customer query (WHERE tenant = $1 AND phone = $2) — this runs
- * on every chat turn and must never scan the ledger.
+ * Read-only. Surfaces only transferSummaryFields (fields the customer already
+ * owns, names clamped). Stage 4: an INDEXED own-customer query (WHERE tenant =
+ * $1 AND phone = $2) — this runs on every chat turn and must never scan the
+ * ledger.
  */
-export async function getRecentTransfersNote(tenantId: string, phone: string, store: Store): Promise<string> {
+export async function getRecentTransfers(
+  tenantId: string,
+  phone: string,
+  store: Store,
+): Promise<TransferSummaryFields[]> {
   const top = await store.listTransfersByPhone(tenantId, phone, MAX_RECENT); // newest-first, indexed, keyed by the customer's own tenant
-  if (top.length === 0) return '';                           // history-less ⇒ unchanged behavior
-  const lines = top.map(formatLine);
-  return (
-    `[RECENT TRANSFERS] The customer's most recent sends (newest first), for context only — ` +
-    `reference naturally if relevant, do not list them unprompted:\n${lines.join('\n')}`
-  );
+  return top.slice(0, MAX_RECENT).map(transferSummaryFields);
 }

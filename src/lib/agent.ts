@@ -1,6 +1,6 @@
 import { buildSystemPrompt } from './prompt';
 import { resolveSendLimits } from './send-limits';
-import { toolSchemasForChannel, executeTool, type AgentChannel } from './tools';
+import { toolSchemasForChannel, executeTool, buildCustomerContext, type AgentChannel, type ToolContext } from './tools';
 import type { ChatMessage, ChatTool, PartnerId, TurnContext } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Store } from './store';
@@ -12,9 +12,7 @@ import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { KycProvider } from './providers/kyc-provider';
 import type { WaCreds } from './whatsapp';
 import type { PartnerStore } from './partner-store';
-import { allowedSendCurrencies, currencyForPhone, destinationCountryForRecipientPhone } from './partner-currency';
-import { getRecentTransfersNote } from './recent-transfers'; // NEW (transfer-memory)
-import { normalizePhone } from './phone';
+import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
@@ -24,6 +22,9 @@ import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { getDb } from '@/db/client';
 
 const MAX_TOOL_ROUNDS = 6;
+// fix 5: the id of the synthetic round-0 get_customer_context call. It lives in
+// the messages sent to the model only — never in the persisted history.
+const CONTEXT_CALL_ID = 'ctx_r0';
 const FALLBACK_REPLY =
   "Sorry, I'm having trouble right now. Could you send that again?";
 
@@ -155,10 +156,37 @@ export function createAgent(deps: AgentDeps) {
     const sendLimits = resolveSendLimits(notePartner);
     const t0CapTxt = `$${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}`;
 
-    // Recent-transfer memory: the customer's OWN recent sends, surfaced once at
-    // round 0 so the model can reference "you sent Mom $500 yesterday". '' when
-    // the customer has no history ⇒ nothing is injected (behavior unchanged).
-    const recentNote = await getRecentTransfersNote(partnerId, phone, deps.store);
+    // ONE tool context per turn: the tools and the round-0 customer context
+    // read the same tenant, phone, stores and tap.
+    const toolCtx: ToolContext = {
+      phone,
+      partnerId,
+      store: deps.store,
+      scheduleStore: deps.scheduleStore,
+      draftStore: deps.draftStore,
+      customerStore: deps.customerStore,
+      dailyVolumeStore: deps.dailyVolumeStore,
+      monthlyVolumeStore: deps.monthlyVolumeStore,  // NEW (KYC)
+      kycProvider: deps.kycProvider,
+      partnerStore: deps.partnerStore, // NEW (P4)
+      waCreds: deps.waCreds, // WL2 — partner's outbound creds for interactive sends
+      channel, // B5 — 'web' blocks non-allowlisted tools at dispatch
+      turn,
+      // Best-rate routing: the LIVE selection service (partner_rates +
+      // integrations over the shared Pool). The tools gate by tenant
+      // (default only) and fail open to mid — this only supplies it.
+      routeSelector: (s, d, m) =>
+        selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
+    };
+
+    // Customer context (fix 5 / F43): the customer's OWN recent sends and, after
+    // a saved-recipient tap, the tapped recipient — as DATA. Injected once at
+    // round 0 as a synthetic get_customer_context tool call + result (below),
+    // never as a system message: recipient names can be outsider-written.
+    // Empty history and no tap ⇒ nothing is injected (behavior unchanged).
+    const customerContext = await buildCustomerContext(toolCtx);
+    const hasCustomerContext =
+      customerContext.recent_transfers.length > 0 || customerContext.selected_recipient !== undefined;
 
     // Sticky funding default (Bundle C): surfaced once at round 0 so the bot can
     // default the funding method instead of re-asking. '' (no injection) for new /
@@ -200,32 +228,17 @@ export function createAgent(deps: AgentDeps) {
             '[NEW CONVERSATION] First message in over 24 hours. Greet warmly and ask how you can help (you may reference their recent history if shown). Do NOT call list_saved_recipients or send_recipient_picker yet — wait until the user actually wants to send. Only then offer a picker or take their details.',
         });
       }
-      // Recipient button tap: freeze the chosen recipient's full details server-side
-      // so the model proceeds straight to amount + funding and NEVER re-asks who.
-      if (round === 0 && turn.buttonTap?.kind === 'recipient') {
-        try {
-          const norm = normalizePhone(turn.buttonTap.recipientPhone);
-          const found = (await deps.store.listRecipients(partnerId, phone, 25)).find(
-            (r) => normalizePhone(r.recipientPhone) === norm,
-          );
-          if (found) {
-            // Any-to-any: infer the payout COUNTRY from the recipient's number
-            // (a recipient-tap bypasses validate_phone, so surface it here too).
-            const destCC = destinationCountryForRecipientPhone(norm);
-            messages.push({
-              role: 'system',
-              content:
-                `[RECIPIENT SELECTED] name=${found.name}, recipient_phone=${found.recipientPhone}, ` +
-                `payout_method=${found.payoutMethod}, payout_destination=${found.payoutDestination}` +
-                (destCC ? `, detected_destination_country=${destCC}` : '') + '. ' +
-                'You already have the recipient — do NOT call send_recipient_picker or ask who again. ' +
-                (destCC ? `Send to ${destCC} unless they say otherwise. ` : '') +
-                'Just collect the amount and funding method, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).',
-            });
-          }
-        } catch (err) {
-          console.warn('recipient-tap hydration failed:', err);
-        }
+      // Recipient button tap: the model proceeds straight to amount + funding and
+      // NEVER re-asks who. fix 5: this note is FIXED text — the tapped recipient's
+      // name, number and country ride the get_customer_context result (data),
+      // and the stored payout rides nothing (resolveStoredPayout rehydrates it
+      // server-side for every chat mint).
+      if (round === 0 && customerContext.selected_recipient) {
+        messages.push({
+          role: 'system',
+          content:
+            "[RECIPIENT SELECTED] The customer tapped a saved recipient — their name, number and country are in the get_customer_context result (selected_recipient). Do NOT call send_recipient_picker or ask who again. Send to that recipient's detected_destination_country unless they say otherwise. Just collect the amount and funding method, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).",
+        });
       }
       // These two notes LEAD with verify-before-send; only inject them when our
       // KYC gate is active. A 'delegated' partner (gateActive=false) handles KYC
@@ -255,9 +268,6 @@ export function createAgent(deps: AgentDeps) {
             `Pass source_currency ONLY if the sender explicitly asks for a different listed currency.]`,
         });
       }
-      if (round === 0 && recentNote) {
-        messages.push({ role: 'system', content: recentNote });
-      }
       if (round === 0 && senderDefaultsNote) {
         messages.push({ role: 'system', content: senderDefaultsNote });
       }
@@ -279,6 +289,24 @@ export function createAgent(deps: AgentDeps) {
         });
       }
       messages.push(...history);
+      // fix 5: the customer context as a tool RESULT, after the new user
+      // message — the same assistant-tool_calls + tool shape the history
+      // replays every turn (see the history.push of role 'tool' below). Lives
+      // in `messages` only: never persisted, rebuilt fresh on every (re)run.
+      if (round === 0 && hasCustomerContext) {
+        messages.push(
+          {
+            role: 'assistant',
+            // '' not null: nothing on this transport has ever sent null content,
+            // and a strict OpenAI-compatible proxy may reject it.
+            content: '',
+            tool_calls: [
+              { id: CONTEXT_CALL_ID, type: 'function', function: { name: 'get_customer_context', arguments: '{}' } },
+            ],
+          },
+          { role: 'tool', tool_call_id: CONTEXT_CALL_ID, content: JSON.stringify(customerContext) },
+        );
+      }
 
       const assistant = await chatWithRetry(messages, channelTools, signal);
       history.push(assistant);
@@ -299,26 +327,7 @@ export function createAgent(deps: AgentDeps) {
           // Catch any throw and hand the model an { error } it can recover from.
           let result: Record<string, unknown>;
           try {
-            result = await executeTool(call.function.name, args, {
-              phone,
-              partnerId,
-              store: deps.store,
-              scheduleStore: deps.scheduleStore,
-              draftStore: deps.draftStore,
-              customerStore: deps.customerStore,
-              dailyVolumeStore: deps.dailyVolumeStore,
-              monthlyVolumeStore: deps.monthlyVolumeStore,  // NEW (KYC)
-              kycProvider: deps.kycProvider,
-              partnerStore: deps.partnerStore, // NEW (P4)
-              waCreds: deps.waCreds, // WL2 — partner's outbound creds for interactive sends
-              channel, // B5 — 'web' blocks non-allowlisted tools at dispatch
-              turn,
-              // Best-rate routing: the LIVE selection service (partner_rates +
-              // integrations over the shared Pool). The tools gate by tenant
-              // (default only) and fail open to mid — this only supplies it.
-              routeSelector: (s, d, m) =>
-                selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
-            });
+            result = await executeTool(call.function.name, args, toolCtx);
           } catch (err) {
             console.error(`tool ${call.function.name} threw:`, err);
             result = { error: 'That step hit a temporary snag — apologize briefly and ask the user to try again.' };

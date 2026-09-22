@@ -16,6 +16,11 @@ import { easternDate, easternMonth } from '@/lib/dates';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { createKycCaseStore } from '@/lib/kyc-case-store';
 import { sql } from 'drizzle-orm';
+import { createAgent } from '@/lib/agent';
+import { createScheduleStore } from '@/lib/schedule-store';
+import { createDraftStore } from '@/lib/draft-store';
+import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import type { ChatMessage } from '@/lib/types';
 
 // tenant-boundary — the end-to-end pin for fix 1 (F44, F45, F47, F50, F52).
 // Two tenants ('default' and 'acme') share ONE phone number. Nothing a
@@ -111,7 +116,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     return { deps, store, customerStore };
   }
 
-  it('acme mint for default\'s number: default recipients/velocity/monthly untouched; acme gets its own', async () => {
+  it('acme mint for default\'s number: default recipients/velocity/monthly untouched; acme accrues its own (and, fix 5, writes no address book)', async () => {
     await seedDefaultOwner();
     const { deps, store } = await apiDeps();
     const r = await createTransaction(deps, ACME, 'pk_1', 'idem-tb-1', {
@@ -121,11 +126,44 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     });
     expect(r).toMatchObject({ ok: true, status: 201 });
     expect((await store.listRecipients('default', PHONE, 5))[0].payoutDestination).toBe('REAL-0001');
-    expect((await store.listRecipients('acme', PHONE, 5))[0].payoutDestination).toBe('PLANTED-9999');
+    expect(await store.listRecipients('acme', PHONE, 5)).toEqual([]); // fix 5: saveRecipient: false
     expect(await store.getTodayTransferCount('default', PHONE)).toBe(1); // the seeded one, unchanged
     expect(await store.getTodayTransferCount('acme', PHONE)).toBe(1);
     expect(await deps.monthlyVolumeStore.getMonthCents('default', PHONE)).toBe(1_000); // the seeded $10 row, unchanged
     expect(await deps.monthlyVolumeStore.getMonthCents('acme', PHONE)).toBe(20_000);
+  });
+
+  it("fix 5 (regression pin on fix 1): acme's API mint for default's number never shows in default's round-0 customer context", async () => {
+    await seedDefaultOwner();
+    const { deps, store, customerStore } = await apiDeps();
+    const r = await createTransaction(deps, ACME, 'pk_1', 'idem-tb-ctx', {
+      amount_source: 100, sender: { phone: PHONE, kyc_status: 'not_started' },
+      beneficiary: { name: 'Acme Planted', phone: '919811112222', payout_method: 'bank', payout_destination: '999988887777' },
+    });
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store, customerStore, partnerStore: deps.partnerStore, monthlyVolumeStore: deps.monthlyVolumeStore,
+      scheduleStore: createScheduleStore(db), draftStore: createDraftStore(redis), dailyVolumeStore: createDailyVolumeStore(store), // fix 16: ledger-backed
+      kycProvider: new MockKycProvider(customerStore, 'https://example.com'),
+      partnerId: 'default',
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'what did I send recently?', { isNewConversation: false, buttonTap: { kind: 'recipient', recipientPhone: '919811112222' } });
+    const everything = JSON.stringify(seen);
+    expect(everything).not.toContain('Acme Planted');
+    expect(everything).not.toContain('999988887777');
+    // fix 16's seedDefaultOwner mints one $10 ledger row for default, so the
+    // round-0 context pair exists — and carries ONLY default's own row. default
+    // has no saved recipient at the tapped number, so no selected_recipient and
+    // no [RECIPIENT SELECTED] note at all.
+    const r0 = seen[0];
+    const ctxMsg = r0.find((m) => m.tool_call_id === 'ctx_r0');
+    expect(ctxMsg).toBeDefined();
+    const ctxResult = JSON.parse(ctxMsg?.content ?? '{}') as { recent_transfers: { recipient_name: string }[]; selected_recipient?: unknown };
+    expect(ctxResult.recent_transfers.map((t) => t.recipient_name)).toEqual(['Seeded Recipient']);
+    expect(ctxResult.selected_recipient).toBeUndefined();
+    expect(r0.some((m) => m.role === 'system' && (m.content ?? '').startsWith('[RECIPIENT SELECTED]'))).toBe(false);
   });
 
   it('F50/F52: the partner API never returns another tenant decrypted legal name', async () => {
