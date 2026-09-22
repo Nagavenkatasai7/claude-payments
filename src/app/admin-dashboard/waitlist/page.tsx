@@ -11,10 +11,12 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge';
 
 // /admin-dashboard/waitlist — SmartRemit's OWN "Join waitlist" signups (the
-// public landing form). Not tenant data: partner-scoped staff get a 404 (the
-// page does not exist for them — never a 403 that confirms it does). The list
-// is MASKED at the repo layer (initial · a***@domain · last-4) and never
-// decrypts; the only decrypting path is the admin-only, audited CSV export
+// public landing form). Not tenant data: PLATFORM STAFF (admins and agents;
+// the nav item is admin-only, but the nav is never the guard) may read the
+// MASKED list; partner-scoped staff get a 404 (the page does not exist for
+// them — never a 403 that confirms it does). The list is masked at the repo
+// layer (initial · a***@domain · last-4) and never decrypts; the only
+// decrypting path is the platform-ADMIN-only, audited CSV export
 // (./export/route.ts).
 
 const COLUMNS: ExpandableColumn[] = [

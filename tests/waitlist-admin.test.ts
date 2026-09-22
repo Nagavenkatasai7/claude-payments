@@ -119,6 +119,11 @@ describe('the page gate', () => {
     await expect(WaitlistPage()).resolves.toBeTruthy();
   });
 
+  it('platform agent → renders the MASKED list too (platform staff, not admin-only); only the export is admin-only', async () => {
+    await signIn(staff({ username: 'ag', role: 'agent' }));
+    await expect(WaitlistPage()).resolves.toBeTruthy();
+  });
+
   it('the nav shows Waitlist to platform admins only', () => {
     expect(visibleNavItems(staff({}))).toContain('waitlist');
     expect(visibleNavItems(staff({ partnerId: 'acme' }))).not.toContain('waitlist');
