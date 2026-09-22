@@ -421,3 +421,39 @@ describe('isMaskedDestination — display placeholders are never payout accounts
     expect(isMaskedDestination(undefined)).toBe(false);
   });
 });
+
+describe('validatePayoutFields — a masked value is never composed into a destination (fix 10 review S1)', () => {
+  it('refuses a mask-glyph run in any field (digit-rule or free-form) instead of composing it', () => {
+    const cases: Array<[CountryCode, Record<string, string>, string]> = [
+      ['IN', { accountNumber: '***123456', ifsc: 'HDFC0001234' }, 'accountNumber'],
+      ['IN', { accountNumber: '•••• 123456', ifsc: 'HDFC0001234' }, 'accountNumber'],
+      ['MX', { clabe: '***012345678901234567' }, 'clabe'],
+      ['US', { routingNumber: '***021000021', accountNumber: '12345678' }, 'routingNumber'],
+      ['CA', { transitNumber: '***12', institutionNumber: '001', accountNumber: '1234567' }, 'transitNumber'],
+    ];
+    for (const [country, fields, key] of cases) {
+      const r = validatePayoutFields(country, fields);
+      expect(r.ok, JSON.stringify(fields)).toBe(false);
+      if (r.ok) throw new Error('expected fail');
+      expect(r.errors[key], JSON.stringify(fields)).toBeDefined();
+    }
+  });
+
+  it('a digit-rule field accepts digits plus space / hyphen / dot separators only', () => {
+    const r = validatePayoutFields('US', { routingNumber: '021000021', accountNumber: '1234x5678' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.accountNumber).toBeDefined();
+  });
+
+  it('composes digit-rule fields from their digits: separators never reach the stored destination', () => {
+    const gb = validatePayoutFields('GB', { sortCode: '12-34-56', accountNumber: '1234 5678' });
+    expect(gb.ok && gb.payoutDestination).toBe('123456 12345678');
+    const nz = validatePayoutFields('NZ', { accountNumber: '01-0123-0123456-00' });
+    expect(nz.ok && nz.payoutDestination).toBe('010123012345600');
+    const inr = validatePayoutFields('IN', { accountNumber: ' 1234 5678 9012 ', ifsc: 'HDFC0001234' });
+    expect(inr.ok && inr.payoutDestination).toBe('HDFC0001234 123456789012');
+    const mx = validatePayoutFields('MX', { clabe: '0123 4567 8901 2345 67' });
+    expect(mx.ok && mx.payoutDestination).toBe('012345678901234567');
+  });
+});

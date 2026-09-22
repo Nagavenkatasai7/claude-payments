@@ -417,6 +417,16 @@ export async function POST(
           { status: 400 },
         );
       }
+      // fix 10 (review S1), defense in depth: validatePayoutFields already refuses a
+      // mask in any field and composes digit fields from their digits, so a
+      // composed display mask means the validator regressed — refuse it here too,
+      // BEFORE any write or charge (the rail would only dead-letter it later).
+      if (isMaskedDestination(validation.payoutDestination)) {
+        return NextResponse.json(
+          { ok: false, error: 'Please check the bank details.', fieldErrors: { payoutDestination: 'Enter the full account details, not a masked value.' } },
+          { status: 400 },
+        );
+      }
       bankDetails = { payoutMethod: 'bank', payoutDestination: validation.payoutDestination };
     }
 

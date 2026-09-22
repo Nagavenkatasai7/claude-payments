@@ -288,3 +288,31 @@ describe('pay route — existing-transfer payout writes (fix 6 / ctx-01)', () =>
     expect((await store.getTransferDecrypted('mx1'))?.payoutDestination).toBe('012345678901234567');
   });
 });
+
+describe('pay route — a masked body is never a payout (fix 10 review S1)', () => {
+  it('an Edit whose account field carries a mask is refused 400 with fieldErrors: nothing written, never charged', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'mk1', payoutDestination: '123456789 HDFC0001234' }));
+    const res = await post('mk1', { country: 'IN', fields: { accountNumber: '***123456', ifsc: 'HDFC0001234' } });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { fieldErrors?: Record<string, string> };
+    expect(body.fieldErrors?.accountNumber).toBeDefined();
+    expect(await status('mk1')).toBe('awaiting_payment');
+    expect((await store.getTransferDecrypted('mk1'))?.payoutDestination).toBe('123456789 HDFC0001234');
+  });
+
+  it('an MX CLABE with a *** prefix is refused the same way (never saved, never charged)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'mk2', destinationCountry: 'MX', destinationCurrency: 'MXN' }));
+    const res = await post('mk2', { country: 'MX', fields: { clabe: '***012345678901234567' } });
+    expect(res.status).toBe(400);
+    expect(await status('mk2')).toBe('awaiting_payment');
+    expect((await store.getTransferDecrypted('mk2'))?.payoutDestination).toBe('');
+  });
+
+  it('a mask in a free-form field (CA transit number) is refused too', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'mk3', destinationCountry: 'CA', destinationCurrency: 'CAD' }));
+    const res = await post('mk3', { country: 'CA', fields: { transitNumber: '***12', institutionNumber: '001', accountNumber: '1234567' } });
+    expect(res.status).toBe(400);
+    expect(await status('mk3')).toBe('awaiting_payment');
+    expect((await store.getTransferDecrypted('mk3'))?.payoutDestination).toBe('');
+  });
+});

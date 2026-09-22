@@ -119,6 +119,9 @@ export type ValidationResult =
   | { ok: true; payoutDestination: string }
   | { ok: false; errors: Record<string, string> };
 
+/** fix 10 (review S1): what a digit-rule field may hold — digits and typed separators. */
+const DIGIT_FIELD_CHARS = /^[0-9 .-]+$/;
+
 function digitsOnly(s: string): string {
   return (s ?? '').replace(/\D/g, '');
 }
@@ -138,6 +141,13 @@ export function validatePayoutFields(
 ): ValidationResult {
   const defs = BANK_FIELDS_BY_COUNTRY[country] ?? [];
   const errors: Record<string, string> = {};
+  // fix 10 (review S1): the values composed into the stored destination. A
+  // digit-rule field (exact `digits` or `minDigits`) is composed from its DIGITS
+  // — separators never reach the ledger — and may hold nothing but digits and
+  // the separators people type (space, hyphen, dot). Before this, the rules
+  // counted digits after stripping but composed the RAW text, so
+  // "***123456" passed as a 6-digit account and was stored as a mask.
+  const composed: Record<string, string> = {};
 
   for (const def of defs) {
     const raw = (fields[def.key] ?? '').trim();
@@ -145,13 +155,19 @@ export function validatePayoutFields(
       errors[def.key] = `${def.label} is required.`;
       continue;
     }
+    // A display mask ("***123456", "•••• 1234") is never a bank value, in any field.
+    if (MASK_RUN.test(raw)) {
+      errors[def.key] = `Enter the full ${def.label.toLowerCase()}, not a masked one.`;
+      continue;
+    }
+    const digitRule = typeof def.digits === 'number' || typeof def.minDigits === 'number';
     // Exact-digit fields (routing 9 / sort 6 / BSB 6) — unchanged.
     if (typeof def.digits === 'number') {
       const d = digitsOnly(raw);
       if (d.length !== def.digits) {
         errors[def.key] = `${def.label} must be ${def.digits} digits.`;
+        continue;
       }
-      continue;
     }
     // Format-pattern fields (IFSC / IBAN): the whole trimmed value must match.
     if (def.pattern && !def.pattern.test(raw)) {
@@ -165,12 +181,22 @@ export function validatePayoutFields(
       const d = digitsOnly(raw);
       if (d.length < def.minDigits) {
         errors[def.key] = `${def.label} must have at least ${def.minDigits} digits.`;
+        continue;
       }
+    }
+    if (digitRule) {
+      if (!DIGIT_FIELD_CHARS.test(raw)) {
+        errors[def.key] = `${def.label} may contain only digits.`;
+        continue;
+      }
+      composed[def.key] = digitsOnly(raw);
+    } else {
+      composed[def.key] = raw;
     }
   }
 
   if (Object.keys(errors).length > 0) return { ok: false, errors };
-  return { ok: true, payoutDestination: composePayoutDestination(country, fields) };
+  return { ok: true, payoutDestination: composePayoutDestination(country, composed) };
 }
 
 /**
