@@ -1,7 +1,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { partners } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import type { CorridorComplianceRule, CountryCode, KycMode, Partner, PartnerId, PartnerStatus, PartnerSupportConfig } from '@/lib/types';
+import type { CorridorComplianceRule, CountryCode, KycMode, Partner, PartnerId, PartnerSendLimits, PartnerStatus, PartnerSupportConfig } from '@/lib/types';
 import { DEFAULT_PARTNER_COUNTRIES } from '@/lib/defaults';
 
 // partner-repo — mirrors partner-store's surface (getPartner / savePartner /
@@ -33,6 +33,10 @@ function rowToPartner(row: PartnerRow): Partner {
     p.corridorCompliance = row.corridorCompliance as Partial<Record<CountryCode, CorridorComplianceRule>>;
   }
   if (row.supportConfig) p.supportConfig = row.supportConfig as PartnerSupportConfig;
+  // Program fix 16: READ-ONLY here. Deliberately NOT in partnerToRow below —
+  // savePartner's full-row upsert (updatePartnerAction) must never rewrite a
+  // limit; fix 16b's setSendLimits is the single-column writer.
+  if (row.sendLimits && typeof row.sendLimits === 'object') p.sendLimits = row.sendLimits as PartnerSendLimits;
   return p;
 }
 

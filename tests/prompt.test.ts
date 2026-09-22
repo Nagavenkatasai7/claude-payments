@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SYSTEM_PROMPT, buildSystemPrompt } from '@/lib/prompt';
-import { MAX_USD } from '@/lib/fx';
-import { T1_DAILY_CAP_CENTS } from '@/lib/tier-rules';
+import { resolveSendLimits } from '@/lib/send-limits';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -187,11 +186,9 @@ describe('SYSTEM_PROMPT — QA batch 2 (multi-currency cap labels, opener, block
 });
 
 describe('SYSTEM_PROMPT — anti-upsell / no-fabricated-minimum rule', () => {
-  it('states the minimum is $10 INCLUSIVE and the max is the MAX_USD cap', () => {
+  it('states the minimum is $10 INCLUSIVE and the max is $2,999', () => {
     expect(SYSTEM_PROMPT).toContain('$10 INCLUSIVE');
-    // Derived, not literal: the prompt interpolates fx.ts's MAX_USD, so this
-    // assertion follows a cap change instead of going stale against it.
-    expect(SYSTEM_PROMPT).toContain(`$${MAX_USD.toLocaleString('en-US')}`);
+    expect(SYSTEM_PROMPT).toContain('$2,999');
   });
 
   it('forbids inventing a minimum-amount error or calling $10+ too low', () => {
@@ -309,27 +306,29 @@ describe('SYSTEM_PROMPT — live-audit fixes: daily-cap framing + T0→T1 timeli
     buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
   ];
 
-  it('cap refusals are framed as a DAILY limit (daily_cap_usd + today_remaining_usd) in BOTH variants', () => {
+  it('over_daily_cap refusals are framed as a DAILY limit (daily_cap_usd + today_remaining_usd) in BOTH variants', () => {
     for (const p of variants) {
-      expect(p).toContain('the limit is a DAILY cap, not a per-transfer one');
+      expect(p).toContain('over_daily_cap → the limit is a DAILY cap');
       expect(p).toContain('Your daily limit right now is $X; you have $Y left today — want to send $Y?');
       expect(p).toContain('use daily_cap_usd as $X and today_remaining_usd as $Y');
       expect(p).toContain('as the actionable next step');
     }
   });
 
-  it('the old per-transfer refusal script is gone from BOTH variants', () => {
+  it('over_per_transfer_cap refusals use per_transfer_cap_usd (fix 16: the per-transfer cap can sit below the daily cap)', () => {
     for (const p of variants) {
-      expect(p).not.toContain('per transfer right now');
-      expect(p).toContain('NEVER phrase the limit as "per transfer"');
+      expect(p).toContain('over_per_transfer_cap → the amount is above the PER-TRANSFER limit');
+      expect(p).toContain('use per_transfer_cap_usd as $X');
+      // The pre-fix rule ("never phrase it per transfer") is gone.
+      expect(p).not.toContain('NEVER phrase the limit as "per transfer"');
     }
   });
 
-  it('T0 refusals add the 3-day timeline via day_of_window and the rise to the T1 cap', () => {
+  it('T0 refusals add the 3-day timeline via day_of_window and the rise to $2,999/day', () => {
     for (const p of variants) {
       expect(p).toContain('day_of_window');
       expect(p).toContain('of your first 3 days');
-      expect(p).toContain(`your daily limit rises to $${(T1_DAILY_CAP_CENTS / 100).toLocaleString('en-US')}/day`);
+      expect(p).toContain('your daily limit rises to $2,999/day');
     }
   });
 
@@ -569,5 +568,34 @@ describe('SYSTEM_PROMPT — FX honesty (Task 9: live-02, money-07)', () => {
       expect(p).toContain('If a tool returns that exchange rates are temporarily unavailable');
       expect(p).toContain('Never estimate a rate yourself and never reuse a rate from an earlier message.');
     }
+  });
+});
+
+// ── Program fix 16 (Task 10, test 19): the bot states the RESOLVED ladder ──
+describe('buildSystemPrompt — send limits (fix 16)', () => {
+  it('the default prompt states $2,999 and $500 and never a $999,999 ceiling', () => {
+    const p = buildSystemPrompt();
+    expect(p).toContain('$2,999');
+    expect(p).toContain('$500');
+    expect(p).not.toContain('999,999');
+    expect(p).not.toContain('999999');
+    // The per-transfer maximum comes from the resolved limits, not fx.ts.
+    expect(p).toContain('between $10 and $2,999 per transfer');
+  });
+
+  it('a tenant T0 of $200 / T1 of $1,000 / per-transfer $800 is what the bot says (both kyc variants)', () => {
+    const limits = resolveSendLimits({ sendLimits: { t0DailyCapCents: 20_000, t1DailyCapCents: 100_000, perTransferCapCents: 80_000 } });
+    for (const kycGateActive of [true, false]) {
+      const p = buildSystemPrompt({ brand: 'Acme Pay', kycGateActive, limits });
+      expect(p).toContain('$200/day');
+      expect(p).toContain('$1,000/day');
+      expect(p).toContain('between $10 and $800 per transfer');
+      expect(p).not.toContain('$2,999');
+      expect(p).not.toContain('$500/day');
+    }
+  });
+
+  it('the default limits object yields the byte-identical SYSTEM_PROMPT', () => {
+    expect(buildSystemPrompt({ brand: 'SmartRemit', limits: resolveSendLimits(null) })).toBe(SYSTEM_PROMPT);
   });
 });

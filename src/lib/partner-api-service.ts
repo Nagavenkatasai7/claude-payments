@@ -9,7 +9,9 @@ import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
-import { createTransfer } from './transfer-create';
+import { createTransfer, TransferIdConflictError } from './transfer-create';
+import { SendBusyError, SendCapError } from './send-limits';
+import { isValidPhone, normalizePhone } from './phone';
 import { sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
@@ -178,10 +180,13 @@ export async function createQuote(
 ): Promise<SvcResult<unknown>> {
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
+  // Program fix 16 (review): the same normalization createTransaction applies,
+  // so a formatted number auto-detects the same currency it will mint under.
+  const quoteSenderPhone = normalizePhone((body.sender as Record<string, unknown> | undefined)?.phone);
   const sourceCurrency = apiSourceCurrency(
     partner,
     str(body.source_currency) || undefined,
-    str((body.sender as Record<string, unknown> | undefined)?.phone) || undefined,
+    quoteSenderPhone || undefined,
   );
   // Callers may pass either destination_country (resolved to its home currency)
   // or destination_currency directly. destination_country takes precedence when
@@ -300,8 +305,14 @@ export async function createTransaction(
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
 
   const sender = (body.sender && typeof body.sender === 'object' ? body.sender : {}) as Record<string, unknown>;
-  const senderPhone = str(sender.phone);
-  if (!senderPhone) return err(400, 'sender.phone is required.');
+  if (!str(sender.phone)) return err(400, 'sender.phone is required.');
+  // Program fix 16 (review MUST 1): ONE identity per number. The cap day, the
+  // EDD month, the velocity count, the customers row and the per-sender lock
+  // are all keyed by this string, so "+1 555…", "1-555-…" and "1555…" must
+  // collapse to the same digits (the chat path already does this) — else a
+  // spelling is a fresh cap. Refused BEFORE ensureCustomer and the claim.
+  const senderPhone = normalizePhone(sender.phone);
+  if (!isValidPhone(senderPhone)) return err(400, 'sender.phone must be a valid E.164-style number.');
 
   // Beneficiary: by reference (partner-scoped) or inline. MOVED ABOVE the
   // customer write and the claim (on main it sits below both, :269-284): a
@@ -416,6 +427,15 @@ export async function createTransaction(
     if (e instanceof Error && e.message === 'kyc_required') {
       return err(422, 'Sender identity verification required (this partner runs SmartRemit KYC).');
     }
+    // Program fix 16: every partner-API mint is capped from the ledger. No
+    // figures in the response (the caps are policy, not a per-sender oracle).
+    // The key stays bound-but-unminted, so the same Idempotency-Key mints once
+    // there is headroom / the lock is free.
+    if (e instanceof SendCapError) return err(422, "This transfer exceeds the sender's current sending limit.");
+    if (e instanceof SendBusyError) return err(503, 'Another transfer for this sender is in progress. Please retry.');
+    // The claimed id already names another tenant's row (unreachable by
+    // provenance; never overwritten). The key stays bound; a new key mints.
+    if (e instanceof TransferIdConflictError) return err(409, 'Idempotency-Key conflict. Retry with a new key.');
     throw e;
   }
 

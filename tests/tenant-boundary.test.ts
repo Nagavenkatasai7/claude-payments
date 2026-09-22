@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
@@ -75,7 +75,7 @@ async function seedDefaultOwner() {
   await store.upsertRecipient('default', PHONE, {
     name: 'Anita', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: 'REAL-0001', lastUsedAt: NOW,
   });
-  await store.incrementTodayTransferCount('default', PHONE);
+  await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 10 }); // one row today (fix 16: the ledger IS the counter)
   return { store, customerStore };
 }
 
@@ -109,7 +109,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
     const deps: PartnerApiDeps = {
-      store, partnerStore: createPartnerStore(db), monthlyVolumeStore: createMonthlyVolumeStore(redis),
+      store, partnerStore: createPartnerStore(db), monthlyVolumeStore: createMonthlyVolumeStore(store),
       integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
       customerStore, db, now: () => NOW,
     };
@@ -129,7 +129,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     expect(await store.listRecipients('acme', PHONE, 5)).toEqual([]); // fix 5: saveRecipient: false
     expect(await store.getTodayTransferCount('default', PHONE)).toBe(1); // the seeded one, unchanged
     expect(await store.getTodayTransferCount('acme', PHONE)).toBe(1);
-    expect(await deps.monthlyVolumeStore.getMonthCents('default', PHONE)).toBe(0);
+    expect(await deps.monthlyVolumeStore.getMonthCents('default', PHONE)).toBe(1_000); // the seeded $10 row, unchanged
     expect(await deps.monthlyVolumeStore.getMonthCents('acme', PHONE)).toBe(20_000);
   });
 
@@ -144,7 +144,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store, customerStore, partnerStore: deps.partnerStore, monthlyVolumeStore: deps.monthlyVolumeStore,
-      scheduleStore: createScheduleStore(db), draftStore: createDraftStore(redis), dailyVolumeStore: createDailyVolumeStore(redis),
+      scheduleStore: createScheduleStore(db), draftStore: createDraftStore(redis), dailyVolumeStore: createDailyVolumeStore(store), // fix 16: ledger-backed
       kycProvider: new MockKycProvider(customerStore, 'https://example.com'),
       partnerId: 'default',
       chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
@@ -153,10 +153,16 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const everything = JSON.stringify(seen);
     expect(everything).not.toContain('Acme Planted');
     expect(everything).not.toContain('999988887777');
-    // default has no ledger history and no saved recipient at the tapped number,
-    // so there is no context pair and no [RECIPIENT SELECTED] note at all.
+    // fix 16's seedDefaultOwner mints one $10 ledger row for default, so the
+    // round-0 context pair exists — and carries ONLY default's own row. default
+    // has no saved recipient at the tapped number, so no selected_recipient and
+    // no [RECIPIENT SELECTED] note at all.
     const r0 = seen[0];
-    expect(r0.some((m) => m.tool_call_id === 'ctx_r0')).toBe(false);
+    const ctxMsg = r0.find((m) => m.tool_call_id === 'ctx_r0');
+    expect(ctxMsg).toBeDefined();
+    const ctxResult = JSON.parse(ctxMsg?.content ?? '{}') as { recent_transfers: { recipient_name: string }[]; selected_recipient?: unknown };
+    expect(ctxResult.recent_transfers.map((t) => t.recipient_name)).toEqual(['Seeded Recipient']);
+    expect(ctxResult.selected_recipient).toBeUndefined();
     expect(r0.some((m) => m.role === 'system' && (m.content ?? '').startsWith('[RECIPIENT SELECTED]'))).toBe(false);
   });
 
@@ -176,25 +182,25 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
 });
 
 describe('D9/D10 transitional fallback: legacy phone-only keys belong to the PRE-FIX tenant only', () => {
-  it('an acme sibling created after the rename never reads default\'s legacy velocity/daily/monthly/kyc_audit', async () => {
+  it('an acme sibling created after the rename never reads default\'s legacy kyc_audit / conv — and the pre-fix counter keys are inert (fix 16)', async () => {
     const { store, customerStore } = await seedDefaultOwner(); // default is the oldest row
     const day = easternDate(Date.now());
     const month = easternMonth(Date.now());
-    // Pre-fix state: only the phone-only legacy counter exists (seedDefaultOwner bumped the
-    // tenant key, which — correctly — would shadow the legacy read).
-    redis.dump.delete(`velocity:default:${PHONE}:${day}`);
+    // Pre-fix Redis counters may still exist for their TTL. Since Program fix 16
+    // they decide NOTHING: every cap figure is a ledger aggregate. Leave them in
+    // place and assert both tenants read only their own ledger rows.
     await redis.set(`velocity:${PHONE}:${day}`, '4');
     await redis.set(`daily_volume:${PHONE}:${day}`, '250000');
     await redis.set(`monthly_volume:${PHONE}:${month}`, '290000');
     await redis.hset(`kyc_audit:${PHONE}`, { '1': JSON.stringify({ at: NOW, actor: 'persona', action: 'legacy.event' }) });
     await customerStore.upsertOnFirstInbound('acme', PHONE); // the post-fix sibling
-    const daily = createDailyVolumeStore(redis, store.legacyTenantOf);
-    const monthly = createMonthlyVolumeStore(redis, store.legacyTenantOf);
+    const daily = createDailyVolumeStore(store);
+    const monthly = createMonthlyVolumeStore(store);
     const kyc = createKycCaseStore(redis, customerStore); // (redis, customers, now?) — src/lib/kyc-case-store.ts:31-35
-    // The pre-fix owner still sees its in-flight window…
-    expect(await store.getTodayTransferCount('default', PHONE)).toBe(4);
-    expect(await daily.getTodayCents('default', PHONE)).toBe(250_000);
-    expect(await monthly.getMonthCents('default', PHONE)).toBe(290_000);
+    // The pre-fix owner sees its own ledger (the one $10 row seedDefaultOwner minted) and its audit…
+    expect(await store.getTodayTransferCount('default', PHONE)).toBe(1);
+    expect(await daily.getTodayCents('default', PHONE)).toBe(1_000);
+    expect(await monthly.getMonthCents('default', PHONE)).toBe(1_000);
     expect((await kyc.getAudit('default', PHONE)).map((e) => e.action)).toEqual(['legacy.event']);
     // …and the sibling sees NOTHING of it (no cap oracle, no audit leak).
     expect(await store.getTodayTransferCount('acme', PHONE)).toBe(0);

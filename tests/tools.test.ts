@@ -20,7 +20,8 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
+import { SendBusyError } from '@/lib/send-limits';
 import {
   resetRateCacheForTests, AED_PER_USD, FX_MAX_AGE_MS, FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE,
 } from '@/lib/rate';
@@ -44,8 +45,8 @@ let db: Db;
 async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHONE, partnerId = 'default') {
   const store = createStore(redis, db);
   const customerStore = createCustomerStore(db, store);
-  const dailyVolumeStore = createDailyVolumeStore(redis);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  const dailyVolumeStore = createDailyVolumeStore(store);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
   // Phase 3: the verify-before-send gate blocks any non-'verified' sender. These
   // existing-behavior tests exercise the send path, so seed the default customer
@@ -100,7 +101,19 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
+
+// Program fix 16: EDD fixtures need PRIOR-day spend this month (same-day spend
+// would trip the daily cap first). Pin the clock mid-month (freshDb ran in
+// beforeEach, BEFORE the fake clock) and seed via the ledger.
+function pinMidMonth() {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-06-15T16:00:00.000Z')); // noon ET
+}
+async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'default') {
+  await seedLedgerSpend(db, { partnerId, phone, amountUsd, status: 'paid', createdAt: new Date(Date.now() - 86_400_000) });
+}
 
 describe('toolSchemas', () => {
   it('exposes all twenty-seven tools', () => {
@@ -734,12 +747,11 @@ describe('check_send_limit', () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis, '15550001111');
     await ctx.customerStore.upsertOnFirstInbound('default', '15550001111');
-    // Spend down to $200 of headroom, then ask for $300.
-    await ctx.dailyVolumeStore.addCents('default', '15550001111', T0_DAILY_CAP_CENTS - 20_000);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: '15550001111', amountUsd: 300 }); // $300 today (ledger)
     const r = await executeTool('check_send_limit', { amount_usd: 300 }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
-    expect(r.today_used_usd).toBe(T0_CAP_USD - 200);
+    expect(r.today_used_usd).toBe(300);
     expect(r.today_remaining_usd).toBe(200);
   });
 
@@ -765,7 +777,7 @@ describe('check_send_limit', () => {
 
   it('check_send_limit: edd_required:true when cumulative-month + requested >= $3k and SoF/occupation absent', async () => {
     const ctx = await buildCtx(fakeRedis(), '15550001111');
-    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 250_000); // $2,500 this month
+    await seedLedgerSpend(db, { partnerId: 'default', phone: ctx.phone, amountUsd: 2500, status: 'paid' }); // $2,500 this month (ledger)
     const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx); // → $3,100
     expect(res.edd_required).toBe(true);
   });
@@ -776,7 +788,7 @@ describe('check_send_limit', () => {
       ...(await ctx.customerStore.upsertOnFirstInbound('default', ctx.phone)).customer,
       sourceOfFunds: 'employment', occupation: 'salaried', eddCapturedAt: '2026-05-01T00:00:00Z',
     });
-    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 250_000);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: ctx.phone, amountUsd: 2500, status: 'paid' });
     const res = await executeTool('check_send_limit', { amount_usd: 600 }, ctx);
     expect(res.edd_required).toBe(false); // sticky profile satisfies it
   });
@@ -850,11 +862,12 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
   });
 
   it('invalid enum value is treated as unsupplied (eddFieldsPresent stays false)', async () => {
+    pinMidMonth();
     const ctx = await buildCtx(fakeRedis(), '15551234567');
-    await grandfathered(ctx);
-    // $2,500 already this month + $600 → crosses $3k; an invalid SoF must NOT
+    await grandfathered(ctx); // T1: past the window, verified
+    // $2,500 YESTERDAY this month + $600 → crosses $3k; an invalid SoF must NOT
     // satisfy the EDD requirement, so the transfer must be flagged edd_required.
-    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 250_000);
+    await seedMonthSpend(ctx.phone, 2500);
     const r = await executeTool('create_transfer', {
       amount_usd: 600,
       recipient_name: 'Mom',
@@ -1574,8 +1587,7 @@ describe('get_quote cap guard (Bundle D)', () => {
 
   it('refuses an over-daily amount and reports the remaining', async () => {
     const ctx = await buildCtx(fakeRedis());
-    // Leave exactly $100 of headroom, then ask for $200.
-    await ctx.dailyVolumeStore.addCents('default', PHONE, T0_DAILY_CAP_CENTS - 10_000);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 400 }); // $400 already used today (ledger)
     const r = await executeTool('get_quote', { amount_usd: 200, funding_method: 'bank_transfer' }, ctx);
     expect(r.within_cap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
@@ -1672,10 +1684,11 @@ describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', 
   });
 
   it('returns needs_edd (and does NOT send a card) when the month is over the EDD threshold', async () => {
+    pinMidMonth();
     const ctx = await buildCtx(fakeRedis());
     await seedPastTransfer(ctx);
-    // push cumulative monthly volume over $3,000 so evaluateEdd trips; customer has no SoF/occupation
-    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 300000);
+    // push cumulative monthly volume over $3,000 (yesterday, in the ledger) so evaluateEdd trips; customer has no SoF/occupation
+    await seedMonthSpend(ctx.phone, 3000);
     const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210', amount_usd: 100 }, ctx);
     expect(r.needs_edd).toBe(true);
     expect(r.sent).toBeUndefined();
@@ -2841,9 +2854,10 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
   });
 
   it('EDD-required repeats degrade to a WhatsApp hand-off (no half-collected answers)', async () => {
+    pinMidMonth();
     const base = await buildCtx(fakeRedis());
     await seedPast(base);
-    await base.monthlyVolumeStore.addCents('default', base.phone, 300000); // over the $3k month threshold
+    await seedMonthSpend(base.phone, 3000); // over the $3k month threshold (yesterday, ledger)
     const ctx = { ...base, channel: 'web' as const };
     const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
 
@@ -4244,6 +4258,7 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
 
   it('the ledger fallback uses ONLY a settled (paid / delivered) consumer row in the SAME destination country', async () => {
     const { ctx } = await returningCtx();
+    await seedSender(db, { partnerId: 'default', phone: ctx.phone, firstSeenDaysAgo: 10 }); // T1: the fixture rows + sends exceed a T0 day (fix 16)
     await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: '****9012',
       lastUsedAt: new Date().toISOString(),
@@ -4467,9 +4482,10 @@ describe('fix 6 (ctx-01): repeat_transfer rehydrates server-side and never carri
   });
 
   it('needs_edd returns the destination MASKED', async () => {
+    pinMidMonth();
     const ctx = await buildCtx(fakeRedis());
     await seedBankPast(ctx);
-    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 300000);
+    await seedMonthSpend(ctx.phone, 3000);
     const r = await executeTool('repeat_transfer', { recipient_phone: MOM, amount_usd: 100 }, ctx);
     expect(r.needs_edd).toBe(true);
     expect(r.payout_destination).toBe('****9012');
@@ -4518,12 +4534,13 @@ describe('fix 5 (F43): no payout destination reaches the model unmasked (UPI inc
   });
 
   it('repeat_transfer needs_edd never carries a full destination (UPI and bank)', async () => {
+    pinMidMonth();
     const ctx = await buildCtx(fakeRedis());
     await seedBoth(ctx);
     for (const [name, phone] of [['Mom', MOM], ['Dad', DAD]] as const) {
       await executeTool('create_transfer', { amount_usd: 100, recipient_name: name, recipient_phone: phone, funding_method: 'bank_transfer' }, ctx);
     }
-    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 300000);
+    await seedMonthSpend(ctx.phone, 3000); // over the $3k month threshold (yesterday, ledger — fix 16 removed addCents)
     for (const phone of [MOM, DAD]) {
       const r = await executeTool('repeat_transfer', { recipient_phone: phone, amount_usd: 50 }, ctx);
       expect(r.needs_edd).toBe(true);
@@ -4756,5 +4773,55 @@ describe('review follow-up: every remaining model-facing recipient name is clamp
     });
     const r = await executeTool('list_schedules', {}, ctx);
     expect((r.schedules as { recipient_name: string }[])[0].recipient_name).toBe(CLEAN);
+  });
+});
+
+// ── Program fix 16 (Task 10, test 13): the approve-tap and legacy create_transfer are capped INSIDE the mint ──
+describe('create_transfer — in-lock send cap (Program fix 16)', () => {
+  it('approve-tap: a sender at cap gets cap_eval from the LOCKED mint even when the tool pre-check was stale', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedLedgerSpend(db, { partnerId: 'default', phone: ctx.phone, amountUsd: 450 });
+    const draftId = await ctx.draftStore.createDraft({
+      senderPhone: ctx.phone, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8_500 },
+    });
+    // A stale pre-check (e.g. a concurrent send landed after it) must not matter: the lock decides.
+    vi.spyOn(ctx.dailyVolumeStore, 'getTodayCents').mockResolvedValue(0);
+    const r = await executeTool('create_transfer', {}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve', draftId } } });
+    expect(r.error).toBe('Cap exceeded for this transfer.');
+    expect(r.cap_eval).toMatchObject({ tier: 'T0', reason: 'over_daily_cap', today_remaining_usd: 50, daily_cap_usd: 500, per_transfer_cap_usd: 500 });
+    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1); // the seeded row only
+  });
+
+  it('approve-tap: a busy sender lock restores the draft and asks the customer to retry', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const draftId = await ctx.draftStore.createDraft({
+      senderPhone: ctx.phone, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8_500 },
+    });
+    vi.spyOn(ctx.store, 'mintUnderSenderLock').mockRejectedValueOnce(new SendBusyError());
+    const tap = () => executeTool('create_transfer', {}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
+    const r = await tap();
+    expect(String(r.error)).toContain('try again');
+    expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull(); // put back
+    const r2 = await tap();
+    expect(r2.transfer_id).toBeTruthy();
+    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
+  });
+
+  it('legacy explicit-args path: the in-lock refusal is the same cap_eval shape', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedLedgerSpend(db, { partnerId: 'default', phone: ctx.phone, amountUsd: 450 });
+    vi.spyOn(ctx.dailyVolumeStore, 'getTodayCents').mockResolvedValue(0);
+    const r = await executeTool('create_transfer', {
+      amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210',
+    }, ctx);
+    expect(r.error).toBe('Cap exceeded for this transfer.');
+    expect(r.cap_eval).toMatchObject({ reason: 'over_daily_cap', tier: 'T0' });
+    expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
   });
 });

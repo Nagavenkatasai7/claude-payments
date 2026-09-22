@@ -5,6 +5,8 @@ import { getCustomerStore } from './customer-store';
 import { getPartnerStore } from './partner-store';
 import { getDailyVolumeStore } from './daily-volume-store';
 import { evaluateCap } from './tier-rules';
+import { PLATFORM_SEND_LIMITS, resolveSendLimits } from './send-limits';
+import type { SendLimits } from './types';
 import { sendGateActive } from './kyc-gate';
 import { logWarn } from './log';
 import type {
@@ -87,9 +89,12 @@ export function buildSummaryContext(
   transfers: Transfer[],
   todayUsedCents: number,
   kycGateActive: boolean,
+  // Program fix 16: the sender's RESOLVED limits (resolveSendLimits(partner));
+  // the platform ladder by default so a partner-less caller states the truth.
+  limits: SendLimits = PLATFORM_SEND_LIMITS,
   now: Date = new Date(),
 ): SummaryContext {
-  const cap = evaluateCap(customer, now, todayUsedCents, 0, kycGateActive);
+  const cap = evaluateCap(customer, now, todayUsedCents, 0, kycGateActive, limits);
   return {
     tier: cap.tier,
     dailyLimitUsd: cap.dailyCapCents / 100,
@@ -220,6 +225,7 @@ export function createCustomerSummarizer(deps: CustomerSummarizerDeps) {
           transfers,
           todayUsedCents,
           sendGateActive(partner),
+          resolveSendLimits(partner),
         );
 
         const reply = await withTimeout(

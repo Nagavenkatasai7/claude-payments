@@ -1,19 +1,46 @@
+import { sql } from 'drizzle-orm';
 import { getRedis } from './redis';
-import { easternDate } from './dates';
-import { getDb, type DbOrTx } from '@/db/client';
-import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { easternDayStart, easternMonthStart } from './dates';
+import { SendBusyError } from './send-limits';
+import { getDb, type Db } from '@/db/client';
+import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo } from '@/db/repos/aux-repos';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
-import type { ChatMessage, CountryCode, PartnerId, Transfer, TransferStatus } from './types';
+import type { CapSubject } from './tier-rules';
+import type { ChatMessage, CountryCode, KycStatus, PartnerId, Transfer, TransferStatus } from './types';
+
+/**
+ * The ONLY operations a locked mint body may perform (Program fix 16). All
+ * three are bound to the lock's transaction; there is deliberately no store,
+ * partner store or volume store in scope, so a root-handle call inside the
+ * lock cannot compile.
+ */
+export interface SenderLedgerOps {
+  totals(now?: Date): Promise<SenderTotals>;
+  getTransfer(id: string): Promise<Transfer | null>;
+  insertTransfer(t: Transfer): Promise<void>;
+}
+
+/** SQLSTATE 55P03 lock_not_available — from `SET LOCAL lock_timeout` — direct or wrapped. */
+function isLockTimeout(err: unknown): boolean {
+  let e: unknown = err;
+  for (let depth = 0; depth < 4 && e && typeof e === 'object'; depth++) {
+    if ((e as { code?: unknown }).code === '55P03') return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
 // engine split follows the locked disposition:
 //   • LEDGER → Postgres repos: transfers (atomic rank-guarded webhook machine,
 //     keyset queries), saved recipients, corridor requests, derived transfer
 //     counts. Encrypted payout destinations ride along (mappers).
-//   • HOT/EPHEMERAL → Redis: conversations, today-velocity counters, inbound
-//     msg dedup, lastmsg recency, migration sentinels.
+//   • HOT/EPHEMERAL → Redis: conversations, inbound msg dedup, lastmsg
+//     recency, migration sentinels. (The today-velocity / daily / monthly
+//     counters were deleted in Program fix 16 — every cap figure is a ledger
+//     aggregate now, see senderTotals below.)
 // Fresh start: the legacy Redis ledger keys (transfer:*, transfers:ids,
 // count:*, recipients:*, corridor_request:*) are abandoned, and the pre-P1/P2
 // lazy-fill shims are gone with them.
@@ -50,7 +77,9 @@ function trimHistory(messages: ChatMessage[]): ChatMessage[] {
   return trimmed;
 }
 
-export function createStore(redis: RedisLike, db: DbOrTx) {
+// `db` is the ROOT handle (never a tx): mintUnderSenderLock opens its own
+// transaction with an isolation level, which only PgDatabase.transaction takes.
+export function createStore(redis: RedisLike, db: Db) {
   const transfersRepo = createTransferRepo(db);
   const recipientsRepo = createRecipientRepo(db);
   const corridorRepo = createCorridorRequestRepo(db);
@@ -60,9 +89,8 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
   const sellerRepo = createSellerRepo(db);
   // D9/D10/D12 (fix 1): which tenant may read a pre-fix phone-only Redis key —
   // the phone's OLDEST customers row (see legacy-tenant.ts). Built once.
-  const legacyTenantOf = legacyTenantResolver(
-    createCustomerRepo(db, (p, ph) => transfersRepo.firstTransferAt(p, ph)),
-  );
+  const customersRepo = createCustomerRepo(db, (p, ph) => transfersRepo.firstTransferAt(p, ph));
+  const legacyTenantOf = legacyTenantResolver(customersRepo);
 
   return {
     /** The D9 legacy-tenant resolver, shared with the volume + KYC-audit stores. */
@@ -175,28 +203,75 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
       return transfersRepo.latestSettledConsumerTo(partnerId, phone, recipientPhone, destinationCountry);
     },
 
-    // ── Today-velocity (Redis counters — date-bucketed, tenant-scoped) ────
-    // Key shape is OWNED HERE (fix 1) and consumed by fix 10; never rename again.
-    // TRANSITIONAL (delete in fix 10): a tenant key that does not exist yet reads
-    // through to the pre-fix phone-only key ONLY for the phone's pre-fix tenant
-    // (legacyKeyAllowed — the oldest customers row), and the first increment
-    // absorbs it, so an in-flight day's count is never reset to zero by the
-    // rename and a post-fix sibling tenant never inherits another tenant's count.
-    async incrementTodayTransferCount(partnerId: PartnerId, phone: string): Promise<void> {
-      const k = `velocity:${partnerId}:${phone}:${easternDate(Date.now())}`;
-      if ((await redis.exists(k)) === 0 && (await legacyKeyAllowed(partnerId, phone, legacyTenantOf))) {
-        const legacy = Number((await redis.get(`velocity:${phone}:${easternDate(Date.now())}`)) ?? '0');
-        if (legacy > 0) await redis.set(k, String(legacy), { ex: 48 * 3600 });
-      }
-      const n = await redis.incr(k);
-      if (n === 1) await redis.expire(k, 48 * 3600);
-    },
+    // ── Sender totals + the locked mint (Program fix 16 / Task 10) ────────
+    // The Redis velocity / daily / monthly counters are GONE (ruling 30): every
+    // figure a cap or a flag reads is an aggregate over `transfers`, computed
+    // by transfer-repo.senderTotalsSince over ET bounds. The pre-fix legacy
+    // dual-read for these counters is gone with them; legacyTenantOf stays for
+    // the conv: and kyc_audit: fallbacks only.
+    /** Today's transfer count for the velocity flag — a ledger count (blocked excluded). */
     async getTodayTransferCount(partnerId: PartnerId, phone: string): Promise<number> {
-      const raw = await redis.get(`velocity:${partnerId}:${phone}:${easternDate(Date.now())}`);
-      if (raw !== null) return Number(raw);
-      if (!(await legacyKeyAllowed(partnerId, phone, legacyTenantOf))) return 0;
-      const legacy = await redis.get(`velocity:${phone}:${easternDate(Date.now())}`);
-      return legacy ? Number(legacy) : 0;
+      const now = new Date();
+      return (await transfersRepo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now))).todayCount;
+    },
+    /** Unlocked read (display, the pre-claim cap check, the tools' check_send_limit). */
+    async senderTotals(partnerId: PartnerId, phone: string, now: Date = new Date()): Promise<SenderTotals> {
+      return transfersRepo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now));
+    },
+    /**
+     * The tier subject createTransfer evaluates INSIDE the lock, read before
+     * it: firstSeenAt from the tenant's customers row, else the tenant's first
+     * transfer, else now (a brand-new sender is T0). kycStatus is the caller's
+     * attestation (input.senderKycStatus) — the same value the KYC backstop
+     * already trusts. Tenant-scoped on both reads.
+     */
+    async capSubject(
+      partnerId: PartnerId,
+      phone: string,
+      kycStatus: KycStatus,
+      now: Date = new Date(),
+    ): Promise<CapSubject> {
+      const row = await customersRepo.getCustomer(partnerId, phone);
+      const firstSeenAt =
+        row?.firstSeenAt ?? (await transfersRepo.firstTransferAt(partnerId, phone)) ?? now.toISOString();
+      return { firstSeenAt, kycStatus };
+    },
+    /**
+     * ONE locked mint per (partner, phone). Opens a READ COMMITTED transaction
+     * (each statement after the lock sees the previous holder's committed
+     * insert — under REPEATABLE READ the snapshot would predate the wait),
+     * bounds the wait with `SET LOCAL lock_timeout = '5s'`, takes
+     * `pg_advisory_xact_lock(hashtext('<partnerId>:<phone>'))` BEFORE any other
+     * statement, and hands `fn` tx-bound operations ONLY (no root handle can
+     * reach in: a root-handle call would deadlock PGlite's single connection and
+     * hold a second Neon pool connection per mint). A throw inside `fn` rolls
+     * everything back. A lock wait past 5 s (SQLSTATE 55P03) surfaces as the
+     * retryable SendBusyError with nothing written.
+     */
+    async mintUnderSenderLock<T>(
+      partnerId: PartnerId,
+      phone: string,
+      fn: (ops: SenderLedgerOps) => Promise<T>,
+    ): Promise<T> {
+      try {
+        return await db.transaction(
+          async (tx) => {
+            await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${partnerId}:${phone}`}))`);
+            const repo = createTransferRepo(tx);
+            return fn({
+              totals: (now: Date = new Date()) =>
+                repo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now)),
+              getTransfer: (id) => repo.getTransfer(id),
+              insertTransfer: (t) => repo.saveTransfer(t),
+            });
+          },
+          { isolationLevel: 'read committed' },
+        );
+      } catch (err) {
+        if (isLockTimeout(err)) throw new SendBusyError();
+        throw err;
+      }
     },
 
     // ── Inbound plumbing (Redis) ─────────────────────────────────────────
