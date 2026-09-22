@@ -588,3 +588,94 @@ describe('recordBlockedAttempt', () => {
     expect(recipients).toHaveLength(0);
   });
 });
+
+describe('createTransfer — ctx-01 chokepoint (fix 6)', () => {
+  const REAL = 'HDFC0001234 123456789012';
+  const yesterday = () => new Date(Date.now() - 86_400_000).toISOString();
+  async function seedSavedMom(store: Awaited<ReturnType<typeof makeStores>>['store'], at: string) {
+    await store.upsertRecipient('default', base.phone, {
+      name: 'Mom', recipientPhone: base.recipientPhone, payoutMethod: 'bank', payoutDestination: REAL, lastUsedAt: at,
+    });
+  }
+
+  it('REFUSES a partner-pulled funding method on a CONSUMER transfer before any write; a B2B ach_pull mint is unaffected', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    for (const fundingMethod of ['ach_pull', 'bank_pull'] as const) {
+      await expect(createTransfer(store, partnerStore, mvs, { ...base, fundingMethod }))
+        .rejects.toThrow('partner_pulled_funding_requires_b2b');
+    }
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(0);
+    const b2b = await createTransfer(store, partnerStore, mvs, {
+      ...base, recipientName: 'Globex Trading LLC', fundingMethod: 'ach_pull', payoutDestination: '',
+      transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      senderBusinessName: 'Acme Imports Ltd', recipientBusinessName: 'Globex Trading LLC',
+    });
+    expect(b2b.status).toBe('awaiting_payment');
+  });
+
+  it('REFUSES a masked destination before ANY write: no ledger row, no velocity/monthly accrual, the saved real account untouched', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const at = yesterday();
+    await seedSavedMom(store, at);
+    for (const bad of ['****9012', '****', 'account on file', 'account ****9012']) {
+      await expect(
+        createTransfer(store, partnerStore, mvs, { ...base, payoutMethod: 'bank', payoutDestination: bad }),
+      ).rejects.toThrow('masked_payout_destination');
+    }
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(0);
+    expect(await mvs.getMonthCents('default', base.phone)).toBe(0);
+    const [saved] = await store.listRecipients('default', base.phone, 5);
+    expect(saved.payoutDestination).toBe(REAL);
+    expect(saved.lastUsedAt).toBe(at);
+  });
+
+  it('sanctions run FIRST: a watchlisted recipient with a masked destination leaves ONE blocked audit row with an EMPTY destination — and nothing else', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, recipientName: 'John Doe', payoutMethod: 'bank', payoutDestination: '****9012',
+    });
+    expect(t.status).toBe('blocked');
+    expect(t.payoutDestination).toBe('');
+    expect(await store.listTransfers()).toHaveLength(1);
+    expect((await store.getTransferDecrypted(t.id))?.payoutDestination).toBe('');
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(0);
+    expect(await mvs.getMonthCents('default', base.phone)).toBe(0);
+    expect(await store.listRecipients('default', base.phone, 5)).toEqual([]);
+  });
+
+  it('BEHAVIOUR CHANGE: a blocked mint with a REAL destination keeps it as evidence but never accrues and never writes the address book', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, {
+      ...base, recipientName: 'John Doe', payoutMethod: 'bank', payoutDestination: REAL,
+    });
+    expect(t.status).toBe('blocked');
+    expect((await store.getTransferDecrypted(t.id))?.payoutDestination).toBe(REAL);
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(0);
+    expect(await mvs.getMonthCents('default', base.phone)).toBe(0);
+    expect(await store.listRecipients('default', base.phone, 5)).toEqual([]);
+  });
+
+  it("an EMPTY destination still mints (the pay page collects it) and still accrues, but never overwrites the sender's saved real account", async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const at = yesterday();
+    await seedSavedMom(store, at);
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, payoutMethod: 'bank', payoutDestination: '' });
+    expect(t.status).toBe('awaiting_payment');
+    expect(await store.getTodayTransferCount('default', base.phone)).toBe(1);
+    const [saved] = await store.listRecipients('default', base.phone, 5);
+    expect(saved.payoutDestination).toBe(REAL);
+    expect(saved.lastUsedAt).toBe(at);
+  });
+
+  it("a B2B mint never writes the payee (a seller's profile account) into the sender's personal address book", async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    await createTransfer(store, partnerStore, mvs, {
+      ...base, recipientName: 'Globex Trading LLC', payoutMethod: 'bank', payoutDestination: REAL,
+      transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      senderBusinessName: 'Acme Imports Ltd', recipientBusinessName: 'Globex Trading LLC',
+    });
+    expect(await store.listRecipients('default', base.phone, 5)).toEqual([]);
+  });
+});
