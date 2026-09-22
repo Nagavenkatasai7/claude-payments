@@ -27,8 +27,8 @@ const PDF_BYTES = Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x3
 const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
 const HTML_BYTES = Uint8Array.from(new TextEncoder().encode('<!DOCTYPE html><html>'));
 
-const PRIVATE_TOKEN = 'vercel_blob_rw_privstore_testtoken';
-const PUBLIC_TOKEN = 'vercel_blob_rw_pubstore_testtoken';
+const PRIVATE_TOKEN = 'test_blob_rw_priv999_testtoken';
+const PUBLIC_TOKEN = 'test_blob_rw_pubstore_testtoken';
 
 const objects = new Map<string, Uint8Array<ArrayBuffer>>([
   [PUB_A, PDF_BYTES],

@@ -116,6 +116,7 @@ export async function GET(
     'x-content-type-options': 'nosniff',
     'content-disposition': `attachment; filename="document-${index}.${ext}"`,
   });
-  if (Number.isFinite(obj.size) && obj.size > 0) headers.set('content-length', String(obj.size));
+  // No content-length: the SDK derives `size` from the upstream content-length
+  // (dist/index.js:184,199), which need not equal the decoded stream's length.
   return new NextResponse(obj.stream, { status: 200, headers });
 }

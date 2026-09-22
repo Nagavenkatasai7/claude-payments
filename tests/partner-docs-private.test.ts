@@ -54,8 +54,8 @@ import {
 } from '@/lib/blob';
 import { POST as uploadPOST } from '@/app/api/partner-application/upload/route';
 
-const PRIVATE_TOKEN = 'vercel_blob_rw_privstore_testtoken';
-const PUBLIC_TOKEN = 'vercel_blob_rw_pubstore_testtoken';
+const PRIVATE_TOKEN = 'test_blob_rw_privstore_testtoken';
+const PUBLIC_TOKEN = 'test_blob_rw_pubstore_testtoken';
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a]); // %PDF-1.4
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
 const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
@@ -194,16 +194,16 @@ describe('isPrivatePartnerDocRef (test 5)', () => {
 });
 
 describe('store pin — the private token names the ONLY host our token may be sent to', () => {
-  it('privateStoreHostFromToken derives <storeId>.private.blob.vercel-storage.com from vercel_blob_rw_<storeId>_<secret>', () => {
-    expect(privateStoreHostFromToken('vercel_blob_rw_Abc123_s3cr3t')).toBe('abc123.private.blob.vercel-storage.com');
+  it('privateStoreHostFromToken derives <storeId>.private.blob.vercel-storage.com from test_blob_rw_<storeId>_<secret>', () => {
+    expect(privateStoreHostFromToken('test_blob_rw_Abc123_s3cr3t')).toBe('abc123.private.blob.vercel-storage.com');
     expect(privateStoreHostFromToken('')).toBeNull();
     expect(privateStoreHostFromToken('vercel_blob_rw')).toBeNull();
-    expect(privateStoreHostFromToken('vercel_blob_rw__s3cr3t')).toBeNull();
-    expect(privateStoreHostFromToken('vercel_blob_rw_evil.com_s3cr3t')).toBeNull();
+    expect(privateStoreHostFromToken('test_blob_rw__s3cr3t')).toBeNull();
+    expect(privateStoreHostFromToken('test_blob_rw_evil.com_s3cr3t')).toBeNull();
   });
 
   it('isOwnPrivateStoreRef accepts only our store host; streamPartnerDoc never calls get for another store', async () => {
-    process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN = 'vercel_blob_rw_abc123_s3cr3t';
+    process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN = 'test_blob_rw_abc123_s3cr3t';
     const ours = `https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf`;
     const foreign = `https://zzz999.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf`;
     expect(isOwnPrivateStoreRef(ours)).toBe(true);
@@ -220,7 +220,7 @@ describe('store pin — the private token names the ONLY host our token may be s
     });
     expect(await streamPartnerDoc(ours)).not.toBeNull();
     expect(getMock).toHaveBeenCalledTimes(1);
-    expect((getMock.mock.calls[0] as [string, Record<string, unknown>])[1].token).toBe('vercel_blob_rw_abc123_s3cr3t');
+    expect((getMock.mock.calls[0] as [string, Record<string, unknown>])[1].token).toBe('test_blob_rw_abc123_s3cr3t');
 
     // With NO token there is no store to pin to: nothing is ever sent.
     delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;

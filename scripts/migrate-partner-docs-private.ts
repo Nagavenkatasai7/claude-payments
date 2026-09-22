@@ -33,7 +33,14 @@ import { del as blobDel, put as blobPut } from '@vercel/blob';
 import { eq } from 'drizzle-orm';
 import { getDb, type Db } from '@/db/client';
 import { partnerApplications } from '@/db/schema';
-import { isLegacyPublicPartnerDocRef, isPartnerDocType, isPrivatePartnerDocRef, sniffDocType, type PartnerDocType } from '@/lib/blob';
+import {
+  isLegacyPublicPartnerDocRef,
+  isPartnerDocType,
+  isPrivatePartnerDocRef,
+  privateStoreHostFromToken,
+  sniffDocType,
+  type PartnerDocType,
+} from '@/lib/blob';
 import type { PartnerApplicationDocument } from '@/lib/types';
 
 export interface MigrateDeps {
@@ -109,6 +116,10 @@ export async function migratePartnerDocsPrivate(
     throw new Error('--apply needs BLOB_READ_WRITE_TOKEN (the old public store, for del) — refusing to run.');
   }
   const { log } = deps;
+  const ownHost = privateStoreHostFromToken(opts.privateToken);
+  if (opts.apply && !ownHost) {
+    throw new Error('PARTNER_DOCS_BLOB_READ_WRITE_TOKEN is not of the vercel_blob_rw_<storeId>_<secret> shape — refusing to run.');
+  }
   const report: MigrateReport = {
     applied: opts.apply, applications: 0, applicationsWithPublicDocs: 0, docsTotal: 0, docsPublic: 0,
     docsMigratable: 0, docsSkipped: 0, docsMigrated: 0, rowsRewritten: 0, deleted: 0, failures: 0, hosts: [],
@@ -167,6 +178,13 @@ export async function migratePartnerDocsPrivate(
         });
         if (!isPrivatePartnerDocRef(result.url, row.partnerRequestId)) {
           throw new Error('private store returned a url that does not bind to the request prefix');
+        }
+        // The staff route will only ever read from the host our token names
+        // (privateStoreHostFromToken). If the store returned any other host the
+        // pin assumption is wrong: abort here, before any row is rewritten or
+        // any public object deleted, instead of discovering it as staff 404s.
+        if (new URL(result.url).hostname !== ownHost) {
+          throw new Error('private store returned a url on a host the token does not name');
         }
         copies.push({
           rowId: row.id,
