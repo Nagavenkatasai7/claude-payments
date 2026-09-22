@@ -40,14 +40,22 @@ const isoNoMs = (iso) => new Date(iso).toISOString().replace('.000Z', 'Z');
 
 // ---------- scrub (port of scrub() in build-corpus.py, plus more token shapes) ----------
 const TOKEN_PATTERNS = [
+  /sk-ant-[A-Za-z0-9_-]{20,}/g, // Anthropic keys (sk-ant-api03-…): the hyphens defeat the generic sk- rule
   /sk-[A-Za-z0-9]{20,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g, // AWS access key ids
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JWTs (base64url header.payload.signature)
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /EAA[A-Za-z0-9]{30,}/g,
   /xox[bp]-[A-Za-z0-9-]{20,}/g,
 ];
+// Bare runs of 10+ digits (phone and card numbers without "+"): keep the last 4. Not after a word
+// char, "/", "=", "#", "." or "+" (ids in URLs such as /actions/runs/35671070038, query values,
+// decimals, and +numbers, which the rule above handles); 1555… test numbers are kept.
+const BARE_DIGITS = /(?<![\w/=#.+])(?!1555)(\d{6,})(\d{4})(?!\w)/g;
 /**
- * Mask phone numbers (except +1555 test numbers), non-org emails and token-like strings.
+ * Mask phone numbers (except +1555 test numbers), bare 10+ digit numbers, non-org emails and
+ * token-like strings (API keys, AWS key ids, JWTs, bearer tokens).
  * @param {unknown} text
  * @returns {string}
  */
@@ -61,6 +69,8 @@ export function scrub(text) {
   );
   s = s.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g, 'Bearer <redacted-token>');
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted-token>');
+  // Last, so a digit run inside a token is already gone with the token.
+  s = s.replace(BARE_DIGITS, (_, a, b) => `${'•'.repeat(a.length)}${b}`);
   return s;
 }
 
@@ -543,63 +553,208 @@ function parseGhPrCommands(cmd) {
   return out;
 }
 
+export const AGENT_DETAIL_MAX = 280;
+const HOUR_MS = 60 * 60 * 1000;
+/** Agent ids as keys: the Agent tool's `tool_response.agentId` and SubagentStop's `agent_id` (an optional `agent-` prefix is ignored). */
+const agentKey = (id) => (typeof id === 'string' ? id.trim().replace(/^agent-/, '') : '');
+const oneLine = (text, max) => scrub(text ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+const isAgentTool = (input) => input.hook_event_name === 'PostToolUse' && (input.tool_name === 'Agent' || input.tool_name === 'Task');
+const contentText = (content) => (Array.isArray(content) ? content.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n') : '');
+
 /**
- * Journal entries for one hook input. Main thread only (no agent_id) for PostToolUse; the
- * Agent prompt is never logged (it may hold sensitive context).
+ * Exit code of a Bash call seen by PostToolUse. Claude Code's Bash tool_response has no exit code
+ * field ({stdout, stderr, interrupted, isImage, noOutputExpected, …}), but PostToolUse fires only
+ * after a tool completes successfully: a command that exits non-zero fires PostToolUseFailure,
+ * with "Exit code N" in `error` (https://code.claude.com/docs/en/hooks.md, PostToolUse and
+ * PostToolUseFailure). So no field means 0, except: interrupted → null (failed);
+ * backgroundTaskId (still running) or returnCodeInterpretation (a non-zero exit Claude Code
+ * read as benign, e.g. grep's "No matches found") → null (unknown). An explicit exit_code wins.
+ * @param {any} tr
+ * @returns {number|null}
+ */
+function bashExitCode(tr) {
+  if (Number.isInteger(tr.exit_code)) return tr.exit_code;
+  if (Number.isInteger(tr.exitCode)) return tr.exitCode;
+  if (tr.interrupted || tr.backgroundTaskId || tr.returnCodeInterpretation) return null;
+  return 0;
+}
+
+/**
+ * True when the hook input needs the agents state (~/.smartremit-ledger/agents.json): a
+ * main-thread Agent launch (no agent_id) or a SubagentStop. Other inputs skip the state file.
+ * @param {any} input
+ * @returns {boolean}
+ */
+export function hookUsesAgents(input) {
+  if (!input || typeof input !== 'object') return false;
+  if (input.hook_event_name === 'SubagentStop') return true;
+  return isAgentTool(input) && !input.agent_id;
+}
+
+/**
+ * Journal entries for one hook input, and the next agents state. Pure: `agents` is never mutated.
+ * - PostToolUse Agent on the MAIN thread (no agent_id): records {agentId, description,
+ *   subagent_type, model, startedAt} under tool_response.agentId and journals "Agent started".
+ *   A foreground run (status "completed") has already stopped, and its SubagentStop fired before
+ *   this hook while its id was unknown, so this one call journals both its start and its finish.
+ * - SubagentStop: journals "Agent finished: <description>" (detail: the scrubbed first 280 chars
+ *   of last_assistant_message) only for a recorded agent not yet finished, then marks it finished.
+ *   A later stop of the same agent only updates lastMessage. Unknown ids (nested helpers,
+ *   Claude Code's internal agents) are skipped.
+ * - PostToolUse Bash on the main thread: `gh pr merge|close` rows.
+ * The Agent prompt (tool_input.prompt, tool_response.prompt) is never logged or stored.
  * @param {any} input
  * @param {string} now
- * @returns {Array<{at: string, kind: string, actor: string, title: string, detail: string, model?: string, refs?: object, result?: string}>}
+ * @param {Record<string, any>} [agents]
+ * @returns {{entries: Array<{at: string, kind: string, actor: string, title: string, detail: string, model?: string, refs?: object, result?: string}>, agents: Record<string, any>, changed: boolean}}
  */
-export function hookToJournalEntries(input, now) {
-  if (!input || typeof input !== 'object') return [];
+export function hookToJournalEntries(input, now, agents = {}) {
+  const none = { entries: [], agents, changed: false };
+  if (!input || typeof input !== 'object') return none;
+
   if (input.hook_event_name === 'SubagentStop') {
-    const detail = scrub(input.last_assistant_message ?? '').replace(/\s+/g, ' ').trim().slice(0, 280);
-    return [{ at: now, kind: 'agent', actor: 'agent', title: `Agent finished (${scrub(input.agent_type || 'agent').slice(0, 60)})`, detail, result: 'ok' }];
+    const id = agentKey(input.agent_id);
+    const rec = id && Object.hasOwn(agents, id) ? agents[id] : null;
+    if (!rec || typeof rec !== 'object') return none;
+    const lastMessage = oneLine(input.last_assistant_message, AGENT_DETAIL_MAX);
+    if (rec.finishedAt) {
+      if (rec.lastMessage === lastMessage) return none;
+      return { entries: [], agents: { ...agents, [id]: { ...rec, lastMessage } }, changed: true };
+    }
+    const entry = {
+      at: now, kind: 'agent', actor: 'agent', ...(rec.model ? { model: rec.model } : {}),
+      title: `Agent finished: ${rec.description || 'agent'}`,
+      detail: lastMessage || `${rec.subagent_type || 'general-purpose'} agent finished`,
+      result: 'ok',
+    };
+    return { entries: [entry], agents: { ...agents, [id]: { ...rec, finishedAt: now, lastMessage } }, changed: true };
   }
-  if (input.hook_event_name !== 'PostToolUse' || input.agent_id) return [];
+
+  if (input.hook_event_name !== 'PostToolUse' || input.agent_id) return none;
   const ti = input.tool_input || {};
   const tr = input.tool_response || {};
-  if (input.tool_name === 'Agent' || input.tool_name === 'Task') {
+
+  if (isAgentTool(input)) {
+    const id = agentKey(tr.agentId);
+    if (id && Object.hasOwn(agents, id)) return none;
+    const description = scrub(ti.description || 'agent').slice(0, 120);
+    const subagentType = scrub(ti.subagent_type || 'general-purpose').slice(0, 60);
+    const model = scrub(tr.resolvedModel || ti.model || ti.subagent_type || '').slice(0, 60);
+    const modelField = model ? { model } : {};
     const finished = tr.status === 'completed';
-    const model = tr.resolvedModel || ti.model || ti.subagent_type || '';
-    const desc = scrub(ti.description || 'agent').slice(0, 120);
-    const secs = finished && tr.totalDurationMs ? `, ${Math.round(tr.totalDurationMs / 1000)} s` : '';
-    return [{
-      at: now, kind: 'agent', actor: 'claude', ...(model ? { model: scrub(model).slice(0, 60) } : {}),
-      title: `${finished ? 'Agent finished' : 'Agent started'}: ${desc}`,
-      detail: `${scrub(ti.subagent_type || 'general-purpose').slice(0, 60)} agent${finished ? '' : ' launched'}${secs}`,
-      result: finished ? 'ok' : 'running',
+    const ms = Number.isFinite(tr.totalDurationMs) && tr.totalDurationMs > 0 ? tr.totalDurationMs : 0;
+    const startedAt = finished && ms && !Number.isNaN(Date.parse(now)) ? new Date(Date.parse(now) - ms).toISOString() : now;
+    const entries = [{
+      at: startedAt, kind: 'agent', actor: 'claude', ...modelField,
+      title: `Agent started: ${description}`,
+      detail: `${subagentType} agent launched${finished ? ' (foreground)' : ''}`,
+      result: 'running',
     }];
+    const rec = { agentId: id, description, subagent_type: subagentType, ...modelField, startedAt };
+    if (finished) {
+      const lastMessage = oneLine(contentText(tr.content), AGENT_DETAIL_MAX);
+      entries.push({
+        at: now, kind: 'agent', actor: 'agent', ...modelField,
+        title: `Agent finished: ${description}`,
+        detail: lastMessage || `${subagentType} agent finished${ms ? `, ${Math.round(ms / 1000)} s` : ''}`,
+        result: 'ok',
+      });
+      Object.assign(rec, { finishedAt: now, lastMessage });
+    }
+    return id ? { entries, agents: { ...agents, [id]: rec }, changed: true } : { entries, agents, changed: false };
   }
+
   if (input.tool_name === 'Bash') {
-    const code = Number.isInteger(tr.exit_code) ? tr.exit_code : Number.isInteger(tr.exitCode) ? tr.exitCode : null;
-    return parseGhPrCommands(String(ti.command ?? '')).map(({ verb, pr }) => ({
+    const code = bashExitCode(tr);
+    const entries = parseGhPrCommands(String(ti.command ?? '')).map(({ verb, pr }) => ({
       at: now, kind: 'pr', actor: 'claude',
       title: `gh pr ${verb}${pr ? ` #${pr}` : ''} run in a session`,
       detail: `Exit ${code ?? 'unknown'}. GitHub records the ${verb} itself; this row records who ran it and when.`,
       ...(pr ? { refs: { pr: [pr] } } : {}),
       result: code === 0 ? 'ok' : code === null ? (tr.interrupted ? 'failed' : 'info') : 'failed',
     }));
+    return { entries, agents, changed: false };
   }
-  return [];
+  return none;
 }
 
-export const SYNC_DUE_JOURNAL = 'Ledger sync due: new journal entries. Run the tracker-sync skill (automated engine) now, then finish.';
+/**
+ * The agents state without stale records: finished agents go 24 h after they finished,
+ * unfinished ones 7 days after they started (a background agent can run for hours).
+ * @param {any} agents
+ * @param {string} now
+ * @param {{finishedTtlMs?: number, openTtlMs?: number}} [opts]
+ * @returns {Record<string, any>}
+ */
+export function pruneAgents(agents, now, { finishedTtlMs = 24 * HOUR_MS, openTtlMs = 7 * 24 * HOUR_MS } = {}) {
+  if (!agents || typeof agents !== 'object' || Array.isArray(agents)) return {};
+  const t = time(now);
+  const out = {};
+  for (const [id, rec] of Object.entries(agents)) {
+    if (!rec || typeof rec !== 'object') continue;
+    const age = rec.finishedAt ? t - time(rec.finishedAt) : t - time(rec.startedAt);
+    if (age <= (rec.finishedAt ? finishedTtlMs : openTtlMs)) out[id] = rec;
+  }
+  return out;
+}
+
+/** Journal kinds the owner wants on the page promptly: an unflushed one makes the Stop hook block at once. */
+export const URGENT_JOURNAL_KINDS = Object.freeze(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step', 'verify']);
+/**
+ * A session `gh pr merge` row that succeeded (kind pr, result ok, as hookToJournalEntries writes
+ * it): urgent like a merge row. The main-moved rule alone cannot catch it when ls-remote fails.
+ * @param {any} o a parsed journal line
+ */
+export const isSessionMerge = (o) => o?.kind === 'pr' && o.result === 'ok' && /^gh pr merge\b/.test(String(o.title ?? ''));
+/** Routine journal entries wait until the last sync is older than this. */
+export const SYNC_STALE_MS = 10 * 60 * 1000;
+const SYNC_DUE_TAIL = 'Run the tracker-sync skill (automated engine) now, then finish.';
+
+/**
+ * The urgent kinds (URGENT_JOURNAL_KINDS) among journal lines, deduped and sorted; a successful
+ * session `gh pr merge` row counts as 'merge'. Bad lines are ignored.
+ * @param {string[]|undefined} lines
+ * @returns {string[]}
+ */
+export function urgentJournalKinds(lines) {
+  const found = new Set();
+  for (const line of Array.isArray(lines) ? lines : []) {
+    try {
+      const o = JSON.parse(line);
+      if (URGENT_JOURNAL_KINDS.includes(o?.kind)) found.add(o.kind);
+      else if (isSessionMerge(o)) found.add('merge');
+    } catch { /* not JSON: sync.mjs warns about it; it cannot make a sync urgent */ }
+  }
+  return [...found].sort();
+}
 
 /**
  * The ledger-sync-due Stop hook's decision. Blocks (once; stop_hook_active short-circuits) when
- * the journal has unflushed bytes, or main moved since the last recorded sync. Never blocks in
- * the cloud routine, when ls-remote failed (remoteMainSha null) or when no sync was recorded yet.
- * @param {{stopHookActive?: boolean, remote?: boolean, disabled?: boolean, journalSize: number, flushedOffset: number, remoteMainSha?: string|null, lastSyncMainSha?: string|null}} args
+ * (c) an unflushed journal line is an urgent kind (URGENT_JOURNAL_KINDS) or a successful session
+ *     `gh pr merge` (isSessionMerge), or
+ * (b) the journal has unflushed bytes and the last sync (last-sync.json `at`) is more than
+ *     10 minutes old or unknown, or
+ * (a) main moved since the last recorded sync (remoteMainSha from ls-remote vs lastSyncMainSha).
+ * The journal checks need no network, so the hook calls this with remoteMainSha null first and
+ * runs ls-remote only when that returns null. Never blocks in the cloud routine, when disabled,
+ * or on (a) when ls-remote failed (remoteMainSha null) or no sync was recorded yet.
+ * @param {{stopHookActive?: boolean, remote?: boolean, disabled?: boolean, journalSize: number, flushedOffset: number, pendingLines?: string[], lastSyncAt?: string|null, now: string, remoteMainSha?: string|null, lastSyncMainSha?: string|null}} args
  * @returns {{decision: 'block', reason: string} | null}
  */
-export function stopDecision({ stopHookActive, remote, disabled, journalSize, flushedOffset, remoteMainSha, lastSyncMainSha }) {
+export function stopDecision({ stopHookActive, remote, disabled, journalSize, flushedOffset, pendingLines = [], lastSyncAt, now, remoteMainSha, lastSyncMainSha }) {
   if (stopHookActive || remote || disabled) return null;
-  if (journalSize > flushedOffset) return { decision: 'block', reason: SYNC_DUE_JOURNAL };
+  if (journalSize > flushedOffset) {
+    const urgent = urgentJournalKinds(pendingLines);
+    if (urgent.length) return { decision: 'block', reason: `Ledger sync due: the journal holds a new ${urgent.join(', ')} entry. ${SYNC_DUE_TAIL}` };
+    const last = typeof lastSyncAt === 'string' ? Date.parse(lastSyncAt) : NaN;
+    if (Number.isNaN(last)) return { decision: 'block', reason: `Ledger sync due: new journal entries and no sync time on record. ${SYNC_DUE_TAIL}` };
+    const age = time(now) - last;
+    if (age > SYNC_STALE_MS) return { decision: 'block', reason: `Ledger sync due: new journal entries and the last sync was ${Math.floor(age / 60_000)} min ago. ${SYNC_DUE_TAIL}` };
+  }
   const last = typeof lastSyncMainSha === 'string' ? lastSyncMainSha.toLowerCase() : '';
   const head = typeof remoteMainSha === 'string' ? remoteMainSha.toLowerCase() : '';
   if (last.length >= 7 && /^[0-9a-f]{40}$/.test(head) && !head.startsWith(last)) {
-    return { decision: 'block', reason: `Ledger sync due: main moved to ${head.slice(0, 7)} since the last sync (${last.slice(0, 7)}). Run the tracker-sync skill (automated engine) now, then finish.` };
+    return { decision: 'block', reason: `Ledger sync due: main moved to ${head.slice(0, 7)} since the last sync (${last.slice(0, 7)}). ${SYNC_DUE_TAIL}` };
   }
   return null;
 }
