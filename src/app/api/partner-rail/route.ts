@@ -99,10 +99,11 @@ export async function POST(req: NextRequest) {
   // destination (composePayoutDestination puts the account last; IN reads
   // "HDFC0001234 000000000000") — is all zeros with at least 6 digits still
   // acks, then reports `failed` / `account_unreachable` on the same delayed,
-  // deduped callback row. Bank rails only: a USDC address is hex, never an
-  // account number. Any other account settles as before.
+  // deduped callback row. The BANK rail only: a USDC address is hex and a UPI
+  // VPA ("000000@ybl") is a handle — neither is an account number. Any other
+  // account settles as before.
   const unreachable =
-    isUnreachableAccount(body.payout?.destination) && (body.payout?.rail ?? 'bank') !== 'usdc';
+    isUnreachableAccount(body.payout?.destination) && (body.payout?.rail ?? 'bank') === 'bank';
   await createOutboxRepo(getDb()).enqueue(
     'rail.callback',
     {

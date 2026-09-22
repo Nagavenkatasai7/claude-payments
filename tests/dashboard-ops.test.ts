@@ -496,6 +496,16 @@ describe('dismissRefund (customer-requested → declined)', () => {
     expect(await outboxRows()).toHaveLength(0);
   });
 
+  it('APPENDS its note after an existing one (fix 8 review S6): a rail-failure note is never clobbered', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({
+      id: 'dis3', status: 'cancelled', fundingRef: 'mockfund-dis3', refundStatus: 'requested',
+      adminNote: 'rail failed: account_unreachable',
+    }));
+    await dismissRefund(db, 'dis3');
+    expect((await store.getTransfer('dis3'))?.adminNote).toBe('rail failed: account_unreachable | refund request dismissed');
+  });
+
   it('refuses any state but requested (in-flight refunds cannot be dismissed)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({

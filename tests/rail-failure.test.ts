@@ -24,7 +24,7 @@ function fixture(over: Partial<Transfer> = {}): Transfer {
   return {
     id: 'rf_t1', phone: '15551230000', amountUsd: 200, feeUsd: 5, totalChargeUsd: 205,
     fxRate: 83, amountInr: 16600, recipientName: 'Anita', recipientPhone: '919876543210',
-    payoutMethod: 'bank', payoutDestination: 'HDFC0001234 000000000000', fundingMethod: 'card',
+    payoutMethod: 'bank', payoutDestination: 'HDFC0001234 000000000000', fundingMethod: 'credit_card',
     status: 'paid', complianceStatus: 'cleared', complianceReasons: [],
     createdAt: minsAgo(3), paidAt: minsAgo(2), partnerId: 'acme',
     sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
@@ -145,7 +145,8 @@ describe('handleRailFailure — funding legs', () => {
   });
 
   it('PARTNER-FUNDED (partner-API confirm: no fundingRef, not pulled): cancelled, refund stays none, NO refund row, contact variant, alert says partner-funded', async () => {
-    await store.saveTransfer(fixture({ fundingRef: undefined }));
+    // bank_transfer is what partner-api-service.ts writes on a partner-API mint.
+    await store.saveTransfer(fixture({ fundingRef: undefined, fundingMethod: 'bank_transfer' }));
     const r = await handleRailFailure(db, 'rf_t1', FAILED);
     expect(r).toEqual({ kind: 'failed', refundStarted: false });
     expect(await load()).toMatchObject({ status: 'cancelled', refundStatus: 'none' });

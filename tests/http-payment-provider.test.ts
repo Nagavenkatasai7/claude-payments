@@ -179,6 +179,13 @@ describe('parseRailFailure (pure)', () => {
     expect(parseRailFailure({ status: 'returned', reason: 'account_unreachable' }))
       .toEqual({ code: 'returned', reason: 'account_unreachable' });
   });
+  it('strips Unicode format characters too: bidi overrides/isolates, line/paragraph separators, zero-width joiners', () => {
+    const reason = 'ok\u202Eevil\u202C \u2066x\u2069\u2028y\u2029z\u200D\u200B\uFEFFend';
+    const r = parseRailFailure({ status: 'failed', reason });
+    expect(r?.reason).toBe('okevil xyzend');
+    expect(r?.reason).not.toMatch(/\p{Cf}/u);
+  });
+
   it('null for forward statuses, unknown statuses and non-objects', () => {
     expect(parseRailFailure({ status: 'paid_out' })).toBeNull();
     expect(parseRailFailure({ status: 'refunded' })).toBeNull();

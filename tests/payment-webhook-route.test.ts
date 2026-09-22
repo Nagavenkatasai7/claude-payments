@@ -338,6 +338,19 @@ describe('POST /api/payment-webhook — rail failure (fix 8)', () => {
     expect(updateTransferFromWebhook).not.toHaveBeenCalled();
   });
 
+  it('AT-LEAST-ONCE: when the handler throws (db down) the POST rejects — a 500 to the rail, which retries the signed callback', async () => {
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure });
+    handleRailFailure.mockRejectedValueOnce(new Error('db down'));
+    await expect(post('simulator', failedBody, sig(failedBody, 'owner_whk'))).rejects.toThrow('db down');
+    expect(handleRailFailure).toHaveBeenCalledTimes(1);
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    // The rail's retry lands on the idempotent claim and succeeds.
+    expect((await post('simulator', failedBody, sig(failedBody, 'owner_whk'))).status).toBe(200);
+    expect(handleRailFailure).toHaveBeenCalledTimes(2);
+  });
+
   it('a REPLAYED signed failure dispatches again (the handler is the idempotent claim) and still answers 200', async () => {
     fixtures.transfersById['wh_1'] = paidTransfer;
     fixtures.integrationsByPartner['owner'] = ownerInteg;

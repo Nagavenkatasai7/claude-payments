@@ -56,17 +56,23 @@ export const RAIL_FAILURE_REASON_MAX = 200;
 /**
  * fix 8 (money-02 / rail-02): parse a rail's `failed` / `returned` callback
  * (case-insensitive) into a bounded RailFailure. The optional `reason` is
- * UNTRUSTED text: control characters (incl. newlines) are stripped, it is
- * trimmed and capped at RAIL_FAILURE_REASON_MAX; missing / non-string / empty
- * ⇒ 'unspecified'. Forward statuses and anything unknown ⇒ null.
+ * UNTRUSTED text: control characters (incl. newlines) AND Unicode format
+ * characters (\p{Cf}: bidi overrides/isolates U+202A–202E / U+2066–2069, zero-
+ * width joiners, BOM) plus the line/paragraph separators U+2028/2029 are
+ * stripped, so a reason can never re-order or hide text in an ops alert or a
+ * staff note; it is then trimmed and capped at RAIL_FAILURE_REASON_MAX;
+ * missing / non-string / empty ⇒ 'unspecified'. Forward statuses and anything
+ * unknown ⇒ null.
  */
+const RAIL_REASON_STRIP = /[\u0000-\u001f\u007f\u2028\u2029]|\p{Cf}/gu;
+
 export function parseRailFailure(body: unknown): RailFailure | null {
   if (!body || typeof body !== 'object') return null;
   const b = body as Record<string, unknown>;
   const status = typeof b.status === 'string' ? b.status.toLowerCase() : '';
   if (status !== 'failed' && status !== 'returned') return null;
   const raw = typeof b.reason === 'string' ? b.reason : '';
-  const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, RAIL_FAILURE_REASON_MAX);
+  const cleaned = raw.replace(RAIL_REASON_STRIP, '').trim().slice(0, RAIL_FAILURE_REASON_MAX);
   return { code: status, reason: cleaned === '' ? 'unspecified' : cleaned };
 }
 

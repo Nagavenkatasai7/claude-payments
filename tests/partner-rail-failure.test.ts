@@ -101,6 +101,11 @@ describe('partner-rail — the all-zero-account failure mode (fix 8)', () => {
     expect((await railCallbacks())[0].payload).toEqual({ reference: 'u_t1', partner_id: 'default' });
   });
 
+  it('a UPI VPA that happens to start with zeros (000000@ybl) is NOT a sentinel: only the bank rail has an account number', async () => {
+    expect((await postInstruction(settle('upi_t1', '000000@ybl', 'upi'))).status).toBe(200);
+    expect((await railCallbacks())[0].payload).toEqual({ reference: 'upi_t1', partner_id: 'default' });
+  });
+
   it('a reverse instruction never schedules a callback, sentinel or not', async () => {
     const res = await postInstruction({ reference: 'reverse-zz_t1', partner_id: 'default', action: 'reverse', payout: { rail: 'bank', destination: ZERO_DEST } });
     expect(res.status).toBe(200);
