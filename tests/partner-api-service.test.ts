@@ -266,16 +266,32 @@ describe('partner-api-service: createTransaction', () => {
     if (r.ok) expect(r.data).toMatchObject({ destination_country: 'IN', destination_currency: 'INR' });
   });
 
-  it('an UNKNOWN destination_country is a 400 naming the list, and nothing is minted (Program-Fix 33, owner decision 2)', async () => {
-    const { deps, store } = await harness();
-    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'ZZ' }));
+  it('an UNKNOWN destination_country is a 400 naming the list BEFORE the claim and the customer write; nothing is minted (Program-Fix 33, owner decision 2)', async () => {
+    const { deps, store, customerStore } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'ZZ', sender: { phone: '15557770002', kyc_status: 'verified' } }));
     expect(r).toMatchObject({ ok: false, status: 400 });
     if (!r.ok) for (const code of ['US', 'IN', 'HK', 'MX']) expect(r.error).toContain(code);
     expect(await store.listTransfers()).toHaveLength(0);
-    // A corrected retry with the SAME key succeeds — the key was never bound.
+    // Edge validation: the key is NOT bound and no sender row was written (the
+    // same invariant every other body check holds — security review of #33).
+    expect(await createIdempotencyRepo(deps.db).find('acme', 'idem-dest-bad')).toBeNull();
+    expect(await customerStore.getCustomer('acme', '15557770002')).toBeNull();
+    // A corrected retry with the SAME key mints normally.
     const ok = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'MX' }));
     expect(ok).toMatchObject({ ok: true, status: 201 });
     if (ok.ok) expect(ok.data).toMatchObject({ destination_country: 'MX', destination_currency: 'MXN' });
+  });
+
+  it('a NON-STRING destination_country (ISO numeric 484, an array) is a 400 too — never treated as absent (Program-Fix 33)', async () => {
+    const { deps, store } = await harness();
+    for (const [key, destination_country] of [['idem-dest-num', 484], ['idem-dest-arr', ['MX']]] as const) {
+      const r = await createTransaction(deps, DELEGATED, 'pk_1', key, txBody({ destination_country }));
+      expect(r, key).toMatchObject({ ok: false, status: 400 });
+      expect(await createIdempotencyRepo(deps.db).find('acme', key), key).toBeNull();
+    }
+    expect(await store.listTransfers()).toHaveLength(0);
+    const q = await createQuote(deps, DELEGATED, { amount_source: 500, destination_country: 484 });
+    expect(q).toMatchObject({ ok: false, status: 400 });
   });
 
   it('createQuote: an UNKNOWN destination_country is a 400, never a silent INR quote', async () => {

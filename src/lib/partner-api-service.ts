@@ -136,9 +136,9 @@ const SUPPORTED_DESTINATIONS = (Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY) as 
 const DESTINATION_COUNTRY_400 = `destination_country must be one of: ${destinationListText()}.`;
 
 // Resolve a body-supplied destination_country → its home currency. Absent ⇒ the
-// legacy IN/INR default (back-compat). Unknown ⇒ null — the caller's 400
-// (Program-Fix 33: an unknown destination is an error, never India).
-function resolveDestination(requested: string): { country: CountryCode; currency: CurrencyCode } | null {
+// legacy IN/INR default (back-compat). Unknown or non-string ⇒ null — the
+// caller's 400 (Program-Fix 33: an unknown destination is an error, never India).
+function resolveDestination(requested: unknown): { country: CountryCode; currency: CurrencyCode } | null {
   const parsed = parseDestinationCountry(requested);
   if (parsed === null) return null;
   const country = parsed ?? DEFAULT_DESTINATION_COUNTRY;
@@ -195,10 +195,11 @@ export async function createQuote(
   );
   // Callers may pass either destination_country (resolved to its home currency)
   // or destination_currency directly. destination_country takes precedence when
-  // present; an unknown one is the caller's 400 (Program-Fix 33 — never a silent
-  // fall-through to INR); absent ⇒ the legacy destination_currency path
-  // (default INR) is unchanged.
-  const destCountryParsed = parseDestinationCountry(str(body.destination_country));
+  // present; an unknown or non-string one is the caller's 400 (Program-Fix 33 —
+  // never a silent fall-through to INR; the RAW value is parsed, not str()-
+  // coerced); absent ⇒ the legacy destination_currency path (default INR) is
+  // unchanged.
+  const destCountryParsed = parseDestinationCountry(body.destination_country);
   if (destCountryParsed === null) return err(400, DESTINATION_COUNTRY_400);
   const destByCountry = destCountryParsed ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryParsed] : undefined;
   // str() trims; upper-cased like pushPartnerRate so "gbp" quotes exactly like "GBP".
@@ -373,6 +374,15 @@ export async function createTransaction(
   if (payoutDestination.trim() === '') {
     return err(400, 'beneficiary payout_destination is required.');
   }
+  // Program-Fix 33: an absent destination_country defaults to IN/INR
+  // (back-compat); an unknown or non-string one is a 400 HERE — above the
+  // customer write and the Idempotency-Key claim, like every other body check,
+  // so a corrected retry under the same key mints normally. The RAW body value
+  // is parsed (not str()-coerced) so a numeric or array value is refused, never
+  // treated as absent. NOTE compliance is SOURCE-gated — the destination is
+  // never fed into screening.
+  const destination = resolveDestination(body.destination_country);
+  if (!destination) return err(400, DESTINATION_COUNTRY_400);
 
   // The LAST step before the claim, AFTER every body check (Task 2 Step 28
   // later inserts its beneficiary name / destination edge validation ABOVE this
@@ -397,12 +407,6 @@ export async function createTransaction(
   // senderPhone is required here (validated above), so an Indian sender with no
   // source_currency auto-detects INR; the helper never throws (→ no 500).
   const sourceCurrency = apiSourceCurrency(partner, str(body.source_currency) || undefined, senderPhone);
-  // Any-to-any destination: an absent destination_country defaults to IN/INR
-  // (back-compat); an unknown one is a 400 before the Idempotency-Key is bound
-  // (Program-Fix 33). NOTE compliance is SOURCE-gated — the destination is
-  // never fed into screening.
-  const destination = resolveDestination(str(body.destination_country));
-  if (!destination) return err(400, DESTINATION_COUNTRY_400);
   const requiresKyc = sendGateActive(partner); // 'delegated' ⇒ false; sanctions still run
   const senderKycStatus = (str(sender.kyc_status) || 'not_started') as KycStatus;
 
