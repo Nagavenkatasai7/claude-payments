@@ -11,6 +11,7 @@ import { sql } from 'drizzle-orm';
 import { STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STUCK_REFUND_MINUTES, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { LEASE_MS, createOutboxRepo } from '@/db/repos/outbox-repo';
 import { cadenceRedis, readLastCronAt, CRON_QUIET_MINUTES, DRAIN_SLA_MINUTES } from '@/lib/worker-cadence';
+import { scrub } from '@/lib/log';
 
 type Row = Record<string, unknown>;
 
@@ -61,7 +62,7 @@ async function main() {
   try {
     lastCronAt = await readLastCronAt(cadenceRedis());
   } catch (e) {
-    cronNote = ` (redis unavailable: ${e instanceof Error ? e.message : String(e)})`;
+    cronNote = ` (redis unavailable: ${scrub(e instanceof Error ? e.message : String(e))})`;
   }
   const lastCronMin = lastCronAt ? Math.round((Date.now() - lastCronAt.getTime()) / 60_000) : null;
   const cronQuiet = lastCronMin === null || lastCronMin > CRON_QUIET_MINUTES;
