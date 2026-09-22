@@ -64,6 +64,7 @@ export function PayForm({
   recipientName,
   fundingMethod,
   summary,
+  savedAccountLabel = null,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -71,7 +72,10 @@ export function PayForm({
   recipientName: string;
   fundingMethod: string;
   summary: PaySummary;
+  savedAccountLabel?: string | null;
 }) {
+  // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
+  const [editBankDetails, setEditBankDetails] = useState(false);
   // B2B ACH-pull (NON-CUSTODIAL): the payer authorizes an ACH debit of their
   // business bank — the licensed partner pulls the funds, SmartRemit never
   // captures. Collect routing / account / account type, then OTP-confirm + pay.
@@ -85,11 +89,19 @@ export function PayForm({
     );
   }
   // Scheduled / re-opened / cron links already carry the recipient's bank
-  // details — keep today's single-step, no-body POST exactly as before.
-  if (!needsBankDetails) {
-    return <SimplePayForm transferId={transferId} />;
+  // details — keep today's single-step, no-body POST exactly as before. fix 6:
+  // a prefilled consumer destination also offers "Edit bank details", which
+  // switches to the two-step form below.
+  if (!needsBankDetails && !editBankDetails) {
+    return (
+      <SimplePayForm
+        transferId={transferId}
+        savedAccountLabel={savedAccountLabel}
+        onEditBankDetails={savedAccountLabel ? () => setEditBankDetails(true) : undefined}
+      />
+    );
   }
-  // Cold-start draft: the sender enters the recipient's bank details here.
+  // Cold-start draft (or "Edit bank details"): the sender enters the recipient's bank details here.
   return (
     <BankDetailsPayForm
       transferId={transferId}
@@ -173,8 +185,12 @@ function OtpFields({
 
 function SimplePayForm({
   transferId,
+  savedAccountLabel = null,
+  onEditBankDetails,
 }: {
   transferId: string;
+  savedAccountLabel?: string | null;
+  onEditBankDetails?: () => void;
 }) {
   const [status, setStatus] = useState<Status>('idle');
   const [code, setCode] = useState('');
@@ -235,10 +251,23 @@ function SimplePayForm({
 
   return (
     <form onSubmit={handleSubmit}>
+      {savedAccountLabel && (
+        <div className={panelClasses}>
+          <div className={lineClasses}>
+            <span className="text-[#8696a0]">Paying to</span>
+            <span>{savedAccountLabel}</span>
+          </div>
+        </div>
+      )}
       <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
       <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
+      {onEditBankDetails && (
+        <button type="button" className={secondaryBtnClasses} onClick={onEditBankDetails} disabled={status === 'paying'}>
+          Edit bank details
+        </button>
+      )}
       {status === 'error' && !otpError && (
         <p className={formErrorClasses}>Something went wrong. Please try again.</p>
       )}

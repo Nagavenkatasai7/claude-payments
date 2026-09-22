@@ -9,6 +9,10 @@ import {
   composeUsdcDestination,
   usdcAddressFromDestination,
   payoutMethodLabel,
+  maskAccountDisplay,
+  isMaskedDestination,
+  ACCOUNT_ON_FILE_PLACEHOLDER,
+  NO_BANK_DETAILS_PLACEHOLDER,
 } from '@/lib/payout-format';
 import type { CountryCode } from '@/lib/types';
 
@@ -374,5 +378,82 @@ describe('payoutMethodLabel — receipt/admin payout wording', () => {
   it('bank and upi keep the existing uppercase rendering (byte-unchanged)', () => {
     expect(payoutMethodLabel('bank')).toBe('BANK');
     expect(payoutMethodLabel('upi')).toBe('UPI');
+  });
+});
+
+describe('isMaskedDestination — display placeholders are never payout accounts (fix 6 / ctx-01)', () => {
+  it('is TRUE for every mask the codebase renders and for common mask glyph runs', () => {
+    for (const v of [
+      '****9012',                                     // tools.maskAccount / mappers.rowToTransfer default read
+      '****',                                         // a mask with no digits
+      '********',                                     // the default read of a row POISONED with '****' (mappers.last4('****') === '****')
+      '  ****9012 ',                                  // whitespace never launders it
+      'bank a/c ****9012',                            // the approve-card "To:" line (tools.maskDestination)
+      'account ****6789',                             // the free-text form prompt.ts:87-88 tells the model to write
+      '***9012',
+      '•••• 9012',
+      '●●●●9012',
+      maskAccountDisplay('HDFC0001234 123456789012'), // payout-format's own staff mask
+      ACCOUNT_ON_FILE_PLACEHOLDER,
+      'Account On File',
+      NO_BANK_DETAILS_PLACEHOLDER,
+    ]) {
+      expect(isMaskedDestination(v), v).toBe(true);
+    }
+  });
+
+  it('is FALSE for real composed bank, US routing+account, IBAN, UPI and USDC destinations', () => {
+    for (const v of [
+      composePayoutDestination('IN', { accountNumber: '123456789012', ifsc: 'HDFC0001234' }),
+      '021000021 12345678901',
+      'AE070331234567890123456',
+      'mom@okhdfc',
+      composeUsdcDestination('0x' + 'a'.repeat(40)),
+    ]) {
+      expect(isMaskedDestination(v), v).toBe(false);
+    }
+  });
+
+  it("is FALSE for '' / whitespace / null / undefined — empty means 'collect on the pay page', which each caller handles", () => {
+    expect(isMaskedDestination('')).toBe(false);
+    expect(isMaskedDestination('   ')).toBe(false);
+    expect(isMaskedDestination(null)).toBe(false);
+    expect(isMaskedDestination(undefined)).toBe(false);
+  });
+});
+
+describe('validatePayoutFields — a masked value is never composed into a destination (fix 10 review S1)', () => {
+  it('refuses a mask-glyph run in any field (digit-rule or free-form) instead of composing it', () => {
+    const cases: Array<[CountryCode, Record<string, string>, string]> = [
+      ['IN', { accountNumber: '***123456', ifsc: 'HDFC0001234' }, 'accountNumber'],
+      ['IN', { accountNumber: '•••• 123456', ifsc: 'HDFC0001234' }, 'accountNumber'],
+      ['MX', { clabe: '***012345678901234567' }, 'clabe'],
+      ['US', { routingNumber: '***021000021', accountNumber: '12345678' }, 'routingNumber'],
+      ['CA', { transitNumber: '***12', institutionNumber: '001', accountNumber: '1234567' }, 'transitNumber'],
+    ];
+    for (const [country, fields, key] of cases) {
+      const r = validatePayoutFields(country, fields);
+      expect(r.ok, JSON.stringify(fields)).toBe(false);
+      if (r.ok) throw new Error('expected fail');
+      expect(r.errors[key], JSON.stringify(fields)).toBeDefined();
+    }
+  });
+
+  it('a digit-rule field accepts digits plus space / hyphen / dot separators only', () => {
+    const r = validatePayoutFields('US', { routingNumber: '021000021', accountNumber: '1234x5678' });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail');
+    expect(r.errors.accountNumber).toBeDefined();
+  });
+
+  it('composes digit-rule fields from their digits: separators never reach the stored destination', () => {
+    const gb = validatePayoutFields('GB', { sortCode: '12-34-56', accountNumber: '1234 5678' });
+    expect(gb.ok && gb.payoutDestination).toBe('123456 12345678');
+    const nz = validatePayoutFields('NZ', { accountNumber: '01-0123-0123456-00' });
+    expect(nz.ok && nz.payoutDestination).toBe('010123012345600');
+    const inr = validatePayoutFields('IN', { accountNumber: ' 1234 5678 9012 ', ifsc: 'HDFC0001234' });
+    expect(inr.ok && inr.payoutDestination).toBe('HDFC0001234 123456789012');
+    const mx = validatePayoutFields('MX', { clabe: '0123 4567 8901 2345 67' });
+    expect(mx.ok && mx.payoutDestination).toBe('012345678901234567');
   });
 });

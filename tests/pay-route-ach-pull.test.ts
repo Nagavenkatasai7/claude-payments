@@ -291,3 +291,33 @@ describe('pay route — B2B ACH-pull (non-custodial: NO funds capture)', () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 });
+
+describe('pay route — the ACH mandate bind is one guarded column write (fix 6 / ctx-01)', () => {
+  it('binding the mandate writes ONLY ach_token_ref: the encrypted legal name survives the masked read', async () => {
+    await store.saveTransfer(makeB2bTransfer({ id: 'bl1', recipientLegalName: 'Acme Supplies Private Limited' }));
+    const res = await postAch('bl1');
+    expect(res.status).toBe(200);
+    const full = await store.getTransferDecrypted('bl1');
+    expect(full?.status).toBe('paid');
+    expect(full?.achTokenRef).toMatch(/^ach_[0-9a-f]+$/);
+    expect(full?.recipientLegalName).toBe('Acme Supplies Private Limited');
+  });
+
+  it('RACE: a concurrent POST binds its mandate and settles between our read and our bind → current truth; never reverted, never settled twice', async () => {
+    await store.saveTransfer(makeB2bTransfer({ id: 'bl2' }));
+    const realGetCustomer = customerStore.getCustomer.bind(customerStore);
+    // getCustomer runs after the route's transfer read and before the bind (the owner KYB read).
+    vi.spyOn(customerStore, 'getCustomer').mockImplementationOnce(async (...a: Parameters<typeof customerStore.getCustomer>) => {
+      await db.execute(sql`UPDATE transfers SET status = 'paid', ach_token_ref = 'ach_first' WHERE id = 'bl2'`); // the other POST won
+      return realGetCustomer(...a);
+    });
+    const res = await postAch('bl2');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: 'paid' });
+    const row = await store.getTransfer('bl2');
+    expect(row?.status).toBe('paid');
+    expect(row?.achTokenRef).toBe('ach_first');
+    expect(await outboxCount()).toBe(0); // no second settlement enqueued
+    expect(capture).not.toHaveBeenCalled();
+  });
+});

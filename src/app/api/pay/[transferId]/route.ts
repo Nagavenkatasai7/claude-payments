@@ -11,6 +11,8 @@ import { isB2bSendVerified, isSendVerified, sendGateActive } from '@/lib/kyc-gat
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
 import { getFundingProvider } from '@/lib/providers/funding-provider';
 import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
@@ -20,7 +22,7 @@ import { settleOrHold } from '@/lib/settlement';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
 import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
-import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
+import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
 import { draftTenant } from '@/lib/legacy-tenant';
@@ -71,6 +73,63 @@ function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
 }
 
 /**
+ * fix 6 (ctx-01): the pay page's ONLY payout write on an existing transfer — one
+ * transaction: the guarded, column-targeted UPDATE (transfer-repo
+ * setPayoutIfEditable: awaiting_payment, uncharged, consumer, this tenant, not
+ * partner-API-minted) + a `transfer.payout_edit` audit row carrying the id and
+ * last-4 only. Returns the updated (masked) row, or null when a guard failed.
+ */
+async function writePayoutIfEditable(transfer: Transfer, bankDetails: BankDetails): Promise<Transfer | null> {
+  const destination = bankDetails.payoutDestination ?? '';
+  return getDb().transaction(async (tx) => {
+    const updated = await createTransferRepo(tx).setPayoutIfEditable(transfer.id, transfer.partnerId, {
+      payoutMethod: bankDetails.payoutMethod ?? 'bank',
+      payoutDestination: destination,
+    });
+    if (updated) {
+      await createAuditRepo(tx).record({
+        partnerId: transfer.partnerId,
+        actor: 'pay-page',
+        actorType: 'system',
+        action: 'transfer.payout_edit',
+        subjectId: transfer.id,
+        meta: { last4: accountLast4(destination) },
+      });
+    }
+    return updated;
+  });
+}
+
+/**
+ * fix 6 (ctx-01): bind the payer's opaque ACH mandate to a B2B ach_pull transfer
+ * through ONE guarded, column-targeted UPDATE (transfer-repo setAchTokenIfAbsent:
+ * this tenant, awaiting_payment, b2b, no token yet) — never a whole-row re-save
+ * of a stale read, which rewrote status and ach_token_ref from that read (a
+ * concurrent POST's paid flip could be reverted and settled twice) and, when the
+ * read carried no mask, wrote recipient_legal_name_enc = NULL (the default read
+ * omits it). A token already bound — ours from a crash-then-retry, or a
+ * concurrent POST's — is kept: the FIRST mandate wins. Returns the row to
+ * settle, or the response to send (current truth).
+ */
+async function bindAchToken(
+  store: ReturnType<typeof getStore>,
+  transfer: Transfer,
+  token: string,
+): Promise<Transfer | NextResponse> {
+  if ((transfer.achTokenRef ?? '').trim() !== '') return transfer;
+  const bound = await createTransferRepo(getDb()).setAchTokenIfAbsent(transfer.id, transfer.partnerId, token);
+  if (bound) return bound;
+  const current = await store.getTransfer(transfer.id);
+  if (!current) return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
+  const refused = refuseUnlessAwaiting(current);
+  if (refused) return refused;
+  if ((current.achTokenRef ?? '').trim() !== '') return current;
+  // Awaiting, token-less, yet the guarded write matched nothing: not a B2B row
+  // (callers only reach here with transferType 'b2b'). Never write around it.
+  return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 409 });
+}
+
+/**
  * Process payment for a resolved, LIVE (awaiting_payment) transfer.
  *
  * REFUSAL GATES — every one returns BEFORE captureFunding. THE ORDER IS THE
@@ -82,7 +141,10 @@ function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  * guards do NOT live here: they are pay-finalize.ts's pre-claim contract
  * (kyc → masked destination → FX → cap → idem.claim) and run before a draft is
  * ever minted into the transfer this function receives. Never add a second
- * copy of any of them to this list.
+ * copy of any of them to this list. An EXISTING transfer's destination is
+ * checked by POST's existing-transfer branch (hasDestination, decrypted read;
+ * payout writes through writePayoutIfEditable) before it is handed to this
+ * function.
  * Then: capture (skipped for partner-pulled B2B) → settleOrHold, which is the
  * ONE compliance decision (settlement.ts):
  *  - cleared  → beginSettlement: ONE transaction flips paid + enqueues the
@@ -93,13 +155,14 @@ function refuseUnlessAwaiting(transfer: Transfer): NextResponse | null {
  * Both charging branches capture funds FIRST — nothing messages "payment
  * received" or flips status before the charge succeeds.
  *
- * NON-CUSTODIAL B2B ACH-pull (`fundingMethod === 'ach_pull'`): SmartRemit
+ * NON-CUSTODIAL B2B ACH-pull (`transferType === 'b2b'` + `fundingMethod === 'ach_pull'`): SmartRemit
  * captures NO funds — the licensed partner ACH-debits the payer's business bank
  * via the signed settlement instruction (which already carries the opaque
  * `achTokenRef` mandate). The capture step is SKIPPED entirely; the compliance
  * branching is otherwise identical. The skip is derived from the TRANSFER
- * (`fundingMethod === 'ach_pull'`), NOT a caller flag — so the non-custodial
- * invariant holds no matter which call site reaches here.
+ * (transferType === 'b2b' AND a partner-pulled fundingMethod — fix 6), NOT a
+ * caller flag — so the non-custodial invariant holds no matter which call site
+ * reaches here.
  */
 async function processTransferPayment(
   store: ReturnType<typeof getStore>,
@@ -156,7 +219,7 @@ async function processTransferPayment(
   // NON-CUSTODIAL B2B pull (ach_pull / bank_pull): SmartRemit captures NOTHING —
   // the partner pulls via the signed instruction. Skip the funding provider
   // entirely (derived from the transfer, so this holds for EVERY call site).
-  if (!isPartnerPulled(transfer.fundingMethod)) {
+  if (!(transfer.transferType === 'b2b' && isPartnerPulled(transfer.fundingMethod))) {
     try {
       await captureFunding(transfer);
     } catch (err) {
@@ -214,7 +277,7 @@ async function processTransferPayment(
 }
 
 const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
-  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
+  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX',
 ]);
 
 /**
@@ -337,11 +400,31 @@ export async function POST(
       for (const [k, v] of Object.entries(rawFields!)) {
         if (typeof v === 'string') fields[k] = v;
       }
+      // fix 6: the per-country form is bound to THIS payment's destination
+      // country (the transfer's, else the draft's) — a caller never picks
+      // another country's field set for it.
+      const target = (await store.getTransfer(transferId)) ?? otpDraft;
+      if (country !== (target?.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY)) {
+        return NextResponse.json(
+          { ok: false, error: 'Please check the bank details.', fieldErrors: { country: 'These bank details are for a different country.' } },
+          { status: 400 },
+        );
+      }
       const validation = validatePayoutFields(country!, fields);
       if (!validation.ok) {
         // 400 BEFORE any charge — nothing is mutated, the sender can retry.
         return NextResponse.json(
           { ok: false, error: 'Please check the bank details.', fieldErrors: validation.errors },
+          { status: 400 },
+        );
+      }
+      // fix 10 (review S1), defense in depth: validatePayoutFields already refuses a
+      // mask in any field and composes digit fields from their digits, so a
+      // composed display mask means the validator regressed — refuse it here too,
+      // BEFORE any write or charge (the rail would only dead-letter it later).
+      if (isMaskedDestination(validation.payoutDestination)) {
+        return NextResponse.json(
+          { ok: false, error: 'Please check the bank details.', fieldErrors: { payoutDestination: 'Enter the full account details, not a masked value.' } },
           { status: 400 },
         );
       }
@@ -357,6 +440,13 @@ export async function POST(
       // processTransferPayment (chokepoint for the draft branch too).
       const refused = refuseUnlessAwaiting(transfer);
       if (refused) return refused;
+      // fix 6: a CONSUMER row carrying a partner-pulled funding method (only a
+      // pre-fix model argument could mint one) is neither captured by us nor
+      // legitimately pulled by the partner. Fail closed: never charge, never instruct.
+      if (isPartnerPulled(transfer.fundingMethod) && transfer.transferType !== 'b2b') {
+        logError('pay.consumer-partner-pulled', new Error('consumer transfer with a partner-pulled funding method'), { transferId: transfer.id });
+        return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
+      }
       // ── Existing transfer branch ──────────────────────────────────────
       // Phase 3 verify-before-send gate — covers scheduled/cron transfers paid
       // on this page. Refuse BEFORE any charge if the owner isn't verified.
@@ -372,7 +462,7 @@ export async function POST(
       // (isB2bSendVerified) replaces the b2c send gate; the payer's ACH bank
       // fields are validated + tokenized into an opaque achTokenRef (raw routing/
       // account never stored), then settlement proceeds WITHOUT a funds capture.
-      if (transfer.fundingMethod === 'ach_pull') {
+      if (transfer.transferType === 'b2b' && transfer.fundingMethod === 'ach_pull') {
         if (sendGateActive(owningPartner) && !isB2bSendVerified(owner)) {
           return NextResponse.json(
             { ok: false, error: 'Please verify your business before sending.', kyc_required: true },
@@ -393,13 +483,10 @@ export async function POST(
         // transfer stays awaiting_payment until settleOrHold commits, so a
         // crash in that narrow window is self-healed by the payer re-submitting
         // (achTokenRef already bound ⇒ settleOrHold resumes cleanly).
-        const withToken: Transfer =
-          (transfer.achTokenRef ?? '').trim() !== ''
-            ? transfer
-            : { ...transfer, achTokenRef: ach.token };
-        if (withToken !== transfer) await store.saveTransfer(withToken);
+        const withToken = await bindAchToken(store, transfer, ach.token);
+        if (withToken instanceof NextResponse) return withToken;
         // Capture is skipped structurally inside processTransferPayment (keyed on
-        // fundingMethod === 'ach_pull'); no caller flag needed.
+        // transferType 'b2b' + a partner-pulled fundingMethod — fix 6); no caller flag needed.
         return await processTransferPayment(store, withToken);
       }
 
@@ -409,25 +496,41 @@ export async function POST(
           { status: 403 },
         );
       }
-      const hasDestination = (transfer.payoutDestination ?? '').trim() !== '';
-      if (!hasDestination) {
-        // A SCHEDULED/cron transfer is created with an empty destination (Item 2:
-        // bank details are never collected in chat). They MUST be collected +
-        // validated here on the secure page before charging — a no-account
-        // transfer must never be delivered.
-        if (!bankDetails) {
+      // fix 6 (ctx-01): `transfer` is the DEFAULT (masked) read — it renders every
+      // stored value, real or poisoned, as "****<last4>". Decide on the explicit
+      // decrypted read; the value only feeds this boolean.
+      const storedDestination =
+        ((await store.getTransferDecrypted(transferId))?.payoutDestination ?? '').trim();
+      const hasDestination = storedDestination !== '' && !isMaskedDestination(storedDestination);
+      // Sender-entered, server-validated, country-bound bank details (the page's
+      // Step 1, or its "Edit bank details") fill or replace the payout of a
+      // CONSUMER transfer through ONE guarded write. A B2B payee is never payer
+      // input: its body is ignored.
+      if (bankDetails && transfer.transferType !== 'b2b') {
+        const edited = await writePayoutIfEditable(transfer, bankDetails);
+        if (!edited) {
+          // A guard failed after our read (a concurrent POST charged / settled /
+          // held it — the OTP verify is not atomic), or the row is not editable
+          // here (charged, partner-API-minted). Never write around the guard:
+          // report current truth.
+          const current = await store.getTransfer(transferId);
+          const nowRefused = current ? refuseUnlessAwaiting(current) : null;
+          if (nowRefused) return nowRefused;
           return NextResponse.json(
-            { ok: false, error: 'Bank details are required to complete this transfer.' },
-            { status: 400 },
+            { ok: false, error: "This transfer's bank details can't be changed here.", reason: 'payout_locked' },
+            { status: 409 },
           );
         }
-        const updated: Transfer = {
-          ...transfer,
-          payoutMethod: bankDetails.payoutMethod ?? 'bank',
-          payoutDestination: bankDetails.payoutDestination ?? '',
-        };
-        await store.saveTransfer(updated);
-        return await processTransferPayment(store, updated);
+        return await processTransferPayment(store, edited);
+      }
+      if (!hasDestination) {
+        // A SCHEDULED/cron transfer can be created with an empty destination (Item 2:
+        // never collected in chat). It MUST be collected + validated here before
+        // charging — a no-account transfer must never be delivered.
+        return NextResponse.json(
+          { ok: false, error: 'Bank details are required to complete this transfer.' },
+          { status: 400 },
+        );
       }
       // Destination already set (re-opened link) → process exactly as before.
       return await processTransferPayment(store, transfer);
@@ -465,6 +568,14 @@ export async function POST(
           { status: 503 },
         );
       }
+      if (result.error === 'bank_details_required') {
+        // fix 6 (ctx-01): the draft holds no usable destination. 400 — never 500 —
+        // nothing was claimed or consumed; the SAME link re-submits.
+        return NextResponse.json(
+          { ok: false, error: 'Bank details are required to complete this transfer.', reason: 'bank_details_required' },
+          { status: 400 },
+        );
+      }
       const msg =
         result.error === 'cap'
           ? 'That amount exceeds your current limit.'
@@ -483,7 +594,7 @@ export async function POST(
     // be validated + tokenized into achTokenRef BEFORE settlement (the partner's
     // instruction carries the mandate token). Capture is already skipped
     // structurally inside processTransferPayment for ach_pull.
-    if (created.fundingMethod === 'ach_pull') {
+    if (created.transferType === 'b2b' && created.fundingMethod === 'ach_pull') {
       const ach = validateAndTokenizeAch(body.ach);
       if (!ach.ok) {
         return NextResponse.json(
@@ -491,11 +602,8 @@ export async function POST(
           { status: 400 },
         );
       }
-      const withToken: Transfer =
-        (created.achTokenRef ?? '').trim() !== ''
-          ? created
-          : { ...created, achTokenRef: ach.token };
-      if (withToken !== created) await store.saveTransfer(withToken);
+      const withToken = await bindAchToken(store, created, ach.token);
+      if (withToken instanceof NextResponse) return withToken;
       return await processTransferPayment(store, withToken);
     }
     return await processTransferPayment(store, created);

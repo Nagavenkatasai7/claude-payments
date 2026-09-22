@@ -215,7 +215,7 @@ export function createAgent(deps: AgentDeps) {
                 (destCC ? `, detected_destination_country=${destCC}` : '') + '. ' +
                 'You already have the recipient — do NOT call send_recipient_picker or ask who again. ' +
                 (destCC ? `Send to ${destCC} unless they say otherwise. ` : '') +
-                'Just collect the amount and funding method, then send_approve_picker.',
+                'Just collect the amount and funding method, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).',
             });
           }
         } catch (err) {

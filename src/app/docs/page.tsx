@@ -111,7 +111,7 @@ curl -X POST $BASE/transactions \\
   }'`}</Code>
           <p className="text-sm text-muted-foreground">
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
-            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>.
+            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code> or <code>b2binvoice:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account.
           </p>
         </section>
 
