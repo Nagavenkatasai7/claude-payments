@@ -698,8 +698,13 @@ export function pruneAgents(agents, now, { finishedTtlMs = 24 * HOUR_MS, openTtl
   return out;
 }
 
-/** Journal kinds the owner wants on the page promptly: an unflushed one makes the Stop hook block at once. */
-export const URGENT_JOURNAL_KINDS = Object.freeze(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step', 'verify']);
+/**
+ * Journal kinds the owner wants on the page promptly: an unflushed one makes the Stop hook block
+ * at once. `approval`, `decision`, `verify` and `owner-step` were urgent before 2026-09-22; the
+ * owner then decided routine rows can wait for SYNC_STALE_MS instead (the Stop hook was blocking
+ * too often and draining usage) — keep this list to what truly cannot wait.
+ */
+export const URGENT_JOURNAL_KINDS = Object.freeze(['incident', 'merge', 'migration']);
 /**
  * A session `gh pr merge` row that succeeded (kind pr, result ok, as hookToJournalEntries writes
  * it): urgent like a merge row. The main-moved rule alone cannot catch it when ls-remote fails.
@@ -707,7 +712,7 @@ export const URGENT_JOURNAL_KINDS = Object.freeze(['approval', 'decision', 'inci
  */
 export const isSessionMerge = (o) => o?.kind === 'pr' && o.result === 'ok' && /^gh pr merge\b/.test(String(o.title ?? ''));
 /** Routine journal entries wait until the last sync is older than this. */
-export const SYNC_STALE_MS = 10 * 60 * 1000;
+export const SYNC_STALE_MS = 60 * 60 * 1000;
 const SYNC_DUE_TAIL = 'Run the tracker-sync skill (automated engine) now, then finish.';
 
 /**
@@ -733,7 +738,7 @@ export function urgentJournalKinds(lines) {
  * (c) an unflushed journal line is an urgent kind (URGENT_JOURNAL_KINDS) or a successful session
  *     `gh pr merge` (isSessionMerge), or
  * (b) the journal has unflushed bytes and the last sync (last-sync.json `at`) is more than
- *     10 minutes old or unknown, or
+ *     60 minutes old or unknown, or
  * (a) main moved since the last recorded sync (remoteMainSha from ls-remote vs lastSyncMainSha).
  * The journal checks need no network, so the hook calls this with remoteMainSha null first and
  * runs ls-remote only when that returns null. Never blocks in the cloud routine, when disabled,
