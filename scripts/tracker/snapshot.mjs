@@ -65,9 +65,9 @@ for (const p of prsGh.sort((a, b) => a.number - b.number)) {
   const prev = known.get(p.number);
   if (!prev || prev.state !== state || prev.mergeSha !== mergeSha || prev.title !== p.title || JSON.stringify(prev.fix) !== JSON.stringify(body.fix)) put('prs', `pr-${p.number}`, body);
   if (state === 'merged' && prev?.state !== 'merged') {
-    events.push({ at: p.mergedAt, kind: 'merge', title: `PR #${p.number} merged`, detail: `${p.title}${fixes.length ? ` (fix ${fixes.join(', ')})` : ''}; ${mergeSha}.` });
+    events.push({ at: p.mergedAt, kind: 'merge', actor: 'github', title: `PR #${p.number} merged`, detail: `${p.title}${fixes.length ? ` (fix ${fixes.join(', ')})` : ''}; ${mergeSha}.`, refs: { pr: [p.number], fix: fixes, sha: mergeSha }, result: 'ok' });
   }
-  if (state === 'open' && !prev) events.push({ at: now, kind: 'plan', title: `PR #${p.number} opened`, detail: p.title });
+  if (state === 'open' && !prev) events.push({ at: now, kind: 'pr', actor: 'github', title: `PR #${p.number} opened`, detail: p.title, refs: { pr: [p.number], fix: fixes } });
   if (state === 'merged') for (const f of fixes) {
     const cur = proposals.get(f) || { fix: f, prs: [], lastMergeSha: null, lastMergedAt: null };
     cur.prs.push(p.number); if (!cur.lastMergedAt || p.mergedAt > cur.lastMergedAt) { cur.lastMergedAt = p.mergedAt; cur.lastMergeSha = mergeSha; }
@@ -100,7 +100,7 @@ function prodDeployState() {
 const statePath = join(DB, 'meta', 'state.json');
 const prevState = existsSync(statePath) ? unwrap(JSON.parse(readFileSync(statePath, 'utf8'))) : null;
 if (smokeMain && prevState && prevState.smokeMain !== smokeMain.conclusion && smokeMain.conclusion) {
-  events.push({ at: smokeMain.createdAt, kind: smokeMain.conclusion === 'success' ? 'verify' : 'incident', title: `Post-deploy smoke ${smokeMain.conclusion} on ${mainSha}`, detail: smokeMain.url });
+  events.push({ at: smokeMain.createdAt, kind: smokeMain.conclusion === 'success' ? 'verify' : 'incident', actor: 'ci', title: `Post-deploy smoke ${smokeMain.conclusion} on ${mainSha}`, detail: smokeMain.url, refs: { sha: mainSha }, result: smokeMain.conclusion === 'success' ? 'ok' : 'failed' });
 }
 put('meta', 'state', {
   mainSha, ciMain: ciMain?.conclusion || ciMain?.status || 'unknown',
