@@ -18,6 +18,8 @@ import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError } from '@/lib/log';
+import { env } from '@/lib/env';
+import { checkSettlementUrl } from '@/lib/settlement-url';
 import { settleOrHold } from '@/lib/settlement';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { getTransactionOtpStore } from '@/lib/transaction-otp';
@@ -135,8 +137,9 @@ async function bindAchToken(
  * REFUSAL GATES — every one returns BEFORE captureFunding. THE ORDER IS THE
  * CONTRACT (ruling 7, route.ts half); every gate refuses before any charge:
  *   1. status guard + blocked (refuseUnlessAwaiting — F53)
- *   2. rail fail-closed (routed rail must be webhook-driven; fix 12 adds the
- *      settlement-URL predicate for the routed AND owner rail)
+ *   2. rail fail-closed (a routed rail must be webhook-driven, and — fix 22 —
+ *      a webhook-driven rail, routed OR owner, must carry a settlement URL
+ *      that passes checkSettlementUrl)
  * The masked-destination (fix 6), FX-unavailable (fix 9) and send-cap (fix 10)
  * guards do NOT live here: they are pay-finalize.ts's pre-claim contract
  * (kyc → masked destination → FX → cap → idem.claim) and run before a draft is
@@ -188,15 +191,32 @@ async function processTransferPayment(
   // into an instruct that can only dead-letter. (The status guard above
   // already returned current truth for a replay, so this only ever sees
   // money that can still be charged.)
+  const railProviderType = railIntegrations.payment.providerType;
+  const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
   if (transfer.settlementPartnerId) {
-    const railProviderType = railIntegrations.payment.providerType;
-    const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
     if (!railWebhookDriven || !railIntegrations.payment.credentials?.settlementUrl) {
       logError(
         'pay.routed-rail-unavailable',
         new Error('routed settlement partner has no usable webhook-driven rail'),
         { transferId: transfer.id },
       );
+      return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
+    }
+  }
+  // Fix 22 (gate #2, owner AND routed rail): a webhook-driven rail whose
+  // settlement URL fails the sync rule (https only, default port, no userinfo,
+  // no IP literal / internal / single-label host; empty counts as failing) is
+  // refused BEFORE any charge. The worker would refuse the instruct anyway
+  // (settlement_url_refused), so charging here could only dead-letter. The
+  // log carries the reason code, never the URL.
+  if (railWebhookDriven) {
+    const railUrl = railIntegrations.payment.credentials?.settlementUrl ?? '';
+    const check = checkSettlementUrl(railUrl, { appOrigin: env.appBaseUrl, production: env.isProduction });
+    if (!check.ok) {
+      logError('pay.rail-url-refused', new Error(`settlement url refused: ${check.reason}`), {
+        transferId: transfer.id,
+        railPartnerId,
+      });
       return NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 400 });
     }
   }
