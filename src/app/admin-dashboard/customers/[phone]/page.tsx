@@ -3,6 +3,9 @@ export const dynamic = 'force-dynamic';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
+import { scopeOf } from '@/lib/staff-scope';
+import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getDailyVolumeStore } from '@/lib/daily-volume-store';
 import { evaluateCap } from '@/lib/tier-rules';
@@ -17,8 +20,9 @@ import { money } from '../../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { markCustomerVerifiedAction, markCustomerRejectedAction, reviewKycAction } from '../actions';
+import { markCustomerVerifiedAction, markCustomerRejectedAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
+import { SendLimitsCard } from '../../send-limits-card';
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'ID' },
@@ -39,6 +43,8 @@ export default async function CustomerDetailPage({
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
+  // Program fix 16b: the raise form is PLATFORM-admin only (the action self-gates too).
+  const isPlatformAdmin = isAdmin && scopeOf(staff).kind === 'platform';
   const { phone } = await params;
   const { partner: partnerHint } = await searchParams;
 
@@ -48,7 +54,7 @@ export default async function CustomerDetailPage({
   if (!customer) notFound();
   const siblingTenants = (await scoped.customerTenants(phone)).filter((id) => id !== customer.partnerId);
 
-  const [mine, todayUsedCents, partner, kycAudit] = await Promise.all([
+  const [mine, todayUsedCents, partner, kycAudit, lastLimitChange] = await Promise.all([
     // Indexed WHERE partner_id = $1 AND phone = $2 (newest-first) — the F44 read sink is tenant-keyed.
     getStore().listTransfersByPhone(customer.partnerId, phone, 50),
     dailyVolumeStore.getTodayCents(customer.partnerId, phone),
@@ -56,6 +62,8 @@ export default async function CustomerDetailPage({
     getKycCaseStore(getStore())
       .getAudit(customer.partnerId, phone)
       .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>),
+    // Program fix 16b: the last audited raise/clear for THIS (tenant, phone).
+    createAuditRepo(getDb()).lastSendLimitChange(customer.partnerId, 'customer', phone).catch(() => null),
   ]);
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
@@ -198,6 +206,17 @@ export default async function CustomerDetailPage({
             </dl>
           </CardContent>
         </Card>
+
+        {/* Program fix 16b: the effective ladder with its sources; the audited raise form for platform admins. */}
+        <SendLimitsCard
+          scope="customer"
+          effective={limits}
+          stored={customer.sendLimitOverride}
+          lastChange={lastLimitChange}
+          canEdit={isPlatformAdmin}
+          action={setCustomerSendLimitAction}
+          hidden={{ phone: customer.senderPhone, partnerId: customer.partnerId }}
+        />
 
         <Card className="mb-6">
           <CardHeader>

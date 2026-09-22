@@ -6,6 +6,7 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
@@ -34,7 +35,9 @@ import {
   savePricingAction,
   saveSupportConfigAction,
   revokeApiKeyAction,
+  setPartnerSendLimitAction,
 } from '../actions';
+import { SendLimitsCard } from '../../send-limits-card';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
@@ -140,13 +143,15 @@ export default async function PartnerDetailPage({
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).
-  const [summary, recentPage, allStaff, integrations, apiKeys, rates] = await Promise.all([
+  const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange] = await Promise.all([
     getStore().transfersSummary(partner.id), // partner.id is scope-checked above
     scoped.transfersPage({ limit: 50, partnerFilter: partner.id }),
     getAuthStore().listStaff(),
     getPartnerIntegrationsStore().getIntegrations(partner.id),
     getPartnerApiKeyStore().list(partner.id),
     createPartnerRateRepo(getDb()).listRatesForPartner(partner.id), // scope-checked above
+    // Program fix 16b: the last audited raise/clear of this partner's default.
+    createAuditRepo(getDb()).lastSendLimitChange(partner.id, 'partner', partner.id).catch(() => null),
   ]);
   const nowMs = Date.now();
   const recents = recentPage.items;
@@ -215,6 +220,7 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="settings">Settings</TabsTrigger>}
             {isAdmin && <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>}
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
+            {isAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
@@ -297,14 +303,7 @@ export default async function PartnerDetailPage({
                   <dt>Countries</dt><dd>{partner.countries.join(', ')}</dd>
                   <dt>KYC mode</dt>
                   <dd>{partner.kycMode === 'delegated' ? 'partner-run (delegated)' : 'SmartRemit-run'}</dd>
-                  {/* Program fix 16: the EFFECTIVE ladder, read-only (raises are fix 16b's audited action). */}
-                  <dt>Send limits</dt>
-                  <dd>
-                    ${(sendLimits.perTransferCapCents / 100).toLocaleString('en-US')} per transfer ·{' '}
-                    ${(sendLimits.t1DailyCapCents / 100).toLocaleString('en-US')}/day verified ·{' '}
-                    ${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}/day first 3 days
-                    {partner.sendLimits ? ' (tightened for this partner)' : ' (platform default)'}
-                  </dd>
+                  {/* Program fix 16b: the send-limits ladder moved to its own card (Settings tab). */}
                   <dt>Primary color</dt>
                   <dd>
                     {partner.primaryColor ? (
@@ -480,6 +479,22 @@ export default async function PartnerDetailPage({
                   </form>
                 </CardContent>
               </Card>
+            </TabsContent>
+          )}
+
+          {/* ── Send limits (Program fix 16b): the partner default + its audited raise ── */}
+          {isAdmin && (
+            <TabsContent value="send-limits">
+              <SendLimitsCard
+                scope="partner"
+                effective={sendLimits}
+                stored={partner.sendLimits}
+                lastChange={lastLimitChange}
+                canEdit={isPlatformAdmin}
+                action={setPartnerSendLimitAction}
+                hidden={{ id: partner.id }}
+                showT0
+              />
             </TabsContent>
           )}
 
