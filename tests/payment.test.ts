@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  buildRailFailureMessage,
   buildRefundMessage,
   buildStage1Message,
   completePaymentStage1,
@@ -501,5 +502,43 @@ describe('recipientDeliveredFallbackText', () => {
     const text = recipientDeliveredFallbackText(awaitingAedTransfer());
     expect(text).toContain('AED');
     expect(text).toContain('Ali');
+  });
+});
+
+// Program-Fix 8: the customer notice for a rail failure. Pure; three variants
+// chosen by the FINAL refund status (rail-failure.ts). The rail's reason and
+// every internal term stay out of it.
+describe('buildRailFailureMessage (fix 8)', () => {
+  const FORBIDDEN = ['partner', 'sanction', 'blocked', 'compliance', 'rail', 'account_unreachable', 'review'];
+  const variants = ['refund', 'reversal', 'contact'] as const;
+
+  it('every variant names the transfer id and the recipient, and leaks no internal term', () => {
+    for (const v of variants) {
+      const msg = buildRailFailureMessage(awaitingTransfer(), v);
+      expect(msg).toContain('pay12345');
+      expect(msg).toContain('Mom');
+      for (const w of FORBIDDEN) expect(msg.toLowerCase()).not.toContain(w);
+    }
+  });
+
+  it('refund: the SOURCE-currency charge is being refunded to the original payment method', () => {
+    const msg = buildRailFailureMessage(awaitingTransfer(), 'refund');
+    expect(msg).toContain('$500.00');
+    expect(msg).toMatch(/refund/i);
+    expect(msg).toContain('original payment method');
+  });
+
+  it('reversal (partner-pulled): says the debit is being reversed, never "refunded to your payment method"', () => {
+    const t: Transfer = { ...awaitingTransfer(), fundingMethod: 'bank_pull', transferType: 'b2b', sourceCurrency: 'GBP', totalChargeSource: 410.5 };
+    const msg = buildRailFailureMessage(t, 'reversal');
+    expect(msg).toContain('£410.50');
+    expect(msg).toMatch(/revers/i);
+    expect(msg).not.toContain('payment method');
+  });
+
+  it('contact: promises a follow-up, promises no refund', () => {
+    const msg = buildRailFailureMessage(awaitingTransfer(), 'contact');
+    expect(msg).toMatch(/contact you/i);
+    expect(msg.toLowerCase()).not.toContain('refund');
   });
 });
