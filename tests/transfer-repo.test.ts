@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
 import { createTransferRepo, type TransferRepo } from '@/db/repos/transfer-repo';
+import { createAuditRepo, createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
@@ -288,5 +289,84 @@ describe('transfer-repo: compliance views + velocity leaderboard (Stage 5e scan 
     expect(top[0]).toEqual({ phone: '15551110000', count: 2 });
     expect(top.find((r) => r.phone === '15553330000')).toBeUndefined();
     expect(await repo.topVelocityToday(10, 'acme')).toEqual([{ phone: '15552220000', count: 1 }]);
+  });
+});
+
+describe('transfer-repo — fix 6 (ctx-01): guarded payout write + rehydration probes', () => {
+  const NEW = { payoutMethod: 'bank' as const, payoutDestination: '987654321098 SBIN0001234' };
+
+  it('setPayoutIfEditable writes ONLY the payout columns — the encrypted legal name, EDD fields and status survive', async () => {
+    await repo.saveTransfer(fixture({ recipientLegalName: 'Mother Legal Name', relationship: 'parent', purpose: 'family_support' }));
+    const updated = await repo.setPayoutIfEditable('tr_1', 'default', NEW);
+    expect(updated?.status).toBe('awaiting_payment');
+    const full = await repo.getTransfer('tr_1', { decrypt: true });
+    expect(full?.payoutDestination).toBe(NEW.payoutDestination);
+    expect(full?.recipientLegalName).toBe('Mother Legal Name');
+    expect(full?.relationship).toBe('parent');
+    expect(full?.purpose).toBe('family_support');
+  });
+
+  it('refuses (null, row untouched) for a paid / in_review / charged / B2B / other-tenant / partner-API row', async () => {
+    await seedPartner(db, 'acme');
+    const cases: Array<[string, Partial<Transfer>]> = [
+      ['p_paid', { status: 'paid' }],
+      ['p_review', { status: 'in_review' }],
+      ['p_charged', { fundingRef: 'mockfund-p_charged' }],
+      ['p_b2b', { transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business' }],
+      ['p_acme', { partnerId: 'acme' }],
+      ['p_api', {}],
+      ['p_api_audit', {}],
+    ];
+    for (const [id, over] of cases) await repo.saveTransfer(fixture({ id, ...over }));
+    await createIdempotencyRepo(db).claim('default', 'order-8841', 'p_api');          // a partner-API claim
+    await createAuditRepo(db).record({ partnerId: 'default', actor: 'pk_1', actorType: 'api_key', action: 'transaction.create', subjectId: 'p_api_audit' });
+    for (const [id] of cases) {
+      expect(await repo.setPayoutIfEditable(id, 'default', NEW), id).toBeNull();
+      expect(await repo.isPayoutEditable(id, 'default'), id).toBe(false);
+      expect((await repo.getTransfer(id, { decrypt: true }))?.payoutDestination, id).toBe('123456789012|HDFC0001234');
+    }
+  });
+
+  it('a pay-page draft claim (draft:<id> under default) does NOT lock the payout', async () => {
+    await repo.saveTransfer(fixture({ id: 'p_draft' }));
+    await createIdempotencyRepo(db).claim('default', 'draft:d_1', 'p_draft');
+    expect(await repo.isPayoutEditable('p_draft', 'default')).toBe(true);
+    expect((await repo.setPayoutIfEditable('p_draft', 'default', NEW))?.id).toBe('p_draft');
+  });
+
+  it('hasB2bTransferTo is an exact (tenant, sender, recipient, b2b) probe', async () => {
+    await repo.saveTransfer(fixture({ id: 'b_1', transferType: 'b2b', recipientPhone: '919822222222' }));
+    expect(await repo.hasB2bTransferTo('default', '15551230000', '919822222222')).toBe(true);
+    expect(await repo.hasB2bTransferTo('default', '15551230000', '919876543210')).toBe(false);
+    expect(await repo.hasB2bTransferTo('acme', '15551230000', '919822222222')).toBe(false);
+  });
+
+  it('latestSettledConsumerTo returns the newest paid/delivered b2c row in the destination country, DECRYPTED', async () => {
+    await repo.saveTransfer(fixture({ id: 's_old', status: 'delivered', createdAt: '2026-06-01T00:00:00.000Z', payoutDestination: 'OLD 111111111111' }));
+    await repo.saveTransfer(fixture({ id: 's_new', status: 'paid', createdAt: '2026-06-05T00:00:00.000Z', payoutDestination: 'NEW 222222222222' }));
+    await repo.saveTransfer(fixture({ id: 's_await', status: 'awaiting_payment', createdAt: '2026-06-09T00:00:00.000Z' }));
+    await repo.saveTransfer(fixture({ id: 's_gb', status: 'delivered', createdAt: '2026-06-10T00:00:00.000Z', destinationCountry: 'GB', destinationCurrency: 'GBP' }));
+    const hit = await repo.latestSettledConsumerTo('default', '15551230000', '919876543210', 'IN');
+    expect(hit?.id).toBe('s_new');
+    expect(hit?.payoutDestination).toBe('NEW 222222222222');
+    expect(await repo.latestSettledConsumerTo('default', '15551230000', '919876543210', 'AE')).toBeNull();
+  });
+
+  it('setAchTokenIfAbsent writes ONLY ach_token_ref, once, on an awaiting B2B row of this tenant — the legal name and status survive', async () => {
+    const b2b = { transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business', fundingMethod: 'ach_pull' } as const;
+    await repo.saveTransfer(fixture({ id: 'a_1', ...b2b, recipientLegalName: 'Globex Trading Private Limited' }));
+    await repo.saveTransfer(fixture({ id: 'a_paid', ...b2b, status: 'paid' }));
+    await repo.saveTransfer(fixture({ id: 'a_b2c' }));
+    expect(await repo.setAchTokenIfAbsent('a_1', 'acme', 'ach_x')).toBeNull();                        // other tenant
+    expect((await repo.setAchTokenIfAbsent('a_1', 'default', 'ach_first'))?.achTokenRef).toBe('ach_first');
+    expect(await repo.setAchTokenIfAbsent('a_1', 'default', 'ach_second')).toBeNull();                // the FIRST mandate is kept
+    const full = await repo.getTransfer('a_1', { decrypt: true });
+    expect(full?.achTokenRef).toBe('ach_first');
+    expect(full?.recipientLegalName).toBe('Globex Trading Private Limited');
+    expect(full?.status).toBe('awaiting_payment');
+    expect(await repo.setAchTokenIfAbsent('a_paid', 'default', 'ach_x')).toBeNull();                  // moved on — untouched
+    expect((await repo.getTransfer('a_paid'))?.achTokenRef).toBeUndefined();
+    expect((await repo.getTransfer('a_paid'))?.status).toBe('paid');
+    expect(await repo.setAchTokenIfAbsent('a_b2c', 'default', 'ach_x')).toBeNull();                   // a consumer row never carries a mandate
   });
 });

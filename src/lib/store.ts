@@ -5,7 +5,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo } from '@/db/repos/aux-repos';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
-import type { ChatMessage, PartnerId, Transfer, TransferStatus } from './types';
+import type { ChatMessage, CountryCode, PartnerId, Transfer, TransferStatus } from './types';
 
 // store — CUT OVER to a COMPOSITE (Stage 2a). Same module path + surface; the
 // engine split follows the locked disposition:
@@ -150,6 +150,19 @@ export function createStore(redis: RedisLike, db: DbOrTx) {
     /** MIN(created_at) for grandfathering — indexed, per tenant. */
     async firstTransferAt(partnerId: PartnerId, phone: string): Promise<string | null> {
       return transfersRepo.firstTransferAt(partnerId, phone);
+    },
+    /** fix 6: EXISTS a B2B transfer from this sender to this number (tenant-scoped). */
+    async hasB2bTransferTo(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<boolean> {
+      return transfersRepo.hasB2bTransferTo(partnerId, phone, recipientPhone);
+    },
+    /** fix 6: DECRYPTED newest settled consumer transfer to this number in this country (rehydration only). */
+    async latestSettledConsumerTransferTo(
+      partnerId: PartnerId,
+      phone: string,
+      recipientPhone: string,
+      destinationCountry: CountryCode,
+    ): Promise<Transfer | null> {
+      return transfersRepo.latestSettledConsumerTo(partnerId, phone, recipientPhone, destinationCountry);
     },
 
     // ── Today-velocity (Redis counters — date-bucketed, tenant-scoped) ────
