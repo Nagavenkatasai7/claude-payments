@@ -463,7 +463,14 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
-    /** fix 6: does this sender have ANY B2B transfer to this number? (tenant-scoped, one probe) */
+    /**
+     * fix 6: does this sender have ANY B2B transfer to this number? (tenant-scoped, one probe)
+     * The stored recipient_phone is compared by its DIGITS — the same rule as
+     * phone.normalizePhone, which the address-book match applies in
+     * resolveStoredPayout — so a B2B row stored with a formatted number still
+     * blocks rehydration (a wider match here is the SAFE direction).
+     * `recipientPhone` must already be normalized (digits only).
+     */
     async hasB2bTransferTo(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<boolean> {
       const rows = await db
         .select({ id: transfers.id })
@@ -471,7 +478,7 @@ export function createTransferRepo(
         .where(and(
           eq(transfers.partnerId, partnerId),
           eq(transfers.phone, phone),
-          eq(transfers.recipientPhone, recipientPhone),
+          sql`regexp_replace(${transfers.recipientPhone}, '[^0-9]', '', 'g') = ${recipientPhone}`,
           eq(transfers.transferType, 'b2b'),
         ))
         .limit(1);

@@ -149,6 +149,11 @@ export async function finalizeDraftPayment(
     bodyDestination !== '' && bankDetails?.payoutMethod
       ? bankDetails.payoutMethod
       : draft.recipient.payoutMethod;
+  // Crash-replay (fix 10 review): the destination above is resolved from THIS
+  // request, but once `draft:<draftId>` is bound to a minted transfer, the claim
+  // below replays that row — so a retry whose body differs (another account)
+  // still settles with the FIRST body's destination. The mint already happened;
+  // it is never re-minted or edited from a replay.
 
   // [fix 6 inserts above this line]
   // ── FX gate (Task 9) — BEFORE idem.claim, so a provider outage or a stale

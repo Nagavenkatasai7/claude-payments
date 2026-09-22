@@ -370,3 +370,12 @@ describe('transfer-repo — fix 6 (ctx-01): guarded payout write + rehydration p
     expect(await repo.setAchTokenIfAbsent('a_b2c', 'default', 'ach_x')).toBeNull();                   // a consumer row never carries a mandate
   });
 });
+
+describe('transfer-repo — fix 10 review nit: hasB2bTransferTo matches the NORMALIZED recipient phone', () => {
+  it('a B2B row stored with a formatted recipient phone is still found by its digits-only form', async () => {
+    await repo.saveTransfer(fixture({ id: 'bn_1', transferType: 'b2b', recipientPhone: '+91 98222-22222' }));
+    expect(await repo.hasB2bTransferTo('default', '15551230000', '919822222222')).toBe(true);
+    expect(await repo.hasB2bTransferTo('default', '15551230000', '919822222223')).toBe(false);
+    expect(await repo.hasB2bTransferTo('acme', '15551230000', '919822222222')).toBe(false);
+  });
+});
