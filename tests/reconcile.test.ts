@@ -5,6 +5,8 @@ import { reconcileSweep, getOpsSnapshot, STALE_LOCK_MINUTES } from '@/lib/reconc
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { beginHold, releaseHold } from '@/lib/settlement';
+import { handleRailFailure } from '@/lib/rail-failure';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -93,6 +95,47 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     const r = await reconcileSweep(db);
     expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
     expect(await outboxRows()).toHaveLength(0);
+  });
+});
+
+// Program-Fix 8: a rail-failed transfer is invisible to EVERY sweep that
+// could move or mis-alert on it.
+describe('reconcileSweep — after a rail failure (fix 8)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' }, webhookSecret: 'w' },
+      whatsapp: {},
+    });
+  });
+
+  it('a rail-failed CHARGED row (cancelled + refund pending) is not stuck-paid, not cancelcharged, and is never re-instructed', async () => {
+    await store.saveTransfer(fixture({ fundingRef: 'mockfund-rc_t1' })); // paid 25 days ago: stuck by age
+    await handleRailFailure(db, 'rc_t1', { code: 'failed', reason: 'account_unreachable' });
+    const r = await reconcileSweep(db);
+    expect(r.stuckPaid).toBe(0);
+    expect(r.reinstructed).toBe(0);
+    const keys = (await outboxRows()).map((x) => x.dedupe_key);
+    expect(keys).toEqual(['refund:rc_t1', 'railfailmsg:rc_t1', 'railfail:rc_t1']);
+    expect(keys.some((k) => k?.startsWith('reinstruct:') || k?.startsWith('recon:') || k?.startsWith('cancelcharged:'))).toBe(false);
+  });
+
+  it('a rail-failed row whose PRIOR refund had failed (cancelled + charged + refund failed) raises no cancelcharged alert — Refunds owns it', async () => {
+    await store.saveTransfer(fixture({ fundingRef: 'mockfund-rc_t1' }));
+    await createTransferRepo(db).updateRefund('rc_t1', { refundStatus: 'pending' });
+    await createTransferRepo(db).updateRefund('rc_t1', { refundStatus: 'failed' });
+    await handleRailFailure(db, 'rc_t1', { code: 'failed', reason: 'x' });
+    await reconcileSweep(db);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['railfail:rc_t1']);
+    expect((await getOpsSnapshot(db)).stuckPaid).toEqual([]);
+    expect((await getOpsSnapshot(db)).refundsFailed.map((t) => t.id)).toEqual(['rc_t1']);
+  });
+
+  it('a rail-failed PARTNER-FUNDED row (cancelled, no fundingRef, refund none) raises no cancelcharged alert either (nothing was captured here)', async () => {
+    await store.saveTransfer(fixture());
+    await handleRailFailure(db, 'rc_t1', { code: 'failed', reason: 'x' });
+    await reconcileSweep(db);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['railfailmsg:rc_t1', 'railfail:rc_t1']);
   });
 });
 

@@ -128,7 +128,7 @@ describe('createTransfer side-effects', () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const partnerStore = createPartnerStore(db);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     await createTransfer(store, partnerStore, monthlyVolumeStore, {
       phone: '15551234567',
       amountSource: 100,
@@ -152,7 +152,7 @@ describe('createTransfer side-effects', () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const partnerStore = createPartnerStore(db);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const input = {
       phone: '15551234567',
       amountSource: 100,

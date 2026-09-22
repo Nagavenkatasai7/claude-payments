@@ -52,6 +52,12 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
 
   const stuck = await transfers.findStuckPaid(STUCK_PAID_MINUTES);
   let reinstructed = 0;
+  // fix 8: a transfer whose rail reported `failed` / `returned` is NOT here —
+  // handleRailFailure leaves `paid` (→ cancelled) and, when refundable, flips
+  // refund_status to pending in the SAME transaction, and findStuckPaid is
+  // `status = 'paid' AND refund_status = 'none'`. A `reinstruct:` row queued
+  // BEFORE the failure landed is skipped by the instruct handler's own guard
+  // (outbox-worker: cancelled / refund pending ⇒ done without a POST).
   for (const t of stuck) {
     // Best-rate routing: the rail that owes the callback is the SETTLEMENT
     // partner's when routed — classify (webhook-driven vs mock) by THEIR

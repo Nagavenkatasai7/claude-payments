@@ -1,4 +1,5 @@
 import { createTransfer } from './transfer-create';
+import { SendBusyError, SendCapError } from './send-limits';
 import { isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { countryForCurrency } from './partner-currency';
 import { newTransferId } from './id';
@@ -59,7 +60,12 @@ export type CrossBorderFinalizeResult =
         | 'currency_mismatch'
         | 'buyer_unscreened'
         | 'blocked'
-        | 'kyc_required';
+        | 'kyc_required'
+        // Program fix 16: the buyer's send cap refused the mint (route ⇒ 400),
+        // or the per-sender mint lock timed out (route ⇒ 503, retryable). In
+        // both cases the claimed id is bound-but-unminted: a retry replays it.
+        | 'cap'
+        | 'busy';
       transferId?: string;
     };
 
@@ -202,7 +208,9 @@ export async function finalizeCrossBorderBillPayment(
   const feeUsd = round2(feeBuyer * buyerToUsd);
   const totalChargeUsd = round2(amountUsd + feeUsd);
 
-  const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
+  let transfer: Awaited<ReturnType<typeof createTransfer>>;
+  try {
+    transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
     id: reservedId, // claimed id — crash-replay re-mints the SAME row
     phone: invoice.buyerPhone, // the payer (buyer)
     recipientName: sellerMasked.businessName, // SCREENED (seller side)
@@ -240,7 +248,13 @@ export async function finalizeCrossBorderBillPayment(
     recipientBusinessName: sellerMasked.businessName,
     achTokenRef: fundingToken, // OPAQUE buyer-bank funding token (no raw digits)
     invoiceId: invoice.id,
-  });
+    });
+  } catch (err) {
+    // Program fix 16: B2B bills are capped like every other mint path.
+    if (err instanceof SendCapError) return { ok: false, error: 'cap' };
+    if (err instanceof SendBusyError) return { ok: false, error: 'busy' };
+    throw err;
+  }
 
   if (transfer.complianceStatus === 'blocked') {
     return { ok: false, error: 'blocked', transferId: transfer.id };

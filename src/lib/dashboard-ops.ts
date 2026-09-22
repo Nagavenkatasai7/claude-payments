@@ -289,7 +289,13 @@ export async function dismissRefund(db: Db, id: string): Promise<void> {
     if (!updated) {
       throw new Error('Cannot dismiss: refund is not awaiting approval.');
     }
-    await repo.saveTransfer({ ...updated, adminNote: 'refund request dismissed' });
+    // APPENDED after any existing note (a rail-failure note, a staff note) —
+    // the same rule as transfer-repo.failPaidFromRail; never clobbered.
+    const prior = (updated.adminNote ?? '').trim();
+    await repo.saveTransfer({
+      ...updated,
+      adminNote: prior === '' ? 'refund request dismissed' : `${prior} | refund request dismissed`,
+    });
   });
 }
 

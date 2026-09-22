@@ -6,6 +6,8 @@ import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { validateSendLimitInput } from '@/lib/send-limits';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import {
@@ -17,8 +19,10 @@ import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
+import { boundUntrustedText, BRAND_MAX, PERSONA_MAX } from '@/lib/untrusted-text';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
+import { checkSettlementUrl } from '@/lib/settlement-url';
 import type {
   Partner,
   PartnerStatus,
@@ -73,14 +77,19 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const requireKycBeforeSend = isPlatform
     ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
     : existing.requireKycBeforeSend;
+  // fix 5 (F43): brand text is interpolated into the bot's SYSTEM prompt and a
+  // partner-scoped admin can set it for their own tenant — strip control
+  // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not
+  // refused, so an existing value still saves. buildSystemPrompt clamps again at
+  // read for pre-fix rows.
   const updated: Partner = {
     ...existing,
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
     countries: submittedCountries.length > 0 ? submittedCountries : existing.countries,
-    brandName: String(formData.get('brandName') ?? '').trim() || undefined,
-    displayName: String(formData.get('displayName') ?? '').trim() || undefined,
+    brandName: boundUntrustedText(formData.get('brandName'), BRAND_MAX) || undefined,
+    displayName: boundUntrustedText(formData.get('displayName'), BRAND_MAX) || undefined,
     supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
-    botPersona: String(formData.get('botPersona') ?? '').trim() || undefined,
+    botPersona: boundUntrustedText(formData.get('botPersona'), PERSONA_MAX) || undefined,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
@@ -234,6 +243,25 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
+/**
+ * Fix 22: the same settlement-URL rule the worker applies before any fetch
+ * (checkSettlementUrl) runs BEFORE any write. A webhook-driven rail (`http`
+ * / `simulator`) must have a passing endpoint — the caller passes the
+ * EFFECTIVE value (submitted, else kept, else the simulator default), so a bad
+ * stored value can never be silently kept. For `mock` / no provider the
+ * caller passes only a SUBMITTED value: not required, but still checked.
+ * The message is generic: never the reason, never the URL.
+ */
+function assertSettlementUrlAllowed(url: string | undefined, providerType: string | undefined): void {
+  const required = providerType === 'http' || providerType === 'simulator';
+  if (!url) {
+    if (required) throw new Error('Settlement endpoint must be a public https:// URL.');
+    return;
+  }
+  const check = checkSettlementUrl(url, { appOrigin: env.appBaseUrl, production: env.isProduction });
+  if (!check.ok) throw new Error('Settlement endpoint must be a public https:// URL.');
+}
+
 export async function savePaymentConfigAction(formData: FormData): Promise<void> {
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
@@ -242,7 +270,8 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
   const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
   // Spread-merge so fields this form doesn't manage are never silently wiped.
   const credentials: Record<string, string> = { ...existing.payment.credentials };
-  const settlementUrl = keepOrUpdate(String(formData.get('settlementUrl') ?? ''), credentials.settlementUrl);
+  const submittedSettlementUrl = String(formData.get('settlementUrl') ?? '').trim();
+  const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
   const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), credentials.signingSecret);
   if (settlementUrl) credentials.settlementUrl = settlementUrl;
   if (signingSecret) credentials.signingSecret = signingSecret;
@@ -256,6 +285,9 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
     if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
     if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
   }
+  // Fix 22: webhook-driven rails check the EFFECTIVE URL; others only a submitted one.
+  const isWebhookDriven = providerType === 'http' || providerType === 'simulator';
+  assertSettlementUrlAllowed(isWebhookDriven ? credentials.settlementUrl : submittedSettlementUrl || undefined, providerType);
 
   await store.saveIntegrations(id, {
     ...existing,
@@ -314,6 +346,51 @@ export async function savePricingAction(formData: FormData): Promise<void> {
     // keep) so a partner's pushed rate survives an admin margin save.
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+// ── Send limits: the audited PLATFORM-ADMIN partner default (Program fix 16b) ──
+// NOT gatePartnerConfig (which admits partner admins): a raise is platform
+// governance, like setPartnerStatusAction. Same steps as the customer action:
+// gate → validate (reason first) → re-read the target → ONE transaction with the
+// single-column UPDATE + the audit row (old, new, actor, reason, expiresAt).
+// The partner shape also carries T0, tighten-only (<= the platform $500).
+
+export async function setPartnerSendLimitAction(formData: FormData): Promise<void> {
+  const staff = await requirePlatformAdmin();
+  const validated = validateSendLimitInput(
+    {
+      perTransferUsd: String(formData.get('perTransferUsd') ?? ''),
+      t1DailyUsd: String(formData.get('t1DailyUsd') ?? ''),
+      t0DailyUsd: String(formData.get('t0DailyUsd') ?? ''),
+      expiresAt: String(formData.get('expiresAt') ?? ''),
+      reason: String(formData.get('reason') ?? ''),
+      clear: formData.get('clear') === 'on',
+    },
+    new Date(),
+    { allowT0: true },
+  );
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Partner id is required.');
+  const existing = await getPartnerStore().getPartner(id);
+  if (!existing) throw new Error('Partner not found.');
+
+  const nowIso = new Date().toISOString();
+  const value = validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso };
+  await getDb().transaction(async (tx) => {
+    // tx-bound repos ONLY inside the transaction (see the customer action).
+    const { found, previous } = await createPartnerStore(tx).setSendLimits(existing.id, value);
+    if (!found) throw new Error('Partner not found.'); // raced a delete ⇒ nothing written
+    await createAuditRepo(tx).record({
+      partnerId: existing.id,
+      actor: staff.username,
+      actorType: 'staff',
+      action: value === null ? 'send_limits.clear' : 'send_limits.set',
+      subjectId: existing.id,
+      meta: { scope: 'partner', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+    });
+  });
+  revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${existing.id}`);
 }
 
 // ── Support: admin-controlled support behavior (PartnerSupportConfig) ───────
@@ -424,10 +501,11 @@ export async function wizardCreatePartnerAction(
     name,
     countries,
     status: 'active',
-    brandName: clean(input.brandName),
-    displayName: clean(input.displayName),
+    // fix 5 (F43): the same save-side clamp as updatePartnerAction.
+    brandName: boundUntrustedText(input.brandName, BRAND_MAX) || undefined,
+    displayName: boundUntrustedText(input.displayName, BRAND_MAX) || undefined,
     supportContact: clean(input.supportContact),
-    botPersona: clean(input.botPersona),
+    botPersona: boundUntrustedText(input.botPersona, PERSONA_MAX) || undefined,
     primaryColor: clean(input.primaryColor),
     logoUrl: sanitizeLogoValue(input.logoUrl),
     kycMode,
@@ -457,6 +535,9 @@ export async function wizardCreatePartnerAction(
     if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
     if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
   }
+  // Fix 22: refuse an unsafe / missing endpoint BEFORE any write (beside the
+  // pnid gate above), so a refusal never leaves an orphan partner behind.
+  assertSettlementUrlAllowed(credentials.settlementUrl, providerType);
   const whatsappConfigured = Boolean(clean(wa.phoneNumberId) && clean(wa.token));
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
   // The partner row and its integrations commit in ONE transaction (fix 1

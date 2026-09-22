@@ -1,7 +1,12 @@
-import type { Customer, Tier, CapEvaluation } from './types';
+import { PLATFORM_SEND_LIMITS } from './send-limits';
+import type { Customer, Tier, CapEvaluation, SendLimits } from './types';
 
-export const T0_DAILY_CAP_CENTS = 99_999_900;  // $999,999.00
-export const T1_DAILY_CAP_CENTS = 99_999_900;  // $999,999.00
+// Program fix 16: the platform ladder lives in send-limits.ts (one source of
+// truth, no env override). These two constants are kept for the display sites
+// and tests that read the PLATFORM figures; a mint is evaluated against the
+// RESOLVED limits passed to evaluateCap (min(partner, platform) in fix 16).
+export const T0_DAILY_CAP_CENTS = PLATFORM_SEND_LIMITS.t0DailyCapCents;  // $500.00
+export const T1_DAILY_CAP_CENTS = PLATFORM_SEND_LIMITS.t1DailyCapCents;  // $2,999.00
 export const OBSERVATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
@@ -12,7 +17,7 @@ export const OBSERVATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
  * A REJECTED verification stays Suspended in both cases (it's a compliance
  * outcome, not a missing step).
  */
-export function deriveTier(customer: Customer, now: Date, kycGateActive = true): Tier {
+export function deriveTier(customer: CapSubject, now: Date, kycGateActive = true): Tier {
   if (customer.kycStatus === 'rejected') return 'Suspended';
   const ageMs = now.getTime() - new Date(customer.firstSeenAt).getTime();
   const inWindow = ageMs < OBSERVATION_WINDOW_MS;
@@ -21,19 +26,35 @@ export function deriveTier(customer: Customer, now: Date, kycGateActive = true):
   return kycGateActive ? 'Suspended' : 'T1';
 }
 
+/**
+ * The two customer fields the tier ladder reads. createTransfer's in-lock cap
+ * check evaluates a `store.capSubject(...)` (firstSeenAt from the customers row,
+ * else the first transfer, else now; kycStatus = the caller's attestation), so
+ * the parameter is the projection rather than a full Customer.
+ */
+export type CapSubject = Pick<Customer, 'firstSeenAt' | 'kycStatus'>;
+
+/**
+ * @param kycGateActive whether the owning partner enforces verify-before-send.
+ * @param limits the RESOLVED send limits for this sender (send-limits.ts
+ *   resolveEffectiveSendLimits(partner, customer)). Required (fix 16) so every caller states which
+ *   ladder it evaluates against; the per-transfer cap is a SEPARATE ceiling,
+ *   min(limits.perTransferCapCents, the tier's daily cap).
+ */
 export function evaluateCap(
-  customer: Customer,
+  customer: CapSubject,
   now: Date,
   todayUsedCents: number,
   requestedCents: number,
-  kycGateActive = true,
+  kycGateActive: boolean,
+  limits: SendLimits,
 ): CapEvaluation {
   const tier = deriveTier(customer, now, kycGateActive);
   const dailyCapCents =
-    tier === 'T0' ? T0_DAILY_CAP_CENTS :
-    tier === 'T1' ? T1_DAILY_CAP_CENTS :
+    tier === 'T0' ? limits.t0DailyCapCents :
+    tier === 'T1' ? limits.t1DailyCapCents :
     0;
-  const perTransferCapCents = dailyCapCents;
+  const perTransferCapCents = Math.min(limits.perTransferCapCents, dailyCapCents);
   const todayRemainingCents = Math.max(0, dailyCapCents - todayUsedCents);
 
   let dayOfWindow: number | undefined;

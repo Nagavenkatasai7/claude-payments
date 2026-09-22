@@ -389,6 +389,8 @@ describe('isMaskedDestination — display placeholders are never payout accounts
       '********',                                     // the default read of a row POISONED with '****' (mappers.last4('****') === '****')
       '  ****9012 ',                                  // whitespace never launders it
       'bank a/c ****9012',                            // the approve-card "To:" line (tools.maskDestination)
+      '****@okhdfc',                                  // fix 5: tools.maskAccount for a UPI id
+      'UPI ****@okhdfc',                              // fix 5: the approve-card "To:" line for a UPI id
       'account ****6789',                             // the free-text form prompt.ts:87-88 tells the model to write
       '***9012',
       '•••• 9012',

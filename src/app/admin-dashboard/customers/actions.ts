@@ -2,10 +2,13 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { requireAdmin, requireScope } from '@/lib/auth';
+import { requireAdmin, requirePlatformAdmin, requireScope } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
+import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getStore } from '@/lib/store';
-import { getCustomerStore } from '@/lib/customer-store';
+import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
+import { validateSendLimitInput } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
@@ -195,6 +198,61 @@ export async function markCustomerRejectedAction(formData: FormData): Promise<vo
     kycStatus: 'rejected',
     kycRejectedReason: reason,
     updatedAt: nowIso,
+  });
+  revalidatePath('/admin-dashboard/customers');
+  revalidatePath(`/admin-dashboard/customers/${phone}`);
+}
+
+/**
+ * Program fix 16b: the audited PLATFORM-ADMIN raise (or clear) of one sender's
+ * send limits. Server-action checklist, in order:
+ *  1. requirePlatformAdmin() — partner-scoped staff and support are redirected
+ *     with no read, no write and no audit row (a raise is platform governance);
+ *  2. validateSendLimitInput — a missing reason throws BEFORE any read, like
+ *     reviewKycAction; whole USD in [1, $10,000]; a future expiry only;
+ *  3. the target is re-read from the posted (partnerId, phone): a missing row
+ *     is "Customer not found." — the write is keyed on THAT row's own key, so a
+ *     raise for (A, phone) can never touch (B, phone);
+ *  4. ONE transaction: read the old value (FOR UPDATE), the single-column
+ *     UPDATE, then the audit_events row (actor, old, new, reason, expiresAt).
+ *     If the audit insert fails, the limit write rolls back.
+ * Only the dollar caps move: sanctions, EDD and the tier gates are untouched
+ * (send-limits.ts resolveEffectiveSendLimits).
+ */
+export async function setCustomerSendLimitAction(formData: FormData): Promise<void> {
+  const staff = await requirePlatformAdmin();
+  const validated = validateSendLimitInput({
+    perTransferUsd: String(formData.get('perTransferUsd') ?? ''),
+    t1DailyUsd: String(formData.get('t1DailyUsd') ?? ''),
+    t0DailyUsd: '', // a customer override never carries T0 (the tier gate is never raised per customer)
+    expiresAt: String(formData.get('expiresAt') ?? ''),
+    reason: String(formData.get('reason') ?? ''),
+    clear: formData.get('clear') === 'on',
+  });
+  const phone = String(formData.get('phone') ?? '').trim();
+  if (!phone) throw new Error('Phone is required.');
+  const partnerId = targetPartnerId(staff, formData); // platform staff MUST name the tenant
+
+  const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
+  if (!customer) throw new Error('Customer not found.');
+
+  const nowIso = new Date().toISOString();
+  const value = validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso };
+  await getDb().transaction(async (tx) => {
+    // tx-bound repos ONLY inside the transaction (a root-handle call here would
+    // deadlock PGlite's single connection / hold a second Neon pool connection).
+    const { found, previous } = await createCustomerStore(tx, getStore()).setSendLimitOverride(
+      customer.partnerId, customer.senderPhone, value,
+    );
+    if (!found) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
+    await createAuditRepo(tx).record({
+      partnerId: customer.partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: value === null ? 'send_limits.clear' : 'send_limits.set',
+      subjectId: customer.senderPhone,
+      meta: { scope: 'customer', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+    });
   });
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(`/admin-dashboard/customers/${phone}`);

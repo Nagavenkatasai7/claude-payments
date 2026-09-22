@@ -229,6 +229,19 @@ export async function POST(
           { status: 409 },
         );
       }
+      // Program fix 16: the buyer's send cap (no figures) / the mint lock timed out (retryable).
+      if (minted.error === 'cap') {
+        return NextResponse.json(
+          { ok: false, reason: 'cap', error: 'This payment exceeds your current sending limit.' },
+          { status: 400 },
+        );
+      }
+      if (minted.error === 'busy') {
+        return NextResponse.json(
+          { ok: false, reason: 'busy', error: 'Please try again.' },
+          { status: 503 },
+        );
+      }
       const msg =
         minted.error === 'blocked' || minted.error === 'buyer_unscreened'
           ? "We can't process this payment."

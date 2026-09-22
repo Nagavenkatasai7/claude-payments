@@ -9,6 +9,7 @@ import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { logWarn } from '@/lib/log';
+import { handleRailFailure, alertRefusedDelivery } from '@/lib/rail-failure';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
 import { recipientTemplateParams, recipientDeliveredFallbackText, formatDestAmount } from '@/lib/payment';
@@ -88,7 +89,23 @@ export async function POST(
     return NextResponse.json({ ok: true, ignored: true });  // unparseable/irrelevant → 200, no mutation
   }
 
+  // fix 8 (money-02 / rail-02): a signed `failed` / `returned` is acted on —
+  // cancel + refund + customer notice + ops alert in ONE transaction (or an
+  // alert alone when the row is not `paid`). Below the HMAC gate, so an
+  // unsigned failure can never act; the `/mock` segment reaches the mock
+  // provider's null above. A throw here 500s and the rail retries: at-least-
+  // once, idempotent by the row claim and the dedupe keys.
+  if ('failure' in result) {
+    await handleRailFailure(getDb(), result.transferId, result.failure);
+    return NextResponse.json({ ok: true });
+  }
+
   const updated = await store.updateTransferFromWebhook(result.transferId, result.status);
+  // fix 8: a REFUSED paid_out on a cancelled row, or on a paid row with a refund
+  // in progress, is never silent — money may have moved twice (railconflict:<id>).
+  if (!updated && result.status === 'delivered') {
+    await alertRefusedDelivery(getDb(), result.transferId);
+  }
   // Fire stage-2 notifications ONLY on a real terminal transition (non-null + delivered).
   if (updated && updated.status === 'delivered') {
     // Phase 4 (B2B): "update accounting" — flip the linked mock invoice to paid.

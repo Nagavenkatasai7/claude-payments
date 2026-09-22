@@ -22,6 +22,7 @@ import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { renderSealedText } from '@/lib/sealed-text';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
+import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn } from '@/lib/log';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
@@ -178,6 +179,19 @@ async function withRowDeadline<T>(work: Promise<T>, ms: number, signal: RowSigna
 
 type Payload = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/**
+ * Fix 22: the SYNC settlement-URL rule, run in the handler BEFORE any fetch.
+ * A refusal is a thrown, RETRYABLE handler error (backoff → dead at
+ * MAX_ATTEMPTS → the deduped ops alert): never skipped, never followed. The
+ * message is the fixed reason code only — it lands in outbox.last_error and the
+ * alert text, so it must never carry the URL. No DNS here (ruling 25): the
+ * connect-time address check lives in safeFetch, the default fetchFn.
+ */
+function assertSettlementUrl(settlementUrl: string): void {
+  const check = checkSettlementUrl(settlementUrl, { appOrigin: env.appBaseUrl, production: env.isProduction });
+  if (!check.ok) throw new Error(`settlement_url_refused:${check.reason}`);
+}
 
 export interface PartnerCtx {
   brand: string;
@@ -347,6 +361,7 @@ async function handle(
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
       const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
       if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
+      assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
       const rawBody = JSON.stringify({
         ...buildSettlementInstruction(transfer),
         partner_id: railPartnerId,
@@ -366,9 +381,7 @@ async function handle(
       let providerRef = `rail-${transferId}`;
       try {
         const parsed = (await res.json()) as { providerRef?: unknown };
-        if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
-          providerRef = parsed.providerRef;
-        }
+        providerRef = safeProviderRef(parsed.providerRef) ?? providerRef; // fix 22: ≤128 chars of [A-Za-z0-9._:-], else the fallback
       } catch {
         /* non-JSON 2xx ack — keep deterministic ref */
       }
@@ -382,7 +395,11 @@ async function handle(
       const partnerId = str(p.partner_id) || str(p.partnerId);
       const { integrations } = await partner(partnerId);
       const webhookSecret = integrations.payment.webhookSecret ?? '';
-      const callbackBody = JSON.stringify({ reference, status: 'paid_out' });
+      // fix 8: the reference rail's one failure mode rides the same row —
+      // `status` (default paid_out) and an optional `reason` pass through.
+      const cbStatus = str(p.status) || 'paid_out';
+      const cbReason = str(p.reason);
+      const callbackBody = JSON.stringify({ reference, status: cbStatus, ...(cbReason ? { reason: cbReason } : {}) });
       const res = await deps.fetchFn(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
         method: 'POST',
         headers: {
@@ -424,6 +441,7 @@ async function handle(
         const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
         const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
+        assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
         const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
         const res = await deps.fetchFn(settlementUrl, {
           method: 'POST',
@@ -438,9 +456,7 @@ async function handle(
         refundRef = `reverse-${transferId}`;
         try {
           const parsed = (await res.json()) as { providerRef?: unknown };
-          if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
-            refundRef = parsed.providerRef;
-          }
+          refundRef = safeProviderRef(parsed.providerRef) ?? refundRef; // fix 22: same rule as the settle ack
         } catch {
           /* non-JSON 2xx ack — keep the deterministic ref */
         }

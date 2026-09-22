@@ -9,9 +9,10 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
-import { evaluateCap, T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
+import { evaluateCap } from '@/lib/tier-rules';
+import { PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedLedgerSpend } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage } from '@/lib/types';
 import type { Db } from '@/db/client';
@@ -101,8 +102,8 @@ describe('end-to-end happy path', () => {
       },
     ];
     let turn = 0;
-    const dailyVolumeStore = createDailyVolumeStore(redis);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const dailyVolumeStore = createDailyVolumeStore(store);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const agent = createAgent({
       store,
@@ -219,8 +220,8 @@ describe('end-to-end returning customer', () => {
       }),
     );
 
-    const dailyVolumeStore = createDailyVolumeStore(redis);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const dailyVolumeStore = createDailyVolumeStore(store);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const agent = createAgent({
       store,
@@ -298,8 +299,8 @@ describe('end-to-end new customer with cap', () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
-    const dailyVolumeStore = createDailyVolumeStore(redis);
-    const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+    const dailyVolumeStore = createDailyVolumeStore(store);
+    const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
     const scheduleStore = createScheduleStore(db);
     const draftStore = createDraftStore(redis);
@@ -397,12 +398,11 @@ describe('end-to-end new customer with cap', () => {
       kycVerifiedAt: new Date().toISOString(),
     });
 
-    // Drive today's usage to $100 short of the T0 cap, so the $200 request
-    // below overshoots it. Written against the constant, not a literal, so
-    // raising the cap cannot quietly turn this into a passing no-op.
-    await dailyVolumeStore.addCents('default', PHONE, T0_DAILY_CAP_CENTS - 40_000 - 10_000);
+    // $400 minted + $50 more in the ledger = $450 used; the $200 request
+    // below overshoots the $500 T0 cap (fix 16: spend is a ledger sum).
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 50 });
 
-    // used = cap − $100, + $200 requested → over_daily_cap.
+    // used = $450, + $200 requested = $650 > $500 → over_daily_cap.
     // (Verifies the observation invariant: KYC verified mid-window does NOT
     //  lift the cap — the tier stays T0 and its cap still binds.)
     const ev = evaluateCap(
@@ -410,17 +410,21 @@ describe('end-to-end new customer with cap', () => {
       new Date(),
       await dailyVolumeStore.getTodayCents('default', PHONE),
       20_000,
+      true,
+      PLATFORM_SEND_LIMITS,
     );
     expect(ev.tier).toBe('T0'); // still in window despite verification
     expect(ev.withinCap).toBe(false);
     expect(ev.reason).toBe('over_daily_cap');
 
-    // Asking for $100 (exactly the $100 remaining of the T0 cap) → within
+    // Asking for $50 (exactly the $50 remaining of the T0 cap) → within
     const within = evaluateCap(
       (await customerStore.getCustomer('default', PHONE))!,
       new Date(),
       await dailyVolumeStore.getTodayCents('default', PHONE),
-      10_000,
+      5_000,
+      true,
+      PLATFORM_SEND_LIMITS,
     );
     expect(within.withinCap).toBe(true);
   });

@@ -19,6 +19,15 @@ import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 // NON-CUSTODIAL: no funds exist here; this is the integration loop, hosted.
 
 const SETTLE_DELAY_MS = 12_000; // a realistic, demo-friendly settlement lag
+export const UNREACHABLE_REASON = 'account_unreachable';
+
+/** fix 8: the sentinel account — the LAST digit run is ≥6 zeros (e.g. "HDFC0001234 000000000000"). */
+export function isUnreachableAccount(destination: unknown): boolean {
+  if (typeof destination !== 'string') return false;
+  const runs = destination.match(/\d+/g);
+  const last = runs?.[runs.length - 1] ?? '';
+  return last.length >= 6 && /^0+$/.test(last);
+}
 
 export async function POST(req: NextRequest) {
   // Stage 3: blunt per-IP ceiling (signature gate below is the real auth).
@@ -32,6 +41,7 @@ export async function POST(req: NextRequest) {
     partner_id?: unknown;
     action?: unknown;
     funding?: { method?: unknown };
+    payout?: { rail?: unknown; destination?: unknown };
   } = {};
   try {
     body = JSON.parse(raw) as typeof body;
@@ -83,9 +93,24 @@ export async function POST(req: NextRequest) {
   // after() sleep). The worker POSTs the SIGNED status callback through the
   // public webhook with retries/backoff/dead-letter — the REAL delivery path,
   // now guaranteed-eventually even if this function dies.
+  //
+  // fix 8: the reference rail's ONE failure mode (demo + Chrome check). A bank
+  // payout whose account number — the LAST digit run of the composed
+  // destination (composePayoutDestination puts the account last; IN reads
+  // "HDFC0001234 000000000000") — is all zeros with at least 6 digits still
+  // acks, then reports `failed` / `account_unreachable` on the same delayed,
+  // deduped callback row. The BANK rail only: a USDC address is hex and a UPI
+  // VPA ("000000@ybl") is a handle — neither is an account number. Any other
+  // account settles as before.
+  const unreachable =
+    isUnreachableAccount(body.payout?.destination) && (body.payout?.rail ?? 'bank') === 'bank';
   await createOutboxRepo(getDb()).enqueue(
     'rail.callback',
-    { reference, partner_id: partnerId },
+    {
+      reference,
+      partner_id: partnerId,
+      ...(unreachable ? { status: 'failed', reason: UNREACHABLE_REASON } : {}),
+    },
     { delayMs: SETTLE_DELAY_MS, dedupeKey: `railcb:${reference}` },
   );
   pokeWorker();

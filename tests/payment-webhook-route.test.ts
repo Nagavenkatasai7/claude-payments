@@ -68,6 +68,17 @@ vi.mock('@/lib/partner-integrations-store', () => ({
 // Stage 3: the per-IP limiter would dial Upstash — always allow in unit tests.
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
 
+// fix 8: the failure path and the refused-delivery alert are PGlite-tested in
+// tests/rail-failure.test.ts (state, transactionality, replay, both orders);
+// here we pin DISPATCH: what the route calls, below the HMAC gate, and what it
+// answers.
+const handleRailFailure = vi.fn(async (..._a: unknown[]) => ({ kind: 'failed', refundStarted: true }));
+const alertRefusedDelivery = vi.fn(async (..._a: unknown[]) => false);
+vi.mock('@/lib/rail-failure', () => ({
+  handleRailFailure: (...a: unknown[]) => handleRailFailure(...a),
+  alertRefusedDelivery: (...a: unknown[]) => alertRefusedDelivery(...a),
+}));
+
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
 
 const deliveredTransfer = {
@@ -94,6 +105,7 @@ function post(provider: string, raw: string, signature?: string) {
 beforeEach(() => {
   sendText.mockClear(); sendTemplate.mockClear();
   updateTransferFromWebhook.mockReset(); handleWebhook.mockReset();
+  handleRailFailure.mockClear(); alertRefusedDelivery.mockClear();
   fixtures.transfersById = {};
   fixtures.integrationsByPartner = {};
   fixtures.getPaymentProviderCalls.length = 0;
@@ -152,7 +164,7 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect(msg).toContain('delivered');
   });
 
-  it('DUPLICATE paid_out (update returns null) → 200 but NO notification', async () => {
+  it('DUPLICATE paid_out (update returns null) → 200 but NO notification; the refused delivery is checked for a conflict (fix 8)', async () => {
     handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
     updateTransferFromWebhook.mockResolvedValue(null); // no real transition
     const res = await post('uniteller', body, sig(body));
@@ -160,6 +172,20 @@ describe('POST /api/payment-webhook/[provider]', () => {
     await flushAfter();
     expect(sendText).not.toHaveBeenCalled();
     expect(sendTemplate).not.toHaveBeenCalled();
+    expect(alertRefusedDelivery).toHaveBeenCalledTimes(1);
+    expect(alertRefusedDelivery.mock.calls[0][1]).toBe('wh_1');
+  });
+
+  it('a REAL delivered transition, or a refused non-delivered status, never checks for a conflict', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+    expect((await post('uniteller', body, sig(body))).status).toBe(200);
+    await flushAfter();
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'paid' });
+    updateTransferFromWebhook.mockResolvedValue(null); // a replayed `funded`
+    expect((await post('uniteller', body, sig(body))).status).toBe(200);
+    expect(alertRefusedDelivery).not.toHaveBeenCalled();
+    expect(handleRailFailure).not.toHaveBeenCalled();
   });
 
   it('malformed JSON → 400, no mutation', async () => {
@@ -254,5 +280,85 @@ describe('POST /api/payment-webhook — settlement routing (settlementPartnerId)
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     expect((sendTemplate.mock.calls[0] as unknown[])[4])
       .toEqual({ phoneNumberId: 'pn_owner', token: 'tok_owner' });
+  });
+});
+
+// Program-Fix 8 (money-02 / rail-02): a rail `failed` / `returned` callback is
+// acted on — below the HMAC gate, never through the forward state machine.
+describe('POST /api/payment-webhook — rail failure (fix 8)', () => {
+  const failedBody = JSON.stringify({ reference: 'wh_1', status: 'failed', reason: 'account_unreachable' });
+  const failure = { code: 'failed', reason: 'account_unreachable' };
+  const paidTransfer = { ...deliveredTransfer, status: 'paid', partnerId: 'owner' };
+  const ownerInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'owner_whk' }, whatsapp: {} };
+  const otherInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'other_whk' }, whatsapp: {} };
+  const mockInteg = { kyc: {}, payment: { providerType: 'mock' }, whatsapp: {} };
+
+  it('a SIGNED failure → handleRailFailure(db, id, failure) once, 200 { ok }, and the forward machine is never touched', async () => {
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure });
+    const res = await post('simulator', failedBody, sig(failedBody, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(handleRailFailure).toHaveBeenCalledTimes(1);
+    expect(handleRailFailure.mock.calls[0].slice(1)).toEqual(['wh_1', failure]);
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(alertRefusedDelivery).not.toHaveBeenCalled();
+    await flushAfter();
+    expect(sendText).not.toHaveBeenCalled(); // the customer notice is an OUTBOX row, not an after() send
+  });
+
+  it("TENANT: partner A's transfer, a failure signed with partner B's secret → 401, nothing acts", async () => {
+    // Unrouted (no settlementPartnerId): the rail partner IS the owner.
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    fixtures.integrationsByPartner['other'] = otherInteg;
+    const res = await post('simulator', failedBody, sig(failedBody, 'other_whk'));
+    expect(res.status).toBe(401);
+    expect(handleWebhook).not.toHaveBeenCalled();
+    expect(handleRailFailure).not.toHaveBeenCalled();
+  });
+
+  it('an UNSIGNED failure to /simulator → 401 (fail-closed)', async () => {
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    const res = await post('simulator', failedBody);
+    expect(res.status).toBe(401);
+    expect(handleRailFailure).not.toHaveBeenCalled();
+  });
+
+  it('an UNSIGNED failure to /mock for a MOCK-rail transfer → 200 ignored: the mock provider parses nothing, the row is untouched', async () => {
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = mockInteg;
+    handleWebhook.mockResolvedValue(null); // MockPaymentProvider.handleWebhook (pinned in payment-provider.test.ts)
+    const res = await post('mock', failedBody);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, ignored: true });
+    expect(handleRailFailure).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+  });
+
+  it('AT-LEAST-ONCE: when the handler throws (db down) the POST rejects — a 500 to the rail, which retries the signed callback', async () => {
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure });
+    handleRailFailure.mockRejectedValueOnce(new Error('db down'));
+    await expect(post('simulator', failedBody, sig(failedBody, 'owner_whk'))).rejects.toThrow('db down');
+    expect(handleRailFailure).toHaveBeenCalledTimes(1);
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    // The rail's retry lands on the idempotent claim and succeeds.
+    expect((await post('simulator', failedBody, sig(failedBody, 'owner_whk'))).status).toBe(200);
+    expect(handleRailFailure).toHaveBeenCalledTimes(2);
+  });
+
+  it('a REPLAYED signed failure dispatches again (the handler is the idempotent claim) and still answers 200', async () => {
+    fixtures.transfersById['wh_1'] = paidTransfer;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure });
+    handleRailFailure.mockResolvedValueOnce({ kind: 'failed', refundStarted: true });
+    handleRailFailure.mockResolvedValueOnce({ kind: 'noop', refundStarted: false });
+    expect((await post('simulator', failedBody, sig(failedBody, 'owner_whk'))).status).toBe(200);
+    expect((await post('simulator', failedBody, sig(failedBody, 'owner_whk'))).status).toBe(200);
+    expect(handleRailFailure).toHaveBeenCalledTimes(2);
   });
 });

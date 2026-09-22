@@ -44,8 +44,8 @@ function buildDeps(redis = fakeRedis()) {
     scheduleStore: createScheduleStore(db),
     draftStore: createDraftStore(redis),
     customerStore,
-    dailyVolumeStore: createDailyVolumeStore(redis),
-    monthlyVolumeStore: createMonthlyVolumeStore(redis),
+    dailyVolumeStore: createDailyVolumeStore(store),
+    monthlyVolumeStore: createMonthlyVolumeStore(store),
     kycProvider: new MockKycProvider(customerStore, 'https://example.com'),
     partnerStore: createPartnerStore(db),
   };
