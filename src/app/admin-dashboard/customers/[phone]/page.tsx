@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { scopeOf } from '@/lib/staff-scope';
+import { logWarn } from '@/lib/log';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createScopedStore } from '@/lib/scoped-store';
@@ -63,7 +64,11 @@ export default async function CustomerDetailPage({
       .getAudit(customer.partnerId, phone)
       .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>),
     // Program fix 16b: the last audited raise/clear for THIS (tenant, phone).
-    createAuditRepo(getDb()).lastSendLimitChange(customer.partnerId, 'customer', phone).catch(() => null),
+    createAuditRepo(getDb()).lastSendLimitChange(customer.partnerId, 'customer', phone).catch((err: unknown) => {
+      // Never blank the card silently: log (tenant id only — no phone), then render "—".
+      logWarn('admin.send_limits.last_change', err, { scope: 'customer', partnerId: customer.partnerId });
+      return null;
+    }),
   ]);
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';

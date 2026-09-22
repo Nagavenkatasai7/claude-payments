@@ -2,6 +2,8 @@ export const dynamic = 'force-dynamic';
 
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
+import { scopeOf } from '@/lib/staff-scope';
+import { logWarn } from '@/lib/log';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';
@@ -133,7 +135,7 @@ export default async function PartnerDetailPage({
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
-  const isPlatformAdmin = isAdmin && !staff.partnerId;
+  const isPlatformAdmin = isAdmin && scopeOf(staff).kind === 'platform'; // one spelling of the rule (see customers/[phone])
   const { id } = await params;
 
   const scoped = createScopedStore(staff);
@@ -151,7 +153,11 @@ export default async function PartnerDetailPage({
     getPartnerApiKeyStore().list(partner.id),
     createPartnerRateRepo(getDb()).listRatesForPartner(partner.id), // scope-checked above
     // Program fix 16b: the last audited raise/clear of this partner's default.
-    createAuditRepo(getDb()).lastSendLimitChange(partner.id, 'partner', partner.id).catch(() => null),
+    createAuditRepo(getDb()).lastSendLimitChange(partner.id, 'partner', partner.id).catch((err: unknown) => {
+      // Never blank the card silently: log (ids only, scrubbed) and render "—".
+      logWarn('admin.send_limits.last_change', err, { scope: 'partner', partnerId: partner.id });
+      return null;
+    }),
   ]);
   const nowMs = Date.now();
   const recents = recentPage.items;
