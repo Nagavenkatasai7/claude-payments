@@ -19,7 +19,8 @@ const inter = Inter({
 // (next/dist/lib/metadata/resolvers/resolve-url.js,
 // getSocialImageMetadataBaseFallback). The default title and description stay
 // neutral: routes without their own metadata (the white-label /pay/** pages)
-// inherit them. Icons come from app/icon.png + app/apple-icon.png.
+// inherit them. There are no root icons: SmartRemit-owned routes set theirs
+// (./brand-icons.ts) so the white-label pay page never shows the mark.
 export const metadata: Metadata = {
   metadataBase: new URL('https://smartremit.ai'),
   title: 'SmartRemit',

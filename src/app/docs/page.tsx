@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { SMARTREMIT_ICONS } from '../brand-icons';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -12,6 +13,7 @@ export const metadata = {
   title: 'SmartRemit — Partner API documentation',
   description:
     'Integrate the SmartRemit white-label remittance infrastructure: REST API, settlement webhooks, WhatsApp channel.',
+  icons: SMARTREMIT_ICONS,
 };
 
 function Code({ children }: { children: string }) {

@@ -1,8 +1,14 @@
+import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { SMARTREMIT_ICONS } from '../brand-icons';
 import { requireStaff } from '@/lib/auth';
 import { resolveNavItems } from './nav';
 import { TopBar } from './top-bar';
 import { DrawerProvider, MobileNavDrawer } from './mobile-nav';
+
+// SmartRemit-owned surface: the SmartRemit.ai tab icon for the whole subtree
+// (see ../brand-icons.ts for why icons are per-route, not app/icon.png).
+export const metadata: Metadata = { icons: SMARTREMIT_ICONS };
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   // Resolve the nav once here so the mobile drawer (a client component) gets plain
