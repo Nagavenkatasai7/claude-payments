@@ -415,10 +415,12 @@ export function createTransferRepo(
     /**
      * fix 6: the pay page's ONLY payout write on an existing transfer. Sets
      * payout_method, payout_destination_enc and payout_destination_last4 and
-     * NOTHING else — never a whole-row upsert from a masked read (transferToRow
-     * would write recipient_legal_name_enc = NULL and rewrite status/funding
-     * columns from a stale read). Returns the updated (masked) row, or null
-     * when any guard failed — the caller reports current truth.
+     * NOTHING else — never a whole-row upsert of a stale read: it rewrites the
+     * status / funding columns from that read, and when the re-saved row
+     * carries a REAL destination (no mask, so saveTransfer's mask guard does
+     * not engage) it writes recipient_legal_name_enc = NULL, which the default
+     * read omits. Returns the updated (masked) row, or null when any guard
+     * failed — the caller reports current truth.
      */
     async setPayoutIfEditable(
       id: string,
@@ -441,10 +443,10 @@ export function createTransferRepo(
      * fix 6: the pay route's ONLY ACH-mandate write. Sets ach_token_ref and
      * NOTHING else, only while the row is this tenant's awaiting_payment B2B
      * transfer with no token yet — replacing the route's whole-row
-     * saveTransfer of a masked read, which wrote recipient_legal_name_enc =
-     * NULL and rewrote status from a stale read (a concurrent POST's paid flip
-     * reverted → settled twice). Null ⇒ a guard failed; the caller re-reads
-     * and reports current truth.
+     * saveTransfer of a stale read, which rewrote status and ach_token_ref from
+     * that read (a concurrent POST's paid flip reverted → settled twice) and,
+     * when the read carried no mask, wrote recipient_legal_name_enc = NULL.
+     * Null ⇒ a guard failed; the caller re-reads and reports current truth.
      */
     async setAchTokenIfAbsent(id: string, partnerId: PartnerId, token: string): Promise<Transfer | null> {
       const rows = await db
