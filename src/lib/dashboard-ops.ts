@@ -1,5 +1,6 @@
 import { env } from './env';
 import { isPartnerPulled } from './funding-method';
+import { CANCEL_REFUSAL, decideStaffCancel } from './dashboard-cancel-policy';
 import { pokeWorker } from './outbox';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
@@ -10,30 +11,43 @@ import type { Store } from './store';
 import type { Scope } from './staff-scope';
 import type { Partner } from './types';
 
+/**
+ * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
+ * Program-Fix 9 / money-05). NON-CUSTODIAL: this function commits NO effect
+ * (no refund, no reversal, no rail message), so it may only flip a row with no
+ * money behind it. The rule is the pure decideStaffCancel
+ * (dashboard-cancel-policy), shared with the transactions list and the B2B page:
+ *   • delivered / cancelled → silent no-op (a second click is never an error),
+ *   • paid → refused: custodial → Refund (issueRefund), partner-pulled → Reverse,
+ *   • ANY in_review hold, charged or not → refused: a hold is a compliance
+ *     decision, so Reject (admin; cancel-only when uncharged, cancel +
+ *     auto-refund when charged, one txn) or Release (admin),
+ *   • charged awaiting_payment → refused: the funding-resume sweep settles or holds it,
+ *   • blocked → refused (terminal compliance state),
+ *   • otherwise (an unfunded awaiting_payment draft) → ONE guarded UPDATE
+ *     (store.cancelTransferIfUnfunded → transfer-repo.cancelIfCancellable).
+ *     The read above is advisory; the UPDATE is the claim. A miss means the
+ *     row moved (paid flip, hold, capture, or a concurrent click): refuse
+ *     from the FRESH row, and never fall back to a write.
+ * Why refuse instead of flipping: a cancelled row is invisible to every safety
+ * net. updateTransferFromWebhook refuses it, findStuckPaid skips it, and
+ * issueRefund rejects it. A charged transfer cancelled here used to strand the
+ * sender's money, with reconcile's cancelcharged:<id> alert as the only trace.
+ */
 export async function cancelTransfer(store: Store, id: string): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
   }
-  if (transfer.status === 'delivered' || transfer.status === 'cancelled') {
-    return;
-  }
-  // NON-CUSTODIAL guard: a PAID partner-pulled transfer (ach_pull / bank_pull) has
-  // already had its SIGNED settlement instruction POSTed to the partner's rail, so
-  // a bare status flip would say "cancelled" while the partner can still pull + pay
-  // out — money the status no longer tracks. The only safe cancel here is the
-  // partner REVERSE instruction via reverseB2bSettlement (refundStatus seam).
-  if (transfer.status === 'paid' && isPartnerPulled(transfer.fundingMethod)) {
-    throw new Error(
-      'Cannot cancel a paid partner-pulled transfer directly — use Reverse (it instructs the partner to return the debit).',
-    );
-  }
-  // Status-guarded: a release / settlement that moved the row after the read
-  // above must never be overwritten by a stale full-row save.
-  const cancelled = await store.updateTransferIfStatus(id, transfer.status, { status: 'cancelled' });
-  if (!cancelled) {
-    throw new Error('Cannot cancel: the transfer changed concurrently — reload and try again.');
-  }
+  const decision = decideStaffCancel(transfer);
+  if (decision.kind === 'noop') return;
+  if (decision.kind === 'refuse') throw new Error(decision.reason);
+  // Tenant-scoped claim: the row's own partner (the action already enforced the
+  // caller's scope via getScopedTransfer / platform scope before calling here).
+  if (await store.cancelTransferIfUnfunded(id, transfer.partnerId)) return;
+  const fresh = await store.getTransfer(id);
+  const again = fresh ? decideStaffCancel(fresh) : null;
+  throw new Error(again?.kind === 'refuse' ? again.reason : CANCEL_REFUSAL.changed);
 }
 
 /**
