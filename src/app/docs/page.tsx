@@ -225,6 +225,19 @@ x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
             process asynchronously — and dedupe on <code>reference</code>, so a retry after a slow
             ack can never pay out twice.
           </p>
+          {/* keep in sync with src/lib/settlement-url.ts + src/lib/safe-fetch.ts (fix 22) */}
+          <p className="text-sm text-muted-foreground">
+            <strong>Endpoint requirements.</strong> Your <code>settlementUrl</code> must be a public{' '}
+            <code>https://</code> host on port 443 (no IP literals, no internal or single-label names,
+            no credentials in the URL). We follow at most two redirects, only <code>307</code>/
+            <code>308</code> to the same origin — never a <code>301</code>/<code>302</code>/
+            <code>303</code>, which would turn the signed POST into a GET. Your ack must be 64 KB or
+            less, uncompressed (we send <code>Accept-Encoding: identity</code> and never decompress),
+            and <code>providerRef</code> is at most 128 characters of <code>A–Z a–z 0–9 . _ : -</code>.
+            An endpoint that fails these checks is refused before the instruction is sent: the
+            instruction is retried with backoff and then raises an ops alert, so fix the endpoint in
+            Admin → Partners → Payment and the retries pick it up.
+          </p>
         </section>
 
         <Separator />

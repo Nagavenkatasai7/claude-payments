@@ -279,7 +279,8 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
       // new Response('', { status: 204 | 205 | 304 }) throws (checked on Node
       // 26.8.1); those statuses are built with a null body.
       const nullBody = r.status === 204 || r.status === 205 || r.status === 304;
-      return new Response(nullBody ? null : r.body, {
+      // A fresh Uint8Array (ArrayBuffer-backed) satisfies BodyInit; ≤64 KB copy.
+      return new Response(nullBody ? null : new Uint8Array(r.body), {
         status: r.status,
         statusText: r.statusText,
         headers: responseHeaders,

@@ -10,8 +10,7 @@ import type {
   PaymentProviderStatus,
   WebhookResult,
 } from './payment-provider';
-import { completePaymentStage1 } from '../payment';
-import { sendText, type WaCreds } from '../whatsapp';
+import type { WaCreds } from '../whatsapp';
 
 // http-payment-provider — the REAL settlement rail adapter (WL3).
 //
@@ -208,47 +207,12 @@ export class HttpPaymentProvider implements PaymentProvider {
     private readonly waCreds?: WaCreds,
   ) {}
 
-  async initiateTransfer(transfer: Transfer): Promise<InitiateResult> {
-    const settlementUrl = this.payment.credentials?.settlementUrl ?? '';
-    const signingSecret = this.payment.credentials?.signingSecret ?? '';
-    // Fail-closed: an http/simulator partner without a configured endpoint must
-    // never silently fall back to a timer-based fake delivery.
-    if (!settlementUrl) {
-      throw new Error('Settlement endpoint not configured for this partner.');
-    }
-
-    // Stage 1 — the customer-facing "payment received" moment (identical to the
-    // mock's stage 1). Funds are charged on the partner's side; we mirror it.
-    const { transfer: t1, senderMessages } = await completePaymentStage1(this.store, transfer.id);
-    for (const msg of senderMessages) await sendText(t1.phone, msg, this.waCreds);
-
-    // POST the SIGNED settlement instruction to the partner's rail. Stage 2
-    // (delivered) arrives via their signed callback to /api/payment-webhook —
-    // NO self-advance timer on this path.
-    const rawBody = JSON.stringify(buildSettlementInstruction(transfer));
-    const res = await fetch(settlementUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
-      },
-      body: rawBody,
-      signal: AbortSignal.timeout(RAIL_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      throw new Error(`Settlement instruction rejected (${res.status}): ${errBody.slice(0, 300)}`);
-    }
-    let providerRef = `rail-${transfer.id}`;
-    try {
-      const parsed = (await res.json()) as { providerRef?: unknown };
-      if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
-        providerRef = parsed.providerRef;
-      }
-    } catch {
-      // Non-JSON 2xx ack is acceptable — keep the deterministic fallback ref.
-    }
-    return { providerRef };
+  async initiateTransfer(_transfer: Transfer): Promise<InitiateResult> {
+    // Fix 22: this path had its own raw global-fetch POST with no URL rule,
+    // redirects followed and an unbounded body, and NO caller — settlement runs
+    // through the outbox (settlement.instruct → safeFetch). Kept only to satisfy
+    // the PaymentProvider interface; it must never send anything.
+    throw new Error('initiateTransfer is not used: settlement runs through the outbox (settlement.instruct).');
   }
 
   async getStatus(providerRef: string): Promise<PaymentProviderStatus> {

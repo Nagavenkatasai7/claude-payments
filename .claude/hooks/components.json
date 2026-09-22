@@ -69,6 +69,7 @@
     ]},
     "platform-security": { "branch": "component/platform-security", "paths": [
       "src/middleware.ts", "src/instrumentation.ts", "src/lib/boot-assert.ts", "src/lib/field-crypto.ts", "src/lib/ip-rate-limit.ts",
+      "src/lib/settlement-url.ts", "src/lib/safe-fetch.ts", "scripts/audit-settlement-urls.ts", "tests/settlement-url*", "tests/safe-fetch*", "tests/fixtures/tls/",
       "src/lib/redis.ts", "src/lib/store.ts", "src/lib/scoped-store.ts", "src/lib/seed.ts", "next.config.*", "vitest.config.*", "playwright.config.*",
       "eslint.config.*", "tsconfig.json", ".github/", "tests/e2e/", "tests/boot-assert*", "tests/field-crypto*", "tests/ip-rate-limit*", "tests/security*", "tests/middleware*"
     ]},
