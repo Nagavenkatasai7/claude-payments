@@ -735,18 +735,26 @@ describe('pruneAgents', () => {
 });
 
 describe('urgentJournalKinds', () => {
-  it('lists the urgent kinds among journal lines, ignoring other kinds and bad lines', () => {
-    expect([...URGENT_JOURNAL_KINDS].sort()).toEqual(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step', 'verify']);
+  it('lists the urgent kinds among journal lines, ignoring routine kinds and bad lines', () => {
+    expect([...URGENT_JOURNAL_KINDS].sort()).toEqual(['incident', 'merge', 'migration']);
     const lines = [
       JSON.stringify({ kind: 'agent', title: 'Agent started: x' }),
       '{not json',
       JSON.stringify({ kind: 'owner-step', title: 'Owner rotated a key' }),
       JSON.stringify({ kind: 'approval', title: 'Approved' }),
-      JSON.stringify({ kind: 'approval', title: 'Approved again' }),
+      JSON.stringify({ kind: 'decision', title: 'Decided' }),
+      JSON.stringify({ kind: 'verify', title: 'Verified' }),
+      JSON.stringify({ kind: 'incident', title: 'Something broke' }),
+      JSON.stringify({ kind: 'migration', title: 'Ran a migration' }),
       'null',
     ];
-    expect(urgentJournalKinds(lines)).toEqual(['approval', 'owner-step']);
+    // approval, decision, verify and owner-step are routine now (owner decision 2026-09-22): they wait for SYNC_STALE_MS.
+    expect(urgentJournalKinds(lines)).toEqual(['incident', 'migration']);
     expect(urgentJournalKinds([JSON.stringify({ kind: 'pr' }), JSON.stringify({ kind: 'agent' })])).toEqual([]);
+    expect(urgentJournalKinds([
+      JSON.stringify({ kind: 'owner-step' }), JSON.stringify({ kind: 'approval' }),
+      JSON.stringify({ kind: 'decision' }), JSON.stringify({ kind: 'verify' }),
+    ])).toEqual([]);
     expect(urgentJournalKinds(undefined)).toEqual([]);
   });
 
@@ -776,18 +784,30 @@ describe('stopDecision (ledger-sync-due)', () => {
     expect(stopDecision(base)).toBeNull();
   });
 
-  it('(b) does not block on routine journal entries when the last sync was 10 minutes ago or less', () => {
-    expect(SYNC_STALE_MS).toBe(10 * 60 * 1000);
+  it('(b) does not block on routine journal entries when the last sync was an hour ago or less', () => {
+    expect(SYNC_STALE_MS).toBe(60 * 60 * 1000);
     expect(stopDecision({ ...base, ...pending })).toBeNull();
-    expect(stopDecision({ ...base, ...pending, lastSyncAt: minutesAgo(10) })).toBeNull();
+    expect(stopDecision({ ...base, ...pending, lastSyncAt: minutesAgo(60) })).toBeNull();
   });
 
-  it('(b) blocks on unflushed journal entries once the last sync is more than 10 minutes old', () => {
-    const d = stopDecision({ ...base, ...pending, lastSyncAt: minutesAgo(11) });
+  it('(b) blocks on unflushed journal entries once the last sync is more than an hour old', () => {
+    const d = stopDecision({ ...base, ...pending, lastSyncAt: minutesAgo(61) });
     expect(d).toEqual({
       decision: 'block',
-      reason: 'Ledger sync due: new journal entries and the last sync was 11 min ago. Run the tracker-sync skill (automated engine) now, then finish.',
+      reason: 'Ledger sync due: new journal entries and the last sync was 61 min ago. Run the tracker-sync skill (automated engine) now, then finish.',
     });
+  });
+
+  it('(b) treats approval, decision, verify and owner-step rows as routine: they wait for the hour, not an instant sync', () => {
+    for (const kind of ['approval', 'decision', 'verify', 'owner-step']) {
+      const line = JSON.stringify({ at: NOW, kind, title: `a ${kind}` });
+      expect(stopDecision({ ...base, journalSize: 300, pendingLines: [line], lastSyncAt: minutesAgo(20) })).toBeNull();
+      const d = stopDecision({ ...base, journalSize: 300, pendingLines: [line], lastSyncAt: minutesAgo(61) });
+      expect(d).toEqual({
+        decision: 'block',
+        reason: 'Ledger sync due: new journal entries and the last sync was 61 min ago. Run the tracker-sync skill (automated engine) now, then finish.',
+      });
+    }
   });
 
   it('(b) treats a missing or unreadable last-sync time as overdue', () => {
@@ -798,7 +818,7 @@ describe('stopDecision (ledger-sync-due)', () => {
     }
   });
 
-  it('(c) blocks at once when an unflushed line is an approval, decision, incident, merge, migration, owner-step or verify', () => {
+  it('(c) blocks at once when an unflushed line is an incident, merge or migration', () => {
     for (const kind of URGENT_JOURNAL_KINDS) {
       const line = JSON.stringify({ at: NOW, kind, title: `a ${kind}` });
       const d = stopDecision({ ...base, journalSize: 400, pendingLines: [agentLine, line], lastSyncAt: minutesAgo(1) });
@@ -807,12 +827,9 @@ describe('stopDecision (ledger-sync-due)', () => {
     }
   });
 
-  it('(c) blocks on a pending verify row with a fresh sync (the review repro)', () => {
+  it('(c) does not block on a pending verify row with a fresh sync: verify is routine now (owner decision 2026-09-22, was the #273 review repro)', () => {
     const verify = JSON.stringify({ at: NOW, kind: 'verify', actor: 'claude', title: 'Chrome walk-through of /pay green', result: 'ok' });
-    expect(stopDecision({ ...base, journalSize: 300, pendingLines: [verify], lastSyncAt: minutesAgo(1) })).toEqual({
-      decision: 'block',
-      reason: 'Ledger sync due: the journal holds a new verify entry. Run the tracker-sync skill (automated engine) now, then finish.',
-    });
+    expect(stopDecision({ ...base, journalSize: 300, pendingLines: [verify], lastSyncAt: minutesAgo(1) })).toBeNull();
   });
 
   it('(c) blocks on a session gh pr merge row even when ls-remote failed (no main-moved signal)', () => {
@@ -825,8 +842,8 @@ describe('stopDecision (ledger-sync-due)', () => {
   });
 
   it('(c) ignores urgent kinds that are already flushed, and non-urgent rows', () => {
-    const approval = JSON.stringify({ at: NOW, kind: 'approval', title: 'x' });
-    expect(stopDecision({ ...base, pendingLines: [approval] })).toBeNull();
+    const incident = JSON.stringify({ at: NOW, kind: 'incident', title: 'x' });
+    expect(stopDecision({ ...base, pendingLines: [incident] })).toBeNull();
     const unknownExitMerge = JSON.stringify({ kind: 'pr', title: 'gh pr merge #1 run in a session', result: 'info' });
     const close = JSON.stringify({ kind: 'pr', title: 'gh pr close #2 run in a session', result: 'ok' });
     expect(stopDecision({ ...base, journalSize: 300, pendingLines: [unknownExitMerge, close, '{bad'] })).toBeNull();
