@@ -6,6 +6,7 @@ import WhatsAppIcon from './landing/WhatsAppIcon';
 import BrandLogo from './landing/BrandLogo';
 import SocialLinks from './landing/SocialLinks';
 import { SHARE_IMAGE } from './landing/share-image';
+import { SMARTREMIT_ICONS } from './brand-icons';
 import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon, BoltIcon, GlobeIcon } from './landing/TrustIcons';
 import RateCalculator from './landing/RateCalculator';
 import HeroPipeline from './landing/HeroPipeline';
@@ -32,6 +33,7 @@ export const metadata: Metadata = {
     images: [SHARE_IMAGE],
   },
   twitter: { card: 'summary_large_image', title: TITLE, images: [SHARE_IMAGE] },
+  icons: SMARTREMIT_ICONS,
 };
 
 // ISR revalidates hourly. getFxRates() caches 5 min with a 60-min ceiling, and
@@ -69,9 +71,15 @@ const PARTNER_CORRIDORS = [
 ];
 
 // Scroll-reveal recipe (existing lp-rise keyframe; progressive — only engages
-// where animation-timeline is supported, and only under motion-safe).
+// where animation-timeline is supported, and only under motion-safe). The
+// view() timeline needs the DOCUMENT as its scroller, so the root uses
+// overflow-x-clip: overflow-x-hidden made the root div a (non-scrolling) scroll
+// container, freezing every reveal at its layout position (the partner form sat
+// at ~54% opacity). The range ends at entry 75%, so a section is fully shown
+// once 3/4 of it (or, if taller than the screen, its top 1/4 of the way down)
+// is on screen, including when you land on it via #partner-with-us.
 const RISE =
-  'motion-safe:supports-[animation-timeline:view()]:[animation-fill-mode:both] motion-safe:supports-[animation-timeline:view()]:[animation-name:lp-rise] motion-safe:supports-[animation-timeline:view()]:[animation-range:entry_0%_cover_40%] motion-safe:supports-[animation-timeline:view()]:[animation-timeline:view()] motion-safe:supports-[animation-timeline:view()]:[animation-timing-function:linear]';
+  'motion-safe:supports-[animation-timeline:view()]:[animation-fill-mode:both] motion-safe:supports-[animation-timeline:view()]:[animation-name:lp-rise] motion-safe:supports-[animation-timeline:view()]:[animation-range:entry_0%_entry_75%] motion-safe:supports-[animation-timeline:view()]:[animation-timeline:view()] motion-safe:supports-[animation-timeline:view()]:[animation-timing-function:linear]';
 
 // Button recipes.
 const BTN_WA =
@@ -173,26 +181,29 @@ export default async function LandingPage({
   return (
     // The [--lp-*] custom properties feed RateCalculator's legacy var hooks.
     <div
-      className={`${inter.className} min-h-svh overflow-x-hidden bg-[#f5f9ff] leading-[1.6] text-[#0b1b3f] antialiased max-[600px]:pb-[84px] [--lp-bg-800:#eef4fc] [--lp-bg-900:#ffffff] [--lp-border:#8391a8] [--lp-text-100:#0b1b3f] [--lp-text-300:#475569] [--lp-wa-deep:#1fbd5d] [--lp-green-text:#047857] [--lp-wa:#25d366] [&_:focus-visible]:rounded-[6px] [&_:focus-visible]:[outline-offset:3px] [&_:focus-visible]:[outline:2px_solid_#0c5bd2]`}
+      className={`${inter.className} min-h-svh overflow-x-clip bg-[#f5f9ff] leading-[1.6] text-[#0b1b3f] antialiased max-[600px]:pb-[84px] [--lp-bg-800:#eef4fc] [--lp-bg-900:#ffffff] [--lp-border:#8391a8] [--lp-text-100:#0b1b3f] [--lp-text-300:#475569] [--lp-wa-deep:#1fbd5d] [--lp-green-text:#047857] [--lp-wa:#25d366] [&_:focus-visible]:rounded-[6px] [&_:focus-visible]:[outline-offset:3px] [&_:focus-visible]:[outline:2px_solid_#0c5bd2]`}
     >
       {/* ============ NAV ============ */}
       <nav
         className="sticky top-0 z-50 border-b border-[#dbe4f0] bg-[rgba(245,249,255,0.85)] backdrop-blur-[12px]"
         aria-label="Primary"
       >
-        <div className="mx-auto flex w-full max-w-[1180px] items-center gap-6 px-5 py-3">
+        <div className="mx-auto flex w-full max-w-[1180px] items-center gap-5 px-5 py-3">
           <a className="inline-flex shrink-0 items-center" href="#top">
-            <BrandLogo height={32} eager />
+            <BrandLogo height={40} eager className="h-9 sm:h-10" />
           </a>
-          <div className="ml-auto flex items-center gap-6">
+          {/* Collapses right to left as the bar narrows: section links, then
+              Create account, then the Log in menu (a plain link on phones),
+              then the WhatsApp label (icon only; the sticky CTA carries it). */}
+          <div className="ml-auto flex items-center gap-5 max-[520px]:gap-3">
             <a
-              className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[760px]:hidden"
+              className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[1180px]:hidden"
               href="#inside"
             >
               What&rsquo;s inside
             </a>
             <a
-              className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[760px]:hidden"
+              className="text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[1180px]:hidden"
               href="#calculator"
             >
               Calculator
@@ -211,19 +222,26 @@ export default async function LandingPage({
             </a>
             <LoginMenu />
             <a
-              className="inline-flex min-h-10 items-center rounded-full border border-[#c5d3e6] px-4 text-[13.5px] font-semibold text-[#0b1b3f] transition-[border-color,background-color] duration-150 hover:border-[#0c5bd2]/50 hover:bg-white max-[920px]:hidden"
+              className="inline-flex min-h-11 items-center text-[14px] font-medium text-[#475569] transition-colors hover:text-[#0b1b3f] min-[761px]:hidden"
+              href="/account/login"
+            >
+              Log in
+            </a>
+            <a
+              className="inline-flex min-h-10 items-center rounded-full border border-[#c5d3e6] px-4 text-[13.5px] font-semibold text-[#0b1b3f] transition-[border-color,background-color] duration-150 hover:border-[#0c5bd2]/50 hover:bg-white max-[1023px]:hidden"
               href="/account/register"
             >
               Create account
             </a>
             <a
-              className="inline-flex min-h-10 items-center gap-2 rounded-full bg-[#25d366] px-4 text-[13.5px] font-bold text-[#04231a] transition-[background-color,transform] duration-150 hover:bg-[#1fbd5d] hover:[transform:translateY(-1px)]"
+              className="inline-flex min-h-10 items-center gap-2 rounded-full bg-[#25d366] px-4 text-[13.5px] font-bold text-[#04231a] transition-[background-color,transform] duration-150 hover:bg-[#1fbd5d] hover:[transform:translateY(-1px)] max-[520px]:min-h-11 max-[520px]:min-w-11 max-[520px]:justify-center max-[520px]:px-0"
               href={genericHref}
               target="_blank"
               rel="noopener noreferrer"
+              aria-label="Start on WhatsApp"
             >
               <WhatsAppIcon size={16} />
-              <span>Start on WhatsApp</span>
+              <span className="max-[520px]:sr-only">Start on WhatsApp</span>
             </a>
           </div>
         </div>
@@ -352,7 +370,7 @@ export default async function LandingPage({
         </section>
 
         {/* ============ WHAT'S INSIDE — product showcase ============ */}
-        <section id="inside" className="px-5 py-[clamp(64px,9vw,140px)]" aria-labelledby="inside-h">
+        <section id="inside" className="scroll-mt-20 px-5 py-[clamp(64px,9vw,140px)]" aria-labelledby="inside-h">
           <div className="mx-auto w-full max-w-[1180px]">
             <div className={`mx-auto max-w-[680px] text-center ${RISE}`}>
               <h2
@@ -442,7 +460,7 @@ export default async function LandingPage({
         {/* ============ CORRIDORS ============ */}
         <section
           id="corridors"
-          className={`border-t border-[#dbe4f0] px-5 py-[clamp(56px,8vw,110px)] ${RISE}`}
+          className={`scroll-mt-20 border-t border-[#dbe4f0] px-5 py-[clamp(56px,8vw,110px)] ${RISE}`}
           aria-labelledby="corridors-h"
         >
           <div className="mx-auto w-full max-w-[1180px] text-center">
@@ -483,7 +501,7 @@ export default async function LandingPage({
         {/* ============ LIVE FX CALCULATOR ============ */}
         <section
           id="calculator"
-          className={`border-t border-[#dbe4f0] px-5 py-[clamp(64px,9vw,130px)] ${RISE}`}
+          className={`scroll-mt-20 border-t border-[#dbe4f0] px-5 py-[clamp(64px,9vw,130px)] ${RISE}`}
           aria-labelledby="calculator-h"
         >
           <div className="mx-auto grid w-full max-w-[1080px] items-center gap-10 lg:grid-cols-2 lg:gap-20">
@@ -561,7 +579,7 @@ export default async function LandingPage({
         {/* ============ PARTNER WITH US — public lead form ============ */}
         <section
           id="partner-with-us"
-          className={`border-t border-[#dbe4f0] px-5 py-[clamp(64px,9vw,130px)] ${RISE}`}
+          className={`scroll-mt-20 border-t border-[#dbe4f0] px-5 py-[clamp(64px,9vw,130px)] ${RISE}`}
           aria-labelledby="partner-h"
         >
           <div className="mx-auto grid w-full max-w-[1080px] items-start gap-10 lg:grid-cols-2 lg:gap-20">
@@ -649,7 +667,7 @@ export default async function LandingPage({
                   />
                 </div>
 
-                <div className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+                <div className="flex flex-col gap-5 sm:flex-row sm:gap-4">
                   <div className="flex flex-1 flex-col gap-2">
                     <label
                       htmlFor="email"
@@ -743,8 +761,8 @@ export default async function LandingPage({
       {/* ============ FOOTER ============ */}
       <footer className="border-t border-[#dbe4f0] bg-white pt-[clamp(40px,6vw,64px)] pb-8">
         <div className="mx-auto mb-10 flex w-full max-w-[1180px] flex-wrap items-center justify-between gap-6 px-5">
-          <div className="flex flex-col gap-3">
-            <BrandLogo height={32} />
+          <div className="flex flex-col items-start gap-3">
+            <BrandLogo height={40} />
             <p className="text-[14px] text-[#475569]">Global money transfers, made simpler.</p>
           </div>
           <nav aria-label="SmartRemit on social media">

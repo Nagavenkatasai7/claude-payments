@@ -4,7 +4,9 @@ import { Inter } from 'next/font/google';
 import { waLink } from '../landing/wa';
 import WhatsAppIcon from '../landing/WhatsAppIcon';
 import BrandLogo from '../landing/BrandLogo';
+import AboutDemoVideo from './AboutDemoVideo';
 import { SHARE_IMAGE } from '../landing/share-image';
+import { SMARTREMIT_ICONS } from '../brand-icons';
 
 // Public /about page — the story, how a send works, and the partner platform.
 // Styled with the SAME inline-Tailwind light brand conventions as the landing
@@ -16,10 +18,8 @@ import { SHARE_IMAGE } from '../landing/share-image';
 
 const inter = Inter({ subsets: ['latin'], display: 'swap' });
 
-// The product-walkthrough video is ON HOLD: /about-demo.mp4 was never
-// published, so the old <video> block only ever showed its (dark) poster over a
-// 404 source. It returns with the finished cut; the CSP media-src still allows
-// same-origin and the Vercel Blob host, so re-adding it needs no header change.
+// The product demo video lives in ./AboutDemoVideo (hidden until an approved
+// clip is set there; the old /about-demo.mp4 was never published).
 
 const WA_HREF = waLink('Hi! I would like to send money home with SmartRemit.');
 
@@ -29,10 +29,11 @@ export const metadata: Metadata = {
     'SmartRemit is non-custodial technology that lets people send money home by chatting on WhatsApp, while licensed partners move the funds. See how one transfer works, start to finish.',
   openGraph: { type: 'website', siteName: 'SmartRemit.ai', images: [SHARE_IMAGE] },
   twitter: { card: 'summary_large_image', images: [SHARE_IMAGE] },
+  icons: SMARTREMIT_ICONS,
 };
 
 const ROOT =
-  `${inter.className} min-h-svh overflow-x-hidden bg-[#f5f9ff] leading-[1.6] text-[#0b1b3f] antialiased ` +
+  `${inter.className} min-h-svh overflow-x-clip bg-[#f5f9ff] leading-[1.6] text-[#0b1b3f] antialiased ` +
   '[--lp-text-100:#0b1b3f] [--lp-text-300:#475569] ' +
   '[&_:focus-visible]:rounded-[6px] [&_:focus-visible]:[outline-offset:3px] [&_:focus-visible]:[outline:2px_solid_#0c5bd2]';
 
@@ -70,19 +71,22 @@ export default function AboutPage() {
       <header className="sticky top-0 z-30 border-b border-[#dbe4f0] bg-[#f5f9ff]/85 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1180px] items-center gap-4 px-5 py-3.5">
           <Link href="/" className="inline-flex shrink-0 items-center">
-            <BrandLogo height={32} eager />
+            <BrandLogo height={40} eager className="h-9 sm:h-10" />
           </Link>
-          <Link href="/" className="ml-auto text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f]">
+          {/* On phones the logo is the way home, and the WhatsApp button
+              drops to its icon, so the bar never overflows. */}
+          <Link href="/" className="ml-auto text-[14px] text-[#475569] transition-colors hover:text-[#0b1b3f] max-[600px]:hidden">
             ← Back to home
           </Link>
           <a
-            className="inline-flex min-h-10 items-center gap-2 rounded-full bg-[#25d366] px-4 text-[13.5px] font-bold text-[#04231a] transition-[background-color,transform] duration-150 hover:bg-[#1fbd5d] hover:[transform:translateY(-1px)]"
+            className="inline-flex min-h-10 items-center gap-2 rounded-full bg-[#25d366] px-4 text-[13.5px] font-bold text-[#04231a] transition-[background-color,transform] duration-150 hover:bg-[#1fbd5d] hover:[transform:translateY(-1px)] max-[600px]:ml-auto max-[520px]:min-h-11 max-[520px]:min-w-11 max-[520px]:justify-center max-[520px]:px-0"
             href={WA_HREF}
             target="_blank"
             rel="noopener noreferrer"
+            aria-label="Start on WhatsApp"
           >
             <WhatsAppIcon size={16} />
-            <span>Start on WhatsApp</span>
+            <span className="max-[520px]:sr-only">Start on WhatsApp</span>
           </a>
         </div>
       </header>
@@ -103,6 +107,9 @@ export default function AboutPage() {
             </p>
           </div>
         </section>
+
+        {/* Demo video: renders nothing until ABOUT_DEMO_VIDEO is set. */}
+        <AboutDemoVideo />
 
         {/* How it works */}
         <section className="border-t border-[#dbe4f0] py-[clamp(48px,7vw,96px)]">
@@ -239,7 +246,7 @@ export default function AboutPage() {
       <footer className="border-t border-[#dbe4f0] bg-white py-8">
         <div className="mx-auto flex w-full max-w-[1180px] flex-wrap items-center justify-between gap-3 px-5 text-[13px] text-[#52607a]">
           <span className="flex flex-wrap items-center gap-3">
-            <BrandLogo height={32} />
+            <BrandLogo height={40} />
             <span>Non-custodial remittance infrastructure.</span>
           </span>
           <span>[Placeholder: licensing &amp; regulatory disclosures]</span>

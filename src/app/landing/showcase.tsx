@@ -36,7 +36,7 @@ export function ChatMock({ rate }: { rate: number }) {
     >
       <div
         aria-hidden="true"
-        className="rounded-[50px] bg-[#0b1b3f] p-[10px] shadow-[0_50px_90px_-40px_rgba(11,27,63,0.6),0_18px_40px_-24px_rgba(12,91,210,0.45)]"
+        className="rounded-[50px] bg-[#0b1b3f] p-[10px] shadow-[0_30px_60px_-28px_rgba(11,27,63,0.5)]"
       >
         <div className="relative overflow-hidden rounded-[40px] bg-[#efeae2]">
           {/* Status bar + dynamic island */}
