@@ -13,7 +13,7 @@ import { env } from '@/lib/env';
 import { Sidebar } from '../../sidebar';
 import { SenderCell } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
-import { resolveSendLimits } from '@/lib/send-limits';
+import { isTightened, resolveSendLimits } from '@/lib/send-limits';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
@@ -303,7 +303,7 @@ export default async function PartnerDetailPage({
                     ${(sendLimits.perTransferCapCents / 100).toLocaleString('en-US')} per transfer ·{' '}
                     ${(sendLimits.t1DailyCapCents / 100).toLocaleString('en-US')}/day verified ·{' '}
                     ${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}/day first 3 days
-                    {partner.sendLimits ? ' (tightened for this partner)' : ' (platform default)'}
+                    {isTightened(sendLimits) ? ' (tightened for this partner)' : ' (platform default)'}
                   </dd>
                   <dt>Primary color</dt>
                   <dd>

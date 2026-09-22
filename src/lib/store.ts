@@ -211,7 +211,8 @@ export function createStore(redis: RedisLike, db: Db) {
     // the conv: and kyc_audit: fallbacks only.
     /** Today's transfer count for the velocity flag — a ledger count (blocked excluded). */
     async getTodayTransferCount(partnerId: PartnerId, phone: string): Promise<number> {
-      return (await this.senderTotals(partnerId, phone)).todayCount;
+      const now = new Date();
+      return (await transfersRepo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now))).todayCount;
     },
     /** Unlocked read (display, the pre-claim cap check, the tools' check_send_limit). */
     async senderTotals(partnerId: PartnerId, phone: string, now: Date = new Date()): Promise<SenderTotals> {

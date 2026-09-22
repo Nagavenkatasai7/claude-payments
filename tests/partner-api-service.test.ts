@@ -749,3 +749,58 @@ describe('createTransaction — send caps (Program fix 16)', () => {
     expect((r2.data as { id: string }).id).toBe('b0');
   });
 });
+
+// ── Review follow-ups (PR #281): sender.phone is ONE identity per number ──
+describe('createTransaction — sender.phone normalization (review MUST 1) + typed id conflict (SHOULD 3)', () => {
+  const PHONE = '15557770016';
+
+  it('a formatted spelling of the same number shares the cap: +1 555 777 0016 after $400 under 15557770016 ⇒ 422, nothing minted', async () => {
+    const { deps, store, db, customerStore } = await harness();
+    await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 400 });
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-norm-1', txBody({ amount_source: 200, sender: { phone: '+1 555 777 0016', kyc_status: 'not_started' } }));
+    expect(r).toMatchObject({ ok: false, status: 422 });
+    expect(await store.getTransferCount('acme', PHONE)).toBe(1); // the seeded row only
+    expect(await store.getTransferCount('acme', '+1 555 777 0016')).toBe(0); // no second identity
+    // The customer row is created under the NORMALIZED number only.
+    expect(await customerStore.getCustomer('acme', PHONE)).not.toBeNull();
+    // A dashed spelling with headroom mints under the normalized number.
+    const ok = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-norm-2', txBody({ amount_source: 100, sender: { phone: '1-555-777-0016', kyc_status: 'not_started' } }));
+    expect(ok).toMatchObject({ ok: true, status: 201 });
+    if (!ok.ok) throw new Error('unexpected');
+    expect((ok.data as { sender_phone: string }).sender_phone).toBe(PHONE);
+    expect(await store.getTransferCount('acme', PHONE)).toBe(2);
+  });
+
+  it('an invalid sender.phone ⇒ 400 before the customer write and the claim', async () => {
+    const { deps, db, customerStore } = await harness();
+    for (const bad of ['abc', '12345', '+1 (555) 12', '1'.repeat(16)]) {
+      const r = await createTransaction(deps, DELEGATED, 'pk_1', `idem-bad-${bad.length}`, txBody({ sender: { phone: bad, kyc_status: 'not_started' } }));
+      expect(r).toMatchObject({ ok: false, status: 400, error: 'sender.phone must be a valid E.164-style number.' });
+      expect(await createIdempotencyRepo(db).find('acme', `idem-bad-${bad.length}`)).toBeNull();
+    }
+    expect(await customerStore.getCustomer('acme', 'abc')).toBeNull();
+    expect(await customerStore.getCustomer('acme', '12345')).toBeNull();
+    // still required when absent
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-bad-0', txBody({ sender: { kyc_status: 'not_started' } })))
+      .toMatchObject({ ok: false, status: 400, error: 'sender.phone is required.' });
+  });
+
+  it('createQuote normalizes sender.phone the same way (+91 98765 43210 ⇒ INR)', async () => {
+    const { deps } = await harness();
+    const multi = partner({ id: 'globex', countries: ['US', 'GB', 'AE', 'IN'] });
+    const q = await createQuote(deps, multi, { amount_source: 2000, destination_country: 'US', sender: { phone: '+91 98765 43210' } });
+    expect(q.ok).toBe(true);
+    if (q.ok) expect(q.data).toMatchObject({ source_currency: 'INR', destination_currency: 'USD' });
+  });
+
+  it('a claimed id that already exists under another tenant ⇒ 409 (TransferIdConflictError), never a 500 and never that row', async () => {
+    const { deps, store, db } = await harness();
+    // genId yields 'b0' for this harness's first mint; plant that id under globex.
+    await seedLedgerSpend(db, { partnerId: 'globex', phone: '15550000999', amountUsd: 10, id: 'b0' });
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-conflict-1', txBody({ sender: { phone: PHONE, kyc_status: 'not_started' } }));
+    expect(r).toMatchObject({ ok: false, status: 409 });
+    expect(JSON.stringify(r)).not.toContain('15550000999');
+    const row = await store.getTransfer('b0');
+    expect([row?.partnerId, row?.amountUsd]).toEqual(['globex', 10]); // untouched
+  });
+});

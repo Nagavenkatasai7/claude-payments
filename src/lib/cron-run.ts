@@ -85,7 +85,7 @@ export async function runDueSchedules(
       continue;
     }
     try {
-      const transfer = await createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
+      const mint = () => createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
         phone: schedule.phone,
         amountSource: schedule.amountSource,
         sourceCurrency: schedule.sourceCurrency,
@@ -98,6 +98,16 @@ export async function runDueSchedules(
         senderKycStatus: owner?.kycStatus ?? 'not_started',
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
       });
+      // Program fix 16: a busy per-sender lock wrote nothing, and /api/cron runs
+      // ONCE a day (no same-day re-run) — so retry the mint once in-process
+      // before counting the schedule as failed.
+      let transfer: Awaited<ReturnType<typeof mint>>;
+      try {
+        transfer = await mint();
+      } catch (first) {
+        if (!(first instanceof SendBusyError)) throw first;
+        transfer = await mint();
+      }
       if (transfer.status !== 'blocked') {
         const url = `${env.appBaseUrl}/pay/${transfer.id}`;
         await deps.sendScheduledLink(schedule, transfer, url);
@@ -109,14 +119,15 @@ export async function runDueSchedules(
       // A refused mint (Task 9: FX unavailable; or any other refusal) is LOUD:
       // a scrubbed error line, counted in the result (the /api/cron JSON), and
       // ONE deduped ops alert per schedule per Eastern day. lastRunAt is NOT
-      // advanced, so a same-day re-run of /api/cron fires it — but the daily
-      // cron has no next-day catch-up (isScheduleDueToday matches the day), so
-      // without the alert this cycle's send would silently disappear.
+      // advanced, so a MANUAL same-day re-run of /api/cron would fire it — the
+      // scheduled cron itself runs once a day with no next-day catch-up
+      // (isScheduleDueToday matches the day), so without the alert this
+      // cycle's send would silently disappear.
       failed++;
       const reason =
         err instanceof RateUnavailableError ? err.reason
         : err instanceof SendCapError ? 'send_cap'   // Program fix 16: the schedule owner is at their cap today
-        : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out (a same-day re-run retries)
+        : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out twice (once retried above)
         : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
       // YYYY-MM-DD for the same Eastern day isScheduleDueToday matches.

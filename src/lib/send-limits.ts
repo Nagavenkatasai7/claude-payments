@@ -57,6 +57,16 @@ export function resolveSendLimits(
   };
 }
 
+/** True when a RESOLVED ladder differs from the platform (an expired or garbage override does not count). */
+export function isTightened(limits: SendLimits): boolean {
+  return (
+    limits.t0DailyCapCents !== PLATFORM_SEND_LIMITS.t0DailyCapCents ||
+    limits.t1DailyCapCents !== PLATFORM_SEND_LIMITS.t1DailyCapCents ||
+    limits.perTransferCapCents !== PLATFORM_SEND_LIMITS.perTransferCapCents ||
+    limits.maxUsd !== PLATFORM_SEND_LIMITS.maxUsd
+  );
+}
+
 function isExpired(expiresAt: unknown, now: Date): boolean {
   if (typeof expiresAt !== 'string') return false;
   const t = Date.parse(expiresAt);

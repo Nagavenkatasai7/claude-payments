@@ -170,6 +170,20 @@ export class PartnerPulledConsumerError extends Error {
   }
 }
 
+/**
+ * Thrown (inside the lock, before any write) when a claim-first `input.id`
+ * already names a row under ANOTHER tenant. Unreachable by provenance — every
+ * `input.id` is a per-tenant idempotency binding on a server-generated id —
+ * but insertTransfer is an upsert, so this refuses instead of overwriting.
+ * The partner API maps it to 409; nothing is written.
+ */
+export class TransferIdConflictError extends Error {
+  constructor() {
+    super('transfer_id_conflict');
+    this.name = 'TransferIdConflictError';
+  }
+}
+
 export async function createTransfer(
   store: Store,
   partnerStore: PartnerStore,           // NEW (P5): to resolve corridor rules
@@ -319,7 +333,7 @@ async function mintLocked(
     // nor re-inserted (insertTransfer is an upsert) — refuse before any write.
     const existing = await ops.getTransfer(input.id);
     if (existing) {
-      if (existing.partnerId !== input.partnerId) throw new Error('transfer_id_conflict');
+      if (existing.partnerId !== input.partnerId) throw new TransferIdConflictError();
       return { transfer: existing, replayed: true };
     }
   }

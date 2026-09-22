@@ -9,7 +9,9 @@
  *        set -a; source .env.local; set +a
  *        DATABASE_URL=<branch pooled url> DATABASE_URL_UNPOOLED=<branch direct url> npx drizzle-kit migrate
  *   2. Run (the POSITIVE gate: RACE_ALLOW_HOST must equal the branch host, so a
- *      sourced prod .env.local can never be the target by accident):
+ *      sourced prod .env.local can never be the target by accident; optionally
+ *      PROD_DB_HOST=<prod hostname> as a second, negative gate; the host must
+ *      also look like a Neon endpoint, ep-….aws.neon.tech):
  *        DATABASE_URL=<branch pooled url> RACE_ALLOW_HOST=<that url's hostname> node_modules/.bin/tsx scripts/race-send-cap.ts
  *   3. Quote the output in the PR, then delete the branch.
  *
@@ -28,6 +30,7 @@ import { drizzle } from 'drizzle-orm/neon-serverless';
 import { sql } from 'drizzle-orm';
 import ws from 'ws';
 import * as schema from '@/db/schema';
+import { easternDayStart, easternMonthStart } from '@/lib/dates';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -51,6 +54,16 @@ if (!url) {
 const targetHost = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
 if (!targetHost || !process.env.RACE_ALLOW_HOST || process.env.RACE_ALLOW_HOST !== targetHost) {
   console.error(`Refusing: set RACE_ALLOW_HOST to the throwaway branch host (DATABASE_URL points at "${targetHost || '?'}").`);
+  process.exit(1);
+}
+// Negative gates (review): never the prod host, and only a Neon endpoint host
+// (ep-<slug>[-pooler].<region>.aws.neon.tech) — a pasted non-Neon URL is refused.
+if (process.env.PROD_DB_HOST && targetHost === process.env.PROD_DB_HOST) {
+  console.error('Refusing: DATABASE_URL points at PROD_DB_HOST.');
+  process.exit(1);
+}
+if (!/^ep-[a-z0-9-]+\.[a-z0-9-]+\.aws\.neon\.tech$/.test(targetHost)) {
+  console.error(`Refusing: "${targetHost}" is not a Neon branch endpoint host.`);
   process.exit(1);
 }
 
@@ -135,8 +148,16 @@ async function main() {
     await a.db.execute(sql`INSERT INTO customers (phone, partner_id, first_seen_at, sender_country, kyc_status)
       VALUES (${phone}, 'default', ${tenDaysAgo}, 'US', 'verified')
       ON CONFLICT (partner_id, phone) DO UPDATE SET first_seen_at = ${tenDaysAgo}, kyc_status = 'verified'`);
-    const yesterday = new Date(Date.now() - 86_400_000);
-    if (yesterday.getMonth() !== new Date().getMonth()) console.log('      (note: yesterday is last month in UTC; B assumes the ET month too)');
+    // "Yesterday" must be in THIS ET month (the EDD window). On the 1st of the
+    // ET month there is no such day: a same-day seed would trip the daily cap
+    // first, so B is SKIPPED (not failed) — rerun tomorrow.
+    const now = new Date();
+    const yesterday = new Date(easternDayStart(now).getTime() - 12 * 3_600_000); // noon ET, previous day
+    if (yesterday.getTime() < easternMonthStart(now).getTime()) {
+      console.log('SKIP  B: today is the 1st of the ET month — no prior day in the EDD window; rerun tomorrow.');
+      await cleanup(a.db, phone);
+      await a.db.execute(sql`DELETE FROM customers WHERE partner_id = 'default' AND phone = ${phone}`);
+    } else {
     await createTransferRepo(a.db).saveTransfer({
       id: `race_seed_${stamp}`, phone, amountUsd: 1500, feeUsd: 0, totalChargeUsd: 1500, fxRate: 85, amountInr: 127_500,
       ...RECIPIENT, fundingMethod: 'bank_transfer', complianceStatus: 'cleared', complianceReasons: [], status: 'paid',
@@ -152,6 +173,7 @@ async function main() {
       `ok=${[r1, r2].filter((r) => r.ok).length} minted=${minted.length} edd_required=${edd} statuses=${JSON.stringify(minted.map((r) => r.compliance_status))}`);
     await cleanup(a.db, phone);
     await a.db.execute(sql`DELETE FROM customers WHERE partner_id = 'default' AND phone = ${phone}`);
+    }
   }
 
   // C. two mints with the SAME input.id at once ⇒ one row, both callers get it, no PK error

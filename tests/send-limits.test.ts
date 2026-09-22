@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   PLATFORM_SEND_LIMITS,
+  isTightened,
   resolveSendLimits,
   SendBusyError,
   SendCapError,
@@ -93,6 +94,17 @@ describe('resolveSendLimits (test 2: a partner can only tighten)', () => {
     expect(resolveSendLimits(expired, now)).toEqual(PLATFORM_SEND_LIMITS);
     const live = partner({ perTransferCapCents: 100_000, expiresAt: '2026-07-01T00:00:00.000Z' });
     expect(resolveSendLimits(live, now).perTransferCapCents).toBe(100_000);
+  });
+
+  it('isTightened is true only when the RESOLVED ladder differs from the platform (review SHOULD 5)', () => {
+    expect(isTightened(resolveSendLimits(null))).toBe(false);
+    expect(isTightened(resolveSendLimits(partner({ perTransferCapCents: 100_000 })))).toBe(true);
+    // An expired or garbage override resolves to the platform ⇒ not tightened.
+    const now = new Date('2026-06-15T12:00:00.000Z');
+    expect(isTightened(resolveSendLimits(partner({ perTransferCapCents: 100_000, expiresAt: '2026-06-01T00:00:00.000Z' }), now))).toBe(false);
+    expect(isTightened(resolveSendLimits(partner({ perTransferCapCents: -1 } as unknown as Partner['sendLimits'])))).toBe(false);
+    // A "raise" clamps to the platform ⇒ not tightened.
+    expect(isTightened(resolveSendLimits(partner({ t1DailyCapCents: 900_000 })))).toBe(false);
   });
 
   it('never returns the frozen platform object itself, and never mutates it', () => {
