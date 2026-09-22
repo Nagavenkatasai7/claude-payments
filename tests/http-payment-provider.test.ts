@@ -328,3 +328,26 @@ describe('buildSettlementInstruction — ctx-01 backstops (fix 6)', () => {
     expect((buildSettlementInstruction(achPull) as { funding?: { method: string } }).funding?.method).toBe('ach_debit');
   });
 });
+
+describe('buildSettlementInstruction — an empty destination only on a B2B partner-pulled row (fix 10 review S2)', () => {
+  it('throws for an empty / blank destination on a consumer row, and on a B2B row that is not partner-pulled', () => {
+    const cases: Array<Partial<Transfer>> = [
+      { payoutDestination: '' },
+      { payoutDestination: '   ' },
+      { payoutDestination: '', transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business', fundingMethod: 'bank_transfer' },
+    ];
+    for (const over of cases) {
+      expect(() => buildSettlementInstruction({ ...fixture(), ...over } as Transfer), JSON.stringify(over))
+        .toThrow('settlement_destination_invalid:rail_t1');
+    }
+  });
+
+  it('a B2B ach_pull or bank_pull row with no destination still builds (the partner pays the payee)', () => {
+    for (const fundingMethod of ['ach_pull', 'bank_pull'] as const) {
+      const built = buildSettlementInstruction({
+        ...fixture(), fundingMethod, achTokenRef: 'ach_abc', transferType: 'b2b', payoutDestination: '',
+      } as Transfer) as { payout: { destination: string } };
+      expect(built.payout.destination, fundingMethod).toBe('');
+    }
+  });
+});

@@ -650,3 +650,20 @@ describe('fix 6 (ctx-01): a masked payout_destination is refused at the edge, be
     expect(await store.listTransfers()).toHaveLength(0);
   });
 });
+
+describe('fix 10 review S2: a consumer transaction needs a payout destination at the edge', () => {
+  it("an empty or missing inline payout_destination → 400 before the claim; the same key then mints", async () => {
+    const { deps, store, db } = await harness();
+    for (const [key, beneficiary] of [
+      ['idem-empty', { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '' }],
+      ['idem-blank', { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '   ' }],
+      ['idem-missing', { name: 'Anita', phone: '919876543210', payout_method: 'bank' }],
+    ] as const) {
+      expect(await createTransaction(deps, DELEGATED, 'pk_1', key, txBody({ beneficiary })), key)
+        .toMatchObject({ ok: false, status: 400 });
+      expect(await createIdempotencyRepo(db).find('acme', key), key).toBeNull();
+    }
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-empty', txBody())).toMatchObject({ ok: true, status: 201 });
+  });
+});

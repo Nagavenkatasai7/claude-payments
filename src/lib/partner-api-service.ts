@@ -306,6 +306,12 @@ export async function createTransaction(
   if (isMaskedDestination(payoutDestination)) {
     return err(422, 'beneficiary payout_destination must be the recipient account, not a masked display value.');
   }
+  // fix 10 (review S2): every partner-API mint is a CONSUMER (b2c) transfer, and
+  // the rail refuses an empty payout on one (buildSettlementInstruction) — so a
+  // missing account is a 400 at the edge, before the customer write and the claim.
+  if (payoutDestination.trim() === '') {
+    return err(400, 'beneficiary payout_destination is required.');
+  }
 
   // The LAST step before the claim, AFTER every body check (Task 2 Step 28
   // later inserts its beneficiary name / destination edge validation ABOVE this

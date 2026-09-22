@@ -65,11 +65,20 @@ export function railCallbackTransferId(body: unknown): string | null {
  *   • a display placeholder ("****9012", "account on file") as the payout; and
  *   • a partner-pulled funding leg (ach_pull / bank_pull) on a CONSUMER row —
  *     the pay route never charged it, and only a B2B bill may be pulled.
- * Messages carry the transfer id only. '' is NOT refused: a B2B ach_pull row
- * legitimately carries no payee destination.
+ *   • an EMPTY payout on anything but a B2B partner-pulled row (fix 10 review
+ *     S2) — only there does the partner pay the payee on its own records.
+ * Messages carry the transfer id only.
  */
 export function buildSettlementInstruction(transfer: Transfer) {
+  const b2bPulled = transfer.transferType === 'b2b' && isPartnerPulled(transfer.fundingMethod);
   if (isMaskedDestination(transfer.payoutDestination)) {
+    throw new Error(`settlement_destination_invalid:${transfer.id}`);
+  }
+  // fix 10 (review S2): an EMPTY payout is legal only where the licensed partner
+  // pays the payee on its own records — a B2B partner-pulled bill. Any other row
+  // with no account (a consumer row, or a card/bank-funded B2B row) is refused
+  // rather than instructing the rail to pay nobody.
+  if ((transfer.payoutDestination ?? '').trim() === '' && !b2bPulled) {
     throw new Error(`settlement_destination_invalid:${transfer.id}`);
   }
   if (isPartnerPulled(transfer.fundingMethod) && transfer.transferType !== 'b2b') {
