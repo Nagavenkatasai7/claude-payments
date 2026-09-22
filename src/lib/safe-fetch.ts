@@ -178,7 +178,13 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
         ...(devAppOrigin ? {} : { lookup }),
         ...(isHttps && deps.ca !== undefined ? { ca: deps.ca } : {}),
       };
-      const req = mod.request(options);
+      let req: http.ClientRequest;
+      try {
+        req = mod.request(options);
+      } catch (err) {
+        fail(err); // a sync throw (bad path/header char) is sanitized like any other failure
+        return;
+      }
       const onAbort = () => {
         req.destroy();
         settle(() => rejectHop(signal?.reason ?? new Error('settlement_fetch_failed:aborted')));

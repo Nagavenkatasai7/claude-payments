@@ -16,3 +16,7 @@ playwright-report
 test-results
 /playwright/.cache
 .gstack/
+
+# Test-only self-signed TLS fixture for tests/safe-fetch.test.ts (NOT a secret).
+# The machine-wide excludes file ignores *.pem; this repo-level negation wins.
+!tests/fixtures/tls/*.pem
