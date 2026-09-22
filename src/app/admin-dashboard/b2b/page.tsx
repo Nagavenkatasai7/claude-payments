@@ -5,6 +5,7 @@ import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { isPartnerPulled } from '@/lib/funding-method';
+import { decideStaffCancel } from '@/lib/dashboard-cancel-policy';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { money } from '../format';
@@ -260,7 +261,7 @@ export default async function B2bPage() {
                   ) : (
                     <span key="kyb" className="text-xs text-muted-foreground">—</span>
                   ),
-                  t.status === 'awaiting_payment' || t.status === 'in_review' ? (
+                  decideStaffCancel(t).kind === 'void' ? (
                     <form key="actions" action={cancelB2bTransferAction}>
                       <input type="hidden" name="id" value={t.id} />
                       <Button
@@ -286,6 +287,16 @@ export default async function B2bPage() {
                         Reverse
                       </Button>
                     </form>
+                  ) : t.status === 'in_review' ? (
+                    // A compliance hold, charged or not, is decided by an admin on the
+                    // Compliance page (Release / Reject), never by Cancel (Task 5,
+                    // Wave 2 review). Reject is cancel-only when uncharged and
+                    // cancel + auto-refund when charged.
+                    <span key="actions" className="text-xs text-muted-foreground">In review — decide in Compliance</span>
+                  ) : t.status === 'awaiting_payment' ? (
+                    // CHARGED (a card-funded B2B bill, pay-finalize.ts): a bare
+                    // cancel would strand the charge; the reconcile sweep resumes it. money-05.
+                    <span key="actions" className="text-xs text-muted-foreground">Charged — settling</span>
                   ) : t.status === 'delivered' ? (
                     <span key="actions" className="text-xs text-muted-foreground">Recall via support</span>
                   ) : (
