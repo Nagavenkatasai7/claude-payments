@@ -1,9 +1,10 @@
-import { and, desc, eq, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
-import { transfers } from '@/db/schema';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { auditEvents, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
-import { rowToTransfer, transferToRow, type TransferRow } from './mappers';
-import type { PartnerId, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
+import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
 
 // transfer-repo — the Postgres ledger for transfers. Mirrors the function
 // surface call sites already use (getTransfer/saveTransfer/
@@ -45,6 +46,30 @@ export function createTransferRepo(
 ) {
   const toDomain = (row: TransferRow, decrypt = false) =>
     rowToTransfer(row, { decrypt, provider });
+
+  // fix 6 (ctx-01): the pay page may write a transfer's payout ONLY while every
+  // one of these holds — evaluated INSIDE the UPDATE, so a concurrent charge /
+  // settle / hold (the OTP verify is get→compare→del, not atomic —
+  // transaction-otp.ts:59-83 — so two POSTs can pass on one code) can never be
+  // reverted or overwritten. Not minted through the partner API: a partner-API
+  // mint binds its Idempotency-Key claim-first (partner-api-service.ts) and
+  // records a transaction.create audit event by an api_key; pay-page drafts
+  // claim 'draft:<id>' under the default tenant (pay-finalize.ts) — a prefix the
+  // partner API refuses at its edge (createTransaction, fix 6), so a 'draft:'
+  // key under default is never a partner claim. ('b2binvoice:<id>' claims need
+  // no exemption: those mints are always transfer_type 'b2b',
+  // b2b-pay-finalize.ts, and fail the b2c test below.) Either partner-API
+  // marker locks the payout the partner supplied.
+  const payoutEditable = (id: string, partnerId: PartnerId) =>
+    and(
+      eq(transfers.id, id),
+      eq(transfers.partnerId, partnerId),
+      eq(transfers.status, 'awaiting_payment'),
+      isNull(transfers.fundingRef),
+      eq(transfers.transferType, 'b2c'),
+      sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%'))`,
+      sql`NOT EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key')`,
+    );
 
   async function page(
     where: ReturnType<typeof and>,
@@ -379,6 +404,108 @@ export function createTransferRepo(
         .where(and(eq(transfers.id, id), eq(transfers.status, expected)))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** fix 6: may the pay page write this transfer's payout? (the same guard setPayoutIfEditable applies) */
+    async isPayoutEditable(id: string, partnerId: PartnerId): Promise<boolean> {
+      const rows = await db.select({ id: transfers.id }).from(transfers).where(payoutEditable(id, partnerId)).limit(1);
+      return rows.length > 0;
+    },
+
+    /**
+     * fix 6: the pay page's ONLY payout write on an existing transfer. Sets
+     * payout_method, payout_destination_enc and payout_destination_last4 and
+     * NOTHING else — never a whole-row upsert of a stale read: it rewrites the
+     * status / funding columns from that read, and when the re-saved row
+     * carries a REAL destination (no mask, so saveTransfer's mask guard does
+     * not engage) it writes recipient_legal_name_enc = NULL, which the default
+     * read omits. Returns the updated (masked) row, or null when any guard
+     * failed — the caller reports current truth.
+     */
+    async setPayoutIfEditable(
+      id: string,
+      partnerId: PartnerId,
+      payout: { payoutMethod: PayoutMethod; payoutDestination: string },
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({
+          payoutMethod: payout.payoutMethod,
+          payoutDestinationEnc: payout.payoutDestination ? encryptField(payout.payoutDestination, provider) : '',
+          payoutDestinationLast4: last4(payout.payoutDestination),
+        })
+        .where(payoutEditable(id, partnerId))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * fix 6: the pay route's ONLY ACH-mandate write. Sets ach_token_ref and
+     * NOTHING else, only while the row is this tenant's awaiting_payment B2B
+     * transfer with no token yet — replacing the route's whole-row
+     * saveTransfer of a stale read, which rewrote status and ach_token_ref from
+     * that read (a concurrent POST's paid flip reverted → settled twice) and,
+     * when the read carried no mask, wrote recipient_legal_name_enc = NULL.
+     * Null ⇒ a guard failed; the caller re-reads and reports current truth.
+     */
+    async setAchTokenIfAbsent(id: string, partnerId: PartnerId, token: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ achTokenRef: token })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'awaiting_payment'),
+          eq(transfers.transferType, 'b2b'),
+          or(isNull(transfers.achTokenRef), eq(transfers.achTokenRef, '')),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * fix 6: does this sender have ANY B2B transfer to this number? (tenant-scoped, one probe)
+     * The stored recipient_phone is compared by its DIGITS — the same rule as
+     * phone.normalizePhone, which the address-book match applies in
+     * resolveStoredPayout — so a B2B row stored with a formatted number still
+     * blocks rehydration (a wider match here is the SAFE direction).
+     * `recipientPhone` must already be normalized (digits only).
+     */
+    async hasB2bTransferTo(partnerId: PartnerId, phone: string, recipientPhone: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: transfers.id })
+        .from(transfers)
+        .where(and(
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, phone),
+          sql`regexp_replace(${transfers.recipientPhone}, '[^0-9]', '', 'g') = ${recipientPhone}`,
+          eq(transfers.transferType, 'b2b'),
+        ))
+        .limit(1);
+      return rows.length > 0;
+    },
+
+    /** fix 6: the sender's newest SETTLED consumer transfer to this number in this country — DECRYPTED (rehydration only). */
+    async latestSettledConsumerTo(
+      partnerId: PartnerId,
+      phone: string,
+      recipientPhone: string,
+      destinationCountry: CountryCode,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, phone),
+          eq(transfers.recipientPhone, recipientPhone),
+          eq(transfers.transferType, 'b2c'),
+          inArray(transfers.status, ['paid', 'delivered']),
+          eq(transfers.destinationCountry, destinationCountry),
+        ))
+        .orderBy(desc(transfers.createdAt))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0], true) : null;
     },
 
     /** Compliance views: newest-first by compliance_status (indexed-friendly). */

@@ -9,7 +9,7 @@ import {
   buildApproveSummary,
   maskAccount,
 } from '@/lib/tools';
-import type { CurrencyCode, Quote } from '@/lib/types';
+import type { CurrencyCode, Quote, Transfer } from '@/lib/types';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -32,6 +32,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
+import { finalizeDraftPayment } from '@/lib/pay-finalize';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
@@ -1609,16 +1610,16 @@ describe('create_transfer records the sender\'s funding method (Bundle C)', () =
 
 describe('repeat_transfer — reactive re-send to a past recipient (Bundle C)', () => {
   const seedPastTransfer = async (ctx: Awaited<ReturnType<typeof buildCtx>>) => {
-    // A real create so the recipient + a past transfer exist with full details.
+    // fix 6: the model can no longer supply a destination — seed the saved
+    // account server-side; the create rehydrates it (recipient + ledger row).
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
     // $200 (not $500) so a repeat stays within the T0 $500/day cap and exercises
     // the REAL cap gate inside repeat_transfer rather than tripping it.
     await executeTool('create_transfer', {
-      amount_usd: 200,
-      recipient_name: 'Mom',
-      recipient_phone: '919876543210',
-      payout_method: 'upi',
-      payout_destination: 'mom@okhdfc',
-      funding_method: 'bank_transfer',
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
     }, ctx);
   };
 
@@ -2792,17 +2793,17 @@ describe('list_recent_transfers (web-only history lookup)', () => {
 
 describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
   const seedPast = async (ctx: Awaited<ReturnType<typeof buildCtx>>) => {
-    await executeTool(
-      'create_transfer',
-      {
-        amount_usd: 200,
-        recipient_name: 'Mom',
-        recipient_phone: '919876543210',
-        payout_method: 'upi',
-        payout_destination: 'mom@okhdfc',
-        funding_method: 'bank_transfer',
-      },
-      ctx, // whatsapp channel — the past send happened in the bot
+    // fix 6: the model can no longer supply a destination — seed the saved
+    // account server-side; the create rehydrates it (recipient + ledger row).
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc',
+      lastUsedAt: new Date().toISOString(),
+    });
+    // $200 (not $500) so a repeat stays within the T0 $500/day cap and exercises
+    // the REAL cap gate inside repeat_transfer rather than tripping it.
+    await executeTool('create_transfer', {
+      amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
+    }, ctx, // whatsapp channel — the past send happened in the bot
     );
   };
 
@@ -3317,6 +3318,14 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
 describe('create_transfer — B2B (business-to-business, ach_pull, non-custodial)', () => {
   it('mints a b2b transfer: discriminators, business names, invoice link; never captures funds', async () => {
     const ctx = await buildCtx(fakeRedis());
+    // fix 6: a chat B2B send pays the sender's OWN unpaid bill (b2b_invoices is
+    // not in freshDb's TRUNCATE set — clear it, then seed the bill).
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_u1', partnerId: 'default', businessName: 'Globex Trading LLC',
+      buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }],
+      amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
     const result = await executeTool('create_transfer', {
       amount_source: 400,                          // within the seeded T0 $500/day cap
       recipient_name: 'Globex Trading LLC',       // payee business legal name
@@ -3361,6 +3370,14 @@ describe('send_approve_picker — B2B draft → approve-tap mint threads busines
   it('carries b2b discriminators + business names + invoice through the draft to the mint', async () => {
     const redis = fakeRedis();
     const ctx = await buildCtx(redis);
+    // fix 6: a chat B2B send pays the sender's OWN unpaid bill (b2b_invoices is
+    // not in freshDb's TRUNCATE set — clear it, then seed the bill).
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_u1', partnerId: 'default', businessName: 'Globex Trading LLC',
+      buyerPhone: PHONE, lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }],
+      amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
     // Prime the FX rate cache BEFORE we replace fetch with the WhatsApp-send stub.
     await executeTool('get_quote', { amount_usd: 100, funding_method: 'ach_pull' }, ctx);
     // Stub fetch for the CTA send (returns ok + text + json so both FX and the
@@ -3413,7 +3430,19 @@ describe('B2B buyer lifecycle controls (L1)', () => {
   // Mint an awaiting_payment B2B transfer owned by ctx.phone via the real tool
   // path (ach_pull, non-custodial — no capture at mint). $400 is within the seeded
   // T0 $500/day cap, so one mint per test is safe.
+  let invoiceSeq = 0;
   async function mintB2b(ctx: Ctx, invoiceId?: string): Promise<string> {
+    // fix 6: a chat B2B mint pays the sender's OWN open bill, for exactly its
+    // amount (400 — within the T0 $500/day cap; seedUnpaidInvoice's 1000 is not).
+    let id = invoiceId;
+    if (!id) {
+      id = `inv_mint_${++invoiceSeq}`;
+      await ctx.store.saveB2bInvoice({
+        id, partnerId: 'default', businessName: 'Globex Trading LLC',
+        buyerPhone: ctx.phone, lineItems: [{ description: 'Widgets', qty: 40, unitAmountUsd: 10 }],
+        amountUsd: 400, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+      });
+    }
     const created = await executeTool('create_transfer', {
       amount_source: 400,
       recipient_name: 'Globex Trading LLC',
@@ -3422,7 +3451,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       entity_type: 'business',
       sender_business_name: 'Acme Imports Ltd',
       recipient_business_name: 'Globex Trading LLC',
-      ...(invoiceId ? { invoice_id: invoiceId } : {}),
+      invoice_id: id,
     }, ctx);
     expect(created.error).toBeUndefined();
     return created.transfer_id as string;
@@ -3939,5 +3968,384 @@ describe('Task 9 — FX unavailable is a friendly refusal, never a thrown agent 
     const r = await executeTool('create_transfer', {}, ctx);
     expect(r).toEqual({ error: FX_QUOTE_EXPIRED_MESSAGE });
     expect(await ctx.store.getTransferCount('default', PHONE)).toBe(0);
+  });
+});
+
+const FIX6_REAL = 'HDFC0001234 123456789012';
+const FIX6_MOM = '919876543210';
+
+/** A ledger row as a past send would have left it (default: a delivered consumer bank send to Mom in IN). */
+function fix6LedgerRow(phone: string, o: Partial<Transfer> & { id: string }): Transfer {
+  return {
+    phone, amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85, amountInr: 17000,
+    recipientName: 'Mom', recipientPhone: FIX6_MOM, payoutMethod: 'bank', payoutDestination: FIX6_REAL,
+    fundingMethod: 'bank_transfer', complianceStatus: 'cleared', complianceReasons: [], status: 'delivered',
+    createdAt: new Date().toISOString(), sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN',
+    destinationCurrency: 'INR', partnerId: 'default', amountSource: 200, feeSource: 0, totalChargeSource: 200,
+    transferType: 'b2c', ...o,
+  };
+}
+
+describe('fix 6 (ctx-01): the model never chooses a payout destination, a partner-pulled method or the B2B shape', () => {
+  const REAL = FIX6_REAL;
+  const MOM = FIX6_MOM;
+
+  async function returningCtx(phone = '15550006006') {
+    const redis = fakeRedis();
+    const ctx = await buildCtx(redis, phone);
+    await ctx.store.upsertRecipient('default', phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: REAL,
+      lastUsedAt: new Date().toISOString(),
+    });
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx); // prime FX
+    const sends: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (typeof init?.body === 'string') sends.push(init.body);
+      return { ok: true, text: async () => '', json: async () => ({ rates: { INR: MOCK_RATE } }) };
+    }));
+    return { ctx, redis, sends };
+  }
+  const cardOf = (sends: string[]) => sends.find((s) => s.includes('cta_url')) ?? '';
+  const draftDest = async (ctx: Awaited<ReturnType<typeof buildCtx>>, r: Record<string, unknown>) =>
+    (await ctx.draftStore.consumeDraft(r.draft_id as string))?.recipient.payoutDestination;
+
+  it('no tool offers payout_method / payout_destination to the model', () => {
+    for (const name of ['create_transfer', 'create_schedule', 'send_approve_picker', 'repeat_transfer']) {
+      const props = toolSchemas.find((t) => t.function.name === name)!.function.parameters.properties as Record<string, unknown>;
+      expect(props, name).not.toHaveProperty('payout_method');
+      expect(props, name).not.toHaveProperty('payout_destination');
+    }
+  });
+
+  it('resolve_recipient → send_approve_picker → pay-page finalize mints the REAL account, never "****9012", saved recipient intact, no digits leak', async () => {
+    const { ctx, sends } = await returningCtx();
+    const resolved = await executeTool('resolve_recipient', { name: 'Mom' }, ctx);
+    const shown = (resolved.recipient as Record<string, unknown>).payout_destination;
+    expect(shown).toBe('****9012');
+    const picker = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+      payout_method: 'bank', payout_destination: shown,
+    }, ctx);
+    const draftId = picker.draft_id as string;
+    expect((await ctx.draftStore.getDraft(draftId))?.recipient.payoutDestination).toBe(REAL);
+    const result = await finalizeDraftPayment({
+      store: ctx.store, customerStore: ctx.customerStore, draftStore: ctx.draftStore,
+      partnerStore: ctx.partnerStore, monthlyVolumeStore: ctx.monthlyVolumeStore,
+      dailyVolumeStore: ctx.dailyVolumeStore, db,
+    }, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect((await ctx.store.getTransferDecrypted(result.transferId))?.payoutDestination).toBe(REAL);
+    expect((await ctx.store.getTransfer(result.transferId))?.payoutDestination).toBe('****9012');
+    expect((await ctx.store.listRecipients('default', ctx.phone, 1))[0].payoutDestination).toBe(REAL);
+    for (const s of [JSON.stringify(resolved), JSON.stringify(picker), ...sends]) expect(s).not.toContain('123456789012');
+  });
+
+  it('send_approve_picker IGNORES any model-supplied destination and rehydrates by the NORMALIZED phone', async () => {
+    const { ctx } = await returningCtx();
+    for (const supplied of ['account on file', 'xxxx9012', 'ending 9012', 'SBIN0009999 000000000001']) {
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom',
+        recipient_phone: '+91 98765 43210', payout_method: 'bank', payout_destination: supplied,
+      }, ctx);
+      expect(await draftDest(ctx, r), supplied).toBe(REAL);
+    }
+  });
+
+  it('a number with NO stored record → cold-start draft and the placeholder card, whatever the model supplied', async () => {
+    const { ctx, sends } = await returningCtx();
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Dad', recipient_phone: '919811111111',
+      payout_method: 'bank', payout_destination: 'xxxx4321',
+    }, ctx);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.recipient.payoutDestination).toBe('');
+    expect(draft?.recipient.payoutMethod).toBe('bank');
+    expect(cardOf(sends)).toContain("you'll enter the details on the secure page");
+    expect(cardOf(sends)).not.toContain('4321');
+  });
+
+  it("rehydration is scoped to (tenant, sender): another sender's record, or the same phone under another tenant, is never used", async () => {
+    await seedPartner(db, 'acme');
+    const { ctx, redis } = await returningCtx('15550006007');
+    const other = await buildCtx(redis, '15559990000');
+    await other.store.upsertRecipient('default', other.phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: 'ICIC0000001 999999999999',
+      lastUsedAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    expect(await draftDest(ctx, await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+    }, ctx))).toBe(REAL);
+    const acme = await buildCtx(redis, '15550006007', 'acme');
+    const a1 = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+    }, acme);
+    const acmeCold = await acme.draftStore.consumeDraft(a1.draft_id as string);
+    expect(acmeCold?.recipient.payoutDestination).toBe('');
+    expect(acmeCold?.partnerId).toBe('acme');
+    await acme.store.upsertRecipient('acme', acme.phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: 'SBIN0000123 555555555555',
+      lastUsedAt: new Date().toISOString(),
+    });
+    expect(await draftDest(acme, await executeTool('send_approve_picker', {
+      amount_usd: 150, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+    }, acme))).toBe('SBIN0000123 555555555555');
+  });
+
+  it("a saved recipient is used only when the number's country IS the send's destination country", async () => {
+    const { ctx } = await returningCtx();
+    const UNCLE = '15557654321'; // a US number; the send defaults to IN
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Uncle', recipientPhone: UNCLE, payoutMethod: 'bank', payoutDestination: 'HDFC0001234 555566667777',
+      lastUsedAt: new Date().toISOString(),
+    });
+    expect(await draftDest(ctx, await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Uncle', recipient_phone: UNCLE,
+    }, ctx))).toBe('');
+  });
+
+  it('the ledger fallback uses ONLY a settled (paid / delivered) consumer row in the SAME destination country', async () => {
+    const { ctx } = await returningCtx();
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: '****9012',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const t0 = Date.now();
+    await ctx.store.saveTransfer(fix6LedgerRow(ctx.phone, {
+      id: 'l_await', status: 'awaiting_payment', payoutDestination: 'ICIC0000001 111111111111',
+      createdAt: new Date(t0 - 1000).toISOString(),
+    }));
+    await ctx.store.saveTransfer(fix6LedgerRow(ctx.phone, {
+      id: 'l_gb', destinationCountry: 'GB', destinationCurrency: 'GBP', payoutDestination: '12-34-56 33333333',
+      createdAt: new Date(t0 - 2000).toISOString(),
+    }));
+    expect(await draftDest(ctx, await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+    }, ctx))).toBe('');
+    await ctx.store.saveTransfer(fix6LedgerRow(ctx.phone, { id: 'l_ok', createdAt: new Date(t0 - 3000).toISOString() }));
+    expect(await draftDest(ctx, await executeTool('send_approve_picker', {
+      amount_usd: 150, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+    }, ctx))).toBe(REAL);
+  });
+
+  it("a number the sender paid as a BUSINESS never rehydrates (a pre-fix B2B mint may have saved a seller's profile account)", async () => {
+    const { ctx } = await returningCtx();
+    const SELLER = '919822222222';
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Globex Trading LLC', recipientPhone: SELLER, payoutMethod: 'bank', payoutDestination: 'HDFC0009999 444444444444',
+      lastUsedAt: new Date().toISOString(),
+    });
+    await ctx.store.saveTransfer(fix6LedgerRow(ctx.phone, {
+      id: 'b2b_bill', recipientPhone: SELLER, recipientName: 'Globex Trading LLC', transferType: 'b2b',
+      senderEntityType: 'business', recipientEntityType: 'business', fundingMethod: 'bank_pull',
+      payoutDestination: 'HDFC0009999 444444444444',
+    }));
+    expect(await draftDest(ctx, await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Globex', recipient_phone: SELLER,
+    }, ctx))).toBe('');
+  });
+
+  it('the rehydrated account never appears in the ToolResult or the card — the card reads "bank a/c ****9012"', async () => {
+    const { ctx, sends } = await returningCtx();
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+    }, ctx);
+    const card = cardOf(sends);
+    expect(card).toContain('bank a/c ****9012');
+    for (const s of [JSON.stringify(r), card]) {
+      expect(s).not.toContain('123456789012');
+      expect(s).not.toContain('HDFC0001234');
+    }
+  });
+
+  it('a saved recipient that is ITSELF poisoned is not rehydrated — cold start, never the mask', async () => {
+    const { ctx } = await returningCtx();
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: '****9012',
+      lastUsedAt: new Date().toISOString(),
+    });
+    expect(await draftDest(ctx, await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: MOM,
+      payout_method: 'bank', payout_destination: '****9012',
+    }, ctx))).toBe('');
+  });
+
+  it('screening still runs first: a blocked attempt is recorded with real figures, never with a model-supplied value', async () => {
+    const { ctx } = await returningCtx();
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'John Doe',
+      recipient_phone: '919800000000', payout_method: 'bank', payout_destination: '****1111',
+    }, ctx);
+    expect(r.blocked).toBe(true);
+    const blocked = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].amountUsd).toBe(200);
+    expect((await ctx.store.getTransferDecrypted(blocked[0].id))?.payoutDestination).toBe('');
+  });
+
+  it('legacy create_transfer IGNORES the model-supplied destination: the stored account for a known number, "" for an unknown one', async () => {
+    const { ctx } = await returningCtx();
+    const a = await executeTool('create_transfer', {
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: MOM,
+      payout_method: 'bank', payout_destination: 'xxxx9012', funding_method: 'bank_transfer',
+    }, ctx);
+    expect((await ctx.store.getTransferDecrypted(a.transfer_id as string))?.payoutDestination).toBe(REAL);
+    const b = await executeTool('create_transfer', {
+      amount_usd: 100, recipient_name: 'Dad', recipient_phone: '919811111111',
+      payout_method: 'bank', payout_destination: 'SBIN0009999 000000000001', funding_method: 'bank_transfer',
+    }, ctx);
+    expect((await ctx.store.getTransferDecrypted(b.transfer_id as string))?.payoutDestination).toBe('');
+    expect((await ctx.store.listRecipients('default', ctx.phone, 25)).map((x) => x.name)).not.toContain('Dad');
+  });
+
+  it('legacy create_transfer: a WATCHLISTED name is still blocked and recorded (empty destination), never saved as a recipient', async () => {
+    const { ctx } = await returningCtx();
+    const r = await executeTool('create_transfer', {
+      amount_usd: 100, recipient_name: 'John Doe', recipient_phone: '919800000000',
+      payout_method: 'bank', payout_destination: '****9012', funding_method: 'bank_transfer',
+    }, ctx);
+    expect(r.status).toBe('blocked');
+    expect((await ctx.store.getTransferDecrypted(r.transfer_id as string))?.payoutDestination).toBe('');
+    expect((await ctx.store.listRecipients('default', ctx.phone, 25)).map((x) => x.name)).not.toContain('John Doe');
+  });
+
+  it('create_schedule IGNORES the model-supplied destination: the stored account for a known number, "" for an unknown one', async () => {
+    const { ctx } = await returningCtx();
+    const s1 = await executeTool('create_schedule', {
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: MOM, frequency: 'monthly', day_of_month: 5,
+      payout_method: 'bank', payout_destination: 'xxxx9012', funding_method: 'bank_transfer',
+    }, ctx);
+    expect((await ctx.scheduleStore.getSchedule(s1.schedule_id as string))?.payoutDestination).toBe(REAL);
+    const s2 = await executeTool('create_schedule', {
+      amount_usd: 100, recipient_name: 'Dad', recipient_phone: '919811111111', frequency: 'monthly', day_of_month: 5,
+      payout_method: 'bank', payout_destination: 'SBIN0009999 000000000001', funding_method: 'bank_transfer',
+    }, ctx);
+    expect((await ctx.scheduleStore.getSchedule(s2.schedule_id as string))?.payoutDestination).toBe('');
+  });
+
+  it('funding_method is a closed set: a partner-pulled or unknown method is refused before any draft, row or schedule', async () => {
+    const { ctx } = await returningCtx();
+    const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+    for (const bad of ['bank_pull', 'crypto']) {
+      expect((await executeTool('send_approve_picker', { amount_usd: 200, funding_method: bad, recipient_name: 'Mom', recipient_phone: MOM }, ctx)).error, bad).toBeDefined();
+      expect((await executeTool('create_transfer', { amount_usd: 100, funding_method: bad, recipient_name: 'Mom', recipient_phone: MOM }, ctx)).error, bad).toBeDefined();
+    }
+    for (const bad of ['bank_pull', 'ach_pull', 'crypto']) {
+      expect((await executeTool('create_schedule', {
+        amount_usd: 100, funding_method: bad, recipient_name: 'Mom', recipient_phone: MOM, frequency: 'monthly', day_of_month: 5,
+      }, ctx)).error, bad).toBeDefined();
+    }
+    expect(createDraft).not.toHaveBeenCalled();
+    expect(await ctx.store.listTransfers()).toHaveLength(0);
+    expect(await ctx.scheduleStore.listActiveSchedules()).toHaveLength(0);
+  });
+
+  it("the B2B shape is not model-selectable: ach_pull / entity_type 'business' need the sender's OWN open bill, seller-less, for exactly its amount", async () => {
+    const { ctx } = await returningCtx();
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+    const seed = (id: string, buyerPhone: string, status: 'unpaid' | 'paid', extra: { sellerId?: string } = {}) => ctx.store.saveB2bInvoice({
+      id, partnerId: 'default', businessName: 'Globex Trading LLC', buyerPhone,
+      lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }], amountUsd: 400, currency: 'USD',
+      status, createdAt: new Date().toISOString(), ...extra,
+    });
+    await seed('inv_mine', ctx.phone, 'unpaid');
+    await seed('inv_paid', ctx.phone, 'paid');
+    await seed('inv_other', '15559990000', 'unpaid');
+    await ctx.store.createSeller({ id: 's_fix6', partnerId: 'default', phone: '15557770000', businessName: 'Globex Trading LLC', country: 'US', currency: 'USD' });
+    await seed('inv_checkout', ctx.phone, 'unpaid', { sellerId: 's_fix6' }); // b2b_invoices.seller_id → sellers.id (schema.ts:156)
+    const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+    const b2bArgs = (over: Record<string, unknown>) => ({
+      amount_source: 400, recipient_name: 'Globex Trading LLC', recipient_phone: '919876543210',
+      sender_business_name: 'Acme Imports Ltd', recipient_business_name: 'Globex Trading LLC', ...over,
+    });
+    for (const over of [
+      { funding_method: 'ach_pull' },                                                       // no entity_type, no bill
+      { funding_method: 'ach_pull', entity_type: 'business' },                              // no bill
+      { funding_method: 'bank_transfer', entity_type: 'business', invoice_id: 'inv_mine' }, // B2B must be ach_pull
+      { funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_nope' },
+      { funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_paid' },
+      { funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_other' },
+      { funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_checkout' },                   // a seller's checkout bill
+      { funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_mine', amount_source: 399 },  // not the billed amount
+    ]) {
+      expect((await executeTool('send_approve_picker', b2bArgs(over), ctx)).error, JSON.stringify(over)).toBeDefined();
+      expect((await executeTool('create_transfer', b2bArgs(over), ctx)).error, JSON.stringify(over)).toBeDefined();
+    }
+    expect(createDraft).not.toHaveBeenCalled();
+    expect(await ctx.store.listTransfers()).toHaveLength(0);
+    const ok = await executeTool('send_approve_picker', b2bArgs({ funding_method: 'ach_pull', entity_type: 'business', invoice_id: 'inv_mine' }), ctx);
+    expect(ok.sent).toBe(true);
+  });
+
+  it('approve tap on a PRE-FIX draft: a placeholder → friendly error + draft RESTORED; a consumer partner-pulled draft → friendly error, nothing minted', async () => {
+    const { ctx } = await returningCtx();
+    const draftOf = (over: Record<string, unknown>) => ctx.draftStore.createDraft({
+      senderPhone: ctx.phone, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: '****9012' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+      ...over,
+    } as Parameters<typeof ctx.draftStore.createDraft>[0]);
+    const tap = (draftId: string) => executeTool('create_transfer', {}, { ...ctx, turn: { isNewConversation: false, buttonTap: { kind: 'approve' as const, draftId } } });
+    const masked = await draftOf({});
+    expect((await tap(masked)).error).toBeDefined();
+    expect(await ctx.draftStore.getDraft(masked)).not.toBeNull();
+    const pulled = await draftOf({ recipient: { name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: REAL }, fundingMethod: 'bank_pull' });
+    expect((await tap(pulled)).error).toBeDefined();
+    expect(await ctx.store.listTransfers()).toHaveLength(0);
+  });
+});
+
+describe('fix 6 (ctx-01): repeat_transfer rehydrates server-side and never carries a destination or a partner-pulled method', () => {
+  const REAL = FIX6_REAL;
+  const MOM = FIX6_MOM;
+  async function seedBankPast(ctx: Awaited<ReturnType<typeof buildCtx>>) {
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: REAL,
+      lastUsedAt: new Date().toISOString(),
+    });
+    await ctx.store.saveTransfer(fix6LedgerRow(ctx.phone, { id: 'past_1' }));
+  }
+
+  it('the new draft carries the real account and the repeated corridor; the result carries no digits', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedBankPast(ctx);
+    const r = await executeTool('repeat_transfer', { recipient_phone: MOM }, ctx);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.recipient.payoutDestination).toBe(REAL);
+    expect(draft?.destinationCountry).toBe('IN');
+    expect(JSON.stringify(r)).not.toContain('123456789012');
+  });
+
+  it('a POISONED saved recipient falls back to the DECRYPTED settled ledger row, never the mask', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedBankPast(ctx);
+    await ctx.store.upsertRecipient('default', ctx.phone, {
+      name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: '****9012',
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('repeat_transfer', { recipient_phone: MOM }, ctx);
+    expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.recipient.payoutDestination).toBe(REAL);
+  });
+
+  it('needs_edd returns the destination MASKED', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedBankPast(ctx);
+    await ctx.monthlyVolumeStore.addCents('default', ctx.phone, 300000);
+    const r = await executeTool('repeat_transfer', { recipient_phone: MOM, amount_usd: 100 }, ctx);
+    expect(r.needs_edd).toBe(true);
+    expect(r.payout_destination).toBe('****9012');
+    expect(JSON.stringify(r)).not.toContain('123456789012');
+  });
+
+  it('funding_method is a closed set on repeat, and a remembered partner-pulled method is never carried into a chat draft', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedBankPast(ctx);
+    const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+    expect((await executeTool('repeat_transfer', { recipient_phone: MOM, funding_method: 'bank_pull' }, ctx)).error).toBeDefined();
+    expect(createDraft).not.toHaveBeenCalled();
+    await ctx.customerStore.recordFundingMethod('default', ctx.phone, 'bank_pull');
+    const r = await executeTool('repeat_transfer', { recipient_phone: MOM }, ctx);
+    expect((await ctx.draftStore.consumeDraft(r.draft_id as string))?.fundingMethod).toBe('bank_transfer');
   });
 });

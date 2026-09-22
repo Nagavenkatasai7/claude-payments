@@ -4,6 +4,8 @@ import { screenTransfer } from './compliance';
 import { resolveCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { logWarn } from './log';
+import { isMaskedDestination } from './payout-format';
+import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
 import { evaluateEddForTransfer } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
@@ -141,6 +143,30 @@ export function assertQuoteOverrideFresh(
   }
 }
 
+/**
+ * fix 6 (ctx-01): thrown by createTransfer when the payout destination is a
+ * display placeholder (payout-format.isMaskedDestination). NOTHING has been
+ * written. The message is a constant and never carries the destination.
+ */
+export class MaskedDestinationError extends Error {
+  constructor() {
+    super('masked_payout_destination');
+    this.name = 'MaskedDestinationError';
+  }
+}
+
+/**
+ * fix 6: thrown when a partner-pulled funding method (ach_pull / bank_pull —
+ * the LICENSED PARTNER debits the payer, so the pay route skips OUR capture)
+ * is asked for on anything but a B2B transfer. NOTHING has been read or written.
+ */
+export class PartnerPulledConsumerError extends Error {
+  constructor() {
+    super('partner_pulled_funding_requires_b2b');
+    this.name = 'PartnerPulledConsumerError';
+  }
+}
+
 export async function createTransfer(
   store: Store,
   partnerStore: PartnerStore,           // NEW (P5): to resolve corridor rules
@@ -158,6 +184,12 @@ export async function createTransfer(
   const requiresKyc = input.requiresKyc ?? true;
   if (requiresKyc && input.senderKycStatus !== 'verified') {
     throw new Error('kyc_required');
+  }
+  // fix 6: only a B2B bill payment may carry a partner-pulled funding method —
+  // on a consumer transfer it would move money with no charge. Refuse before
+  // any read or write (cron counts it as a failed run).
+  if (isPartnerPulled(input.fundingMethod) && (input.transferType ?? 'b2c') !== 'b2b') {
+    throw new PartnerPulledConsumerError();
   }
   // Resolve destination — default to IN/INR for full back-compat (all existing tests unchanged).
   const destinationCountry = input.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY;
@@ -253,6 +285,33 @@ export async function createTransfer(
     achTokenRef: input.achTokenRef,
     invoiceId: input.invoiceId,
   };
+  // ── Blocked-row early return (fix 6 / ctx-01) ─────────────────────────────
+  // complianceStatus is FINAL here (screenTransfer + the EDD merge above). A
+  // watchlist hit is an auditable, never-charged, never-instructed row and
+  // NOTHING else: no velocity / monthly accrual and no address-book write — the
+  // contract recordBlockedAttempt (below) has always documented. Its destination
+  // is evidence only, so a display placeholder is scrubbed to '' (a blocked row
+  // is saved with an empty or a real destination, never a mask). It sits ABOVE
+  // the placeholder refusal on purpose: sanctions always run and leave their row.
+  if (complianceStatus === 'blocked') {
+    const blockedRow: Transfer = isMaskedDestination(transfer.payoutDestination)
+      ? { ...transfer, payoutDestination: '' }
+      : transfer;
+    await store.saveTransfer(blockedRow);
+    return blockedRow;
+  }
+
+  // ── Placeholder refusal (fix 6 / ctx-01) ──────────────────────────────────
+  // "****9012" / "account on file" is what a MASKED read renders, never an
+  // account. Refuse BEFORE the insert, any counter and any recipient write. ''
+  // is NOT refused: a cron, approve-tap, legacy or B2B ach_pull mint legitimately
+  // starts with none; the pay route collects it and pay-finalize refuses a
+  // bodyless '' on any draft but a B2B ach_pull one. (Task 10 later adds its cap
+  // check between this refusal and the insert.)
+  if (isMaskedDestination(transfer.payoutDestination)) {
+    throw new MaskedDestinationError();
+  }
+
   await store.saveTransfer(transfer);
   // (transfer count is now DERIVED from the ledger — no counter to bump)
   // Accruals and the address book are keyed by the transfer's TENANT (fix 1 /
@@ -261,16 +320,21 @@ export async function createTransfer(
   await store.incrementTodayTransferCount(input.partnerId, input.phone);
   await monthlyVolumeStore.addCents(input.partnerId, input.phone, Math.round(transfer.amountUsd * 100));   // NEW (KYC)
 
-  try {
-    await store.upsertRecipient(input.partnerId, input.phone, {
-      name: input.recipientName,
-      recipientPhone: input.recipientPhone,
-      payoutMethod: input.payoutMethod,
-      payoutDestination: input.payoutDestination,
-      lastUsedAt: new Date().toISOString(),
-    });
-  } catch (err) {
-    logWarn('transfer.upsert_recipient', err, { transferId: transfer.id });
+  // Refresh the sender's PERSONAL address book only with a real consumer
+  // destination (fix 6): a '' mint must never erase a saved account, and a B2B
+  // payee's account (seller profile / partner-held) is never a personal payout.
+  if (transfer.transferType !== 'b2b' && transfer.payoutDestination.trim() !== '') {
+    try {
+      await store.upsertRecipient(input.partnerId, input.phone, {
+        name: input.recipientName,
+        recipientPhone: input.recipientPhone,
+        payoutMethod: input.payoutMethod,
+        payoutDestination: transfer.payoutDestination,
+        lastUsedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      logWarn('transfer.upsert_recipient', err, { transferId: transfer.id });
+    }
   }
 
   return transfer;
@@ -303,7 +367,7 @@ export interface BlockedAttemptInput {
  * row (status='blocked'), so blocked attempts are visible in the ledger and
  * compliance views instead of vanishing silently.
  *
- * Unlike createTransfer's blocked branch, this writes ONLY the row: it does NOT
+ * Like createTransfer's blocked branch (early return since fix 6), this writes ONLY the row: it does NOT
  * increment the all-time / today velocity counters, does NOT accrue monthly
  * volume, and does NOT upsert the (watchlisted) recipient. A blocked attempt
  * must never advance the customer's caps, EDD volume, or saved-recipient list.
