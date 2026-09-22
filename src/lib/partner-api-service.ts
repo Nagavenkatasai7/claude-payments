@@ -533,7 +533,7 @@ export async function confirmTransaction(
     const result = await settleOrHold(deps.db as Db, tr, integrations);
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its
-    // simulated DELIVERY_DELAY_MS. The 5-min heartbeat stays the guarantee.
+    // simulated DELIVERY_DELAY_MS. The per-minute cron still drains it.
     pokeWorker();
     if (result.kind === 'started' && !result.webhookDriven) {
       pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);

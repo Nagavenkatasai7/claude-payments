@@ -8,7 +8,7 @@ its own `component/<name>` branch on GitHub and a path map in `.claude/hooks/com
 |---|---|---|
 | whatsapp-agent | `src/lib/agent.ts` `prompt.ts` `tools.ts` `ollama.ts` `whatsapp*.ts` `web-chat.ts` · `src/app/api/whatsapp/` `api/copilot/` | `component/whatsapp-agent` |
 | money-paths | `settlement.ts` `rail-failure.ts` `pay-finalize.ts` `transfer-create.ts` `payment.ts` `refund-policy.ts` `schedule*.ts` · providers (payment/funding/webhook-verify) · `api/pay/` `api/payment-webhook/` `api/funding-webhook/` `api/partner-rail/` · dashboard transactions/refunds/schedules | `component/money-paths` |
-| outbox-worker | `outbox.ts` `outbox-worker.ts` `reconcile.ts` `cron-run.ts` · `api/worker/` `api/cron/` · `worker-heartbeat.yml` · `scripts/outbox-status.ts` | `component/outbox-worker` |
+| outbox-worker | `outbox.ts` `outbox-worker.ts` `reconcile.ts` `worker-cadence.ts` `cron-run.ts` · `api/worker/` `api/cron/` · `worker-heartbeat.yml` · `scripts/outbox-status.ts` | `component/outbox-worker` |
 | compliance-kyc | `compliance*.ts` `kyc-*.ts` `consent.ts` `tier-rules.ts` · providers (kyc/persona/sanctions) · `api/persona-webhook/` · dashboard compliance/kyc | `component/compliance-kyc` |
 | partner-api | `partner-api*.ts` `partner-config.ts` `partner-integrations*.ts` `partner-store.ts` · `api/partner/` `api/partner-application/` · dashboard partners/api-keys/partner-requests · `src/app/onboard/` · demo-partner scripts | `component/partner-api` |
 | admin-dashboard | `src/app/admin-dashboard/**` (minus the pages owned above) · `src/app/login/` · `api/dashboard/` · `auth*.ts` `staff-scope.ts` `permissions.ts` `dashboard*.ts` `analytics.ts` `ticket-*.ts` | `component/admin-dashboard` |

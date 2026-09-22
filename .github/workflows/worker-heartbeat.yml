@@ -1,15 +1,24 @@
-# The durability GUARANTEE for the outbox worker (free-tier choice, locked):
-# Vercel's plan only allows daily crons, so this 5-minute GitHub Actions
-# schedule is the heartbeat that drains anything the best-effort after() poke
-# missed (crashed function, lost poke, delayed retries). Overlap-safe: the
-# worker claims rows with FOR UPDATE SKIP LOCKED.
+# BACKUP clock for the outbox worker (Program-Fix 12). The Vercel per-minute
+# cron (vercel.json: /api/worker on `* * * * *`) is the worker's clock; this
+# hourly GitHub Actions run is the backup that drains anything if that cron
+# goes quiet, and its plain GET is what raises the `cronquiet` alarm (a
+# cron-sourced call cannot notice its own absence). Hourly, not every 5
+# minutes: the repo is private, so Actions minutes are billed, and a schedule
+# GitHub really honoured at that rate could exhaust the quota that the
+# required `ci / ci` check and smoke.yml depend on. Overlap-safe: the worker
+# claims rows with FOR UPDATE SKIP LOCKED.
 name: worker-heartbeat
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '17 * * * *'
   workflow_dispatch: {}
 
 permissions: {}
+
+# A released backlog of scheduled runs collapses to one running + one pending.
+concurrency:
+  group: worker-heartbeat
+  cancel-in-progress: false
 
 jobs:
   drain:
@@ -20,9 +29,8 @@ jobs:
     timeout-minutes: 4
     steps:
       # -f makes a non-2xx response FAIL this run — GitHub only notifies the
-      # repo owner on workflow-run failure, so without it a broken drain (and
-      # therefore the outbox delivery guarantee) is silent. One retry absorbs
-      # transient cold-start blips before alerting.
+      # repo owner on workflow-run failure, so without it a broken backup drain
+      # is silent. One retry absorbs transient cold-start blips before alerting.
       - name: Drain the outbox
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}

@@ -1112,3 +1112,90 @@ describe('drainOnce — outbound deadlines (rail-09 / obs-03)', () => {
     }
   });
 });
+
+describe('drainOnce — poison rows dead-letter on reclaim (Program-Fix 12 / Task 8)', () => {
+  // A row that KILLS its function never reaches markFailed: the platform kill
+  // leaves it 'processing', claimBatch reclaims it after LEASE_MS with
+  // attempts + 1, and it runs again. markFailed dead-letters at >= MAX_ATTEMPTS
+  // and retryDead resets attempts to 0, so attempts > MAX_ATTEMPTS can only
+  // arise through a reclaim: the guard dead-letters it WITHOUT running the
+  // handler, on the existing single dead:<id> alert path.
+  async function alertKeys(): Promise<string[]> {
+    const r = await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string }> }).rows.map((x) => x.dedupe_key);
+  }
+
+  it('a processing row at MAX_ATTEMPTS with an expired lease is dead-lettered, never handled, with ONE dead:<id> alert', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', text: 'poison' });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+
+    const r = await drainOnce(deps(), 'w_next');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1, released: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    const after = (await db.execute(
+      sql`SELECT status, attempts, last_error, lease_owner FROM outbox WHERE id = ${row.id}`,
+    )) as unknown as { rows: Array<{ status: string; attempts: number; last_error: string; lease_owner: string | null }> };
+    expect(after.rows[0]).toMatchObject({ status: 'dead', attempts: MAX_ATTEMPTS + 1, lease_owner: null });
+    expect(after.rows[0].last_error).toMatch(/reclaimed past MAX_ATTEMPTS/);
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+
+    // Draining again adds nothing: the dead row is not claimable and the alert is deduped.
+    const again = await drainOnce(deps(), 'w_next2');
+    expect(again.dead).toBe(0);
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+  });
+
+  it('a row reclaimed BELOW the ceiling still runs (a reclaim is an ordinary retry)', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', text: 'fine' });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    const r = await drainOnce(deps(), 'w_next');
+    expect(r).toMatchObject({ processed: 1, dead: 0 });
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('drainOnce — the poison guard runs before the budget and hard-stop releases (Program-Fix 12 review follow-up)', () => {
+  // Pins deviation 6: the guard sits before the stopAfter release and the
+  // TERMINAL_ON_DEADLINE hard-stop release. A poison row released instead would
+  // get one attempt refunded and be reclaimed again next drain, forever.
+  async function alertKeys(): Promise<string[]> {
+    const r = await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string }> }).rows.map((x) => x.dedupe_key);
+  }
+
+  it('with stopAfter already passed, a poison whatsapp.text row is dead-lettered, not released', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', text: 'poison' });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    const r = await drainOnce(deps(), 'w_next', 10, { stopAfter: 0 });
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1, released: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    const after = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE id = ${row.id}`)) as unknown as {
+      rows: Array<{ status: string; attempts: number }>;
+    };
+    expect(after.rows[0]).toEqual({ status: 'dead', attempts: MAX_ATTEMPTS + 1 });
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+  });
+
+  it('with a hardStopAt too tight for an agent.turn, a poison agent.turn row is dead-lettered, not released', async () => {
+    await outbox.enqueue('agent.turn', { phone: '15551230000', messageText: 'poison', turn: {} });
+    const [row] = await outbox.claimBatch(1, 'w_killed');
+    await db.execute(
+      sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS}, lease_until = now() - interval '1 minute' WHERE id = ${row.id}`,
+    );
+    // hardStopAt = now: any TERMINAL_ON_DEADLINE row that is NOT poison would be released here.
+    const r = await drainOnce(deps(), 'w_next', 10, { hardStopAt: Date.now() });
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1, released: 0 });
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(await alertKeys()).toEqual([`dead:${row.id}`]);
+  });
+});

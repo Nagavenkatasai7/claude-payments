@@ -30,7 +30,7 @@
       "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
     ]},
     "outbox-worker": { "branch": "component/outbox-worker", "paths": [
-      "src/lib/outbox.ts", "src/lib/outbox-worker.ts", "src/lib/reconcile.ts", "src/lib/cron-run.ts", "src/db/repos/outbox-repo.ts",
+      "src/lib/outbox.ts", "src/lib/outbox-worker.ts", "src/lib/reconcile.ts", "src/lib/worker-cadence.ts", "src/lib/cron-run.ts", "src/db/repos/outbox-repo.ts",
       "src/app/api/worker/", "src/app/api/cron/", ".github/workflows/worker-heartbeat.yml", "scripts/outbox-status.ts",
       "tests/outbox*", "tests/reconcile*", "tests/cron-*", "tests/worker*"
     ]},

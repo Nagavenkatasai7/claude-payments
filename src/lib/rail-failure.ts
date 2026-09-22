@@ -128,7 +128,7 @@ export async function handleRailFailure(
     );
     return { kind: 'failed', refundStarted };
   });
-  pokeWorker(); // fast path — the heartbeat is the guarantee
+  pokeWorker(); // fast path — the per-minute cron drains it regardless
   return outcome;
 }
 

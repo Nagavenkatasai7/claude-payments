@@ -10,6 +10,8 @@ import { getDb } from '@/db/client';
 import { sql } from 'drizzle-orm';
 import { STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STUCK_REFUND_MINUTES, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { LEASE_MS, createOutboxRepo } from '@/db/repos/outbox-repo';
+import { cadenceRedis, readLastCronAt, CRON_QUIET_MINUTES, DRAIN_SLA_MINUTES } from '@/lib/worker-cadence';
+import { scrub } from '@/lib/log';
 
 type Row = Record<string, unknown>;
 
@@ -37,10 +39,39 @@ async function main() {
     FROM outbox GROUP BY status ORDER BY status`);
   section('OUTBOX rows by status', byStatus, 'outbox is empty');
 
-  const due = await q(sql`
-    SELECT count(*)::int AS due_now, min(next_attempt_at) AS oldest_due
-    FROM outbox WHERE status IN ('pending','failed') AND next_attempt_at <= now()`);
-  section('DUE backlog (claimable by the next drain)', due);
+  // Lease-inclusive (fix 12): the same predicate claimBatch uses, so this line and
+  // the worker's draingap alarm can never disagree (due pending/failed + expired leases).
+  const dueSummary = await createOutboxRepo(db).dueSummary();
+  const oldestWaitMin = dueSummary.oldestDueAt
+    ? Math.round((Date.now() - dueSummary.oldestDueAt.getTime()) / 60_000)
+    : null;
+  const drainBehind = oldestWaitMin !== null && oldestWaitMin > DRAIN_SLA_MINUTES;
+  section(
+    `DUE backlog (claimable by the next drain, incl. expired leases — SLA ${DRAIN_SLA_MINUTES}m${drainBehind ? ' — BEHIND' : ''})`,
+    dueSummary.dueNow === 0
+      ? []
+      : [{ due_now: dueSummary.dueNow, oldest_due: dueSummary.oldestDueAt?.toISOString(), oldest_wait_min: oldestWaitMin }],
+  );
+
+  // fix 12: the Vercel per-minute cron's last recorded run (Redis marker,
+  // src/lib/worker-cadence.ts). Absent ⇒ the cron has never reached this
+  // deployment (or Redis is unreachable) — counted as needing a human, like a
+  // quiet marker. KV vars missing from .env.local must not block this report.
+  let lastCronAt: Date | null = null;
+  let cronNote = '';
+  try {
+    lastCronAt = await readLastCronAt(cadenceRedis());
+  } catch (e) {
+    cronNote = ` (redis unavailable: ${scrub(e instanceof Error ? e.message : String(e))})`;
+  }
+  const lastCronMin = lastCronAt ? Math.round((Date.now() - lastCronAt.getTime()) / 60_000) : null;
+  const cronQuiet = lastCronMin === null || lastCronMin > CRON_QUIET_MINUTES;
+  console.log(`\nLAST CRON RUN (Vercel /api/worker every minute; quiet >${CRON_QUIET_MINUTES}m)`);
+  console.log(
+    lastCronAt
+      ? `  ${lastCronAt.toISOString()} — ${lastCronMin}m ago${cronQuiet ? ' — QUIET' : ''}`
+      : `  none — no marker${cronNote}`,
+  );
 
   const openByKind = await q(sql`
     SELECT kind, status, count(*)::int AS n
@@ -70,7 +101,7 @@ async function main() {
     WHERE status = 'processing'
       AND coalesce(lease_until, locked_at + make_interval(secs => ${leaseSec})) < now() - make_interval(mins => ${STALE_LOCK_MINUTES})
     ORDER BY 5 LIMIT 20`);
-  section(`STALE locks (lease expired >${STALE_LOCK_MINUTES}m and NOT reclaimed — the drain is not running; check worker-heartbeat.yml)`, staleLocks);
+  section(`STALE locks (lease expired >${STALE_LOCK_MINUTES}m and NOT reclaimed — the drain is not running; check the Vercel cron (Settings → Cron Jobs) and worker-heartbeat.yml)`, staleLocks);
 
   // Rows claimed by PRE-0014 code (never leased). Informational: claimBatch and the
   // stale-lock sweep treat them as leased until locked_at + LEASE_MS, so they are
@@ -115,7 +146,7 @@ async function main() {
 
   const needsHuman =
     dead.length + staleLocks.length + stuckPaid.length + staleReview.length + pendingRefunds.length +
-    secretsAtRest.length;
+    secretsAtRest.length + (cronQuiet ? 1 : 0) + (drainBehind ? 1 : 0);
   console.log(`\nSUMMARY: ${needsHuman === 0 ? 'nothing needs a human' : `${needsHuman} row(s) need a human — see sections above`}\n`);
 }
 
