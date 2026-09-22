@@ -202,6 +202,49 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /**
+     * fix 8 (money-02 / rail-02): the rail-failure CLAIM. Runs in the caller's
+     * transaction: `SELECT … FOR UPDATE` (the row lock — a concurrent paid_out,
+     * staff refund or sweep waits) and then ONE guarded UPDATE that moves only
+     * a `paid` row: status → 'cancelled' (the existing terminal state, no new
+     * status value), admin_note ← `note` (appended after any staff note), and
+     * refund_status by the PRIOR value:
+     *   none / requested + refundable → pending   (the caller enqueues refund:<id>)
+     *   none / requested, NOT refundable → unchanged (partner-funded: no charge here)
+     *   pending / completed / failed → unchanged   (a staff refund owns it)
+     * "Refundable" = funding_ref IS NOT NULL (SmartRemit captured funds) OR a
+     * partner-pulled leg (ach_pull / bank_pull — the worker posts the signed
+     * REVERSE). Not a CTE: the caller branches on the prior refund status,
+     * which a single UPDATE … RETURNING cannot show. Returns the locked prior
+     * row (null when missing) and the updated row (null when not `paid`).
+     * Drizzle 0.45.2: select().…().for('update') —
+     * node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
+     */
+    async failPaidFromRail(
+      id: string,
+      note: string,
+    ): Promise<{ prior: Transfer | null; updated: Transfer | null }> {
+      const locked = await db.select().from(transfers).where(eq(transfers.id, id)).limit(1).for('update');
+      const prior = locked[0] ? toDomain(locked[0]) : null;
+      if (!prior || prior.status !== 'paid') return { prior, updated: null };
+      const rows = await db
+        .update(transfers)
+        .set({
+          status: 'cancelled',
+          // APPENDED, never clobbered: a rail must not erase a staff note.
+          adminNote: sql`CASE WHEN COALESCE(${transfers.adminNote}, '') = '' THEN ${note} ELSE ${transfers.adminNote} || ' | ' || ${note} END`,
+          refundStatus: sql`CASE
+            WHEN ${transfers.refundStatus} IN ('none', 'requested')
+              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
+              THEN 'pending'
+            ELSE ${transfers.refundStatus}
+          END`,
+        })
+        .where(and(eq(transfers.id, id), eq(transfers.status, 'paid')))
+        .returning();
+      return { prior, updated: rows[0] ? toDomain(rows[0]) : null };
+    },
+
     /** Persist the settlement ref exactly once (never clobbers an existing ref). */
     async setProviderRef(id: string, ref: string): Promise<void> {
       await db

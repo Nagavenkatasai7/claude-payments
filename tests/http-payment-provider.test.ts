@@ -14,6 +14,7 @@ vi.mock('@/lib/whatsapp', () => ({
 import {
   HttpPaymentProvider,
   normalizeRailStatus,
+  parseRailFailure,
   railCallbackTransferId,
   buildSettlementInstruction,
   signBody,
@@ -53,7 +54,7 @@ describe('normalizeRailStatus', () => {
     expect(normalizeRailStatus('paid_out')).toBe('delivered');
     expect(normalizeRailStatus('PAID_OUT')).toBe('delivered'); // case-insensitive
   });
-  it('failed/unknown/non-string → null (forward-only machine ignores them)', () => {
+  it('failed/unknown/non-string → null (failed/returned are parseRailFailure\'s job, fix 8)', () => {
     expect(normalizeRailStatus('failed')).toBeNull();
     expect(normalizeRailStatus('refunded')).toBeNull();
     expect(normalizeRailStatus(42)).toBeNull();
@@ -148,10 +149,49 @@ describe('HttpPaymentProvider.handleWebhook', () => {
     expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'funded' }))
       .toEqual({ transferId: 'rail_t1', status: 'paid' });
   });
-  it('null for missing reference or unmapped status', async () => {
+  it('null for missing reference or a truly unmapped status', async () => {
     const provider = new HttpPaymentProvider(createStore(fakeRedis(), db), PAYMENT);
     expect(await provider.handleWebhook({ status: 'paid_out' })).toBeNull();
-    expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'failed' })).toBeNull();
+    expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'refunded' })).toBeNull();
+    expect(await provider.handleWebhook({ reference: 'rail_t1', status: 42 })).toBeNull();
+  });
+
+  // Program-Fix 8 (money-02 / rail-02): a failure callback is a RESULT, not a
+  // dropped event. This INVERTS the old lock (`failed → null`).
+  it('failed / returned map to a bounded RailFailure (reason scrubbed of control chars, capped at 200)', async () => {
+    const provider = new HttpPaymentProvider(createStore(fakeRedis(), db), PAYMENT);
+    const noisy = 'bad IFSC\n\u0007' + 'x'.repeat(500);
+    const r = await provider.handleWebhook({ reference: 't1', status: 'FAILED', reason: noisy });
+    expect(r).toEqual({ transferId: 't1', failure: { code: 'failed', reason: expect.any(String) } });
+    const reason = (r as { failure: { reason: string } }).failure.reason;
+    expect(reason.length).toBeLessThanOrEqual(200);
+    expect(reason).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(reason.startsWith('bad IFSC')).toBe(true);
+    expect(await provider.handleWebhook({ reference: 't1', status: 'returned' }))
+      .toEqual({ transferId: 't1', failure: { code: 'returned', reason: 'unspecified' } });
+  });
+});
+
+describe('parseRailFailure (pure)', () => {
+  it('maps failed/returned case-insensitively; a non-string or empty reason becomes "unspecified"', () => {
+    expect(parseRailFailure({ status: 'Failed', reason: '  ' })).toEqual({ code: 'failed', reason: 'unspecified' });
+    expect(parseRailFailure({ status: 'RETURNED', reason: 12 })).toEqual({ code: 'returned', reason: 'unspecified' });
+    expect(parseRailFailure({ status: 'returned', reason: 'account_unreachable' }))
+      .toEqual({ code: 'returned', reason: 'account_unreachable' });
+  });
+  it('strips Unicode format characters too: bidi overrides/isolates, line/paragraph separators, zero-width joiners', () => {
+    const reason = 'ok\u202Eevil\u202C \u2066x\u2069\u2028y\u2029z\u200D\u200B\uFEFFend';
+    const r = parseRailFailure({ status: 'failed', reason });
+    expect(r?.reason).toBe('okevil xyzend');
+    expect(r?.reason).not.toMatch(/\p{Cf}/u);
+  });
+
+  it('null for forward statuses, unknown statuses and non-objects', () => {
+    expect(parseRailFailure({ status: 'paid_out' })).toBeNull();
+    expect(parseRailFailure({ status: 'refunded' })).toBeNull();
+    expect(parseRailFailure({ status: 42 })).toBeNull();
+    expect(parseRailFailure(null)).toBeNull();
+    expect(parseRailFailure('failed')).toBeNull();
   });
 });
 

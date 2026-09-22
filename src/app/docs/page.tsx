@@ -256,6 +256,17 @@ x-signature: 9c44…   # HMAC-SHA256(rawBody, webhookSecret)
                 <li><code>created</code> → awaiting payment (no-op transition)</li>
                 <li><code>funded</code> → paid (customer charged on your side)</li>
                 <li><code>paid_out</code> → delivered — triggers the branded WhatsApp delivery notifications</li>
+                <li>
+                  <code>failed</code> / <code>returned</code> → cancelled — the sender&apos;s charge is
+                  refunded (a partner-pulled debit gets a signed <code>reverse</code> instruction) and the
+                  customer is notified, in one transaction. An optional <code>reason</code> (string, ≤200
+                  characters) is stored on the transfer&apos;s note for your ops and ours.
+                </li>
+              </ul>
+              <ul className="mt-3 space-y-1.5 text-muted-foreground">
+                <li>A <code>failed</code> after <code>paid_out</code> is recorded for ops and never reverses a delivery.</li>
+                <li>A <code>paid_out</code> after a <code>failed</code> is refused and alerted — the transfer stays cancelled.</li>
+                <li>A <code>reverse</code> for a debit that never happened must be a no-op on your side.</li>
               </ul>
             </CardContent>
           </Card>
@@ -263,7 +274,10 @@ x-signature: 9c44…   # HMAC-SHA256(rawBody, webhookSecret)
             No rail yet? Point your integration at the <strong className="text-foreground">hosted
             reference rail</strong> (<code>providerType: simulator</code>) — it verifies your
             signatures, acks a providerRef, and calls the public webhook back ~12s later, running
-            the exact production loop end to end.
+            the exact production loop end to end. To exercise the failure path, pay to a bank
+            account that is all zeros (for India: account <code>000000000000</code>, IFSC{' '}
+            <code>HDFC0001234</code>): the reference rail acks, then reports{' '}
+            <code>failed</code> with reason <code>account_unreachable</code>.
           </p>
         </section>
 
