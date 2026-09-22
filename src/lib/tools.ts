@@ -35,6 +35,7 @@ import { screenTransfer } from './compliance';
 import { transferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
 import { isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
+import { boundUntrustedText, ID_MAX, NAME_MAX } from './untrusted-text';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -106,15 +107,34 @@ function accountLast4(dest: string): string {
   return last.slice(-4);
 }
 
+/** Longest UPI bank handle ever shown (real handles are short: okhdfc, ybl, paytm). */
+const UPI_HANDLE_MAX = 32;
+
+/**
+ * Masks a UPI id (fix 5 / owner decision 4): the user part — often a phone
+ * number or a name — becomes "****", and only the bank handle after the LAST
+ * '@' survives, reduced to [A-Za-z0-9._-] and capped, so an outsider-written
+ * handle can never carry text to the model. No '@' (or no clean handle) ⇒
+ * "****". '' stays '' (nothing on file).
+ */
+function maskUpi(dest: string): string {
+  const v = (dest ?? '').trim();
+  if (v === '') return '';
+  const at = v.lastIndexOf('@');
+  const handle = at >= 0 ? v.slice(at + 1).replace(/[^A-Za-z0-9._-]/g, '').slice(0, UPI_HANDLE_MAX) : '';
+  return handle ? `****@${handle}` : '****';
+}
+
 /**
  * Masks a payout_destination for tool responses fed back to the LLM
- * (list_saved_recipients / resolve_recipient): UPI IDs pass through unchanged
- * (no account digits to hide); bank destinations collapse to "****<last4>" so a
- * full account number — or an IBAN, which embeds the account — can never be
- * echoed by the model.
+ * (list_saved_recipients / resolve_recipient / repeat_transfer needs_edd): a
+ * UPI id collapses to "****@handle" (fix 5); bank destinations collapse to
+ * "****<last4>" so a full account number — or an IBAN, which embeds the
+ * account — can never be echoed by the model. Also used by the customer's own
+ * /account saved-recipients list.
  */
 export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: string): string {
-  if (payoutMethod === 'upi') return payoutDestination;
+  if (payoutMethod === 'upi') return maskUpi(payoutDestination);
   const last4 = accountLast4(payoutDestination);
   return last4 ? `****${last4}` : ACCOUNT_ON_FILE_PLACEHOLDER;
 }
@@ -134,7 +154,8 @@ export { NO_BANK_DETAILS_PLACEHOLDER };
  * details on the secure pay page) the bank line shows the placeholder instead.
  */
 function maskDestination(method: PayoutMethod, dest: string): string {
-  if (method === 'upi' && dest) return `UPI ${dest}`;
+  // fix 5: a UPI id is masked like everywhere else ("UPI ****@okhdfc").
+  if (method === 'upi' && dest) return `UPI ${maskUpi(dest)}`;
   const last4 = accountLast4(dest);
   return last4 ? `bank a/c ****${last4}` : NO_BANK_DETAILS_PLACEHOLDER;
 }
@@ -220,7 +241,10 @@ export function buildApproveSummary(
   }
 
   return [
-    `Sending ${fmt(q.amountSource)} to ${recipientName}.`,
+    // fix 5: the name may be a pre-fix outsider-written value, and on the web
+    // channel this summary is returned to the model — clamp it (a clean name
+    // is byte-for-byte unchanged).
+    `Sending ${fmt(q.amountSource)} to ${boundUntrustedText(recipientName, NAME_MAX)}.`,
     feeLine,
     `Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`,
     `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
@@ -2863,9 +2887,11 @@ async function listSavedRecipientsTool(
   try {
     const recipients = await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 2);
     return {
+      // fix 5: names (and pre-fix API-planted numbers) are outsider-written —
+      // clamped at read; the destination is masked (UPI included).
       recipients: recipients.map((r) => ({
-        name: r.name,
-        recipient_phone: r.recipientPhone,
+        name: boundUntrustedText(r.name, NAME_MAX),
+        recipient_phone: boundUntrustedText(r.recipientPhone, ID_MAX),
         payout_method: r.payoutMethod,
         payout_destination: maskAccount(r.payoutMethod, r.payoutDestination),
         last_used_at: r.lastUsedAt,
@@ -2893,10 +2919,11 @@ async function resolveRecipientTool(
   }
 
   // Customer-owned fields only — never partner/compliance/PII.
-  // payout_destination is masked so the LLM never sees a raw account number.
+  // payout_destination is masked so the LLM never sees a raw account number;
+  // the name and number are clamped at read (fix 5).
   const shape = (r: import('./types').Recipient) => ({
-    name: r.name,
-    recipient_phone: r.recipientPhone,
+    name: boundUntrustedText(r.name, NAME_MAX),
+    recipient_phone: boundUntrustedText(r.recipientPhone, ID_MAX),
     payout_method: r.payoutMethod,
     payout_destination: maskAccount(r.payoutMethod, r.payoutDestination),
   });
@@ -3267,7 +3294,7 @@ async function repeatTransferTool(
       amount_usd: amountSource,
       source_currency: last.sourceCurrency,
       funding_method: fundingMethod,
-      recipient_name: last.recipientName,
+      recipient_name: boundUntrustedText(last.recipientName, NAME_MAX), // fix 5: clamped at read
       recipient_phone: recipientPhone,
       payout_method: stored?.payoutMethod ?? last.payoutMethod,
       payout_destination: stored ? maskAccount(stored.payoutMethod, stored.payoutDestination) : '',
