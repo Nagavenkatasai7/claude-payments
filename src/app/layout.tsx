@@ -1,6 +1,7 @@
 import './tailwind.css'; // THE stylesheet pipeline (Stage 5e): preflight + legacy theme layers + utilities
 import type { ReactNode } from 'react';
 import { Inter } from 'next/font/google';
+import { SpeedInsights } from '@vercel/speed-insights/next';
 
 // Self-hosted Inter for the login + admin-dashboard (sh-* theme). Exposed as a CSS
 // variable that --sh-font-sans consumes (globals.css). The landing (.lp) and pay
@@ -27,7 +28,10 @@ export const viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={inter.variable}>
-      <body>{children}</body>
+      <body>
+        {children}
+        <SpeedInsights />
+      </body>
     </html>
   );
 }
