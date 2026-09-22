@@ -234,7 +234,8 @@ export function createOutboxRepo(db: DbOrTx) {
      * STILL not reclaimed. The reclaim lives in claimBatch, so an expired lease
      * normally disappears within one drain; one that survives this long means
      * the drain itself is not running. Ids/kinds/timestamps only — callers must
-     * never print `payload` (it may carry creds until fix 11).
+     * never print `payload` (message bodies are customer-facing text; sealed
+     * email values are ciphertext — fix 11 keeps secrets out, not PII).
      */
     async listStaleProcessing(minutes: number, limit = 100): Promise<OutboxRow[]> {
       return db

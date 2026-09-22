@@ -103,8 +103,23 @@ async function main() {
     FROM transfers t WHERE t.refund_status = 'pending' ORDER BY t.paid_at LIMIT 20`);
   section(`PENDING REFUNDS (stuck if last_refund_effect_at is null or older than ${STUCK_REFUND_MINUTES}m)`, pendingRefunds);
 
+  // fix 11: secrets that pre-fix releases copied into payloads. COUNTS ONLY —
+  // the payload itself is never selected. The 0016 gate: before /migrate-prod
+  // every row here must be done or dead (0016 leaves an UNSENT legacy row
+  // untouched so it still sends correctly — it would survive the scrub); after
+  // the apply this must print "none".
+  const secretsAtRest = await q(sql`
+    SELECT kind, status, count(*)::int AS n
+    FROM outbox
+    WHERE (payload -> 'creds') IS NOT NULL
+       OR (kind = 'email.send' AND starts_with(dedupe_key, 'partner_app_invite:')
+           AND (payload -> 'sealed') IS NULL AND payload ->> 'text' LIKE '%/partners/apply/%')
+    GROUP BY kind, status ORDER BY kind, status`);
+  section('SECRETS AT REST (fix 11: legacy creds / cleartext invite links — must be none once drizzle 0016 is applied)', secretsAtRest);
+
   const needsHuman =
-    dead.length + staleLocks.length + stuckPaid.length + staleReview.length + pendingRefunds.length;
+    dead.length + staleLocks.length + stuckPaid.length + staleReview.length + pendingRefunds.length +
+    secretsAtRest.length;
   console.log(`\nSUMMARY: ${needsHuman === 0 ? 'nothing needs a human' : `${needsHuman} row(s) need a human — see sections above`}\n`);
 }
 
