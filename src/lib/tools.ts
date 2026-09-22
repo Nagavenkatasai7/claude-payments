@@ -1446,7 +1446,7 @@ async function createTransferTool(
         compliance_reasons: transfer.complianceReasons,
         amount_inr: transfer.amountInr,
         total_charge_usd: transfer.totalChargeUsd,
-        recipient_name: transfer.recipientName,
+        recipient_name: boundUntrustedText(transfer.recipientName, NAME_MAX), // fix 5: clamped at read
       };
     } catch (err) {
       // A stale approved quote (FX_QUOTE_EXPIRED_MESSAGE) or, for a legacy draft
@@ -1572,7 +1572,7 @@ async function createTransferTool(
       compliance_reasons: transfer.complianceReasons,
       amount_inr: transfer.amountInr,
       total_charge_usd: transfer.totalChargeUsd,
-      recipient_name: transfer.recipientName,
+      recipient_name: boundUntrustedText(transfer.recipientName, NAME_MAX), // fix 5: clamped at read
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'create_transfer');
@@ -2943,7 +2943,7 @@ async function listSchedulesTool(
     schedules: mine.map((s) => ({
       schedule_id: s.id,
       amount_usd: s.amountUsd,
-      recipient_name: s.recipientName,
+      recipient_name: boundUntrustedText(s.recipientName, NAME_MAX), // fix 5: clamped at read
       frequency: s.frequency,
       day_of_month: s.dayOfMonth ?? null,
       day_of_week: s.dayOfWeek ?? null,
@@ -3332,6 +3332,13 @@ async function repeatTransferTool(
   if (!last) {
     return { error: "I don't see a past transfer to that number — who would you like to send to?" };
   }
+  // fix 5: the past row's name may be pre-fix outsider-written text. It seeds
+  // the new draft (and the web summary returned to the model), so it is clamped
+  // once here; a name that clamps to nothing is not reused.
+  const recipientName = boundUntrustedText(last.recipientName, NAME_MAX);
+  if (!recipientName) {
+    return { error: "I can't reuse the name on that past transfer — who would you like to send to?" };
+  }
 
   // Amount + funding fallback chain.
   const overrideAmount = Number(args.amount_source ?? args.amount_usd);
@@ -3378,7 +3385,7 @@ async function repeatTransferTool(
       amount_usd: amountSource,
       source_currency: last.sourceCurrency,
       funding_method: fundingMethod,
-      recipient_name: boundUntrustedText(last.recipientName, NAME_MAX), // fix 5: clamped at read
+      recipient_name: recipientName, // fix 5: clamped at read
       recipient_phone: recipientPhone,
       payout_method: stored?.payoutMethod ?? last.payoutMethod,
       payout_destination: stored ? maskAccount(stored.payoutMethod, stored.payoutDestination) : '',
@@ -3393,7 +3400,7 @@ async function repeatTransferTool(
     {
       amount_usd: amountSource,
       funding_method: fundingMethod,
-      recipient_name: last.recipientName,
+      recipient_name: recipientName, // fix 5: clamped (review follow-up)
       recipient_phone: recipientPhone,
       destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
       source_currency: last.sourceCurrency,
