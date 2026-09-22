@@ -282,3 +282,72 @@ describe('buildSettlementInstruction — USDC seller payout leg', () => {
     expect(i.payout).toEqual({ rail: 'usdc', destination: WALLET });
   });
 });
+
+describe('buildSettlementInstruction — ctx-01 backstops (fix 6)', () => {
+  it('throws instead of instructing the rail to pay a masked placeholder', () => {
+    for (const bad of ['****9012', '****', '********', 'account on file', 'bank a/c ****9012', '•••• 9012']) {
+      expect(() => buildSettlementInstruction({ ...fixture(), payoutDestination: bad }), bad)
+        .toThrow('settlement_destination_invalid:rail_t1');
+    }
+  });
+
+  it('the error carries the transfer id only — never the destination', () => {
+    let message = '';
+    try {
+      buildSettlementInstruction({ ...fixture(), payoutDestination: '****9012' });
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toBe('settlement_destination_invalid:rail_t1');
+    expect(message).not.toContain('9012');
+  });
+
+  it('throws for a CONSUMER row carrying a partner-pulled funding method (never charged by us, never legitimately pulled)', () => {
+    for (const fundingMethod of ['ach_pull', 'bank_pull'] as const) {
+      expect(() => buildSettlementInstruction({ ...fixture(), fundingMethod }), fundingMethod)
+        .toThrow('settlement_funding_invalid:rail_t1');
+    }
+  });
+
+  it('real bank / UPI / USDC destinations build unchanged, and a B2B ach_pull row with NO destination still builds', () => {
+    type Built = { payout: { destination: string } };
+    expect((buildSettlementInstruction(fixture()) as Built).payout.destination).toBe('1234567890');
+    expect((buildSettlementInstruction({ ...fixture(), payoutMethod: 'upi', payoutDestination: 'mom@okhdfc' }) as Built)
+      .payout.destination).toBe('mom@okhdfc');
+    const wallet = '0x' + 'b'.repeat(40);
+    expect((buildSettlementInstruction({ ...fixture(), payoutMethod: 'usdc', payoutDestination: `USDC|${wallet}` }) as Built)
+      .payout.destination).toBe(wallet);
+    const b2b = buildSettlementInstruction({
+      ...fixture(), fundingMethod: 'ach_pull', achTokenRef: 'ach_abc', transferType: 'b2b', payoutDestination: '',
+    } as Transfer) as Built;
+    expect(b2b.payout.destination).toBe('');
+  });
+
+  it('existing B2B funding-leg fixtures still build (they all carry transferType b2b)', () => {
+    const achPull = { ...fixture(), id: 'ach_t2', fundingMethod: 'ach_pull', achTokenRef: 'ach_x', transferType: 'b2b' } as Transfer;
+    expect((buildSettlementInstruction(achPull) as { funding?: { method: string } }).funding?.method).toBe('ach_debit');
+  });
+});
+
+describe('buildSettlementInstruction — an empty destination only on a B2B partner-pulled row (fix 10 review S2)', () => {
+  it('throws for an empty / blank destination on a consumer row, and on a B2B row that is not partner-pulled', () => {
+    const cases: Array<Partial<Transfer>> = [
+      { payoutDestination: '' },
+      { payoutDestination: '   ' },
+      { payoutDestination: '', transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business', fundingMethod: 'bank_transfer' },
+    ];
+    for (const over of cases) {
+      expect(() => buildSettlementInstruction({ ...fixture(), ...over } as Transfer), JSON.stringify(over))
+        .toThrow('settlement_destination_invalid:rail_t1');
+    }
+  });
+
+  it('a B2B ach_pull or bank_pull row with no destination still builds (the partner pays the payee)', () => {
+    for (const fundingMethod of ['ach_pull', 'bank_pull'] as const) {
+      const built = buildSettlementInstruction({
+        ...fixture(), fundingMethod, achTokenRef: 'ach_abc', transferType: 'b2b', payoutDestination: '',
+      } as Transfer) as { payout: { destination: string } };
+      expect(built.payout.destination, fundingMethod).toBe('');
+    }
+  });
+});

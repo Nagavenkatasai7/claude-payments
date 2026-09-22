@@ -5,17 +5,29 @@
 # Why deployment_status and not a job in ci.yml: ci.yml fires on pull_request
 # BEFORE the Vercel preview exists (testing it there would need racy polling);
 # deployment_status fires exactly when Vercel reports the deployment ready and
-# carries its URL in github.event.deployment_status.target_url. Same proven
-# mechanism as smoke.yml (Production).
+# carries its URL in github.event.deployment_status.environment_url (target_url
+# holds the same URL and is the fallback). Same proven mechanism as smoke.yml
+# (Production). The workflow file always comes from main, so a change here
+# takes effect only after it merges.
 #
 # Preview deployments sit behind Vercel Deployment Protection, so Playwright
 # sends the "Protection Bypass for Automation" header (see playwright.config.ts)
-# using the VERCEL_AUTOMATION_BYPASS_SECRET repo secret. Until that secret is
-# minted (coordinator task), the smoke job SKIPS cleanly via the gate job —
-# secrets are not readable in job-level `if:` (actions/runner#520), so a tiny
-# gate job exports presence as an output instead.
+# using the VERCEL_AUTOMATION_BYPASS_SECRET repo secret:
+# https://vercel.com/docs/deployment-protection/methods-to-bypass-deployment-protection/protection-bypass-automation
+# Until that secret exists, the smoke job SKIPS with a warning and the setup
+# steps in the run summary. Secrets are not readable in job-level `if:`
+# (actions/runner#520), so a tiny gate job exports presence as an output.
 #
-# NOT a required check — the coordinator decides that after the secret exists.
+# Shared data: Preview deployments get the production DATABASE_URL (one Neon
+# branch), so the smoke's self-provisioned fixtures (E2E Smoke Partner,
+# e2e-smoke-partner, e2e-smoke-support) are the same rows the production smoke
+# uses. The smoke job's concurrency group keeps two previews from racing on
+# them. KV_REST_API_* (staff records and sessions live in Redis) and
+# PASSWORD_PEPPER, like FIELD_ENCRYPTION_KEY, are scoped to Production only,
+# so staff login cannot work on a preview until the owner decides how Preview
+# gets them.
+#
+# NOT a required check.
 name: Preview Smoke
 
 on:
@@ -30,25 +42,61 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
-      run-smoke: ${{ steps.check.outputs.has-secret }}
+      run-smoke: ${{ steps.check.outputs.run-smoke }}
+      url: ${{ steps.check.outputs.url }}
     steps:
-      - name: Check bypass secret presence
+      - name: Check the bypass secret and resolve the preview URL
         id: check
+        shell: bash
+        # Event fields and the secret reach the script through env only. The
+        # secret is only tested for presence, never printed.
         env:
           BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          ENVIRONMENT_URL: ${{ github.event.deployment_status.environment_url }}
+          TARGET_URL: ${{ github.event.deployment_status.target_url }}
         run: |
-          if [ -n "$BYPASS_SECRET" ]; then
-            echo "has-secret=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has-secret=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::VERCEL_AUTOMATION_BYPASS_SECRET is not configured - skipping preview smoke"
+          set -u
+          if [ -z "$BYPASS_SECRET" ]; then
+            echo "run-smoke=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Preview smoke skipped::The repo secret VERCEL_AUTOMATION_BYPASS_SECRET is not set, so Playwright cannot get past Vercel Deployment Protection on the preview. The run summary lists the setup steps."
+            cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ### Preview smoke skipped: VERCEL_AUTOMATION_BYPASS_SECRET is not set
+
+          Preview deployments are behind Vercel Deployment Protection. To let this smoke through:
+
+          1. Vercel → claude-payments → Settings → Deployment Protection → Protection Bypass for Automation → create a secret.
+          2. Copy it.
+          3. Run `gh secret set VERCEL_AUTOMATION_BYPASS_SECRET` and paste the secret when prompted. Do not pass it through `echo` or a pipe.
+
+          Staff login also needs `KV_REST_API_URL`, `KV_REST_API_TOKEN` and `PASSWORD_PEPPER` on Preview. Today they (and `FIELD_ENCRYPTION_KEY`) are scoped to Production only, so the login tests fail on a preview until the owner decides how Preview gets them.
+          SUMMARY
+            exit 0
           fi
+
+          # Send the bypass secret and the E2E credentials only to this
+          # project's Vercel preview host.
+          url="${ENVIRONMENT_URL:-$TARGET_URL}"
+          url="${url%/}"
+          if [[ ! "$url" =~ ^https://claude-payments-[a-z0-9-]+\.vercel\.app$ ]]; then
+            echo "::error title=Preview smoke::The deployment_status event has no Vercel preview URL for this project (expected https://claude-payments-<id>.vercel.app in environment_url or target_url). Nothing was tested."
+            exit 1
+          fi
+          echo "run-smoke=true" >> "$GITHUB_OUTPUT"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Preview smoke will test ${url}."
 
   preview-smoke:
     needs: gate
     if: needs.gate.outputs.run-smoke == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # One preview smoke at a time: the fixtures live in the shared database and
+    # the partner spec deletes and recreates e2e-smoke-partner, so two runs at
+    # once can break each other. A newer run waits; GitHub keeps one waiting
+    # run per group and cancels an older waiting one.
+    concurrency:
+      group: preview-smoke-fixtures
+      cancel-in-progress: false
 
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +105,7 @@ jobs:
           # file itself still comes from the default branch). The sha comes
           # from Vercel's deployment object (write-scoped integration).
           ref: ${{ github.event.deployment.sha }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -90,19 +139,26 @@ jobs:
       - name: Smoke test the preview deployment
         env:
           CI: 'true'
-          # The per-deployment preview URL; protection is bypassed via the
-          # header playwright.config.ts adds when the secret is present.
-          BASE_URL: ${{ github.event.deployment_status.target_url }}
+          # The per-deployment preview URL, validated by the gate job.
+          # playwright.config.ts sends x-vercel-protection-bypass and
+          # x-vercel-set-bypass-cookie on every page and API request when
+          # VERCEL_AUTOMATION_BYPASS_SECRET is set.
+          BASE_URL: ${{ needs.gate.outputs.url }}
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           E2E_USERNAME: ${{ secrets.E2E_USERNAME }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           E2E_PARTNER_PASSWORD: ${{ secrets.E2E_PARTNER_PASSWORD }}
         run: npm run e2e
 
+      # Trace zips are excluded, as in smoke.yml and nightly.yml (#247): a
+      # trace records every fill() value (the staff passwords) and every
+      # request header (the bypass secret).
       - name: Upload trace on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: preview-playwright-trace
-          path: test-results/
+          path: |
+            test-results/
+            !test-results/**/*.zip
           retention-days: 7

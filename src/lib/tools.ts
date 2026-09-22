@@ -4,10 +4,10 @@ import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPho
 import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
-import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
+import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
-import { DEFAULT_PARTNER_ID } from './defaults';
+import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
@@ -34,6 +34,7 @@ import {
 import { screenTransfer } from './compliance';
 import { transferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -115,15 +116,13 @@ function accountLast4(dest: string): string {
 export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: string): string {
   if (payoutMethod === 'upi') return payoutDestination;
   const last4 = accountLast4(payoutDestination);
-  return last4 ? `****${last4}` : 'account on file';
+  return last4 ? `****${last4}` : ACCOUNT_ON_FILE_PLACEHOLDER;
 }
 
-// Cold-start placeholder for the approve card's "To:" line when no bank details
-// have been collected yet (Item 2: the sender enters them on the secure pay
-// page, never in chat). A saved/known destination still renders the masked
-// "bank a/c ****<last4>" line.
-export const NO_BANK_DETAILS_PLACEHOLDER =
-  "their bank account (you'll enter the details on the secure page)";
+// Cold-start placeholder for the approve card's "To:" line (Item 2). The
+// literal lives in payout-format.ts so isMaskedDestination and the card share
+// ONE string; re-exported here so no importer changes.
+export { NO_BANK_DETAILS_PLACEHOLDER };
 
 /**
  * Masks a payout_destination for the customer-facing approval card. Shows ONLY
@@ -138,6 +137,48 @@ function maskDestination(method: PayoutMethod, dest: string): string {
   if (method === 'upi' && dest) return `UPI ${dest}`;
   const last4 = accountLast4(dest);
   return last4 ? `bank a/c ****${last4}` : NO_BANK_DETAILS_PLACEHOLDER;
+}
+
+// ── Server-side payout rehydration (fix 6 / audit ctx-01) ────────────────────
+
+/**
+ * The ONLY source of a payout destination for a chat-created draft, transfer or
+ * schedule — no tool reads args.payout_* (and no schema offers them). Returns
+ * the sender's OWN stored payout for this number, or null (the caller
+ * cold-starts: '' / 'bank', collected on the secure pay page):
+ *   1. the saved recipient (listRecipients — explicit decrypt), used ONLY when
+ *      (a) the number's own calling-code country IS the send's destination
+ *      country (the recipients row carries no country) and (b) the sender has
+ *      NO B2B transfer to that number (one tenant-scoped probe — a pre-fix B2B
+ *      mint may have saved a seller's verified-profile account there);
+ *   2. else the sender's newest CONSUMER transfer to that number that settled
+ *      (paid / delivered) in the SAME destination country, DECRYPTED.
+ * '' or a display placeholder is never usable. Keyed (ctx.partnerId, ctx.phone)
+ * + the normalized recipient phone ONLY (fix 1: a phone is not an identity).
+ * The value goes into a DRAFT or an encrypted SCHEDULE row only — never a
+ * ToolResult, card body or log line. Read errors propagate (the agent turn's
+ * outbox row retries).
+ */
+async function resolveStoredPayout(
+  ctx: ToolContext,
+  recipientPhone: string,
+  destinationCountry: CountryCode,
+): Promise<{ payoutMethod: PayoutMethod; payoutDestination: string } | null> {
+  const usable = (v: string | undefined): string | null => {
+    const t = (v ?? '').trim();
+    return t !== '' && !isMaskedDestination(t) ? t : null;
+  };
+  const paidAsBusiness = await ctx.store.hasB2bTransferTo(ctx.partnerId, ctx.phone, recipientPhone);
+  if (!paidAsBusiness && countryForPhone(recipientPhone) === destinationCountry) {
+    const saved = (await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 25)).find(
+      (r) => normalizePhone(r.recipientPhone) === recipientPhone,
+    );
+    const fromBook = usable(saved?.payoutDestination);
+    if (saved && fromBook) return { payoutMethod: saved.payoutMethod, payoutDestination: fromBook };
+  }
+  const settled = await ctx.store.latestSettledConsumerTransferTo(ctx.partnerId, ctx.phone, recipientPhone, destinationCountry);
+  const fromLedger = usable(settled?.payoutDestination);
+  return settled && fromLedger ? { payoutMethod: settled.payoutMethod, payoutDestination: fromLedger } : null;
 }
 
 /**
@@ -198,6 +239,24 @@ function asEnum<T extends readonly string[]>(set: T, v: unknown): T[number] | un
   return typeof v === 'string' && (set as readonly string[]).includes(v) ? (v as T[number]) : undefined;
 }
 
+// ── funding_method and the B2B shape are closed (fix 6) ─────────────────────
+// Tools used to cast the model's funding_method straight to FundingMethod, and
+// isB2bArgs treats funding_method 'ach_pull' alone as B2B — so a model could put
+// a partner-pulled method (the pay route skips OUR funds capture for it) on a
+// consumer send, or make any send "B2B". Each tool now accepts ONLY its schema
+// enum (absent ⇒ bank_transfer), and a send is B2B only when it pays the
+// sender's OWN open bill.
+const CHAT_FUNDING_METHODS = ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'] as const;
+const CONSUMER_FUNDING_METHODS = ['credit_card', 'debit_card', 'bank_transfer'] as const;
+/** undefined ⇒ not supplied (caller defaults); null ⇒ supplied but outside `set` (caller refuses). */
+function parseFundingArg<T extends readonly string[]>(set: T, v: unknown): T[number] | null | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  return asEnum(set, v) ?? null;
+}
+function fundingMethodError(set: readonly string[]): string {
+  return `funding_method must be one of: ${set.join(', ')}.`;
+}
+
 // ── B2B (business-to-business) arg parsing ───────────────────────────────────
 // A send is treated as B2B when entity_type === 'business' OR funding_method is
 // 'ach_pull' (the two travel together — either alone is a malformed B2B call we
@@ -223,6 +282,47 @@ function parseB2bArgs(args: Record<string, unknown>): ParsedB2b | null {
   };
 }
 const BUSINESS_ENTITY: EntityType = 'business';
+
+/**
+ * A B2B send (isB2bArgs: entity_type 'business' OR funding_method 'ach_pull')
+ * must be the payment of the sender's OWN open US bill, for exactly its amount:
+ * entity_type 'business' AND funding_method 'ach_pull' AND an invoice_id that
+ * resolves — tenant-scoped (getB2bInvoiceScoped) — to an 'unpaid' invoice whose
+ * buyer is ctx.phone, that has NO sellerId (a registered seller's cross-border
+ * bill is paid only on its own checkout, /pay/b2b/<id> — b2b-pay-finalize.ts
+ * requires the sellerId there, and delivery of a B2B transfer marks its linked
+ * invoice paid, so a chat send must not settle it for a model-chosen amount),
+ * in USD, sent in USD for exactly amountUsd. Returns a refusal, or null.
+ */
+async function refuseUnlessOwnOpenBill(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  b2b: ParsedB2b,
+  amountSource: number,
+  sourceCurrency: CurrencyCode,
+): Promise<ToolResult | null> {
+  if (args.entity_type !== 'business' || args.funding_method !== 'ach_pull' || !b2b.invoiceId) {
+    return { error: 'A business bill payment needs entity_type business, funding_method ach_pull and the invoice_id from present_bill.' };
+  }
+  const invoice = await ctx.store.getB2bInvoiceScoped(b2b.invoiceId, ctx.partnerId);
+  if (!invoice || invoice.status !== 'unpaid' || invoice.buyerPhone !== ctx.phone) {
+    return { error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' };
+  }
+  if (invoice.sellerId) {
+    return {
+      error: 'This bill is paid on its secure checkout page, not in chat. Share the pay_url with the customer.',
+      pay_url: `${env.appBaseUrl}/pay/b2b/${invoice.id}`,
+    };
+  }
+  if (
+    invoice.currency !== 'USD' ||
+    sourceCurrency !== 'USD' ||
+    Math.round(amountSource * 100) !== Math.round(invoice.amountUsd * 100)
+  ) {
+    return { error: `This bill is for exactly ${invoice.amountUsd} USD: send amount_source ${invoice.amountUsd} with source_currency USD.` };
+  }
+  return null;
+}
 
 export const toolSchemas: ChatTool[] = [
   {
@@ -377,19 +477,13 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'create_transfer',
       description:
-        'Create the transfer record after the user confirms the quote and provides recipient details.',
+        "Create the transfer record after the user confirms the quote and gives the recipient's name, WhatsApp number and destination country. Never collect or pass bank details: the stored payout details for that number are reused automatically, otherwise the sender enters them on the secure pay page.",
       parameters: {
         type: 'object',
         properties: {
           amount_source: { type: 'number', description: "Send amount in the sender's OWN currency (rupees for India, dollars for the US, etc.). Do NOT convert it yourself." },
           amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           recipient_name: { type: 'string' },
-          payout_method: { type: 'string', enum: ['upi', 'bank'] },
-          payout_destination: {
-            type: 'string',
-            description:
-              'The UPI ID, or the bank account number with IFSC code.',
-          },
           funding_method: {
             type: 'string',
             enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'],
@@ -539,7 +633,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'create_schedule',
       description:
-        'Set up a recurring transfer that repeats monthly or weekly. Collect all recipient details first, just like create_transfer.',
+        "Set up a recurring transfer that repeats monthly or weekly. Collect the recipient's name and WhatsApp number first — never bank details: the stored payout details for that number are reused automatically, otherwise the sender enters them on the secure page for each scheduled payment.",
       parameters: {
         type: 'object',
         properties: {
@@ -547,8 +641,6 @@ export const toolSchemas: ChatTool[] = [
           amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string', description: "Recipient's WhatsApp number with country code." },
-          payout_method: { type: 'string', enum: ['upi', 'bank'] },
-          payout_destination: { type: 'string' },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
           frequency: { type: 'string', enum: ['monthly', 'weekly'] },
           day_of_month: { type: 'number', description: 'Day 1-28, required when frequency is monthly.' },
@@ -725,7 +817,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'resolve_recipient',
       description:
-        "Look up the sender's saved recipients by a name they typed (e.g. 'Mom'). Returns { match: 'exact', recipient } when exactly one saved recipient matches — use its payout_method, payout_destination, and recipient_phone directly (do not re-ask). Returns { match: 'ambiguous', candidates } when more than one could match — call send_recipient_picker with the candidates. Returns { match: 'none' } when nothing matches — ask for the recipient's number and payout details.",
+        "Look up the sender's saved recipients by a name they typed (e.g. 'Mom'). Returns { match: 'exact', recipient } when exactly one saved recipient matches — use its recipient_phone directly (do not re-ask). Its payout_destination is a masked display value: NEVER pass payout details to another tool — the stored payout details are reused automatically. Returns { match: 'ambiguous', candidates } when more than one could match — call send_recipient_picker with the candidates. Returns { match: 'none' } when nothing matches — ask for the recipient's name, number and destination country (bank details are entered on the secure pay page).",
       parameters: {
         type: 'object',
         properties: {
@@ -740,7 +832,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'repeat_transfer',
       description:
-        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount; funding_method overrides the remembered method. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with all the details it returned plus those two fields.",
+        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount; funding_method overrides the remembered method. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with the amount, source_currency, funding_method, destination_country, recipient_name and recipient_phone it returned plus those two fields (never payout details — the stored ones are reused automatically).",
       parameters: {
         type: 'object',
         properties: {
@@ -1324,6 +1416,20 @@ async function createTransferTool(
       const refusal = fxRefusal(err, 'create_transfer');
       if (refusal) return refusal;
       if (err instanceof QuoteError) return { error: err.message };
+      if (err instanceof MaskedDestinationError) {
+        // fix 6: a pre-fix draft carrying a display placeholder. Nothing was
+        // written — put the draft back under ITS tenant; its secure pay link now
+        // collects the bank details.
+        await ctx.draftStore.restoreDraft(draft, ctxDraftId);
+        return {
+          error:
+            "This approval has no usable bank details. Ask the customer to tap Approve & Pay on the card and enter the recipient's bank details on the secure page.",
+        };
+      }
+      if (err instanceof PartnerPulledConsumerError) {
+        // fix 6: a pre-fix consumer draft carrying a partner-pulled method — dead.
+        return { error: 'That approval is no longer valid. Ask the customer to start the send again.' };
+      }
       throw err;
     }
   }
@@ -1336,6 +1442,10 @@ async function createTransferTool(
         'A valid recipient WhatsApp number with country code is required before creating the transfer. Ask the user for it (e.g. 919876543210).',
     };
   }
+  // fix 6: funding_method is a closed set.
+  const legacyFundingArg = parseFundingArg(CHAT_FUNDING_METHODS, args.funding_method);
+  if (legacyFundingArg === null) return { error: fundingMethodError(CHAT_FUNDING_METHODS) };
+  const legacyFunding: FundingMethod = legacyFundingArg ?? 'bank_transfer';
   // Resolve currency + rates and reuse customer for cap check + partnerId.
   let legacyResolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
   try {
@@ -1360,6 +1470,10 @@ async function createTransferTool(
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
   const amountSource = Number(args.amount_source ?? args.amount_usd);
+  if (legacyB2b) {
+    const notOwnBill = await refuseUnlessOwnOpenBill(ctx, args, legacyB2b, amountSource, sourceCurrency);
+    if (notOwnBill) return notOwnBill;
+  }
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap check on the legacy path (cron-fired or no-button cold-start)
   {
@@ -1373,6 +1487,8 @@ async function createTransferTool(
       };
     }
   }
+  // fix 6: the payout destination is SERVER-SIDE only (never args.payout_*).
+  const legacyPayout = legacyB2b ? null : await resolveStoredPayout(ctx, recipientPhone, legacyDestCountry);
   const legacySof = asEnum(SOURCE_OF_FUNDS, args.source_of_funds);
   const legacyOcc = asEnum(OCCUPATIONS, args.occupation);
   try {
@@ -1385,10 +1501,10 @@ async function createTransferTool(
       partnerId: ctx.partnerId,
       recipientName: String(args.recipient_name),
       recipientPhone,
-      payoutMethod: (args.payout_method as PayoutMethod | undefined) ?? 'bank',
-      // Item 2: bank details come from the secure pay page; legacy reads default to ''.
-      payoutDestination: typeof args.payout_destination === 'string' ? args.payout_destination : '',
-      fundingMethod: (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer',
+      payoutMethod: legacyPayout?.payoutMethod ?? 'bank',
+      // fix 6: the sender's own stored record for this number, or '' (the secure pay page collects it).
+      payoutDestination: legacyPayout?.payoutDestination ?? '',
+      fundingMethod: legacyFunding,
       // ── KYC Travel-Rule / EDD: validated from args + sender legal name ──
       recipientLegalName: typeof args.recipient_legal_name === 'string' ? args.recipient_legal_name : undefined,
       relationship: asEnum(RELATIONSHIPS, args.relationship),
@@ -1410,7 +1526,7 @@ async function createTransferTool(
     });
     await ctx.dailyVolumeStore.addCents(ctx.partnerId, ctx.phone, Math.round(transfer.amountUsd * 100));
     await persistEddProfile(ctx, legacyCustomer, legacySof, legacyOcc);
-    await ctx.customerStore.recordFundingMethod(ctx.partnerId, ctx.phone, args.funding_method as FundingMethod);
+    await ctx.customerStore.recordFundingMethod(ctx.partnerId, ctx.phone, legacyFunding);
     return {
       transfer_id: transfer.id,
       status: transfer.status,
@@ -2618,6 +2734,9 @@ async function createScheduleTool(
   if (!isValidPhone(recipientPhone)) {
     return { error: 'A valid recipient WhatsApp number with country code is required.' };
   }
+  // fix 6: a schedule is a consumer send — funding_method is a closed set.
+  const scheduleFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
+  if (scheduleFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
   const frequency = args.frequency === 'weekly' ? 'weekly' : 'monthly';
   let dayOfMonth: number | undefined;
   let dayOfWeek: number | undefined;
@@ -2646,16 +2765,19 @@ async function createScheduleTool(
       endDate = args.end_date.trim();
     }
   }
+  // fix 6: SERVER-SIDE payout only; cron mints a schedule with no destination
+  // country, i.e. DEFAULT_DESTINATION_COUNTRY.
+  const schedulePayout = await resolveStoredPayout(ctx, recipientPhone, DEFAULT_DESTINATION_COUNTRY);
   const schedule: Schedule = {
     id: newTransferId(),
     phone: ctx.phone,
     amountUsd: amountSource, // kept as source amount (USD-equivalent when USD; else raw source)
     recipientName: String(args.recipient_name),
     recipientPhone,
-    payoutMethod: (args.payout_method as Schedule['payoutMethod'] | undefined) ?? 'bank',
-    // Item 2: bank details come from the secure pay page; legacy reads default to ''.
-    payoutDestination: typeof args.payout_destination === 'string' ? args.payout_destination : '',
-    fundingMethod: (args.funding_method as Schedule['fundingMethod'] | undefined) ?? 'bank_transfer',
+    payoutMethod: schedulePayout?.payoutMethod ?? 'bank',
+    // fix 6: the sender's own stored record, or '' (collected on the pay page each run).
+    payoutDestination: schedulePayout?.payoutDestination ?? '',
+    fundingMethod: scheduleFundingArg ?? 'bank_transfer',
     frequency,
     dayOfMonth,
     dayOfWeek,
@@ -2816,14 +2938,11 @@ async function sendApprovePickerTool(
         "A valid recipient WhatsApp number with country code is required (e.g. 919876543210).",
     };
   }
-  // G: default funding_method to bank_transfer when absent
-  const fundingMethod = (args.funding_method as FundingMethod | undefined) ?? 'bank_transfer';
-  // Item 2: bank details are entered on the secure pay page, not collected in
-  // chat. On a cold start the LLM passes no payout fields → method 'bank',
-  // destination ''. When a saved recipient is reused (repeat_transfer /
-  // resolve_recipient), those args ARE supplied and we keep them verbatim.
-  const payoutMethod: PayoutMethod = (args.payout_method as PayoutMethod | undefined) ?? 'bank';
-  const payoutDestination = typeof args.payout_destination === 'string' ? args.payout_destination : '';
+  // G: default funding_method to bank_transfer when absent. fix 6: a value outside
+  // the schema enum (e.g. a model-invented 'bank_pull') is refused, never cast.
+  const fundingArg = parseFundingArg(CHAT_FUNDING_METHODS, args.funding_method);
+  if (fundingArg === null) return { error: fundingMethodError(CHAT_FUNDING_METHODS) };
+  const fundingMethod: FundingMethod = fundingArg ?? 'bank_transfer';
   // B2B (business-to-business): a bill payment between two businesses, funded by
   // ach_pull. Parsed once; null ⇒ a normal consumer send (every b2c line below
   // is byte-for-byte unchanged). For B2B the recipient_name the card/screen use
@@ -2852,6 +2971,10 @@ async function sendApprovePickerTool(
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
   const amountSource = Number(args.amount_source ?? args.amount_usd);
+  if (b2b) {
+    const notOwnBill = await refuseUnlessOwnOpenBill(ctx, args, b2b, amountSource, sourceCurrency);
+    if (notOwnBill) return notOwnBill;
+  }
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
   {
@@ -2871,6 +2994,15 @@ async function sendApprovePickerTool(
       };
     }
   }
+  // ── Payout destination: SERVER-SIDE ONLY (fix 6 / audit ctx-01) ─────────
+  // args.payout_* are NEVER read: the sender's OWN stored record for this number
+  // in this destination country, or '' (cold start — the secure pay page). A
+  // B2B payee never comes from the sender's address book ('' — the partner
+  // pays the payee). After the verify + cap gates (a refused call decrypts
+  // nothing), before screening (a blocked attempt never records a model string).
+  const stored = b2b ? null : await resolveStoredPayout(ctx, recipientPhone, destinationCountry);
+  const payoutMethod: PayoutMethod = stored?.payoutMethod ?? 'bank';
+  const payoutDestination = stored?.payoutDestination ?? '';
   // Screen at card-show (read-only) BEFORE creating the draft. Quote first so a
   // blocked attempt is recorded with real figures.
   const transfersToday = await ctx.store.getTodayTransferCount(ctx.partnerId, ctx.phone);
@@ -2906,8 +3038,8 @@ async function sendApprovePickerTool(
           recipientName: String(args.recipient_name),
           recipientPhone,
           payoutMethod,
-          // Item 2: bank details aren't collected in chat — the screener matches
-          // on name, not the account number — so a blocked attempt records ''.
+          // fix 6: the sender's stored destination for this number, or '' — never a
+          // model-supplied value (the screener matches on name, not the account).
           payoutDestination,
           fundingMethod,
           amountUsd: q.amountUsd,
@@ -3049,6 +3181,9 @@ async function repeatTransferTool(
   if (!isValidPhone(recipientPhone)) {
     return { error: "I need the recipient's WhatsApp number to repeat a transfer." };
   }
+  // fix 6: funding_method is a closed set (the schema's consumer enum).
+  const repeatFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
+  if (repeatFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
 
   // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
   // Stage 4: indexed per-phone page, then a small in-JS recipient filter.
@@ -3060,17 +3195,6 @@ async function repeatTransferTool(
     return { error: "I don't see a past transfer to that number — who would you like to send to?" };
   }
 
-  // The default ledger read MASKS payout destinations (****last4) — a repeat
-  // must carry the REAL account into the new draft. Hydrate it from the saved
-  // recipient (decrypted), else a decrypted read of that exact transfer.
-  const savedRecipient = (await ctx.store.listRecipients(ctx.partnerId, ctx.phone, 25)).find(
-    (r) => normalizePhone(r.recipientPhone) === recipientPhone,
-  );
-  const realPayoutDestination =
-    savedRecipient?.payoutDestination ||
-    (await ctx.store.getTransferDecrypted(last.id))?.payoutDestination ||
-    '';
-
   // Amount + funding fallback chain.
   const overrideAmount = Number(args.amount_source ?? args.amount_usd);
   const amountSource =
@@ -3078,10 +3202,13 @@ async function repeatTransferTool(
       ? overrideAmount
       : last.amountSource ?? last.amountUsd;
   const customer = await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone);
-  const fundingMethod =
-    (args.funding_method as FundingMethod | undefined) ??
-    customer?.lastFundingMethod ??
-    last.fundingMethod;
+  // fix 6: never carry a partner-pulled method (a B2B bill's ach_pull / bank_pull,
+  // remembered or last-used) into a chat draft — consumer methods only.
+  const fundingMethod: FundingMethod =
+    repeatFundingArg ??
+    asEnum(CONSUMER_FUNDING_METHODS, customer?.lastFundingMethod) ??
+    asEnum(CONSUMER_FUNDING_METHODS, last.fundingMethod) ??
+    'bank_transfer';
 
   // Defense-in-depth cap + EDD re-check on the REAL amount — the same gate the
   // normal flow runs before quoting. EDD must be collected BEFORE the approval
@@ -3105,6 +3232,8 @@ async function repeatTransferTool(
           'This send needs a couple of quick extra verification questions that can only be completed in the WhatsApp chat. Kindly ask the customer to message us on WhatsApp to finish this transfer.',
       };
     }
+    // fix 6: surface the stored destination MASKED; the follow-up card rehydrates by itself.
+    const stored = await resolveStoredPayout(ctx, recipientPhone, last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY);
     return {
       needs_edd: true,
       edd_threshold_usd: limit.edd_threshold_usd,
@@ -3113,8 +3242,9 @@ async function repeatTransferTool(
       funding_method: fundingMethod,
       recipient_name: last.recipientName,
       recipient_phone: recipientPhone,
-      payout_method: last.payoutMethod,
-      payout_destination: realPayoutDestination,
+      payout_method: stored?.payoutMethod ?? last.payoutMethod,
+      payout_destination: stored ? maskAccount(stored.payoutMethod, stored.payoutDestination) : '',
+      destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
     };
   }
 
@@ -3127,8 +3257,7 @@ async function repeatTransferTool(
       funding_method: fundingMethod,
       recipient_name: last.recipientName,
       recipient_phone: recipientPhone,
-      payout_method: last.payoutMethod,
-      payout_destination: realPayoutDestination,
+      destination_country: last.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY,
       source_currency: last.sourceCurrency,
     },
     ctx,
