@@ -16,6 +16,11 @@ import { easternDate, easternMonth } from '@/lib/dates';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { createKycCaseStore } from '@/lib/kyc-case-store';
 import { sql } from 'drizzle-orm';
+import { createAgent } from '@/lib/agent';
+import { createScheduleStore } from '@/lib/schedule-store';
+import { createDraftStore } from '@/lib/draft-store';
+import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
+import type { ChatMessage } from '@/lib/types';
 
 // tenant-boundary — the end-to-end pin for fix 1 (F44, F45, F47, F50, F52).
 // Two tenants ('default' and 'acme') share ONE phone number. Nothing a
@@ -126,6 +131,29 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     expect(await store.getTodayTransferCount('acme', PHONE)).toBe(1);
     expect(await deps.monthlyVolumeStore.getMonthCents('default', PHONE)).toBe(0);
     expect(await deps.monthlyVolumeStore.getMonthCents('acme', PHONE)).toBe(20_000);
+  });
+
+  it("fix 5 (regression pin on fix 1): acme's API mint for default's number never shows in default's round-0 customer context", async () => {
+    await seedDefaultOwner();
+    const { deps, store, customerStore } = await apiDeps();
+    const r = await createTransaction(deps, ACME, 'pk_1', 'idem-tb-ctx', {
+      amount_source: 100, sender: { phone: PHONE, kyc_status: 'not_started' },
+      beneficiary: { name: 'Acme Planted', phone: '919811112222', payout_method: 'bank', payout_destination: '999988887777' },
+    });
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store, customerStore, partnerStore: deps.partnerStore, monthlyVolumeStore: deps.monthlyVolumeStore,
+      scheduleStore: createScheduleStore(db), draftStore: createDraftStore(redis), dailyVolumeStore: createDailyVolumeStore(redis),
+      kycProvider: new MockKycProvider(customerStore, 'https://example.com'),
+      partnerId: 'default',
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn(PHONE, 'what did I send recently?', { isNewConversation: false, buttonTap: { kind: 'recipient', recipientPhone: '919811112222' } });
+    const everything = JSON.stringify(seen);
+    expect(everything).not.toContain('Acme Planted');
+    expect(everything).not.toContain('999988887777');
+    expect(everything).not.toContain('selected_recipient');
   });
 
   it('F50/F52: the partner API never returns another tenant decrypted legal name', async () => {
