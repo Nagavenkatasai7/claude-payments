@@ -11,7 +11,9 @@ import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
 import { issueApplicationToken } from '@/lib/partner-application-token';
+import { isPartnerType, partnerTypeLabel } from '@/lib/partner-type';
 import { getRedis } from '@/lib/redis';
+import { PARTNER_CORRIDOR_CODES } from '@/app/landing/corridors';
 
 // submitPartnerRequestAction — the PUBLIC "Partner with us" landing form action.
 // Intentionally unauthenticated (anyone can express interest), but defended:
@@ -21,9 +23,10 @@ import { getRedis } from '@/lib/redis';
 // On success the lead is persisted AND an 'email.send' effect is enqueued in ONE
 // transaction (durable outbox), then the worker is poked to deliver promptly.
 
-// The 10 supported corridors + an "Other" escape hatch. Server-side allow-list:
-// anything outside this set is dropped from the submitted corridors.
-const ALLOWED_CORRIDORS = new Set(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX', 'Other']);
+// The 10 supported corridors + an "Other" escape hatch — the landing page's
+// own list (src/app/landing/corridors.ts), so the checkboxes and this
+// allow-list cannot drift. Anything outside it is dropped from the submission.
+const ALLOWED_CORRIDORS = PARTNER_CORRIDOR_CODES;
 
 const EMAIL_RE = /.+@.+\..+/;
 
@@ -59,14 +62,20 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
     .map((c) => String(c).trim())
     .filter((c) => ALLOWED_CORRIDORS.has(c));
 
+  // "I am a:" — required, allow-listed (src/lib/partner-type.ts); the column's
+  // CHECK constraint refuses anything else, but the edge rejects it first.
+  const partnerTypeRaw = String(formData.get('partner_type') ?? '').trim();
+  const partnerType = isPartnerType(partnerTypeRaw) ? partnerTypeRaw : null;
+
   const phoneDigits = (phone.match(/\d/g) ?? []).length;
   const valid =
     companyName.length >= 2 &&
     EMAIL_RE.test(email) &&
     phoneDigits >= 7 &&
-    corridors.length >= 1;
+    corridors.length >= 1 &&
+    partnerType !== null;
 
-  if (!valid) redirect('/?partner=err#partner-with-us');
+  if (!valid || partnerType === null) redirect('/?partner=err#partner-with-us');
 
   // ── PERSIST + NOTIFY in ONE transaction ────────────────────────────────────
   // redirect() throws by design — keep it OUT of the transaction/try so it is
@@ -85,6 +94,7 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
       corridors,
       comments: comments || undefined,
       capturedAt: new Date().toISOString(),
+      partnerType,
     });
 
     // Mint a 30-day, single-use capability token for the detailed application
@@ -107,6 +117,7 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
         text:
           `New partner request via smartremit.ai\n\n` +
           `Company: ${companyName}\n` +
+          `Partner type: ${partnerTypeLabel(partnerType)}\n` +
           `Email: ${email}\n` +
           `Phone: ${phone}\n` +
           `Corridors: ${corridors.join(', ')}\n` +

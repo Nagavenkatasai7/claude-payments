@@ -120,6 +120,13 @@
       "when": 1790041836606,
       "tag": "0016_scrub_outbox_secrets",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790047171245,
+      "tag": "0017_waitlist_and_partner_type",
+      "breakpoints": true
     }
   ]
 }

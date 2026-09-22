@@ -8,6 +8,9 @@ import RateCalculator from './landing/RateCalculator';
 import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
 import { submitPartnerRequestAction } from './partners-action';
+import WaitlistForm from './landing/WaitlistForm';
+import { PARTNER_CORRIDORS } from './landing/corridors';
+import { PARTNER_TYPES } from '@/lib/partner-type';
 
 // Self-hosted Inter, scoped to the landing tree only (applied on the landing
 // root div), so it never touches the sh-* dashboard or .payapp themes.
@@ -42,22 +45,9 @@ const COUNTRIES = [
   { name: 'India', short: 'India', code: 'in' },
 ];
 
-// Corridor checkbox options for the "Partner with us" form. Values are the
-// allow-listed codes the server action accepts (10 supported corridors + Other);
-// labels are the friendly names shown to prospects.
-const PARTNER_CORRIDORS = [
-  { value: 'US', label: 'United States' },
-  { value: 'CA', label: 'Canada' },
-  { value: 'GB', label: 'United Kingdom' },
-  { value: 'AE', label: 'UAE' },
-  { value: 'SG', label: 'Singapore' },
-  { value: 'AU', label: 'Australia' },
-  { value: 'NZ', label: 'New Zealand' },
-  { value: 'IN', label: 'India' },
-  { value: 'HK', label: 'Hong Kong' },
-  { value: 'MX', label: 'Mexico' },
-  { value: 'Other', label: 'Other' },
-];
+// Corridor checkbox options for the "Partner with us" form (and the waitlist's
+// destination list) live in ./landing/corridors — one list, shared with the
+// server actions' allow-lists.
 
 // Scroll-reveal recipe (existing lp-rise keyframe; progressive — only engages
 // where animation-timeline is supported, and only under motion-safe).
@@ -130,9 +120,15 @@ function LoginMenu() {
 export default async function LandingPage({
   searchParams,
 }: {
-  // Next.js 16: searchParams is a Promise. We read ?partner=ok|err|rate to show
-  // the post-submit note next to the "Partner with us" form.
-  searchParams?: Promise<{ partner?: string }>;
+  // Next.js 16: searchParams is a Promise. We read ?partner=ok|err|rate and
+  // ?waitlist=ok|err|rate to show the post-submit notes next to the two forms,
+  // and utm_source / utm_campaign to attribute waitlist signups.
+  searchParams?: Promise<{
+    partner?: string;
+    waitlist?: string;
+    utm_source?: string;
+    utm_campaign?: string;
+  }>;
 }) {
   // ui-08 (Task 9): the figure is shown ONLY with its provenance — live ⇒
   // "mid-market rate, ECB fixing of <date>"; a cached rate ⇒ "indicative";
@@ -154,7 +150,9 @@ export default async function LandingPage({
   // is ever labelled live (HeroPipeline's `live`; ChatMock never claims it).
   const illustrativeRate = fxRate ?? FALLBACK_FX_RATE;
 
-  const partnerStatus = (await searchParams)?.partner;
+  const params = await searchParams;
+  const partnerStatus = params?.partner;
+  const waitlistStatus = params?.waitlist;
 
   const genericHref = waLink(WA_MESSAGES.generic);
 
@@ -190,6 +188,12 @@ export default async function LandingPage({
               href="#calculator"
             >
               Calculator
+            </a>
+            <a
+              className="text-[14px] text-[#8b94a0] transition-colors hover:text-[#f5f7f8] max-[760px]:hidden"
+              href="#waitlist"
+            >
+              Join waitlist
             </a>
             <a
               className="text-[14px] text-[#8b94a0] transition-colors hover:text-[#f5f7f8] max-[760px]:hidden"
@@ -504,6 +508,13 @@ export default async function LandingPage({
           </div>
         </section>
 
+        {/* ============ JOIN WAITLIST — public early-access form ============ */}
+        <WaitlistForm
+          status={waitlistStatus}
+          utmSource={params?.utm_source}
+          utmCampaign={params?.utm_campaign}
+        />
+
         {/* ============ PARTNER WITH US — public lead form ============ */}
         <section
           id="partner-with-us"
@@ -545,8 +556,8 @@ export default async function LandingPage({
                   role="alert"
                   className="mb-6 rounded-xl border border-[rgba(248,113,113,0.35)] bg-[rgba(248,113,113,0.08)] px-4 py-3 text-[14px] text-[#f4c7c7]"
                 >
-                  Please check the form — a company name, valid email, phone, and at least one
-                  corridor are required.
+                  Please check the form — a company name, valid email, phone, partner type, and
+                  at least one corridor are required.
                 </p>
               )}
               {partnerStatus === 'rate' && (
@@ -633,6 +644,29 @@ export default async function LandingPage({
                     />
                   </div>
                 </div>
+
+                <fieldset className="flex flex-col gap-3">
+                  <legend className="mb-1 text-[13px] font-semibold text-[#f5f7f8]">
+                    I am a:
+                  </legend>
+                  <div className="flex flex-col gap-2.5">
+                    {PARTNER_TYPES.map((t) => (
+                      <label
+                        key={t.value}
+                        className="inline-flex items-center gap-2.5 text-[14px] text-[#aeb6c0]"
+                      >
+                        <input
+                          type="radio"
+                          name="partner_type"
+                          value={t.value}
+                          required
+                          className="h-4 w-4 accent-[#25d366]"
+                        />
+                        {t.label}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
 
                 <fieldset className="flex flex-col gap-3">
                   <legend className="mb-1 text-[13px] font-semibold text-[#f5f7f8]">

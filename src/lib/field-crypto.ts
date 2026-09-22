@@ -71,6 +71,38 @@ function aesGcmOpen(masterKey: Buffer, sealed: Buffer): Buffer {
 }
 
 /**
+ * Decode the master key from its env representation: a 64-hex-char OR a
+ * base64-encoded 32-byte key (or an already-decoded 32-byte Buffer). THE one
+ * decoder — EnvKeyProvider and blind-index.ts both use it, so the accepted
+ * shapes can never drift apart (the boot-assert incident: a second parser
+ * with a narrower contract rejected the valid production key). Throws on
+ * anything that does not decode to exactly 32 bytes.
+ */
+export function decodeMasterKey(raw: string | Buffer | undefined): Buffer {
+  const value = raw ?? '';
+  if (Buffer.isBuffer(value)) {
+    if (value.length !== MASTER_KEY_BYTES) {
+      throw new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes');
+    }
+    return value;
+  }
+  let key: Buffer | null = null;
+  if (/^[0-9a-fA-F]{64}$/.test(value)) {
+    key = Buffer.from(value, 'hex');
+  } else if (value.length > 0) {
+    try {
+      key = Buffer.from(value, 'base64');
+    } catch {
+      key = null;
+    }
+  }
+  if (!key || key.length !== MASTER_KEY_BYTES) {
+    throw new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes');
+  }
+  return key;
+}
+
+/**
  * App-managed master key from a Vercel secret. Accepts a 64-hex-char OR a
  * base64-encoded 32-byte key; validates the **decoded** length is 32 bytes
  * **at use** (not at import) so dev/test without the env var doesn't break the
@@ -80,27 +112,7 @@ export class EnvKeyProvider implements EncryptionKeyProvider {
   constructor(private readonly rawKey: string | Buffer) {}
 
   private masterKey(): Buffer {
-    const raw = this.rawKey ?? '';
-    if (Buffer.isBuffer(raw)) {
-      if (raw.length !== MASTER_KEY_BYTES) {
-        throw new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes');
-      }
-      return raw;
-    }
-    let key: Buffer | null = null;
-    if (/^[0-9a-fA-F]{64}$/.test(raw)) {
-      key = Buffer.from(raw, 'hex');
-    } else if (raw.length > 0) {
-      try {
-        key = Buffer.from(raw, 'base64');
-      } catch {
-        key = null;
-      }
-    }
-    if (!key || key.length !== MASTER_KEY_BYTES) {
-      throw new Error('FIELD_ENCRYPTION_KEY missing or not 32 bytes');
-    }
-    return key;
+    return decodeMasterKey(this.rawKey);
   }
 
   wrapDataKey(dek: Buffer): Buffer {

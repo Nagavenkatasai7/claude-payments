@@ -8,6 +8,7 @@ import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { PARTNER_TYPES, filterByPartnerType, partnerTypeLabel } from '@/lib/partner-type';
 
 // /admin-dashboard/partner-requests — inbound "Partner with us" leads from the
 // public landing form. These are business-development contacts (company name,
@@ -17,6 +18,7 @@ import { Badge } from '@/components/ui/badge';
 
 const COLUMNS: ExpandableColumn[] = [
   { label: 'Company', primary: true },
+  { label: 'Type', primary: true },
   { label: 'Email', primary: true },
   { label: 'Phone' },
   { label: 'Corridors' },
@@ -25,11 +27,26 @@ const COLUMNS: ExpandableColumn[] = [
   { label: 'Submitted', primary: true },
 ];
 
-export default async function PartnerRequestsPage() {
+// The ?type= filter chips: every partner type, plus "No answer" for rows
+// captured before the question existed. An unknown value shows everything.
+const TYPE_FILTERS: { value: string | undefined; label: string }[] = [
+  { value: undefined, label: 'All' },
+  ...PARTNER_TYPES.map((t) => ({ value: t.value as string, label: t.label })),
+  { value: 'none', label: 'No answer' },
+];
+
+export default async function PartnerRequestsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ type?: string }>;
+}) {
   const { scope } = await requireScope();
   if (scope.kind !== 'platform') redirect('/admin-dashboard');
 
-  const requests = await getStore().listPartnerRequests();
+  const type = (await searchParams)?.type;
+  const all = await getStore().listPartnerRequests();
+  const requests = filterByPartnerType(all, type);
+  const activeFilter = TYPE_FILTERS.some((f) => f.value === type) ? type : undefined;
 
   return (
     <>
@@ -40,6 +57,7 @@ export default async function PartnerRequestsPage() {
             <div className="sh-page-title">Partner requests</div>
             <div className="sh-page-sub">
               {requests.length} inbound lead{requests.length === 1 ? '' : 's'}
+              {activeFilter ? ` · filtered from ${all.length}` : ''}
             </div>
           </div>
         </div>
@@ -50,6 +68,25 @@ export default async function PartnerRequestsPage() {
             <CardDescription>
               Companies that submitted the &ldquo;Partner with us&rdquo; form, newest by capture time.
             </CardDescription>
+            <nav aria-label="Filter by partner type" className="mt-3 flex flex-wrap gap-2">
+              {TYPE_FILTERS.map((f) => {
+                const active = f.value === activeFilter;
+                return (
+                  <Link
+                    key={f.label}
+                    href={f.value ? `/admin-dashboard/partner-requests?type=${f.value}` : '/admin-dashboard/partner-requests'}
+                    aria-current={active ? 'page' : undefined}
+                    className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                      active
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground'
+                    }`}
+                  >
+                    {f.label}
+                  </Link>
+                );
+              })}
+            </nav>
           </CardHeader>
           <CardContent>
             <ExpandableTable
@@ -71,6 +108,11 @@ export default async function PartnerRequestsPage() {
                     </Link>
                   ) : (
                     <span key="company" className="font-medium">{r.companyName}</span>
+                  ),
+                  r.partnerType ? (
+                    <Badge key="type" variant="outline">{partnerTypeLabel(r.partnerType)}</Badge>
+                  ) : (
+                    <span key="type" className="text-xs text-muted-foreground">—</span>
                   ),
                   <a key="email" href={`mailto:${r.email}`} className="text-primary hover:underline">
                     {r.email}
