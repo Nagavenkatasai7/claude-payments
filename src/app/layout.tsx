@@ -2,6 +2,11 @@ import './tailwind.css'; // THE stylesheet pipeline (Stage 5e): preflight + lega
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { Inter } from 'next/font/google';
+// Real-user Core Web Vitals. Same-origin only (/_vercel/speed-insights/script.js
+// + /vitals), so the enforced CSP's 'self' covers it; it sends nothing unless
+// Speed Insights is enabled on the Vercel project
+// (node_modules/@vercel/speed-insights/dist/next/index.d.mts:39).
+import { SpeedInsights } from '@vercel/speed-insights/next';
 
 // Self-hosted Inter for the login + admin-dashboard (sh-* theme). Exposed as a CSS
 // variable that --sh-font-sans consumes (globals.css). The landing (.lp) and pay
@@ -38,7 +43,10 @@ export const viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={inter.variable}>
-      <body>{children}</body>
+      <body>
+        {children}
+        <SpeedInsights />
+      </body>
     </html>
   );
 }
