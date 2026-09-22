@@ -140,8 +140,10 @@ async function main() {
   // legacy row untouched — it would survive the scrub); after the apply this
   // must print "none". Since Program-Fix 12 (second PR) the worker has no shim
   // for such a row: it fails closed (legacy_creds_payload), dead-letters and
-  // alerts, and stays counted here. A row here now means a regressed producer
-  // or a survivor to scrub by hand. The query is the PGlite-tested
+  // alerts, and, when `creds` is an object, stays counted here; any other
+  // non-null `creds` shows only in DEAD rows with `last_error =
+  // legacy_creds_payload`. A row here now means a regressed producer or a
+  // survivor to scrub by hand. The query is the PGlite-tested
   // outboxRepo.listSecretsAtRest (tests/outbox-payload-secrets.test.ts): it tests
   // a VALUE, not a key, so a `"creds": null` row never blocks the gate.
   const secretsAtRest: Row[] = await createOutboxRepo(db).listSecretsAtRest();

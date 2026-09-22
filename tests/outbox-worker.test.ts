@@ -474,6 +474,26 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
     expect(await outbox.listSecretsAtRest()).toEqual([{ kind: 'whatsapp.text', status: 'dead', n: 1 }]);
   });
 
+  // Review follow-up (PR #286): the guard is `!= null`, deliberately WIDER than
+  // listSecretsAtRest's jsonb_typeof = 'object' detector. Pin every non-object
+  // shape so nobody narrows it to an object check later.
+  it.each([
+    ['"abc"', '"abc"'],
+    ['[]', '[]'],
+    ['0', '0'],
+    ['false', 'false'],
+    ['{}', '{}'],
+  ])('NO SHIM (fix 12b): a non-object "creds": %s with no partnerId still fails closed', async (_label, json) => {
+    const payload = `{"to":"15551230000","body":"odd","creds":${json}}`;
+    await db.execute(sql`INSERT INTO outbox (kind, payload, dedupe_key) VALUES ('whatsapp.text', ${payload}::jsonb, 'legacy:odd')`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    expect(sendText).not.toHaveBeenCalled();
+    const [row] = await legacyRows();
+    expect(row.status).toBe('failed');
+    expect(row.last_error).toBe('legacy_creds_payload');
+  });
+
   it('"creds": null holds nothing (same reading as listSecretsAtRest / 0016): no partnerId ⇒ the shared number', async () => {
     await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES
       ('whatsapp.text', '{"to":"15551230000","body":"nullcreds","creds":null}'::jsonb)`);
@@ -488,6 +508,19 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
       ('whatsapp.text', '{"to":"15551230000","body":"both","partnerId":"acme","creds":{"phoneNumberId":"pn_stale","token":"tok_stale"}}'::jsonb)`);
     await drainOnce(deps(), 'w1');
     expect(sendText).toHaveBeenCalledWith('15551230000', 'both', { phoneNumberId: 'pn_acme', token: 'tok_live' });
+  });
+
+  // Review follow-up (PR #286): a partnerId that resolves to NO creds (ghost
+  // partner) still wins over a persisted creds object — the row degrades to
+  // the shared number like any ghost-partner row, and the payload token is
+  // never used. Pins the check order: partnerId first, then the creds guard.
+  it('a GHOST partnerId beside a persisted creds object sends on the shared number — never on the persisted token', async () => {
+    await insertLegacyRow('whatsapp.text', ',"partnerId":"never_seeded"');
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'legacy', undefined);
+    expect(JSON.stringify(sendText.mock.calls)).not.toMatch(new RegExp(LEGACY_TOKEN));
   });
 
   it('an unknown kind dead-letters instead of looping forever', async () => {
