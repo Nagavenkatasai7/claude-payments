@@ -75,7 +75,7 @@
 /*
  * B7 — landing hero pipeline (src/app/landing/HeroPipeline.tsx).
  *
- * The UN-animated base markup is FULLY LIT (every node green-bordered, every
+ * The UN-animated base markup is FULLY LIT (every node teal-bordered, every
  * connector solid) — that IS the prefers-reduced-motion / no-support state.
  * Under motion-safe, the cycle animations below take over: nodes start dim
  * (fill-mode: backwards holds the 0% frame through the stagger delay), light
@@ -84,33 +84,33 @@
  */
 @keyframes lp-node-cycle {
   0% {
-    opacity: 0.38;
-    border-color: rgba(255, 255, 255, 0.09);
-    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+    opacity: 0.5;
+    border-color: #dbe4f0;
+    box-shadow: 0 0 0 0 rgba(17, 161, 198, 0);
   }
   6%, 76% {
     opacity: 1;
-    border-color: rgba(37, 211, 102, 0.5);
-    box-shadow: 0 0 28px -6px rgba(37, 211, 102, 0.4);
+    border-color: rgba(17, 161, 198, 0.55);
+    box-shadow: 0 0 28px -8px rgba(17, 161, 198, 0.45);
   }
   90%, 100% {
-    opacity: 0.38;
-    border-color: rgba(255, 255, 255, 0.09);
-    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+    opacity: 0.5;
+    border-color: #dbe4f0;
+    box-shadow: 0 0 0 0 rgba(17, 161, 198, 0);
   }
 }
 @keyframes lp-dot-cycle {
   0% {
-    background: rgba(255, 255, 255, 0.22);
-    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+    background: #c7d2e0;
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0);
   }
   6%, 76% {
-    background: #25d366;
-    box-shadow: 0 0 0 4px rgba(37, 211, 102, 0.18);
+    background: #34d399;
+    box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.22);
   }
   90%, 100% {
-    background: rgba(255, 255, 255, 0.22);
-    box-shadow: 0 0 0 0 rgba(37, 211, 102, 0);
+    background: #c7d2e0;
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0);
   }
 }
 @keyframes lp-link-x {

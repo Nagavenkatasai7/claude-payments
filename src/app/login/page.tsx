@@ -1,7 +1,12 @@
+import type { Metadata } from 'next';
 import { LoginForm } from './login-form';
+import { SMARTREMIT_ICONS } from '../brand-icons';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const dynamic = 'force-dynamic';
+
+// SmartRemit-owned surface (see ../brand-icons.ts): the SmartRemit.ai tab icon.
+export const metadata: Metadata = { icons: SMARTREMIT_ICONS };
 
 // Staff sign-in (Stage 5e conversion — shadcn/Tailwind, no sh-* classes).
 
