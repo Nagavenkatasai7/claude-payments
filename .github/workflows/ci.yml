@@ -13,12 +13,21 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every check runs as its own job, side by side, and the test suite is split
+# into 4 shards. Wall time is the slowest job (a test shard), not the sum of
+# every step. The final `ci` job is the REQUIRED status check in branch
+# protection: it keeps the name `ci` and passes only when every job above it
+# succeeded, so branch protection needs no change.
 jobs:
-  ci:
-    name: ci
+  # Fails when src/db/schema.ts has changes not covered by drizzle/
+  # (drizzle-kit generate diffs schema.ts against the latest drizzle/meta
+  # snapshot — no DB connection needed — and writes files only on drift).
+  # BLOCKING since the 0005 snapshot catch-up: an unapplied schema change
+  # can no longer merge (the 2026-06-11 outage class is unmergeable).
+  drift:
+    name: migration drift
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
 
@@ -30,18 +39,14 @@ jobs:
       - name: Install
         run: npm ci
 
-      # Fails when src/db/schema.ts has changes not covered by drizzle/
-      # (drizzle-kit generate diffs schema.ts against the latest drizzle/meta
-      # snapshot — no DB connection needed — and writes files only on drift).
-      # BLOCKING since the 0005 snapshot catch-up: an unapplied schema change
-      # can no longer merge (the 2026-06-11 outage class is unmergeable).
       - name: Migration drift check (schema vs drizzle/)
         run: |
           npx drizzle-kit generate --name ci_drift_check
           drift="$(git status --porcelain -- drizzle/)"
-          # ALWAYS restore drizzle/ before later steps: the vitest suites apply
-          # ./drizzle via PGlite migrate() (tests/helpers-db.ts), so a generated
-          # drift artifact left on disk would double-apply DDL and fail `npm test`.
+          # Restore drizzle/ so no generated drift artifact is left on disk.
+          # This job has no later steps (the test shards run in their own
+          # checkouts), but the restore is kept so the check leaves the tree
+          # exactly as it found it.
           git checkout -- drizzle/
           git clean -fdq drizzle/
           if [ -n "$drift" ]; then
@@ -51,20 +56,133 @@ jobs:
           fi
           echo "schema.ts and drizzle/ migrations agree"
 
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
       - name: Typecheck
         run: npm run typecheck
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
 
       - name: Lint
         run: npm run lint
 
+  # The Vitest suite in 4 shards. `--shard=i/4` sorts the test files by a hash
+  # of their path and runs slice i, so the 4 shards together run every file
+  # exactly once (vitest 3.2.6, BaseSequencer.shard in
+  # node_modules/vitest/dist/chunks/coverage.DfSpMS-b.js). The shards do NOT
+  # pass --passWithNoTests (which `npm test` does): a shard that resolves no
+  # test files then exits non-zero instead of passing silently.
+  # GitHub Actions sets CI=true, so vitest.config.ts keeps retry: 1 and
+  # Vitest's default worker count, as before.
+  test:
+    name: test (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      # One red shard must not cancel the others: every failure is reported.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
       - name: Test
-        run: npm test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npx vitest run --shard="${SHARD}/4"
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
 
       - name: Build
         run: npm run build
 
-      # Blocking at high. Runs LAST so a dependency advisory never hides
-      # typecheck/lint/test/build results on the PR (2026-09-09 to 09-14 every
-      # PR was red here and no other check ran).
+  # Blocking at high. Its own job, so a dependency advisory never hides the
+  # typecheck/lint/test/build results on the PR (2026-09-09 to 09-14 every
+  # PR was red here and no other check ran).
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
+
+  # The REQUIRED status check. Keep the job name exactly `ci`, and let no other
+  # job use that name. `if: always()` makes it run (and report) even when a
+  # job above failed or was cancelled; it then passes only when every needed
+  # job succeeded. A matrix job's result is `failure` when any shard failed.
+  ci:
+    name: ci
+    if: always()
+    needs: [drift, typecheck, lint, test, build, audit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every check to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed="$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success") | .key')"
+          if [ -n "$failed" ]; then
+            echo "::error title=CI::These checks did not succeed: $(echo "$failed" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "All checks succeeded."
