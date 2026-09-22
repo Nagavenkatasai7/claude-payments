@@ -60,7 +60,10 @@ export function decideStaffCancel(t: CancelView): StaffCancelDecision {
       // Charged or not: a hold is decided by Reject / Release (admin), never by Cancel.
       return { kind: 'refuse', reason: CANCEL_REFUSAL.inReview };
     case 'awaiting_payment':
-      return t.fundingRef ? { kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting } : { kind: 'void' };
+      // Exactly `== null`, matching the claim's SQL `funding_ref IS NULL`: an
+      // empty-string ref is NOT NULL there, so it must be refused here too,
+      // never offered as a void the guarded UPDATE cannot land.
+      return t.fundingRef == null ? { kind: 'void' } : { kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting };
     default: {
       // Exhaustive: a new TransferStatus (e.g. Task 4's rail-failure state)
       // fails tsc HERE until its Cancel semantics are decided. At runtime an

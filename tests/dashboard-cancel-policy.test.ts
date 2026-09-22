@@ -47,6 +47,15 @@ describe('decideStaffCancel', () => {
       .toEqual({ kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting });
   });
 
+  it('treats ONLY a null/absent fundingRef as uncharged, matching the claim’s SQL `funding_ref IS NULL`: an empty-string ref is refused', () => {
+    // '' is falsy in JS but NOT NULL in SQL: a truthiness check would offer a
+    // void the guarded UPDATE can never land.
+    expect(decideStaffCancel({ status: 'awaiting_payment', fundingMethod: 'credit_card', fundingRef: '' }))
+      .toEqual({ kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting });
+    expect(showsStaffCancel({ status: 'awaiting_payment', fundingMethod: 'credit_card', fundingRef: '' })).toBe(false);
+    expect(decideStaffCancel({ status: 'awaiting_payment', fundingMethod: 'credit_card', fundingRef: undefined })).toEqual({ kind: 'void' });
+  });
+
   it('REFUSES blocked: a terminal compliance state is never rewritten', () => {
     expect(decideStaffCancel({ status: 'blocked', fundingMethod: 'credit_card' }))
       .toEqual({ kind: 'refuse', reason: CANCEL_REFUSAL.blocked });
