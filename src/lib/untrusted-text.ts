@@ -11,9 +11,19 @@
 //    a system prompt sees it.
 //
 // "Dirty" means anything that can break out of a data field into the prompt's
-// structure: control characters (\p{Cc}: newline, tab, NUL, BEL, DEL, C1),
-// the Unicode line / paragraph separators, and the bracket characters []{}<>
-// used by the agent's own "[NOTE]" markers and by markup. Pure; no I/O.
+// structure, or hide text from a human reviewer while the model still reads it:
+//  • control characters (\p{Cc}: newline, tab, NUL, BEL, DEL, C1) and the
+//    Unicode line / paragraph separators;
+//  • invisible format characters (\p{Cf}: zero-width space / joiners, bidi
+//    embeddings / overrides / isolates, word joiner, BOM, soft hyphen, and the
+//    TAG block used for "ASCII smuggling");
+//  • the bracket characters []{}<> used by the agent's own "[NOTE]" markers
+//    and by markup — including lookalikes: every check runs on the NFKC form,
+//    which folds the fullwidth / small forms to ASCII, and the CJK brackets
+//    U+3008–3011 are markers too;
+//  • lone surrogates (ill-formed UTF-16).
+// NFKC leaves ordinary text in the supported scripts (Devanagari, Chinese,
+// accented Latin, Arabic) readable. Pure; no I/O.
 
 /** Recipient / sender / business names. */
 export const NAME_MAX = 80;
@@ -29,24 +39,40 @@ export const ID_MAX = 32;
 // Non-global twins for .test() (a /g regex carries lastIndex between calls).
 const BREAKING = /[\p{Cc}\u2028\u2029]/u;
 const BREAKING_ALL = /[\p{Cc}\u2028\u2029]/gu;
-const MARKERS = /[[\]{}<>]/;
-const MARKERS_ALL = /[[\]{}<>]/g;
+const FORMAT = /\p{Cf}/u;
+const FORMAT_ALL = /\p{Cf}/gu;
+const MARKERS = /[[\]{}<>\u3008-\u3011]/u;
+const MARKERS_ALL = /[[\]{}<>\u3008-\u3011]/gu;
+// In /u mode a PAIRED surrogate is one astral code point, so this class
+// matches only LONE surrogates — the same test as ES2024
+// String.prototype.isWellFormed, which tsconfig's ES2022 lib does not type.
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+const LONE_SURROGATE_ALL = /[\uD800-\uDFFF]/gu;
 
 /** Length in characters (code points), so a surrogate pair counts once. */
 function charLength(v: string): number {
   return [...v].length;
 }
 
+/** ES2024 String.prototype.toWellFormed: each lone surrogate becomes U+FFFD. */
+function toWellFormed(v: string): string {
+  return v.replace(LONE_SURROGATE_ALL, '\uFFFD');
+}
+
 /**
- * The read-side clamp. Control characters and line / paragraph separators
- * become a space, []{}<> are removed, whitespace runs collapse to one space,
- * and the result is trimmed and capped at `max` characters — the trailing '…'
- * included, never splitting a surrogate pair. A non-string (or a value that
- * strips to nothing) returns ''. A clean value comes back byte-for-byte.
+ * The read-side clamp. Lone surrogates become U+FFFD and the value is
+ * NFKC-normalized; format characters are deleted; control characters and line
+ * / paragraph separators become a space; brackets (ASCII and CJK) are removed;
+ * whitespace runs collapse to one space; and the result is trimmed and capped
+ * at `max` characters — the trailing '…' included, never splitting a surrogate
+ * pair. A non-string (or a value that strips to nothing) returns ''. A clean,
+ * NFC-composed value comes back byte-for-byte.
  */
 export function boundUntrustedText(v: unknown, max: number): string {
   if (typeof v !== 'string') return '';
-  const flat = v
+  const flat = toWellFormed(v)
+    .normalize('NFKC')
+    .replace(FORMAT_ALL, '')
     .replace(BREAKING_ALL, ' ')
     .replace(MARKERS_ALL, '')
     .replace(/\s+/g, ' ')
@@ -58,22 +84,33 @@ export function boundUntrustedText(v: unknown, max: number): string {
 }
 
 /**
- * The write-side gate: a non-blank string of at most `max` characters with no
- * control character, no line / paragraph separator and none of [ ] { } < >.
- * Letters in any script and ordinary punctuation (' - . & ( ) ,) pass.
+ * The write-side gate: a well-formed, non-blank string whose NFKC form has at
+ * most `max` characters and no control character, line / paragraph separator,
+ * format character, or bracket ([ ] { } < > and the CJK brackets U+3008–3011,
+ * fullwidth forms included via NFKC). Letters in any script, combining marks
+ * and ordinary punctuation (' - . & ( ) ,) pass. A name that needs a zero-width
+ * joiner is refused (the joiner is invisible text); the read-side clamp would
+ * delete it anyway.
  */
 export function isCleanName(v: unknown, max: number = NAME_MAX): boolean {
-  if (typeof v !== 'string' || v.trim() === '') return false;
-  if (charLength(v) > max) return false;
-  return !BREAKING.test(v) && !MARKERS.test(v);
+  if (typeof v !== 'string' || LONE_SURROGATE.test(v)) return false;
+  const n = v.normalize('NFKC');
+  if (n.trim() === '' || charLength(n) > max) return false;
+  return !BREAKING.test(n) && !FORMAT.test(n) && !MARKERS.test(n);
 }
 
 /**
  * Shape check for an opaque value that is never shown raw (an inline payout
- * destination): at most `max` characters and no control character or line /
- * paragraph separator. Spaces, '|' and '@' stay legal — composed destinations
- * use them.
+ * destination): well-formed, at most `max` characters, and no control
+ * character, line / paragraph separator or format character. Spaces, '|' and
+ * '@' stay legal — composed destinations use them.
  */
 export function isBoundedPrintable(v: unknown, max: number): boolean {
-  return typeof v === 'string' && charLength(v) <= max && !BREAKING.test(v);
+  return (
+    typeof v === 'string' &&
+    !LONE_SURROGATE.test(v) &&
+    charLength(v) <= max &&
+    !BREAKING.test(v) &&
+    !FORMAT.test(v)
+  );
 }
