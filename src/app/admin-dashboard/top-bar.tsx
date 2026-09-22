@@ -1,3 +1,4 @@
+import Image from 'next/image';
 import { requireStaff } from '@/lib/auth';
 import { logout } from '../login/actions';
 import { Button } from '@/components/ui/button';
@@ -22,7 +23,16 @@ export async function TopBar() {
     <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-border bg-card px-5">
       <MobileMenuButton />
       <div className="flex flex-none items-center gap-[9px] text-[15px] font-bold tracking-[-0.3px] text-foreground">
-        <div className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] bg-linear-to-br from-primary to-[#7d72ff] text-[11px] font-extrabold tracking-[-0.3px] text-white shadow-[0_1px_2px_rgba(83,58,253,0.35)]">SR</div>
+        {/* The SmartRemit.ai mark at the old badge's 26px; decorative (the
+            wordmark text beside it names the product). */}
+        <Image
+          src="/brand/smartremit-mark.png"
+          alt=""
+          width={26}
+          height={26}
+          loading="eager"
+          className="h-[26px] w-[26px] flex-none"
+        />
         SmartRemit
       </div>
       <CommandPalette items={commandItems} />
