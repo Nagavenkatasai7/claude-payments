@@ -1802,7 +1802,7 @@ async function createInvoiceTool(
       {
         to: buyerPhone,
         body: `You have a new bill from ${seller.businessName} — pay securely: ${payUrl}`,
-        ...(ctx.waCreds ? { creds: ctx.waCreds } : {}),
+        partnerId: routedSenderPartnerId(ctx),
       },
       { dedupeKey: `billpush:${invoiceId}` },
     );
@@ -1833,6 +1833,20 @@ async function createInvoiceTool(
   };
 }
 
+/**
+ * The tenant whose WhatsApp NUMBER this turn runs on, persisted on a system push
+ * so the worker re-resolves that tenant's creds at drain time (fix 11 / F58 —
+ * the payload never carries ctx.waCreds). A turn holds waCreds ONLY when it
+ * arrived on a partner's BYO number, and then ctx.partnerId IS that routed
+ * partner (src/app/api/worker/route.ts: both come from the agent.turn row's
+ * routedPartnerId). A shared-number turn has neither ⇒ undefined ⇒ the key is
+ * dropped by JSON serialization ⇒ the worker sends on the shared env number,
+ * exactly as before.
+ */
+function routedSenderPartnerId(ctx: ToolContext): PartnerId | undefined {
+  return ctx.waCreds ? ctx.partnerId : undefined;
+}
+
 // Seller-facing links (onboarding / pay) are delivered by the SYSTEM via the
 // durable outbox — NOT typed by the bot, which is globally barred from writing URLs
 // (the consumer pay link is system-delivered the same way). Best-effort + deduped:
@@ -1846,7 +1860,7 @@ async function enqueueSellerLink(
   try {
     await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
       'whatsapp.text',
-      { to, body, ...(ctx.waCreds ? { creds: ctx.waCreds } : {}) },
+      { to, body, partnerId: routedSenderPartnerId(ctx) },
       { dedupeKey },
     );
     pokeWorker();

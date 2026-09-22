@@ -3059,6 +3059,33 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(rows.rows.every((x) => String(x.payload.body).includes(String(second.onboarding_url)))).toBe(true);
   });
 
+  it('a turn on a partner BYO number: the onboarding-link row names that partner and never carries ctx.waCreds (fix 11 / F58)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis(), PHONE, 'acme');
+    const r = await executeTool(
+      'register_seller',
+      { business_name: 'Acme Exports Inc' },
+      { ...ctx, waCreds: { phoneNumberId: 'pn_acme', token: 'tok_ctx' } },
+    );
+    expect(r.registered).toBe(true);
+    const rows = (await db.execute(
+      sql`SELECT payload FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown> }> };
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].payload.partnerId).toBe('acme');
+    expect('creds' in rows.rows[0].payload).toBe(false);
+    expect(JSON.stringify(rows.rows[0].payload)).not.toContain('tok_ctx');
+  });
+
+  it('a shared-number turn (no ctx.waCreds): the row carries neither partnerId nor creds ⇒ the worker uses the shared number, as before', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    const rows = (await db.execute(
+      sql`SELECT payload FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown> }> };
+    expect(Object.keys(rows.rows[0].payload).sort()).toEqual(['body', 'to']);
+  });
+
   it('is blocked at dispatch on the web channel (WhatsApp-only)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, { ...ctx, channel: 'web' });
@@ -3141,6 +3168,29 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     const sellerPush = rows.rows.find((x) => x.dedupe_key === `sellerbill:${r.invoice_id}`)!;
     expect(sellerPush.payload.to).toBe(PHONE); // the seller's OWN number
     expect(String(sellerPush.payload.body)).toContain(String(r.pay_url));
+  });
+
+  it('billpush: and sellerbill: rows name the routed partner and never carry ctx.waCreds (fix 11 / F58)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    // 'default' reached on its OWN BYO number: the routed tenant and ctx.partnerId coincide.
+    const r = await executeTool(
+      'create_invoice',
+      { buyer_phone: '+1 555 987 6543', amount: 250, description: 'design work' },
+      { ...ctx, waCreds: { phoneNumberId: 'pn_default', token: 'tok_ctx' } },
+    );
+    expect(r.created).toBe(true);
+    const rows = (await db.execute(
+      sql`SELECT payload, dedupe_key FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown>; dedupe_key: string }> };
+    expect(rows.rows.map((x) => x.dedupe_key).sort()).toEqual(
+      [`billpush:${r.invoice_id}`, `sellerbill:${r.invoice_id}`].sort(),
+    );
+    for (const row of rows.rows) {
+      expect(row.payload.partnerId).toBe('default');
+      expect('creds' in row.payload).toBe(false);
+      expect(JSON.stringify(row.payload)).not.toContain('tok_ctx');
+    }
   });
 
   it('is replay-safe: a duplicate call returns the SAME bill (one invoice, one buyer push)', async () => {
