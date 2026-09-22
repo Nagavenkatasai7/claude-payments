@@ -108,22 +108,55 @@ export const PAY_PAGE_SCOPE = 'paypage';
 /** Per-IP page renders per window. Generous on purpose: reloads, double renders, link previews. */
 export const PAY_PAGE_IP_LIMIT = 60;
 
+/**
+ * Deadline for one page-guard lookup (review S1). `retry: false` bounds
+ * ERRORS, not HANGS: a stalled Upstash would otherwise stall every /pay/<id>
+ * render, including transfer-backed links that never touched Redis before
+ * fix 23. Past this the guard answers "allowed" (fail-open).
+ */
+export const PAY_PAGE_GUARD_TIMEOUT_MS = 1500;
+
 export interface IpGuardDeps {
   redis?: RedisLike;
   now?: () => number;
+  /** Deadline override (tests). Default PAY_PAGE_GUARD_TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+
+// A page-guard-only client. The shared `limiterRedis()` above serves the 12
+// POST callers and is untouched. This one adds a per-request abort so the HTTP
+// request itself is released at the deadline: the FUNCTION form of `signal`
+// (`signal?: AbortSignal | (() => AbortSignal)`, @upstash/redis 1.38.1
+// error-8y4qG0W2.d.ts:132) yields a fresh AbortSignal per request and the
+// request throws on abort instead of retrying (same pattern as fix 12's
+// worker-cadence.ts). The Promise.race in isIpRateLimited is the contract;
+// this abort is what stops a dead socket from outliving the render.
+let pageGuardCached: RedisLike | null = null;
+function pageGuardRedis(): RedisLike {
+  if (!pageGuardCached) {
+    pageGuardCached = new Redis({
+      url: env.kvUrl,
+      token: env.kvToken,
+      automaticDeserialization: false,
+      retry: false,
+      signal: () => AbortSignal.timeout(PAY_PAGE_GUARD_TIMEOUT_MS),
+    }) as unknown as RedisLike;
+  }
+  return pageGuardCached;
 }
 
 /**
  * Page-facing guard: `true` ⇒ over budget, render the generic sheet; `false` ⇒
  * render normally. It FAILS OPEN and NEVER THROWS: any limiter error, a Redis
- * outage, or an unknown client IP (no forwarded header — one shared bucket
- * would lock out everyone behind a header-stripping proxy) all yield `false`.
- * Nothing is logged here: the guard must not leak the id or the decision.
+ * outage, a limiter that does not answer within PAY_PAGE_GUARD_TIMEOUT_MS, or
+ * an unknown client IP (no forwarded header — one shared bucket would lock out
+ * everyone behind a header-stripping proxy) all yield `false`. Nothing is
+ * logged here: the guard must not leak the id or the decision.
  *
  * `headers` is the Fetch `Headers` shape; Next's `await headers()` returns a
  * `ReadonlyHeaders` (next/dist/server/request/headers.d.ts:11) that satisfies
  * it, exactly as `clientIpFrom(await headers())` does in waitlist-action.ts.
- * `deps` lets tests inject a fake Redis and a fixed clock.
+ * `deps` lets tests inject a fake Redis, a fixed clock and a shorter deadline.
  */
 export async function isIpRateLimited(
   headers: Headers,
@@ -132,16 +165,29 @@ export async function isIpRateLimited(
   windowSec = 60,
   deps: IpGuardDeps = {},
 ): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const ip = clientIpFrom(headers);
     if (ip === 'unknown') return false;
-    const result = await checkIpRateLimit(deps.redis ?? limiterRedis(), scope, ip, {
-      limit,
-      windowSec,
-      now: deps.now ? deps.now() : Date.now(),
+    const timeoutMs = deps.timeoutMs ?? PAY_PAGE_GUARD_TIMEOUT_MS;
+    // The deadline resolves "allowed": a stalled limiter must never hide a
+    // customer's payment sheet. Promise.race subscribes to both inputs, so a
+    // late rejection from the losing limiter call is absorbed, never unhandled.
+    const deadline = new Promise<IpRateLimitResult>((resolve) => {
+      timer = setTimeout(() => resolve({ allowed: true, remaining: limit, limit }), timeoutMs);
     });
+    const result = await Promise.race([
+      checkIpRateLimit(deps.redis ?? pageGuardRedis(), scope, ip, {
+        limit,
+        windowSec,
+        now: deps.now ? deps.now() : Date.now(),
+      }),
+      deadline,
+    ]);
     return !result.allowed;
   } catch {
     return false; // fail-open: availability wins on a money page
+  } finally {
+    if (timer !== undefined) clearTimeout(timer); // never keep the function alive
   }
 }
