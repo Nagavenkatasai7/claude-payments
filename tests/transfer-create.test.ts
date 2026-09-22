@@ -867,13 +867,67 @@ describe('createTransfer — send caps from the ledger (Program fix 16)', () => 
     expect(t.todayCount).toBe(2);
   });
 
-  it('a partner row can only TIGHTEN: per-transfer $100 refuses a $150 T1 send; a $900,000 T1 cap stays $2,999', async () => {
+  it('a partner tightening is a STRUCTURED cap refusal (per-transfer $100 refuses $150); a $900,000 T1 cap clamps to the $10,000 ceiling (fix 16b)', async () => {
     const { db, store, partnerStore, mvs } = await t1Stores();
     await db.execute(sql`UPDATE partners SET send_limits = '{"perTransferCapCents":10000,"t1DailyCapCents":90000000}'::jsonb WHERE id = 'default'`);
+    // Fix 16b keeps fix 16's refusal mapping: a tightening is refused by evaluateCap
+    // (SendCapError → 422 / 'cap' / cap_eval), never pre-empted by the quote ceiling.
     await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 150 }))
-      .rejects.toMatchObject({ evaluation: { reason: 'over_per_transfer_cap', perTransferCapCents: 10_000, dailyCapCents: 299_900 } });
+      .rejects.toMatchObject({ evaluation: { reason: 'over_per_transfer_cap', perTransferCapCents: 10_000, dailyCapCents: 1_000_000 } });
     const ok = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 90 });
     expect(ok.status).toBe('awaiting_payment');
+  });
+
+  // ── Program fix 16b (Task 10b, test 8): a raise lifts ONLY the dollar caps ──
+  describe('a raised customer ($5,000 per transfer, T1 $5,000) — only the dollar caps move (fix 16b)', () => {
+    const RAISE = '{"perTransferCapCents":500000,"t1DailyCapCents":500000}';
+    async function raised(phone: string, opts: { firstSeenDaysAgo: number; kycStatus: string }) {
+      const s = await makeStores();
+      await seedSender(s.db, { partnerId: 'default', phone, ...opts });
+      await s.db.execute(sql`UPDATE customers SET send_limit_override = ${RAISE}::jsonb WHERE partner_id = 'default' AND phone = ${phone}`);
+      return s;
+    }
+
+    it('in T0 (day 1) is STILL capped at $500/day — the tier gate is never raised', async () => {
+      const { store, partnerStore, mvs } = await raised(T0_PHONE, { firstSeenDaysAgo: 0, kycStatus: 'verified' });
+      await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 600 }))
+        .rejects.toMatchObject({ evaluation: { tier: 'T0', reason: 'over_per_transfer_cap', dailyCapCents: 50_000, perTransferCapCents: 50_000 } });
+      const ok = await createTransfer(store, partnerStore, mvs, { ...base, phone: T0_PHONE, amountSource: 500 });
+      expect(ok.status).toBe('awaiting_payment');
+    });
+
+    it('once Suspended (KYC rejected) is still refused', async () => {
+      const { store, partnerStore, mvs } = await raised(T1_PHONE, { firstSeenDaysAgo: 10, kycStatus: 'rejected' });
+      await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 100, requiresKyc: false, senderKycStatus: 'rejected' }))
+        .rejects.toMatchObject({ evaluation: { tier: 'Suspended', reason: 'verification_rejected', dailyCapCents: 0 } });
+      expect(await store.listTransfersByPhone('default', T1_PHONE, 5)).toEqual([]);
+    });
+
+    it('$4,000 without the EDD fields mints FLAGGED edd_required; with them eddRequired is true (EDD still applies)', async () => {
+      const { store, partnerStore, mvs } = await raised(T1_PHONE, { firstSeenDaysAgo: 10, kycStatus: 'verified' });
+      const a = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 4000 });
+      expect(a.status).toBe('awaiting_payment');
+      expect(a.complianceStatus).toBe('flagged');
+      expect(a.complianceReasons).toContain('edd_required');
+      expect(a.eddRequired).toBe(true);
+      // A second raised sender WITH the EDD profile: eddRequired stays true, no edd_required flag.
+      const other = '15550160003';
+      const s2 = await raised(other, { firstSeenDaysAgo: 10, kycStatus: 'verified' });
+      const b = await createTransfer(s2.store, s2.partnerStore, s2.mvs, {
+        ...base, phone: other, amountSource: 4000, sourceOfFunds: 'employment', occupation: 'salaried',
+      });
+      expect(b.eddRequired).toBe(true);
+      expect(b.complianceReasons).not.toContain('edd_required');
+      expect(b.amountUsd).toBe(4000);
+    });
+
+    it('sending to a watchlisted recipient still writes a blocked row (sanctions untouched)', async () => {
+      const { store, partnerStore, mvs } = await raised(T1_PHONE, { firstSeenDaysAgo: 10, kycStatus: 'verified' });
+      const t = await createTransfer(store, partnerStore, mvs, { ...base, phone: T1_PHONE, amountSource: 4000, recipientName: 'John Doe' });
+      expect(t.status).toBe('blocked');
+      expect(t.complianceStatus).toBe('blocked');
+      expect((await store.senderTotals('default', T1_PHONE)).todayUsdCents).toBe(0); // never consumes cap
+    });
   });
 
   it('T1 can send $2,999 once; $2,999.01 hits the quote ceiling and $3,000 in a day hits the daily cap', async () => {

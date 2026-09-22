@@ -8,7 +8,7 @@ import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRep
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
-import type { ChatMessage, CountryCode, KycStatus, PartnerId, Transfer, TransferStatus } from './types';
+import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
 
 /**
  * The ONLY operations a locked mint body may perform (Program fix 16). All
@@ -229,11 +229,13 @@ export function createStore(redis: RedisLike, db: Db) {
       phone: string,
       kycStatus: KycStatus,
       now: Date = new Date(),
-    ): Promise<CapSubject> {
+    ): Promise<CapSubject & { sendLimitOverride?: SendLimitOverride }> {
       const row = await customersRepo.getCustomer(partnerId, phone);
       const firstSeenAt =
         row?.firstSeenAt ?? (await transfersRepo.firstTransferAt(partnerId, phone)) ?? now.toISOString();
-      return { firstSeenAt, kycStatus };
+      // Program fix 16b: the customer's raise rides along (same row, no extra
+      // query on the hot path) so createTransfer resolves the effective limits.
+      return { firstSeenAt, kycStatus, sendLimitOverride: row?.sendLimitOverride };
     },
     /**
      * ONE locked mint per (partner, phone). Opens a READ COMMITTED transaction

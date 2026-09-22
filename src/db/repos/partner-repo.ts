@@ -74,6 +74,31 @@ export function createPartnerRepo(db: DbOrTx) {
       await db.insert(partners).values(row).onConflictDoUpdate({ target: partners.id, set: row });
     },
 
+    /**
+     * Program fix 16b: the ONE writer of partners.send_limits — a single-column
+     * UPDATE, so updatePartnerAction's full-row savePartner (which never names
+     * the column) can't clobber a raise and a raise can't clobber branding.
+     * Reads the previous value under FOR UPDATE first so the caller's audit
+     * row records the true old value inside its transaction. An unknown id ⇒
+     * { found: false } and nothing written.
+     */
+    async setSendLimits(
+      id: PartnerId,
+      value: PartnerSendLimits | null,
+    ): Promise<{ found: boolean; previous: PartnerSendLimits | null }> {
+      const rows = await db
+        .select({ sendLimits: partners.sendLimits })
+        .from(partners)
+        .where(eq(partners.id, id))
+        .limit(1)
+        .for('update');
+      if (!rows[0]) return { found: false, previous: null };
+      const prev = rows[0].sendLimits;
+      const previous = prev && typeof prev === 'object' ? (prev as PartnerSendLimits) : null;
+      await db.update(partners).set({ sendLimits: value, updatedAt: new Date() }).where(eq(partners.id, id));
+      return { found: true, previous };
+    },
+
     async listPartners(): Promise<Partner[]> {
       const rows = await db.select().from(partners).orderBy(asc(partners.createdAt));
       return rows.map(rowToPartner);

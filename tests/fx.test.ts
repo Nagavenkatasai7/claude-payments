@@ -3,6 +3,7 @@ import {
   sourceForInr, sourceForDest, quote, QuoteError, MIN_USD, MAX_USD, wouldBeFeeUsd,
   usdPivotCrossRate, assertRatesUsable,
 } from '@/lib/fx';
+import { SEND_LIMIT_HARD_CEILING_CENTS } from '@/lib/send-limits';
 import { FALLBACK_FX_RATES, FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from '@/lib/rate';
 
 const USD: FxRates = { toInr: 85, toUsd: 1 };
@@ -164,6 +165,41 @@ describe('quote (non-USD coverage)', () => {
   });
   it('enforces MAX_USD on the USD-equivalent for a non-USD source', () => {
     expect(() => quote(2362, 'GBP', GBP, 'bank_transfer', 0)).toThrow(QuoteError); // 2362×1.27=2999.74 > 2999
+  });
+});
+
+// ── Program fix 16b (Task 10b, test 9): the per-sender quote ceiling ──────
+describe('quote — per-sender quote ceiling (fix 16b, ruling 12 amended)', () => {
+  const LEGACY_MSG = 'Transfers must be between $10 and $2999.';
+
+  it('the DEFAULT path is byte-for-byte unchanged: $3,000 throws the legacy message', () => {
+    expect(() => quote(3000, 'USD', USD, 'bank_transfer', 0)).toThrow(QuoteError);
+    expect(() => quote(3000, 'USD', USD, 'bank_transfer', 0)).toThrow(LEGACY_MSG);
+    expect(() => quote(2999, 'USD', USD, 'bank_transfer', 0)).not.toThrow();
+    // Passing the platform max explicitly is the same path.
+    expect(() => quote(3000, 'USD', USD, 'bank_transfer', 0, 'INR', undefined, MAX_USD)).toThrow(LEGACY_MSG);
+  });
+
+  it('$4,000 with a trailing maxUsd of 5000 succeeds; $5,001 is refused with the raised figure', () => {
+    const q = quote(4000, 'USD', USD, 'bank_transfer', 1, 'INR', undefined, 5000);
+    expect(q.amountUsd).toBe(4000);
+    expect(q.amountInr).toBe(4000 * 85);
+    expect(() => quote(5001, 'USD', USD, 'bank_transfer', 1, 'INR', undefined, 5000)).toThrow('Transfers must be between $10 and $5000.');
+  });
+
+  it('the trailing maxUsd is ALWAYS clamped to the $10,000 hard ceiling; garbage falls back to MAX_USD', () => {
+    expect(SEND_LIMIT_HARD_CEILING_CENTS / 100).toBe(10_000);
+    expect(() => quote(10_000, 'USD', USD, 'bank_transfer', 1, 'INR', undefined, 50_000)).not.toThrow();
+    expect(() => quote(10_001, 'USD', USD, 'bank_transfer', 1, 'INR', undefined, 50_000)).toThrow('Transfers must be between $10 and $10000.');
+    for (const garbage of [NaN, 0, -1, Infinity]) {
+      expect(() => quote(3000, 'USD', USD, 'bank_transfer', 1, 'INR', undefined, garbage)).toThrow(LEGACY_MSG);
+    }
+  });
+
+  it('a non-USD sender sees the raised range in their own currency', () => {
+    // GBP: toUsd 1.27 ⇒ max £floor(5000/1.27) = £3937
+    expect(() => quote(3900, 'GBP', GBP, 'bank_transfer', 1, 'INR', undefined, 5000)).not.toThrow();
+    expect(() => quote(4000, 'GBP', GBP, 'bank_transfer', 1, 'INR', undefined, 5000)).toThrow('Transfers must be between £8 and £3,937.');
   });
 });
 

@@ -10,7 +10,7 @@ import { quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
 import { createTransfer } from './transfer-create';
-import { SendBusyError, SendCapError } from './send-limits';
+import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
@@ -181,7 +181,9 @@ export async function createQuote(
     const rates = await getFxRates(sourceCurrency);
     const destRates = await getDestinationRates(destinationCurrency);
     // transferCount drives the fee tier; a partner-API quote uses standard pricing.
-    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd);
+    // Fix 16b: the preview has no customer, so its ceiling is the PARTNER-level
+    // effective max; the mint itself applies any customer override.
+    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(resolveEffectiveSendLimits(partner, null)));
     return ok(200, {
       amount_source: q.amountSource,
       source_currency: sourceCurrency,

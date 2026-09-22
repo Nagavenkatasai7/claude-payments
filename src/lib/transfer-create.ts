@@ -8,7 +8,7 @@ import { logWarn } from './log';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
-import { resolveSendLimits, SendCapError } from './send-limits';
+import { quoteCeilingUsd, resolveEffectiveSendLimits, SendCapError } from './send-limits';
 import { evaluateCap, evaluateEddForTransfer, type CapSubject } from './tier-rules';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type { SenderLedgerOps, Store } from './store';
@@ -200,6 +200,24 @@ export async function createTransfer(
   // Resolve destination — default to IN/INR for full back-compat (all existing tests unchanged).
   const destinationCountry = input.destinationCountry ?? DEFAULT_DESTINATION_COUNTRY;
   const destinationCurrency = input.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY;
+
+  // ── Root-handle reads, ALL ABOVE the sender lock (Program fix 16) ────────
+  // Nothing below the lock may touch the store / partner store: the locked
+  // body receives tx-bound SenderLedgerOps only (see mintLocked). Fix 16b
+  // hoists the partner + subject reads above the quote too: the quote ceiling
+  // is now the sender's EFFECTIVE per-transfer cap (customer override, else
+  // partner default, else platform), never above the $10,000 hard ceiling.
+  const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
+  const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
+  const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
+  // The tier subject (firstSeenAt from the customers row / first transfer /
+  // now; kycStatus = the attestation the backstop above already trusts; the
+  // customer's raise, if any) and the RESOLVED limits (fix 16b: customer →
+  // partner → platform, clamped to the hard ceiling; T0 tighten-only).
+  const subject = await store.capSubject(input.partnerId, input.phone, input.senderKycStatus);
+  const limits = resolveEffectiveSendLimits(partner, subject);
+  const kycGateActive = sendGateActive(partner);
+
   // U7 (audit): when the caller supplies the quote the customer approved (the
   // draft's stored quote), honor it verbatim — NO re-quote. Otherwise quote from
   // current state exactly as before. Everything downstream reads from `q`:
@@ -217,22 +235,8 @@ export async function createTransfer(
     // when no rate inside the ceiling exists: it propagates as a clean refusal
     // that every mint caller maps (503 / friendly tool error / fx_unavailable).
     const destRates = await getDestinationRates(destinationCurrency);
-    q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd);
+    q = quote(input.amountSource, input.sourceCurrency, rates, input.fundingMethod, transferCount, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(limits));
   }
-
-  // ── Root-handle reads, ALL ABOVE the sender lock (Program fix 16) ────────
-  // Nothing below the lock may touch the store / partner store: the locked
-  // body receives tx-bound SenderLedgerOps only (see mintLocked).
-  const sourceCountry = countryForCurrency(input.sourceCurrency);   // P4 symbol
-  const partner = await partnerStore.getPartner(input.partnerId);   // NEW (P5)
-  const rules = resolveCorridorRules(partner, sourceCountry);        // NEW (P5)
-  // The tier subject (firstSeenAt from the customers row / first transfer /
-  // now; kycStatus = the attestation the backstop above already trusts) and
-  // the RESOLVED limits (min(partner, platform) in fix 16; 16b swaps this one
-  // call for resolveEffectiveSendLimits).
-  const subject = await store.capSubject(input.partnerId, input.phone, input.senderKycStatus);
-  const limits = resolveSendLimits(partner);
-  const kycGateActive = sendGateActive(partner);
   // Best-rate routing: a route is only ever honored together with the quote it
   // priced. If the quote override is absent we re-quoted at the CURRENT mid
   // above — settling that through the winning partner's rail would pay out at

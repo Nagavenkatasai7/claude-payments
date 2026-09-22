@@ -13,7 +13,7 @@ import { env } from '@/lib/env';
 import { Sidebar } from '../../sidebar';
 import { SenderCell } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
-import { resolveSendLimits } from '@/lib/send-limits';
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
@@ -136,7 +136,7 @@ export default async function PartnerDetailPage({
   const scoped = createScopedStore(staff);
   const partner = await scoped.getPartner(id);
   if (!partner) notFound();
-  const sendLimits = resolveSendLimits(partner); // Program fix 16: the effective ladder (read-only here)
+  const sendLimits = resolveEffectiveSendLimits(partner, null); // Program fix 16b: the partner-level effective ladder
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).

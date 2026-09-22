@@ -37,7 +37,7 @@ export type CapSubject = Pick<Customer, 'firstSeenAt' | 'kycStatus'>;
 /**
  * @param kycGateActive whether the owning partner enforces verify-before-send.
  * @param limits the RESOLVED send limits for this sender (send-limits.ts
- *   resolveSendLimits(partner)). Required (fix 16) so every caller states which
+ *   resolveEffectiveSendLimits(partner, customer)). Required (fix 16) so every caller states which
  *   ladder it evaluates against; the per-transfer cap is a SEPARATE ceiling,
  *   min(limits.perTransferCapCents, the tier's daily cap).
  */
