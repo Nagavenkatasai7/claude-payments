@@ -1,8 +1,8 @@
 /**
  * Program-Fix 22 (Task 12) — safeFetch: the only client that may carry a
- * settlement / reverse instruction. Local https server (self-signed fixture in
- * tests/fixtures/tls, NOT a secret) + an INJECTED resolver: no real DNS, no
- * network. The connect-time `lookup` is exercised for real; the address
+ * settlement / reverse instruction. Local https server with a throwaway
+ * self-signed certificate generated per run by `openssl` (no key is ever
+ * committed) + an INJECTED resolver: no real DNS, no network. The connect-time `lookup` is exercised for real; the address
  * predicate is the real `isPublicAddress` except where a test needs the
  * loopback server to be dialled (then a predicate allowing only 127.0.0.1 is
  * injected — the spec's "public then private" stub would dial a real IP).
@@ -10,12 +10,32 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import http from 'node:http';
 import https from 'node:https';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { createSafeFetch, MAX_ACK_BYTES, type ResolvedAddress } from '@/lib/safe-fetch';
 
-const CERT = readFileSync(new URL('./fixtures/tls/cert.pem', import.meta.url));
-const KEY = readFileSync(new URL('./fixtures/tls/key.pem', import.meta.url));
+// Node cannot mint an X.509 certificate itself, so a throwaway self-signed pair
+// is generated into a temp dir per run. Explicit SANs: Node's checkServerIdentity
+// refuses `*.tld` wildcards, so `*.example` would not match `rail.example`.
+let CERT: Buffer;
+let KEY: Buffer;
+let tlsDir = '';
+function mintTestCert(): void {
+  tlsDir = mkdtempSync(join(tmpdir(), 'smartremit-safe-fetch-'));
+  const key = join(tlsDir, 'key.pem');
+  const cert = join(tlsDir, 'cert.pem');
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+    '-keyout', key, '-out', cert,
+    '-subj', '/CN=rail.example/O=SmartRemit safe-fetch test (throwaway)',
+    '-addext', 'subjectAltName=DNS:rail.example,DNS:other.example,DNS:evil.example,DNS:localhost,IP:127.0.0.1',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  KEY = readFileSync(key);
+  CERT = readFileSync(cert);
+}
 
 type Seen = { method: string; url: string; headers: http.IncomingHttpHeaders; body: string };
 type Handler = (req: http.IncomingMessage, res: http.ServerResponse, body: string) => void;
@@ -42,6 +62,7 @@ function serve(req: http.IncomingMessage, res: http.ServerResponse) {
 }
 
 beforeAll(async () => {
+  mintTestCert();
   tlsServer = https.createServer({ cert: CERT, key: KEY }, serve);
   tlsServer.on('connection', () => { connections++; });
   await new Promise<void>((r) => tlsServer.listen(0, '127.0.0.1', r));
@@ -55,6 +76,7 @@ afterAll(async () => {
   plainServer.closeAllConnections();
   await new Promise<void>((r) => tlsServer.close(() => r()));
   await new Promise<void>((r) => plainServer.close(() => r()));
+  if (tlsDir) rmSync(tlsDir, { recursive: true, force: true });
 });
 beforeEach(() => {
   seen = [];
