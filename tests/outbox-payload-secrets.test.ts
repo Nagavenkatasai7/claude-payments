@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import ts from 'typescript';
 import { sql } from 'drizzle-orm';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import type { Db } from '@/db/client';
 
@@ -311,5 +312,69 @@ describe('TRIPWIRE: outbox-repo.enqueue refuses a secret-bearing payload under t
     const r = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as { rows: Array<{ n: number }> };
     expect(r.rows[0].n).toBe(0);
     expect(await outbox.enqueue('whatsapp.text', { to: '1', body: 'x', partnerId: 'default' })).toBe(true);
+  });
+});
+
+describe('drizzle/0016_scrub_outbox_secrets (data-only) — scrubs legacy rows without degrading an unsent one, idempotent', () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await freshDb(); // migrate() already ran 0016 once, against an empty outbox
+    await seedPartner(db, 'acme');
+    await createIntegrationsRepo(db).saveIntegrations('acme', {
+      kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+  });
+
+  async function runMigration(): Promise<void> {
+    const file = readFileSync(join(ROOT, 'drizzle/0016_scrub_outbox_secrets.sql'), 'utf8');
+    for (const stmt of file.split('--> statement-breakpoint')) {
+      if (stmt.trim()) await db.execute(sql.raw(stmt));
+    }
+  }
+
+  async function payloads(): Promise<Record<string, Record<string, unknown>>> {
+    const r = (await db.execute(sql`SELECT dedupe_key, payload FROM outbox ORDER BY id`)) as unknown as {
+      rows: Array<{ dedupe_key: string; payload: Record<string, unknown> }>;
+    };
+    return Object.fromEntries(r.rows.map((x) => [x.dedupe_key, x.payload]));
+  }
+
+  it('back-fills partnerId, strips creds only where safe, redacts only FINISHED legacy invites, leaves new-shape rows alone', async () => {
+    // Raw INSERTs: these are rows the PREVIOUS release wrote (the enqueue tripwire refuses them).
+    await db.execute(sql`INSERT INTO outbox (kind, payload, status, dedupe_key) VALUES
+      ('whatsapp.text', '{"to":"1","body":"a","creds":{"phoneNumberId":"pn_acme","token":"LEAKED1"}}'::jsonb, 'pending', 'stage1:legacy_known_pending'),
+      ('whatsapp.text', '{"to":"1","body":"b","creds":{"phoneNumberId":"pn_gone","token":"LEAKED2"}}'::jsonb, 'done', 'stage1:legacy_unknown_done'),
+      ('whatsapp.text', '{"to":"1","body":"c","creds":{"phoneNumberId":"pn_gone","token":"LEAKED3"}}'::jsonb, 'dead', 'stage1:legacy_unknown_dead'),
+      ('whatsapp.text', '{"to":"1","body":"d","creds":{"phoneNumberId":"pn_gone","token":"KEEP4"}}'::jsonb, 'pending', 'stage1:legacy_unknown_pending'),
+      ('email.send', '{"to":["a@b.c"],"subject":"s","text":"link: https://x/partners/apply/0123456789abcdef"}'::jsonb, 'done', 'partner_app_invite:preq_done'),
+      ('email.send', '{"to":["a@b.c"],"subject":"s","text":"link: https://x/partners/apply/fedcba9876543210"}'::jsonb, 'dead', 'partner_app_invite:preq_dead'),
+      ('email.send', '{"to":["a@b.c"],"subject":"s","text":"link: https://x/partners/apply/00112233445566778"}'::jsonb, 'pending', 'partner_app_invite:preq_pending'),
+      ('whatsapp.text', '{"to":"1","body":"z","partnerId":"acme"}'::jsonb, 'pending', 'stage1:new'),
+      ('email.send', '{"to":["a@b.c"],"subject":"s","text":"{{apply_link}}","sealed":{"apply_link":"v1.a.b.c.d"}}'::jsonb, 'done', 'partner_app_invite:preq_new'),
+      ('email.send', '{"to":["team@x"],"subject":"New partner request","text":"Review: https://x/admin-dashboard/partner-requests"}'::jsonb, 'done', 'preq:preq_new'),
+      ('funding.refund', '{"transferId":"keep_me"}'::jsonb, 'done', 'refund:keep_me')`);
+
+    await runMigration();
+    const by = await payloads();
+    // Replaceable ⇒ stripped: the pending row now names acme and re-resolves its creds at drain.
+    expect(by['stage1:legacy_known_pending']).toEqual({ to: '1', body: 'a', partnerId: 'acme' });
+    // Finished ⇒ stripped (no current owner ⇒ no partnerId).
+    expect(by['stage1:legacy_unknown_done']).toEqual({ to: '1', body: 'b' });
+    expect(by['stage1:legacy_unknown_dead']).toEqual({ to: '1', body: 'c' });
+    // UNSENT and unresolvable ⇒ untouched, so the shim still sends it from its own number.
+    expect(by['stage1:legacy_unknown_pending']).toEqual({ to: '1', body: 'd', creds: { phoneNumberId: 'pn_gone', token: 'KEEP4' } });
+    // Finished legacy invites are redacted; an UNSENT one keeps its link (never emails the redaction).
+    expect(by['partner_app_invite:preq_done'].text).toBe('[redacted by migration 0016: legacy partner-application link]');
+    expect(by['partner_app_invite:preq_dead'].text).toBe('[redacted by migration 0016: legacy partner-application link]');
+    expect(by['partner_app_invite:preq_pending'].text).toBe('link: https://x/partners/apply/00112233445566778');
+    // New-shape and unrelated rows are untouched.
+    expect(by['stage1:new']).toEqual({ to: '1', body: 'z', partnerId: 'acme' });
+    expect(by['partner_app_invite:preq_new'].text).toBe('{{apply_link}}');
+    expect(by['preq:preq_new'].text).toBe('Review: https://x/admin-dashboard/partner-requests');
+    expect(by['refund:keep_me']).toEqual({ transferId: 'keep_me' }); // scripts/outbox-status.ts + reconcile read payload->>'transferId'
+    expect(JSON.stringify(by)).not.toMatch(/LEAKED/);
+
+    await runMigration(); // idempotent
+    expect(await payloads()).toEqual(by);
   });
 });
