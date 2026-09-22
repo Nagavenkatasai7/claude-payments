@@ -1,5 +1,6 @@
 import { MIN_USD, MAX_USD } from './fx';
 import { T0_DAILY_CAP_CENTS, T1_DAILY_CAP_CENTS } from './tier-rules';
+import { boundUntrustedText, BRAND_MAX, PERSONA_MAX } from './untrusted-text';
 
 /**
  * Cap figures the prompt states to the customer. Interpolated from the SINGLE
@@ -35,8 +36,12 @@ export interface SystemPromptBrand {
 export function buildSystemPrompt(
   b: SystemPromptBrand = { brand: 'SmartRemit' },
 ): string {
-  const brand = b.brand?.trim() || 'SmartRemit';
-  const persona = b.botPersona?.trim();
+  // fix 5 (F43): brand and persona are partner-authored — clamped here so the
+  // identity line, UNSUPPORTED DESTINATIONS and BRAND VOICE all get the bounded
+  // value, pre-fix rows included. 'SmartRemit' passes unchanged, so the default
+  // prompt (SYSTEM_PROMPT) is byte-for-byte what it was.
+  const brand = boundUntrustedText(b.brand, BRAND_MAX) || 'SmartRemit';
+  const persona = boundUntrustedText(b.botPersona, PERSONA_MAX);
   const kycGateActive = b.kycGateActive ?? true;
   const base = `You are the assistant for ${brand}, a service that lets people send money between 10 countries — US, Canada, UK, UAE, Singapore, Australia, New Zealand, India, Hong Kong, and Mexico — to friends and family, bank-to-bank, in any direction.
 

@@ -35,7 +35,7 @@ import { screenTransfer } from './compliance';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
 import { isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
-import { boundUntrustedText, ID_MAX, NAME_MAX } from './untrusted-text';
+import { BILL_TEXT_MAX, boundUntrustedText, ID_MAX, isCleanName, NAME_MAX } from './untrusted-text';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -1609,13 +1609,15 @@ async function presentBillTool(
     return { has_bill: false };
   }
   if (!invoice) return { has_bill: false };
+  // fix 5 (F63): the seller wrote the business name and every line item, and the
+  // prompt reads them back — clamp at read (pre-fix rows included).
   return {
     has_bill: true,
     invoice: {
       invoice_id: invoice.id,
-      seller_business_name: invoice.businessName,
+      seller_business_name: boundUntrustedText(invoice.businessName, NAME_MAX),
       line_items: invoice.lineItems.map((li) => ({
-        description: li.description,
+        description: boundUntrustedText(li.description, BILL_TEXT_MAX),
         qty: li.qty,
         unit_amount_usd: li.unitAmountUsd,
       })),
@@ -1653,6 +1655,14 @@ async function registerSellerTool(
     return {
       registered: false,
       reply_to_customer: "What's the name of your business? I'll use it to register you as a seller.",
+    };
+  }
+  // fix 5 (F63): the business name is read back to every buyer's agent turn
+  // (present_bill, check_bill_status) — refuse it before any write or screen.
+  if (!isCleanName(businessName, NAME_MAX)) {
+    return {
+      registered: false,
+      reply_to_customer: `Please send your business name in ${NAME_MAX} characters or fewer, without brackets.`,
     };
   }
 
@@ -1872,7 +1882,17 @@ async function createInvoiceTool(
   }
   const buyerDenominated = invoicedCurrency !== seller.currency; // Case B
 
-  const description = String(args.description ?? '').trim() || `Invoice from ${seller.businessName}`;
+  // fix 5 (F63): a seller-written description is read back to the buyer's agent
+  // (present_bill). Refuse a dirty one BEFORE the claim and the insert, so
+  // nothing is created and nothing is claimed. Absent ⇒ the default line.
+  const rawDescription = String(args.description ?? '').trim();
+  if (rawDescription !== '' && !isCleanName(rawDescription, BILL_TEXT_MAX)) {
+    return {
+      created: false,
+      reply_to_customer: `Please keep the bill description under ${BILL_TEXT_MAX} characters, without brackets.`,
+    };
+  }
+  const description = rawDescription || `Invoice from ${seller.businessName}`;
 
   // Replay-safe minting (claim-first, the minting spine): the agent.turn outbox row
   // is at-least-once — a transient reply-send 5xx re-runs the WHOLE turn, and the
@@ -2602,7 +2622,7 @@ async function checkBillStatusTool(
       const partnerId = await resolveBuyerPartnerId(ctx);
       const invoice = await ctx.store.getB2bInvoiceScoped(transfer.invoiceId, partnerId);
       if (invoice) {
-        result.seller_business_name = invoice.businessName;
+        result.seller_business_name = boundUntrustedText(invoice.businessName, NAME_MAX); // fix 5: clamped at read
         result.invoice_status = invoice.status;
         result.invoice_paid = invoice.status === 'paid';
       }
@@ -2836,7 +2856,7 @@ async function updateRecipientPhoneTool(
   return {
     transfer_id: transfer.id,
     recipient_phone: recipientPhone,
-    recipient_name: transfer.recipientName,
+    recipient_name: boundUntrustedText(transfer.recipientName, NAME_MAX), // fix 5: may be API-written
     status: transfer.status,
   };
 }
