@@ -7,6 +7,7 @@ import {
   isOwnPrivateStoreRef,
   isPartnerDocType,
   isPrivatePartnerDocRef,
+  privateStoreHostFromToken,
   streamPartnerDoc,
 } from '@/lib/blob';
 import { env } from '@/lib/env';
@@ -77,10 +78,15 @@ export async function GET(
   // exactly the store our token opens (isOwnPrivateStoreRef). Anything else —
   // a legacy public ref, another request's object, a foreign host, someone
   // else's private store — is 404 and the store (and our token) never sees it.
-  // With no private token there is no store to pin to and nothing can be read:
-  // 503 (the same "not enabled" the upload gives), before any audit row.
+  // With no private token — or one whose shape names no store — there is no
+  // host to pin to and nothing can be read: 503 (the same "not enabled" the
+  // upload gives), before any audit row, never a silent 404.
   if (!isPrivatePartnerDocRef(doc.url, id)) return notFound();
-  if (!env.partnerDocsBlobToken) return new NextResponse(null, { status: 503 });
+  const ownHost = privateStoreHostFromToken(env.partnerDocsBlobToken);
+  if (!ownHost) {
+    if (env.partnerDocsBlobToken) logError('partner-docs', 'PARTNER_DOCS_BLOB_READ_WRITE_TOKEN names no store — check its shape');
+    return new NextResponse(null, { status: 503 });
+  }
   if (!isOwnPrivateStoreRef(doc.url)) return notFound();
 
   // 3. Audit BEFORE any bytes. A failed audit write ⇒ 500, no read.
@@ -103,7 +109,9 @@ export async function GET(
     obj = await streamPartnerDoc(doc.url);
   } catch (err) {
     if (isBlobNotConfigured(err)) return new NextResponse(null, { status: 503 });
-    logError('partner-docs', 'private store read failed', { requestId: id, index, err });
+    // A BlobError message can embed the object URL: log the NAME only.
+    const errName = err instanceof Error ? err.name : typeof err;
+    logError('partner-docs', 'private store read failed', { requestId: id, index, errName });
     return new NextResponse(null, { status: 502 });
   }
   if (!obj) return notFound();

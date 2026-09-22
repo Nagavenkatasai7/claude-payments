@@ -305,6 +305,32 @@ describe('GET …/documents/[index] — refusals (test 8)', () => {
     expect(getMock).not.toHaveBeenCalled();
   });
 
+  it('SF2: private token SET but not of the <vendor>_blob_rw_<storeId>_… shape → 503 (not a silent 404), no audit row, get never called', async () => {
+    await seed([{ label: 'Licence', url: PRIVATE_URL, size: 9, contentType: 'application/pdf' }]);
+    process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN = 'nonsense';
+    const res = await get(REQ, '0');
+    expect(res.status).toBe(503);
+    expect(getMock).not.toHaveBeenCalled();
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('SF3: a store read failure → 502, and the error log carries the error NAME only — never the object URL', async () => {
+    await seed([{ label: 'Licence', url: PRIVATE_URL, size: 9, contentType: 'application/pdf' }]);
+    class BlobError extends Error { constructor(m: string) { super(m); this.name = 'BlobError'; } }
+    getMock.mockRejectedValue(new BlobError(`Failed to fetch blob: 403 Forbidden ${PRIVATE_URL}`));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const res = await get(REQ, '0');
+      expect(res.status).toBe(502);
+      const logged = spy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+      expect(logged).toContain('BlobError');
+      expect(logged).not.toContain('blob.vercel-storage.com');
+      expect(logged).not.toContain('Forbidden');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('private token unset → 503, get never called (no fallback to the public store)', async () => {
     await seed([{ label: 'Licence', url: PRIVATE_URL, size: 9, contentType: 'application/pdf' }]);
     delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;

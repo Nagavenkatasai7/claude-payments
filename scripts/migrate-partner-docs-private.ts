@@ -68,6 +68,8 @@ export interface MigrateReport {
   docsSkipped: number;
   docsMigrated: number;
   rowsRewritten: number;
+  /** Rows skipped because `documents` changed between the snapshot and the rewrite (a re-run picks them up). */
+  rowsChanged: number;
   deleted: number;
   failures: number;
   /** Distinct public hosts seen (never a full URL). */
@@ -122,7 +124,7 @@ export async function migratePartnerDocsPrivate(
   }
   const report: MigrateReport = {
     applied: opts.apply, applications: 0, applicationsWithPublicDocs: 0, docsTotal: 0, docsPublic: 0,
-    docsMigratable: 0, docsSkipped: 0, docsMigrated: 0, rowsRewritten: 0, deleted: 0, failures: 0, hosts: [],
+    docsMigratable: 0, docsSkipped: 0, docsMigrated: 0, rowsRewritten: 0, rowsChanged: 0, deleted: 0, failures: 0, hosts: [],
   };
   const hosts = new Set<string>();
 
@@ -236,9 +238,25 @@ export async function migratePartnerDocsPrivate(
       return c ? c.newDoc : d;
     });
     try {
-      await db.transaction(async (tx) => {
+      // Re-select the row under lock inside its own transaction: if `documents`
+      // changed since the snapshot (someone edited the row while phase 1 ran),
+      // skip it — never write over a concurrent edit. Its public objects then
+      // stay (they are still referenced) and a re-run picks the row up again.
+      const unchanged = await db.transaction(async (tx) => {
+        const current = await tx
+          .select({ documents: partnerApplications.documents })
+          .from(partnerApplications)
+          .where(eq(partnerApplications.id, row.id))
+          .for('update');
+        if (JSON.stringify(current[0]?.documents ?? null) !== JSON.stringify(row.documents)) return false;
         await tx.update(partnerApplications).set({ documents: next }).where(eq(partnerApplications.id, row.id));
+        return true;
       });
+      if (!unchanged) {
+        report.rowsChanged += 1;
+        log(`  ${row.id}: SKIP — row changed since the snapshot; left as-is (its public objects stay), re-run to migrate it`);
+        continue;
+      }
       report.rowsRewritten += 1;
       report.docsMigrated += rowCopies.length;
       rewrittenOldUrls.push(...rowCopies.map((c) => c.oldUrl));
@@ -290,7 +308,7 @@ async function main() {
   console.log(
     `\nSUMMARY: applications=${report.applications} withPublicDocs=${report.applicationsWithPublicDocs} docs=${report.docsTotal} ` +
     `public=${report.docsPublic} migratable=${report.docsMigratable} skipped=${report.docsSkipped} migrated=${report.docsMigrated} ` +
-    `rowsRewritten=${report.rowsRewritten} deleted=${report.deleted} failures=${report.failures} hosts=${report.hosts.join(',') || '-'}\n`,
+    `rowsRewritten=${report.rowsRewritten} rowsChanged=${report.rowsChanged} deleted=${report.deleted} failures=${report.failures} hosts=${report.hosts.join(',') || '-'}\n`,
   );
   if (report.failures > 0) process.exit(1);
 }

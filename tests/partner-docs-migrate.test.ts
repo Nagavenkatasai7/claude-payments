@@ -203,6 +203,40 @@ describe('scripts/migrate-partner-docs-private (test 10)', () => {
     expect(out).not.toContain(PUBLIC_TOKEN);
   });
 
+  it('SF5: a row that changed between the snapshot and its rewrite is skipped and reported; its public objects stay; other rows proceed', async () => {
+    const d = deps();
+    const realPut = d.put;
+    // While the script is in phase 1 (after its snapshot), someone edits papp_A.
+    d.put = (async (pathname: string, body: unknown, opts: Record<string, unknown>) => {
+      if (pathname.includes(`partner-applications/${REQ_A}/`)) {
+        await db.execute(sql`UPDATE partner_applications SET documents = ${JSON.stringify([
+          { label: 'Licence (renamed meanwhile)', url: PUB_A, size: 9, contentType: 'application/pdf' },
+          { label: 'Scan', url: PRIV_A, size: 10, contentType: 'image/png' },
+        ])}::jsonb WHERE id = 'papp_A'`);
+      }
+      return realPut(pathname, body as never, opts as never);
+    }) as unknown as MigrateDeps['put'];
+
+    const report = await migratePartnerDocsPrivate(db, { apply: true, privateToken: PRIVATE_TOKEN, publicToken: PUBLIC_TOKEN }, d);
+
+    expect(report).toMatchObject({ rowsRewritten: 1, rowsChanged: 1, deleted: 1, failures: 0 });
+    const after = await rows();
+    const a = after.find((r) => r.id === 'papp_A')!;
+    const b = after.find((r) => r.id === 'papp_B')!;
+    // A kept the concurrent edit verbatim — still public, nothing of ours written over it.
+    expect(a.documents[0]).toEqual({ label: 'Licence (renamed meanwhile)', url: PUB_A, size: 9, contentType: 'application/pdf' });
+    // B was rewritten as normal.
+    expect(b.documents[0].url).toMatch(/^https:\/\/priv999\.private\.blob\.vercel-storage\.com\//);
+    // del: once, ONLY B's old public url — A's public object must survive because A still references it.
+    const dels = calls.filter((x) => x.op === 'del').map((x) => x.arg as { urls: string[]; opts: Record<string, unknown> });
+    expect(dels).toHaveLength(1);
+    expect(dels[0].urls).toEqual([PUB_B]);
+    expect(dels[0].opts.token).toBe(PUBLIC_TOKEN);
+    const out = lines.join('\n');
+    expect(out).toMatch(/papp_A.*changed/i);
+    expect(out).not.toMatch(/https?:\/\//);
+  });
+
   it('--apply is idempotent: a second run finds nothing public and calls nothing', async () => {
     await migratePartnerDocsPrivate(db, { apply: true, privateToken: PRIVATE_TOKEN, publicToken: PUBLIC_TOKEN }, deps());
     calls = [];

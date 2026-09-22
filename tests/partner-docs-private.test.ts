@@ -185,6 +185,16 @@ describe('isPrivatePartnerDocRef (test 5)', () => {
       `https://private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf`,
       // a store id with a dot (would be a different label)
       `https://abc.def.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf`,
+      // SF1: percent-encoded traversal INSIDE a segment (the parser does not collapse `..%2f`)
+      `https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/..%2fpreq_other/x.pdf`,
+      // SF1: any percent-escape in the pathname at all
+      `https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x%2e%2e/y.pdf`,
+      // SF1: an explicit port
+      `https://abc123.private.blob.vercel-storage.com:8443/partner-applications/${REQUEST_ID}/x.pdf`,
+      // SF1: a query string
+      `https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf?download=1`,
+      // SF1: a fragment
+      `https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf#frag`,
       // not a URL at all
       'not a url',
       '',
@@ -214,6 +224,10 @@ describe('store pin — the private token names the ONLY host our token may be s
     expect(isOwnPrivateStoreRef(foreign)).toBe(false);
     expect(isOwnPrivateStoreRef(`https://abc123.public.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf`)).toBe(false);
     expect(isOwnPrivateStoreRef('not a url')).toBe(false);
+    // SF1: port, query and fragment are refused here too
+    expect(isOwnPrivateStoreRef(`https://abc123.private.blob.vercel-storage.com:8443/partner-applications/${REQUEST_ID}/x.pdf`)).toBe(false);
+    expect(isOwnPrivateStoreRef(`https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf?d=1`)).toBe(false);
+    expect(isOwnPrivateStoreRef(`https://abc123.private.blob.vercel-storage.com/partner-applications/${REQUEST_ID}/x.pdf#f`)).toBe(false);
 
     expect(await streamPartnerDoc(foreign)).toBeNull();
     expect(getMock).not.toHaveBeenCalled();

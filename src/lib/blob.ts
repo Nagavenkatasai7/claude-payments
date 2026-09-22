@@ -102,21 +102,36 @@ const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]+$/;
  * token resolved. We PARSE with `new URL` and anchor on the hostname, so
  * `https://evil.com/?x=private.blob.vercel-storage.com`,
  * `…vercel-storage.com.evil.com`, the `@evil.com` userinfo form, `http:` and a
- * `..` traversal (normalised by the parser) all fail. One applicant can never
- * attach another's object; the staff route re-checks this before every read.
+ * `..` traversal (normalised by the parser) all fail. A percent-escape anywhere
+ * in the pathname is refused outright (`..%2f` inside a segment is NOT
+ * collapsed by the parser), as are an explicit port, a query and a fragment —
+ * the store never issues any of those. One applicant can never attach
+ * another's object; the staff route re-checks this before every read.
  */
 export function isPrivatePartnerDocRef(url: string, requestId: string): boolean {
   if (!SAFE_REQUEST_ID.test(requestId)) return false;
+  const u = parseBareHttpsUrl(url);
+  if (!u) return false;
+  if (!PRIVATE_HOST.test(u.hostname)) return false;
+  if (u.pathname.includes('%')) return false;
+  return u.pathname.startsWith(`/partner-applications/${requestId}/`);
+}
+
+/**
+ * Parse `url` and accept only the bare https form a Blob store emits: no
+ * userinfo, no explicit port, no query, no fragment. Null otherwise.
+ */
+function parseBareHttpsUrl(url: string): URL | null {
   let u: URL;
   try {
     u = new URL(url);
   } catch {
-    return false;
+    return null;
   }
-  if (u.protocol !== 'https:') return false;
-  if (u.username || u.password) return false;
-  if (!PRIVATE_HOST.test(u.hostname)) return false;
-  return u.pathname.startsWith(`/partner-applications/${requestId}/`);
+  if (u.protocol !== 'https:') return null;
+  if (u.username || u.password) return null;
+  if (u.port !== '' || u.search !== '' || u.hash !== '') return null;
+  return u;
 }
 
 /**
@@ -145,12 +160,8 @@ export function privateStoreHostFromToken(token: string): string | null {
 export function isOwnPrivateStoreRef(url: string): boolean {
   const host = privateStoreHostFromToken(env.partnerDocsBlobToken);
   if (!host) return false;
-  try {
-    const u = new URL(url);
-    return u.protocol === 'https:' && !u.username && !u.password && u.hostname === host;
-  } catch {
-    return false;
-  }
+  const u = parseBareHttpsUrl(url);
+  return u !== null && u.hostname === host;
 }
 
 /** True when `url` parses to an https URL on the OLD public store (a not-yet-migrated ref). */
