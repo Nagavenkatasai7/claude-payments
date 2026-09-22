@@ -155,7 +155,7 @@ async function bindAchToken(
  * Both charging branches capture funds FIRST — nothing messages "payment
  * received" or flips status before the charge succeeds.
  *
- * NON-CUSTODIAL B2B ACH-pull (`fundingMethod === 'ach_pull'`): SmartRemit
+ * NON-CUSTODIAL B2B ACH-pull (`transferType === 'b2b'` + `fundingMethod === 'ach_pull'`): SmartRemit
  * captures NO funds — the licensed partner ACH-debits the payer's business bank
  * via the signed settlement instruction (which already carries the opaque
  * `achTokenRef` mandate). The capture step is SKIPPED entirely; the compliance
