@@ -59,3 +59,22 @@ describe('newTransferId — distinct and URL/Redis-safe', () => {
     }
   });
 });
+
+describe('newTransferId — WhatsApp-safe first character (review S2)', () => {
+  // The bot sends /pay/<id> as plain text and WhatsApp can read a leading `_`
+  // as an italic marker. The 22nd character is always one of A/Q/g/w (128 bits
+  // = 21 sextets + 2 bits, so the last sextet is bb0000), so only the FIRST
+  // character can be `_` or `-`; the mint rejects those (2/64, ~0.046 bits).
+  it('5,000 ids: none starts with "_" or "-", every one is 22 chars', () => {
+    for (let i = 0; i < 5_000; i++) {
+      const id = newTransferId();
+      expect(id).toHaveLength(22);
+      expect(id[0]).not.toMatch(/[_-]/);
+      expect(id).toMatch(ID_RE);
+    }
+  });
+
+  it('the last character is always A, Q, g or w (so a trailing "_"/"-" is impossible)', () => {
+    for (let i = 0; i < 2_000; i++) expect(newTransferId()[21]).toMatch(/^[AQgw]$/);
+  });
+});

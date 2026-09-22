@@ -16,8 +16,19 @@ import { randomBytes } from 'node:crypto';
  * ids resolve forever — no read path checks length or charset, and no CHECK
  * constraint is ever added. This is the one place the shape is decided.
  *
+ * WhatsApp safety (review S2): the bot sends `/pay/<id>` as plain text and a
+ * LEADING `_` can read as an italic marker, so an id whose first character is
+ * `_` or `-` is re-drawn. Rejection probability 2/64; entropy cost
+ * -log2(62/64) ≈ 0.046 bits, so the id keeps ~127.95 bits. A TRAILING `_`/`-`
+ * cannot occur: 128 bits = 21 sextets + 2 bits, so the 22nd character is
+ * always one of `A`, `Q`, `g`, `w`.
+ *
  * Node.js runtime only (`node:crypto`): never import from `src/middleware.ts`.
  */
 export function newTransferId(): string {
-  return randomBytes(16).toString('base64url');
+  let id: string;
+  do {
+    id = randomBytes(16).toString('base64url');
+  } while (id[0] === '_' || id[0] === '-');
+  return id;
 }
