@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { requireScope } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { getOpsSnapshot, STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STALE_LOCK_MINUTES } from '@/lib/reconcile';
+import { getCadenceSnapshot, cadenceRedis, DRAIN_SLA_MINUTES, CRON_QUIET_MINUTES } from '@/lib/worker-cadence';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -43,6 +44,16 @@ export default async function OpsPage() {
   void staff;
 
   const snap = await getOpsSnapshot(getDb());
+  // Program-Fix 12: the worker's clock. Redis failure ⇒ lastCronAt null (shown red).
+  const cadence = await getCadenceSnapshot(getDb(), cadenceRedis());
+  const oldestWaitMin = cadence.oldestDueAt
+    ? Math.max(0, Math.round((Date.now() - cadence.oldestDueAt.getTime()) / 60_000))
+    : 0;
+  const drainBehind = oldestWaitMin > DRAIN_SLA_MINUTES;
+  const lastCronMin = cadence.lastCronAt
+    ? Math.max(0, Math.round((Date.now() - cadence.lastCronAt.getTime()) / 60_000))
+    : null;
+  const cronQuiet = lastCronMin === null || lastCronMin > CRON_QUIET_MINUTES;
   const senderNames = await resolveSenderNames(
     getDb(),
     [
@@ -59,7 +70,9 @@ export default async function OpsPage() {
     snap.staleLocks.length === 0 &&
     snap.stuckPaid.length === 0 &&
     snap.staleReviews.length === 0 &&
-    refundsTotal === 0;
+    refundsTotal === 0 &&
+    !drainBehind &&
+    !cronQuiet;
 
   return (
     <>
@@ -74,7 +87,7 @@ export default async function OpsPage() {
           </div>
         </div>
 
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-5 mb-6">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-7 mb-6">
           <Card>
             <CardHeader className="pb-2">
               <CardDescription>Outbox pending</CardDescription>
@@ -102,6 +115,26 @@ export default async function OpsPage() {
               lease expired &gt;{STALE_LOCK_MINUTES}m, not reclaimed — drain down?
             </CardContent>
           </Card>
+          <Card className={drainBehind ? 'border-destructive/50' : ''}>
+            <CardHeader className="pb-2">
+              <CardDescription>Due backlog</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">{cadence.dueNow}</CardTitle>
+            </CardHeader>
+            <CardContent className="text-xs text-muted-foreground">
+              claimable now · oldest {oldestWaitMin}m (SLA {DRAIN_SLA_MINUTES}m)
+            </CardContent>
+          </Card>
+          <Card className={cronQuiet ? 'border-destructive/50' : ''}>
+            <CardHeader className="pb-2">
+              <CardDescription>Last cron run</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">
+                {lastCronMin === null ? 'never' : `${lastCronMin}m`}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="text-xs text-muted-foreground">
+              {lastCronMin === null ? 'no marker' : 'ago'} · Vercel per-minute cron (quiet &gt;{CRON_QUIET_MINUTES}m)
+            </CardContent>
+          </Card>
           <Card className={snap.stuckPaid.length ? 'border-destructive/50' : ''}>
             <CardHeader className="pb-2">
               <CardDescription>Stuck in paid</CardDescription>
@@ -125,7 +158,8 @@ export default async function OpsPage() {
         {healthy && (
           <Card className="mb-6">
             <CardContent className="py-8 text-center text-sm text-muted-foreground">
-              ✅ All clear — no stuck transfers, no dead effects. The worker heartbeat and
+              ✅ All clear — no stuck transfers, no dead effects, no backlog. The Vercel
+              per-minute worker cron (hourly GitHub heartbeat as backup) and the
               reconciliation sweep are watching.
             </CardContent>
           </Card>
@@ -179,8 +213,8 @@ export default async function OpsPage() {
               <CardTitle>Stale locks</CardTitle>
               <CardDescription>
                 Effects still marked processing more than {STALE_LOCK_MINUTES}m after their lease
-                expired. The next drain reclaims them automatically — if these persist, the worker
-                heartbeat is not running.
+                expired. The next drain reclaims them automatically — if these persist, neither the
+                Vercel per-minute cron nor the GitHub heartbeat is reaching the worker.
               </CardDescription>
             </CardHeader>
             <CardContent>

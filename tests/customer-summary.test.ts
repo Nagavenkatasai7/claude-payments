@@ -1,3 +1,4 @@
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { describe, it, expect, vi } from 'vitest';
 import { fakeRedis } from './helpers';
 import {
@@ -110,11 +111,18 @@ describe('buildSummaryContext', () => {
   });
 
   it('derives tier + remaining daily limit the same way check_send_limit does', () => {
-    // Verified, past the 3-day window, gate on ⇒ T1 ($999,999/day); $500 used.
+    // Verified, past the 3-day window, gate on ⇒ T1 ($2,999/day); $500 used.
     const ctx = buildSummaryContext(customer(), [], 50_000, true);
     expect(ctx.tier).toBe('T1');
-    expect(ctx.dailyLimitUsd).toBe(999999);
-    expect(ctx.dailyRemainingUsd).toBe(999499);
+    expect(ctx.dailyLimitUsd).toBe(2999);
+    expect(ctx.dailyRemainingUsd).toBe(2499);
+  });
+
+  it('states the RESOLVED limits: a tenant T1 cap of $1,000 makes dailyLimitUsd 1000 (fix 16)', () => {
+    const limits = resolveEffectiveSendLimits({ sendLimits: { t1DailyCapCents: 100_000 } }, null);
+    const ctx = buildSummaryContext(customer(), [], 50_000, true, limits);
+    expect(ctx.dailyLimitUsd).toBe(1000);
+    expect(ctx.dailyRemainingUsd).toBe(500);
   });
 
   it('counts only in-flight refunds as pending and overlays refund state per transfer', () => {

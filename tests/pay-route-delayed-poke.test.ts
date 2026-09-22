@@ -179,7 +179,13 @@ describe('pay route — delayed best-effort poke for the delivered message', () 
   });
 
   it('webhook-driven rail (simulator): NO delayed poke is scheduled', async () => {
-    integrations = { kyc: {}, payment: { providerType: 'simulator' }, whatsapp: {} };
+    // Fix 22: a webhook-driven OWNER rail must carry a passing settlementUrl or
+    // the pay route refuses before capture (gate #2) — give it a public one.
+    integrations = {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' } },
+      whatsapp: {},
+    };
     await store.saveTransfer(makeTransfer({ id: 'd2' }));
     const res = await post('d2');
     expect(res.status).toBe(200);

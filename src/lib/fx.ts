@@ -1,8 +1,9 @@
 import type { CurrencyCode, FundingMethod, Quote } from './types';
 import { FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from './rate';
+import { SEND_LIMIT_HARD_CEILING_CENTS } from './send-limits';
 
 export const MIN_USD = 10;
-export const MAX_USD = 999999;
+export const MAX_USD = 2999; // pinned to PLATFORM_SEND_LIMITS.maxUsd (send-limits.ts) — ruling 12: this line only
 
 export class QuoteError extends Error {
   constructor(message: string) {
@@ -67,13 +68,24 @@ function fmtAmount(amount: number, currency: CurrencyCode): string {
  * USD source keeps the exact legacy string (byte-for-byte). The source bound is
  * rounded so the stated range never admits a value that then fails the USD check.
  */
-function limitMessage(sourceCurrency: CurrencyCode, rates: FxRates): string {
+function limitMessage(sourceCurrency: CurrencyCode, rates: FxRates, maxUsd: number = MAX_USD): string {
   if (sourceCurrency === 'USD' || !Number.isFinite(rates.toUsd) || rates.toUsd <= 0) {
-    return `Transfers must be between $${MIN_USD} and $${MAX_USD}.`;
+    return `Transfers must be between $${MIN_USD} and $${maxUsd}.`;
   }
   const minSrc = Math.ceil(MIN_USD / rates.toUsd);
-  const maxSrc = Math.floor(MAX_USD / rates.toUsd);
+  const maxSrc = Math.floor(maxUsd / rates.toUsd);
   return `Transfers must be between ${fmtAmount(minSrc, sourceCurrency)} and ${fmtAmount(maxSrc, sourceCurrency)}.`;
+}
+
+/**
+ * Program fix 16b (ruling 12, amended): the per-sender quote ceiling. A caller
+ * that knows the sender passes its resolved `limits.maxUsd`; it is ALWAYS
+ * clamped to the hard ceiling ($10,000), and anything non-finite / <= 0 falls
+ * back to the platform MAX_USD, so the default path is byte-for-byte unchanged.
+ */
+function effectiveMaxUsd(maxUsd: number | undefined): number {
+  if (maxUsd === undefined || !Number.isFinite(maxUsd) || maxUsd <= 0) return MAX_USD;
+  return Math.min(maxUsd, SEND_LIMIT_HARD_CEILING_CENTS / 100);
 }
 
 export function quote(
@@ -84,6 +96,7 @@ export function quote(
   transferCount: number,
   destinationCurrency: CurrencyCode = 'INR',  // NEW (any-to-any) — defaults to INR (back-compat)
   destToUsd?: number,                          // NEW — destination currency's USD rate (for the cross-rate via USD pivot)
+  maxUsd: number = MAX_USD,                    // fix 16b — the sender's effective quote ceiling (<= $10,000; default = platform)
 ): Quote {
   assertRatesUsable(rates);
   if (!Number.isFinite(amountSource)) {
@@ -94,8 +107,9 @@ export function quote(
   if (!Number.isFinite(amountUsd)) {
     throw new QuoteError('Invalid exchange rate; please try again.');
   }
-  if (amountUsd < MIN_USD || amountUsd > MAX_USD) {
-    throw new QuoteError(limitMessage(sourceCurrency, rates));
+  const ceilingUsd = effectiveMaxUsd(maxUsd);
+  if (amountUsd < MIN_USD || amountUsd > ceilingUsd) {
+    throw new QuoteError(limitMessage(sourceCurrency, rates, ceilingUsd));
   }
 
   let feeUsd: number;

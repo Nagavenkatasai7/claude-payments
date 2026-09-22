@@ -86,7 +86,7 @@ describe('customer store', () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const ps = createPartnerStore(db);
-    const mvs = createMonthlyVolumeStore(redis);
+    const mvs = createMonthlyVolumeStore(store);
     // Pre-existing transfer (e.g. from before this batch shipped)
     await createTransfer(store, ps, mvs, {
       phone: PHONE,
@@ -136,7 +136,7 @@ describe('customer-store P1: senderCountry', () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const ps = createPartnerStore(db);
-    const mvs = createMonthlyVolumeStore(redis);
+    const mvs = createMonthlyVolumeStore(store);
     await createTransfer(store, ps, mvs, {
       phone: '15550008888',
       amountSource: 50,

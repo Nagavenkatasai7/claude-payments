@@ -123,6 +123,43 @@ export function buildRefundMessage(transfer: Transfer): string {
   );
 }
 
+/**
+ * fix 8 (money-02 / rail-02): the customer notice when the partner's rail
+ * reports `failed` / `returned` on a paid transfer. Pure. The variant is chosen
+ * by the FINAL refund status (rail-failure.ts):
+ *   refund   — SmartRemit captured the charge; funding.refund is queued;
+ *   reversal — a partner-pulled debit (ach_pull / bank_pull); a signed REVERSE
+ *              is queued, so the wording is "reversed", never "refunded to a
+ *              payment method";
+ *   contact  — nothing to refund here (partner-funded); ops follow up.
+ * NEVER the rail's reason, NEVER an internal term (partner / compliance /
+ * rail): the existing `refundmsg:` completion message follows when the refund
+ * drains, so this one only says what is happening now.
+ */
+export type RailFailureNoticeVariant = 'refund' | 'reversal' | 'contact';
+
+export function buildRailFailureMessage(transfer: Transfer, variant: RailFailureNoticeVariant): string {
+  const sourceCharge = formatSourceCharge(
+    transfer.totalChargeSource ?? transfer.totalChargeUsd,
+    transfer.sourceCurrency ?? 'USD',
+  );
+  const head = `We couldn't deliver your transfer ${transfer.id} to ${transfer.recipientName}.`;
+  switch (variant) {
+    case 'refund':
+      return (
+        `${head} Your ${sourceCharge} is being refunded to your original payment method — ` +
+        `we'll message you when it's done.`
+      );
+    case 'reversal':
+      return (
+        `${head} The ${sourceCharge} debit to your business account is being reversed — ` +
+        `we'll message you when it's done.`
+      );
+    case 'contact':
+      return `${head} Our team will contact you shortly about your ${sourceCharge}.`;
+  }
+}
+
 export async function completePaymentStage1(
   store: Store,
   transferId: string,

@@ -1,11 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
+import { bearerMatches } from '@/lib/cron-auth';
 import { getDb } from '@/db/client';
 import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import { sweepFxHealth, sweepStaleRates } from '@/lib/rate-staleness';
+import {
+  cadenceRedis,
+  checkCronQuiet,
+  invocationSource,
+  recordCronRun,
+  shouldProbeFx,
+  sweepDrainGap,
+  type CronQuietResult,
+  type DrainGapResult,
+} from '@/lib/worker-cadence';
 import { logError } from '@/lib/log';
 import {
   sendText,
@@ -15,6 +26,7 @@ import {
 } from '@/lib/whatsapp';
 import { newTransferId } from '@/lib/id';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
+import { safeFetch } from '@/lib/safe-fetch';
 import { chat } from '@/lib/ollama';
 import { createAgent } from '@/lib/agent';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -29,12 +41,16 @@ import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 export const maxDuration = 60;
 
 // /api/worker — drains the durability outbox (Stage 2b) and runs the
-// reconciliation sweep (Stage 2d). Invoked two ways:
-//   • the after() POKE from any enqueue site (fast path, best effort),
-//   • the GitHub Actions 5-minute heartbeat (the delivery guarantee).
+// reconciliation sweep (Stage 2d). Invoked three ways (src/lib/worker-cadence):
+//   • the Vercel per-minute cron (vercel.json `* * * * *`; a GET carrying
+//     x-vercel-cron-schedule) — the clock,
+//   • the hourly GitHub Actions heartbeat (a plain GET) — the backup, and the
+//     call that can notice a quiet cron,
+//   • the after() POKE from any enqueue site (a POST) — the fast path.
 // Claiming uses FOR UPDATE SKIP LOCKED and a 5-minute LEASE, so overlapping
 // invocations are safe and a killed invocation's rows are reclaimed. Auth
-// mirrors /api/cron: Bearer CRON_SECRET when configured.
+// mirrors /api/cron: Bearer CRON_SECRET when configured — Vercel sends exactly
+// that header (manage-cron-jobs, "Securing cron jobs").
 
 const TIME_BUDGET_MS = 45_000;
 // No row STARTS after this point in the invocation: a money row (bounded by the
@@ -54,10 +70,24 @@ async function run(req: NextRequest): Promise<NextResponse> {
   // The platform's kill clock starts at invocation, not after the sweeps —
   // hardStopAt below must be derived from THIS instant.
   const invocationStart = Date.now();
-  if (env.cronSecret) {
-    const auth = req.headers.get('authorization');
-    if (auth !== `Bearer ${env.cronSecret}`) {
-      return new NextResponse('Unauthorized', { status: 401 });
+  // Constant-time, fail-closed (src/lib/cron-auth.ts).
+  if (env.cronSecret && !bearerMatches(req.headers.get('authorization'), env.cronSecret)) {
+    return new NextResponse('Unauthorized', { status: 401 });
+  }
+
+  // Cadence (Program-Fix 12). ONE clock instant for every gate and dedupe
+  // bucket below. The source label is read AFTER the Bearer check: an
+  // unauthenticated request never touches the marker. The marker is written
+  // BEFORE the drain so a saturated drain the platform kills at maxDuration
+  // still leaves proof the cron reached us (else cronquiet false-alarms);
+  // the client has no retries and a 2 s abort, so it can only shorten a drain.
+  const now = new Date(invocationStart);
+  const source = invocationSource(req.method, req.headers);
+  if (source === 'cron') {
+    try {
+      await recordCronRun(cadenceRedis(), now);
+    } catch (err) {
+      logError('worker.cron-marker', err); // client construction (missing KV env) — the drain still runs
     }
   }
 
@@ -67,7 +97,10 @@ async function run(req: NextRequest): Promise<NextResponse> {
     store,
     sendText,
     sendTemplate,
-    fetchFn: fetch,
+    // Fix 22: every rail POST (settlement.instruct, funding.refund reverse,
+    // rail.callback) goes through safeFetch — https only, connect-time private-
+    // address check, ≤2 same-origin 307/308, identity encoding, 64 KB ack cap.
+    fetchFn: safeFetch,
     recipientTemplateName: RECIPIENT_TEMPLATE_NAME,
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
     listStaff: () => getAuthStore().listStaff(),
@@ -92,6 +125,17 @@ async function run(req: NextRequest): Promise<NextResponse> {
     },
   };
 
+  // Quiet-cron check on NON-cron calls only (a cron call cannot notice its own
+  // absence). Its alert row drains in this same invocation. Fail-open.
+  let cronQuiet: CronQuietResult | null = null;
+  if (source !== 'cron') {
+    try {
+      cronQuiet = await checkCronQuiet(deps.db, cadenceRedis(), now);
+    } catch (err) {
+      logError('worker.cron-quiet', err);
+    }
+  }
+
   // Safety-net sweep FIRST so its enqueued effects drain in this same
   // invocation. Two indexed queries that normally return zero rows — cheap
   // enough to run on every poke.
@@ -111,14 +155,25 @@ async function run(req: NextRequest): Promise<NextResponse> {
     logError('worker.rate-sweep', err);
   }
 
+  // Drain-gap SLA (Program-Fix 12): one deduped ops alert per hour while the
+  // oldest claimable row (due, or an expired lease) has waited past
+  // DRAIN_SLA_MINUTES. Counts and ages only; a throw never blocks the drain.
+  let drainGap: DrainGapResult | null = null;
+  try {
+    drainGap = await sweepDrainGap(deps.db, now);
+  } catch (err) {
+    logError('worker.drain-gap', err);
+  }
+
   // Platform FX health (Task 9): one deduped ops alert per degraded/refusing
-  // currency per hour. The 5-minute heartbeat's GET only
-  // (.github/workflows/worker-heartbeat.yml) — never a POST poke
-  // (src/lib/outbox.ts): during an outage every poke would otherwise re-dial
-  // Frankfurter for 9 currencies. The probes run in parallel, each bounded by
+  // currency per hour. shouldProbeFx (src/lib/worker-cadence.ts): the hourly
+  // heartbeat GET always, the per-minute cron only on a :x0 minute, never a
+  // POST poke (src/lib/outbox.ts) — during an outage every poke (or every
+  // cron tick, 1,440 a day) would otherwise re-dial Frankfurter for 9
+  // currencies. The probes run in parallel, each bounded by
   // FX_FETCH_TIMEOUT_MS; a throw never blocks the drain.
   let fxHealth = 0;
-  if (req.method === 'GET') {
+  if (shouldProbeFx(source, now)) {
     try {
       fxHealth = await sweepFxHealth(deps.db);
     } catch (err) {
@@ -155,14 +210,19 @@ async function run(req: NextRequest): Promise<NextResponse> {
     if (drainedNothing || Date.now() >= stopAfter) break;
   }
 
-  return NextResponse.json({ ok: true, processed, failed, dead, released, sweep, staleRates, fxHealth });
+  // Nothing parses this body (the heartbeat curls to /dev/null; the poke ignores
+  // it), so adding fields is safe across a rolling release.
+  return NextResponse.json({
+    ok: true, source, processed, failed, dead, released, sweep, staleRates, fxHealth, drainGap, cronQuiet,
+  });
 }
 
 export async function POST(req: NextRequest) {
   return run(req);
 }
 
-// The heartbeat (GitHub Actions cron) calls GET for simplicity; same handler.
+// The Vercel cron and the GitHub heartbeat call GET (Vercel always GETs the
+// production deployment: vercel.com/docs/cron-jobs, "How cron jobs work").
 export async function GET(req: NextRequest) {
   return run(req);
 }

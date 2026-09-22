@@ -1,81 +1,71 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
+import { createMonthlyVolumeStore, getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
+import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
+import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
+import type { Db } from '@/db/client';
 
+// Program fix 16 (ruling 30): the monthly-volume store is a LEDGER adapter —
+// the rolling-month EDD total is the sum of the sender's non-blocked,
+// non-cancelled rows since the first of the ET month. No Redis, no addCents.
 const PHONE = '15551234567';
 const OTHER = '15559999999';
 
-beforeEach(() => {
+let db: Db;
+beforeEach(async () => {
+  db = await freshDb(); // BEFORE any fake clock
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-05-24T18:00:00Z')); // May 2026, 2pm ET
 });
 afterEach(() => vi.useRealTimers());
 
-describe('monthly-volume store', () => {
-  it('getMonthCents returns 0 when nothing recorded (dormant)', async () => {
-    const mvs = createMonthlyVolumeStore(fakeRedis());
+describe('monthly-volume store (ledger adapter)', () => {
+  it('getMonthCents returns 0 when nothing was minted (dormant)', async () => {
+    const mvs = createMonthlyVolumeStore(createStore(fakeRedis(), db));
     expect(await mvs.getMonthCents('default', PHONE)).toBe(0);
   });
 
-  it('addCents + getMonthCents round-trips', async () => {
-    const mvs = createMonthlyVolumeStore(fakeRedis());
-    await mvs.addCents('default', PHONE, 250_000); // $2,500
-    expect(await mvs.getMonthCents('default', PHONE)).toBe(250_000);
-  });
-
-  it('multiple addCents accumulate (catches structuring across many sends)', async () => {
-    const mvs = createMonthlyVolumeStore(fakeRedis());
-    await mvs.addCents('default', PHONE, 100_000);
-    await mvs.addCents('default', PHONE, 150_000);
-    await mvs.addCents('default', PHONE, 60_000);
+  it('accumulates every send this month (catches structuring across many sends), excluding blocked + cancelled', async () => {
+    const mvs = createMonthlyVolumeStore(createStore(fakeRedis(), db));
+    const day = 86_400_000;
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 1000, status: 'paid', createdAt: new Date(Date.now() - 10 * day) });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 1500, status: 'delivered', createdAt: new Date(Date.now() - 3 * day) });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 600 });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 5000, status: 'blocked' });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 5000, status: 'cancelled', createdAt: new Date(Date.now() - day) });
     expect(await mvs.getMonthCents('default', PHONE)).toBe(310_000);
   });
 
-  it('isolates per phone', async () => {
-    const mvs = createMonthlyVolumeStore(fakeRedis());
-    await mvs.addCents('default', PHONE, 250_000);
+  it('isolates per phone and per tenant', async () => {
+    await seedPartner(db, 'acme');
+    const mvs = createMonthlyVolumeStore(createStore(fakeRedis(), db));
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 2500 });
+    await seedLedgerSpend(db, { partnerId: 'acme', phone: PHONE, amountUsd: 100 });
     expect(await mvs.getMonthCents('default', OTHER)).toBe(0);
+    expect(await mvs.getMonthCents('default', PHONE)).toBe(250_000);
+    expect(await mvs.getMonthCents('acme', PHONE)).toBe(10_000);
   });
 
-  it('isolates per ET calendar month (different month → separate counter)', async () => {
-    const mvs = createMonthlyVolumeStore(fakeRedis());
-    await mvs.addCents('default', PHONE, 250_000);
-    vi.setSystemTime(new Date('2026-06-15T18:00:00Z')); // June 2026
+  it('isolates per ET calendar month (last month\'s spend does not count; the ET boundary applies)', async () => {
+    const mvs = createMonthlyVolumeStore(createStore(fakeRedis(), db));
+    // 2026-05-01 03:59Z is April 30, 23:59 ET — last month.
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 2500, status: 'paid', createdAt: new Date('2026-05-01T03:59:00Z') });
+    // 2026-05-01 04:00Z is May 1, 00:00 ET — this month.
+    await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 200, status: 'paid', createdAt: new Date('2026-05-01T04:00:00Z') });
+    expect(await mvs.getMonthCents('default', PHONE)).toBe(20_000);
+    vi.setSystemTime(new Date('2026-06-02T18:00:00Z')); // June
     expect(await mvs.getMonthCents('default', PHONE)).toBe(0);
   });
 
-  it('addCents sets a 35-day TTL on the month key', async () => {
+  it('never touches Redis and has no addCents', async () => {
     const redis = fakeRedis();
-    let capturedOpts: { ex?: number } | undefined;
-    const origSet = redis.set.bind(redis);
-    redis.set = async (k, v, o) => {
-      if (k.startsWith('monthly_volume:')) capturedOpts = o;
-      return origSet(k, v, o);
-    };
-    const mvs = createMonthlyVolumeStore(redis);
-    await mvs.addCents('default', PHONE, 1);
-    expect(capturedOpts?.ex).toBe(35 * 24 * 60 * 60);
+    const mvs = createMonthlyVolumeStore(createStore(redis, db));
+    await mvs.getMonthCents('default', PHONE);
+    expect(redis.dump.size).toBe(0);
+    expect('addCents' in mvs).toBe(false);
   });
 
-  it('keys on (partnerId, phone): the same phone under two tenants has two counters', async () => {
-    const mvs = createMonthlyVolumeStore(fakeRedis());
-    await mvs.addCents('default', PHONE, 30_000);
-    expect(await mvs.getMonthCents('acme', PHONE)).toBe(0);
-    await mvs.addCents('acme', PHONE, 5_000);
-    expect(await mvs.getMonthCents('default', PHONE)).toBe(30_000);
-    expect(await mvs.getMonthCents('acme', PHONE)).toBe(5_000);
-  });
-
-  it('TRANSITIONAL: the legacy phone-only key is read (and absorbed on the next add) so an in-flight cap is not reset — for the pre-fix tenant only', async () => {
-    const redis = fakeRedis();
-    await redis.set(`monthly_volume:${PHONE}:2026-05`, '12000');
-    // The store is handed the D9 resolver; here the phone's oldest row belongs to default.
-    const mvs = createMonthlyVolumeStore(redis, async () => 'default');
-    expect(await mvs.getMonthCents('default', PHONE)).toBe(12_000);
-    expect(await mvs.getMonthCents('acme', PHONE)).toBe(0); // a post-fix sibling never inherits it
-    await mvs.addCents('default', PHONE, 1_000);
-    expect(await mvs.getMonthCents('default', PHONE)).toBe(13_000);
-    // Without a resolver (the constructor default) there is NO fallback — fail closed.
-    expect(await createMonthlyVolumeStore(redis).getMonthCents('default', '15550009999')).toBe(0);
+  it('getMonthlyVolumeStore() builds over the process store (same surface)', () => {
+    expect(typeof getMonthlyVolumeStore().getMonthCents).toBe('function');
   });
 });

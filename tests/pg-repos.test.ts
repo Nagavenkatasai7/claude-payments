@@ -405,4 +405,30 @@ describe('outbox-repo (durability backbone)', () => {
     expect(again.id).toBe(ra.id);
     expect(again.attempts).toBe(1); // the release refunded the never-run attempt; this claim re-charges it
   });
+
+  // ── dueSummary (Program-Fix 12 / Task 8): the drain-gap alarm's input ─────────
+  it('dueSummary counts due pending/failed rows PLUS expired leases and returns the oldest due instant', async () => {
+    const r = createOutboxRepo(db);
+    expect(await r.dueSummary()).toEqual({ dueNow: 0, oldestDueAt: null });
+
+    await r.enqueue('whatsapp.text', { to: 'a' }); // pending, due now
+    await r.enqueue('whatsapp.text', { to: 'b' }, { delayMs: 60 * 60_000 }); // pending, NOT due
+    await r.enqueue('rail.callback', { reference: 'c' });
+    await r.enqueue('mock.settle', { transferId: 'd' });
+    // Claim a, c, d (ORDER BY id; 'b' is not due). 'd' keeps a live lease.
+    const [a] = await r.claimBatch(1, 'w1');
+    const [c] = await r.claimBatch(1, 'w2');
+    const [d] = await r.claimBatch(1, 'w3');
+    expect([a.kind, c.kind, d.kind]).toEqual(['whatsapp.text', 'rail.callback', 'mock.settle']);
+    // 'a' becomes a failed row due 20 minutes ago (SQL-relative time, never a date).
+    await db.execute(sql`UPDATE outbox SET status = 'failed', next_attempt_at = now() - interval '20 minutes', lease_until = null, lease_owner = null WHERE id = ${a.id}`);
+    // 'c' is stranded with a lease that expired 8 minutes ago.
+    await db.execute(sql`UPDATE outbox SET lease_until = now() - interval '8 minutes' WHERE id = ${c.id}`);
+
+    const s = await r.dueSummary();
+    expect(s.dueNow).toBe(2); // 'a' (failed, due) + 'c' (expired lease); not 'b' (future), not 'd' (live lease)
+    const ageMin = (Date.now() - s.oldestDueAt!.getTime()) / 60_000;
+    expect(ageMin).toBeGreaterThan(19);
+    expect(ageMin).toBeLessThan(21);
+  });
 });

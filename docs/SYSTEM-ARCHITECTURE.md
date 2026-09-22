@@ -46,7 +46,7 @@ Two invariants are structurally untoggleable:
 | FX | **Frankfurter API** | Live USD/GBP/CAD/AED/SGD/AUD/NZD→INR rates, no key |
 | KYC vendor | **Persona** (hosted flow + webhook) | When SmartRemit runs verification |
 | Tests | **Vitest** (~122 files / ~1,315 tests) + **PGlite** (real in-process Postgres) + `fakeRedis` + **Playwright** (post-deploy smoke) | UNIQUE/SKIP LOCKED/transactions are tested against real Postgres semantics |
-| CI/CD | GitHub Actions (`ci.yml` gate on PRs, `smoke.yml` post-deploy, `worker-heartbeat.yml` every 5 min) | Branch protection: no direct pushes to `main` |
+| CI/CD | GitHub Actions (`ci.yml` gate on PRs, `smoke.yml` post-deploy, `worker-heartbeat.yml` hourly backup to the Vercel per-minute worker cron) | Branch protection: no direct pushes to `main` |
 
 ---
 
@@ -398,7 +398,7 @@ secret-bearing payload shape.
 kind, exponential backoff `2^attempts` (cap 1h), **dead at 8 attempts** → exactly one
 deduped WhatsApp ops alert to `OPS_ALERT_PHONE`.
 
-**Delivery guarantee**: a GitHub Actions heartbeat hits the worker every 5 minutes;
+**Worker clock**: a Vercel cron (`vercel.json`) GETs the worker every minute and an hourly GitHub Actions heartbeat backs it up;
 `pokeWorker()` (a best-effort `after()` fetch) makes the common case drain in seconds.
 
 **Reconciliation sweep** (every worker run): transfers stuck in `paid` >15 min →
@@ -524,7 +524,7 @@ SQL GROUP BYs like the overview's `summary()` — queued, non-blocking.)
 | Reference-rail status callback | our own `/api/payment-webhook/simulator` | signed with the partner's `webhookSecret` — exercising the exact inbound path |
 | Meta Graph sends | WhatsApp Cloud API | Bearer token (platform or partner) |
 
-**Heartbeats:** GitHub Actions → `/api/worker` (5-min, Bearer `CRON_SECRET`);
+**Schedulers:** Vercel cron → `/api/worker` (every minute, Bearer `CRON_SECRET`); GitHub Actions → `/api/worker` (hourly backup, same Bearer);
 Vercel cron → `/api/cron` (daily schedules).
 
 ---

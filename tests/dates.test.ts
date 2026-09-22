@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { easternDate, easternDayOfMonth, easternDayOfWeek, easternMonth } from '@/lib/dates';
+import { easternDate, easternDayOfMonth, easternDayOfWeek, easternDayStart, easternMonth, easternMonthStart } from '@/lib/dates';
 
 // 2026-05-21T16:00:00Z is noon Eastern on Thu May 21, 2026.
 const NOON_ET = Date.parse('2026-05-21T16:00:00.000Z');
@@ -56,5 +56,51 @@ describe('easternMonth', () => {
   });
   it('zero-pads single-digit months', () => {
     expect(easternMonth(Date.parse('2026-01-15T18:00:00Z'))).toBe('2026-01');
+  });
+});
+
+// Program fix 16 (Task 10, test 4): the ledger cap totals are a plain
+// created_at range, bounded by ET midnight / the first of the ET month. Both
+// helpers must be right on the DST edge days (2026-03-08 spring forward,
+// 2026-11-01 fall back) and late in the ET evening.
+describe('easternDayStart / easternMonthStart (fix 16)', () => {
+  const cases: Array<{ label: string; at: string; dayStart: string; monthStart: string }> = [
+    // 23:30 EST on 2026-03-07 = 04:30Z 03-08; ET midnight of 03-07 is 05:00Z 03-07.
+    { label: '23:30 ET the night before spring-forward', at: '2026-03-08T04:30:00.000Z', dayStart: '2026-03-07T05:00:00.000Z', monthStart: '2026-03-01T05:00:00.000Z' },
+    // 23:30 EDT on 2026-03-08 = 03:30Z 03-09; ET midnight of 03-08 was still EST (05:00Z).
+    { label: '23:30 ET on spring-forward day', at: '2026-03-09T03:30:00.000Z', dayStart: '2026-03-08T05:00:00.000Z', monthStart: '2026-03-01T05:00:00.000Z' },
+    // 23:30 EST on 2026-11-01 = 04:30Z 11-02; ET midnight of 11-01 was still EDT (04:00Z).
+    { label: '23:30 ET on fall-back day', at: '2026-11-02T04:30:00.000Z', dayStart: '2026-11-01T04:00:00.000Z', monthStart: '2026-11-01T04:00:00.000Z' },
+    // 23:30 EDT on 2026-10-31 = 03:30Z 11-01; month start = 11-01 00:00 EDT? No: still October.
+    { label: '23:30 ET on Halloween (the night before fall-back)', at: '2026-11-01T03:30:00.000Z', dayStart: '2026-10-31T04:00:00.000Z', monthStart: '2026-10-01T04:00:00.000Z' },
+    // A plain summer noon.
+    { label: 'noon EDT', at: '2026-05-21T16:00:00.000Z', dayStart: '2026-05-21T04:00:00.000Z', monthStart: '2026-05-01T04:00:00.000Z' },
+    // 00:30 EST on Jan 1 (UTC is already Jan 1 05:30).
+    { label: '00:30 ET on New Year', at: '2026-01-01T05:30:00.000Z', dayStart: '2026-01-01T05:00:00.000Z', monthStart: '2026-01-01T05:00:00.000Z' },
+    // 23:30 EST on Dec 31 2025 = 04:30Z Jan 1 2026 — still December in ET.
+    { label: '23:30 ET on New Year\'s Eve', at: '2026-01-01T04:30:00.000Z', dayStart: '2025-12-31T05:00:00.000Z', monthStart: '2025-12-01T05:00:00.000Z' },
+  ];
+
+  for (const c of cases) {
+    it(`${c.label}: both helpers return ET midnight`, () => {
+      const at = Date.parse(c.at);
+      expect(easternDayStart(at).toISOString()).toBe(c.dayStart);
+      expect(easternMonthStart(at).toISOString()).toBe(c.monthStart);
+      // The instant before the day start belongs to the previous ET date.
+      const before = easternDayStart(at).getTime() - 1;
+      expect(easternDate(before)).not.toBe(easternDate(at));
+      expect(easternDayStart(before).getTime()).toBeLessThan(easternDayStart(at).getTime());
+      // And the start itself is on the same ET date as `at`.
+      expect(easternDate(easternDayStart(at).getTime())).toBe(easternDate(at));
+      expect(easternMonth(easternMonthStart(at).getTime())).toBe(easternMonth(at));
+    });
+  }
+
+  it('accepts a Date as well as epoch ms and rejects an invalid instant', () => {
+    const d = new Date('2026-05-21T16:00:00.000Z');
+    expect(easternDayStart(d).toISOString()).toBe('2026-05-21T04:00:00.000Z');
+    expect(easternMonthStart(d).toISOString()).toBe('2026-05-01T04:00:00.000Z');
+    expect(() => easternDayStart(NaN)).toThrow(RangeError);
+    expect(() => easternMonthStart(Infinity)).toThrow(RangeError);
   });
 });

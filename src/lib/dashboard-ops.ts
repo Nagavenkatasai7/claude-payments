@@ -165,7 +165,7 @@ export async function releaseTransfer(store: Store, db: Db, id: string): Promise
   if (r.kind === 'already') {
     throw new Error('Cannot release: transfer is not in_review (it moved concurrently)');
   }
-  pokeWorker(); // fast path for the rail effect — the heartbeat is the guarantee
+  pokeWorker(); // fast path for the rail effect — the per-minute cron drains it regardless
 }
 
 /**
@@ -207,7 +207,7 @@ export async function rejectTransfer(store: Store, db: Db, id: string): Promise<
     return true;
   });
   if (!refunding) return;
-  pokeWorker(); // fast path — the heartbeat is the guarantee
+  pokeWorker(); // fast path — the per-minute cron drains it regardless
 }
 
 /**
@@ -289,7 +289,13 @@ export async function dismissRefund(db: Db, id: string): Promise<void> {
     if (!updated) {
       throw new Error('Cannot dismiss: refund is not awaiting approval.');
     }
-    await repo.saveTransfer({ ...updated, adminNote: 'refund request dismissed' });
+    // APPENDED after any existing note (a rail-failure note, a staff note) —
+    // the same rule as transfer-repo.failPaidFromRail; never clobbered.
+    const prior = (updated.adminNote ?? '').trim();
+    await repo.saveTransfer({
+      ...updated,
+      adminNote: prior === '' ? 'refund request dismissed' : `${prior} | refund request dismissed`,
+    });
   });
 }
 

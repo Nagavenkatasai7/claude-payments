@@ -40,8 +40,8 @@ function buildHarness(redis: FakeRedis, partnerId = 'default') {
   const customerStore = createCustomerStore(db, store);
   const scheduleStore = createScheduleStore(db);
   const draftStore = createDraftStore(redis);
-  const dailyVolumeStore = createDailyVolumeStore(redis);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  const dailyVolumeStore = createDailyVolumeStore(store);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
   const partnerStore = createPartnerStore(db); // pg-backed (Stage 2a cutover)
   const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
 
