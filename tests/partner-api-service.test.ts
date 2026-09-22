@@ -8,7 +8,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { FX_UNAVAILABLE_MESSAGE, resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
   createTransaction, getTransaction, confirmTransaction, listTransactions,
@@ -82,12 +82,18 @@ const txBody = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// A realistic Frankfurter stub: a USD base echoes INR only; any other base
+// echoes BOTH legs (Task 9: a non-USD response missing its USD leg is now a
+// refusal, never a static-table substitution).
+function frankfurterStub(url: string) {
+  const rates = String(url).includes('from=USD') ? { INR: 85.2 } : { USD: 1.27, INR: 108.2 };
+  return { ok: true, json: async () => ({ rates }), text: async () => '' };
+}
+
 beforeEach(() => {
   resetRateCacheForTests();
   vi.mocked(pokeWorker).mockClear();
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
-  }));
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => frankfurterStub(url)));
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -558,5 +564,63 @@ describe('partner-api-service: confirmTransaction enforces the compliance hold (
     expect(await confirmTransaction(h.deps, partner({ id: 'rival' }), 'pk_r', id)).toMatchObject({ ok: false, status: 404 });
     expect((await h.store.getTransfer(id))?.status).toBe('awaiting_payment');
     expect(await outboxRows(h.db)).toHaveLength(0);
+  });
+});
+
+describe('partner-api-service: FX unavailable is a 503 (retryable), never a 400 (Task 9)', () => {
+  it('createQuote → 503 with the customer-safe message when Frankfurter is down and nothing is cached', async () => {
+    const { deps } = await harness();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    expect(await createQuote(deps, DELEGATED, { amount_source: 500 })).toEqual({
+      ok: false, status: 503, error: FX_UNAVAILABLE_MESSAGE,
+    });
+  });
+
+  it('createTransaction → 503, nothing minted; a retry with the SAME key mints once FX is back', async () => {
+    const { deps, store } = await harness();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-fx', txBody())).toMatchObject({ ok: false, status: 503 });
+    expect(await store.listTransfers()).toHaveLength(0);
+
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => frankfurterStub(url)));
+    const retry = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-fx', txBody());
+    expect(retry).toMatchObject({ ok: true, status: 201 }); // the bound-but-unminted id is minted now
+    expect(await store.listTransfers()).toHaveLength(1);
+  });
+
+  it('a replay of an ALREADY-minted key still returns 200 during an FX outage (the replay never re-prices)', async () => {
+    const { deps } = await harness();
+    const first = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-ok', txBody());
+    expect(first).toMatchObject({ ok: true, status: 201 });
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    expect(await createTransaction(deps, DELEGATED, 'pk_1', 'idem-ok', txBody())).toMatchObject({ ok: true, status: 200 });
+  });
+});
+
+describe('partner-api-service: createQuote validates destination_currency at the edge (Task 9 security review)', () => {
+  it('an unsupported destination_currency is a 400 and never reaches the FX provider', async () => {
+    const { deps } = await harness();
+    const r = await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: 'EUR&to=JPY' });
+    expect(r).toMatchObject({ ok: false, status: 400 });
+    const urls = vi.mocked(global.fetch).mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes('EUR'))).toBe(false);
+  });
+
+  it('a supported destination_currency still quotes', async () => {
+    const { deps } = await harness();
+    expect(await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: 'GBP' })).toMatchObject({
+      ok: true, status: 200,
+    });
+  });
+
+  it('destination_currency is case- and whitespace-insensitive (parity with pushPartnerRate): " gbp " quotes exactly like "GBP"', async () => {
+    const { deps } = await harness();
+    const upper = await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: 'GBP' });
+    const lower = await createQuote(deps, DELEGATED, { amount_source: 500, destination_currency: ' gbp ' });
+    expect(lower).toMatchObject({ ok: true, status: 200 });
+    expect(lower).toEqual(upper);
+    expect((lower as { data: { destination_currency: string } }).data.destination_currency).toBe('GBP');
   });
 });

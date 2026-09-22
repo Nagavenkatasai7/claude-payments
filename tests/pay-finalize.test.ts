@@ -8,7 +8,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createDailyVolumeStore } from '@/lib/daily-volume-store';
 import { T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
-import { resetRateCacheForTests } from '@/lib/rate';
+import { FX_MAX_AGE_MS, resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 
@@ -557,5 +557,137 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
     if (!result.ok) throw new Error('unexpected');
     expect((await stores.store.getTransfer(result.transferId))!.partnerId).toBe('acme');
     expect(await stores.customerStore.getCustomer('default', PHONE)).toBeNull();
+  });
+});
+
+describe('finalizeDraftPayment — FX gate (Task 9): refuses BEFORE the claim, never burns the draft', () => {
+  // Ruling 7 pre-claim order: kyc → masked destination (fix 6) → FX (this) → cap (fix 10) → idem.claim.
+  async function verifiedSender(stores: Awaited<ReturnType<typeof buildStores>>) {
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+  }
+
+  it('a stored quote whose rate is older than the ceiling → fx_unavailable; no FX dial, draft kept, key unclaimed, nothing minted', async () => {
+    const stores = await buildStores();
+    await verifiedSender(stores);
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17_000, fxFetchedAt: Date.now() - FX_MAX_AGE_MS - 1 },
+    });
+
+    // quoteExpired: the route answers the EXPIRED-quote message (a retry can never succeed).
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'fx_unavailable', quoteExpired: true });
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled(); // honored-verbatim path never re-quotes
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    const { createIdempotencyRepo } = await import('@/db/repos/aux-repos');
+    expect(await createIdempotencyRepo(stores.db).find('default', `draft:${draftId}`)).toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+  });
+
+  it('a crash-replay of an ALREADY-MINTED draft replays its transfer — the FX gate never refuses a minted draft', async () => {
+    const stores = await buildStores();
+    await verifiedSender(stores);
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17_000, fxFetchedAt: Date.now() - FX_MAX_AGE_MS - 1 },
+    });
+    // The crash window: a prior attempt claimed the key and MINTED (while the
+    // rate was still fresh), then died before consumeDraft — the draft is still
+    // live and its quote has since aged past the ceiling.
+    const { createIdempotencyRepo } = await import('@/db/repos/aux-repos');
+    await createIdempotencyRepo(stores.db).claim('default', `draft:${draftId}`, 'tr_minted');
+    await createTransfer(stores.store, stores.partnerStore, stores.monthlyVolumeStore, {
+      id: 'tr_minted', phone: PHONE, recipientName: 'Mom', recipientPhone: '919876543210',
+      payoutMethod: 'upi', payoutDestination: 'mom@upi', fundingMethod: 'bank_transfer',
+      amountSource: 200, sourceCurrency: 'USD', partnerId: 'default', senderKycStatus: 'verified',
+      quote: {
+        amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85, amountInr: 17_000,
+        amountSource: 200, feeSource: 0, totalChargeSource: 200,
+      },
+    });
+
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: true, transferId: 'tr_minted' });
+    expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1); // replayed, never re-minted
+  });
+
+  it('a fresh stored quote (fxFetchedAt inside the ceiling) mints verbatim', async () => {
+    const stores = await buildStores();
+    await verifiedSender(stores);
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 95.82, amountInr: 19_164, fxFetchedAt: Date.now() - 10 * 60_000 },
+    });
+    const result = await finalizeDraftPayment(stores, draftId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect((await stores.store.getTransfer(result.transferId))?.fxRate).toBe(95.82);
+  });
+
+  it('a legacy draft that must re-quote while Frankfurter is down → fx_unavailable; the SAME link mints once FX is back', async () => {
+    const stores = await buildStores();
+    await verifiedSender(stores);
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 254, amountSource: 200, sourceCurrency: 'GBP', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 }, // no feeSource/totalChargeSource ⇒ re-quote path
+    });
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'fx_unavailable' });
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+
+    // Provider recovers: the single-use key was never burned, so the same link completes.
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.3395, INR: 128.35 } }) }));
+    expect((await finalizeDraftPayment(stores, draftId)).ok).toBe(true);
+  });
+});
+
+describe('finalizeDraftPayment — FX refused AFTER the claim (Task 9 review): mapped, never a thrown 400', () => {
+  it('a legacy re-quote whose live rate becomes unavailable between the gate and the mint → fx_unavailable; the claimed id stays unminted and a retry mints THAT id', async () => {
+    const stores = await buildStores();
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    const draftId = await stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+      amountUsd: 254, amountSource: 200, sourceCurrency: 'GBP', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 1.99, fxRate: 108, amountInr: 21_600 }, // no feeSource/totalChargeSource ⇒ re-quote at mint
+    });
+    const fxUp = () =>
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { USD: 1.3395, INR: 128.35 } }) }));
+    resetRateCacheForTests();
+    fxUp(); // the pre-claim gate sees a live rate
+    // createTransfer's legacy branch reads getTransferCount right before its
+    // getFxRates — AFTER idem.claim. Take FX down at exactly that point.
+    vi.spyOn(stores.store, 'getTransferCount').mockImplementationOnce(async () => {
+      resetRateCacheForTests();
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+      return 0;
+    });
+
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'fx_unavailable' });
+    const { createIdempotencyRepo } = await import('@/db/repos/aux-repos');
+    const claimedId = await createIdempotencyRepo(stores.db).find('default', `draft:${draftId}`);
+    expect(claimedId).not.toBeNull(); // bound…
+    expect(await stores.store.getTransfer(claimedId as string)).toBeNull(); // …but never minted
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(0);
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull(); // not consumed
+
+    // FX recovers: the same link mints the SAME claimed id (the crash-replay shape).
+    resetRateCacheForTests();
+    fxUp();
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: true, transferId: claimedId });
+    expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
   });
 });

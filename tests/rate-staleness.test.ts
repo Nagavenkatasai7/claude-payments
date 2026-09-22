@@ -2,8 +2,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerRateRepo, type PartnerRateRepo } from '@/db/repos/partner-rate-repo';
-import { sweepStaleRates } from '@/lib/rate-staleness';
+import { sweepStaleRates, sweepFxHealth, FX_PROBE_CURRENCIES } from '@/lib/rate-staleness';
+import { RateUnavailableError, type FxRates } from '@/lib/rate';
+import type { FxRatesFn } from '@/lib/corridor-demand';
 import type { Db } from '@/db/client';
+import type { CurrencyCode } from '@/lib/types';
 
 // sweepStaleRates — the pricing safety net (runs on every /api/worker poke +
 // 5-min heartbeat). One expired pushed rate ⇒ exactly ONE deduped ops alert,
@@ -112,5 +115,50 @@ describe('sweepStaleRates', () => {
         `stale-rate:p2:GBPAED:${Date.parse(e2)}`,
       ].sort(),
     );
+  });
+});
+
+describe('sweepFxHealth (Task 9) — the FX outage alert', () => {
+  const live = (): FxRates => ({ toInr: 95.82, toUsd: 1, fetchedAt: Date.now(), source: 'live' });
+  const fxWith = (bad: Partial<Record<CurrencyCode, 'cache' | 'down'>>): FxRatesFn => async (c) => {
+    if (bad[c] === 'down') throw new RateUnavailableError('fetch_failed', c);
+    if (bad[c] === 'cache') return { ...live(), fetchedAt: Date.now() - 600_000, source: 'cache' };
+    return live();
+  };
+
+  it('probes every fetched currency — never AED (derived from the USD peg)', () => {
+    expect([...FX_PROBE_CURRENCIES].sort()).toEqual(['AUD', 'CAD', 'GBP', 'HKD', 'INR', 'MXN', 'NZD', 'SGD', 'USD']);
+  });
+
+  it('a refusing and a degraded currency each raise ONE ops.alert keyed on the hour bucket', async () => {
+    const now = new Date();
+    const bucket = Math.floor(now.getTime() / 3_600_000);
+    expect(await sweepFxHealth(db, fxWith({ GBP: 'down', USD: 'cache' }), now)).toBe(2);
+    const rows = await outboxRows();
+    expect(rows.every((r) => r.kind === 'ops.alert')).toBe(true);
+    expect(rows.map((r) => r.dedupe_key).sort()).toEqual([`fx-health:GBP:${bucket}`, `fx-health:USD:${bucket}`]);
+  });
+
+  it('re-running in the same hour adds NOTHING; the next hour alerts again', async () => {
+    const now = new Date();
+    const fx = fxWith({ GBP: 'down' });
+    expect(await sweepFxHealth(db, fx, now)).toBe(1);
+    expect(await sweepFxHealth(db, fx, now)).toBe(0);
+    expect(await sweepFxHealth(db, fx, new Date(now.getTime() + 3_600_000))).toBe(1);
+    expect(await outboxRows()).toHaveLength(2);
+  });
+
+  it('all-live rates raise no alert', async () => {
+    expect(await sweepFxHealth(db, fxWith({}), new Date())).toBe(0);
+    expect(await outboxRows()).toHaveLength(0);
+  });
+
+  it('the alert names the currency and state only — no phone, amount or partner data', async () => {
+    await sweepFxHealth(db, fxWith({ MXN: 'down' }), new Date());
+    const r = await db.execute(sql`SELECT payload FROM outbox`);
+    const { message } = (r as unknown as { rows: Array<{ payload: { message: string } }> }).rows[0].payload;
+    expect(message).toContain('MXN');
+    expect(message).toContain('UNAVAILABLE (fetch_failed)');
+    expect(message).not.toMatch(/\d{7,}/);
   });
 });

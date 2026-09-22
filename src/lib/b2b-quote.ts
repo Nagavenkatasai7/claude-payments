@@ -1,4 +1,4 @@
-import { QuoteError, sourceForDest, usdPivotCrossRate, wouldBeFeeUsd } from './fx';
+import { QuoteError, assertRatesUsable, sourceForDest, usdPivotCrossRate, wouldBeFeeUsd } from './fx';
 import type { FxRates } from './rate';
 import type { CurrencyCode, FundingMethod } from './types';
 
@@ -91,6 +91,9 @@ export function quoteCrossBorderBill(input: CrossBorderBillInput): CrossBorderBi
   if (!Number.isFinite(invoicedAmount) || invoicedAmount <= 0) {
     throw new QuoteError('Please give a valid bill amount.');
   }
+  // Provenance gate (Task 9): never price a bill off the static display table
+  // or a rate older than FX_MAX_AGE_MS — throws RateUnavailableError.
+  assertRatesUsable(rates);
   // buyer→USD: the SINGLE anchor for BOTH the cross-rate (rates.toUsd, consumed
   // inside sourceForDest/usdPivotCrossRate) AND the buyer-currency fee — so the
   // two legs can never be priced off different USD rates. A USD buyer is exactly
@@ -154,6 +157,9 @@ export function quoteBuyerDenominatedBill(input: CrossBorderBillInput): CrossBor
   if (!Number.isFinite(invoicedAmount) || invoicedAmount <= 0) {
     throw new QuoteError('Please give a valid bill amount.');
   }
+  // Provenance gate (Task 9) — Case B multiplies usdPivotCrossRate directly
+  // below, so nothing downstream would otherwise check where the rate came from.
+  assertRatesUsable(rates);
   // buyer→USD: the SINGLE anchor for BOTH the cross-rate and the buyer-currency
   // fee (mirrors Case S). A USD buyer is exactly 1.
   const buyerToUsd = buyerCurrency === 'USD' ? 1 : rates.toUsd;

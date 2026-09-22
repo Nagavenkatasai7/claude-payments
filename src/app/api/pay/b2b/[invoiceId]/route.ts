@@ -8,7 +8,7 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { getB2bQuoteStore } from '@/lib/b2b-quote-store';
 import { billDenomination } from '@/lib/b2b-quote';
-import { getFxRates } from '@/lib/rate';
+import { getFxRates, RateUnavailableError } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { settleOrHold } from '@/lib/settlement';
 import { isB2bSendVerified, sendGateActive } from '@/lib/kyc-gate';
@@ -177,6 +177,26 @@ export async function POST(
       );
     }
 
+    // ── FX (Task 9) — BEFORE the OTP check, so a provider outage never burns
+    // the single-use code, and before the claim-first mint, so a refusal never
+    // lands between mint and settlement. buyer→USD is the ledger USD-equivalent
+    // (screening + accrual basis) — the CHARGED figure is the locked
+    // buyer-currency quote; this is internal only. A USD buyer needs no FX.
+    let buyerToUsd = 1;
+    if (buyerCurrency !== 'USD') {
+      try {
+        buyerToUsd = (await getFxRates(buyerCurrency)).toUsd;
+      } catch (err) {
+        if (err instanceof RateUnavailableError) {
+          return NextResponse.json(
+            { ok: false, reason: 'fx_unavailable', error: err.message },
+            { status: 503 },
+          );
+        }
+        throw err;
+      }
+    }
+
     // ── OTP step-up — verified LAST (right before money moves) so a recoverable
     // failure above (bad bank fields, expired quote, seller deactivated) never
     // BURNS the single-use code. Nothing below this line is reachable without a
@@ -189,11 +209,6 @@ export async function POST(
         { status: 403 },
       );
     }
-
-    // buyer→USD for the ledger USD-equivalent (screening + accrual basis) — the
-    // CHARGED figure is the locked buyer-currency quote; this is internal only.
-    const buyerRates = await getFxRates(buyerCurrency);
-    const buyerToUsd = buyerCurrency === 'USD' ? 1 : buyerRates.toUsd;
 
     // ── Claim-first mint (seller payout pulled from the PROFILE inside) ───────
     const minted = await finalizeCrossBorderBillPayment(

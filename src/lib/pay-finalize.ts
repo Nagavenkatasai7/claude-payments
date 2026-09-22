@@ -1,8 +1,9 @@
-import { createTransfer, quoteOverrideFromDraft } from './transfer-create';
+import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft } from './transfer-create';
+import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
 import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
-import { DEFAULT_PARTNER_ID } from './defaults';
+import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
@@ -36,7 +37,22 @@ export interface FinalizeStores {
 
 export type FinalizeResult =
   | { ok: true; transferId: string }
-  | { ok: false; error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required'; transferId?: string };
+  | {
+      ok: false;
+      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable';
+      transferId?: string;
+      // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
+      // quote aged past the ceiling — a retry can never succeed (the customer
+      // needs a fresh quote), so the route answers the expired-quote message.
+      quoteExpired?: true;
+    };
+
+/** Task 9: a RateUnavailableError → the fx_unavailable arm (same shape pre- and post-claim). */
+function fxRefused(err: RateUnavailableError): FinalizeResult {
+  return err.reason === 'stale_quote'
+    ? { ok: false, error: 'fx_unavailable', quoteExpired: true }
+    : { ok: false, error: 'fx_unavailable' };
+}
 
 /**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
@@ -95,6 +111,36 @@ export async function finalizeDraftPayment(
     draft.transferType === 'b2b' ? isB2bSendVerified(customer) : isSendVerified(customer);
   if (sendGateActive(partner) && !payVerified) return { ok: false, error: 'kyc_required' };
 
+  // [fix 6 inserts above this line]
+  // ── FX gate (Task 9) — BEFORE idem.claim, so a provider outage or a stale
+  // quote never burns the single-use draft key (ruling 7 pre-claim contract:
+  // kyc → masked destination (fix 6) → FX (this) → cap (fix 10) → idem.claim).
+  // A draft with a COMPLETE stored quote is honored verbatim — never re-quoted
+  // — so the only check is the age of the rate behind it. A legacy draft with
+  // no complete quote re-quotes inside createTransfer, so pre-flight both FX
+  // legs here (this also warms the L1 cache the mint reads moments later).
+  // A draft that ALREADY minted (the process died after the mint, before
+  // consumeDraft) skips the gate: the claim below replays that transfer's
+  // outcome, and a replay is never re-priced or refused for FX. A bound-but-
+  // UNminted claim is still gated — nothing has been priced into the ledger.
+  const quoteOverride = quoteOverrideFromDraft(draft);
+  const idem = createIdempotencyRepo(db);
+  const priorClaim = await idem.find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
+  const alreadyMinted = priorClaim !== null && (await store.getTransfer(priorClaim)) !== null;
+  if (!alreadyMinted) {
+    try {
+      if (quoteOverride) {
+        assertQuoteOverrideFresh(quoteOverride);
+      } else {
+        await getFxRates(draft.sourceCurrency);
+        await getDestinationRates(draft.destinationCurrency ?? DEFAULT_DESTINATION_CURRENCY);
+      }
+    } catch (err) {
+      if (err instanceof RateUnavailableError) return fxRefused(err);
+      throw err;
+    }
+  }
+
   // Defense-in-depth cap re-check at pay time (the card-show check may be stale).
   const todayUsedCents = await dailyVolumeStore.getTodayCents(partnerId, draft.senderPhone);
   const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100), sendGateActive(partner));
@@ -105,7 +151,7 @@ export async function finalizeDraftPayment(
   // submit or crash-replay converges on the winner. The claim is keyed under
   // DEFAULT_PARTNER_ID deliberately: a draftId is globally unique, and the
   // expired-draft replay above must find it without knowing the customer's partner.
-  const idem = createIdempotencyRepo(db);
+  // (`idem` is created above by the FX gate — Task 9.)
   const candidateId = newTransferId();
   const reservedId = await idem.claim(DEFAULT_PARTNER_ID, `draft:${draftId}`, candidateId);
   if (reservedId !== candidateId) {
@@ -139,7 +185,7 @@ export async function finalizeDraftPayment(
   // charge if another transfer landed in between, or drift the FX rate between
   // card and payment. quoteOverrideFromDraft owns the USD / non-USD / legacy
   // rules (legacy non-USD drafts get NO override and fall back to a re-quote).
-  const quoteOverride = quoteOverrideFromDraft(draft);
+  // (quoteOverride is computed ABOVE the claim by the FX gate — Task 9.)
 
   // ── B2B: the pay page is the PRIMARY mint path (the Approve & Pay card opens
   // /pay/<draftId>), so it MUST thread the same B2B discriminators + business
@@ -150,42 +196,55 @@ export async function finalizeDraftPayment(
   // achTokenRef is bound by the rail at pay/settlement time (U2), never here. ──
   const isB2bDraft = draft.transferType === 'b2b';
 
-  const transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
-    id: reservedId, // the claimed id — crash-replay re-mints the SAME row
-    phone: draft.senderPhone,
-    recipientName: draft.recipient.name,
-    recipientPhone: draft.recipient.recipientPhone,
-    payoutMethod,
-    payoutDestination,
-    fundingMethod: draft.fundingMethod,
-    amountSource: draft.amountSource,
-    sourceCurrency: draft.sourceCurrency,
-    destinationCountry: draft.destinationCountry,
-    destinationCurrency: draft.destinationCurrency,
-    partnerId,
-    recipientLegalName: draft.recipientLegalName,
-    relationship: draft.relationship,
-    purpose: draft.purpose,
-    sourceOfFunds: draft.sourceOfFunds,
-    occupation: draft.occupation,
-    // For B2B, screen the PAYER business name (else the individual sender name).
-    senderName: (isB2bDraft ? draft.senderBusinessName : undefined) ?? customer.fullName,
-    senderKycStatus: customer.kycStatus,
-    requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
-    quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
-    // Best-rate routing: the winning partner's rail settles this transfer —
-    // but ONLY at the rate it offered (the draft's quote). The legacy fallback
-    // above re-quotes at mid, so it must drop the route too (never a
-    // partner-routed transfer at a platform rate).
-    settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
-    // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
-    transferType: draft.transferType,
-    senderEntityType: draft.senderEntityType,
-    recipientEntityType: draft.recipientEntityType,
-    senderBusinessName: draft.senderBusinessName,
-    recipientBusinessName: draft.recipientBusinessName,
-    invoiceId: draft.invoiceId,
-  });
+  // Task 9 (review): the FX gate above ran moments ago, but the stored quote's
+  // rate — or a legacy re-quote's live rate — can still cross the 60-min
+  // ceiling between the gate and this mint. createTransfer refuses BEFORE any
+  // write, so map it exactly like the pre-claim gate: the claimed id stays
+  // bound-but-UNMINTED and the draft is not consumed, so a retry of the same
+  // link falls through the claim's replay branch and mints THAT id (the
+  // existing crash-replay shape). Never the route's generic 400.
+  let transfer: Awaited<ReturnType<typeof createTransfer>>;
+  try {
+    transfer = await createTransfer(store, partnerStore, monthlyVolumeStore, {
+      id: reservedId, // the claimed id — crash-replay re-mints the SAME row
+      phone: draft.senderPhone,
+      recipientName: draft.recipient.name,
+      recipientPhone: draft.recipient.recipientPhone,
+      payoutMethod,
+      payoutDestination,
+      fundingMethod: draft.fundingMethod,
+      amountSource: draft.amountSource,
+      sourceCurrency: draft.sourceCurrency,
+      destinationCountry: draft.destinationCountry,
+      destinationCurrency: draft.destinationCurrency,
+      partnerId,
+      recipientLegalName: draft.recipientLegalName,
+      relationship: draft.relationship,
+      purpose: draft.purpose,
+      sourceOfFunds: draft.sourceOfFunds,
+      occupation: draft.occupation,
+      // For B2B, screen the PAYER business name (else the individual sender name).
+      senderName: (isB2bDraft ? draft.senderBusinessName : undefined) ?? customer.fullName,
+      senderKycStatus: customer.kycStatus,
+      requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
+      quote: quoteOverride, // U7: honor the draft's quote (undefined ⇒ legacy re-quote)
+      // Best-rate routing: the winning partner's rail settles this transfer —
+      // but ONLY at the rate it offered (the draft's quote). The legacy fallback
+      // above re-quotes at mid, so it must drop the route too (never a
+      // partner-routed transfer at a platform rate).
+      settlementPartnerId: quoteOverride ? draft.settlementPartnerId : undefined,
+      // ── B2B discriminators + business names + linked invoice (undefined for b2c) ──
+      transferType: draft.transferType,
+      senderEntityType: draft.senderEntityType,
+      recipientEntityType: draft.recipientEntityType,
+      senderBusinessName: draft.senderBusinessName,
+      recipientBusinessName: draft.recipientBusinessName,
+      invoiceId: draft.invoiceId,
+    });
+  } catch (err) {
+    if (err instanceof RateUnavailableError) return fxRefused(err);
+    throw err;
+  }
 
   // Consume AFTER the mint: the transfer now exists, so losing the draft here
   // costs nothing (the claim replays it); losing the transfer there was fatal.

@@ -2,6 +2,10 @@ import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
 import { isSendVerified, sendGateActive } from './kyc-gate';
 import { env } from './env';
+import { logError } from './log';
+import { RateUnavailableError } from './rate';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type { CustomerStore } from './customer-store';
@@ -11,6 +15,8 @@ import type { KycProvider } from './providers/kyc-provider';
 import type { Customer, Schedule, Transfer } from './types';
 
 export interface CronDeps {
+  // Task 9: the ledger handle a refused run's deduped ops alert is enqueued on.
+  db: DbOrTx;
   store: Store;
   partnerStore: PartnerStore;           // NEW (P5): for corridor-aware compliance
   customerStore: CustomerStore;         // NEW (Item 4): skip opted-out customers
@@ -33,9 +39,10 @@ export interface CronDeps {
 
 export async function runDueSchedules(
   deps: CronDeps,
-): Promise<{ fired: number }> {
+): Promise<{ fired: number; failed: number }> {
   const schedules = await deps.scheduleStore.listActiveSchedules();
   let fired = 0;
+  let failed = 0;
   for (const schedule of schedules) {
     // QA #7: if the schedule has an endDate and the current run time is AFTER it,
     // mark it cancelled and skip firing — it will no longer appear in active schedules.
@@ -98,8 +105,32 @@ export async function runDueSchedules(
       await deps.scheduleStore.saveSchedule(schedule);
       fired++;
     } catch (err) {
-      console.error('Schedule run failed:', schedule.id, err);
+      // A refused mint (Task 9: FX unavailable; or any other refusal) is LOUD:
+      // a scrubbed error line, counted in the result (the /api/cron JSON), and
+      // ONE deduped ops alert per schedule per Eastern day. lastRunAt is NOT
+      // advanced, so a same-day re-run of /api/cron fires it — but the daily
+      // cron has no next-day catch-up (isScheduleDueToday matches the day), so
+      // without the alert this cycle's send would silently disappear.
+      failed++;
+      const reason = err instanceof RateUnavailableError ? err.reason : 'error';
+      logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
+      // YYYY-MM-DD for the same Eastern day isScheduleDueToday matches.
+      const day = new Date(deps.now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      try {
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          {
+            message:
+              `⚠️ SmartRemit ops: scheduled send ${schedule.id} was NOT created on ${day} (${reason}) — ` +
+              `the customer got no pay link. Re-run /api/cron today once the cause clears; ` +
+              `the daily cron does not retry it tomorrow.`,
+          },
+          { dedupeKey: `schedule-refused:${schedule.id}:${day}` },
+        );
+      } catch (alertErr) {
+        logError('cron.schedule-alert', alertErr, { scheduleId: schedule.id });
+      }
     }
   }
-  return { fired };
+  return { fired, failed };
 }

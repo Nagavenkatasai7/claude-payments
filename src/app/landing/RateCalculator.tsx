@@ -6,8 +6,12 @@ import { inr as formatInr } from './format';
 import WhatsAppIcon from './WhatsAppIcon';
 
 interface Props {
-  /** Server-passed live USD→INR rate (already fallback-guarded). */
-  liveRate: number;
+  /** Server-passed USD→INR rate; null when the FX provider refused (no figure shown). */
+  rate: number | null;
+  /** true only for a rate fetched live; false ⇒ an indicative cached rate. */
+  live: boolean;
+  /** The ECB fixing date the provider reported (YYYY-MM-DD), for the "as of" copy. */
+  asOf: string | null;
 }
 
 const DEFAULT_AMOUNT = 1000;
@@ -29,7 +33,7 @@ const btnWaBlock =
  * hydration / with JS disabled. After hydration, the amount input drives both
  * the "they get" figure and the WhatsApp prefill + button label.
  */
-export default function RateCalculator({ liveRate }: Props) {
+export default function RateCalculator({ rate, live, asOf }: Props) {
   const [amount, setAmount] = useState<string>(String(DEFAULT_AMOUNT));
 
   const numeric = useMemo(() => {
@@ -37,7 +41,7 @@ export default function RateCalculator({ liveRate }: Props) {
     return Number.isFinite(n) && n > 0 ? n : 0;
   }, [amount]);
 
-  const theyGet = numeric * liveRate;
+  const theyGet = rate === null ? null : numeric * rate;
   const hasAmount = numeric > 0;
 
   const message = hasAmount
@@ -77,7 +81,7 @@ export default function RateCalculator({ liveRate }: Props) {
         <div className="flex flex-1 flex-col gap-1.5">
           <span className="text-[12.5px] uppercase tracking-[.04em] text-[var(--lp-text-300)]">They get</span>
           <span className="py-[9px] text-[22px] leading-normal font-extrabold text-[var(--lp-wa)]" aria-live="polite">
-            {hasAmount ? formatInr(theyGet) : '₹0'}
+            {theyGet === null ? '—' : hasAmount ? formatInr(theyGet) : '₹0'}
           </span>
         </div>
       </div>
@@ -92,8 +96,11 @@ export default function RateCalculator({ liveRate }: Props) {
       </a>
 
       <p className="mt-3 text-xs leading-[1.5] text-[var(--lp-text-300)]">
-        Live rate from our FX provider, updated hourly. Final rate is locked when
-        you confirm in chat.
+        {rate === null
+          ? 'Our FX provider is temporarily unreachable, so no rate is shown. The exact rate is quoted and locked when you confirm in chat.'
+          : live
+            ? `Mid-market rate from our FX provider${asOf ? ` (ECB fixing of ${asOf})` : ''}. Final rate is locked when you confirm in chat.`
+            : `Indicative rate${asOf ? ` (ECB fixing of ${asOf})` : ''}: our FX provider is temporarily unreachable. The exact rate is quoted and locked when you confirm in chat.`}
       </p>
     </div>
   );

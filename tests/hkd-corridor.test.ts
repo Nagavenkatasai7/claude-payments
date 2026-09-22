@@ -19,9 +19,10 @@ describe('HKD / Hong Kong is a first-class corridor', () => {
     expect(countryForCurrency('HKD')).toBe('HK');
   });
 
-  it('has an offline fallback rate (HKD is USD-pegged ≈ 7.8/USD)', () => {
+  it('has a display-only table rate (HKD is USD-pegged ≈ 7.85/USD) that is never priced', () => {
     expect(FALLBACK_FX_RATES.HKD).toBeDefined();
     expect(FALLBACK_FX_RATES.HKD.toUsd).toBeCloseTo(0.128, 2);
+    expect(FALLBACK_FX_RATES.HKD.source).toBe('fallback'); // fx.ts refuses to quote it (Task 9)
   });
 
   it('defines HK bank fields (bank code + branch code + account)', () => {
