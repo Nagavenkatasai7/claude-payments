@@ -62,7 +62,7 @@ if (process.env.PROD_DB_HOST && targetHost === process.env.PROD_DB_HOST) {
   console.error('Refusing: DATABASE_URL points at PROD_DB_HOST.');
   process.exit(1);
 }
-if (!/^ep-[a-z0-9-]+\.[a-z0-9-]+\.aws\.neon\.tech$/.test(targetHost)) {
+if (!/^ep-[a-z0-9-]+(?:\.[a-z0-9-]+)+\.aws\.neon\.tech$/.test(targetHost)) {
   console.error(`Refusing: "${targetHost}" is not a Neon branch endpoint host.`);
   process.exit(1);
 }
