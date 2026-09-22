@@ -200,7 +200,8 @@ export function createTransferRepo(
      * transaction: `SELECT … FOR UPDATE` (the row lock — a concurrent paid_out,
      * staff refund or sweep waits) and then ONE guarded UPDATE that moves only
      * a `paid` row: status → 'cancelled' (the existing terminal state, no new
-     * status value), admin_note ← `note`, and refund_status by the PRIOR value:
+     * status value), admin_note ← `note` (appended after any staff note), and
+     * refund_status by the PRIOR value:
      *   none / requested + refundable → pending   (the caller enqueues refund:<id>)
      *   none / requested, NOT refundable → unchanged (partner-funded: no charge here)
      *   pending / completed / failed → unchanged   (a staff refund owns it)
@@ -223,7 +224,8 @@ export function createTransferRepo(
         .update(transfers)
         .set({
           status: 'cancelled',
-          adminNote: note,
+          // APPENDED, never clobbered: a rail must not erase a staff note.
+          adminNote: sql`CASE WHEN COALESCE(${transfers.adminNote}, '') = '' THEN ${note} ELSE ${transfers.adminNote} || ' | ' || ${note} END`,
           refundStatus: sql`CASE
             WHEN ${transfers.refundStatus} IN ('none', 'requested')
               AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))

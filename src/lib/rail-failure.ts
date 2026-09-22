@@ -67,10 +67,12 @@ export async function handleRailFailure(
         prior.status === 'delivered'
           ? `rail reported ${failure.code} AFTER delivery — the recipient was paid; investigate and claw back (Refund on the transfer's Details page) if the rail is right`
           : `rail reported ${failure.code} on a transfer that is ${prior.status} (never instructed) — nothing was changed; investigate`;
+      // Keyed by the prior status so an early stray `failed` (e.g. while
+      // awaiting_payment) can never spend the key the real cancel alert uses.
       await outbox.enqueue(
         'ops.alert',
         { message: `⚠️ SmartRemit ops: ${who(prior)}: ${detail}. Rail reason: ${reason}.` },
-        { dedupeKey: `railfail:${transferId}` },
+        { dedupeKey: `railfail:${transferId}:${prior.status}` },
       );
       return { kind: 'alert_only', refundStarted: false };
     }

@@ -209,16 +209,24 @@ describe('handleRailFailure — rows that are not paid are never flipped', () =>
     expect((await createTransferRepo(db).updateTransferFromWebhook('rf_t1', 'delivered'))?.status).toBe('delivered');
     expect(await handleRailFailure(db, 'rf_t1', FAILED)).toEqual({ kind: 'alert_only', refundStarted: false });
     expect(await load()).toMatchObject({ status: 'delivered', refundStatus: 'none' });
-    expect(await keys()).toEqual(['railfail:rf_t1']);
-    expect(await alertText('railfail:rf_t1')).toMatch(/after delivery/i);
+    expect(await keys()).toEqual(['railfail:rf_t1:delivered']);
+    expect(await alertText('railfail:rf_t1:delivered')).toMatch(/after delivery/i);
   });
 
   it.each(['awaiting_payment', 'in_review', 'blocked'] as const)('%s (never instructed): status unchanged, alert only', async (status) => {
     await store.saveTransfer(fixture({ status, paidAt: undefined, fundingRef: undefined, adminNote: 'keep' }));
     expect(await handleRailFailure(db, 'rf_t1', FAILED)).toEqual({ kind: 'alert_only', refundStarted: false });
     expect(await load()).toMatchObject({ status, refundStatus: 'none', adminNote: 'keep' });
-    expect(await keys()).toEqual(['railfail:rf_t1']);
-    expect(await alertText('railfail:rf_t1')).toContain(status);
+    expect(await keys()).toEqual([`railfail:rf_t1:${status}`]);
+    expect(await alertText(`railfail:rf_t1:${status}`)).toContain(status);
+  });
+
+  it('an early stray failure (awaiting_payment) never spends the key the REAL cancel alert uses later', async () => {
+    await store.saveTransfer(fixture({ status: 'awaiting_payment', paidAt: undefined }));
+    await handleRailFailure(db, 'rf_t1', FAILED);
+    await store.saveTransfer(fixture()); // now paid + charged
+    expect((await handleRailFailure(db, 'rf_t1', FAILED)).kind).toBe('failed');
+    expect(await keys()).toEqual(['railfail:rf_t1:awaiting_payment', 'refund:rf_t1', 'railfailmsg:rf_t1', 'railfail:rf_t1']);
   });
 
   it('CANCELLED already: a no-op with no effects', async () => {

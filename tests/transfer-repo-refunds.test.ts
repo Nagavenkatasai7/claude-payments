@@ -175,6 +175,11 @@ describe('failPaidFromRail — the rail-failure claim (fix 8)', () => {
     expect((await repo.getTransfer('rf1'))).toMatchObject({ status: 'cancelled', refundStatus: 'pending' });
   });
 
+  it('a staff note is preserved: the rail note is appended, never clobbered', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf1n', status: 'paid', paidAt: minsAgo(1), fundingRef: 'mockfund-rf1n', adminNote: 'VIP — handle with care' }));
+    expect((await failed('rf1n')).updated?.adminNote).toBe('VIP — handle with care | rail failed: account_unreachable');
+  });
+
   it('a paid PARTNER-PULLED row (bank_pull, no fundingRef) is refundable: → pending (the worker posts the signed REVERSE)', async () => {
     await repo.saveTransfer(fixture({ id: 'rf2', status: 'paid', paidAt: minsAgo(1), fundingMethod: 'bank_pull', transferType: 'b2b' }));
     expect((await failed('rf2')).updated).toMatchObject({ status: 'cancelled', refundStatus: 'pending' });
