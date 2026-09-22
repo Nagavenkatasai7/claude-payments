@@ -19,6 +19,7 @@ import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
+import { checkSettlementUrl } from '@/lib/settlement-url';
 import type {
   Partner,
   PartnerStatus,
@@ -234,6 +235,25 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
+/**
+ * Fix 22: the same settlement-URL rule the worker applies before any fetch
+ * (checkSettlementUrl) runs BEFORE any write. A webhook-driven rail (`http`
+ * / `simulator`) must have a passing endpoint — the caller passes the
+ * EFFECTIVE value (submitted, else kept, else the simulator default), so a bad
+ * stored value can never be silently kept. For `mock` / no provider the
+ * caller passes only a SUBMITTED value: not required, but still checked.
+ * The message is generic: never the reason, never the URL.
+ */
+function assertSettlementUrlAllowed(url: string | undefined, providerType: string | undefined): void {
+  const required = providerType === 'http' || providerType === 'simulator';
+  if (!url) {
+    if (required) throw new Error('Settlement endpoint must be a public https:// URL.');
+    return;
+  }
+  const check = checkSettlementUrl(url, { appOrigin: env.appBaseUrl, production: env.isProduction });
+  if (!check.ok) throw new Error('Settlement endpoint must be a public https:// URL.');
+}
+
 export async function savePaymentConfigAction(formData: FormData): Promise<void> {
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
@@ -242,7 +262,8 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
   const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
   // Spread-merge so fields this form doesn't manage are never silently wiped.
   const credentials: Record<string, string> = { ...existing.payment.credentials };
-  const settlementUrl = keepOrUpdate(String(formData.get('settlementUrl') ?? ''), credentials.settlementUrl);
+  const submittedSettlementUrl = String(formData.get('settlementUrl') ?? '').trim();
+  const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
   const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), credentials.signingSecret);
   if (settlementUrl) credentials.settlementUrl = settlementUrl;
   if (signingSecret) credentials.signingSecret = signingSecret;
@@ -256,6 +277,9 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
     if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
     if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
   }
+  // Fix 22: webhook-driven rails check the EFFECTIVE URL; others only a submitted one.
+  const isWebhookDriven = providerType === 'http' || providerType === 'simulator';
+  assertSettlementUrlAllowed(isWebhookDriven ? credentials.settlementUrl : submittedSettlementUrl || undefined, providerType);
 
   await store.saveIntegrations(id, {
     ...existing,
@@ -457,6 +481,9 @@ export async function wizardCreatePartnerAction(
     if (!credentials.signingSecret) credentials.signingSecret = randomBytes(32).toString('hex');
     if (!webhookSecret) webhookSecret = randomBytes(32).toString('hex');
   }
+  // Fix 22: refuse an unsafe / missing endpoint BEFORE any write (beside the
+  // pnid gate above), so a refusal never leaves an orphan partner behind.
+  assertSettlementUrlAllowed(credentials.settlementUrl, providerType);
   const whatsappConfigured = Boolean(clean(wa.phoneNumberId) && clean(wa.token));
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
   // The partner row and its integrations commit in ONE transaction (fix 1

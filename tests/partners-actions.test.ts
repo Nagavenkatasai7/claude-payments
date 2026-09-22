@@ -72,6 +72,7 @@ import {
   saveSupportConfigAction,
   createPartnerStaffAction,
   saveWhatsappConfigAction,
+  savePaymentConfigAction,
 } from '@/app/admin-dashboard/partners/actions';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { createPartnerStore } from '@/lib/partner-store';
@@ -489,5 +490,99 @@ describe('WhatsApp number routing is identity (fix 1, D11)', () => {
     expect(rejected).toHaveLength(1);
     expect((rejected[0].reason as Error).message).toBe('That WhatsApp number cannot be used.');
     expect((await ps.listPartners()).length).toBe(before + 1); // no orphan ACTIVE partner from the loser
+  });
+});
+
+describe('settlement URL is validated at save time (Program-Fix 22, acceptance tests 10 and 11)', () => {
+  const MSG = 'Settlement endpoint must be a public https:// URL.';
+  const staff = (o: { role: 'admin' | 'agent'; partnerId?: string }) => ({ username: 'u', ...o });
+  const form = (values: Record<string, string>): FormData => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(values)) fd.set(k, v);
+    return fd;
+  };
+  let integrations: ReturnType<typeof createPartnerIntegrationsStore>;
+  beforeEach(async () => {
+    await seedPartner(db, 'acme');
+    await seedPartner(db, 'beta');
+    integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7)));
+    await integrations.saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'http', credentials: { settlementUrl: 'https://rail.acme-test.com/settle', signingSecret: 'sgn' } },
+    });
+  });
+
+  it.each([
+    'http://169.254.169.254/',
+    'https://localhost/x',
+    'https://10.0.0.1/settle',
+    'https://user:pw@rail.acme-test.com/settle',
+    'https://rail.acme-test.com:8443/settle',
+    'https://metadata/',
+    'ftp://rail.acme-test.com/',
+  ])('a partner admin scoped to A saving %s for A gets the generic message and the row is unchanged', async (url) => {
+    currentStaff = staff({ role: 'admin', partnerId: 'acme' });
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: url }))).rejects.toThrow(MSG);
+    const after = await integrations.getIntegrations('acme');
+    expect(after.payment.credentials?.settlementUrl).toBe('https://rail.acme-test.com/settle');
+    expect(after.payment.providerType).toBe('http');
+  });
+
+  it('a public https URL saves', async () => {
+    currentStaff = staff({ role: 'admin', partnerId: 'acme' });
+    await savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: 'https://rail2.acme-test.com/settle' }));
+    expect((await integrations.getIntegrations('acme')).payment.credentials?.settlementUrl).toBe('https://rail2.acme-test.com/settle');
+  });
+
+  it('a partner admin scoped to A saving for B gets "Partner not found." (scope gate first)', async () => {
+    currentStaff = staff({ role: 'admin', partnerId: 'acme' });
+    await expect(savePaymentConfigAction(form({ id: 'beta', providerType: 'http', settlementUrl: 'http://169.254.169.254/' }))).rejects.toThrow('Partner not found.');
+    expect((await integrations.getIntegrations('beta')).payment.credentials).toBeUndefined();
+  });
+
+  it('kept bad value (test 11): a stored invalid URL + blank field + providerType http is refused — never silently kept', async () => {
+    // Bypass the action to plant a bad stored value (pre-fix rows).
+    await integrations.saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'http', credentials: { settlementUrl: 'http://10.0.0.5/settle', signingSecret: 'sgn' } },
+    });
+    currentStaff = staff({ role: 'admin' });
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'http', settlementUrl: '' }))).rejects.toThrow(MSG);
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'simulator', settlementUrl: '' }))).rejects.toThrow(MSG);
+    // mock does not require a URL: the blank field passes and the kept value is not the gate.
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'mock', settlementUrl: '' }))).resolves.toBeUndefined();
+    // ...but a SUBMITTED bad value is still refused for mock.
+    await expect(savePaymentConfigAction(form({ id: 'acme', providerType: 'mock', settlementUrl: 'http://10.0.0.5/x' }))).rejects.toThrow(MSG);
+  });
+
+  it('http with NO stored and NO submitted URL is refused (a webhook-driven rail needs an endpoint)', async () => {
+    currentStaff = staff({ role: 'admin' });
+    await expect(savePaymentConfigAction(form({ id: 'beta', providerType: 'http', settlementUrl: '' }))).rejects.toThrow(MSG);
+    expect((await integrations.getIntegrations('beta')).payment.providerType).toBeUndefined();
+  });
+
+  it('simulator with a blank URL saves the auto-provisioned app-origin URL', async () => {
+    currentStaff = staff({ role: 'admin' });
+    await savePaymentConfigAction(form({ id: 'beta', providerType: 'simulator', settlementUrl: '' }));
+    const after = await integrations.getIntegrations('beta');
+    expect(after.payment.providerType).toBe('simulator');
+    expect(after.payment.credentials?.settlementUrl).toBe(`${process.env.APP_BASE_URL}/api/partner-rail`);
+  });
+
+  it('the wizard with a bad URL throws and NO partner row exists', async () => {
+    currentStaff = staff({ role: 'admin' });
+    for (const url of ['http://10.0.0.1', 'https://169.254.169.254/latest', 'https://localhost/x']) {
+      await expect(
+        wizardCreatePartnerAction({ name: 'Bad Rail', countries: ['US'], payment: { providerType: 'http', settlementUrl: url } }),
+      ).rejects.toThrow(MSG);
+    }
+    const seeded = new Set(['default', 'acme', 'beta']);
+    expect((await ps.listPartners()).filter((p) => !seeded.has(p.id))).toHaveLength(0);
+    // http with no URL at all is refused too; simulator auto-provisions and passes.
+    await expect(
+      wizardCreatePartnerAction({ name: 'No Rail', countries: ['US'], payment: { providerType: 'http' } }),
+    ).rejects.toThrow(MSG);
+    const ok = await wizardCreatePartnerAction({ name: 'Sim', countries: ['US'], payment: { providerType: 'simulator' } });
+    expect(ok.settlementConfigured).toBe(true);
   });
 });
