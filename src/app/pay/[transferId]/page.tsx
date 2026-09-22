@@ -5,6 +5,9 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-config';
 import type { CountryCode } from '@/lib/types';
 import { draftTenant } from '@/lib/legacy-tenant';
+import { accountLast4, isMaskedDestination } from '@/lib/payout-format';
+import { getDb } from '@/db/client';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { PayForm } from './pay-form';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
@@ -57,6 +60,12 @@ function Row({
   );
 }
 
+/** fix 6: last-4 label for a REAL stored destination (this page is link-reachable without OTP — never more than 4 digits). */
+function savedAccountLabelFor(dest: string): string {
+  const l4 = accountLast4(dest);
+  return l4 ? `account ending ${l4}` : 'the saved account';
+}
+
 /**
  * Format any amount in any ISO-4217 currency using Intl.NumberFormat.
  * Gives ₹ for INR, £ for GBP, AED for AED, $ for USD, etc.
@@ -104,6 +113,7 @@ export default async function PayPage({
     // destination) — the sender enters recipient bank details on the secure page.
     // A re-opened link whose destination is already set skips Step 1 (bodyless POST).
     needsBankDetails: boolean;
+    savedAccountLabel: string | null; // fix 6: non-null ⇒ the single-step form offers "Edit bank details"
   };
 
   let view: View | null = null;
@@ -112,6 +122,14 @@ export default async function PayPage({
 
   if (transfer) {
     brandPartnerId = transfer.partnerId;
+    // fix 6 (ctx-01): decide Step 1 and the Edit offer on the explicit decrypted
+    // read (boolean + last-4 label only); Edit only where the guarded write would
+    // accept it (consumer, uncharged, awaiting, not partner-API-minted).
+    const storedTransferDest =
+      ((await getStore().getTransferDecrypted(transferId))?.payoutDestination ?? '').trim();
+    const transferNeedsDetails = storedTransferDest === '' || isMaskedDestination(storedTransferDest);
+    const transferEditable =
+      !transferNeedsDetails && (await createTransferRepo(getDb()).isPayoutEditable(transfer.id, transfer.partnerId));
     const destCurrency: string = transfer.destinationCurrency ?? 'INR';
     const sourceCurrency: string = transfer.sourceCurrency ?? 'USD';
     view = {
@@ -129,7 +147,8 @@ export default async function PayPage({
       // Usually a re-opened link with the destination already set → skip Step 1.
       // But a SCHEDULED/cron transfer is created with an EMPTY destination (Item
       // 2: never collected in chat) — collect the recipient's bank details here.
-      needsBankDetails: (transfer.payoutDestination ?? '').trim() === '',
+      needsBankDetails: transferNeedsDetails,
+      savedAccountLabel: transferEditable ? savedAccountLabelFor(storedTransferDest) : null,
     };
   } else {
     // Dual-lookup: treat the segment as a draftId
@@ -144,11 +163,12 @@ export default async function PayPage({
         draft.quote.totalChargeSource ??
         draft.quote.totalChargeUsd ??
         draft.amountSource + feeSource;
-      // A cold-start draft carries NO bank string (Item 2: details are entered
-      // here on the secure page). An old in-flight draft created before Item 2
-      // may already have draft.recipient.payoutDestination — skip Step 1 and let
-      // the bodyless POST fall back to that stored destination.
-      const hasStoredDest = (draft.recipient.payoutDestination ?? '').trim() !== '';
+      // A cold-start draft carries NO bank string (Item 2). A draft carrying a REAL
+      // stored destination (rehydrated server-side) skips Step 1 but offers "Edit bank
+      // details" on a consumer draft. fix 6: a MASKED placeholder is not a stored
+      // destination — collect it on Step 1 like a cold start.
+      const storedDraftDest = (draft.recipient.payoutDestination ?? '').trim();
+      const hasStoredDest = storedDraftDest !== '' && !isMaskedDestination(storedDraftDest);
       view = {
         id: transferId,
         recipientName: draft.recipient.name,
@@ -162,6 +182,7 @@ export default async function PayPage({
         fundingMethod: draft.fundingMethod,
         awaitingPayment: true, // a draft is always awaiting payment
         needsBankDetails: !hasStoredDest,
+        savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
       };
     }
   }
@@ -215,6 +236,7 @@ export default async function PayPage({
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}
+            savedAccountLabel={view.savedAccountLabel}
             recipientName={view.recipientName}
             fundingMethod={view.fundingMethod}
             summary={{

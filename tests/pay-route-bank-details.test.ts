@@ -6,10 +6,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
+import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import type { Transfer } from '@/lib/types';
 
 // Keep the real NextRequest/NextResponse; only no-op after() so stage-2 never runs.
@@ -106,7 +108,7 @@ function post(id: string, body?: unknown) {
       ? { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }
       : {}),
   });
-  return POST(req, { params: Promise.resolve({ transferId: id }) }) as Promise<{ status: number }>;
+  return POST(req, { params: Promise.resolve({ transferId: id }) }) as Promise<Response>;
 }
 
 beforeEach(async () => {
@@ -172,5 +174,117 @@ describe('pay route — scheduled transfer with no bank details (Item 2)', () =>
     const res = await post('s4');
     expect(res.status).toBe(403);
     expect(await status('s4')).toBe('awaiting_payment'); // never charged
+  });
+});
+
+describe('pay route — existing-transfer payout writes (fix 6 / ctx-01)', () => {
+  const EDIT = { country: 'IN', fields: { accountNumber: '987654321098', ifsc: 'SBIN0001234' } };
+
+  it('a masked stored destination is treated as NO destination: bodyless → 400, never charged, row untouched', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'm1', payoutDestination: '****9012' }));
+    expect((await store.getTransfer('m1'))?.payoutDestination).toBe('****9012');
+    expect((await post('m1')).status).toBe(400);
+    expect(await status('m1')).toBe('awaiting_payment');
+    expect((await store.getTransferDecrypted('m1'))?.payoutDestination).toBe('****9012');
+  });
+
+  it('the same row + a VALID body → the real destination replaces the mask, then it charges', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'm2', payoutDestination: '****9012' }));
+    const res = await post('m2', { country: 'IN', fields: { accountNumber: '123456789012', ifsc: 'HDFC0001234' } });
+    expect(res.status).toBe(200);
+    expect(await status('m2')).toBe('paid');
+    expect((await store.getTransferDecrypted('m2'))?.payoutDestination).toContain('123456789012');
+  });
+
+  it("a row poisoned with '****' (default read '********') also needs bank details", async () => {
+    await store.saveTransfer(makeTransfer({ id: 'm3', payoutDestination: '****' }));
+    expect((await post('m3')).status).toBe(400);
+  });
+
+  it('Edit bank details REPLACES a real stored destination on a consumer row — and the encrypted legal name survives (no whole-row re-save)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'e1', payoutDestination: '123456789 HDFC0001234', recipientLegalName: 'Mother Legal Name' }));
+    const res = await post('e1', EDIT);
+    expect(res.status).toBe(200);
+    expect(await status('e1')).toBe('paid');
+    const full = await store.getTransferDecrypted('e1');
+    expect(full?.payoutDestination).toContain('987654321098');
+    expect(full?.recipientLegalName).toBe('Mother Legal Name');
+    const audit = (await db.execute(sql`SELECT action, subject_id, meta FROM audit_events WHERE subject_id = 'e1'`)) as unknown as { rows: Array<{ action: string; meta: { last4: string } }> };
+    expect(audit.rows.map((r) => r.action)).toContain('transfer.payout_edit');
+    expect(JSON.stringify(audit.rows)).not.toContain('987654321098');
+  });
+
+  it('a CHARGED awaiting row (fundingRef set) is never edited: 409, destination unchanged', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'e2', payoutDestination: '123456789 HDFC0001234', fundingRef: 'mockfund-e2' }));
+    const res = await post('e2', EDIT);
+    expect(res.status).toBe(409);
+    expect((await store.getTransferDecrypted('e2'))?.payoutDestination).toBe('123456789 HDFC0001234');
+  });
+
+  it('RACE: a concurrent no-body POST settles the row between our read and the Edit write → current truth, never reverted', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'e3', payoutDestination: '123456789 HDFC0001234' }));
+    const realDecrypt = store.getTransferDecrypted.bind(store);
+    vi.spyOn(store, 'getTransferDecrypted').mockImplementationOnce(async (id: string) => {
+      const before = await realDecrypt(id);
+      await store.updateTransferFromWebhook(id, 'paid'); // the other POST won
+      return before;
+    });
+    const res = await post('e3', EDIT);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, status: 'paid' });
+    expect(await status('e3')).toBe('paid');
+    expect((await store.getTransferDecrypted('e3'))?.payoutDestination).toBe('123456789 HDFC0001234');
+  });
+
+  it('RACE: a concurrent hold (in_review) is never reverted to awaiting_payment by an Edit', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'e4', payoutDestination: '123456789 HDFC0001234' }));
+    const realDecrypt = store.getTransferDecrypted.bind(store);
+    vi.spyOn(store, 'getTransferDecrypted').mockImplementationOnce(async (id: string) => {
+      const before = await realDecrypt(id);
+      await store.updateTransferIfStatus(id, 'awaiting_payment', { status: 'in_review' });
+      return before;
+    });
+    const res = await post('e4', EDIT);
+    expect(await res.json()).toMatchObject({ ok: true, status: 'in_review' });
+    expect(await status('e4')).toBe('in_review');
+    expect((await store.getTransferDecrypted('e4'))?.payoutDestination).toBe('123456789 HDFC0001234');
+  });
+
+  it("a PARTNER-API-minted row's beneficiary is never payer-editable: 409, unchanged", async () => {
+    await store.saveTransfer(makeTransfer({ id: 'e5', payoutDestination: '123456789 HDFC0001234' }));
+    await createIdempotencyRepo(db).claim('default', 'order-8841', 'e5');
+    const res = await post('e5', EDIT);
+    expect(res.status).toBe(409);
+    expect((await store.getTransferDecrypted('e5'))?.payoutDestination).toBe('123456789 HDFC0001234');
+  });
+
+  it("a body NEVER touches a B2B transfer's payee: its stored destination is kept and it settles as before", async () => {
+    await store.saveTransfer(makeTransfer({
+      id: 'e6', transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+      fundingMethod: 'bank_pull', payoutDestination: '123456789 HDFC0001234',
+    }));
+    expect((await post('e6', EDIT)).status).toBe(200);
+    expect((await store.getTransferDecrypted('e6'))?.payoutDestination).toBe('123456789 HDFC0001234');
+  });
+
+  it("the body's country must be the payment's own destination country; a CONSUMER row carrying a partner-pulled method is refused outright", async () => {
+    await store.saveTransfer(makeTransfer({ id: 'c1', payoutDestination: '' }));
+    const res = await post('c1', { country: 'GB', fields: { accountNumber: '12345678', sortCode: '123456' } });
+    expect(res.status).toBe(400);
+    expect((await store.getTransferDecrypted('c1'))?.payoutDestination).toBe('');
+    await store.saveTransfer(makeTransfer({ id: 'c2', payoutDestination: '123456789 HDFC0001234', fundingMethod: 'bank_pull' }));
+    expect((await post('c2')).status).toBe(400);
+    expect(await status('c2')).toBe('awaiting_payment'); // never charged, never instructed
+  });
+
+  it('an HK or MX consumer row accepts its own country\'s bank form (the route knows every CountryCode)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'hk1', destinationCountry: 'HK', destinationCurrency: 'HKD' }));
+    expect((await post('hk1', { country: 'HK', fields: { bankCode: '004', branchCode: '123', accountNumber: '123456789' } })).status).toBe(200);
+    expect(await status('hk1')).toBe('paid');
+    expect((await store.getTransferDecrypted('hk1'))?.payoutDestination).toBe('004 123 123456789');
+    await store.saveTransfer(makeTransfer({ id: 'mx1', destinationCountry: 'MX', destinationCurrency: 'MXN' }));
+    expect((await post('mx1', { country: 'MX', fields: { clabe: '012345678901234567' } })).status).toBe(200);
+    expect(await status('mx1')).toBe('paid');
+    expect((await store.getTransferDecrypted('mx1'))?.payoutDestination).toBe('012345678901234567');
   });
 });
