@@ -44,6 +44,8 @@ export const partners = pgTable('partners', {
   kycMode: text('kyc_mode').notNull().default('ours'),
   requireKycBeforeSend: boolean('require_kyc_before_send'),
   corridorCompliance: jsonb('corridor_compliance'),
+  // Program fix 16 (0018): PartnerSendLimits — tighten-only in fix 16, audited raises in 16b.
+  sendLimits: jsonb('send_limits'),
   supportConfig: jsonb('support_config'), // PartnerSupportConfig (absent ⇒ defaults)
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -229,6 +231,8 @@ export const customers = pgTable(
     sourceOfFunds: text('source_of_funds'),
     occupation: text('occupation'),
     eddCapturedAt: timestamp('edd_captured_at', { withTimezone: true }),
+    // Program fix 16 (0018): SendLimitOverride — declared + read here, written by fix 16b.
+    sendLimitOverride: jsonb('send_limit_override'),
     lastFundingMethod: text('last_funding_method'),
     lastFundingMethodAt: timestamp('last_funding_method_at', { withTimezone: true }),
     passwordHash: text('password_hash'),

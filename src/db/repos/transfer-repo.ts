@@ -27,6 +27,13 @@ export interface Page<T> {
   nextCursor?: string;
 }
 
+/** Program fix 16: one sender's ledger totals for the cap, velocity and EDD checks. */
+export interface SenderTotals {
+  todayUsdCents: number;
+  todayCount: number;
+  monthUsdCents: number;
+}
+
 function cursorOf(t: Transfer): string {
   return `${t.createdAt}|${t.id}`;
 }
@@ -675,6 +682,51 @@ export function createTransferRepo(
         .where(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone)));
       const v = rows[0]?.min;
       return v ? new Date(v).toISOString() : null;
+    },
+
+    /**
+     * Program fix 16 (Task 10): the send-cap, velocity and EDD totals in ONE
+     * indexed query (transfers_phone_created) over a plain created_at range —
+     * no Redis counter decides a cap or a flag any more. Tenant-scoped.
+     *   todayUsdCents  = Σ amount_usd (cents) since dayStart, excluding blocked
+     *                    and cancelled (a cancelled row moved no money: fix 9's
+     *                    void, fix 8's rail failure) — the daily cap;
+     *   todayCount     = rows since dayStart excluding only blocked (awaiting
+     *                    rows count, like countByPhone) — the velocity flag;
+     *   monthUsdCents  = Σ amount_usd since monthStart with the same exclusions
+     *                    — the rolling-month EDD total.
+     * The bounds are passed in (dates.ts easternDayStart/easternMonthStart)
+     * so fake timers work and the query is a plain range. Under the sender
+     * lock (store.mintUnderSenderLock, READ COMMITTED) this sees the previous
+     * holder's committed insert.
+     */
+    async senderTotalsSince(
+      partnerId: PartnerId,
+      phone: string,
+      dayStart: Date,
+      monthStart: Date,
+    ): Promise<SenderTotals> {
+      const rows = await db
+        .select({
+          todayUsdCents: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.createdAt} >= ${dayStart} and ${transfers.status} not in ('blocked', 'cancelled')), 0)::bigint`,
+          todayCount: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${dayStart} and ${transfers.status} != 'blocked')::int`,
+          monthUsdCents: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.status} not in ('blocked', 'cancelled')), 0)::bigint`,
+        })
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.partnerId, partnerId),
+            eq(transfers.phone, phone),
+            sql`${transfers.createdAt} >= ${monthStart}`,
+          ),
+        );
+      const r = rows[0];
+      // bigint sums arrive as strings from pg; cents fit a JS number.
+      return {
+        todayUsdCents: Number(r?.todayUsdCents ?? 0),
+        todayCount: Number(r?.todayCount ?? 0),
+        monthUsdCents: Number(r?.monthUsdCents ?? 0),
+      };
     },
 
     /**

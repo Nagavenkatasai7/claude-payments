@@ -12,6 +12,7 @@ describe('P2 hard rule: bot never mentions partner in any chat content', () => {
     'src/lib/agent.ts',
     'src/lib/tools.ts',
     'src/lib/recent-transfers.ts',
+    'src/lib/untrusted-text.ts',
     'tests/agent.test.ts',
     'tests/e2e.test.ts',
   ];
@@ -40,7 +41,7 @@ describe('P4 currency note guards', () => {
 });
 
 describe('P5 corridor guards: bot never surfaces corridor/compliance config', () => {
-  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts', 'src/lib/recent-transfers.ts'];
+  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts', 'src/lib/recent-transfers.ts', 'src/lib/untrusted-text.ts'];
   const forbidden = ['corridor', 'watchlist', 'corridorcompliance', 'sanctions'];
 
   for (const rel of filesToScan) {
@@ -65,7 +66,7 @@ describe('P5 corridor guards: bot never surfaces corridor/compliance config', ()
 });
 
 describe('KYC guards: bot never leaks PII values or EDD internals to chat content', () => {
-  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts', 'src/lib/recent-transfers.ts'];
+  const filesToScan = ['src/lib/prompt.ts', 'src/lib/agent.ts', 'src/lib/tools.ts', 'src/lib/recent-transfers.ts', 'src/lib/untrusted-text.ts'];
   // Stored-PII / internal terms that must never appear inside a chat content literal.
   const forbidden = ['govidnumber', 'gov_id', 'residentialaddress', 'pepdeclared', 'eddcapturedat'];
 
@@ -88,21 +89,24 @@ describe('KYC guards: bot never leaks PII values or EDD internals to chat conten
   });
 });
 
-describe('transfer-memory: recent-transfers module + rendered note stay partner-/compliance-blind', () => {
-  it('the module source contains none of the forbidden tenant/compliance terms', () => {
-    const src = readFileSync(resolve(process.cwd(), 'src/lib/recent-transfers.ts'), 'utf-8').toLowerCase();
-    for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'compliance'])
-      expect(src).not.toContain(term);
+describe('transfer-memory: the context builder modules + the rendered context stay partner-/compliance-blind', () => {
+  it('the recent-transfers and untrusted-text module sources contain none of the forbidden tenant/compliance terms', () => {
+    for (const rel of ['src/lib/recent-transfers.ts', 'src/lib/untrusted-text.ts']) {
+      const src = readFileSync(resolve(process.cwd(), rel), 'utf-8').toLowerCase();
+      for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'compliance'])
+        expect(src, `${rel}: ${term}`).not.toContain(term);
+    }
     // 'blocked' MUST appear once — as the STATUS_LABEL KEY mapping to 'on hold' —
     // but never as a value the customer sees. Assert the mapping is to 'on hold'.
-    expect(src).toContain("blocked: 'on hold'");
+    const recent = readFileSync(resolve(process.cwd(), 'src/lib/recent-transfers.ts'), 'utf-8').toLowerCase();
+    expect(recent).toContain("blocked: 'on hold'");
   });
 
-  it('a rendered note (incl. a blocked transfer) leaks no tenant/compliance internals', async () => {
+  it('the rendered get_customer_context result (incl. a blocked transfer) leaks no tenant/compliance internals', async () => {
     const { createStore } = await import('@/lib/store');
     const { fakeRedis } = await import('./helpers');
     const { freshDb } = await import('./helpers-db');
-    const { getRecentTransfersNote } = await import('@/lib/recent-transfers');
+    const { buildCustomerContext } = await import('@/lib/tools');
     // Transfers live in Postgres now (core ledger cutover).
     const db = await freshDb();
     const store = createStore(fakeRedis(), db);
@@ -118,8 +122,11 @@ describe('transfer-memory: recent-transfers module + rendered note stay partner-
     await store.saveTransfer({ ...base, id: 'g2', recipientName: 'Ravi', status: 'blocked',
       createdAt: '2026-05-27T12:00:00Z' } as never);
 
-    const note = (await getRecentTransfersNote('default', '+1555', store)).toLowerCase();
-    for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'blocked', 'compliance', 'partnerid'])
+    const context = await buildCustomerContext({
+      phone: '+1555', partnerId: 'default', store, turn: { isNewConversation: false },
+    } as unknown as import('@/lib/tools').ToolContext);
+    const note = JSON.stringify(context).toLowerCase();
+    for (const term of ['partner', 'corridor', 'watchlist', 'sanctions', 'blocked', 'compliance', 'partnerid', 'payout', 'mom@upi'])
       expect(note).not.toContain(term);
     expect(note).toContain('mom');     // customer-owned data IS present
     expect(note).toContain('on hold'); // blocked surfaced as the soft label

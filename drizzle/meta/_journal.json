@@ -127,6 +127,13 @@
       "when": 1790047171245,
       "tag": "0017_waitlist_and_partner_type",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790056747009,
+      "tag": "0018_send_limits",
+      "breakpoints": true
     }
   ]
 }
