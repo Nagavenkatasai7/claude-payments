@@ -80,6 +80,7 @@ export function SendLimitsCard(p: SendLimitsCardProps) {
         </dl>
         <p className="mt-3 text-xs text-muted-foreground">
           A raise lifts only the dollar caps, up to {usd(SEND_LIMIT_HARD_CEILING_CENTS)} per transfer and per day.
+          A single transfer is also bounded by the daily cap, so raise both fields together.
           Sanctions screening, EDD ($3,000/month) and the first-3-days tier gate still apply. Every change is audited.
         </p>
 
