@@ -18,6 +18,7 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { encryptField, defaultProvider } from '@/lib/field-crypto';
+import { clientIpFrom } from '@/lib/ip-rate-limit';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -61,10 +62,9 @@ function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? '');
 }
 
+/** The caller's IP via the ONE shared trust rule (first x-forwarded-for hop, then x-real-ip, else 'unknown'). */
 async function clientIp(): Promise<string> {
-  const h = await headers();
-  const fwd = h.get('x-forwarded-for') ?? '';
-  return fwd.split(',')[0].trim() || h.get('x-real-ip') || 'unknown';
+  return clientIpFrom(await headers());
 }
 
 /**
@@ -341,8 +341,10 @@ export async function resetAction(
   if (!updated) return { step: 'login', error: SESSION_EXPIRED };
 
   // The WhatsApp OTP proved the number: lift the phone's login lock (fix 19).
-  // This is the owner's way out of a lock that many strangers' IPs filled.
-  await authStore.clearLoginFailures(phone);
+  // This is the owner's way out of a lock that many strangers' IPs filled. The
+  // resetter's own (phone, IP) hourly bucket is cleared too — it is their IP, and
+  // otherwise the NEW password would be refused at home for the rest of the hour.
+  await authStore.clearLoginFailures(phone, await clientIp());
 
   await getPendingAuthStore().consume(pendingToken); // single-use
   return { step: 'login', notice: 'Password reset. Please sign in with your new password.' };

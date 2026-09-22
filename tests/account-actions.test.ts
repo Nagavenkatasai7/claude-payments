@@ -338,17 +338,27 @@ describe('loginAction — attempt caps without third-party lockout (fix 19)', ()
     expect(cookieSet).toHaveBeenCalled();
   });
 
-  it('30 reservations over 4 IPs lock the phone for every IP; a successful reset unlocks it the same day', async () => {
+  it('30 failures over 3 IPs lock the phone for every IP; a reset from the owner IP unlocks that IP the same hour', async () => {
     await registerVerified();
-    const ips = ['198.51.100.11', '198.51.100.12', '198.51.100.13', '198.51.100.14'];
-    for (let i = 0; i < 30; i++) expect(await authStore.reserveLoginAttempt(NORM, ips[i % 4])).toBe(true);
-    clientIpHeader = '198.51.100.99'; // an IP that never failed
-    const locked = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
-    expect(locked.step).toBe('login');
-    expect(locked.error).toBe('Invalid phone or password.');
+    // The owner's own IP fails 10 times (its hourly bucket is full) …
+    clientIpHeader = IP_A;
+    for (let i = 0; i < 10; i++) {
+      expect((await loginAction(null, form({ phone: PHONE, password: 'wrong' }))).step).toBe('login');
+    }
+    // … and two strangers fill the rest of the phone/day ceiling.
+    for (let i = 0; i < 20; i++) {
+      expect(await authStore.reserveLoginAttempt(NORM, i % 2 ? '198.51.100.12' : '198.51.100.13')).toBe(true);
+    }
+    for (const ip of [IP_A, '198.51.100.99' /* never failed */]) {
+      clientIpHeader = ip;
+      const locked = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+      expect(locked.step).toBe('login');
+      expect(locked.error).toBe('Invalid phone or password.');
+    }
     expect(cookieSet).not.toHaveBeenCalled();
 
-    // The owner proves the phone over WhatsApp and resets the password.
+    // The owner proves the phone over WhatsApp and resets the password FROM HOME (ip-A).
+    clientIpHeader = IP_A;
     otpNowMs += 31_000; // past the per-phone resend cooldown
     const req = await requestResetAction(null, form({ phone: PHONE }));
     expect(req.pendingToken).toBeTruthy();
@@ -360,7 +370,8 @@ describe('loginAction — attempt caps without third-party lockout (fix 19)', ()
     expect(reset.step).toBe('login');
     expect(reset.notice).toMatch(/password reset/i);
 
-    // Unlocked: the new password logs in from the same IP, same day.
+    // Unlocked at home: the new password logs in from ip-A, same hour, same day —
+    // the reset cleared the phone/day ceiling AND the resetter's own (phone, IP) bucket.
     await expect(loginAction(null, form({ phone: PHONE, password: NEW_PASSWORD }))).rejects.toThrow(
       'REDIRECT:/account',
     );
