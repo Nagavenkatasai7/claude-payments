@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt } from '@/lib/transfer-create';
+import { createTransfer, quoteOverrideFromDraft, recordBlockedAttempt, TransferIdConflictError } from '@/lib/transfer-create';
 import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -835,6 +835,8 @@ describe('createTransfer — send caps from the ledger (Program fix 16)', () => 
     const { db, store, partnerStore, mvs } = await makeStores();
     await seedPartner(db, 'acme');
     await seedLedgerSpend(db, { partnerId: 'acme', phone: T0_PHONE, amountUsd: 10, id: 'cross_1' });
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, id: 'cross_1', phone: T0_PHONE }))
+      .rejects.toBeInstanceOf(TransferIdConflictError);
     await expect(createTransfer(store, partnerStore, mvs, { ...base, id: 'cross_1', phone: T0_PHONE }))
       .rejects.toThrow('transfer_id_conflict');
     const row = await store.getTransfer('cross_1');

@@ -130,6 +130,9 @@ describe('store ledger totals (Program fix 16: no Redis counters)', () => {
     expect(await store.getTodayTransferCount('default', 'p')).toBe(2);
     expect(await store.getTodayTransferCount('acme', 'p')).toBe(0);
     expect('incrementTodayTransferCount' in store).toBe(false);
+    // Review SHOULD 2: no `this` — the method survives destructuring / partial mocks.
+    const { getTodayTransferCount } = store;
+    expect(await getTodayTransferCount('default', 'p')).toBe(2);
   });
 
   it('senderTotals reads the ledger; a Redis flush mid-test leaves the totals unchanged (test 18)', async () => {
