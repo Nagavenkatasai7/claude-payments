@@ -49,11 +49,20 @@ export const env = {
   get emailFrom(): string {
     return process.env.EMAIL_FROM ?? (this.smtpUser ? `SmartRemit <${this.smtpUser}>` : '');
   },
-  // Vercel Blob — document uploads for the detailed partner application. OPTIONAL
-  // (boot-assert never requires it): unset ⇒ uploads are gated with a friendly
-  // message and the text application still submits.
+  // Vercel Blob — the OLD public store's token (fix 24: it no longer receives
+  // uploads). Kept only so the one-off owner script can `del()` the old public
+  // objects after re-issuing them; the store can be deleted once that has run.
   get blobReadWriteToken(): string {
     return process.env.BLOB_READ_WRITE_TOKEN ?? '';
+  },
+  // Fix 24: the PRIVATE Blob store that holds partner licence / KYB / AML
+  // documents. OPTIONAL (boot-assert never requires it): unset ⇒ uploads are
+  // gated with a friendly 503 and the text application still submits. It is
+  // passed EXPLICITLY on every put/get so SDK auth is deterministic even while
+  // the old public store's BLOB_READ_WRITE_TOKEN is still connected — there is
+  // no fallback from this token to that one, by design.
+  get partnerDocsBlobToken(): string {
+    return process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN ?? '';
   },
   get ollamaBaseUrl() {
     return required('OLLAMA_BASE_URL');
