@@ -40,10 +40,32 @@ const redirectMock = vi.fn((path: string) => {
 });
 vi.mock('next/navigation', () => ({ redirect: (p: string) => redirectMock(p) }));
 
+// Fix 21: requestResetAction sends the reset code AFTER the response via
+// next/server's after(). Capture the callbacks so a test can assert what was
+// (not) sent before and after the response, then drain them explicitly. When
+// `afterThrows` is set the mock behaves like a call outside a request scope.
+const afterQueue: Array<() => unknown> = [];
+let afterThrows = false;
+vi.mock('next/server', async (orig) => {
+  const real = await orig<typeof import('next/server')>();
+  return {
+    ...real,
+    after: (task: () => unknown) => {
+      if (afterThrows) throw new Error('`after` was called outside a request scope.');
+      afterQueue.push(task);
+    },
+  };
+});
+async function runAfter(): Promise<void> {
+  const tasks = afterQueue.splice(0);
+  for (const t of tasks) await t();
+}
+
 // pg-backed: the auth store needs a customer store over a fresh Postgres per
 // test — module-scope `let` rebuilt in beforeEach (NEVER inside the hoisted
 // vi.mock factory; the closure below dereferences it at call time).
 let authStore: ReturnType<typeof createCustomerAuthStore>;
+let customerStore: ReturnType<typeof createCustomerStore>;
 // Relative clock seam for the OTP store so a test can step past the 30-s
 // per-phone resend cooldown (it spans purposes: register → reset).
 let otpNowMs = Date.now();
@@ -112,8 +134,11 @@ beforeEach(async () => {
   cookieSet.mockClear();
   cookieDelete.mockClear();
   redirectMock.mockClear();
+  afterQueue.length = 0;
+  afterThrows = false;
   const db = await freshDb();
-  authStore = createCustomerAuthStore(redis, createCustomerStore(db, createStore(fakeRedis(), db)));
+  customerStore = createCustomerStore(db, createStore(fakeRedis(), db));
+  authStore = createCustomerAuthStore(redis, customerStore);
 });
 
 describe('registerAction', () => {
@@ -211,7 +236,34 @@ describe('resendOtpAction', () => {
     const reg = await register();
     expect(sentCodes).toHaveLength(1);
     await resendOtpAction(null, form({ pendingToken: reg.pendingToken! }));
+    await runAfter(); // fix 21: resend work is post-response too
     expect(sentCodes).toHaveLength(1); // 30s cooldown
+  });
+
+  it('does the same pre-response work for a registered and an unregistered reset token, and never sends to a non-account (fix 21)', async () => {
+    await register();
+    sentCodes.length = 0;
+    otpNowMs += 31_000;
+    const registered = await requestResetAction(null, form({ phone: PHONE }));
+    const unregistered = await requestResetAction(null, form({ phone: '+1 (202) 555-0199' }));
+    await runAfter();
+    expect(sentCodes).toHaveLength(1); // the request itself: one code, registered phone
+    sentCodes.length = 0;
+    otpNowMs += 31_000; // past the cooldown so a registered resend really re-sends
+
+    const a = await resendOtpAction(null, form({ pendingToken: unregistered.pendingToken! }));
+    expect(afterQueue).toHaveLength(1); // queued, not sent, exactly like a real account
+    const b = await resendOtpAction(null, form({ pendingToken: registered.pendingToken! }));
+    expect(afterQueue).toHaveLength(2);
+    expect(sentCodes).toHaveLength(0); // nothing goes out while either response is built
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+    expect(a.step).toBe('otp');
+    expect(a.notice).toBe(b.notice);
+
+    await runAfter();
+    expect(sentCodes).toHaveLength(1);
+    expect(sentCodes[0].phone).toBe(NORM); // the unregistered number never receives a code
+    expect([...redis.dump.keys()].some((k) => k.startsWith('sr_otpip:'))).toBe(true); // one real send counted
   });
 });
 
@@ -362,6 +414,7 @@ describe('loginAction — attempt caps without third-party lockout (fix 19)', ()
     otpNowMs += 31_000; // past the per-phone resend cooldown
     const req = await requestResetAction(null, form({ phone: PHONE }));
     expect(req.pendingToken).toBeTruthy();
+    await runAfter(); // fix 21: the code goes out after the response
     expect(sentCodes).toHaveLength(1);
     const reset = await resetAction(
       null,
@@ -398,6 +451,121 @@ describe('loginAction — attempt caps without third-party lockout (fix 19)', ()
     await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow(
       'REDIRECT:/account',
     );
+  });
+});
+
+// Program-Fix 21 (F55): the reset request is not an account oracle. Every valid
+// phone gets the same reply (a fresh pending token, same step + notice); the code
+// is sent only for a real account and only AFTER the response; a reset attempted
+// with an unregistered token dead-ends like a wrong code and never sets anything.
+describe('requestResetAction / resetAction — no account enumeration (fix 21)', () => {
+  const UNREG_PHONE = '+1 (202) 555-0199';
+  const UNREG_NORM = '12025550199';
+  const NEW_PASSWORD = 'staple battery horse';
+
+  it('returns one reply shape for a registered and an unregistered valid phone', async () => {
+    await register();
+    otpNowMs += 31_000; // past the per-phone resend cooldown (register → reset)
+    const registered = await requestResetAction(null, form({ phone: PHONE }));
+    const unregistered = await requestResetAction(null, form({ phone: UNREG_PHONE }));
+
+    expect(Object.keys(registered).sort()).toEqual(Object.keys(unregistered).sort());
+    expect(registered.step).toBe('otp');
+    expect(unregistered.step).toBe('otp');
+    expect(registered.notice).toBe(unregistered.notice);
+    expect(registered.error).toBeUndefined();
+    expect(unregistered.error).toBeUndefined();
+    expect(registered.phone).toBe(NORM);
+    expect(unregistered.phone).toBe(UNREG_NORM);
+    expect(registered.pendingToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(unregistered.pendingToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(registered.pendingToken).not.toBe(unregistered.pendingToken);
+  });
+
+  it('sends the code only for the registered phone, and only AFTER the response', async () => {
+    await register();
+    sentCodes.length = 0;
+    otpNowMs += 31_000;
+    await requestResetAction(null, form({ phone: PHONE }));
+    await requestResetAction(null, form({ phone: UNREG_PHONE }));
+    expect(sentCodes).toHaveLength(0); // nothing sent while the response is being built
+    expect(afterQueue).toHaveLength(1); // exactly one post-response task was queued
+
+    await runAfter();
+    expect(sentCodes).toHaveLength(1);
+    expect(sentCodes[0].phone).toBe(NORM);
+    expect(afterQueue).toHaveLength(0);
+  });
+
+  it('a reset with an unregistered token is a dead end: wrong-code message, no row created or changed', async () => {
+    const req = await requestResetAction(null, form({ phone: UNREG_PHONE }));
+    await runAfter();
+    expect(sentCodes).toHaveLength(0);
+
+    const s = await resetAction(
+      null,
+      form({ pendingToken: req.pendingToken!, code: '123456', password: NEW_PASSWORD }),
+    );
+    expect(s.step).toBe('otp');
+    expect(s.error).toBe('That code is incorrect or expired.');
+    expect(s.phone).toBe(UNREG_NORM);
+
+    // Nothing was created for the number, and nothing that fix 19 reserves was touched:
+    // the verify hit `no_code` before any daily/per-code reservation.
+    expect(await customerStore.findByPhone(UNREG_NORM)).toEqual([]);
+    expect(await authStore.getCustomer(UNREG_NORM)).toBeNull();
+    const keys = [...redis.dump.keys()];
+    expect(keys.some((k) => k.startsWith('otp:'))).toBe(false);
+    expect(keys.some((k) => k.startsWith('sr_loginfail:'))).toBe(false);
+    expect(keys.some((k) => k.startsWith('sr_otpip:'))).toBe(false);
+    // The token is NOT consumed by a failed verify (same as a real account's wrong code).
+    expect(keys.filter((k) => k.startsWith('pending:'))).toHaveLength(1);
+    // A second guess gets the identical message.
+    const again = await resetAction(
+      null,
+      form({ pendingToken: req.pendingToken!, code: '654321', password: NEW_PASSWORD }),
+    );
+    expect(again.error).toBe('That code is incorrect or expired.');
+    expect(await customerStore.findByPhone(UNREG_NORM)).toEqual([]);
+  });
+
+  it('a registered phone still resets end to end (the code from the after() task works)', async () => {
+    await register();
+    sentCodes.length = 0;
+    otpNowMs += 31_000;
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    await runAfter();
+    expect(sentCodes).toHaveLength(1);
+    const done = await resetAction(
+      null,
+      form({ pendingToken: req.pendingToken!, code: sentCodes[0].code, password: NEW_PASSWORD }),
+    );
+    expect(done.step).toBe('login');
+    expect(done.notice).toMatch(/password reset/i);
+    expect(await authStore.verifyCustomerPassword(NORM, NEW_PASSWORD)).not.toBeNull();
+    expect(await authStore.verifyCustomerPassword(NORM, PASSWORD)).toBeNull();
+  });
+
+  it('falls back to an inline send when after() is unavailable (availability over timing)', async () => {
+    await register();
+    sentCodes.length = 0;
+    otpNowMs += 31_000;
+    afterThrows = true;
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    expect(req.step).toBe('otp');
+    expect(req.pendingToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(afterQueue).toHaveLength(0);
+    expect(sentCodes).toHaveLength(1); // sent inline
+    expect(sentCodes[0].phone).toBe(NORM);
+  });
+
+  it('an invalid phone keeps the neutral no-token reply', async () => {
+    const s = await requestResetAction(null, form({ phone: 'abc' }));
+    expect(s.step).toBe('otp');
+    expect(s.phone).toBeUndefined();
+    expect(s.pendingToken).toBeUndefined();
+    expect(afterQueue).toHaveLength(0);
+    expect(sentCodes).toHaveLength(0);
   });
 });
 

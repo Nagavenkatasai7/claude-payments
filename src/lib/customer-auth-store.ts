@@ -8,7 +8,7 @@ import { logWarn } from './log';
 import { normalizePhone, isValidPhone } from './phone';
 import { countryForPhone } from './partner-currency';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from './defaults';
-import { hashPassword, verifyPassword, needsRehash } from './password';
+import { hashPassword, verifyPassword, verifyPasswordOrDummy, needsRehash } from './password';
 import {
   encryptField,
   defaultProvider,
@@ -259,7 +259,13 @@ export function createCustomerAuthStore(
     ): Promise<Customer | null> {
       const phone = normalizePhone(phoneRaw);
       const customer = await loadAccountRow(phone);
-      if (!customer?.passwordHash) return null;
+      if (!customer?.passwordHash) {
+        // Fix 21: no account (or no password) still pays ONE Argon2id verify
+        // against the per-instance dummy hash, so a login for an unknown phone
+        // takes as long as a wrong password for a known one.
+        await verifyPasswordOrDummy(password, null);
+        return null;
+      }
 
       const ok = await verifyPassword(password, customer.passwordHash);
       if (!ok) return null;

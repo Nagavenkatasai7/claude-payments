@@ -61,6 +61,40 @@ export async function verifyPassword(
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+// Fix 21 (F62 / CWE-208): one Argon2id hash per instance, of a random secret
+// nobody knows, so a login for a MISSING account can pay the same verify as a
+// login for a real one. Memoized as a promise so concurrent first callers on a
+// cold instance share the single computation. The value is never stored,
+// logged or compared against anything real; it only burns the same work.
+let dummyHashPromise: Promise<string> | null = null;
+function dummyHash(): Promise<string> {
+  if (!dummyHashPromise) {
+    dummyHashPromise = hashPassword(randomBytes(32).toString('hex')).catch((err) => {
+      dummyHashPromise = null; // don't cache a failure
+      throw err;
+    });
+  }
+  return dummyHashPromise;
+}
+
+/**
+ * Verify a password against a stored hash that MAY be absent (unknown
+ * username / phone, or a record without a password). When `stored` is empty
+ * the same Argon2id verify runs against the per-instance dummy hash and the
+ * result is ALWAYS false, so a caller that returns one generic error cannot be
+ * told apart by response time. With a real hash this is exactly verifyPassword.
+ */
+export async function verifyPasswordOrDummy(
+  plain: string,
+  stored: string | null | undefined,
+): Promise<boolean> {
+  if (!stored) {
+    await verifyPassword(plain, await dummyHash());
+    return false;
+  }
+  return verifyPassword(plain, stored);
+}
+
 /**
  * True when `stored` should be upgraded on the next successful login: either it
  * isn't an Argon2id PHC string at all (legacy scrypt), or its m/t/p parameters
