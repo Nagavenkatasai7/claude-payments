@@ -2061,10 +2061,10 @@ async function persistEddProfile(
 }
 
 /**
- * Normalizes a model-supplied transfer_id before lookup. The [RECENT TRANSFERS]
- * note renders each id with a leading '#' (e.g. "#abc12345") and the prompt
- * tells the model it may use that exact token — so strip a leading '#' and
- * surrounding whitespace, otherwise getTransfer's exact-match never matches.
+ * Normalizes a model-supplied transfer_id before lookup. Earlier builds
+ * rendered each id with a leading '#' (e.g. "#abc12345") and conversation
+ * history still carries that form — so strip a leading '#' and surrounding
+ * whitespace, otherwise getTransfer's exact-match never matches.
  * Returns '' for a missing/non-string value (reads as not-found, never throws).
  */
 function normalizeTransferId(raw: unknown): string {
