@@ -153,7 +153,11 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const everything = JSON.stringify(seen);
     expect(everything).not.toContain('Acme Planted');
     expect(everything).not.toContain('999988887777');
-    expect(everything).not.toContain('selected_recipient');
+    // default has no ledger history and no saved recipient at the tapped number,
+    // so there is no context pair and no [RECIPIENT SELECTED] note at all.
+    const r0 = seen[0];
+    expect(r0.some((m) => m.tool_call_id === 'ctx_r0')).toBe(false);
+    expect(r0.some((m) => m.role === 'system' && (m.content ?? '').startsWith('[RECIPIENT SELECTED]'))).toBe(false);
   });
 
   it('F50/F52: the partner API never returns another tenant decrypted legal name', async () => {
