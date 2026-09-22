@@ -3,6 +3,8 @@ import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
 import type { CurrencyCode, PartnerRate, SettlementRoute } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
+import { env } from './env';
+import { checkSettlementUrl } from './settlement-url';
 
 // partner-rates — best-rate selection (internal). The platform mid-market rate
 // is ALWAYS the baseline competitor; an eligible partner wins a corridor only
@@ -84,7 +86,13 @@ export async function selectSettlementRoute(
       const integrations = await integrationsStore.getIntegrations(c.partnerId);
       const providerType = integrations.payment.providerType ?? '';
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
-      if (ROUTABLE_PROVIDER_TYPES.has(providerType) && settlementUrl.trim() !== '') {
+      // Fix 22: routable only when the endpoint passes the same sync URL rule
+      // the worker applies before any fetch — never route money into a rail
+      // whose instruct could only be refused.
+      if (
+        ROUTABLE_PROVIDER_TYPES.has(providerType) &&
+        checkSettlementUrl(settlementUrl, { appOrigin: env.appBaseUrl, production: env.isProduction }).ok
+      ) {
         return { fxRate: c.fxRate, source: 'partner', settlementPartnerId: c.partnerId };
       }
     } catch (err) {

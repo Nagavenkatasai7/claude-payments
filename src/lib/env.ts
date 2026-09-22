@@ -79,6 +79,14 @@ export const env = {
     // check (warns; preserves dev/test + current prod). Set ⇒ fail-closed 401.
     return process.env.META_APP_SECRET ?? '';
   },
+  /**
+   * True only under NODE_ENV=production. Fix 22: the settlement-URL rule's
+   * http app-origin exception (local-dev simulator) exists only when this is
+   * false. Vitest runs under NODE_ENV=test.
+   */
+  get isProduction(): boolean {
+    return process.env.NODE_ENV === 'production';
+  },
   get appBaseUrl() {
     const explicit = process.env.APP_BASE_URL;
     if (explicit && explicit.trim()) return explicit.trim().replace(/\/+$/, '');

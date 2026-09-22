@@ -246,7 +246,7 @@ describe('drainOnce — rail.callback (the reference rail settle leg)', () => {
   it('POSTs the signed paid_out callback to the public webhook', async () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
       kyc: {},
-      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://x', signingSecret: 's' }, webhookSecret: 'whk_cb' },
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail.example/x', signingSecret: 's' }, webhookSecret: 'whk_cb' },
       whatsapp: {},
     });
     fetchFn.mockResolvedValue({ ok: true });
@@ -759,6 +759,128 @@ describe('drainOnce — funding.refund on a B2B ach_pull (NON-CUSTODIAL partner 
     expect(t.refundRef).toBe('reverse-rail-9');
     const dead = await outbox.listDead();
     expect(dead).toHaveLength(0);
+  });
+});
+
+describe('drainOnce — settlement URL fails CLOSED (Program-Fix 22, acceptance tests 7 and 9)', () => {
+  const lastError = async (kind: string) =>
+    ((await db.execute(sql`SELECT status, attempts, last_error FROM outbox WHERE kind = ${kind}`)) as unknown as {
+      rows: Array<{ status: string; attempts: number; last_error: string | null }>;
+    }).rows[0];
+
+  async function railAt(settlementUrl: string) {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'http', credentials: { settlementUrl, signingSecret: 'sgn' }, webhookSecret: 'whk' },
+      whatsapp: {},
+    });
+  }
+
+  it('settlement.instruct: a stored http://10.0.0.5 URL never reaches fetchFn; the row fails with a fixed reason, backs off, dies at MAX_ATTEMPTS with the ops alert, and providerRef is never written', async () => {
+    await store.saveTransfer(transferFixture());
+    await railAt('http://10.0.0.5/settle');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+
+    let r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    let row = await lastError('settlement.instruct');
+    expect(row.status).toBe('failed');
+    expect(row.attempts).toBe(1);
+    expect(row.last_error).toBe('settlement_url_refused:scheme'); // the reason only — never the URL
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+
+    await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'settlement.instruct'`);
+    r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(1);
+    row = await lastError('settlement.instruct');
+    expect(row.status).toBe('dead');
+    expect(row.last_error).toBe('settlement_url_refused:scheme');
+    expect(fetchFn).not.toHaveBeenCalled();
+    const alerts = (await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`)) as unknown as {
+      rows: Array<{ dedupe_key: string; payload: unknown }>;
+    };
+    expect(alerts.rows).toHaveLength(1);
+    expect(alerts.rows[0].dedupe_key).toMatch(/^dead:\d+$/);
+    expect(JSON.stringify(alerts.rows[0].payload)).not.toContain('10.0.0.5');
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeFalsy();
+  });
+
+  it.each([
+    ['https://169.254.169.254/latest', 'ip_literal'],
+    ['https://user:pw@rail.acme.com/settle', 'userinfo'],
+    ['https://rail.acme.com:8443/settle', 'port'],
+    ['https://localhost/settle', 'internal_host'],
+  ])('settlement.instruct refuses %s with %s before any fetch', async (url, reason) => {
+    await store.saveTransfer(transferFixture());
+    await railAt(url);
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await lastError('settlement.instruct')).last_error).toBe(`settlement_url_refused:${reason}`);
+  });
+
+  it('funding.refund (partner reverse): the same refusal, fetchFn never called, refund stays pending, dead at the cap', async () => {
+    await store.saveTransfer({
+      ...transferFixture(),
+      fundingMethod: 'ach_pull',
+      transferType: 'b2b',
+      achTokenRef: 'ach_deadbeef',
+      refundStatus: 'pending',
+    } as Transfer);
+    await railAt('http://10.0.0.5/settle');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'never' }) });
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+
+    let r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 1, dead: 0 });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await lastError('funding.refund')).last_error).toBe('settlement_url_refused:scheme');
+    expect((await store.getTransfer('wk_t1'))!.refundStatus).toBe('pending');
+
+    await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = 'funding.refund'`);
+    r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await store.getTransfer('wk_t1'))!.refundStatus).toBe('pending');
+    expect((await store.getTransfer('wk_t1'))!.refundRef).toBeFalsy();
+  });
+
+  it('the existing https://rail.example fixture still drains through the injected fetchFn (test 8)', async () => {
+    await store.saveTransfer(transferFixture());
+    await railAt('https://rail.example/settle');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-ok' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-ok');
+  });
+
+  it('providerRef hardening (test 9): a hostile ack keeps the deterministic rail-<id>; a reverse keeps reverse-<id>', async () => {
+    await store.saveTransfer(transferFixture());
+    await railAt('https://rail.example/settle');
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: '<script>' + 'x'.repeat(300) }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-wk_t1');
+
+    // A 129-char token is refused too; 128 of the allowed alphabet is kept.
+    await store.saveTransfer({ ...transferFixture(), id: 'wk_t2' });
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'a'.repeat(129) }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t2' }, { dedupeKey: 'instruct:wk_t2' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((await store.getTransfer('wk_t2'))!.paymentProviderRef).toBe('rail-wk_t2');
+
+    await store.saveTransfer({
+      ...transferFixture(), id: 'wk_t3', fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x', refundStatus: 'pending',
+    } as Transfer);
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rev ref with spaces' }) });
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t3' }, { dedupeKey: 'refund:wk_t3' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect((await store.getTransfer('wk_t3'))!.refundRef).toBe('reverse-wk_t3');
   });
 });
 
