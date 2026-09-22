@@ -647,6 +647,8 @@ export interface PartnerRequest {
   // Stage-2 detailed application (the emailed link → form).
   applicationStatus?: string;   // 'invited' | 'completed'
   tokenExpiresAt?: string;      // ISO-8601 — when the application link expires
+  // "I am a:" (src/lib/partner-type.ts). Absent on rows captured before 0017.
+  partnerType?: 'referral' | 'business' | 'licensed_mt';
 }
 
 /** A document uploaded with a partner application (a private Vercel Blob ref). */

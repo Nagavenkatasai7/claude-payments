@@ -12,6 +12,7 @@ import {
 } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { isPartnerType } from '@/lib/partner-type';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
 import type {
@@ -181,6 +182,7 @@ function rowToPartnerRequest(row: PartnerRequestRow): PartnerRequest {
   };
   if (row.comments) r.comments = row.comments;
   if (row.tokenExpiresAt) r.tokenExpiresAt = row.tokenExpiresAt.toISOString();
+  if (isPartnerType(row.partnerType)) r.partnerType = row.partnerType;
   return r;
 }
 
@@ -195,6 +197,7 @@ export function createPartnerRequestRepo(db: DbOrTx) {
         corridors: req.corridors,
         comments: req.comments ?? null,
         capturedAt: new Date(req.capturedAt),
+        partnerType: req.partnerType ?? null,
       });
     },
 

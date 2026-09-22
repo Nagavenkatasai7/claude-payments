@@ -485,21 +485,64 @@ export const corridorRequests = pgTable('corridor_requests', {
 // Inbound "Partner with us" leads from the public landing form. A durable record
 // (the email notification is a best-effort push on top); platform staff review
 // them on /admin-dashboard/partner-requests.
-export const partnerRequests = pgTable('partner_requests', {
-  id: text('id').primaryKey(),
-  companyName: text('company_name').notNull(),
-  email: text('email').notNull(),
-  phone: text('phone').notNull(),
-  corridors: jsonb('corridors').notNull().default([]), // string[] of country codes
-  comments: text('comments'),
-  capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
-  // Stage-2 detailed application: an emailed single-use, 30-day capability link.
-  // Only the SHA-256 HASH of the URL token is stored (a DB dump leaks nothing
-  // usable). status: 'invited' (link sent) → 'completed' (form submitted ⇒ link dead).
-  applicationTokenHash: text('application_token_hash'),
-  tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
-  applicationStatus: text('application_status').notNull().default('invited'),
-});
+export const partnerRequests = pgTable(
+  'partner_requests',
+  {
+    id: text('id').primaryKey(),
+    companyName: text('company_name').notNull(),
+    email: text('email').notNull(),
+    phone: text('phone').notNull(),
+    corridors: jsonb('corridors').notNull().default([]), // string[] of country codes
+    comments: text('comments'),
+    capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
+    // Stage-2 detailed application: an emailed single-use, 30-day capability link.
+    // Only the SHA-256 HASH of the URL token is stored (a DB dump leaks nothing
+    // usable). status: 'invited' (link sent) → 'completed' (form submitted ⇒ link dead).
+    applicationTokenHash: text('application_token_hash'),
+    tokenExpiresAt: timestamp('token_expires_at', { withTimezone: true }),
+    applicationStatus: text('application_status').notNull().default('invited'),
+    // "I am a:" — referral partner | business accepting payments | licensed money
+    // transmitter (src/lib/partner-type.ts). NULLABLE: rows captured before 0017
+    // have no answer; the form makes it required at the edge.
+    partnerType: text('partner_type'),
+  },
+  (t) => [
+    check('partner_requests_partner_type_check', sql`${t.partnerType} IN ('referral','business','licensed_mt')`),
+  ],
+);
+
+// Public "Join waitlist" signups (SmartRemit's OWN marketing list — no tenant
+// column; platform staff only). PII is envelope-encrypted at rest (`*_enc`,
+// field-crypto); dedupe is enforced by KEYED blind indexes (`*_bidx`,
+// src/lib/blind-index.ts) — never an unkeyed hash of an email or phone. The
+// masked siblings (`name_initial`, `email_masked`, `phone_last4`) are computed
+// at write time so the admin list never decrypts; only the audited CSV export
+// opens the ciphertext.
+export const waitlistSignups = pgTable(
+  'waitlist_signups',
+  {
+    id: text('id').primaryKey(),
+    fullNameEnc: text('full_name_enc').notNull(), // ENCRYPTED
+    emailEnc: text('email_enc').notNull(), // ENCRYPTED
+    phoneEnc: text('phone_enc').notNull(), // ENCRYPTED (E.164)
+    locationEnc: text('location_enc').notNull(), // ENCRYPTED (city / state, free text)
+    emailBidx: text('email_bidx').notNull(), // HMAC blind index of the normalised email
+    phoneBidx: text('phone_bidx').notNull(), // HMAC blind index of the E.164 phone
+    nameInitial: text('name_initial').notNull(),
+    emailMasked: text('email_masked').notNull(),
+    phoneLast4: text('phone_last4').notNull(),
+    destinations: jsonb('destinations').notNull().default([]), // string[] of country codes
+    consentAt: timestamp('consent_at', { withTimezone: true }).notNull(),
+    consentTextVersion: text('consent_text_version').notNull(),
+    utmSource: text('utm_source'),
+    utmCampaign: text('utm_campaign'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('waitlist_signups_email_bidx').on(t.emailBidx),
+    uniqueIndex('waitlist_signups_phone_bidx').on(t.phoneBidx),
+  ],
+);
 
 // The detailed partner application (Stage 2) — one row per submitted application,
 // linked to its partner_request. The KYB/compliance/commercial answers live in a

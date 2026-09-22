@@ -104,7 +104,13 @@ const VALID = {
   phone: '+1 555 123 4567',
   comments: 'We move ~$2M/mo US→IN.',
   corridors: ['US', 'IN'],
+  partner_type: 'licensed_mt',
 };
+
+async function partnerTypes(): Promise<(string | null)[]> {
+  const res = await db.execute(sql`SELECT partner_type FROM partner_requests ORDER BY captured_at`);
+  return (res as unknown as { rows: { partner_type: string | null }[] }).rows.map((r) => r.partner_type);
+}
 
 beforeEach(async () => {
   db = await freshDb();
@@ -152,6 +158,35 @@ describe('submitPartnerRequestAction', () => {
     expect(invite!.payload.text).not.toContain('/partners/apply/');
 
     expect(pokeWorkerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores the partner type ("I am a:") on the row and names it in the team email', async () => {
+    await expect(submitPartnerRequestAction(form(VALID))).rejects.toThrow('REDIRECT:/?partner=ok#partner-with-us');
+    expect(await partnerTypes()).toEqual(['licensed_mt']);
+    const [lead] = await partnerRequestRows();
+    const team = (await emailOutboxRows()).find((e) => e.dedupeKey === `preq:${lead.id}`)!;
+    expect(team.payload.text).toContain('Partner type: Licensed money transmitter');
+  });
+
+  it.each(['referral', 'business', 'licensed_mt'])('accepts partner_type=%s', async (t) => {
+    await expect(submitPartnerRequestAction(form({ ...VALID, partner_type: t }))).rejects.toThrow(
+      'REDIRECT:/?partner=ok#partner-with-us',
+    );
+    expect(await partnerTypes()).toEqual([t]);
+  });
+
+  it('rejects a missing partner_type with ?partner=err and persists nothing', async () => {
+    await expect(submitPartnerRequestAction(form({ ...VALID, partner_type: '' }))).rejects.toThrow(
+      'REDIRECT:/?partner=err#partner-with-us',
+    );
+    expect(await partnerRequestRows()).toHaveLength(0);
+  });
+
+  it('rejects an unknown partner_type (never stored raw; the CHECK would refuse it anyway)', async () => {
+    await expect(submitPartnerRequestAction(form({ ...VALID, partner_type: 'admin' }))).rejects.toThrow(
+      'REDIRECT:/?partner=err#partner-with-us',
+    );
+    expect(await partnerRequestRows()).toHaveLength(0);
   });
 
   it('filters corridors to the allow-list (drops bogus values)', async () => {
