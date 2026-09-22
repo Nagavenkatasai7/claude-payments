@@ -9,10 +9,25 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
-import { EnvKeyProvider } from '@/lib/field-crypto';
+import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
+
+// Spy on the integrations repo FACTORY: partnerContext() builds one repo per
+// resolution, so "how many were built during a drain" is an engine-independent
+// measure of the per-batch creds memoization (fix 11).
+const integrationsRepoSpy = vi.hoisted(() => ({ calls: 0 }));
+vi.mock('@/db/repos/integrations-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/integrations-repo')>();
+  return {
+    ...real,
+    createIntegrationsRepo: (...args: Parameters<typeof real.createIntegrationsRepo>) => {
+      integrationsRepoSpy.calls++;
+      return real.createIntegrationsRepo(...args);
+    },
+  };
+});
 
 // The durability engine's failure paths: retry with backoff, dead-letter with
 // exactly-one ops alert, and the settlement.instruct happy path (signed POST +
@@ -260,16 +275,125 @@ describe('drainOnce — email.send (partner-lead notification)', () => {
     expect(sent[0].to).toEqual(['venkat@smartremit.ai', 'rohan@smartremit.ai']);
     expect(sent[0].subject).toContain('Acme Remit');
   });
+
+  it('renders {{placeholders}} from field-crypto SEALED values at send time; the row holds only ciphertext (fix 11 / F66)', async () => {
+    const sent: { to: string[]; subject: string; text: string }[] = [];
+    const d: WorkerDeps = { ...deps(), sendEmail: async (m) => { sent.push(m); } };
+    const link = 'https://smartremit.test/partners/apply/deadbeef';
+    await outbox.enqueue(
+      'email.send',
+      { to: ['lead@acme.com'], subject: 'Complete', text: 'Go:\n\n{{apply_link}}\n\nThanks', sealed: { apply_link: encryptField(link) } },
+      { dedupeKey: 'partner_app_invite:preq_x' },
+    );
+    const r = await drainOnce(d, 'w1');
+    expect(r.processed).toBe(1);
+    expect(sent[0].text).toBe(`Go:\n\n${link}\n\nThanks`);
+    const row = (await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'partner_app_invite:preq_x'`)) as unknown as {
+      rows: Array<{ payload: unknown }>;
+    };
+    expect(JSON.stringify(row.rows[0].payload)).not.toContain('deadbeef');
+  });
+
+  it('a placeholder with no sealed blob FAILS the row (retryable) with a last_error naming only the placeholder', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => {} };
+    await outbox.enqueue('email.send', { to: ['lead@acme.com'], subject: 's', text: '{{apply_link}}', sealed: {} });
+    const r = await drainOnce(d, 'w1');
+    expect(r.failed).toBe(1);
+    const row = (await db.execute(sql`SELECT last_error FROM outbox WHERE kind = 'email.send'`)) as unknown as {
+      rows: Array<{ last_error: string }>;
+    };
+    expect(row.rows[0].last_error).toBe('sealed-text: no sealed value for {{apply_link}}');
+  });
 });
 
-describe('drainOnce — plain sends', () => {
-  it('whatsapp.text and whatsapp.template flow through with creds', async () => {
-    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', creds: { phoneNumberId: '111', token: 't' } });
+describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11 / F49·F54·F58)', () => {
+  const ACME_WA = { phoneNumberId: 'pn_acme', token: 'tok_acme' };
+  async function byoWhatsApp(partnerId: string, whatsapp: Record<string, string>) {
+    await createIntegrationsRepo(db, provider).saveIntegrations(partnerId, {
+      kyc: {}, payment: { providerType: 'mock' }, whatsapp,
+    });
+  }
+
+  it('whatsapp.text resolves the partner creds from payload.partnerId', async () => {
+    await byoWhatsApp('acme', ACME_WA);
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'hi', ACME_WA);
+  });
+
+  it('whatsapp.template resolves the partner creds from payload.partnerId', async () => {
+    await byoWhatsApp('acme', ACME_WA);
+    await outbox.enqueue('whatsapp.template', {
+      to: '919876543210', template: 'transfer_delivered', lang: 'en', params: ['a'], partnerId: 'acme',
+    });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendTemplate).toHaveBeenCalledWith('919876543210', 'transfer_delivered', 'en', ['a'], ACME_WA);
+  });
+
+  it('no partnerId ⇒ the shared env number (creds undefined), exactly as before', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi' });
     await outbox.enqueue('whatsapp.template', { to: '919876543210', template: 'transfer_delivered', lang: 'en', params: ['a'] });
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(2);
-    expect(sendText).toHaveBeenCalledWith('15551230000', 'hi', { phoneNumberId: '111', token: 't' });
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'hi', undefined);
     expect(sendTemplate).toHaveBeenCalledWith('919876543210', 'transfer_delivered', 'en', ['a'], undefined);
+  });
+
+  it('a partner with no integrations row, a half-configured channel, or no partner row degrades to the shared number — never dead-letters', async () => {
+    await seedPartner(db, 'ghostp'); // partner row, no integrations row
+    await byoWhatsApp('acme', { phoneNumberId: 'pn_only' }); // no token ⇒ waCredsFrom ⇒ undefined
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'a', partnerId: 'ghostp' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'b', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'c', partnerId: 'never_seeded' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 3, failed: 0, dead: 0 });
+    expect(sendText).toHaveBeenCalledTimes(3);
+    for (const call of sendText.mock.calls) expect((call as unknown[])[2]).toBeUndefined();
+  });
+
+  it('a token ROTATED after enqueue is used at drain time with no re-enqueue — and the row never held either token', async () => {
+    await byoWhatsApp('acme', { phoneNumberId: 'pn_acme', token: 'tok_v1' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', partnerId: 'acme' }, { dedupeKey: 'rot:1' });
+    await byoWhatsApp('acme', { phoneNumberId: 'pn_acme', token: 'tok_v2' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'hi', { phoneNumberId: 'pn_acme', token: 'tok_v2' });
+    const row = (await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'rot:1'`)) as unknown as {
+      rows: Array<{ payload: unknown }>;
+    };
+    expect(JSON.stringify(row.rows[0].payload)).not.toMatch(/tok_v1|tok_v2|creds/);
+  });
+
+  it('per-batch memoization: five rows for ONE partner cost ONE integrations resolution', async () => {
+    await byoWhatsApp('acme', ACME_WA);
+    for (let i = 0; i < 5; i++) {
+      await outbox.enqueue('whatsapp.text', { to: '15551230000', body: `m${i}`, partnerId: 'acme' });
+    }
+    integrationsRepoSpy.calls = 0;
+    const r = await drainOnce(deps(), 'w1', 10);
+    expect(r.processed).toBe(5);
+    expect(integrationsRepoSpy.calls).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(5);
+    for (const call of sendText.mock.calls) expect((call as unknown[])[2]).toEqual(ACME_WA);
+  });
+
+  // Legacy rows are INSERTed raw: they are what the PREVIOUS release wrote, and
+  // outbox-repo.enqueue's test-only tripwire (fix 11) refuses a creds payload.
+  it('TRANSITION SHIM: a legacy row (previous release) with creds and no partnerId still sends on the persisted number', async () => {
+    await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES
+      ('whatsapp.text', '{"to":"15551230000","body":"legacy","creds":{"phoneNumberId":"111","token":"t"}}'::jsonb)`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'legacy', { phoneNumberId: '111', token: 't' });
+  });
+
+  it('partnerId WINS over a persisted creds object — a stale or foreign token can never be pinned by a payload', async () => {
+    await byoWhatsApp('acme', { phoneNumberId: 'pn_acme', token: 'tok_live' });
+    await db.execute(sql`INSERT INTO outbox (kind, payload) VALUES
+      ('whatsapp.text', '{"to":"15551230000","body":"both","partnerId":"acme","creds":{"phoneNumberId":"pn_stale","token":"tok_stale"}}'::jsonb)`);
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'both', { phoneNumberId: 'pn_acme', token: 'tok_live' });
   });
 
   it('an unknown kind dead-letters instead of looping forever', async () => {
@@ -391,9 +515,14 @@ describe('drainOnce — funding.refund (the money-back leg)', () => {
     expect(t?.refundedAt).toBeTruthy();
 
     const rows = (await db.execute(
-      sql`SELECT kind, dedupe_key FROM outbox WHERE kind = 'whatsapp.text'`,
-    )) as unknown as { rows: Array<{ kind: string; dedupe_key: string }> };
-    expect(rows.rows).toEqual([{ kind: 'whatsapp.text', dedupe_key: 'refundmsg:wk_t1' }]);
+      sql`SELECT kind, dedupe_key, payload FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ kind: string; dedupe_key: string; payload: Record<string, unknown> }> };
+    expect(rows.rows.map(({ kind, dedupe_key }) => ({ kind, dedupe_key }))).toEqual([
+      { kind: 'whatsapp.text', dedupe_key: 'refundmsg:wk_t1' },
+    ]);
+    // fix 11 / F54: the refund message persists the OWNING partnerId, never creds.
+    expect(rows.rows[0].payload.partnerId).toBe('acme');
+    expect(JSON.stringify(rows.rows[0].payload)).not.toMatch(/creds|tok_acme|tok_railp/);
 
     // Second pass delivers the message — owner creds, refund copy, no reasons.
     r = await drainOnce(deps(), 'w1');

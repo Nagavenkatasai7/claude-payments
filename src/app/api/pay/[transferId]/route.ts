@@ -171,21 +171,13 @@ async function processTransferPayment(
   const refused = refuseUnlessAwaiting(transfer);
   if (refused) return refused;
 
-  // WL2/WL3 + best-rate routing: RAIL-side config (settlement URL/secret/
-  // providerType) resolves via the ROUTED settlement partner when set; the
-  // customer-facing WhatsApp creds ALWAYS resolve via the OWNING partner.
-  // Unrouted (settlementPartnerId absent) ⇒ ONE fetch, exactly as before;
-  // routed ⇒ the two independent fetches run in parallel.
+  // WL3 + best-rate routing: RAIL-side config (settlement URL/secret/
+  // providerType) resolves via the ROUTED settlement partner when set. The
+  // customer-facing WhatsApp message is BRAND-side: settleOrHold persists the
+  // OWNING partnerId on the stage-1 row and the worker resolves that partner's
+  // creds at drain time (fix 11) — so no brand-side read happens here.
   const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
-  const integrationsStore = getPartnerIntegrationsStore();
-  const railIntegrationsPromise = integrationsStore.getIntegrations(railPartnerId);
-  const [railIntegrations, brandIntegrations] = await Promise.all([
-    railIntegrationsPromise,
-    railPartnerId === transfer.partnerId
-      ? railIntegrationsPromise
-      : integrationsStore.getIntegrations(transfer.partnerId),
-  ]);
-  const waCreds = waCredsFrom(brandIntegrations);
+  const railIntegrations = await getPartnerIntegrationsStore().getIntegrations(railPartnerId);
 
   // Fail-closed: a ROUTED transfer must settle on the settlement partner's
   // webhook-driven rail. Routing eligibility was checked at quote time — if
@@ -231,8 +223,8 @@ async function processTransferPayment(
   // The ONE compliance decision: settle (cleared) or hold (flagged) — each an
   // atomic transaction whose effects are dedupe-keyed outbox rows. settleOrHold
   // decides the rail purely from the PASSED integrations — hand it the RAIL
-  // partner's config, message with the OWNER's creds.
-  const result = await settleOrHold(getDb(), transfer, railIntegrations, waCreds);
+  // partner's config; the stage-1 row names the OWNER (transfer.partnerId).
+  const result = await settleOrHold(getDb(), transfer, railIntegrations);
   pokeWorker(); // fast-path drain (the stage-1 / held message is READY now)
   switch (result.kind) {
     case 'held':

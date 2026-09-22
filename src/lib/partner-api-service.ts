@@ -12,7 +12,6 @@ import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from '
 import { createTransfer } from './transfer-create';
 import { sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
-import { waCredsFrom } from './whatsapp-creds';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
 import type { DbOrTx } from '@/db/client';
 import {
@@ -443,9 +442,9 @@ export async function confirmTransaction(
   if (t.complianceStatus !== 'cleared') {
     // FLAGGED: hold, never settle. beginHold is ONE transaction (in_review
     // flip + held stage-1 outbox row, dedupe stage1:<id>); NO rail effect.
-    // Partner-scoped: ownership was checked above; creds are the OWNER's.
-    const integrations = await deps.integrationsStore.getIntegrations(partner.id);
-    const hold = await beginHold(deps.db as Db, t, waCredsFrom(integrations));
+    // Partner-scoped: ownership was checked above; the held row names the
+    // OWNER (t.partnerId) and the worker resolves its creds at drain (fix 11).
+    const hold = await beginHold(deps.db as Db, t);
     if (hold.kind === 'held') {
       pokeWorker(); // the held "payment received / under review" message is READY now
       // Audit ONLY a real transition (mirrors the settle path below): on the
@@ -459,12 +458,12 @@ export async function confirmTransaction(
 
   const initiate = deps.initiatePayment ?? (async (tr: Transfer) => {
     // Stage 2c: the atomic settlement transaction — paid flip + stage-1 message
-    // + rail effect (signed instruct / delayed mock settle) commit together,
-    // with the partner's WhatsApp creds on the customer message. settleOrHold
-    // re-checks the LEDGER: if the row was re-screened to flagged since the
-    // read above, it is held instead of instructed.
+    // + rail effect (signed instruct / delayed mock settle) commit together;
+    // the customer message names the OWNING partner (creds resolve at drain —
+    // fix 11). settleOrHold re-checks the LEDGER: if the row was re-screened
+    // to flagged since the read above, it is held instead of instructed.
     const integrations = await deps.integrationsStore.getIntegrations(partner.id);
-    const result = await settleOrHold(deps.db as Db, tr, integrations, waCredsFrom(integrations));
+    const result = await settleOrHold(deps.db as Db, tr, integrations);
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its
     // simulated DELIVERY_DELAY_MS. The 5-min heartbeat stays the guarantee.

@@ -19,6 +19,8 @@ import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
+import { renderSealedText } from '@/lib/sealed-text';
+import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { logWarn } from '@/lib/log';
 import type { Store } from '@/lib/store';
@@ -176,7 +178,21 @@ async function withRowDeadline<T>(work: Promise<T>, ms: number, signal: RowSigna
 type Payload = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
-async function partnerContext(deps: WorkerDeps, partnerId: string) {
+export interface PartnerCtx {
+  brand: string;
+  waCreds: WaCreds | undefined;
+  integrations: PartnerIntegrations;
+}
+
+/** The drain-time resolver every handler uses for a partner's brand + WhatsApp creds + rail config. */
+export type PartnerResolver = (partnerId: string) => Promise<PartnerCtx>;
+
+async function partnerContext(deps: WorkerDeps, partnerId: string): Promise<PartnerCtx> {
+  // Pure reads, repeatable on every attempt. No row / a half-configured channel
+  // ⇒ waCreds undefined ⇒ the shared env number — never a throw, so a customer
+  // message cannot dead-letter on a tenant-config gap. A transient DB error
+  // throws and rides the ordinary backoff (no token is in the error: the token
+  // is never in scope until getIntegrations returns).
   const partner = await createPartnerRepo(deps.db).getPartner(partnerId);
   const integrations = await createIntegrationsRepo(deps.db).getIntegrations(partnerId);
   return {
@@ -186,23 +202,72 @@ async function partnerContext(deps: WorkerDeps, partnerId: string) {
   };
 }
 
-async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Promise<void> {
+/**
+ * One resolver per drain BATCH (fix 11): whatsapp.text/template now resolve
+ * creds per row, so N rows for one partner must cost ONE partner + ONE
+ * integrations read, not 2N. A rejected resolution is evicted so the next row
+ * re-reads instead of inheriting it. Scope is the batch, never the process — a
+ * rotated token is picked up by the next drain with no re-enqueue.
+ */
+export function memoizedPartnerContext(deps: WorkerDeps): PartnerResolver {
+  const cache = new Map<string, Promise<PartnerCtx>>();
+  return (partnerId) => {
+    const hit = cache.get(partnerId);
+    if (hit) return hit;
+    const fresh = partnerContext(deps, partnerId);
+    cache.set(partnerId, fresh);
+    fresh.catch(() => cache.delete(partnerId));
+    return fresh;
+  };
+}
+
+/**
+ * Creds for a plain customer-facing send. `payload.partnerId` is the
+ * AUTHORITATIVE tenant (a ledger value written by the producer — never inferred
+ * from `to`); its creds are resolved NOW, so a DB dump holds no bearer token
+ * and a rotated token needs no re-enqueue. No partnerId ⇒ shared env number.
+ *
+ * TRANSITION SHIM (Task 8, wave 4, deletes it): a row the PREVIOUS release
+ * enqueued carries `creds` and no `partnerId`; honour it so the deploy→migrate
+ * window drains on the right number. drizzle/0016_scrub_outbox_secrets
+ * back-fills partnerId from the phone number id and strips creds where that is
+ * safe — but it deliberately LEAVES an UNSENT row whose number matches no
+ * current partner (stripping it would move the send to the shared number), and
+ * a stale old-deployment writer can add rows after it runs. So applying 0016
+ * alone does NOT make this branch unreachable: remove it only once
+ * `scripts/outbox-status.ts` "SECRETS AT REST" prints `none` on prod.
+ */
+async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<WaCreds | undefined> {
+  const partnerId = str(p.partnerId);
+  if (partnerId) return (await partner(partnerId)).waCreds;
+  const legacy = p.creds as Partial<WaCreds> | null | undefined;
+  if (legacy && typeof legacy.phoneNumberId === 'string' && typeof legacy.token === 'string') {
+    return { phoneNumberId: legacy.phoneNumberId, token: legacy.token };
+  }
+  return undefined;
+}
+
+async function handle(
+  deps: WorkerDeps,
+  row: OutboxRow,
+  signal: RowSignal,
+  partner: PartnerResolver,
+): Promise<void> {
   const p = row.payload as Payload;
   switch (row.kind) {
     // ── Plain customer-facing sends (the transactional message outbox) ──────
+    // Payloads carry the OWNING partnerId, never creds (fix 11 / F49·F54·F58).
     case 'whatsapp.text': {
-      const creds = p.creds as WaCreds | undefined;
-      await deps.sendText(str(p.to), str(p.body), creds);
+      await deps.sendText(str(p.to), str(p.body), await resolveSendCreds(p, partner));
       return;
     }
     case 'whatsapp.template': {
-      const creds = p.creds as WaCreds | undefined;
       await deps.sendTemplate(
         str(p.to),
         str(p.template),
         str(p.lang),
         (p.params as string[]) ?? [],
-        creds,
+        await resolveSendCreds(p, partner),
       );
       return;
     }
@@ -210,7 +275,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
     // ── The mock rail's stage 2 (was a 120s after() sleep — now durable) ────
     case 'mock.settle': {
       const transferId = str(p.transferId);
-      const { brand, waCreds } = await partnerContext(deps, str(p.partnerId) || 'default');
+      const { brand, waCreds } = await partner(str(p.partnerId) || 'default');
       const stage2 = await completePaymentStage2(deps.store, transferId, { brand });
       for (const msg of stage2.senderMessages) {
         await deps.sendText(stage2.transfer.phone, msg, waCreds);
@@ -314,7 +379,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
     case 'rail.callback': {
       const reference = str(p.reference);
       const partnerId = str(p.partner_id) || str(p.partnerId);
-      const { integrations } = await partnerContext(deps, partnerId);
+      const { integrations } = await partner(partnerId);
       const webhookSecret = integrations.payment.webhookSecret ?? '';
       const callbackBody = JSON.stringify({ reference, status: 'paid_out' });
       const res = await deps.fetchFn(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
@@ -381,9 +446,6 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
       } else {
         ({ refundRef } = await (deps.fundingProvider ?? getFundingProvider()).refund(transfer));
       }
-      // The customer-facing message rides the OWNING partner's number — the
-      // brand the sender talks to — NEVER the settlement partner's.
-      const { waCreds } = await partnerContext(deps, transfer.partnerId);
       await deps.db.transaction(async (tx) => {
         const updated = await createTransferRepo(tx).updateRefund(transferId, {
           refundStatus: 'completed',
@@ -393,9 +455,12 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
         // Guarded transition refused (a concurrent drain already completed it)
         // ⇒ that drain owns the message; enqueueing here would race it.
         if (!updated) return;
+        // The customer-facing message rides the OWNING partner's number — the
+        // brand the sender talks to — NEVER the settlement partner's. Only the
+        // id is persisted (fix 11 / F54); creds resolve when THIS row drains.
         await createOutboxRepo(tx).enqueue(
           'whatsapp.text',
-          { to: transfer.phone, body: buildRefundMessage(transfer), creds: waCreds },
+          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId },
           { dedupeKey: `refundmsg:${transferId}` },
         );
       });
@@ -463,12 +528,16 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
     // ── Transactional email (partner-lead notifications) ────────────────────
     // Durable: the real sender no-ops when SMTP is unconfigured (no retry storm);
     // when configured, a send failure throws and rides the backoff/dead-letter.
+    // `sealed` (optional) maps {{placeholders}} in text/html to field-crypto
+    // blobs — the partner-application invite link (fix 11 / F66). Opened at SEND
+    // time only; the row stays ciphertext. A missing blob throws naming the
+    // placeholder, never a value.
     case 'email.send': {
       await (deps.sendEmail ?? sendEmailDefault)({
         to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
         subject: str(p.subject),
-        text: str(p.text),
-        ...(typeof p.html === 'string' ? { html: p.html } : {}),
+        text: renderSealedText(str(p.text), p.sealed),
+        ...(typeof p.html === 'string' ? { html: renderSealedText(p.html, p.sealed) } : {}),
       });
       return;
     }
@@ -501,9 +570,7 @@ async function handle(deps: WorkerDeps, row: OutboxRow, signal: RowSignal): Prom
       }
       // Re-resolve the routing partner's outbound creds at RUN time (the
       // payload never carries tokens; rotation is picked up automatically).
-      const waCreds = routedPartnerId
-        ? (await partnerContext(deps, routedPartnerId)).waCreds
-        : undefined;
+      const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
       const reply = await deps.runAgentTurn(
         phone,
         str(p.messageText),
@@ -564,6 +631,7 @@ export async function drainOnce(
 ): Promise<DrainResult> {
   const outbox: OutboxRepo = createOutboxRepo(deps.db);
   const rows = await outbox.claimBatch(batchSize, workerId);
+  const partner = memoizedPartnerContext(deps); // one drain-time creds resolver per BATCH (fix 11)
   const rowDeadlineMs = opts.rowDeadlineMs ?? ROW_DEADLINE_MS;
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
   for (let i = 0; i < rows.length; i++) {
@@ -590,7 +658,7 @@ export async function drainOnce(
     // and it flags the row `abandoned` when it fires.
     const signal = newRowSignal(rowDeadlineMs);
     try {
-      await withRowDeadline(handle(deps, row, signal), rowDeadlineMs, signal);
+      await withRowDeadline(handle(deps, row, signal, partner), rowDeadlineMs, signal);
       if (await outbox.markDone(row.id, workerId)) {
         result.processed++;
       } else {

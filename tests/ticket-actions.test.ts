@@ -47,6 +47,7 @@ import {
   copilotRejectAction,
 } from '@/app/admin-dashboard/tickets/actions';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createAuthStore } from '@/lib/auth-store';
 import { outbox, auditEvents } from '@/db/schema';
 
@@ -394,5 +395,50 @@ describe('audit trail', () => {
       expect(r.subjectId).toBe(t.id);
       expect(r.partnerId).toBe('p1');
     }
+  });
+});
+
+describe('nudge payloads never carry a secret (fix 11 / F58)', () => {
+  // A BYO-WhatsApp tenant: the previous code copied this token into every nudge row.
+  async function byoWhatsApp(partnerId: string) {
+    await createIntegrationsRepo(db).saveIntegrations(partnerId, {
+      kyc: {}, payment: {}, whatsapp: { phoneNumberId: `pn_${partnerId}`, token: `tok_${partnerId}` },
+    });
+  }
+
+  it('replyAction: the nudge payload names ticket.partnerId and carries no creds/token', async () => {
+    await byoWhatsApp('p1');
+    const t = await makeTicket('p1', { customerPhone: '15559998888' });
+    currentStaff = staff({ partnerId: 'p1' });
+    await replyAction(form({ ticketId: t.id, body: 'We are checking.' }));
+    const rows = await outboxRows();
+    expect(rows).toHaveLength(1);
+    const payload = rows[0].payload as Record<string, unknown>;
+    expect(payload.partnerId).toBe('p1');
+    expect(payload.to).toBe('15559998888');
+    expect('creds' in payload).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain('tok_p1');
+  });
+
+  it('resolveAction: the ticketresolved nudge names ticket.partnerId and carries no creds/token', async () => {
+    await byoWhatsApp('p1');
+    const t = await makeTicket('p1');
+    currentStaff = staff({ partnerId: 'p1' });
+    await resolveAction(form({ ticketId: t.id }));
+    const nudge = (await outboxRows()).find((r) => r.dedupeKey === `ticketresolved:${t.id}`)!;
+    const payload = nudge.payload as Record<string, unknown>;
+    expect(payload.partnerId).toBe('p1');
+    expect('creds' in payload).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain('tok_p1');
+  });
+
+  it("platform support replying to p2's ticket persists p2 (the ticket's OWNER), never the actor's tenant", async () => {
+    await byoWhatsApp('p2');
+    const t = await makeTicket('p2');
+    currentStaff = staff({}); // unscoped platform support
+    await replyAction(form({ ticketId: t.id, body: 'Hello from platform support.' }));
+    const payload = (await outboxRows())[0].payload as Record<string, unknown>;
+    expect(payload.partnerId).toBe('p2');
+    expect(JSON.stringify(payload)).not.toContain('tok_p2');
   });
 });

@@ -381,6 +381,18 @@ instruction, rail callback, mock settle, agent turn, ops alert — is a row writ
 **dedupe-keyed** (`stage1:{id}`, `instruct:{id}`, `wamid:{id}`, …) so at-least-once
 delivery can never double-send.
 
+**No secrets at rest in payloads** (Phase 1 Task 11 / Program-Fix 18): a customer-facing
+`whatsapp.text`/`whatsapp.template` row carries the OWNING `partnerId`, and the
+worker resolves that partner's WhatsApp creds at drain time (one lookup per
+partner per claimed batch) — a rotated token needs no re-enqueue and a DB dump
+holds no bearer token. The one capability that must ride a payload, the
+partner-application link, is sealed with field-crypto (`payload.sealed`) and
+rendered into `{{placeholders}}` at send time. `tests/outbox-payload-secrets.test.ts`
+rejects at build time any `.enqueue(` payload whose type contains `WaCreds` or a
+`partner-integrations` config, or that carries a secret-named key or value (followed
+through local variables). Under test, `outbox-repo.enqueue` also throws on a
+secret-bearing payload shape.
+
 **Worker** (`/api/worker` → `drainOnce`): claims batches via
 `FOR UPDATE SKIP LOCKED` (concurrent drains are safe by construction), executes by
 kind, exponential backoff `2^attempts` (cap 1h), **dead at 8 attempts** → exactly one

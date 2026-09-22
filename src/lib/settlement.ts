@@ -4,7 +4,6 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { buildStage1Message } from '@/lib/payment';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
-import type { WaCreds } from '@/lib/whatsapp';
 import type { Transfer } from '@/lib/types';
 
 // settlement — THE transactional "money was paid" entry point (Stage 2c).
@@ -12,7 +11,9 @@ import type { Transfer } from '@/lib/types';
 // One Postgres transaction commits, together:
 //   • the awaiting_payment → paid status flip (atomic claim — a double submit
 //     or crash-replay flips nothing and is a clean no-op),
-//   • the customer's stage-1 "payment received" message (outbox, deduped),
+//   • the customer's stage-1 "payment received" message (outbox, deduped;
+//     the payload names the OWNING partnerId only — the worker resolves that
+//     partner's WhatsApp creds at drain time, so no token is ever at rest here),
 //   • the settlement effect for the partner's rail:
 //       http/simulator → a SIGNED settlement.instruct row (the worker POSTs it
 //                        with retries; delivery arrives via the partner's
@@ -98,7 +99,6 @@ export async function beginSettlement(
   db: Db,
   transfer: Transfer,
   integrations: PartnerIntegrations,
-  waCreds?: WaCreds,
 ): Promise<SettlementResult> {
   return db.transaction(async (tx): Promise<SettlementResult> => {
     const repo = createTransferRepo(tx);
@@ -114,10 +114,13 @@ export async function beginSettlement(
       return { kind: 'refused', complianceStatus: row.complianceStatus };
     }
 
-    const outbox = createOutboxRepo(tx);
-    await outbox.enqueue(
+    // Brand vs rail: the customer-facing message rides the OWNING partner's
+    // WhatsApp number (paid.partnerId, already in hand — no read added to this
+    // transaction); the rail is decided from `integrations` below. Only the id
+    // is persisted (fix 11 / F49): the worker resolves the creds at DRAIN time.
+    await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
-      { to: paid.phone, body: buildStage1Message(paid), creds: waCreds },
+      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId },
       { dedupeKey: `stage1:${paid.id}` },
     );
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
@@ -145,19 +148,16 @@ export async function beginSettlement(
  * + direct sendText sequence, which had an observable intermediate 'paid'
  * state and a non-durable message.
  */
-export async function beginHold(
-  db: Db,
-  transfer: Transfer,
-  waCreds?: WaCreds,
-): Promise<HoldResult> {
+export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult> {
   return db.transaction(async (tx): Promise<HoldResult> => {
     const held = await createTransferRepo(tx).markInReviewIfAwaiting(transfer.id);
     if (!held) return { kind: 'already' };
     // `held` is the masked RETURNING row; buildStage1Message never names the
-    // destination, so no payout field can reach the outbox payload.
+    // destination, so no payout field can reach the outbox payload. Same shape
+    // as the paid stage-1: the OWNING partnerId, never creds (fix 11 / F49).
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
-      { to: held.phone, body: buildStage1Message(held, { held: true }), creds: waCreds },
+      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId },
       { dedupeKey: `stage1:${held.id}` },
     );
     return { kind: 'held' };
@@ -178,18 +178,17 @@ export async function settleOrHold(
   db: Db,
   transfer: Transfer,
   integrations: PartnerIntegrations,
-  waCreds?: WaCreds,
 ): Promise<SettleOrHoldResult> {
   if (transfer.complianceStatus === 'blocked') {
     return { kind: 'refused', complianceStatus: 'blocked' };
   }
   if (transfer.complianceStatus === 'cleared') {
-    const settled = await beginSettlement(db, transfer, integrations, waCreds);
+    const settled = await beginSettlement(db, transfer, integrations);
     if (settled.kind !== 'refused') return settled;
     if (settled.complianceStatus === 'blocked') return { kind: 'refused', complianceStatus: 'blocked' };
     // Ledger says flagged: hold it.
   }
-  return beginHold(db, transfer, waCreds);
+  return beginHold(db, transfer);
 }
 
 /**

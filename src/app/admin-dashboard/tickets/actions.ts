@@ -7,9 +7,7 @@ import { scopeOf, canSee, type Scope } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { pokeWorker } from '@/lib/outbox';
 import { env } from '@/lib/env';
 import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
@@ -94,9 +92,9 @@ export async function replyAction(formData: FormData): Promise<void> {
 
   const db = getDb();
   // The nudge rides the OWNING partner's WhatsApp number (brand-side), exactly
-  // like reconcile's customer-facing sends. Resolved OUTSIDE the transaction —
-  // it's a read; the payload carries the creds like every whatsapp.text row.
-  const waCreds = waCredsFrom(await createIntegrationsRepo(db).getIntegrations(ticket.partnerId));
+  // like reconcile's customer-facing sends. Only ticket.partnerId is persisted
+  // (fix 11 / F58) — a repo value from getScopedTicket, never a form field; the
+  // worker resolves that partner's creds at drain time.
   await db.transaction(async (tx) => {
     const repo = createTicketRepo(tx);
     const msg = await repo.appendMessage({
@@ -113,7 +111,7 @@ export async function replyAction(formData: FormData): Promise<void> {
         {
           to: ticket.customerPhone,
           body: `You have a new reply from support — view it in your SmartRemit dashboard: ${supportUrl(ticket.id)}`,
-          creds: waCreds,
+          partnerId: ticket.partnerId,
         },
         { dedupeKey: `ticketmsg:${ticket.id}:${msg.id}` },
       );
@@ -211,7 +209,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);
   const db = getDb();
-  const waCreds = waCredsFrom(await createIntegrationsRepo(db).getIntegrations(ticket.partnerId));
+  // Owner tenant only (fix 11 / F58); creds resolve at drain.
   await db.transaction(async (tx) => {
     const updated = await createTicketRepo(tx).updateStatus(ticket.id, 'resolved');
     if (!updated) throw new Error('Ticket cannot be resolved.');
@@ -221,7 +219,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
         {
           to: ticket.customerPhone,
           body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${supportUrl(ticket.id)}`,
-          creds: waCreds,
+          partnerId: ticket.partnerId,
         },
         { dedupeKey: `ticketresolved:${ticket.id}` },
       );

@@ -505,6 +505,20 @@ describe('partner-api-service: confirmTransaction enforces the compliance hold (
     expect(pokeWorker).toHaveBeenCalled(); // the held stage-1 message is READY now — fast-path drain requested
   });
 
+  it("the held stage-1 row names the OWNING partner and never carries its WhatsApp token (fix 11 / F49)", async () => {
+    const h = await harness();
+    await h.deps.integrationsStore.saveIntegrations('acme', {
+      kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 'tok_acme' },
+    });
+    const id = await mintFlagged(h, DELEGATED, 'idem-hold-creds');
+    await confirmTransaction(h.deps, DELEGATED, 'pk_1', id);
+    const r = await h.db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = ${`stage1:${id}`}`);
+    const payload = (r as unknown as { rows: Array<{ payload: Record<string, unknown> }> }).rows[0].payload;
+    expect(payload.partnerId).toBe('acme');
+    expect('creds' in payload).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain('tok_acme');
+  });
+
   it('on a flagged transfer NEVER calls deps.initiatePayment (the hold is decided before the injection seam)', async () => {
     const h = await harness();
     const initiatePayment = vi.fn(h.deps.initiatePayment!); // the harness fake flips straight to paid
