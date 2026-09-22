@@ -1,5 +1,5 @@
 import { buildSystemPrompt } from './prompt';
-import { resolveSendLimits } from './send-limits';
+import { resolveEffectiveSendLimits } from './send-limits';
 import { toolSchemasForChannel, executeTool, buildCustomerContext, type AgentChannel, type ToolContext } from './tools';
 import type { ChatMessage, ChatTool, PartnerId, TurnContext } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
@@ -151,9 +151,10 @@ export function createAgent(deps: AgentDeps) {
     // (Sanctions are unaffected and still run inside createTransfer.)
     const branding = resolvePartnerBranding(notePartner);
     const gateActive = sendGateActive(notePartner);
-    // Program fix 16: the limits the bot STATES are the routed tenant's resolved
-    // ladder — the same figures its tools refuse on. Never a literal.
-    const sendLimits = resolveSendLimits(notePartner);
+    // Program fix 16/16b: the limits the bot STATES are this sender's EFFECTIVE
+    // ladder (customer raise → partner default → platform) — the same figures
+    // its tools refuse on. Never a literal.
+    const sendLimits = resolveEffectiveSendLimits(notePartner, noteCustomer);
     const t0CapTxt = `$${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}`;
 
     // ONE tool context per turn: the tools and the round-0 customer context

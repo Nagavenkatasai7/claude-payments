@@ -1,4 +1,4 @@
-import { resolveSendLimits } from '@/lib/send-limits';
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { describe, it, expect, vi } from 'vitest';
 import { fakeRedis } from './helpers';
 import {
@@ -119,7 +119,7 @@ describe('buildSummaryContext', () => {
   });
 
   it('states the RESOLVED limits: a tenant T1 cap of $1,000 makes dailyLimitUsd 1000 (fix 16)', () => {
-    const limits = resolveSendLimits({ sendLimits: { t1DailyCapCents: 100_000 } });
+    const limits = resolveEffectiveSendLimits({ sendLimits: { t1DailyCapCents: 100_000 } }, null);
     const ctx = buildSummaryContext(customer(), [], 50_000, true, limits);
     expect(ctx.dailyLimitUsd).toBe(1000);
     expect(ctx.dailyRemainingUsd).toBe(500);

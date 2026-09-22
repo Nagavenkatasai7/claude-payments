@@ -1042,6 +1042,41 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     expect(sys.join('\n')).not.toContain('$500/day');
   });
 
+  it('a $5,000 CUSTOMER override makes the system prompt state $5,000 for the per-transfer and daily limits — never 999,999 (fix 16b)', async () => {
+    const b = build();
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    await b.customerStore.saveCustomer({
+      senderPhone: '15551234567', firstSeenAt: tenDaysAgo, kycStatus: 'verified', senderCountry: 'US', partnerId: 'default',
+      createdAt: tenDaysAgo, updatedAt: tenDaysAgo,
+    });
+    // The override column is written by fix 16b's single-column UPDATE only (never by saveCustomer).
+    await db.execute(sql`UPDATE customers SET send_limit_override = '{"perTransferCapCents":500000,"t1DailyCapCents":500000}'::jsonb WHERE partner_id = 'default' AND phone = '15551234567'`);
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: freshScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
+      kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'what is my limit?', { isNewConversation: true });
+    const sys = seen[0].filter((m) => m.role === 'system').map((m) => String(m.content));
+    expect(sys[0]).toContain('between $10 and $5,000 per transfer');
+    expect(sys[0]).toContain('$5,000/day');
+    expect(sys[0]).not.toContain('$2,999');
+    expect(sys.join('\n')).not.toContain('999,999');
+    // Another phone under the same tenant is still on the platform ladder.
+    seen.length = 0;
+    await agent.runAgentTurn('15559990000', 'hi', { isNewConversation: true });
+    const sys2 = seen[0].filter((m) => m.role === 'system').map((m) => String(m.content));
+    expect(sys2[0]).toContain('between $10 and $2,999 per transfer');
+    expect(sys2[0]).not.toContain('$5,000');
+  });
+
   it('prepends [TIER_REMINDER day 2/3] when turn.tierReminderDayOfWindow is 2', async () => {
     const b = build();
     // Gate is partner OPT-IN now — these verify-flow paths need it ON.

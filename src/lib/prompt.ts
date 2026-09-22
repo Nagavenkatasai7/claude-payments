@@ -5,7 +5,7 @@ import { boundUntrustedText, BRAND_MAX, PERSONA_MAX } from './untrusted-text';
 
 /**
  * Cap figures the prompt states to the customer are interpolated from the
- * RESOLVED send limits (Program fix 16: resolveSendLimits(partner) — the
+ * RESOLVED send limits (Program fix 16/16b: resolveEffectiveSendLimits(partner, customer) — the
  * platform ladder, or a tenant's tighter figures), never from a literal, so
  * the bot can never quote a ceiling its own tools would refuse.
  */
@@ -24,7 +24,7 @@ export interface SystemPromptBrand {
    */
   kycGateActive?: boolean;
   /**
-   * The send limits this bot states (Program fix 16): resolveSendLimits of the
+   * The send limits this bot states (Program fix 16/16b): resolveEffectiveSendLimits of the
    * routed tenant. Default: the platform ladder (T0 $500/day, T1 $2,999/day,
    * $2,999 per transfer).
    */

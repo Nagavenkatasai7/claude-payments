@@ -2,10 +2,13 @@ export const dynamic = 'force-dynamic';
 
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
+import { scopeOf } from '@/lib/staff-scope';
+import { logWarn } from '@/lib/log';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
@@ -13,7 +16,7 @@ import { env } from '@/lib/env';
 import { Sidebar } from '../../sidebar';
 import { SenderCell } from '../../sender-cell';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
-import { isTightened, resolveSendLimits } from '@/lib/send-limits';
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
 import { CopyField } from '../copy-field';
@@ -34,7 +37,9 @@ import {
   savePricingAction,
   saveSupportConfigAction,
   revokeApiKeyAction,
+  setPartnerSendLimitAction,
 } from '../actions';
+import { SendLimitsCard } from '../../send-limits-card';
 import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
@@ -130,23 +135,29 @@ export default async function PartnerDetailPage({
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
-  const isPlatformAdmin = isAdmin && !staff.partnerId;
+  const isPlatformAdmin = isAdmin && scopeOf(staff).kind === 'platform'; // one spelling of the rule (see customers/[phone])
   const { id } = await params;
 
   const scoped = createScopedStore(staff);
   const partner = await scoped.getPartner(id);
   if (!partner) notFound();
-  const sendLimits = resolveSendLimits(partner); // Program fix 16: the effective ladder (read-only here)
+  const sendLimits = resolveEffectiveSendLimits(partner, null); // Program fix 16b: the partner-level effective ladder
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).
-  const [summary, recentPage, allStaff, integrations, apiKeys, rates] = await Promise.all([
+  const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange] = await Promise.all([
     getStore().transfersSummary(partner.id), // partner.id is scope-checked above
     scoped.transfersPage({ limit: 50, partnerFilter: partner.id }),
     getAuthStore().listStaff(),
     getPartnerIntegrationsStore().getIntegrations(partner.id),
     getPartnerApiKeyStore().list(partner.id),
     createPartnerRateRepo(getDb()).listRatesForPartner(partner.id), // scope-checked above
+    // Program fix 16b: the last audited raise/clear of this partner's default.
+    createAuditRepo(getDb()).lastSendLimitChange(partner.id, 'partner', partner.id).catch((err: unknown) => {
+      // Never blank the card silently: log (ids only, scrubbed) and render "—".
+      logWarn('admin.send_limits.last_change', err, { scope: 'partner', partnerId: partner.id });
+      return null;
+    }),
   ]);
   const nowMs = Date.now();
   const recents = recentPage.items;
@@ -215,6 +226,7 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="settings">Settings</TabsTrigger>}
             {isAdmin && <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>}
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
+            {isAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
@@ -297,14 +309,7 @@ export default async function PartnerDetailPage({
                   <dt>Countries</dt><dd>{partner.countries.join(', ')}</dd>
                   <dt>KYC mode</dt>
                   <dd>{partner.kycMode === 'delegated' ? 'partner-run (delegated)' : 'SmartRemit-run'}</dd>
-                  {/* Program fix 16: the EFFECTIVE ladder, read-only (raises are fix 16b's audited action). */}
-                  <dt>Send limits</dt>
-                  <dd>
-                    ${(sendLimits.perTransferCapCents / 100).toLocaleString('en-US')} per transfer ·{' '}
-                    ${(sendLimits.t1DailyCapCents / 100).toLocaleString('en-US')}/day verified ·{' '}
-                    ${(sendLimits.t0DailyCapCents / 100).toLocaleString('en-US')}/day first 3 days
-                    {isTightened(sendLimits) ? ' (tightened for this partner)' : ' (platform default)'}
-                  </dd>
+                  {/* Program fix 16b: the send-limits ladder moved to its own card (Settings tab). */}
                   <dt>Primary color</dt>
                   <dd>
                     {partner.primaryColor ? (
@@ -480,6 +485,22 @@ export default async function PartnerDetailPage({
                   </form>
                 </CardContent>
               </Card>
+            </TabsContent>
+          )}
+
+          {/* ── Send limits (Program fix 16b): the partner default + its audited raise ── */}
+          {isAdmin && (
+            <TabsContent value="send-limits">
+              <SendLimitsCard
+                scope="partner"
+                effective={sendLimits}
+                stored={partner.sendLimits}
+                lastChange={lastLimitChange}
+                canEdit={isPlatformAdmin}
+                action={setPartnerSendLimitAction}
+                hidden={{ id: partner.id }}
+                showT0
+              />
             </TabsContent>
           )}
 

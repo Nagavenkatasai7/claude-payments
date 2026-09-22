@@ -538,6 +538,20 @@ export interface PartnerSendLimits extends SendLimitOverride {
   t0DailyCapCents?: number;
 }
 
+// Program fix 16b: where each effective figure came from (for the admin card).
+export type SendLimitSource = 'customer' | 'partner' | 'platform';
+/**
+ * The ladder resolveEffectiveSendLimits returns: a SendLimits (so evaluateCap
+ * and the prompt take it unchanged) plus the per-field provenance.
+ */
+export interface EffectiveSendLimits extends SendLimits {
+  source: {
+    perTransferCapCents: SendLimitSource;
+    t1DailyCapCents: SendLimitSource;
+    t0DailyCapCents: SendLimitSource;
+  };
+}
+
 // ── Phase 1 country + currency types (P1) ─────────────────────────────
 //
 // `country?: string` on Customer (B1) is reserved for free-text KYC-provider

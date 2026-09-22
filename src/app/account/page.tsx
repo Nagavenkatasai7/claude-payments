@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { CheckCircle2, ShieldCheck } from 'lucide-react';
 import { requireCustomer } from '@/lib/customer-auth';
 import { sendGateActive } from '@/lib/kyc-gate';
-import { resolveSendLimits } from '@/lib/send-limits';
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -131,7 +131,7 @@ async function SmartSummaryCard({ customer: sessionCustomer }: { customer: Custo
         transfers,
         todayUsedCents,
         sendGateActive(partner),
-        resolveSendLimits(partner),
+        resolveEffectiveSendLimits(partner, customer),
       );
       fallback = buildDeterministicSummary(context);
     }
@@ -193,7 +193,7 @@ export default async function AccountHomePage() {
   // plus the same cap composition the bot's check_send_limit uses. The current
   // month's total is simply the last (newest) trend bucket — no second scan.
   const now = new Date();
-  const cap = buildSummaryContext(customer, transfers, todayUsedCents, gateActive, resolveSendLimits(partner));
+  const cap = buildSummaryContext(customer, transfers, todayUsedCents, gateActive, resolveEffectiveSendLimits(partner, customer));
   const buckets = monthlyBuckets(transfers, now);
   const monthSentUsd = buckets[buckets.length - 1].volumeUsd;
   const pendingRefunds = transfers.filter(

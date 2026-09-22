@@ -5,7 +5,7 @@ import { newTransferId } from './id';
 import { env } from './env';
 import { normalizePhone, isValidPhone } from './phone';
 import { createTransfer, MaskedDestinationError, PartnerPulledConsumerError, quoteOverrideFromDraft, recordBlockedAttempt } from './transfer-create';
-import { resolveSendLimits, SendBusyError, SendCapError } from './send-limits';
+import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
@@ -1245,9 +1245,12 @@ async function getQuoteTool(
     // so it covers the amount_inr (receive-first) path too. Only when the amount is
     // finite — a missing/NaN amount falls through to quote()'s "valid amount" error.
     const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
+    // Program fix 16b: this sender's EFFECTIVE limits (customer raise → partner
+    // default → platform) drive BOTH the cap guard and the quote ceiling below.
+    const limits = resolveEffectiveSendLimits(partner, customer);
     if (Number.isFinite(amountUsd)) {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
-      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner), resolveSendLimits(partner));
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, Math.round(amountUsd * 100), sendGateActive(partner), limits);
       if (!ev.withinCap) {
         // kyc_url (and the Persona inquiry behind it) only exists when the
         // partner's verify-before-send gate is ON — gate-off customers get the
@@ -1282,6 +1285,7 @@ async function getQuoteTool(
       transferCount,
       destinationCurrency,
       destToUsd,
+      quoteCeilingUsd(limits), // fix 16b: the sender's quote ceiling (<= the $10,000 hard ceiling)
     );
     // Best-rate routing (default tenant only): when a competing partner beat
     // the mid-market rate, re-price ONLY the rate-dependent fields. Fees and
@@ -1309,6 +1313,7 @@ async function getQuoteTool(
             transferCount,
             destinationCurrency,
             destToUsd,
+            quoteCeilingUsd(limits),
           );
           if (routedQ.amountUsd <= q.amountUsd) {
             q = applyRouteToQuote(routedQ, route);
@@ -1405,7 +1410,7 @@ async function createTransferTool(
     {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
-      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveSendLimits(partner));
+      const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveEffectiveSendLimits(partner, customer));
       if (!ev.withinCap) {
         return {
           error: 'That quote would exceed your current sending cap. Please request a fresh quote.',
@@ -1548,7 +1553,7 @@ async function createTransferTool(
   {
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
-    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents, sendGateActive(legacyPartner), resolveSendLimits(legacyPartner));
+    const ev = evaluateCap(legacyCustomer, new Date(), todayUsedCents, requestedCents, sendGateActive(legacyPartner), resolveEffectiveSendLimits(legacyPartner, legacyCustomer));
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -3147,10 +3152,12 @@ async function sendApprovePickerTool(
   }
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   // Cap enforcement (defense in depth — check_send_limit + this + create_transfer)
+  // Program fix 16b: the sender's EFFECTIVE limits also bound the quote below.
+  const limits = resolveEffectiveSendLimits(partner, customer);
   {
     const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
     const requestedCents = Math.round(amountUsd * 100);
-    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveSendLimits(partner));
+    const ev = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), limits);
     if (!ev.withinCap) {
       return {
         error: 'Cap exceeded for this transfer.',
@@ -3178,7 +3185,7 @@ async function sendApprovePickerTool(
   const transfersToday = await ctx.store.getTodayTransferCount(ctx.partnerId, ctx.phone);
   try {
     const transferCount = await ctx.store.getTransferCount(ctx.partnerId, ctx.phone);
-    let q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd);
+    let q = quote(amountSource, sourceCurrency, rates, fundingMethod, transferCount, destinationCurrency, destToUsd, quoteCeilingUsd(limits));
 
     // Best-rate routing (default tenant only): the card, the draft, and the
     // eventual mint all carry the WINNING rate. The route's settlement partner
@@ -3533,7 +3540,7 @@ async function checkSendLimitTool(
   const amountUsd = Math.round(amountSource * rates.toUsd * 100) / 100;
   const requestedCents = Math.round(amountUsd * 100);
   const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
-  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveSendLimits(partner));
+  const evalResult = evaluateCap(customer, new Date(), todayUsedCents, requestedCents, sendGateActive(partner), resolveEffectiveSendLimits(partner, customer));
 
   const monthUsedCents = await ctx.monthlyVolumeStore.getMonthCents(ctx.partnerId, ctx.phone);   // NEW (KYC)
   const edd = evaluateEdd(monthUsedCents, requestedCents);                         // NEW (KYC)

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SYSTEM_PROMPT, buildSystemPrompt } from '@/lib/prompt';
-import { resolveSendLimits } from '@/lib/send-limits';
+import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -584,7 +584,7 @@ describe('buildSystemPrompt — send limits (fix 16)', () => {
   });
 
   it('a tenant T0 of $200 / T1 of $1,000 / per-transfer $800 is what the bot says (both kyc variants)', () => {
-    const limits = resolveSendLimits({ sendLimits: { t0DailyCapCents: 20_000, t1DailyCapCents: 100_000, perTransferCapCents: 80_000 } });
+    const limits = resolveEffectiveSendLimits({ sendLimits: { t0DailyCapCents: 20_000, t1DailyCapCents: 100_000, perTransferCapCents: 80_000 } }, null);
     for (const kycGateActive of [true, false]) {
       const p = buildSystemPrompt({ brand: 'Acme Pay', kycGateActive, limits });
       expect(p).toContain('$200/day');
@@ -596,6 +596,6 @@ describe('buildSystemPrompt — send limits (fix 16)', () => {
   });
 
   it('the default limits object yields the byte-identical SYSTEM_PROMPT', () => {
-    expect(buildSystemPrompt({ brand: 'SmartRemit', limits: resolveSendLimits(null) })).toBe(SYSTEM_PROMPT);
+    expect(buildSystemPrompt({ brand: 'SmartRemit', limits: resolveEffectiveSendLimits(null, null) })).toBe(SYSTEM_PROMPT);
   });
 });

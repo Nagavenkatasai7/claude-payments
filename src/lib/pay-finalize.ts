@@ -1,7 +1,7 @@
 import { assertQuoteOverrideFresh, createTransfer, quoteOverrideFromDraft } from './transfer-create';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { isSendVerified, isB2bSendVerified, sendGateActive } from './kyc-gate';
-import { resolveSendLimits, SendBusyError, SendCapError } from './send-limits';
+import { resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
 import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
@@ -192,14 +192,14 @@ export async function finalizeDraftPayment(
 
   // Defense-in-depth cap re-check at pay time (the card-show check may be
   // stale), the LAST pre-claim gate (ruling 7), on LEDGER totals and the
-  // partner's resolved limits (Program fix 16). The authoritative check runs
+  // sender's EFFECTIVE limits (fix 16b: customer → partner → platform). The authoritative check runs
   // again inside createTransfer's sender lock. SKIPPED when the draft already
   // minted: the minted row would count itself and refuse its own replay.
   if (!alreadyMinted) {
     const todayUsedCents = await dailyVolumeStore.getTodayCents(partnerId, draft.senderPhone);
     const ev = evaluateCap(
       customer, new Date(), todayUsedCents, Math.round(draft.amountUsd * 100),
-      sendGateActive(partner), resolveSendLimits(partner),
+      sendGateActive(partner), resolveEffectiveSendLimits(partner, customer),
     );
     if (!ev.withinCap) return { ok: false, error: 'cap' };
   }

@@ -258,6 +258,36 @@ export function createCustomerRepo(
         .where(tenantKey(partnerId, senderPhone));
     },
 
+    /**
+     * Program fix 16b: the ONE writer of customers.send_limit_override — a
+     * single-column UPDATE keyed (partner_id, phone), so a KYC / consent
+     * saveCustomer (which never names the column) can't clobber a raise and a
+     * raise can't clobber anything else. Reads the previous value under FOR
+     * UPDATE first so the caller's audit row records the true old value when
+     * this runs inside its transaction. A missing row ⇒ { found: false } and
+     * nothing written (the caller refuses "Customer not found.").
+     */
+    async setSendLimitOverride(
+      partnerId: PartnerId,
+      senderPhone: string,
+      value: SendLimitOverride | null,
+    ): Promise<{ found: boolean; previous: SendLimitOverride | null }> {
+      const rows = await db
+        .select({ sendLimitOverride: customers.sendLimitOverride })
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1)
+        .for('update');
+      if (!rows[0]) return { found: false, previous: null };
+      const prev = rows[0].sendLimitOverride;
+      const previous = prev && typeof prev === 'object' ? (prev as SendLimitOverride) : null;
+      await db
+        .update(customers)
+        .set({ sendLimitOverride: value, updatedAt: new Date() })
+        .where(tenantKey(partnerId, senderPhone));
+      return { found: true, previous };
+    },
+
     async setOptedOut(partnerId: PartnerId, senderPhone: string): Promise<void> {
       await db
         .update(customers)
