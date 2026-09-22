@@ -19,6 +19,7 @@ import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
+import { boundUntrustedText, BRAND_MAX, PERSONA_MAX } from '@/lib/untrusted-text';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import type {
@@ -75,14 +76,19 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const requireKycBeforeSend = isPlatform
     ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
     : existing.requireKycBeforeSend;
+  // fix 5 (F43): brand text is interpolated into the bot's SYSTEM prompt and a
+  // partner-scoped admin can set it for their own tenant — strip control
+  // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not
+  // refused, so an existing value still saves. buildSystemPrompt clamps again at
+  // read for pre-fix rows.
   const updated: Partner = {
     ...existing,
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
     countries: submittedCountries.length > 0 ? submittedCountries : existing.countries,
-    brandName: String(formData.get('brandName') ?? '').trim() || undefined,
-    displayName: String(formData.get('displayName') ?? '').trim() || undefined,
+    brandName: boundUntrustedText(formData.get('brandName'), BRAND_MAX) || undefined,
+    displayName: boundUntrustedText(formData.get('displayName'), BRAND_MAX) || undefined,
     supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
-    botPersona: String(formData.get('botPersona') ?? '').trim() || undefined,
+    botPersona: boundUntrustedText(formData.get('botPersona'), PERSONA_MAX) || undefined,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
@@ -471,10 +477,11 @@ export async function wizardCreatePartnerAction(
     name,
     countries,
     status: 'active',
-    brandName: clean(input.brandName),
-    displayName: clean(input.displayName),
+    // fix 5 (F43): the same save-side clamp as updatePartnerAction.
+    brandName: boundUntrustedText(input.brandName, BRAND_MAX) || undefined,
+    displayName: boundUntrustedText(input.displayName, BRAND_MAX) || undefined,
     supportContact: clean(input.supportContact),
-    botPersona: clean(input.botPersona),
+    botPersona: boundUntrustedText(input.botPersona, PERSONA_MAX) || undefined,
     primaryColor: clean(input.primaryColor),
     logoUrl: sanitizeLogoValue(input.logoUrl),
     kycMode,

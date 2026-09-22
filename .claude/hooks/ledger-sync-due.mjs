@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Stop hook `ledger-sync-due`: asks Claude to run the tracker-sync skill before finishing when
-// (c) an unflushed journal line (past the `flushed` marker) has kind approval, decision, incident,
-//     merge, migration, owner-step or verify, or is a successful session `gh pr merge` row (kind
-//     pr): these reach the page promptly, even when ls-remote fails;
+// (c) an unflushed journal line (past the `flushed` marker) has kind incident, merge or migration,
+//     or is a successful session `gh pr merge` row (kind pr): these reach the page promptly, even
+//     when ls-remote fails;
 // (b) the journal has unflushed bytes AND the last sync (`at` in last-sync.json) is more than
-//     10 minutes old (or unknown): routine rows such as agent starts wait for the next window;
+//     60 minutes old (or unknown): routine rows (approval, decision, verify, owner-step, agent
+//     starts, etc.) wait for the next window — narrowed from 10 min/7 kinds on 2026-09-22 so the
+//     hook stops blocking so often it drained usage;
 // (a) origin/main (git ls-remote, 3 s timeout) differs from mainSha in last-sync.json, which the
 //     skill writes after a successful sync (journal.mjs mark-flushed --main-sha).
 // (b) and (c) need no network, so ls-remote runs only when neither blocks.
