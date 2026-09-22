@@ -83,7 +83,13 @@ async function run(req: NextRequest): Promise<NextResponse> {
   // the client has no retries and a 2 s abort, so it can only shorten a drain.
   const now = new Date(invocationStart);
   const source = invocationSource(req.method, req.headers);
-  if (source === 'cron') await recordCronRun(cadenceRedis(), now);
+  if (source === 'cron') {
+    try {
+      await recordCronRun(cadenceRedis(), now);
+    } catch (err) {
+      logError('worker.cron-marker', err); // client construction (missing KV env) — the drain still runs
+    }
+  }
 
   const store = getStore();
   const deps: WorkerDeps = {
