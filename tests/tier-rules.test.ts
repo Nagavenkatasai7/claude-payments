@@ -9,6 +9,7 @@ import {
   evaluateEdd,
   evaluateEddForTransfer,
 } from '@/lib/tier-rules';
+import { PLATFORM_SEND_LIMITS, type SendLimits } from '@/lib/send-limits';
 import type { Customer } from '@/lib/types';
 
 function customer(overrides: Partial<Customer> & { firstSeenAt: string }): Customer {
@@ -62,7 +63,7 @@ describe('deriveTier', () => {
 describe('evaluateCap', () => {
   it('T0 customer with no spending today + small request → within cap', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_2, 0, 10_000); // $100 requested
+    const r = evaluateCap(c, DAY_2, 0, 10_000, true, PLATFORM_SEND_LIMITS); // $100 requested
     expect(r.withinCap).toBe(true);
     expect(r.tier).toBe('T0');
     expect(r.dailyCapCents).toBe(T0_DAILY_CAP_CENTS);
@@ -73,15 +74,14 @@ describe('evaluateCap', () => {
 
   it('T0 customer over the per-transfer cap', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_2, 0, T0_DAILY_CAP_CENTS + 10_000); // cap + $100
+    const r = evaluateCap(c, DAY_2, 0, 60_000, true, PLATFORM_SEND_LIMITS); // $600
     expect(r.withinCap).toBe(false);
     expect(r.reason).toBe('over_per_transfer_cap');
   });
 
   it('T0 customer over the daily cap (cumulative)', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    // $200 of headroom left, asking for $300 more.
-    const r = evaluateCap(c, DAY_2, T0_DAILY_CAP_CENTS - 20_000, 30_000);
+    const r = evaluateCap(c, DAY_2, 30_000, 30_000, true, PLATFORM_SEND_LIMITS); // $300 already, requesting $300 more = $600
     expect(r.withinCap).toBe(false);
     expect(r.reason).toBe('over_daily_cap');
     expect(r.todayRemainingCents).toBe(20_000); // $200 left
@@ -89,21 +89,52 @@ describe('evaluateCap', () => {
 
   it('T0 customer at exactly the daily cap → within', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_2, 30_000, 20_000); // $300 + $200 = $500 exactly
+    const r = evaluateCap(c, DAY_2, 30_000, 20_000, true, PLATFORM_SEND_LIMITS); // $300 + $200 = $500 exactly
     expect(r.withinCap).toBe(true);
   });
 
   it('T1 customer can send up to the higher cap', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'verified' });
-    const r = evaluateCap(c, DAY_4, 0, 200_000); // $2,000
+    const r = evaluateCap(c, DAY_4, 0, 200_000, true, PLATFORM_SEND_LIMITS); // $2,000
     expect(r.withinCap).toBe(true);
     expect(r.tier).toBe('T1');
     expect(r.dailyCapCents).toBe(T1_DAILY_CAP_CENTS);
   });
 
+  // Program fix 16 (test 3): the per-transfer cap is a SEPARATE ceiling —
+  // min(limits.perTransferCapCents, dailyCapCents) — so a partner that tightens
+  // the per-transfer cap below the daily cap refuses $1,500 and passes $900.
+  it('a per-transfer cap below the daily cap is its own ceiling (fix 16)', () => {
+    const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'verified' });
+    const limits: SendLimits = { ...PLATFORM_SEND_LIMITS, perTransferCapCents: 100_000, maxUsd: 1000 };
+    const over = evaluateCap(c, DAY_4, 0, 150_000, true, limits); // $1,500
+    expect(over.withinCap).toBe(false);
+    expect(over.reason).toBe('over_per_transfer_cap');
+    expect(over.perTransferCapCents).toBe(100_000);
+    expect(over.dailyCapCents).toBe(299_900);
+    const ok = evaluateCap(c, DAY_4, 0, 90_000, true, limits); // $900
+    expect(ok.withinCap).toBe(true);
+    // For T0 the per-transfer cap can never exceed the T0 daily cap.
+    const t0 = evaluateCap(customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' }), DAY_2, 0, 60_000, true, limits);
+    expect(t0.perTransferCapCents).toBe(50_000);
+    expect(t0.reason).toBe('over_per_transfer_cap');
+  });
+
+  it('a partner-tightened T1 daily cap binds T1 and leaves T0 alone', () => {
+    const limits: SendLimits = { ...PLATFORM_SEND_LIMITS, t1DailyCapCents: 100_000 };
+    // $500 used, $600 requested: under the $1,000 per-transfer ceiling, over the $1,000 day.
+    const t1 = evaluateCap(customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'verified' }), DAY_4, 50_000, 60_000, true, limits);
+    expect(t1.dailyCapCents).toBe(100_000);
+    expect(t1.perTransferCapCents).toBe(100_000); // min(platform per-transfer, the tightened day)
+    expect(t1.reason).toBe('over_daily_cap');
+    const t0 = evaluateCap(customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'verified' }), DAY_2, 0, 10_000, true, limits);
+    expect(t0.dailyCapCents).toBe(50_000);
+    expect(t0.withinCap).toBe(true);
+  });
+
   it('Suspended (day 4 unverified) → not within, reason = verification_required_after_window', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_4, 0, 1_000);
+    const r = evaluateCap(c, DAY_4, 0, 1_000, true, PLATFORM_SEND_LIMITS);
     expect(r.withinCap).toBe(false);
     expect(r.tier).toBe('Suspended');
     expect(r.reason).toBe('verification_required_after_window');
@@ -112,30 +143,30 @@ describe('evaluateCap', () => {
 
   it('Suspended (rejected) → not within, reason = verification_rejected', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'rejected' });
-    const r = evaluateCap(c, DAY_2, 0, 1_000);
+    const r = evaluateCap(c, DAY_2, 0, 1_000, true, PLATFORM_SEND_LIMITS);
     expect(r.withinCap).toBe(false);
     expect(r.reason).toBe('verification_rejected');
   });
 
   it('zero-request returns within=true (status-only check)', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    const r = evaluateCap(c, DAY_2, 0, 0);
+    const r = evaluateCap(c, DAY_2, 0, 0, true, PLATFORM_SEND_LIMITS);
     expect(r.withinCap).toBe(true);
     expect(r.todayRemainingCents).toBe(T0_DAILY_CAP_CENTS);
   });
 
   it('dayOfWindow is 1 on signup day, 2 on day 2, 3 on day 3', () => {
     const c = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'pending' });
-    expect(evaluateCap(c, SIGN_UP, 0, 0).dayOfWindow).toBe(1);
-    expect(evaluateCap(c, DAY_2, 0, 0).dayOfWindow).toBe(2);
-    expect(evaluateCap(c, DAY_3, 0, 0).dayOfWindow).toBe(3);
+    expect(evaluateCap(c, SIGN_UP, 0, 0, true, PLATFORM_SEND_LIMITS).dayOfWindow).toBe(1);
+    expect(evaluateCap(c, DAY_2, 0, 0, true, PLATFORM_SEND_LIMITS).dayOfWindow).toBe(2);
+    expect(evaluateCap(c, DAY_3, 0, 0, true, PLATFORM_SEND_LIMITS).dayOfWindow).toBe(3);
   });
 
   it('dayOfWindow is undefined for T1 and Suspended', () => {
     const verified = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'verified' });
-    expect(evaluateCap(verified, DAY_4, 0, 0).dayOfWindow).toBeUndefined();
+    expect(evaluateCap(verified, DAY_4, 0, 0, true, PLATFORM_SEND_LIMITS).dayOfWindow).toBeUndefined();
     const suspended = customer({ firstSeenAt: SIGN_UP.toISOString(), kycStatus: 'rejected' });
-    expect(evaluateCap(suspended, DAY_2, 0, 0).dayOfWindow).toBeUndefined();
+    expect(evaluateCap(suspended, DAY_2, 0, 0, true, PLATFORM_SEND_LIMITS).dayOfWindow).toBeUndefined();
   });
 });
 
@@ -190,8 +221,8 @@ describe('evaluateCap regression (EDD is orthogonal — cap math unchanged)', ()
       senderCountry: 'US' as const, partnerId: 'default', createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
     };
-    const ev = evaluateCap(c, new Date('2026-05-29T00:00:00Z'), 0, 100_000);
+    const ev = evaluateCap(c, new Date('2026-05-29T00:00:00Z'), 0, 100_000, true, PLATFORM_SEND_LIMITS);
     expect(ev.tier).toBe('T1');
-    expect(ev.dailyCapCents).toBe(T1_DAILY_CAP_CENTS); // cap-agnostic: EDD never touches cap math
+    expect(ev.dailyCapCents).toBe(299_900); // unchanged T1_DAILY_CAP_CENTS
   });
 });

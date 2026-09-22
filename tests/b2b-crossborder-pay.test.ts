@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
+import { SendBusyError } from '@/lib/send-limits';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
@@ -10,7 +11,7 @@ import type { FxRates } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedLedgerSpend } from './helpers-db';
 import type { B2bInvoice } from '@/lib/types';
 
 // Plan 4 — the cross-border B2B money path. NON-CUSTODIAL invariants under test:
@@ -52,7 +53,7 @@ async function buildStores() {
   const store = createStore(redis, db);
   const customerStore = createCustomerStore(db, store);
   const partnerStore = createPartnerStore(db);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
   return { redis, db, store, customerStore, partnerStore, monthlyVolumeStore };
 }
 
@@ -390,5 +391,36 @@ describe('finalizeCrossBorderBillPayment — Case B (buyer-denominated) mint', (
     const res = await finalize(stores, 'inv_third', computeCaseBQuote());
     expect(res).toMatchObject({ ok: false, error: 'currency_mismatch' });
     expect(await transferCount(stores)).toBe(0);
+  });
+});
+
+// ── Program fix 16 (Task 10, test 13): B2B bills are capped from the ledger ──
+describe('finalizeCrossBorderBillPayment — send cap (Program fix 16)', () => {
+  it('a buyer at cap ⇒ { ok:false, error:"cap" }, nothing minted, the claim bound-but-unminted; a retry mints the bound id once there is headroom', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const invoiceId = await seedInvoice(stores);
+    // The bill is 1,000 HKD × 0.128 = $128; a T0 buyer (upsertOnFirstInbound ⇒ now) has $500/day.
+    const seeded = await seedLedgerSpend(stores.db, { partnerId: DEFAULT_PARTNER_ID, phone: BUYER_PHONE, amountUsd: 400 });
+    const r = await finalize(stores, invoiceId);
+    expect(r).toEqual({ ok: false, error: 'cap' });
+    expect(await transferCount(stores)).toBe(1); // the seeded row only
+    expect((await stores.store.getB2bInvoice(invoiceId))?.status).toBe('unpaid');
+    await stores.store.cancelTransferIfUnfunded(seeded, DEFAULT_PARTNER_ID);
+    const r2 = await finalize(stores, invoiceId);
+    expect(r2.ok).toBe(true);
+    expect(await transferCount(stores)).toBe(2);
+  });
+
+  it('a busy sender lock ⇒ { ok:false, error:"busy" } (retryable), nothing minted', async () => {
+    const stores = await buildStores();
+    await seedActiveSeller(stores);
+    await seedBuyer(stores);
+    const invoiceId = await seedInvoice(stores);
+    vi.spyOn(stores.store, 'mintUnderSenderLock').mockRejectedValueOnce(new SendBusyError());
+    expect(await finalize(stores, invoiceId)).toEqual({ ok: false, error: 'busy' });
+    expect(await transferCount(stores)).toBe(0);
+    expect((await finalize(stores, invoiceId)).ok).toBe(true);
   });
 });

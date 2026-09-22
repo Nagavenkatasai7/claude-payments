@@ -13,6 +13,7 @@ import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
+import { handleRailFailure } from '@/lib/rail-failure';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -257,6 +258,34 @@ describe('drainOnce — rail.callback (the reference rail settle leg)', () => {
     expect(url).toContain('/api/payment-webhook/simulator');
     expect(JSON.parse(String(init.body))).toEqual({ reference: 'wk_t1', status: 'paid_out' });
     expect((init.headers as Record<string, string>)['x-signature']).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// Program-Fix 8: the reference rail's failure mode rides the same row.
+describe('drainOnce — rail.callback carries a failure status through (fix 8)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://x', signingSecret: 's' }, webhookSecret: 'whk_cb' },
+      whatsapp: {},
+    });
+    fetchFn.mockResolvedValue({ ok: true });
+  });
+
+  it('status + reason pass through into the SIGNED body', async () => {
+    await outbox.enqueue('rail.callback', { reference: 'wk_t1', partner_id: 'acme', status: 'failed', reason: 'account_unreachable' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/api/payment-webhook/simulator');
+    expect(JSON.parse(String(init.body))).toEqual({ reference: 'wk_t1', status: 'failed', reason: 'account_unreachable' });
+    expect((init.headers as Record<string, string>)['x-signature'])
+      .toBe(createHmac('sha256', 'whk_cb').update(String(init.body)).digest('hex'));
+  });
+
+  it('a non-string status / reason falls back to paid_out with no reason key', async () => {
+    await outbox.enqueue('rail.callback', { reference: 'wk_t1', partner_id: 'acme', status: 7, reason: null });
+    await drainOnce(deps(), 'w1');
+    expect(JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body))).toEqual({ reference: 'wk_t1', status: 'paid_out' });
   });
 });
 
@@ -612,6 +641,65 @@ describe('drainOnce — funding.refund (the money-back leg)', () => {
     const r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
     expect(sendText).not.toHaveBeenCalled();
+  });
+});
+
+// Program-Fix 8: no re-instruct after a rail failure, and the partner-pulled
+// reverse from a rail-failed row.
+describe('drainOnce — after a rail failure (fix 8)', () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+
+  it('a reinstruct:<id> row queued BEFORE the failure landed is marked done WITHOUT a fetch, and no new reinstruct row appears', async () => {
+    await store.saveTransfer({ ...transferFixture(), fundingRef: 'mockfund-wk_t1' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    // The rail's failure lands: cancelled + refund pending in one transaction.
+    expect((await handleRailFailure(db, 'wk_t1', { code: 'failed', reason: 'account_unreachable' })).kind).toBe('failed');
+    expect(await createTransferRepo(db).findStuckPaid(0)).toEqual([]);
+
+    const r = await drainOnce(deps(), 'w1');
+    expect(fetchFn).not.toHaveBeenCalledWith('https://rail.example/settle', expect.anything());
+    const row = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'reinstruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
+    expect(row.rows[0].status).toBe('done');
+    expect(r.failed).toBe(0);
+    const keys = ((await db.execute(sql`SELECT dedupe_key FROM outbox ORDER BY id`)) as unknown as { rows: Array<{ dedupe_key: string }> }).rows.map((x) => x.dedupe_key);
+    expect(keys.filter((k) => k?.startsWith('reinstruct:'))).toEqual(['reinstruct:wk_t1']);
+  });
+
+  it('a rail-failed B2B bank_pull row drains as the SIGNED REVERSE (no funds-provider refund) and completes the refund', async () => {
+    const refund = vi.fn();
+    const d: WorkerDeps = {
+      ...deps(),
+      fundingProvider: { capture: async (t) => ({ fundingRef: `mockfund-${t.id}` }), refund, handleWebhook: async () => null },
+    };
+    await store.saveTransfer({
+      ...transferFixture(), fundingMethod: 'bank_pull', transferType: 'b2b', achTokenRef: 'bankpull_x',
+      sourceCountry: 'GB', sourceCurrency: 'GBP',
+    } as Transfer);
+    expect(await handleRailFailure(db, 'wk_t1', { code: 'returned', reason: 'x' })).toEqual({ kind: 'failed', refundStarted: true });
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'simrail-reverse-wk_t1' }) });
+
+    const r = await drainOnce(d, 'w1'); // refund (reverse) + notice + alert rows
+    expect(r.failed).toBe(0);
+    expect(refund).not.toHaveBeenCalled();
+    const reverseCall = fetchFn.mock.calls.find(([u]) => u === 'https://rail.example/settle') as [string, RequestInit];
+    expect(reverseCall).toBeTruthy();
+    const body = JSON.parse(String(reverseCall[1].body)) as Record<string, unknown>;
+    expect(body).toMatchObject({ action: 'reverse', reference: 'reverse-wk_t1', partner_id: 'acme', funding: { method: 'bank_debit', token: 'bankpull_x' } });
+    expect((reverseCall[1].headers as Record<string, string>)['x-signature']).toMatch(/^[0-9a-f]{64}$/);
+    expect(await store.getTransfer('wk_t1')).toMatchObject({ status: 'cancelled', refundStatus: 'completed', refundRef: 'simrail-reverse-wk_t1' });
+    // The rail-failure notice said "reversed"; the completion message follows.
+    const texts = sendText.mock.calls.map((c) => String(c[1]));
+    expect(texts.some((t) => /reversed/.test(t))).toBe(true);
   });
 });
 

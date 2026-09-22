@@ -350,9 +350,49 @@ export function createAuditRepo(db: DbOrTx) {
     async listRecent(limit = 50) {
       return db.select().from(auditEvents).orderBy(desc(auditEvents.at)).limit(limit);
     },
+
+    /**
+     * Program fix 16b: the newest send_limits.set / send_limits.clear row for
+     * ONE subject — tenant-keyed, and keyed on the meta scope too so a partner
+     * id and a phone can never read each other's history. Feeds the admin
+     * "Send limits" card ("last change: actor, when, reason").
+     */
+    async lastSendLimitChange(
+      partnerId: PartnerId,
+      scope: 'customer' | 'partner',
+      subjectId: string,
+    ): Promise<SendLimitChange | null> {
+      const rows = await db
+        .select({ actor: auditEvents.actor, action: auditEvents.action, meta: auditEvents.meta, at: auditEvents.at })
+        .from(auditEvents)
+        .where(
+          sql`${auditEvents.partnerId} = ${partnerId}
+            AND ${auditEvents.subjectId} = ${subjectId}
+            AND ${auditEvents.action} IN ('send_limits.set', 'send_limits.clear')
+            AND ${auditEvents.meta}->>'scope' = ${scope}`,
+        )
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(1);
+      const r = rows[0];
+      if (!r) return null;
+      return {
+        actor: r.actor,
+        action: r.action as SendLimitChange['action'],
+        meta: (r.meta ?? {}) as Record<string, unknown>,
+        at: r.at.toISOString(),
+      };
+    },
   };
 }
 export type AuditRepo = ReturnType<typeof createAuditRepo>;
+
+/** One send-limit audit row, as the admin card renders it (fix 16b). */
+export interface SendLimitChange {
+  actor: string;
+  action: 'send_limits.set' | 'send_limits.clear';
+  meta: Record<string, unknown>;
+  at: string;
+}
 
 // ── B2B mock invoices (the "ERP" stand-in for the test case) ─────────────────
 export function createB2bInvoiceRepo(db: DbOrTx) {

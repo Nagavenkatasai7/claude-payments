@@ -588,6 +588,15 @@ export async function POST(
           { status: 400 },
         );
       }
+      if (result.error === 'busy') {
+        // Program fix 16: the per-sender mint lock timed out (another send for
+        // this customer is in flight). Nothing was minted or consumed; the SAME
+        // link re-submits and replays the bound id.
+        return NextResponse.json(
+          { ok: false, error: 'Please try again.', reason: 'busy' },
+          { status: 503 },
+        );
+      }
       const msg =
         result.error === 'cap'
           ? 'That amount exceeds your current limit.'

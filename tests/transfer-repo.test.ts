@@ -460,3 +460,62 @@ describe('transfer-repo — fix 10 review nit: hasB2bTransferTo matches the NORM
     expect(await repo.hasB2bTransferTo('acme', '15551230000', '919822222222')).toBe(false);
   });
 });
+
+// Program fix 16 (Task 10, test 5): the cap / velocity / EDD totals are
+// aggregates over the ledger, tenant-scoped, over a plain created_at range.
+describe('senderTotalsSince (fix 16: ledger totals under one query)', () => {
+  const PHONE = '15551230000';
+  const DAY = new Date('2026-06-10T04:00:00.000Z');   // ET midnight, June 10
+  const MONTH = new Date('2026-06-01T04:00:00.000Z'); // ET midnight, June 1
+
+  beforeEach(async () => {
+    db = await freshDb();
+    await seedPartner(db, 'acme');
+    repo = createTransferRepo(db, provider);
+    const at = (h: number) => new Date(DAY.getTime() + h * 3_600_000).toISOString();
+    const row = (id: string, over: Partial<Transfer>) => repo.saveTransfer(fixture({ id, phone: PHONE, ...over }));
+    // Today, tenant A: one of each status.
+    await row('a_await', { status: 'awaiting_payment', amountUsd: 100, createdAt: at(1) });
+    await row('a_paid', { status: 'paid', amountUsd: 200, createdAt: at(2) });
+    await row('a_review', { status: 'in_review', amountUsd: 30, createdAt: at(3) });
+    await row('a_deliv', { status: 'delivered', amountUsd: 40, createdAt: at(4) });
+    await row('a_cancel', { status: 'cancelled', amountUsd: 500, createdAt: at(5) });
+    await row('a_blocked', { status: 'blocked', complianceStatus: 'blocked', amountUsd: 700, createdAt: at(6) });
+    // Yesterday (ET) and earlier this month, tenant A.
+    await row('a_yday', { status: 'paid', amountUsd: 1000, createdAt: at(-1) });
+    await row('a_m1', { status: 'delivered', amountUsd: 55.55, createdAt: new Date(MONTH.getTime() + 3_600_000).toISOString() });
+    // Last month, tenant A — outside every window.
+    await row('a_lastm', { status: 'paid', amountUsd: 9000, createdAt: new Date(MONTH.getTime() - 3_600_000).toISOString() });
+    // Today, tenant B, same phone — must never count for A.
+    await row('b_today', { status: 'paid', amountUsd: 5000, createdAt: at(1), partnerId: 'acme' });
+  });
+
+  it('sums today’s awaiting/paid/in_review/delivered only; counts everything but blocked; month includes prior days', async () => {
+    const t = await repo.senderTotalsSince('default', PHONE, DAY, MONTH);
+    expect(t).toEqual({
+      todayUsdCents: 37_000,          // 100 + 200 + 30 + 40 (cancelled + blocked excluded)
+      todayCount: 5,                  // 6 rows today minus the blocked one (cancelled counts, like countByPhone)
+      monthUsdCents: 37_000 + 100_000 + 5_555, // + yesterday $1,000 + June 1 $55.55
+    });
+    expect(typeof t.todayUsdCents).toBe('number');
+    expect(typeof t.monthUsdCents).toBe('number');
+    expect(typeof t.todayCount).toBe('number');
+  });
+
+  it('is tenant-scoped: the other tenant sees only its own row, and an unknown sender is all zeros', async () => {
+    expect(await repo.senderTotalsSince('acme', PHONE, DAY, MONTH)).toEqual({
+      todayUsdCents: 500_000, todayCount: 1, monthUsdCents: 500_000,
+    });
+    expect(await repo.senderTotalsSince('default', '15550000000', DAY, MONTH)).toEqual({
+      todayUsdCents: 0, todayCount: 0, monthUsdCents: 0,
+    });
+  });
+
+  it('the day boundary is inclusive of dayStart and exclusive of the instant before', async () => {
+    await repo.saveTransfer(fixture({ id: 'edge_in', phone: PHONE, amountUsd: 1, createdAt: DAY.toISOString() }));
+    await repo.saveTransfer(fixture({ id: 'edge_out', phone: PHONE, amountUsd: 2, createdAt: new Date(DAY.getTime() - 1).toISOString() }));
+    const t = await repo.senderTotalsSince('default', PHONE, DAY, MONTH);
+    expect(t.todayUsdCents).toBe(37_000 + 100);
+    expect(t.monthUsdCents).toBe(37_000 + 100_000 + 5_555 + 100 + 200);
+  });
+});

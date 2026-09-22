@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
+import { SendBusyError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { captureQueries, freshDb, seedLedgerSpend } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer, CorridorRequest } from '@/lib/types';
-import { easternDate } from '@/lib/dates';
+
+afterEach(() => vi.restoreAllMocks());
 
 let db: Db;
 beforeEach(async () => {
@@ -117,59 +119,109 @@ describe('firstTransferAt (tenant-scoped)', () => {
   });
 });
 
-describe('store velocity counter (tenant-scoped)', () => {
-  it('defaults today count to 0 and increments', async () => {
+describe('store ledger totals (Program fix 16: no Redis counters)', () => {
+  it('getTodayTransferCount is DERIVED from the ledger — blocked rows excluded, cancelled rows count — and the Redis increment is gone', async () => {
     const store = createStore(fakeRedis(), db);
     expect(await store.getTodayTransferCount('default', 'p')).toBe(0);
-    await store.incrementTodayTransferCount('default', 'p');
-    await store.incrementTodayTransferCount('default', 'p');
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p', amountUsd: 10 });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p', amountUsd: 10, status: 'cancelled' });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p', amountUsd: 10, status: 'blocked' });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p', amountUsd: 10, createdAt: new Date(Date.now() - 2 * 86_400_000) });
     expect(await store.getTodayTransferCount('default', 'p')).toBe(2);
-  });
-
-  it('velocity is isolated per (partner, phone) — a partner-API mint never inflates another tenant\'s counter', async () => {
-    const store = createStore(fakeRedis(), db);
-    await store.incrementTodayTransferCount('default', 'p1');
-    expect(await store.getTodayTransferCount('default', 'p1')).toBe(1);
-    expect(await store.getTodayTransferCount('acme', 'p1')).toBe(0);
-    expect(await store.getTodayTransferCount('default', 'p2')).toBe(0);
-  });
-
-  it('uses velocity:{partnerId}:{phone}:{easternDate}', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis, db);
-    await store.incrementTodayTransferCount('default', 'p');
-    expect(redis.dump.has(`velocity:default:p:${easternDate(Date.now())}`)).toBe(true);
-  });
-
-  it('TRANSITIONAL: reads fall back to the legacy phone-only key for one window — ONLY for the phone\'s pre-fix (oldest-row) tenant; the first increment absorbs it', async () => {
-    const redis = fakeRedis();
-    const store = createStore(redis, db);
-    // Pre-fix state: the phone has exactly ONE customer row, under default.
-    await createCustomerStore(db, store).upsertOnFirstInbound('default', 'p');
-    await redis.set(`velocity:p:${easternDate(Date.now())}`, '3');
-    expect(await store.getTodayTransferCount('default', 'p')).toBe(3);
-    await store.incrementTodayTransferCount('default', 'p');
-    expect(await store.getTodayTransferCount('default', 'p')).toBe(4);
-  });
-
-  it('TRANSITIONAL: a post-fix sibling tenant NEVER reads the legacy key (D3 — no cross-tenant compliance oracle)', async () => {
-    const { seedPartner } = await import('./helpers-db');
-    await seedPartner(db, 'acme');
-    const redis = fakeRedis();
-    const store = createStore(redis, db);
-    const cs = createCustomerStore(db, store);
-    // The pre-fix owner is seeded with an EXPLICIT createdAt one minute in the past: two
-    // upsertOnFirstInbound calls can land in the same millisecond, and findByPhone's
-    // asc(partnerId) tie-break would then make 'acme' the "oldest" row (flake).
-    const T0 = new Date(Date.now() - 60_000).toISOString();
-    await cs.saveCustomer({ senderPhone: 'p', firstSeenAt: T0, kycStatus: 'not_started', senderCountry: 'US', partnerId: 'default', optInAt: T0, createdAt: T0, updatedAt: T0 }); // pre-fix owner
-    await cs.upsertOnFirstInbound('acme', 'p');    // post-fix sibling (createdAt = now, strictly later)
-    await redis.set(`velocity:p:${easternDate(Date.now())}`, '3');
-    expect(await store.getTodayTransferCount('default', 'p')).toBe(3);
     expect(await store.getTodayTransferCount('acme', 'p')).toBe(0);
-    // No customer row at all ⇒ no legacy read either (fail closed).
-    await redis.set(`velocity:q:${easternDate(Date.now())}`, '9');
-    expect(await store.getTodayTransferCount('default', 'q')).toBe(0);
+    expect('incrementTodayTransferCount' in store).toBe(false);
+    // Review SHOULD 2: no `this` — the method survives destructuring / partial mocks.
+    const { getTodayTransferCount } = store;
+    expect(await getTodayTransferCount('default', 'p')).toBe(2);
+  });
+
+  it('senderTotals reads the ledger; a Redis flush mid-test leaves the totals unchanged (test 18)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p', amountUsd: 120.5 });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p', amountUsd: 80, status: 'paid', createdAt: new Date(Date.now() - 2 * 86_400_000) });
+    const before = await store.senderTotals('default', 'p');
+    expect(before.todayUsdCents).toBe(12_050);
+    expect(before.todayCount).toBe(1);
+    // Yesterday's row is in the month total only when it is the same ET month —
+    // relative dates, so assert the relation rather than a literal.
+    expect(before.monthUsdCents).toBeGreaterThanOrEqual(12_050);
+    redis.dump.clear();
+    expect(await store.senderTotals('default', 'p')).toEqual(before);
+    // No counter key was ever written.
+    expect([...redis.dump.keys()].filter((k) => /^(daily_volume|monthly_volume|velocity):/.test(k))).toEqual([]);
+  });
+
+  it('capSubject: firstSeenAt from the customers row, else the first transfer, else now; kycStatus is the caller attestation', async () => {
+    const store = createStore(fakeRedis(), db);
+    const fourDaysAgo = new Date(Date.now() - 4 * 86_400_000).toISOString();
+    // (a) a customers row wins
+    await createCustomerStore(db, store).saveCustomer({
+      senderPhone: 'p1', firstSeenAt: fourDaysAgo, kycStatus: 'not_started', senderCountry: 'US', partnerId: 'default',
+      createdAt: fourDaysAgo, updatedAt: fourDaysAgo,
+    });
+    const a = await store.capSubject('default', 'p1', 'verified');
+    expect(a).toEqual({ firstSeenAt: fourDaysAgo, kycStatus: 'verified' });
+    // (b) no row ⇒ the tenant's first transfer
+    const tenDaysAgo = new Date(Date.now() - 10 * 86_400_000);
+    await seedLedgerSpend(db, { partnerId: 'default', phone: 'p2', amountUsd: 10, createdAt: tenDaysAgo });
+    expect((await store.capSubject('default', 'p2', 'verified')).firstSeenAt).toBe(tenDaysAgo.toISOString());
+    // …and never another tenant's row or transfer
+    const now = new Date();
+    const c = await store.capSubject('acme', 'p2', 'verified', now);
+    expect(c).toEqual({ firstSeenAt: now.toISOString(), kycStatus: 'verified' });
+  });
+
+  it('mintUnderSenderLock: READ COMMITTED, then SET LOCAL lock_timeout, then pg_advisory_xact_lock(hashtext($1)) BEFORE any statement on transfers (test 8)', async () => {
+    const store = createStore(fakeRedis(), db);
+    const txSpy = vi.spyOn(db, 'transaction');
+    const stop = captureQueries();
+    const minted = await store.mintUnderSenderLock('default', 'p', async (ops) => {
+      const totals = await ops.totals();
+      expect(totals.todayUsdCents).toBe(0);
+      await ops.insertTransfer(sampleTransfer('lock_1', new Date().toISOString(), 'p'));
+      return ops.getTransfer('lock_1');
+    });
+    const log = stop();
+    expect(minted?.id).toBe('lock_1');
+    expect(txSpy).toHaveBeenCalledTimes(1);
+    expect(txSpy.mock.calls[0][1]).toEqual({ isolationLevel: 'read committed' });
+    const sqls = log.map((q) => q.sql.toLowerCase());
+    const iso = sqls.findIndex((q) => q.includes('set transaction isolation level read committed'));
+    const to = sqls.findIndex((q) => q.includes("set local lock_timeout = '5s'"));
+    const lock = sqls.findIndex((q) => q.includes('pg_advisory_xact_lock(hashtext($1))'));
+    const firstTransfers = sqls.findIndex((q) => /\btransfers\b/.test(q));
+    expect(iso).toBeGreaterThanOrEqual(0);
+    expect(to).toBe(iso + 1);
+    expect(lock).toBe(to + 1);
+    expect(log[lock].params[0]).toBe('default:p');
+    expect(firstTransfers).toBeGreaterThan(lock);
+    // A committed insert is visible outside the lock.
+    expect((await store.getTransfer('lock_1'))?.id).toBe('lock_1');
+  });
+
+  it('mintUnderSenderLock: a throw inside the body rolls the insert back and propagates', async () => {
+    const store = createStore(fakeRedis(), db);
+    await expect(
+      store.mintUnderSenderLock('default', 'p', async (ops) => {
+        await ops.insertTransfer(sampleTransfer('rb_1', new Date().toISOString(), 'p'));
+        throw new Error('refused-after-insert');
+      }),
+    ).rejects.toThrow('refused-after-insert');
+    expect(await store.getTransfer('rb_1')).toBeNull();
+    expect(await store.getTodayTransferCount('default', 'p')).toBe(0);
+  });
+
+  it('mintUnderSenderLock maps SQLSTATE 55P03 (lock_timeout) to SendBusyError, direct or wrapped in cause', async () => {
+    const store = createStore(fakeRedis(), db);
+    const timeout = Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+    vi.spyOn(db, 'transaction').mockRejectedValueOnce(timeout);
+    await expect(store.mintUnderSenderLock('default', 'p', async () => 'never')).rejects.toBeInstanceOf(SendBusyError);
+    vi.spyOn(db, 'transaction').mockRejectedValueOnce(new Error('Failed query', { cause: timeout }));
+    await expect(store.mintUnderSenderLock('default', 'p', async () => 'never')).rejects.toBeInstanceOf(SendBusyError);
+    // Any other error is NOT busy.
+    vi.spyOn(db, 'transaction').mockRejectedValueOnce(Object.assign(new Error('dup'), { code: '23505' }));
+    await expect(store.mintUnderSenderLock('default', 'p', async () => 'never')).rejects.toThrow('dup');
   });
 });
 

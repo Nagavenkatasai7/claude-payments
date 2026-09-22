@@ -6,6 +6,8 @@ import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { validateSendLimitInput } from '@/lib/send-limits';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import {
@@ -17,6 +19,7 @@ import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
+import { boundUntrustedText, BRAND_MAX, PERSONA_MAX } from '@/lib/untrusted-text';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
@@ -74,14 +77,19 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   const requireKycBeforeSend = isPlatform
     ? formData.get('requireKycBeforeSend') === 'on' // OPT-IN gate, either mode
     : existing.requireKycBeforeSend;
+  // fix 5 (F43): brand text is interpolated into the bot's SYSTEM prompt and a
+  // partner-scoped admin can set it for their own tenant — strip control
+  // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not
+  // refused, so an existing value still saves. buildSystemPrompt clamps again at
+  // read for pre-fix rows.
   const updated: Partner = {
     ...existing,
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
     countries: submittedCountries.length > 0 ? submittedCountries : existing.countries,
-    brandName: String(formData.get('brandName') ?? '').trim() || undefined,
-    displayName: String(formData.get('displayName') ?? '').trim() || undefined,
+    brandName: boundUntrustedText(formData.get('brandName'), BRAND_MAX) || undefined,
+    displayName: boundUntrustedText(formData.get('displayName'), BRAND_MAX) || undefined,
     supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
-    botPersona: String(formData.get('botPersona') ?? '').trim() || undefined,
+    botPersona: boundUntrustedText(formData.get('botPersona'), PERSONA_MAX) || undefined,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
@@ -340,6 +348,51 @@ export async function savePricingAction(formData: FormData): Promise<void> {
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
+// ── Send limits: the audited PLATFORM-ADMIN partner default (Program fix 16b) ──
+// NOT gatePartnerConfig (which admits partner admins): a raise is platform
+// governance, like setPartnerStatusAction. Same steps as the customer action:
+// gate → validate (reason first) → re-read the target → ONE transaction with the
+// single-column UPDATE + the audit row (old, new, actor, reason, expiresAt).
+// The partner shape also carries T0, tighten-only (<= the platform $500).
+
+export async function setPartnerSendLimitAction(formData: FormData): Promise<void> {
+  const staff = await requirePlatformAdmin();
+  const validated = validateSendLimitInput(
+    {
+      perTransferUsd: String(formData.get('perTransferUsd') ?? ''),
+      t1DailyUsd: String(formData.get('t1DailyUsd') ?? ''),
+      t0DailyUsd: String(formData.get('t0DailyUsd') ?? ''),
+      expiresAt: String(formData.get('expiresAt') ?? ''),
+      reason: String(formData.get('reason') ?? ''),
+      clear: formData.get('clear') === 'on',
+    },
+    new Date(),
+    { allowT0: true },
+  );
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Partner id is required.');
+  const existing = await getPartnerStore().getPartner(id);
+  if (!existing) throw new Error('Partner not found.');
+
+  const nowIso = new Date().toISOString();
+  const value = validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso };
+  await getDb().transaction(async (tx) => {
+    // tx-bound repos ONLY inside the transaction (see the customer action).
+    const { found, previous } = await createPartnerStore(tx).setSendLimits(existing.id, value);
+    if (!found) throw new Error('Partner not found.'); // raced a delete ⇒ nothing written
+    await createAuditRepo(tx).record({
+      partnerId: existing.id,
+      actor: staff.username,
+      actorType: 'staff',
+      action: value === null ? 'send_limits.clear' : 'send_limits.set',
+      subjectId: existing.id,
+      meta: { scope: 'partner', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+    });
+  });
+  revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${existing.id}`);
+}
+
 // ── Support: admin-controlled support behavior (PartnerSupportConfig) ───────
 // Stored on the partner row (same opt-in pattern as requireKycBeforeSend).
 // enableSupportPortal defaults to TRUE when absent, so the checkbox writes an
@@ -448,10 +501,11 @@ export async function wizardCreatePartnerAction(
     name,
     countries,
     status: 'active',
-    brandName: clean(input.brandName),
-    displayName: clean(input.displayName),
+    // fix 5 (F43): the same save-side clamp as updatePartnerAction.
+    brandName: boundUntrustedText(input.brandName, BRAND_MAX) || undefined,
+    displayName: boundUntrustedText(input.displayName, BRAND_MAX) || undefined,
     supportContact: clean(input.supportContact),
-    botPersona: clean(input.botPersona),
+    botPersona: boundUntrustedText(input.botPersona, PERSONA_MAX) || undefined,
     primaryColor: clean(input.primaryColor),
     logoUrl: sanitizeLogoValue(input.logoUrl),
     kycMode,

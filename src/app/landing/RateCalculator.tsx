@@ -4,6 +4,8 @@ import { useMemo, useState } from 'react';
 import { calculatorMessage, waLink, WA_MESSAGES } from './wa';
 import { inr as formatInr } from './format';
 import WhatsAppIcon from './WhatsAppIcon';
+// Pure, types-only module (never fx.ts → rate.ts → log.ts in a client bundle).
+import { PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
 
 interface Props {
   /** Server-passed USD→INR rate; null when the FX provider refused (no figure shown). */
@@ -67,7 +69,7 @@ export default function RateCalculator({ rate, live, asOf }: Props) {
               type="number"
               inputMode="decimal"
               min={10}
-              max={999999}
+              max={PLATFORM_SEND_LIMITS.maxUsd}
               step={50}
               value={amount}
               onChange={(e) => setAmount(e.target.value)}

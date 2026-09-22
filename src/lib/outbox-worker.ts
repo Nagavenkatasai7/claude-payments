@@ -394,7 +394,11 @@ async function handle(
       const partnerId = str(p.partner_id) || str(p.partnerId);
       const { integrations } = await partner(partnerId);
       const webhookSecret = integrations.payment.webhookSecret ?? '';
-      const callbackBody = JSON.stringify({ reference, status: 'paid_out' });
+      // fix 8: the reference rail's one failure mode rides the same row —
+      // `status` (default paid_out) and an optional `reason` pass through.
+      const cbStatus = str(p.status) || 'paid_out';
+      const cbReason = str(p.reason);
+      const callbackBody = JSON.stringify({ reference, status: cbStatus, ...(cbReason ? { reason: cbReason } : {}) });
       const res = await deps.fetchFn(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
         method: 'POST',
         headers: {

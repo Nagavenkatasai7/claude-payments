@@ -27,6 +27,13 @@ export interface Page<T> {
   nextCursor?: string;
 }
 
+/** Program fix 16: one sender's ledger totals for the cap, velocity and EDD checks. */
+export interface SenderTotals {
+  todayUsdCents: number;
+  todayCount: number;
+  monthUsdCents: number;
+}
+
 function cursorOf(t: Transfer): string {
   return `${t.createdAt}|${t.id}`;
 }
@@ -193,6 +200,49 @@ export function createTransferRepo(
         )
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * fix 8 (money-02 / rail-02): the rail-failure CLAIM. Runs in the caller's
+     * transaction: `SELECT … FOR UPDATE` (the row lock — a concurrent paid_out,
+     * staff refund or sweep waits) and then ONE guarded UPDATE that moves only
+     * a `paid` row: status → 'cancelled' (the existing terminal state, no new
+     * status value), admin_note ← `note` (appended after any staff note), and
+     * refund_status by the PRIOR value:
+     *   none / requested + refundable → pending   (the caller enqueues refund:<id>)
+     *   none / requested, NOT refundable → unchanged (partner-funded: no charge here)
+     *   pending / completed / failed → unchanged   (a staff refund owns it)
+     * "Refundable" = funding_ref IS NOT NULL (SmartRemit captured funds) OR a
+     * partner-pulled leg (ach_pull / bank_pull — the worker posts the signed
+     * REVERSE). Not a CTE: the caller branches on the prior refund status,
+     * which a single UPDATE … RETURNING cannot show. Returns the locked prior
+     * row (null when missing) and the updated row (null when not `paid`).
+     * Drizzle 0.45.2: select().…().for('update') —
+     * node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
+     */
+    async failPaidFromRail(
+      id: string,
+      note: string,
+    ): Promise<{ prior: Transfer | null; updated: Transfer | null }> {
+      const locked = await db.select().from(transfers).where(eq(transfers.id, id)).limit(1).for('update');
+      const prior = locked[0] ? toDomain(locked[0]) : null;
+      if (!prior || prior.status !== 'paid') return { prior, updated: null };
+      const rows = await db
+        .update(transfers)
+        .set({
+          status: 'cancelled',
+          // APPENDED, never clobbered: a rail must not erase a staff note.
+          adminNote: sql`CASE WHEN COALESCE(${transfers.adminNote}, '') = '' THEN ${note} ELSE ${transfers.adminNote} || ' | ' || ${note} END`,
+          refundStatus: sql`CASE
+            WHEN ${transfers.refundStatus} IN ('none', 'requested')
+              AND (${transfers.fundingRef} IS NOT NULL OR ${transfers.fundingMethod} IN ('ach_pull', 'bank_pull'))
+              THEN 'pending'
+            ELSE ${transfers.refundStatus}
+          END`,
+        })
+        .where(and(eq(transfers.id, id), eq(transfers.status, 'paid')))
+        .returning();
+      return { prior, updated: rows[0] ? toDomain(rows[0]) : null };
     },
 
     /** Persist the settlement ref exactly once (never clobbers an existing ref). */
@@ -632,6 +682,51 @@ export function createTransferRepo(
         .where(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone)));
       const v = rows[0]?.min;
       return v ? new Date(v).toISOString() : null;
+    },
+
+    /**
+     * Program fix 16 (Task 10): the send-cap, velocity and EDD totals in ONE
+     * indexed query (transfers_phone_created) over a plain created_at range —
+     * no Redis counter decides a cap or a flag any more. Tenant-scoped.
+     *   todayUsdCents  = Σ amount_usd (cents) since dayStart, excluding blocked
+     *                    and cancelled (a cancelled row moved no money: fix 9's
+     *                    void, fix 8's rail failure) — the daily cap;
+     *   todayCount     = rows since dayStart excluding only blocked (awaiting
+     *                    rows count, like countByPhone) — the velocity flag;
+     *   monthUsdCents  = Σ amount_usd since monthStart with the same exclusions
+     *                    — the rolling-month EDD total.
+     * The bounds are passed in (dates.ts easternDayStart/easternMonthStart)
+     * so fake timers work and the query is a plain range. Under the sender
+     * lock (store.mintUnderSenderLock, READ COMMITTED) this sees the previous
+     * holder's committed insert.
+     */
+    async senderTotalsSince(
+      partnerId: PartnerId,
+      phone: string,
+      dayStart: Date,
+      monthStart: Date,
+    ): Promise<SenderTotals> {
+      const rows = await db
+        .select({
+          todayUsdCents: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.createdAt} >= ${dayStart} and ${transfers.status} not in ('blocked', 'cancelled')), 0)::bigint`,
+          todayCount: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${dayStart} and ${transfers.status} != 'blocked')::int`,
+          monthUsdCents: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.status} not in ('blocked', 'cancelled')), 0)::bigint`,
+        })
+        .from(transfers)
+        .where(
+          and(
+            eq(transfers.partnerId, partnerId),
+            eq(transfers.phone, phone),
+            sql`${transfers.createdAt} >= ${monthStart}`,
+          ),
+        );
+      const r = rows[0];
+      // bigint sums arrive as strings from pg; cents fit a JS number.
+      return {
+        todayUsdCents: Number(r?.todayUsdCents ?? 0),
+        todayCount: Number(r?.todayCount ?? 0),
+        monthUsdCents: Number(r?.monthUsdCents ?? 0),
+      };
     },
 
     /**

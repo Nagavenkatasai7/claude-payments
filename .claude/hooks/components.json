@@ -35,13 +35,13 @@
       "tests/outbox*", "tests/reconcile*", "tests/cron-*", "tests/worker*"
     ]},
     "money-paths": { "branch": "component/money-paths", "paths": [
-      "src/lib/settlement.ts", "src/lib/pay-finalize.ts", "src/lib/transfer-create.ts", "src/lib/payment.ts", "src/lib/funding-method.ts",
+      "src/lib/settlement.ts", "src/lib/rail-failure.ts", "src/lib/pay-finalize.ts", "src/lib/transfer-create.ts", "src/lib/payment.ts", "src/lib/funding-method.ts",
       "src/lib/refund-policy.ts", "src/lib/transaction-otp.ts", "src/lib/schedule.ts", "src/lib/schedule-store.ts",
       "src/lib/providers/payment-provider.ts", "src/lib/providers/http-payment-provider.ts", "src/lib/providers/funding-provider.ts", "src/lib/providers/payment-webhook-verify.ts",
       "src/db/repos/transfer-repo.ts", "src/db/repos/schedule-repo.ts",
       "src/app/api/pay/", "src/app/api/payment-webhook/", "src/app/api/funding-webhook/", "src/app/api/partner-rail/",
       "src/app/admin-dashboard/refunds/", "src/app/admin-dashboard/schedules/", "src/app/admin-dashboard/transactions/",
-      "tests/settlement*", "tests/pay-*", "tests/transfer-*", "tests/payment*", "tests/funding*", "tests/refund*", "tests/schedule*", "tests/partner-rail*"
+      "tests/settlement*", "tests/rail-failure*", "tests/pay-*", "tests/transfer-*", "tests/payment*", "tests/funding*", "tests/refund*", "tests/schedule*", "tests/partner-rail*"
     ]},
     "partner-api": { "branch": "component/partner-api", "paths": [
       "src/lib/partner-api*", "src/lib/partner-config.ts", "src/lib/partner-integrations*", "src/lib/partner-rate-limit.ts",

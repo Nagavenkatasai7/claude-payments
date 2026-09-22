@@ -40,7 +40,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
   const store = createStore(redis, db);
   const customerStore = createCustomerStore(db, store);
   const partnerStore = createPartnerStore(db);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
   const scheduleStore = createScheduleStore(db);
 
   for (const id of ['acme', 'beta']) {
