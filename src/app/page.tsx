@@ -5,6 +5,7 @@ import { waLink, WA_MESSAGES, corridorMessage } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
 import BrandLogo from './landing/BrandLogo';
 import SocialLinks from './landing/SocialLinks';
+import { SHARE_IMAGE } from './landing/share-image';
 import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon, BoltIcon, GlobeIcon } from './landing/TrustIcons';
 import RateCalculator from './landing/RateCalculator';
 import HeroPipeline from './landing/HeroPipeline';
@@ -15,16 +16,22 @@ import { submitPartnerRequestAction } from './partners-action';
 // root div), so it never touches the sh-* dashboard or .payapp themes.
 const inter = Inter({ subsets: ['latin'], display: 'swap' });
 
+const TITLE = 'SmartRemit.ai — Global money transfers, made simpler.';
+const DESCRIPTION =
+  'Send money across borders by chatting on WhatsApp. An AI agent quotes the live mid-market rate, a hosted page takes payment, and licensed partners settle. Non-custodial, sanctions-screened, 8 corridors — any direction.';
+
 export const metadata: Metadata = {
-  title: 'SmartRemit — Send money by chatting. Watch it arrive.',
-  description:
-    'An AI agent quotes the live mid-market rate in WhatsApp, a hosted page takes payment, and licensed partners settle. Non-custodial, sanctions-screened, 8 corridors — any direction.',
+  title: TITLE,
+  description: DESCRIPTION,
   openGraph: {
-    title: 'SmartRemit — Send money by chatting. Watch it arrive.',
+    title: TITLE,
     description:
-      'An AI agent quotes live mid-market FX in WhatsApp; licensed partners settle. Non-custodial remittance infrastructure across 8 corridors.',
+      'Send money by chatting on WhatsApp. Live mid-market FX, licensed partners settle. Non-custodial remittance infrastructure across 8 corridors.',
     type: 'website',
+    siteName: 'SmartRemit.ai',
+    images: [SHARE_IMAGE],
   },
+  twitter: { card: 'summary_large_image', title: TITLE, images: [SHARE_IMAGE] },
 };
 
 // ISR revalidates hourly. getFxRates() caches 5 min with a 60-min ceiling, and

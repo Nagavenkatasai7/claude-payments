@@ -4,6 +4,7 @@ import { Inter } from 'next/font/google';
 import { waLink } from '../landing/wa';
 import WhatsAppIcon from '../landing/WhatsAppIcon';
 import BrandLogo from '../landing/BrandLogo';
+import { SHARE_IMAGE } from '../landing/share-image';
 
 // Public /about page — the story, how a send works, and the partner platform.
 // Styled with the SAME inline-Tailwind light brand conventions as the landing
@@ -26,6 +27,8 @@ export const metadata: Metadata = {
   title: 'About SmartRemit — non-custodial remittance infrastructure',
   description:
     'SmartRemit is non-custodial technology that lets people send money home by chatting on WhatsApp, while licensed partners move the funds. See how one transfer works, start to finish.',
+  openGraph: { type: 'website', siteName: 'SmartRemit.ai', images: [SHARE_IMAGE] },
+  twitter: { card: 'summary_large_image', images: [SHARE_IMAGE] },
 };
 
 const ROOT =

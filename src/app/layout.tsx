@@ -1,4 +1,5 @@
 import './tailwind.css'; // THE stylesheet pipeline (Stage 5e): preflight + legacy theme layers + utilities
+import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { Inter } from 'next/font/google';
 
@@ -11,7 +12,16 @@ const inter = Inter({
   variable: '--font-inter',
 });
 
-export const metadata = {
+// metadataBase makes the page-level share images (openGraph/twitter `images`
+// on / and /about) absolute https://smartremit.ai URLs in production, which
+// link-preview crawlers need (generate-metadata.md "metadataBase"). On Vercel
+// previews Next uses the preview URL, and localhost in dev, for social images
+// (next/dist/lib/metadata/resolvers/resolve-url.js,
+// getSocialImageMetadataBaseFallback). The default title and description stay
+// neutral: routes without their own metadata (the white-label /pay/** pages)
+// inherit them. Icons come from app/icon.png + app/apple-icon.png.
+export const metadata: Metadata = {
+  metadataBase: new URL('https://smartremit.ai'),
   title: 'SmartRemit',
   description: 'Send money across borders via WhatsApp',
 };
