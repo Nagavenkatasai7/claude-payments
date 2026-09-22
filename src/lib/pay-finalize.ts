@@ -5,6 +5,8 @@ import { evaluateCap } from './tier-rules';
 import { draftTenant } from './legacy-tenant';
 import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
+import { isMaskedDestination } from './payout-format';
+import { isPartnerPulled } from './funding-method';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
@@ -18,7 +20,9 @@ import type { PayoutMethod } from './types';
 /**
  * Bank details collected on the secure pay page (Item 2). Both fields optional:
  * an absent/empty payoutDestination means "no body supplied" → fall back to the
- * draft's stored destination (covers old in-flight drafts during the TTL drain).
+ * draft's stored destination, used only when it is a real account (fix 6: a
+ * placeholder, or '' on anything but a B2B ach_pull draft, answers
+ * bank_details_required; a B2B draft ignores the body).
  */
 export interface BankDetails {
   payoutMethod?: PayoutMethod;
@@ -39,7 +43,10 @@ export type FinalizeResult =
   | { ok: true; transferId: string }
   | {
       ok: false;
-      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable';
+      // 'bank_details_required' (fix 6 / ctx-01): the resolved payout destination
+      // is a masked placeholder, or '' on anything but a B2B ach_pull draft.
+      // Nothing was claimed or consumed; the route answers 400. Never a 500.
+      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable' | 'bank_details_required';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -57,8 +64,9 @@ function fxRefused(err: RateUnavailableError): FinalizeResult {
 /**
  * Pay-time finalization for a draft-keyed pay link: turns a Draft into a real
  * Transfer at the moment of payment (create-at-pay). Mirrors the createTransferTool
- * button-tap parity: peek → gates → cap re-check → CLAIM-FIRST mint → consume →
- * accruals. Returns the new transferId for the caller to run the payment path.
+ * button-tap parity: peek → kyc → payout destination (fix 6) → FX (Task 9) → cap →
+ * CLAIM-FIRST mint → consume → accruals. Returns the new transferId for the
+ * caller to run the payment path.
  *
  * Stage 2c crash-safety: the idempotency key `draft:<draftId>` is bound to a
  * pre-generated transfer id BEFORE minting, and the draft is consumed AFTER.
@@ -110,6 +118,37 @@ export async function finalizeDraftPayment(
   const payVerified =
     draft.transferType === 'b2b' ? isB2bSendVerified(customer) : isSendVerified(customer);
   if (sendGateActive(partner) && !payVerified) return { ok: false, error: 'kyc_required' };
+
+  // ── fix 6 (ctx-01): resolve the payout destination BEFORE the claim ───────
+  // Ruling 7 guard order, all ABOVE idem.claim: kyc → THIS → FX (Task 9) → cap
+  // (Task 10) → idem.claim. A refusal leaves the single-use draft AND its
+  // draft:<draftId> key untouched. Pure function of (draft, body).
+  //
+  // A CONSUMER draft carrying a partner-pulled method (ach_pull / bank_pull —
+  // only a pre-fix model argument could create one) would never be charged:
+  // it is dead, never minted (createTransfer refuses it too).
+  if (isPartnerPulled(draft.fundingMethod) && draft.transferType !== 'b2b') {
+    return { ok: false, error: 'expired_or_used' };
+  }
+  //   body → route.ts composed it from validated, country-bound fields; it also
+  //          REPLACES a stored destination (the page's "Edit bank details") —
+  //          on a CONSUMER draft only: a B2B payee is never payer input.
+  //   none → the draft's stored destination, used ONLY when it is a real account.
+  //          '' ("the pay page must collect it") is refused except on a B2B
+  //          ach_pull draft, whose pay form collects only the payer's debit
+  //          mandate (the licensed partner pays the payee on its own records).
+  const bodyDestination =
+    draft.transferType === 'b2b' ? '' : (bankDetails?.payoutDestination ?? '').trim();
+  const payoutDestination =
+    bodyDestination !== '' ? bodyDestination : (draft.recipient.payoutDestination ?? '').trim();
+  const b2bAchPull = draft.transferType === 'b2b' && draft.fundingMethod === 'ach_pull';
+  if (isMaskedDestination(payoutDestination) || (payoutDestination === '' && !b2bAchPull)) {
+    return { ok: false, error: 'bank_details_required' };
+  }
+  const payoutMethod =
+    bodyDestination !== '' && bankDetails?.payoutMethod
+      ? bankDetails.payoutMethod
+      : draft.recipient.payoutMethod;
 
   // [fix 6 inserts above this line]
   // ── FX gate (Task 9) — BEFORE idem.claim, so a provider outage or a stale
@@ -165,19 +204,6 @@ export async function finalizeDraftPayment(
         : { ok: true, transferId: existing.id };
     }
   }
-
-  // Item 2: the recipient's bank details are entered on the secure pay page and
-  // arrive here in the POST body (bankDetails). Use them for the created
-  // transfer, but FALL BACK to the draft's stored destination when the body is
-  // empty/absent (covers old in-flight drafts still draining their 30-min TTL).
-  const bodyDestination = (bankDetails?.payoutDestination ?? '').trim();
-  const payoutDestination = bodyDestination !== ''
-    ? bodyDestination
-    : draft.recipient.payoutDestination ?? '';
-  const payoutMethod =
-    bodyDestination !== '' && bankDetails?.payoutMethod
-      ? bankDetails.payoutMethod
-      : draft.recipient.payoutMethod;
 
   // U7 (audit): mint with the DRAFT's stored quote — the exact figures the
   // approval card and the pay page showed. Re-quoting at pay time (current

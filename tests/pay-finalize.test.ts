@@ -11,6 +11,8 @@ import { T0_DAILY_CAP_CENTS } from '@/lib/tier-rules';
 import { FX_MAX_AGE_MS, resetRateCacheForTests } from '@/lib/rate';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 const PHONE = '15551234567';
 
@@ -689,5 +691,114 @@ describe('finalizeDraftPayment — FX refused AFTER the claim (Task 9 review): m
     fxUp();
     expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: true, transferId: claimedId });
     expect(await stores.store.getTransferCount('default', PHONE)).toBe(1);
+  });
+});
+
+describe('fix 6 (ctx-01): the payout destination is settled BEFORE idem.claim — a refusal burns nothing', () => {
+  const claimFor = (stores: Awaited<ReturnType<typeof buildStores>>, draftId: string) =>
+    createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
+
+  async function verifiedDraft(
+    stores: Awaited<ReturnType<typeof buildStores>>,
+    over: Record<string, unknown>,
+  ): Promise<string> {
+    const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    return stores.draftStore.createDraft({
+      senderPhone: PHONE, partnerId: 'default',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+      amountUsd: 200, amountSource: 200, sourceCurrency: 'USD', fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 17000 },
+      ...over,
+    } as Parameters<typeof stores.draftStore.createDraft>[0]);
+  }
+  const b2bAchDraft = {
+    recipient: { name: 'Globex Trading LLC', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+    amountUsd: 400, amountSource: 400, fundingMethod: 'ach_pull',
+    quote: { feeUsd: 1.99, fxRate: 85, amountInr: 34000 },
+    transferType: 'b2b', senderEntityType: 'business', recipientEntityType: 'business',
+    senderBusinessName: 'Acme Imports Ltd', recipientBusinessName: 'Globex Trading LLC', invoiceId: 'inv_u1',
+  };
+
+  it('a masked stored destination + a bodyless POST → bank_details_required: nothing minted, key NOT claimed, draft NOT consumed, no accrual', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200, 'Mom', '****9012', 'bank');
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'bank_details_required' });
+    expect(await stores.store.listTransfers()).toHaveLength(0);
+    expect(await claimFor(stores, draftId)).toBeNull();
+    expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await stores.dailyVolumeStore.getTodayCents('default', PHONE)).toBe(0);
+  });
+
+  it('the SAME link then finalizes with real bank details — the claim binds only now; ledger and address book hold the real account', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200, 'Mom', '****9012', 'bank');
+    await finalizeDraftPayment(stores, draftId);
+    const result = await finalizeDraftPayment(stores, draftId, {
+      payoutMethod: 'bank', payoutDestination: '021000021 12345678901',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unexpected');
+    expect(await claimFor(stores, draftId)).toBe(result.transferId);
+    expect((await stores.store.getTransferDecrypted(result.transferId))?.payoutDestination).toBe('021000021 12345678901');
+    expect(await stores.draftStore.getDraft(draftId)).toBeNull();
+    const [rec] = await stores.store.listRecipients('default', PHONE, 1);
+    expect(rec.payoutDestination).toBe('021000021 12345678901');
+  });
+
+  it("BEHAVIOUR CHANGE: a consumer cold-start draft ('' destination) with a bodyless POST is refused", async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200, 'Mom', '', 'bank');
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'bank_details_required' });
+    expect(await claimFor(stores, draftId)).toBeNull();
+  });
+
+  it('a masked value in the BODY is refused too (defence in depth)', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200);
+    expect(await finalizeDraftPayment(stores, draftId, { payoutMethod: 'bank', payoutDestination: '****9012' }))
+      .toEqual({ ok: false, error: 'bank_details_required' });
+    expect(await claimFor(stores, draftId)).toBeNull();
+  });
+
+  it("the '' exemption keys on the DRAFT'S shape: a CONSUMER draft carrying a partner-pulled method is dead (expired_or_used) even with a body; a B2B bank_pull draft is refused", async () => {
+    for (const fundingMethod of ['bank_pull', 'ach_pull']) {
+      const stores = await buildStores();
+      const draftId = await verifiedDraft(stores, { fundingMethod });
+      expect(await finalizeDraftPayment(stores, draftId, { payoutMethod: 'bank', payoutDestination: '021000021 12345678901' }), fundingMethod)
+        .toEqual({ ok: false, error: 'expired_or_used' });
+      expect(await claimFor(stores, draftId)).toBeNull();
+      expect(await stores.store.listTransfers()).toHaveLength(0);
+    }
+    const stores = await buildStores();
+    const draftId = await verifiedDraft(stores, { ...b2bAchDraft, fundingMethod: 'bank_pull' });
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'bank_details_required' });
+  });
+
+  it("a B2B ach_pull draft mints with NO destination, and a body NEVER sets its payee (the payee is never payer input)", async () => {
+    // Separate stores per mint: two $400 bills in one day would trip the T0 $500 cap.
+    const s1 = await buildStores();
+    const plain = await verifiedDraft(s1, b2bAchDraft);
+    const r1 = await finalizeDraftPayment(s1, plain);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) throw new Error('unexpected');
+    expect((await s1.store.getTransferDecrypted(r1.transferId))?.payoutDestination).toBe('');
+    const s2 = await buildStores();
+    const crafted = await verifiedDraft(s2, b2bAchDraft);
+    const r2 = await finalizeDraftPayment(s2, crafted, { payoutMethod: 'bank', payoutDestination: '999999999999 SBIN0009999' });
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) throw new Error('unexpected');
+    expect((await s2.store.getTransferDecrypted(r2.transferId))?.payoutDestination).toBe('');
+  });
+
+  it('guard order (ruling 7): an unverified sender with a masked draft gets kyc_required — the kyc gate runs first', async () => {
+    const stores = await buildStores();
+    const draftId = await makeDraft(stores, 200, 'Mom', '****9012', 'bank');
+    const dflt = await stores.partnerStore.ensureDefaultPartner();
+    await stores.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
+    const c = await stores.customerStore.getCustomer('default', PHONE);
+    await stores.customerStore.saveCustomer({ ...c!, kycStatus: 'grandfathered' });
+    expect(await finalizeDraftPayment(stores, draftId)).toEqual({ ok: false, error: 'kyc_required' });
+    expect(await claimFor(stores, draftId)).toBeNull();
   });
 });
