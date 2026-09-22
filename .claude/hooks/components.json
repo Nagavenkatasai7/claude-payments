@@ -65,11 +65,12 @@
     ]},
     "landing-docs": { "branch": "component/landing-docs", "paths": [
       "src/app/page.tsx", "src/app/landing/", "src/app/about/", "src/app/docs/", "src/app/partners/", "src/app/partners-action.ts",
-      "src/lib/logo.ts", "src/lib/blob.ts", "src/lib/email.ts", "public/"
+      "src/lib/logo.ts", "src/lib/email.ts", "public/"
     ]},
     "platform-security": { "branch": "component/platform-security", "paths": [
       "src/middleware.ts", "src/instrumentation.ts", "src/lib/boot-assert.ts", "src/lib/field-crypto.ts", "src/lib/ip-rate-limit.ts",
       "src/lib/settlement-url.ts", "src/lib/safe-fetch.ts", "scripts/audit-settlement-urls.ts", "tests/settlement-url*", "tests/safe-fetch*",
+      "src/lib/blob.ts", "src/app/admin-dashboard/partner-requests/[id]/documents/", "scripts/migrate-partner-docs-private.ts", "tests/partner-docs-*",
       "src/lib/redis.ts", "src/lib/store.ts", "src/lib/scoped-store.ts", "src/lib/seed.ts", "next.config.*", "vitest.config.*", "playwright.config.*",
       "eslint.config.*", "tsconfig.json", ".github/", "tests/e2e/", "tests/boot-assert*", "tests/field-crypto*", "tests/ip-rate-limit*", "tests/security*", "tests/middleware*"
     ]},
