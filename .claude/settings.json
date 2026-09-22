@@ -116,7 +116,9 @@
       "WebFetch(domain:nodejs.org)",
       "WebFetch(domain:www.npmjs.com)",
       "WebFetch(domain:owasp.org)",
-      "WebFetch(domain:cheatsheetseries.owasp.org)"
+      "WebFetch(domain:cheatsheetseries.owasp.org)",
+      "Bash(node scripts/tracker/sync.mjs:*)",
+      "Bash(node scripts/tracker/journal.mjs:*)"
     ],
     "deny": [
       "Read(./.env)",
@@ -168,6 +170,26 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ledger-journal.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ledger-journal.mjs\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -177,6 +199,26 @@
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify-on-stop.sh\"",
             "timeout": 900
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ledger-sync-due.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/ledger-journal.mjs\"",
+            "timeout": 10
           }
         ]
       }
