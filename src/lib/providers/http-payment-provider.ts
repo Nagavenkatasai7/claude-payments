@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import type { Store } from '../store';
-import { usdcAddressFromDestination } from '../payout-format';
+import { isMaskedDestination, usdcAddressFromDestination } from '../payout-format';
+import { isPartnerPulled } from '../funding-method';
 import type { Transfer, TransferStatus } from '../types';
 import type { PartnerPaymentConfig } from '../partner-integrations';
 import type {
@@ -55,8 +56,25 @@ export function railCallbackTransferId(body: unknown): string | null {
   return typeof candidate === 'string' && candidate !== '' ? candidate : null;
 }
 
-/** The signed instruction body POSTed to the partner's settlement endpoint. */
+/**
+ * The signed instruction body POSTed to the partner's settlement endpoint.
+ *
+ * fix 6 (ctx-01) LAST-LINE BACKSTOPS — a row written before fix 6 fails loudly
+ * in its settlement.instruct outbox row (2^n backoff → dead at 8 → deduped ops
+ * alert, plus reconcile's stuck-paid alert) instead of instructing:
+ *   • a display placeholder ("****9012", "account on file") as the payout; and
+ *   • a partner-pulled funding leg (ach_pull / bank_pull) on a CONSUMER row —
+ *     the pay route never charged it, and only a B2B bill may be pulled.
+ * Messages carry the transfer id only. '' is NOT refused: a B2B ach_pull row
+ * legitimately carries no payee destination.
+ */
 export function buildSettlementInstruction(transfer: Transfer) {
+  if (isMaskedDestination(transfer.payoutDestination)) {
+    throw new Error(`settlement_destination_invalid:${transfer.id}`);
+  }
+  if (isPartnerPulled(transfer.fundingMethod) && transfer.transferType !== 'b2b') {
+    throw new Error(`settlement_funding_invalid:${transfer.id}`);
+  }
   return {
     reference: transfer.id,
     partner_id: transfer.partnerId,
