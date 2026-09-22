@@ -44,7 +44,8 @@ export const MAX_ACK_BYTES = 64 * 1024;
 export const MAX_REDIRECTS = 2;
 
 export type ResolvedAddress = { address: string; family: number };
-export type Resolve = (hostname: string) => Promise<ResolvedAddress[]>;
+/** `hints` are Node's getaddrinfo flags (ADDRCONFIG under autoSelectFamily); threaded through unchanged. */
+export type Resolve = (hostname: string, opts?: { hints?: number }) => Promise<ResolvedAddress[]>;
 
 export interface SafeFetchDeps {
   /** Hostname → every address. Default: dns.promises.lookup(host, { all: true }). */
@@ -81,8 +82,8 @@ function sanitized(err: unknown): Error {
   return new Error(`settlement_fetch_failed:${code}`);
 }
 
-const defaultResolve: Resolve = async (hostname) => {
-  const all = await dns.promises.lookup(hostname, { all: true });
+export const defaultResolve: Resolve = async (hostname, opts) => {
+  const all = await dns.promises.lookup(hostname, { all: true, hints: opts?.hints });
   return all.map((a) => ({ address: a.address, family: a.family }));
 };
 
@@ -124,7 +125,7 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
   // fails the WHOLE connect: no address of that answer is ever dialled.
   const lookup: LookupFunction = (hostname, options, callback) => {
     const want = options.family === 4 || options.family === 'IPv4' ? 4 : options.family === 6 || options.family === 'IPv6' ? 6 : 0;
-    resolve(hostname).then(
+    resolve(hostname, { hints: options.hints }).then(
       (addrs) => {
         const usable = addrs.filter((a) => want === 0 || a.family === want);
         if (usable.length === 0) {
@@ -178,25 +179,29 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
         ...(devAppOrigin ? {} : { lookup }),
         ...(isHttps && deps.ca !== undefined ? { ca: deps.ca } : {}),
       };
-      let req: http.ClientRequest;
+      // Declared BEFORE the request is built: settle() (reached by fail() on a
+      // synchronous request() throw) removes this listener, and a `const` in the
+      // temporal dead zone would turn that into a ReferenceError.
+      let req: http.ClientRequest | undefined;
+      const onAbort = () => {
+        req?.destroy();
+        settle(() => rejectHop(signal?.reason ?? new Error('settlement_fetch_failed:aborted')));
+      };
       try {
         req = mod.request(options);
       } catch (err) {
         fail(err); // a sync throw (bad path/header char) is sanitized like any other failure
         return;
       }
-      const onAbort = () => {
-        req.destroy();
-        settle(() => rejectHop(signal?.reason ?? new Error('settlement_fetch_failed:aborted')));
-      };
       signal?.addEventListener('abort', onAbort, { once: true });
-      req.on('error', fail);
-      req.on('response', (res) => {
+      const request = req;
+      request.on('error', fail);
+      request.on('response', (res) => {
         const status = res.statusCode ?? 0;
         const declared = Number(res.headers['content-length']);
         if (Number.isFinite(declared) && declared > MAX_ACK_BYTES) {
           res.destroy();
-          req.destroy();
+          request.destroy();
           fail(refused('body_too_large'));
           return;
         }
@@ -206,7 +211,7 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
           received += chunk.length;
           if (received > MAX_ACK_BYTES) {
             res.destroy();
-            req.destroy();
+            request.destroy();
             fail(refused('body_too_large'));
             return;
           }
@@ -227,8 +232,8 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
           );
         });
       });
-      if (body) req.end(body);
-      else req.end();
+      if (body) request.end(body);
+      else request.end();
     });
   }
 
@@ -237,8 +242,17 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
     const production = deps.production ?? env.isProduction;
     const signal = init?.signal ?? undefined;
     const method = (init?.method ?? 'GET').toUpperCase();
-    const body = bodyToBuffer(init?.body);
-    const headers = headersToRecord(init?.headers);
+    let body: Buffer | null;
+    let headers: Record<string, string>;
+    try {
+      body = bodyToBuffer(init?.body);
+      headers = headersToRecord(init?.headers);
+    } catch (err) {
+      // undici's Headers echoes the offending value in its TypeError; keep the
+      // fixed-code contract (unsupported_body keeps its own code).
+      if (err instanceof Error && err.message.startsWith('settlement_fetch_failed:')) throw err;
+      throw new Error('settlement_fetch_failed:invalid_request');
+    }
     delete headers.host;
     headers['accept-encoding'] = 'identity';
     if (body) headers['content-length'] = String(body.length);
@@ -286,9 +300,14 @@ export function createSafeFetch(deps: SafeFetchDeps = {}): typeof fetch {
       // 26.8.1); those statuses are built with a null body.
       const nullBody = r.status === 204 || r.status === 205 || r.status === 304;
       // A fresh Uint8Array (ArrayBuffer-backed) satisfies BodyInit; ≤64 KB copy.
+      // new Response() throws TypeError('Invalid statusText') on a reason phrase
+      // outside its alphabet (e.g. `HTTP/1.1 200 \x01`, delivered verbatim by
+      // the client parser). Not a fixed code, so gate it: keep a well-formed
+      // phrase, drop anything else. The status itself is what callers use.
+      const statusText = /^[\t\x20-\x7e\x80-\xff]*$/.test(r.statusText) ? r.statusText : '';
       return new Response(nullBody ? null : new Uint8Array(r.body), {
         status: r.status,
-        statusText: r.statusText,
+        statusText,
         headers: responseHeaders,
       });
     }

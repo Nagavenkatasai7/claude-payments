@@ -15,7 +15,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { createSafeFetch, MAX_ACK_BYTES, type ResolvedAddress } from '@/lib/safe-fetch';
+import dns from 'node:dns';
+import { createSafeFetch, defaultResolve, MAX_ACK_BYTES, type ResolvedAddress } from '@/lib/safe-fetch';
 
 // Node cannot mint an X.509 certificate itself, so a throwaway self-signed pair
 // is generated into a temp dir per run. Explicit SANs: Node's checkServerIdentity
@@ -361,5 +362,70 @@ describe('safeFetch — acks, body cap and deadline (acceptance test 6)', () => 
     const sf = client();
     await expect(sf('https://rail.example/settle', { method: 'POST', body: new FormData() })).rejects.toThrow('settlement_fetch_failed:unsupported_body');
     expect(connections).toBe(0);
+  });
+});
+
+describe('safeFetch — review follow-ups (PR #280)', () => {
+  it('a header value Node rejects at request() time, WITH a signal set, is a fixed code (no TDZ ReferenceError)', async () => {
+    // "\x01" passes undici's Headers but http.request() throws ERR_INVALID_CHAR synchronously.
+    const err = await client()('https://rail.example/settle', {
+      method: 'POST',
+      headers: { 'x-signature': 'bad\x01value' },
+      body: '{}',
+      signal: AbortSignal.timeout(5_000),
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('settlement_fetch_failed:ERR_INVALID_CHAR');
+    expect(connections).toBe(0);
+  });
+
+  it('a header value undici rejects is a fixed code too — never the echoed value', async () => {
+    const err = await client()('https://rail.example/settle', {
+      method: 'POST',
+      headers: { 'x-signature': 'bad\x00value' },
+      body: '{}',
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe('settlement_fetch_failed:invalid_request');
+    expect((err as Error).message).not.toContain('bad');
+  });
+
+  it('a reason phrase with a control character does not throw in the Response constructor', async () => {
+    handler = (req) => {
+      req.socket.write('HTTP/1.1 200 a\x01b\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}');
+      req.socket.end();
+    };
+    const res = await post(client(), 'https://rail.example/settle');
+    expect(res.ok).toBe(true);
+    expect(res.status).toBe(200);
+    expect(res.statusText).toBe('');
+    expect(await res.json()).toEqual({});
+  });
+
+  it('a well-formed reason phrase is kept', async () => {
+    handler = (_req, res) => { res.writeHead(202, 'Accepted Later'); res.end(); };
+    const res = await post(client(), 'https://rail.example/settle');
+    expect(res.statusText).toBe('Accepted Later');
+  });
+
+  it("Node's lookup hints (ADDRCONFIG) reach the resolver", async () => {
+    const resolve = vi.fn(async (_host: string, _opts?: { hints?: number }) => loopback);
+    await post(client({ resolve }), 'https://rail.example/settle');
+    expect(resolve).toHaveBeenCalledTimes(1);
+    const opts = resolve.mock.calls[0][1];
+    expect(typeof opts?.hints).toBe('number');
+    expect((opts!.hints! & dns.ADDRCONFIG) !== 0).toBe(true);
+  });
+
+  it('defaultResolve threads hints into dns.promises.lookup with all: true (mocked; no real DNS)', async () => {
+    const spy = vi.spyOn(dns.promises, 'lookup').mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as never);
+    try {
+      const out = await defaultResolve('rail.example', { hints: dns.ADDRCONFIG });
+      expect(spy).toHaveBeenCalledWith('rail.example', { all: true, hints: dns.ADDRCONFIG });
+      expect(out).toEqual([{ address: '93.184.216.34', family: 4 }]);
+      await defaultResolve('rail.example');
+      expect(spy).toHaveBeenLastCalledWith('rail.example', { all: true, hints: undefined });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
