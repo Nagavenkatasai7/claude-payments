@@ -18,7 +18,7 @@ import { pokeWorker } from '@/lib/outbox';
  * Enqueue an out-of-band AI triage for a customer ticket, then poke the worker
  * for the fast path. ONLY ever called for kind 'customer' tickets. The enqueue
  * shares the caller's transaction when a tx is passed; the poke is a best-effort,
- * fire-and-forget nudge (the heartbeat is the delivery guarantee).
+ * fire-and-forget nudge (the per-minute cron drains it regardless).
  */
 export async function enqueueTriage(db: DbOrTx, ticketId: string): Promise<void> {
   await createOutboxRepo(db).enqueue(

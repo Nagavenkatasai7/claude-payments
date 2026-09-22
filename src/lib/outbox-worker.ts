@@ -30,8 +30,9 @@ import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
 // outbox row written transactionally with the state change that implies it;
 // this worker drains them with retries → backoff → dead-letter (+ ops alert).
-// Vercel after() is reduced to a best-effort POKE of /api/worker; the GitHub
-// Actions 5-minute heartbeat is the delivery GUARANTEE.
+// Vercel after() is reduced to a best-effort POKE of /api/worker; a Vercel cron
+// drains every minute and an hourly GitHub Actions heartbeat backs it up
+// (src/lib/worker-cadence.ts).
 //
 // Handlers are dispatch-by-kind, DI'd so PGlite tests run them without any
 // network. Every handler is IDEMPOTENT by construction (dedupe keys upstream +
@@ -622,6 +623,21 @@ export interface DrainOptions {
   hardStopAt?: number;
 }
 
+/**
+ * Exactly one ops alert per dead row: every dead-letter path (handler failure at
+ * the ceiling, terminal row deadline, poison reclaim) shares the `dead:<id>`
+ * dedupe key. Never recursive — a dead ops.alert row does not alert about
+ * itself. Ids, kinds, counts and a trimmed error only; never the payload.
+ */
+async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Promise<void> {
+  if (row.kind === 'ops.alert') return;
+  await outbox.enqueue(
+    'ops.alert',
+    { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${text}` },
+    { dedupeKey: `dead:${row.id}` },
+  );
+}
+
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
 export async function drainOnce(
   deps: WorkerDeps,
@@ -636,6 +652,29 @@ export async function drainOnce(
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+    if (row.attempts > MAX_ATTEMPTS) {
+      // POISON RECLAIM (Task 8 / Program-Fix 12). claimBatch has no attempts
+      // filter, but markFailed dead-letters at >= MAX_ATTEMPTS and retryDead
+      // resets attempts to 0, so a claimed row past the ceiling can only be a
+      // reclaim: its every run KILLED the function before markFailed could
+      // write. Running it again would kill this one too — dead-letter it
+      // WITHOUT the handler, on the ordinary single dead:<id> alert path.
+      // Two cheap DB writes, so it runs even past stopAfter (the row was
+      // already claimed; a release would only refund one attempt and repeat).
+      const status = await outbox.markFailed(
+        row.id,
+        row.attempts,
+        'reclaimed past MAX_ATTEMPTS: worker died on every attempt',
+        workerId,
+      );
+      if (status === 'dead') {
+        result.dead++;
+        await alertDead(outbox, row, `DEAD after ${row.attempts} claims (reclaimed: the worker died on every attempt)`);
+      } else {
+        logWarn('worker.lease', 'poison reclaim: markFailed refused, lease no longer ours', { id: row.id, kind: row.kind, status });
+      }
+      continue;
+    }
     if (opts.stopAfter !== undefined && Date.now() >= opts.stopAfter) {
       // Out of budget: give the unstarted remainder back NOW (attempt refunded)
       // rather than parking it under a 5-minute lease.
@@ -690,15 +729,12 @@ export async function drainOnce(
       }
       if (status === 'dead') {
         result.dead++;
-        // Exactly one alert per dead row (dedupe key), never recursive.
-        if (row.kind !== 'ops.alert') {
-          await outbox.enqueue(
-            'ops.alert',
-            // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
-            { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}` },
-            { dedupeKey: `dead:${row.id}` },
-          );
-        }
+        // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
+        await alertDead(
+          outbox,
+          row,
+          `${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}`,
+        );
       } else {
         result.failed++;
       }

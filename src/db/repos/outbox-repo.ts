@@ -322,6 +322,31 @@ export function createOutboxRepo(db: DbOrTx) {
         .where(sql`${outbox.status} IN ('pending','failed')`);
       return rows[0]?.n ?? 0;
     },
+
+    /**
+     * What the NEXT drain would claim (Program-Fix 12 / Task 8): due
+     * 'pending'/'failed' rows PLUS 'processing' rows whose lease has expired —
+     * the same predicate and the same `coalesce(lease_until, locked_at + LEASE)`
+     * expression as claimBatch, so the drain-gap alarm and the claim can never
+     * disagree. `oldestDueAt` is the instant the oldest row became claimable
+     * (next_attempt_at, or the lease expiry for an abandoned row); null when
+     * nothing is due. Counts and timestamps only — no payload is selected.
+     */
+    async dueSummary(): Promise<{ dueNow: number; oldestDueAt: Date | null }> {
+      const rows = await db.execute(sql`
+        SELECT count(*)::int AS due_now,
+               min(CASE WHEN status IN ('pending','failed') THEN next_attempt_at
+                        ELSE coalesce(lease_until, locked_at + make_interval(secs => ${LEASE_SEC})) END) AS oldest_due_at
+        FROM outbox
+        WHERE (status IN ('pending','failed') AND next_attempt_at <= now())
+           OR (status = 'processing' AND coalesce(lease_until, locked_at + make_interval(secs => ${LEASE_SEC})) < now())
+      `);
+      const r = (rows as unknown as { rows: Array<Record<string, unknown>> }).rows[0] ?? {};
+      return {
+        dueNow: Number(r.due_now ?? 0),
+        oldestDueAt: r.oldest_due_at ? new Date(String(r.oldest_due_at)) : null,
+      };
+    },
   };
 }
 

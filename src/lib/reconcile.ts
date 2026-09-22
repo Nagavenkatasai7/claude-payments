@@ -7,7 +7,8 @@ import { settleOrHold } from '@/lib/settlement';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every /api/worker
-// invocation (poke + 5-min heartbeat), AFTER the outbox drain. It catches the
+// invocation (per-minute Vercel cron, hourly GitHub heartbeat, poke), BEFORE the
+// outbox drain so its effects drain in the same call. It catches the
 // states the happy path can't lose silently anymore but an external party can
 // still strand:
 //   • a webhook-driven transfer stuck in 'paid' too long (the partner's rail
@@ -29,7 +30,7 @@ export const STUCK_REFUND_MINUTES = 60;
 /**
  * A 'processing' row whose lease expired this long ago and is STILL unreclaimed.
  * claimBatch reclaims expired leases on every drain, so a survivor means the
- * drain is not running (heartbeat / poke down) — alert per row, deduped.
+ * drain is not running (cron / heartbeat / poke down) — alert per row, deduped.
  */
 export const STALE_LOCK_MINUTES = 15;
 
@@ -232,7 +233,7 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
         message:
           `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) has sat in 'processing' for ` +
           `>${STALE_LOCK_MINUTES}m past its lease and was not reclaimed — the worker drain is not running; ` +
-          `check the GitHub Actions heartbeat.`,
+          `check the Vercel cron (Settings → Cron Jobs) and the GitHub heartbeat.`,
       },
       { dedupeKey: `stalelock:${row.id}` },
     );

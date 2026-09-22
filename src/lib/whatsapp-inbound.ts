@@ -153,7 +153,7 @@ export async function processInboundWebhook(
     { phone: incoming.from, messageText, turn, routedPartnerId },
     { dedupeKey: `wamid:${incoming.messageId}` },
   );
-  pokeWorker(); // fast path — the heartbeat is the guarantee
+  pokeWorker(); // fast path — the per-minute cron drains it regardless
 
   return { ok: true };
 }

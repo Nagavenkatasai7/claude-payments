@@ -260,7 +260,7 @@ async function processTransferPayment(
         // Mock rail: the delivered confirmation is a DELAYED outbox row
         // (DELIVERY_DELAY_MS) that the immediate poke above can't see — schedule
         // a best-effort second poke for just after the delay elapses so the
-        // customer isn't waiting on the 5-minute heartbeat. Real rails are
+        // customer isn't waiting on the next cron tick. Real rails are
         // webhook-driven (the callback pokes).
         pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);
       }
