@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { fakeRedis } from './helpers';
 
@@ -117,5 +117,157 @@ describe('retry-after header accuracy — regression (bug-hunt)', () => {
       expect(retryAfterSec).toBeGreaterThanOrEqual(1);
       expect(retryAfterSec).toBeLessThanOrEqual(windowSec);
     }
+  });
+});
+
+// ── Program-Fix 23: the hosted pay-page guard ────────────────────────────────
+// A page (not a route) cannot answer 429: it either renders the sheet or the
+// same generic "inactive" sheet. isIpRateLimited() is the boolean the pages
+// branch on. It FAILS OPEN on everything (Redis error, unknown IP) and never
+// throws — a limiter outage must never hide a customer's payment sheet.
+import { isIpRateLimited, PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT } from '@/lib/ip-rate-limit';
+import type { RedisLike } from '@/lib/store';
+
+function fwd(ip: string): Headers {
+  return new Headers({ 'x-forwarded-for': ip });
+}
+
+describe('isIpRateLimited — page guard (fail-open, never throws)', () => {
+  it('exports the page scope and limit: "paypage", 60 per window, distinct from the POST "pay" scope', () => {
+    expect(PAY_PAGE_SCOPE).toBe('paypage');
+    expect(PAY_PAGE_IP_LIMIT).toBe(60);
+    expect(PAY_PAGE_SCOPE).not.toBe('pay');
+  });
+
+  it('the 60th call in a window is allowed (false) and the 61st is throttled (true)', async () => {
+    const redis = fakeRedis();
+    const deps = { redis, now: () => T0 };
+    for (let i = 1; i <= 60; i++) {
+      expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT, 60, deps)).toBe(false);
+    }
+    expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT, 60, deps)).toBe(true);
+    // The key carries the page scope, never the POST scope.
+    expect([...redis.dump.keys()].some((k) => k.startsWith('iprl|paypage|1.2.3.4|'))).toBe(true);
+    expect([...redis.dump.keys()].some((k) => k.startsWith('iprl|pay|'))).toBe(false);
+  });
+
+  it('a different scope has its own budget', async () => {
+    const redis = fakeRedis();
+    const deps = { redis, now: () => T0 };
+    for (let i = 0; i < 61; i++) await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT, 60, deps);
+    expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT, 60, deps)).toBe(true);
+    expect(await isIpRateLimited(fwd('1.2.3.4'), 'other', PAY_PAGE_IP_LIMIT, 60, deps)).toBe(false);
+  });
+
+  it('a new window resets the budget', async () => {
+    const redis = fakeRedis();
+    for (let i = 0; i < 61; i++) await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis, now: () => T0 });
+    expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis, now: () => T0 })).toBe(true);
+    expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis, now: () => T0 + 60_001 })).toBe(false);
+  });
+
+  it('a throwing Redis fails OPEN (false) and never throws', async () => {
+    const throwing: RedisLike = {
+      ...fakeRedis(),
+      async incr() {
+        throw new Error('upstash down');
+      },
+    };
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing })).resolves.toBe(false);
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing })).resolves.toBe(false);
+  });
+
+  it('a Redis whose expire throws (after a successful incr) still fails open', async () => {
+    const half: RedisLike = {
+      ...fakeRedis(),
+      async expire() {
+        throw new Error('expire failed');
+      },
+    };
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: half })).resolves.toBe(false);
+  });
+
+  it('no forwarded headers (IP "unknown") fails open and never touches Redis', async () => {
+    const redis = fakeRedis();
+    for (let i = 0; i < 100; i++) {
+      expect(await isIpRateLimited(new Headers(), PAY_PAGE_SCOPE, 1, 60, { redis })).toBe(false);
+    }
+    expect(redis.dump.size).toBe(0);
+  });
+
+  it('a headers object whose get() throws fails open and never throws', async () => {
+    const hostile = { get: () => { throw new Error('boom'); } } as unknown as Headers;
+    await expect(isIpRateLimited(hostile, PAY_PAGE_SCOPE, 1, 60, { redis: fakeRedis() })).resolves.toBe(false);
+  });
+});
+
+// ── Review S1: the page guard has a DEADLINE ──────────────────────────────────
+// `retry: false` bounds errors, not hangs. A stalled Upstash must not stall
+// every /pay/<id> render, so the guard races the limiter against a timer that
+// resolves "allowed" (fail-open) and clears that timer either way.
+import { PAY_PAGE_GUARD_TIMEOUT_MS } from '@/lib/ip-rate-limit';
+
+describe('isIpRateLimited — deadline (fail-open on a stalled limiter)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function hanging(): RedisLike {
+    return { ...fakeRedis(), incr: () => new Promise<number>(() => {}) }; // never settles
+  }
+
+  it('exports a 1500 ms default deadline', () => {
+    expect(PAY_PAGE_GUARD_TIMEOUT_MS).toBe(1500);
+  });
+
+  it('a Redis whose incr never resolves ⇒ false once the deadline passes (default 1500 ms)', async () => {
+    const p = isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: hanging() });
+    await vi.advanceTimersByTimeAsync(1499);
+    let settled = false;
+    void p.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(p).resolves.toBe(false);
+  });
+
+  it('deps.timeoutMs overrides the deadline', async () => {
+    const p = isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: hanging(), timeoutMs: 200 });
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(p).resolves.toBe(false);
+  });
+
+  it('the fast path clears its timer (nothing keeps the function alive)', async () => {
+    const redis = fakeRedis();
+    expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis })).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    // Over budget on the fast path still decides correctly, and still clears.
+    for (let i = 0; i < 60; i++) await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis });
+    expect(await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis })).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('the deadline path clears its timer too, and a late limiter rejection is absorbed', async () => {
+    const late: RedisLike = {
+      ...fakeRedis(),
+      incr: () => new Promise<number>((_, reject) => setTimeout(() => reject(new Error('late abort')), 3000)),
+    };
+    const p = isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: late });
+    await vi.advanceTimersByTimeAsync(1500);
+    await expect(p).resolves.toBe(false);
+    // Only the fake's own 3000 ms rejection timer remains; the guard's is gone.
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1500); // the late rejection fires: must not be an unhandled rejection
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('real timers: a 50 ms deadline settles in well under 2 s', async () => {
+    vi.useRealTimers();
+    const t0 = Date.now();
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: hanging(), timeoutMs: 50 })).resolves.toBe(false);
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 });

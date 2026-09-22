@@ -7,6 +7,8 @@ import { getFxRates } from '@/lib/rate';
 import { countryForPhone, currencyForPhone } from '@/lib/partner-currency';
 import { BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { BillPayForm } from './bill-pay-form';
+import { headers } from 'next/headers';
+import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
 
 // Cross-border B2B bill checkout page (Plan 4). The buyer opens /pay/b2b/<invoiceId>:
 // the obligation is FIXED in the seller's currency (Case S — we quote the buyer's
@@ -52,11 +54,18 @@ function formatMoney(amount: number, currency: string): string {
   }
 }
 
-function Inactive({ branding, message }: { branding: ResolvedBranding; message: string }) {
+// Program-Fix 23: ONE message for every non-payable state (missing, settled,
+// voided, unsupported country, inactive seller, third-currency, throttled), with
+// DEFAULT branding — a dead link reveals neither the partner nor the bill state.
+const INACTIVE_MESSAGE = 'This bill is no longer active';
+
+/** `branding` is passed ONLY for a live, payable bill (the FX-down catch); every dead sheet is default-branded. */
+function Inactive({ message, branding }: { message: string; branding?: ResolvedBranding }) {
+  const brand = branding ?? resolvePartnerBranding(null);
   return (
     <main className={pageClasses}>
       <div className={sheetClasses}>
-        <Brand branding={branding} />
+        <Brand branding={brand} />
         <h1 className={headingClasses}>{message}</h1>
       </div>
     </main>
@@ -69,11 +78,14 @@ export default async function CrossBorderBillPayPage({
   params: Promise<{ invoiceId: string }>;
 }) {
   const { invoiceId } = await params;
+  // Program-Fix 23: fail-open per-IP guard BEFORE the invoice read. Over budget
+  // ⇒ the same generic sheet as a missing bill, never a 429, nothing logged.
+  // `headers()` is `Promise<ReadonlyHeaders>` (next/dist/server/request/headers.d.ts:11).
+  if (await isIpRateLimited(await headers(), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT)) {
+    return <Inactive message={INACTIVE_MESSAGE} />;
+  }
   const store = getStore();
   const invoice = await store.getB2bInvoice(invoiceId);
-  const branding = resolvePartnerBranding(
-    invoice ? await getPartnerStore().getPartner(invoice.partnerId) : null,
-  );
 
   const isCrossBorder =
     !!invoice &&
@@ -82,21 +94,21 @@ export default async function CrossBorderBillPayPage({
     invoice.invoicedAmount > 0 &&
     !!invoice.invoicedCurrency;
   if (!invoice || !isCrossBorder) {
-    return <Inactive branding={branding} message="This bill is no longer active" />;
+    return <Inactive message={INACTIVE_MESSAGE} />;
   }
   if (invoice.status !== 'unpaid') {
-    return <Inactive branding={branding} message="This bill has already been settled" />;
+    return <Inactive message={INACTIVE_MESSAGE} />;
   }
 
   const buyerCountry = countryForPhone(invoice.buyerPhone);
   const buyerCurrency = currencyForPhone(invoice.buyerPhone);
   if (!buyerCountry || !buyerCurrency || !BANK_FIELDS_BY_COUNTRY[buyerCountry]) {
-    return <Inactive branding={branding} message="We can't accept a payment from your country yet" />;
+    return <Inactive message={INACTIVE_MESSAGE} />;
   }
 
   const seller = await store.getSellerById(invoice.sellerId!);
   if (!seller || seller.status !== 'active' || seller.partnerId !== invoice.partnerId) {
-    return <Inactive branding={branding} message="This bill is no longer payable" />;
+    return <Inactive message={INACTIVE_MESSAGE} />;
   }
   const sellerCurrency = seller.currency;
   const invoicedAmount = invoice.invoicedAmount!;
@@ -109,9 +121,13 @@ export default async function CrossBorderBillPayPage({
   // (this page, the POST route, and the finalize defense can never disagree).
   const denomination = billDenomination(invoicedCurrency, sellerCurrency, buyerCurrency);
   if (!denomination) {
-    return <Inactive branding={branding} message="This bill is no longer payable" />;
+    return <Inactive message={INACTIVE_MESSAGE} />;
   }
   const isBuyerDenominated = denomination === 'buyer';
+
+  // The partner is read only for a PAYABLE bill (Program-Fix 23): its brand
+  // dresses the checkout and the FX-down retry sheet, never a dead link.
+  const branding = resolvePartnerBranding(await getPartnerStore().getPartner(invoice.partnerId));
 
   // Live-locked checkout quote — reused on reload, re-quoted on expiry. Wrapped:
   // a QuoteError (bad FX input) or a RateUnavailableError (Task 9: provider

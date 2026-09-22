@@ -3036,7 +3036,7 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
     expect(r.registered).toBe(true);
     expect(r.status).toBe('pending');
-    expect(String(r.onboarding_url)).toMatch(/\/onboard\/seller\/s_[a-z0-9]+$/i);
+    expect(String(r.onboarding_url)).toMatch(/\/onboard\/seller\/s_[A-Za-z0-9_-]+$/);
 
     // The seller exists, pending, country/currency derived from the US phone.
     const seller = await ctx.store.getSeller(PHONE, 'default');
@@ -3186,8 +3186,8 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
       ctx,
     );
     expect(r.created).toBe(true);
-    expect(String(r.invoice_id)).toMatch(/^inv_[a-z0-9]+$/i);
-    expect(String(r.pay_url)).toMatch(/\/pay\/b2b\/inv_[a-z0-9]+$/i);
+    expect(String(r.invoice_id)).toMatch(/^inv_[A-Za-z0-9_-]+$/);
+    expect(String(r.pay_url)).toMatch(/\/pay\/b2b\/inv_[A-Za-z0-9_-]+$/);
     expect(String(r.pay_url)).toContain(String(r.invoice_id));
     expect(r.amount).toBe(250);
     expect(r.currency).toBe('USD');

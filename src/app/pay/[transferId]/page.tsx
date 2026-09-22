@@ -9,6 +9,8 @@ import { accountLast4, isMaskedDestination } from '@/lib/payout-format';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { PayForm } from './pay-form';
+import { headers } from 'next/headers';
+import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
 
 // WL1: the secure pay page renders the PARTNER's brand (name, color, logo) so the
 // customer experiences the partner end-to-end. Default/unconfigured ⇒ 'SmartRemit'
@@ -41,6 +43,22 @@ function Brand({ branding }: { branding: ResolvedBranding }) {
 async function resolveBrandFor(partnerId: string | null): Promise<ResolvedBranding> {
   if (!partnerId) return resolvePartnerBranding(null);
   return resolvePartnerBranding(await getPartnerStore().getPartner(partnerId));
+}
+
+/**
+ * The ONE dead-link sheet (Program-Fix 23): not-found and throttled render this
+ * identical markup with default branding, so the page is never an oracle for
+ * whether an id exists.
+ */
+function InactiveSheet({ branding }: { branding: ResolvedBranding }) {
+  return (
+    <main className={pageClasses}>
+      <div className={sheetClasses}>
+        <Brand branding={branding} />
+        <h1 className={headingClasses}>This link is no longer active</h1>
+      </div>
+    </main>
+  );
 }
 
 function Row({
@@ -90,6 +108,12 @@ export default async function PayPage({
   params: Promise<{ transferId: string }>;
 }) {
   const { transferId } = await params;
+  // Program-Fix 23: fail-open per-IP guard BEFORE any ledger/draft read. Over
+  // budget ⇒ the same sheet as not-found (default brand), never a 429, no log.
+  // `headers()` is `Promise<ReadonlyHeaders>` (next/dist/server/request/headers.d.ts:11).
+  if (await isIpRateLimited(await headers(), PAY_PAGE_SCOPE, PAY_PAGE_IP_LIMIT)) {
+    return <InactiveSheet branding={resolvePartnerBranding(null)} />;
+  }
   const transfer = await getStore().getTransfer(transferId);
 
   // ── Build a unified view object so JSX is shared between both paths ──
@@ -190,14 +214,7 @@ export default async function PayPage({
   const branding = await resolveBrandFor(brandPartnerId);
 
   if (!view) {
-    return (
-      <main className={pageClasses}>
-        <div className={sheetClasses}>
-          <Brand branding={branding} />
-          <h1 className={headingClasses}>This link is no longer active</h1>
-        </div>
-      </main>
-    );
+    return <InactiveSheet branding={branding} />;
   }
 
   const feeLabel =
