@@ -15,6 +15,7 @@ import {
 } from '@/lib/whatsapp';
 import { newTransferId } from '@/lib/id';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
+import { safeFetch } from '@/lib/safe-fetch';
 import { chat } from '@/lib/ollama';
 import { createAgent } from '@/lib/agent';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -67,7 +68,10 @@ async function run(req: NextRequest): Promise<NextResponse> {
     store,
     sendText,
     sendTemplate,
-    fetchFn: fetch,
+    // Fix 22: every rail POST (settlement.instruct, funding.refund reverse,
+    // rail.callback) goes through safeFetch — https only, connect-time private-
+    // address check, ≤2 same-origin 307/308, identity encoding, 64 KB ack cap.
+    fetchFn: safeFetch,
     recipientTemplateName: RECIPIENT_TEMPLATE_NAME,
     recipientTemplateLang: RECIPIENT_TEMPLATE_LANG,
     listStaff: () => getAuthStore().listStaff(),
