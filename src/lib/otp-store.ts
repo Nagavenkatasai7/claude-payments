@@ -18,9 +18,13 @@ import type { CountryCode } from './types';
  *    ceremony can't be redeemed at another (NIST 800-63B authenticator binding).
  *  - One live code per (number, purpose); a fresh issue overwrites the prior one.
  *  - 300s server TTL; single-use (consumed on the first correct verify).
- *  - ≤5 wrong guesses per code → burn. PLUS a per-number DAILY fail counter that
- *    survives resend (≥10 failed/number/day → locked) — the per-code cap alone is
- *    reset by resend, so the daily lock is the real brute-force ceiling.
+ *  - ≤5 compares per code → burn, PLUS a per-number DAILY ceiling that survives
+ *    resend (≤10 verify attempts/number/day → locked) — the per-code cap alone is
+ *    reset by resend, so the daily ceiling is the real brute-force bound. Both are
+ *    RESERVED with an atomic INCR before the compare (Program-Fix 19): a parallel
+ *    burst cannot read one stale count and all pass. A success consumes one daily
+ *    reservation; a lock burns the code record but leaves the per-code counter to
+ *    its TTL so a late request can never restart it at 1.
  *  - Send throttle: independent ≥30s cooldown key, ≤5/hour, ≤10/day per number,
  *    8-country geo allow-list; rate buckets use atomic incr+expire (no clobber).
  *  - Constant-time hash comparison on verify; obviously-malformed input is rejected
@@ -33,8 +37,8 @@ const CODE_TTL_MS = 300_000; // 5 minutes (≤ the 10-min NIST ceiling)
 const RESEND_COOLDOWN_MS = 30_000; // ≥30s between sends (independent key)
 const MAX_PER_HOUR = 5;
 const MAX_PER_DAY = 10;
-const MAX_ATTEMPTS = 5; // wrong guesses allowed per code before burn
-const MAX_FAIL_PER_DAY = 10; // total wrong guesses per number/day before lock
+const MAX_ATTEMPTS = 5; // compares allowed per code before burn
+const MAX_FAIL_PER_DAY = 10; // verify attempts per number/day before lock (reserved, not counted after)
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -48,7 +52,8 @@ const ALLOWED_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'A
 
 export interface OtpRecord {
   hash: string; // sha256hex(code)
-  attempts: number; // wrong-guess count for THIS code
+  /** Legacy per-code counter: no longer written (the `otp:att:` key is authoritative); read harmlessly from old records. */
+  attempts?: number;
   expMs: number; // absolute expiry (ms epoch)
 }
 
@@ -71,6 +76,10 @@ function sha256hex(input: string): string {
 function otpKey(purpose: OtpPurpose, phoneHash: string): string {
   return `otp:${purpose}:${phoneHash}`;
 }
+/** Per-code compare reservations (INCR'd before every compare; cleared by issue/success/expiry). */
+function attKey(purpose: OtpPurpose, phoneHash: string): string {
+  return `otp:att:${purpose}:${phoneHash}`;
+}
 
 export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
   const now = opts.now ?? (() => Date.now());
@@ -89,11 +98,9 @@ export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
   function failKey(phoneHash: string, t: number): string {
     return `otp:faillock:${phoneHash}:${Math.floor(t / DAY_MS)}`;
   }
+  /** Issue-time read of the daily ceiling; verify-time uses a RESERVATION (bump) instead. */
   async function isDailyLocked(phoneHash: string, t: number): Promise<boolean> {
     return (await readCounter(failKey(phoneHash, t))) >= MAX_FAIL_PER_DAY;
-  }
-  async function recordFailure(phoneHash: string, t: number): Promise<void> {
-    await bump(failKey(phoneHash, t), DAY_BUCKET_TTL_S);
   }
 
   return {
@@ -133,7 +140,10 @@ export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
       }
 
       const code = String(randomInt(1_000_000)).padStart(6, '0');
-      const record: OtpRecord = { hash: sha256hex(code), attempts: 0, expMs: t + CODE_TTL_MS };
+      const record: OtpRecord = { hash: sha256hex(code), expMs: t + CODE_TTL_MS };
+      // Fresh code ⇒ fresh per-code budget, cleared BEFORE the record lands so a
+      // reservation racing this issue counts against the new code, not nothing.
+      await redis.del(attKey(purpose, phoneHash));
       await redis.set(otpKey(purpose, phoneHash), JSON.stringify(record), { ex: OTP_TTL_S });
       await redis.set(cdKey, String(t), { ex: COOLDOWN_TTL_S });
 
@@ -150,9 +160,6 @@ export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
       // budget (an empty/garbage submission must not consume the victim's code).
       if (!/^\d{6}$/.test(code)) return { ok: false, reason: 'wrong' };
 
-      // Per-number daily fail lock (survives resend) — checked before the record.
-      if (await isDailyLocked(phoneHash, t)) return { ok: false, reason: 'locked' };
-
       const raw = await redis.get(key);
       if (!raw) return { ok: false, reason: 'no_code' };
 
@@ -166,13 +173,22 @@ export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
 
       if (t >= record.expMs) {
         await redis.del(key);
+        await redis.del(attKey(purpose, phoneHash));
         return { ok: false, reason: 'expired' };
       }
 
-      record.attempts += 1;
-      if (record.attempts > MAX_ATTEMPTS) {
+      // RESERVE before the compare (fix 19). Only a live code reaches here, so a
+      // verify with no code burns nothing. Daily ceiling first (it survives
+      // resend), then the per-code budget. Past a cap the record is burned; the
+      // per-code counter is left to its TTL / the next issue (never reset by a lock).
+      const dayN = await bump(failKey(phoneHash, t), DAY_BUCKET_TTL_S);
+      if (dayN > MAX_FAIL_PER_DAY) {
         await redis.del(key);
-        await recordFailure(phoneHash, t); // counts toward the daily lock
+        return { ok: false, reason: 'locked' };
+      }
+      const codeN = await bump(attKey(purpose, phoneHash), OTP_TTL_S);
+      if (codeN > MAX_ATTEMPTS) {
+        await redis.del(key);
         return { ok: false, reason: 'locked' };
       }
 
@@ -180,12 +196,11 @@ export function createOtpStore(redis: RedisLike, opts: OtpStoreOptions = {}) {
       const b = Buffer.from(record.hash, 'hex');
       if (a.length === b.length && timingSafeEqual(a, b)) {
         await redis.del(key); // consume — single use
+        await redis.del(attKey(purpose, phoneHash));
         return { ok: true };
       }
 
-      await redis.set(key, JSON.stringify(record), { ex: OTP_TTL_S });
-      await recordFailure(phoneHash, t); // every wrong guess counts toward the daily lock
-      return { ok: false, reason: 'wrong' };
+      return { ok: false, reason: 'wrong' }; // the reservation above already counted it
     },
   };
 }
