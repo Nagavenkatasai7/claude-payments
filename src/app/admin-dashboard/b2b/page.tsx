@@ -294,7 +294,7 @@ export default async function B2bPage() {
                     // cancel + auto-refund when charged.
                     <span key="actions" className="text-xs text-muted-foreground">In review — decide in Compliance</span>
                   ) : t.status === 'awaiting_payment' ? (
-                    // CHARGED (a card-funded B2B bill, pay-finalize.ts:190-197): a bare
+                    // CHARGED (a card-funded B2B bill, pay-finalize.ts:221-228): a bare
                     // cancel would strand the charge; the reconcile sweep resumes it. money-05.
                     <span key="actions" className="text-xs text-muted-foreground">Charged — settling</span>
                   ) : t.status === 'delivered' ? (
