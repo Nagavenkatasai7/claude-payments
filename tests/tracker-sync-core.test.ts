@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   FIRST_PROGRAM_PR,
   LEGACY_FIX_MAP,
+  SYNC_STALE_MS,
+  URGENT_JOURNAL_KINDS,
   buildState,
   currentFixStatuses,
   deriveFixStates,
@@ -10,6 +12,7 @@ import {
   eventIds,
   fixesForPr,
   hookToJournalEntries,
+  hookUsesAgents,
   isProgramPr,
   journalToEvents,
   legacyEventKeys,
@@ -19,12 +22,14 @@ import {
   planSync,
   prDocs,
   prEvents,
+  pruneAgents,
   rank,
   runEvents,
   scrub,
   sliceJournal,
   splitBatches,
   stopDecision,
+  urgentJournalKinds,
   batchWrites,
 } from '../scripts/tracker/sync-core.mjs';
 
@@ -508,83 +513,250 @@ describe('scrub (port of build-corpus.py)', () => {
 
 describe('hookToJournalEntries', () => {
   const NOW = '2026-09-22T03:00:00.000Z';
+  type Agents = Record<string, Record<string, unknown>>;
   const agentInput = (status: string, extra: Record<string, unknown> = {}) => ({
     hook_event_name: 'PostToolUse',
     tool_name: 'Agent',
     tool_input: { description: 'Build fix 13', subagent_type: 'general-purpose', model: 'opus', prompt: 'SECRET PROMPT with +919876543210' },
-    tool_response: { status, agentId: 'a1b2', resolvedModel: 'claude-opus-5', totalDurationMs: 61000 },
+    tool_response: { status, agentId: 'a1b2', resolvedModel: 'claude-opus-5', totalDurationMs: 61000, prompt: 'SECRET PROMPT echoed back' },
     ...extra,
   });
+  const stop = (agentId: string, msg: string, agentType = 'general-purpose') => ({
+    hook_event_name: 'SubagentStop', agent_id: agentId, agent_type: agentType, stop_hook_active: false, last_assistant_message: msg,
+  });
+  const launched = (agents: Agents = {}) => hookToJournalEntries(agentInput('async_launched'), NOW, agents).agents;
 
-  it('journals a main-thread background Agent launch without the prompt', () => {
-    const [e, ...rest] = hookToJournalEntries(agentInput('async_launched'), NOW);
-    expect(rest).toEqual([]);
-    expect(e).toMatchObject({ at: NOW, kind: 'agent', actor: 'claude', model: 'claude-opus-5', title: 'Agent started: Build fix 13', result: 'running' });
-    expect(JSON.stringify(e)).not.toContain('SECRET');
+  it('journals a main-thread background Agent launch without the prompt and records it by agentId', () => {
+    const r = hookToJournalEntries(agentInput('async_launched'), NOW, {});
+    expect(r.entries).toHaveLength(1);
+    expect(r.entries[0]).toMatchObject({ at: NOW, kind: 'agent', actor: 'claude', model: 'claude-opus-5', title: 'Agent started: Build fix 13', result: 'running' });
+    expect(r.changed).toBe(true);
+    expect(r.agents).toEqual({ a1b2: { agentId: 'a1b2', description: 'Build fix 13', subagent_type: 'general-purpose', model: 'claude-opus-5', startedAt: NOW } });
+    expect(JSON.stringify(r)).not.toContain('SECRET');
   });
 
-  it('journals a foreground Agent completion as finished', () => {
-    const [e] = hookToJournalEntries(agentInput('completed'), NOW);
-    expect(e).toMatchObject({ title: 'Agent finished: Build fix 13', result: 'ok' });
+  it('does not journal a second start for an agentId it already recorded', () => {
+    const agents = launched();
+    const again = hookToJournalEntries(agentInput('async_launched'), '2026-09-22T03:05:00.000Z', agents);
+    expect(again).toEqual({ entries: [], agents, changed: false });
+  });
+
+  it('journals one start and one finish for a foreground Agent (its SubagentStop fired before this hook)', () => {
+    const fg = agentInput('completed');
+    fg.tool_response = { ...fg.tool_response, content: [{ type: 'text', text: 'Fixed it.\n\nMail jane.doe@gmail.com ' + 'y'.repeat(400) }] } as typeof fg.tool_response;
+    const r = hookToJournalEntries(fg, NOW, {});
+    expect(r.entries.map((e: { title: string }) => e.title)).toEqual(['Agent started: Build fix 13', 'Agent finished: Build fix 13']);
+    expect(r.entries[0]).toMatchObject({ at: '2026-09-22T02:58:59.000Z', actor: 'claude', result: 'running' });
+    expect(r.entries[1]).toMatchObject({ at: NOW, kind: 'agent', actor: 'agent', model: 'claude-opus-5', result: 'ok' });
+    expect(r.entries[1].detail).toMatch(/^Fixed it\. Mail j…@gmail\.com y+$/);
+    expect(r.entries[1].detail.length).toBeLessThanOrEqual(280);
+    expect(r.agents.a1b2).toMatchObject({ startedAt: '2026-09-22T02:58:59.000Z', finishedAt: NOW });
+    // A SubagentStop that arrives later (or a resume) adds no row.
+    const late = hookToJournalEntries(stop('a1b2', 'closing text'), '2026-09-22T03:00:01.000Z', r.agents);
+    expect(late.entries).toEqual([]);
   });
 
   it('falls back to the requested model, then the subagent type', () => {
     const noResolved = agentInput('async_launched');
-    noResolved.tool_response = { status: 'async_launched', agentId: 'x', resolvedModel: '', totalDurationMs: 0 };
-    expect(hookToJournalEntries(noResolved, NOW)[0].model).toBe('opus');
+    noResolved.tool_response = { status: 'async_launched', agentId: 'x', resolvedModel: '', totalDurationMs: 0, prompt: '' };
+    expect(hookToJournalEntries(noResolved, NOW, {}).entries[0].model).toBe('opus');
     const bare = { ...noResolved, tool_input: { description: 'd', subagent_type: 'Explore', prompt: 'p' } };
-    expect(hookToJournalEntries(bare, NOW)[0].model).toBe('Explore');
+    expect(hookToJournalEntries(bare, NOW, {}).entries[0].model).toBe('Explore');
   });
 
-  it("skips a subagent's own tool calls", () => {
-    expect(hookToJournalEntries(agentInput('async_launched', { agent_id: 'sub-1', agent_type: 'general-purpose' }), NOW)).toEqual([]);
-    expect(hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', agent_id: 'sub-1', tool_input: { command: 'gh pr merge 260 --squash' }, tool_response: { exit_code: 0 } }, NOW)).toEqual([]);
+  it("skips a subagent's own tool calls, including the launches of its nested helpers", () => {
+    expect(hookToJournalEntries(agentInput('async_launched', { agent_id: 'sub-1', agent_type: 'general-purpose' }), NOW, {})).toEqual({ entries: [], agents: {}, changed: false });
+    expect(hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', agent_id: 'sub-1', tool_input: { command: 'gh pr merge 260 --squash' }, tool_response: { exit_code: 0 } }, NOW, {}).entries).toEqual([]);
   });
 
-  it('journals SubagentStop with a scrubbed 280-char detail', () => {
-    const msg = 'Done. Contact jane.doe@gmail.com or +919876543210. ' + 'x'.repeat(400);
-    const [e] = hookToJournalEntries({ hook_event_name: 'SubagentStop', agent_id: 'a1', agent_type: 'Explore', last_assistant_message: msg }, NOW);
-    expect(e).toMatchObject({ at: NOW, kind: 'agent', title: 'Agent finished (Explore)', result: 'ok' });
+  it('journals ONE finish row on the first SubagentStop of a recorded agent, titled with its description', () => {
+    const msg = 'Done. Contact jane.doe@gmail.com or +919876543210.\n' + 'x'.repeat(400);
+    const r = hookToJournalEntries(stop('a1b2', msg), '2026-09-22T03:10:00.000Z', launched());
+    expect(r.entries).toHaveLength(1);
+    const [e] = r.entries;
+    expect(e).toMatchObject({ at: '2026-09-22T03:10:00.000Z', kind: 'agent', actor: 'agent', model: 'claude-opus-5', title: 'Agent finished: Build fix 13', result: 'ok' });
     expect(e.detail.length).toBeLessThanOrEqual(280);
-    expect(e.detail).not.toContain('jane.doe@');
-    expect(e.detail).not.toContain('9876543210');
+    expect(e.detail).toMatch(/^Done\. Contact j…@gmail\.com or \+•+3210\. x+$/);
+    expect(r.changed).toBe(true);
+    expect(r.agents.a1b2).toMatchObject({ finishedAt: '2026-09-22T03:10:00.000Z', lastMessage: e.detail });
+  });
+
+  it('a later stop of the same agent only updates the stored last message', () => {
+    const first = hookToJournalEntries(stop('a1b2', 'Reading outbox tests'), '2026-09-22T03:10:00.000Z', launched());
+    const second = hookToJournalEntries(stop('a1b2', 'All green; PR #271 opened.'), '2026-09-22T03:40:00.000Z', first.agents);
+    expect(second.entries).toEqual([]);
+    expect(second.changed).toBe(true);
+    expect(second.agents.a1b2).toMatchObject({ finishedAt: '2026-09-22T03:10:00.000Z', lastMessage: 'All green; PR #271 opened.' });
+    const same = hookToJournalEntries(stop('a1b2', 'All green; PR #271 opened.'), '2026-09-22T03:41:00.000Z', second.agents);
+    expect(same).toEqual({ entries: [], agents: second.agents, changed: false });
+  });
+
+  it('skips stops of unknown agents: nested helpers and internal agents with an empty agent_type', () => {
+    const agents = launched();
+    expect(hookToJournalEntries(stop('nested-9', 'Reading outbox-payload-secrets.test.ts static gate'), NOW, agents)).toEqual({ entries: [], agents, changed: false });
+    expect(hookToJournalEntries(stop('c0ffee', 'Tracing fundingRef writes', ''), NOW, agents)).toEqual({ entries: [], agents, changed: false });
+    expect(hookToJournalEntries({ hook_event_name: 'SubagentStop', last_assistant_message: 'no id' }, NOW, agents).entries).toEqual([]);
+  });
+
+  it('matches agent ids with or without an "agent-" prefix, and falls back to a plain detail when the message is empty', () => {
+    const r = hookToJournalEntries(stop('agent-a1b2', ''), NOW, launched());
+    expect(r.entries[0]).toMatchObject({ title: 'Agent finished: Build fix 13', detail: 'general-purpose agent finished' });
+    const prefixed = agentInput('async_launched');
+    prefixed.tool_response = { ...prefixed.tool_response, agentId: 'agent-ff01' };
+    const rec = hookToJournalEntries(prefixed, NOW, {}).agents;
+    expect(Object.keys(rec)).toEqual(['ff01']);
+    expect(hookToJournalEntries(stop('ff01', 'ok'), NOW, rec).entries).toHaveLength(1);
+  });
+
+  it('never mutates the agents object it is given', () => {
+    const agents = launched();
+    const snapshot = JSON.stringify(agents);
+    hookToJournalEntries(stop('a1b2', 'done'), NOW, agents);
+    hookToJournalEntries(agentInput('async_launched', { tool_response: { status: 'async_launched', agentId: 'b2' } }), NOW, agents);
+    expect(JSON.stringify(agents)).toBe(snapshot);
+  });
+
+  it('still journals a launch that carries no agentId (nothing to match its stop against)', () => {
+    const r = hookToJournalEntries(agentInput('async_launched', { tool_response: { status: 'async_launched' } }), NOW, {});
+    expect(r.entries.map((e: { title: string }) => e.title)).toEqual(['Agent started: Build fix 13']);
+    expect(r.changed).toBe(false);
   });
 
   it('journals gh pr merge/close with the PR number and exit status', () => {
-    const [m] = hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr merge 260 --squash --delete-branch' }, tool_response: { exit_code: 0 } }, NOW);
+    const [m] = hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr merge 260 --squash --delete-branch' }, tool_response: { exit_code: 0 } }, NOW, {}).entries;
     expect(m).toMatchObject({ kind: 'pr', actor: 'claude', refs: { pr: [260] }, result: 'ok' });
     expect(m.title).toMatch(/merge/);
-    const [c] = hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr close https://github.com/o/r/pull/258 --comment "stale"' }, tool_response: { exit_code: 1 } }, NOW);
+    const [c] = hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr close https://github.com/o/r/pull/258 --comment "stale"' }, tool_response: { exit_code: 1 } }, NOW, {}).entries;
     expect(c).toMatchObject({ kind: 'pr', refs: { pr: [258] }, result: 'failed' });
-    expect(hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr view 260' }, tool_response: { exit_code: 0 } }, NOW)).toEqual([]);
+    expect(hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr view 260' }, tool_response: { exit_code: 0 } }, NOW, {}).entries).toEqual([]);
   });
 
-  it('returns [] for malformed or unrelated input', () => {
-    expect(hookToJournalEntries(null, NOW)).toEqual([]);
-    expect(hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Edit' }, NOW)).toEqual([]);
-    expect(hookToJournalEntries({ hook_event_name: 'Stop' }, NOW)).toEqual([]);
+  it('returns no entries and no change for malformed or unrelated input', () => {
+    for (const input of [null, { hook_event_name: 'PostToolUse', tool_name: 'Edit' }, { hook_event_name: 'Stop' }]) {
+      expect(hookToJournalEntries(input, NOW, {})).toEqual({ entries: [], agents: {}, changed: false });
+    }
+    expect(hookToJournalEntries(agentInput('async_launched'), NOW).entries).toHaveLength(1);
+  });
+});
+
+describe('hookUsesAgents', () => {
+  it('is true only for main-thread Agent launches and SubagentStop', () => {
+    expect(hookUsesAgents({ hook_event_name: 'PostToolUse', tool_name: 'Agent' })).toBe(true);
+    expect(hookUsesAgents({ hook_event_name: 'PostToolUse', tool_name: 'Task' })).toBe(true);
+    expect(hookUsesAgents({ hook_event_name: 'SubagentStop', agent_id: 'a1' })).toBe(true);
+    expect(hookUsesAgents({ hook_event_name: 'PostToolUse', tool_name: 'Agent', agent_id: 'sub-1' })).toBe(false);
+    expect(hookUsesAgents({ hook_event_name: 'PostToolUse', tool_name: 'Bash' })).toBe(false);
+    expect(hookUsesAgents(null)).toBe(false);
+  });
+});
+
+describe('pruneAgents', () => {
+  const NOW = '2026-09-22T12:00:00.000Z';
+  it('drops finished agents after 24 h and unfinished ones after 7 days, keeping the rest', () => {
+    const agents = {
+      fresh: { startedAt: '2026-09-22T11:00:00.000Z' },
+      doneRecent: { startedAt: '2026-09-21T10:00:00.000Z', finishedAt: '2026-09-21T13:00:00.000Z' },
+      doneOld: { startedAt: '2026-09-21T09:00:00.000Z', finishedAt: '2026-09-21T11:00:00.000Z' },
+      longRunning: { startedAt: '2026-09-17T12:00:00.000Z' },
+      abandoned: { startedAt: '2026-09-15T11:00:00.000Z' },
+      junk: 'not an object',
+    };
+    expect(Object.keys(pruneAgents(agents, NOW)).sort()).toEqual(['doneRecent', 'fresh', 'longRunning']);
+    expect(agents).toHaveProperty('doneOld');
+  });
+  it('returns {} for a non-object state', () => {
+    expect(pruneAgents(null, NOW)).toEqual({});
+    expect(pruneAgents([1, 2], NOW)).toEqual({});
+  });
+});
+
+describe('urgentJournalKinds', () => {
+  it('lists the urgent kinds among journal lines, ignoring other kinds and bad lines', () => {
+    expect([...URGENT_JOURNAL_KINDS].sort()).toEqual(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step']);
+    const lines = [
+      JSON.stringify({ kind: 'agent', title: 'Agent started: x' }),
+      '{not json',
+      JSON.stringify({ kind: 'owner-step', title: 'Owner rotated a key' }),
+      JSON.stringify({ kind: 'approval', title: 'Approved' }),
+      JSON.stringify({ kind: 'approval', title: 'Approved again' }),
+      'null',
+    ];
+    expect(urgentJournalKinds(lines)).toEqual(['approval', 'owner-step']);
+    expect(urgentJournalKinds([JSON.stringify({ kind: 'pr' }), JSON.stringify({ kind: 'agent' })])).toEqual([]);
+    expect(urgentJournalKinds(undefined)).toEqual([]);
   });
 });
 
 describe('stopDecision (ledger-sync-due)', () => {
-  const base = { stopHookActive: false, remote: false, journalSize: 100, flushedOffset: 100, remoteMainSha: 'ef0bc28b0435d829ea5839262b9151cc7ddcbdb4', lastSyncMainSha: 'ef0bc28' };
+  const NOW = '2026-09-22T03:00:00.000Z';
+  const minutesAgo = (m: number) => new Date(Date.parse(NOW) - m * 60_000).toISOString();
+  const agentLine = JSON.stringify({ at: NOW, kind: 'agent', title: 'Agent started: x' });
+  const base = {
+    stopHookActive: false, remote: false, disabled: false,
+    journalSize: 100, flushedOffset: 100, pendingLines: [] as string[],
+    lastSyncAt: minutesAgo(2), now: NOW,
+    remoteMainSha: 'ef0bc28b0435d829ea5839262b9151cc7ddcbdb4', lastSyncMainSha: 'ef0bc28',
+  };
+  const pending = { journalSize: 250, pendingLines: [agentLine] };
+
   it('does not block when nothing is due', () => {
     expect(stopDecision(base)).toBeNull();
   });
-  it('blocks on unflushed journal entries with the exact reason', () => {
-    expect(stopDecision({ ...base, journalSize: 250 })).toEqual({
+
+  it('(b) does not block on routine journal entries when the last sync was 10 minutes ago or less', () => {
+    expect(SYNC_STALE_MS).toBe(10 * 60 * 1000);
+    expect(stopDecision({ ...base, ...pending })).toBeNull();
+    expect(stopDecision({ ...base, ...pending, lastSyncAt: minutesAgo(10) })).toBeNull();
+  });
+
+  it('(b) blocks on unflushed journal entries once the last sync is more than 10 minutes old', () => {
+    const d = stopDecision({ ...base, ...pending, lastSyncAt: minutesAgo(11) });
+    expect(d).toEqual({
       decision: 'block',
-      reason: 'Ledger sync due: new journal entries. Run the tracker-sync skill (automated engine) now, then finish.',
+      reason: 'Ledger sync due: new journal entries and the last sync was 11 min ago. Run the tracker-sync skill (automated engine) now, then finish.',
     });
   });
-  it('blocks when main moved since the last sync', () => {
-    const d = stopDecision({ ...base, lastSyncMainSha: '37785e0' });
-    expect(d?.decision).toBe('block');
-    expect(d?.reason).toMatch(/ef0bc28/);
+
+  it('(b) treats a missing or unreadable last-sync time as overdue', () => {
+    for (const lastSyncAt of [null, undefined, 'not a date']) {
+      const d = stopDecision({ ...base, ...pending, lastSyncAt });
+      expect(d?.decision).toBe('block');
+      expect(d?.reason).toMatch(/no sync time on record/);
+    }
   });
-  it('never blocks when stop_hook_active, in the cloud, or when ls-remote failed / no sync recorded', () => {
-    expect(stopDecision({ ...base, journalSize: 999, stopHookActive: true })).toBeNull();
-    expect(stopDecision({ ...base, journalSize: 999, remote: true })).toBeNull();
+
+  it('(c) blocks at once when an unflushed line is an approval, decision, incident, merge, migration or owner-step', () => {
+    for (const kind of URGENT_JOURNAL_KINDS) {
+      const line = JSON.stringify({ at: NOW, kind, title: `a ${kind}` });
+      const d = stopDecision({ ...base, journalSize: 400, pendingLines: [agentLine, line], lastSyncAt: minutesAgo(1) });
+      expect(d?.decision).toBe('block');
+      expect(d?.reason).toBe(`Ledger sync due: the journal holds a new ${kind} entry. Run the tracker-sync skill (automated engine) now, then finish.`);
+    }
+  });
+
+  it('(c) ignores urgent kinds that are already flushed, and non-urgent kinds', () => {
+    const approval = JSON.stringify({ at: NOW, kind: 'approval', title: 'x' });
+    expect(stopDecision({ ...base, pendingLines: [approval] })).toBeNull();
+    expect(stopDecision({ ...base, journalSize: 300, pendingLines: [JSON.stringify({ kind: 'pr', title: 'gh pr merge #1' }), '{bad'] })).toBeNull();
+  });
+
+  it('(a) blocks when main moved since the last sync, even with routine entries pending and a fresh sync', () => {
+    const d = stopDecision({ ...base, ...pending, lastSyncMainSha: '37785e0' });
+    expect(d?.decision).toBe('block');
+    expect(d?.reason).toMatch(/main moved to ef0bc28 since the last sync \(37785e0\)/);
+  });
+
+  it('(a) supports the two-phase hook: no network result first, then the ls-remote result', () => {
+    const args = { ...base, ...pending, lastSyncMainSha: '37785e0' };
+    expect(stopDecision({ ...args, remoteMainSha: null })).toBeNull();
+    expect(stopDecision(args)?.decision).toBe('block');
+  });
+
+  it('never blocks when stop_hook_active, in the cloud, when disabled, or when ls-remote failed / no sync recorded', () => {
+    const urgent = { journalSize: 999, pendingLines: [JSON.stringify({ at: NOW, kind: 'incident', title: 'x' })], lastSyncAt: null };
+    expect(stopDecision({ ...base, ...urgent, stopHookActive: true })).toBeNull();
+    expect(stopDecision({ ...base, ...urgent, remote: true })).toBeNull();
+    expect(stopDecision({ ...base, ...urgent, disabled: true })).toBeNull();
     expect(stopDecision({ ...base, remoteMainSha: null, lastSyncMainSha: '37785e0' })).toBeNull();
     expect(stopDecision({ ...base, lastSyncMainSha: null })).toBeNull();
   });
