@@ -10,16 +10,32 @@ export const DELIVERY_DELAY_MS = 120000; // 2 minutes — moved from the pay rou
 
 // Provider-side lifecycle, mapped to our TransferStatus in handleWebhook/update.
 // created → 'awaiting_payment'; funded → 'paid'; paid_out → 'delivered'.
+// 'failed' (and the rail-side alias 'returned') is NOT a TransferStatus: it is
+// a RailFailure handled by src/lib/rail-failure.ts (Program-Fix 8).
 export type PaymentProviderStatus = 'created' | 'funded' | 'paid_out' | 'failed';
 
 export interface InitiateResult {
   providerRef: string;          // partner's settlement id; persisted onto Transfer.paymentProviderRef
 }
 
-export interface WebhookResult {
-  transferId: string;           // OUR transfer id (the partner echoes it back)
-  status: TransferStatus;       // already mapped to our domain ('paid' | 'delivered')
+/**
+ * A rail's report that the payout did NOT happen (fix 8 / money-02, rail-02).
+ * `reason` is the rail's free text: UNTRUSTED, control-stripped and capped at
+ * 200 chars by parseRailFailure. It reaches the ops alert (scrubbed) and the
+ * transfer's admin note (scrubbed) — never the customer, never the model.
+ */
+export interface RailFailure {
+  code: 'failed' | 'returned';
+  reason: string;
 }
+
+/**
+ * A parsed callback: either a forward status (mapped to our domain — 'paid' |
+ * 'delivered' | 'awaiting_payment') or a failure. Narrow with `'failure' in r`.
+ */
+export type WebhookResult =
+  | { transferId: string; status: TransferStatus }   // OUR transfer id (the partner echoes it back)
+  | { transferId: string; failure: RailFailure };
 
 /**
  * The pluggable settlement seam, mirroring KycProvider / SanctionsScreener.
@@ -42,7 +58,11 @@ export interface WebhookResult {
  *     created  → 'awaiting_payment'  (no-op)
  *     funded   → 'paid'              (stage-1 effect)
  *     paid_out → 'delivered'         (fires stage-2 notifications once)
- *     failed   → (not mapped in v1; logged/ignored — reversal is out of scope)
+ *     failed / returned → the transfer is CANCELLED, the sender's charge is
+ *                         refunded (or the partner-pulled debit reversed), the
+ *                         customer is told and ops is alerted — one transaction
+ *                         (src/lib/rail-failure.ts, fix 8). A failure after
+ *                         paid_out never reverses a delivery: alert only.
  *
  * No real client is built in this batch; the contract is documented here only.
  */

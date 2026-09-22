@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
+import { bearerMatches } from '@/lib/cron-auth';
 import { getStore } from '@/lib/store';
 import { getScheduleStore } from '@/lib/schedule-store';
 import { getCustomerStore } from '@/lib/customer-store';
@@ -23,11 +24,9 @@ export const maxDuration = 300;
 
 export async function GET(req: NextRequest) {
   // When CRON_SECRET is configured, Vercel sends it as a Bearer token.
-  if (env.cronSecret) {
-    const auth = req.headers.get('authorization');
-    if (auth !== `Bearer ${env.cronSecret}`) {
-      return new NextResponse('Unauthorized', { status: 401 });
-    }
+  // Constant-time, fail-closed (src/lib/cron-auth.ts).
+  if (env.cronSecret && !bearerMatches(req.headers.get('authorization'), env.cronSecret)) {
+    return new NextResponse('Unauthorized', { status: 401 });
   }
 
   const store = getStore();

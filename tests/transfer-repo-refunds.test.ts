@@ -157,3 +157,81 @@ describe('refund queues + crash-resume query', () => {
     expect(victims.map((t) => t.id)).toEqual(['crash1']);
   });
 });
+
+// ── Program-Fix 8: the rail-failure claim (money-02 / rail-02) ───────────────
+// `failPaidFromRail` runs SELECT … FOR UPDATE then ONE guarded UPDATE in the
+// caller's transaction. Only a `paid` row moves; the refund column follows the
+// table in docs/superpowers (task-04 §2): none/requested + refundable → pending,
+// everything else unchanged. Every other status returns updated: null.
+describe('failPaidFromRail — the rail-failure claim (fix 8)', () => {
+  const failed = (id: string) => repo.failPaidFromRail(id, 'rail failed: account_unreachable');
+
+  it('a paid CHARGED row (fundingRef) → cancelled + refund pending, note recorded; prior is the pre-claim row', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf1', status: 'paid', paidAt: minsAgo(1), fundingRef: 'mockfund-rf1' }));
+    const r = await failed('rf1');
+    expect(r.prior?.status).toBe('paid');
+    expect(r.prior?.refundStatus).toBe('none');
+    expect(r.updated).toMatchObject({ status: 'cancelled', refundStatus: 'pending', adminNote: 'rail failed: account_unreachable' });
+    expect((await repo.getTransfer('rf1'))).toMatchObject({ status: 'cancelled', refundStatus: 'pending' });
+  });
+
+  it('a staff note is preserved: the rail note is appended, never clobbered', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf1n', status: 'paid', paidAt: minsAgo(1), fundingRef: 'mockfund-rf1n', adminNote: 'VIP — handle with care' }));
+    expect((await failed('rf1n')).updated?.adminNote).toBe('VIP — handle with care | rail failed: account_unreachable');
+  });
+
+  it('a paid PARTNER-PULLED row (bank_pull, no fundingRef) is refundable: → pending (the worker posts the signed REVERSE)', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf2', status: 'paid', paidAt: minsAgo(1), fundingMethod: 'bank_pull', transferType: 'b2b' }));
+    expect((await failed('rf2')).updated).toMatchObject({ status: 'cancelled', refundStatus: 'pending' });
+  });
+
+  it('a paid PARTNER-FUNDED row (no fundingRef, card/bank funding) is NOT refundable: cancelled, refund stays none', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf3', status: 'paid', paidAt: minsAgo(1) }));
+    expect((await failed('rf3')).updated).toMatchObject({ status: 'cancelled', refundStatus: 'none' });
+  });
+
+  it('prior refund requested → pending; pending / completed / failed are left as they are', async () => {
+    for (const [id, prior, expected] of [
+      ['rf4', 'requested', 'pending'],
+      ['rf5', 'pending', 'pending'],
+      ['rf6', 'completed', 'completed'],
+      ['rf7', 'failed', 'failed'],
+    ] as const) {
+      await repo.saveTransfer(fixture({ id, status: 'paid', paidAt: minsAgo(1), fundingRef: `mockfund-${id}` }));
+      if (prior === 'requested') await repo.updateRefund(id, { refundStatus: 'requested' });
+      if (prior === 'pending' || prior === 'completed' || prior === 'failed') await repo.updateRefund(id, { refundStatus: 'pending' });
+      if (prior === 'completed') await repo.updateRefund(id, { refundStatus: 'completed', refundRef: 'r', refundedAt: NOW.toISOString() });
+      if (prior === 'failed') await repo.updateRefund(id, { refundStatus: 'failed' });
+      const r = await failed(id);
+      expect(r.prior?.refundStatus).toBe(prior);
+      expect(r.updated).toMatchObject({ status: 'cancelled', refundStatus: expected });
+    }
+  });
+
+  it('every non-paid status is untouched (updated null, prior returned); a missing row is { prior: null, updated: null }', async () => {
+    for (const status of ['awaiting_payment', 'in_review', 'blocked', 'delivered', 'cancelled'] as const) {
+      const id = `np_${status}`;
+      await repo.saveTransfer(fixture({ id, status, fundingRef: 'mockfund-x', adminNote: 'keep' }));
+      const r = await failed(id);
+      expect(r.prior?.status).toBe(status);
+      expect(r.updated).toBeNull();
+      expect(await repo.getTransfer(id)).toMatchObject({ status, refundStatus: 'none', adminNote: 'keep' });
+    }
+    expect(await repo.failPaidFromRail('nope', 'x')).toEqual({ prior: null, updated: null });
+  });
+
+  it('a second claim on the same row is a no-op (prior is now cancelled)', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf8', status: 'paid', paidAt: minsAgo(1), fundingRef: 'mockfund-rf8' }));
+    await failed('rf8');
+    const again = await failed('rf8');
+    expect(again.prior?.status).toBe('cancelled');
+    expect(again.updated).toBeNull();
+  });
+
+  it('is excluded from findStuckPaid afterwards (status left paid) — the sweep can never re-instruct it', async () => {
+    await repo.saveTransfer(fixture({ id: 'rf9', status: 'paid', paidAt: minsAgo(30), fundingRef: 'mockfund-rf9' }));
+    expect((await repo.findStuckPaid(15)).map((t) => t.id)).toEqual(['rf9']);
+    await failed('rf9');
+    expect(await repo.findStuckPaid(15)).toEqual([]);
+  });
+});

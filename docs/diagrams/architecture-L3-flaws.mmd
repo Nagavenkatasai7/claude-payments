@@ -33,7 +33,7 @@ flowchart LR
         fxext["Live exchange rates (Frankfurter)"]:::external
         pspext["Card / bank charger (mock today)"]:::external
         railext["Partner payout rail"]:::external
-        ghext["GitHub Actions (CI/CD + 5-min heartbeat)"]:::external
+        ghext["GitHub Actions (CI/CD + hourly backup heartbeat) and Vercel per-minute cron"]:::external
     end
 
     customer -->|"chats + pays"| agent
@@ -48,7 +48,7 @@ flowchart LR
     outbox -.->|"signed payout instruction"| railext
     railext -->|"payout confirmed (signed webhook)"| money
     outbox -.->|"queued WhatsApp messages (replies, notices, alerts)"| waext
-    ghext -->|"5-minute wake-up = the delivery guarantee"| outbox
+    ghext -->|"per-minute Vercel cron wake-up; hourly Actions backup"| outbox
     admin -->|"staff logins + sessions live here"| redis
 
     f1["⚠ HIGH: Sanctions screening is mock exact-match"]:::flaw
@@ -61,7 +61,7 @@ flowchart LR
     f4 -.-> admin
     f5["⚠ HIGH: One channel for OTPs and alerts"]:::flaw
     f5 -.-> waext
-    f6["⚠ MEDIUM: Delivery guarantee is a GitHub cron"]:::flaw
+    f6["⚠ MEDIUM (fixed, fix 12): drain clock was a GitHub cron"]:::flaw
     f6 -.-> ghext
     f7["⚠ MEDIUM: No database-level tenant isolation"]:::flaw
     f7 -.-> ledger

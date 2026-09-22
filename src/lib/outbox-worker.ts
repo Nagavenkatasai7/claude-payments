@@ -22,6 +22,7 @@ import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { renderSealedText } from '@/lib/sealed-text';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
+import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn } from '@/lib/log';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
@@ -30,8 +31,9 @@ import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
 // outbox row written transactionally with the state change that implies it;
 // this worker drains them with retries → backoff → dead-letter (+ ops alert).
-// Vercel after() is reduced to a best-effort POKE of /api/worker; the GitHub
-// Actions 5-minute heartbeat is the delivery GUARANTEE.
+// Vercel after() is reduced to a best-effort POKE of /api/worker; a Vercel cron
+// drains every minute and an hourly GitHub Actions heartbeat backs it up
+// (src/lib/worker-cadence.ts).
 //
 // Handlers are dispatch-by-kind, DI'd so PGlite tests run them without any
 // network. Every handler is IDEMPOTENT by construction (dedupe keys upstream +
@@ -177,6 +179,19 @@ async function withRowDeadline<T>(work: Promise<T>, ms: number, signal: RowSigna
 
 type Payload = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/**
+ * Fix 22: the SYNC settlement-URL rule, run in the handler BEFORE any fetch.
+ * A refusal is a thrown, RETRYABLE handler error (backoff → dead at
+ * MAX_ATTEMPTS → the deduped ops alert): never skipped, never followed. The
+ * message is the fixed reason code only — it lands in outbox.last_error and the
+ * alert text, so it must never carry the URL. No DNS here (ruling 25): the
+ * connect-time address check lives in safeFetch, the default fetchFn.
+ */
+function assertSettlementUrl(settlementUrl: string): void {
+  const check = checkSettlementUrl(settlementUrl, { appOrigin: env.appBaseUrl, production: env.isProduction });
+  if (!check.ok) throw new Error(`settlement_url_refused:${check.reason}`);
+}
 
 export interface PartnerCtx {
   brand: string;
@@ -346,6 +361,7 @@ async function handle(
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
       const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
       if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
+      assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
       const rawBody = JSON.stringify({
         ...buildSettlementInstruction(transfer),
         partner_id: railPartnerId,
@@ -365,9 +381,7 @@ async function handle(
       let providerRef = `rail-${transferId}`;
       try {
         const parsed = (await res.json()) as { providerRef?: unknown };
-        if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
-          providerRef = parsed.providerRef;
-        }
+        providerRef = safeProviderRef(parsed.providerRef) ?? providerRef; // fix 22: ≤128 chars of [A-Za-z0-9._:-], else the fallback
       } catch {
         /* non-JSON 2xx ack — keep deterministic ref */
       }
@@ -381,7 +395,11 @@ async function handle(
       const partnerId = str(p.partner_id) || str(p.partnerId);
       const { integrations } = await partner(partnerId);
       const webhookSecret = integrations.payment.webhookSecret ?? '';
-      const callbackBody = JSON.stringify({ reference, status: 'paid_out' });
+      // fix 8: the reference rail's one failure mode rides the same row —
+      // `status` (default paid_out) and an optional `reason` pass through.
+      const cbStatus = str(p.status) || 'paid_out';
+      const cbReason = str(p.reason);
+      const callbackBody = JSON.stringify({ reference, status: cbStatus, ...(cbReason ? { reason: cbReason } : {}) });
       const res = await deps.fetchFn(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
         method: 'POST',
         headers: {
@@ -423,6 +441,7 @@ async function handle(
         const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
         const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
+        assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
         const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
         const res = await deps.fetchFn(settlementUrl, {
           method: 'POST',
@@ -437,9 +456,7 @@ async function handle(
         refundRef = `reverse-${transferId}`;
         try {
           const parsed = (await res.json()) as { providerRef?: unknown };
-          if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
-            refundRef = parsed.providerRef;
-          }
+          refundRef = safeProviderRef(parsed.providerRef) ?? refundRef; // fix 22: same rule as the settle ack
         } catch {
           /* non-JSON 2xx ack — keep the deterministic ref */
         }
@@ -622,6 +639,21 @@ export interface DrainOptions {
   hardStopAt?: number;
 }
 
+/**
+ * Exactly one ops alert per dead row: every dead-letter path (handler failure at
+ * the ceiling, terminal row deadline, poison reclaim) shares the `dead:<id>`
+ * dedupe key. Never recursive — a dead ops.alert row does not alert about
+ * itself. Ids, kinds, counts and a trimmed error only; never the payload.
+ */
+async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Promise<void> {
+  if (row.kind === 'ops.alert') return;
+  await outbox.enqueue(
+    'ops.alert',
+    { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${text}` },
+    { dedupeKey: `dead:${row.id}` },
+  );
+}
+
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
 export async function drainOnce(
   deps: WorkerDeps,
@@ -636,6 +668,29 @@ export async function drainOnce(
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
+    if (row.attempts > MAX_ATTEMPTS) {
+      // POISON RECLAIM (Task 8 / Program-Fix 12). claimBatch has no attempts
+      // filter, but markFailed dead-letters at >= MAX_ATTEMPTS and retryDead
+      // resets attempts to 0, so a claimed row past the ceiling can only be a
+      // reclaim: its every run KILLED the function before markFailed could
+      // write. Running it again would kill this one too — dead-letter it
+      // WITHOUT the handler, on the ordinary single dead:<id> alert path.
+      // Two cheap DB writes, so it runs even past stopAfter (the row was
+      // already claimed; a release would only refund one attempt and repeat).
+      const status = await outbox.markFailed(
+        row.id,
+        row.attempts,
+        'reclaimed past MAX_ATTEMPTS: killed on every recorded attempt (the last run may have completed) — check the effect before retrying',
+        workerId,
+      );
+      if (status === 'dead') {
+        result.dead++;
+        await alertDead(outbox, row, `DEAD after ${row.attempts} claims — reclaimed past MAX_ATTEMPTS: killed on every recorded attempt (the last run may have completed) — check the effect before retrying`);
+      } else {
+        logWarn('worker.lease', 'poison reclaim: markFailed refused, lease no longer ours', { id: row.id, kind: row.kind, status });
+      }
+      continue;
+    }
     if (opts.stopAfter !== undefined && Date.now() >= opts.stopAfter) {
       // Out of budget: give the unstarted remainder back NOW (attempt refunded)
       // rather than parking it under a 5-minute lease.
@@ -690,15 +745,12 @@ export async function drainOnce(
       }
       if (status === 'dead') {
         result.dead++;
-        // Exactly one alert per dead row (dedupe key), never recursive.
-        if (row.kind !== 'ops.alert') {
-          await outbox.enqueue(
-            'ops.alert',
-            // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
-            { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}` },
-            { dedupeKey: `dead:${row.id}` },
-          );
-        }
+        // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
+        await alertDead(
+          outbox,
+          row,
+          `${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}`,
+        );
       } else {
         result.failed++;
       }

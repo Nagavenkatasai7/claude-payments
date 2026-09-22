@@ -30,18 +30,18 @@
       "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
     ]},
     "outbox-worker": { "branch": "component/outbox-worker", "paths": [
-      "src/lib/outbox.ts", "src/lib/outbox-worker.ts", "src/lib/reconcile.ts", "src/lib/cron-run.ts", "src/db/repos/outbox-repo.ts",
+      "src/lib/outbox.ts", "src/lib/outbox-worker.ts", "src/lib/reconcile.ts", "src/lib/worker-cadence.ts", "src/lib/cron-run.ts", "src/db/repos/outbox-repo.ts",
       "src/app/api/worker/", "src/app/api/cron/", ".github/workflows/worker-heartbeat.yml", "scripts/outbox-status.ts",
       "tests/outbox*", "tests/reconcile*", "tests/cron-*", "tests/worker*"
     ]},
     "money-paths": { "branch": "component/money-paths", "paths": [
-      "src/lib/settlement.ts", "src/lib/pay-finalize.ts", "src/lib/transfer-create.ts", "src/lib/payment.ts", "src/lib/funding-method.ts",
+      "src/lib/settlement.ts", "src/lib/rail-failure.ts", "src/lib/pay-finalize.ts", "src/lib/transfer-create.ts", "src/lib/payment.ts", "src/lib/funding-method.ts",
       "src/lib/refund-policy.ts", "src/lib/transaction-otp.ts", "src/lib/schedule.ts", "src/lib/schedule-store.ts",
       "src/lib/providers/payment-provider.ts", "src/lib/providers/http-payment-provider.ts", "src/lib/providers/funding-provider.ts", "src/lib/providers/payment-webhook-verify.ts",
       "src/db/repos/transfer-repo.ts", "src/db/repos/schedule-repo.ts",
       "src/app/api/pay/", "src/app/api/payment-webhook/", "src/app/api/funding-webhook/", "src/app/api/partner-rail/",
       "src/app/admin-dashboard/refunds/", "src/app/admin-dashboard/schedules/", "src/app/admin-dashboard/transactions/",
-      "tests/settlement*", "tests/pay-*", "tests/transfer-*", "tests/payment*", "tests/funding*", "tests/refund*", "tests/schedule*", "tests/partner-rail*"
+      "tests/settlement*", "tests/rail-failure*", "tests/pay-*", "tests/transfer-*", "tests/payment*", "tests/funding*", "tests/refund*", "tests/schedule*", "tests/partner-rail*"
     ]},
     "partner-api": { "branch": "component/partner-api", "paths": [
       "src/lib/partner-api*", "src/lib/partner-config.ts", "src/lib/partner-integrations*", "src/lib/partner-rate-limit.ts",
@@ -69,6 +69,7 @@
     ]},
     "platform-security": { "branch": "component/platform-security", "paths": [
       "src/middleware.ts", "src/instrumentation.ts", "src/lib/boot-assert.ts", "src/lib/field-crypto.ts", "src/lib/ip-rate-limit.ts",
+      "src/lib/settlement-url.ts", "src/lib/safe-fetch.ts", "scripts/audit-settlement-urls.ts", "tests/settlement-url*", "tests/safe-fetch*",
       "src/lib/redis.ts", "src/lib/store.ts", "src/lib/scoped-store.ts", "src/lib/seed.ts", "next.config.*", "vitest.config.*", "playwright.config.*",
       "eslint.config.*", "tsconfig.json", ".github/", "tests/e2e/", "tests/boot-assert*", "tests/field-crypto*", "tests/ip-rate-limit*", "tests/security*", "tests/middleware*"
     ]},

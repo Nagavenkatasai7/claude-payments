@@ -8,10 +8,11 @@ import type {
   InitiateResult,
   PaymentProvider,
   PaymentProviderStatus,
+  RailFailure,
   WebhookResult,
 } from './payment-provider';
-import { completePaymentStage1 } from '../payment';
-import { sendText, type WaCreds } from '../whatsapp';
+import type { WaCreds } from '../whatsapp';
+import { logWarn } from '../log';
 
 // http-payment-provider — the REAL settlement rail adapter (WL3).
 //
@@ -34,10 +35,10 @@ import { sendText, type WaCreds } from '../whatsapp';
 export const RAIL_TIMEOUT_MS = 15_000;
 
 /**
- * Normalize a partner-rail lifecycle status to our TransferStatus.
+ * Normalize a partner-rail FORWARD lifecycle status to our TransferStatus.
  * created → awaiting_payment (no-op transition), funded → paid,
- * paid_out → delivered. failed/unknown → null (logged by the caller; reversal
- * flows are out of scope in v1 — the forward-only state machine ignores them).
+ * paid_out → delivered. Anything else → null: `failed` / `returned` are a
+ * RailFailure (parseRailFailure, fix 8), the rest is unknown and ignored.
  */
 export function normalizeRailStatus(status: unknown): TransferStatus | null {
   switch (typeof status === 'string' ? status.toLowerCase() : '') {
@@ -46,6 +47,32 @@ export function normalizeRailStatus(status: unknown): TransferStatus | null {
     case 'paid_out': return 'delivered';
     default: return null;
   }
+}
+
+/** The rail's free-text reason is bounded here, once, at the edge. */
+export const RAIL_FAILURE_REASON_MAX = 200;
+
+/**
+ * fix 8 (money-02 / rail-02): parse a rail's `failed` / `returned` callback
+ * (case-insensitive) into a bounded RailFailure. The optional `reason` is
+ * UNTRUSTED text: control characters (incl. newlines) AND Unicode format
+ * characters (\p{Cf}: bidi overrides/isolates U+202A–202E / U+2066–2069, zero-
+ * width joiners, BOM) plus the line/paragraph separators U+2028/2029 are
+ * stripped, so a reason can never re-order or hide text in an ops alert or a
+ * staff note; it is then trimmed and capped at RAIL_FAILURE_REASON_MAX;
+ * missing / non-string / empty ⇒ 'unspecified'. Forward statuses and anything
+ * unknown ⇒ null.
+ */
+const RAIL_REASON_STRIP = /[\u0000-\u001f\u007f\u2028\u2029]|\p{Cf}/gu;
+
+export function parseRailFailure(body: unknown): RailFailure | null {
+  if (!body || typeof body !== 'object') return null;
+  const b = body as Record<string, unknown>;
+  const status = typeof b.status === 'string' ? b.status.toLowerCase() : '';
+  if (status !== 'failed' && status !== 'returned') return null;
+  const raw = typeof b.reason === 'string' ? b.reason : '';
+  const cleaned = raw.replace(RAIL_REASON_STRIP, '').trim().slice(0, RAIL_FAILURE_REASON_MAX);
+  return { code: status, reason: cleaned === '' ? 'unspecified' : cleaned };
 }
 
 /** Tolerant transfer-id extraction from a rail callback ({reference} preferred). */
@@ -208,47 +235,12 @@ export class HttpPaymentProvider implements PaymentProvider {
     private readonly waCreds?: WaCreds,
   ) {}
 
-  async initiateTransfer(transfer: Transfer): Promise<InitiateResult> {
-    const settlementUrl = this.payment.credentials?.settlementUrl ?? '';
-    const signingSecret = this.payment.credentials?.signingSecret ?? '';
-    // Fail-closed: an http/simulator partner without a configured endpoint must
-    // never silently fall back to a timer-based fake delivery.
-    if (!settlementUrl) {
-      throw new Error('Settlement endpoint not configured for this partner.');
-    }
-
-    // Stage 1 — the customer-facing "payment received" moment (identical to the
-    // mock's stage 1). Funds are charged on the partner's side; we mirror it.
-    const { transfer: t1, senderMessages } = await completePaymentStage1(this.store, transfer.id);
-    for (const msg of senderMessages) await sendText(t1.phone, msg, this.waCreds);
-
-    // POST the SIGNED settlement instruction to the partner's rail. Stage 2
-    // (delivered) arrives via their signed callback to /api/payment-webhook —
-    // NO self-advance timer on this path.
-    const rawBody = JSON.stringify(buildSettlementInstruction(transfer));
-    const res = await fetch(settlementUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
-      },
-      body: rawBody,
-      signal: AbortSignal.timeout(RAIL_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => '');
-      throw new Error(`Settlement instruction rejected (${res.status}): ${errBody.slice(0, 300)}`);
-    }
-    let providerRef = `rail-${transfer.id}`;
-    try {
-      const parsed = (await res.json()) as { providerRef?: unknown };
-      if (typeof parsed.providerRef === 'string' && parsed.providerRef !== '') {
-        providerRef = parsed.providerRef;
-      }
-    } catch {
-      // Non-JSON 2xx ack is acceptable — keep the deterministic fallback ref.
-    }
-    return { providerRef };
+  async initiateTransfer(_transfer: Transfer): Promise<InitiateResult> {
+    // Fix 22: this path had its own raw global-fetch POST with no URL rule,
+    // redirects followed and an unbounded body, and NO caller — settlement runs
+    // through the outbox (settlement.instruct → safeFetch). Kept only to satisfy
+    // the PaymentProvider interface; it must never send anything.
+    throw new Error('initiateTransfer is not used: settlement runs through the outbox (settlement.instruct).');
   }
 
   async getStatus(providerRef: string): Promise<PaymentProviderStatus> {
@@ -264,10 +256,12 @@ export class HttpPaymentProvider implements PaymentProvider {
     const transferId = railCallbackTransferId(body);
     if (!transferId) return null;
     const status = normalizeRailStatus((body as Record<string, unknown>).status);
-    if (!status) {
-      console.warn(`Partner rail callback with unmapped status for ${transferId} — ignored (forward-only).`);
-      return null;
-    }
-    return { transferId, status };
+    if (status) return { transferId, status };
+    // fix 8: a failure is a RESULT the route acts on (cancel + refund + notify +
+    // alert), never a dropped event. Only a truly unknown status is ignored.
+    const failure = parseRailFailure(body);
+    if (failure) return { transferId, failure };
+    logWarn('payment-webhook.unmapped', 'partner rail callback with unmapped status — ignored', { transferId });
+    return null;
   }
 }

@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
@@ -14,6 +17,7 @@ vi.mock('@/lib/whatsapp', () => ({
 import {
   HttpPaymentProvider,
   normalizeRailStatus,
+  parseRailFailure,
   railCallbackTransferId,
   buildSettlementInstruction,
   signBody,
@@ -53,7 +57,7 @@ describe('normalizeRailStatus', () => {
     expect(normalizeRailStatus('paid_out')).toBe('delivered');
     expect(normalizeRailStatus('PAID_OUT')).toBe('delivered'); // case-insensitive
   });
-  it('failed/unknown/non-string → null (forward-only machine ignores them)', () => {
+  it('failed/unknown/non-string → null (failed/returned are parseRailFailure\'s job, fix 8)', () => {
     expect(normalizeRailStatus('failed')).toBeNull();
     expect(normalizeRailStatus('refunded')).toBeNull();
     expect(normalizeRailStatus(42)).toBeNull();
@@ -75,68 +79,32 @@ describe('railCallbackTransferId', () => {
   });
 });
 
-describe('HttpPaymentProvider.initiateTransfer (the real rail loop, outbound leg)', () => {
-  it('fires stage-1, POSTs the SIGNED instruction, returns the rail providerRef, arms NO timer', async () => {
+describe('HttpPaymentProvider.initiateTransfer — dead path closed (Program-Fix 22, acceptance test 14)', () => {
+  it('throws with NO fetch and NO ledger/message side effect: settlement runs through the outbox (settlement.instruct)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(fixture());
-    let captured: { url: string; body: string; sig: string } | null = null;
-    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
-      captured = {
-        url: String(url),
-        body: String(init.body),
-        sig: (init.headers as Record<string, string>)['x-signature'] ?? '',
-      };
-      return { ok: true, json: async () => ({ providerRef: 'rail-ref-99' }) } as Response;
-    }));
-
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
     const provider = new HttpPaymentProvider(store, PAYMENT, 'Acme Pay');
-    const { providerRef } = await provider.initiateTransfer(fixture());
-
-    // stage-1 charged + sender message sent
-    expect((await store.getTransfer('rail_t1'))!.status).toBe('paid');
-    expect(sendText).toHaveBeenCalledTimes(1);
-    // signed instruction went to the partner's endpoint
-    expect(captured!.url).toBe('https://rail.example/settle');
-    const expectedSig = createHmac('sha256', 'sign-secret').update(captured!.body).digest('hex');
-    expect(captured!.sig).toBe(expectedSig);
-    const instruction = JSON.parse(captured!.body) as Record<string, unknown>;
-    expect(instruction.reference).toBe('rail_t1');
-    expect(instruction.partner_id).toBe('acme');
-    // rail's ref is persisted upstream by the caller
-    expect(providerRef).toBe('rail-ref-99');
-    // NO self-advance: status stays 'paid' until the rail's callback arrives
-    expect((await store.getTransfer('rail_t1'))!.status).toBe('paid');
-  });
-
-  it('fail-closed: no settlementUrl configured → throws, nothing charged', async () => {
-    const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(fixture());
-    const provider = new HttpPaymentProvider(store, { providerType: 'http' });
-    await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/not configured/);
+    await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/not used.*settlement\.instruct/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
     expect((await store.getTransfer('rail_t1'))!.status).toBe('awaiting_payment');
-  });
-
-  it('rail rejection (non-2xx) throws after stage-1 (caller surfaces the error)', async () => {
-    const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(fixture());
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down' }) as unknown as Response));
-    const provider = new HttpPaymentProvider(store, PAYMENT);
-    await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/503/);
-  });
-
-  it('passes the rail deadline signal and rethrows an abort (stage-1 already sent; providerRef never written)', async () => {
-    const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(fixture());
-    let signal: AbortSignal | null | undefined;
-    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
-      signal = init.signal;
-      throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
-    }));
-    const provider = new HttpPaymentProvider(store, PAYMENT);
-    await expect(provider.initiateTransfer(fixture())).rejects.toThrow(/aborted/);
-    expect(signal).toBeInstanceOf(AbortSignal);
-    expect(RAIL_TIMEOUT_MS).toBe(15_000);
     expect((await store.getTransfer('rail_t1'))!.paymentProviderRef).toBeFalsy();
+    expect(RAIL_TIMEOUT_MS).toBe(15_000); // the worker's rail deadline is unchanged
+  });
+
+  it('static scan: no raw `fetch(settlementUrl` survives anywhere in src/ (the only rail client is safeFetch)', () => {
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name) && readFileSync(full, 'utf8').includes('fetch(settlementUrl')) hits.push(full);
+      }
+    };
+    walk(fileURLToPath(new URL('../src', import.meta.url)));
+    expect(hits).toEqual([]);
   });
 });
 
@@ -148,10 +116,49 @@ describe('HttpPaymentProvider.handleWebhook', () => {
     expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'funded' }))
       .toEqual({ transferId: 'rail_t1', status: 'paid' });
   });
-  it('null for missing reference or unmapped status', async () => {
+  it('null for missing reference or a truly unmapped status', async () => {
     const provider = new HttpPaymentProvider(createStore(fakeRedis(), db), PAYMENT);
     expect(await provider.handleWebhook({ status: 'paid_out' })).toBeNull();
-    expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'failed' })).toBeNull();
+    expect(await provider.handleWebhook({ reference: 'rail_t1', status: 'refunded' })).toBeNull();
+    expect(await provider.handleWebhook({ reference: 'rail_t1', status: 42 })).toBeNull();
+  });
+
+  // Program-Fix 8 (money-02 / rail-02): a failure callback is a RESULT, not a
+  // dropped event. This INVERTS the old lock (`failed → null`).
+  it('failed / returned map to a bounded RailFailure (reason scrubbed of control chars, capped at 200)', async () => {
+    const provider = new HttpPaymentProvider(createStore(fakeRedis(), db), PAYMENT);
+    const noisy = 'bad IFSC\n\u0007' + 'x'.repeat(500);
+    const r = await provider.handleWebhook({ reference: 't1', status: 'FAILED', reason: noisy });
+    expect(r).toEqual({ transferId: 't1', failure: { code: 'failed', reason: expect.any(String) } });
+    const reason = (r as { failure: { reason: string } }).failure.reason;
+    expect(reason.length).toBeLessThanOrEqual(200);
+    expect(reason).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(reason.startsWith('bad IFSC')).toBe(true);
+    expect(await provider.handleWebhook({ reference: 't1', status: 'returned' }))
+      .toEqual({ transferId: 't1', failure: { code: 'returned', reason: 'unspecified' } });
+  });
+});
+
+describe('parseRailFailure (pure)', () => {
+  it('maps failed/returned case-insensitively; a non-string or empty reason becomes "unspecified"', () => {
+    expect(parseRailFailure({ status: 'Failed', reason: '  ' })).toEqual({ code: 'failed', reason: 'unspecified' });
+    expect(parseRailFailure({ status: 'RETURNED', reason: 12 })).toEqual({ code: 'returned', reason: 'unspecified' });
+    expect(parseRailFailure({ status: 'returned', reason: 'account_unreachable' }))
+      .toEqual({ code: 'returned', reason: 'account_unreachable' });
+  });
+  it('strips Unicode format characters too: bidi overrides/isolates, line/paragraph separators, zero-width joiners', () => {
+    const reason = 'ok\u202Eevil\u202C \u2066x\u2069\u2028y\u2029z\u200D\u200B\uFEFFend';
+    const r = parseRailFailure({ status: 'failed', reason });
+    expect(r?.reason).toBe('okevil xyzend');
+    expect(r?.reason).not.toMatch(/\p{Cf}/u);
+  });
+
+  it('null for forward statuses, unknown statuses and non-objects', () => {
+    expect(parseRailFailure({ status: 'paid_out' })).toBeNull();
+    expect(parseRailFailure({ status: 'refunded' })).toBeNull();
+    expect(parseRailFailure({ status: 42 })).toBeNull();
+    expect(parseRailFailure(null)).toBeNull();
+    expect(parseRailFailure('failed')).toBeNull();
   });
 });
 

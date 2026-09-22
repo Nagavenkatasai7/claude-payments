@@ -9,7 +9,9 @@ import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
-import { createTransfer } from './transfer-create';
+import { createTransfer, TransferIdConflictError } from './transfer-create';
+import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
+import { isValidPhone, normalizePhone } from './phone';
 import { sendGateActive } from './kyc-gate';
 import { resolvePartnerBranding } from './partner-config';
 import type { PartnerIntegrationsStore } from './partner-integrations-store';
@@ -29,6 +31,7 @@ import { newTransferId } from './id';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 import { resolveSenderNames, senderNameKey } from './sender-names';
 import type { CustomerStore } from './customer-store';
+import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -65,6 +68,25 @@ const num = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+// ── fix 5 (F43): partner-authored text is DATA the agent later reads back ──
+// Names are refused at the edge (untrusted-text.isCleanName); the payout method
+// is a closed set; an inline destination gets a bounded, printable shape check
+// (full validatePayoutFields parity is a partner-API v2 change).
+const PAYOUT_METHODS: readonly PayoutMethod[] = ['bank', 'upi', 'usdc'];
+const INLINE_DESTINATION_MAX = 64;
+const nameError = (field: string) =>
+  `${field} must be 1–${NAME_MAX} characters with no brackets or control characters.`;
+const methodError = (field: string) => `${field} must be one of ${PAYOUT_METHODS.join(', ')}.`;
+
+/** undefined ⇒ absent (the caller defaults to 'bank'); null ⇒ present but not in the closed set. */
+function parsePayoutMethod(v: unknown): PayoutMethod | null | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (s === '') return undefined;
+  return (PAYOUT_METHODS as readonly string[]).includes(s) ? (s as PayoutMethod) : null;
+}
 
 // Public transfer view — exposes the end-customer SENDER identity to the partner
 // (a deliberate, user-approved privacy change: previously the sender was hidden).
@@ -158,10 +180,13 @@ export async function createQuote(
 ): Promise<SvcResult<unknown>> {
   const amount = num(body.amount_source ?? body.amount);
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
+  // Program fix 16 (review): the same normalization createTransaction applies,
+  // so a formatted number auto-detects the same currency it will mint under.
+  const quoteSenderPhone = normalizePhone((body.sender as Record<string, unknown> | undefined)?.phone);
   const sourceCurrency = apiSourceCurrency(
     partner,
     str(body.source_currency) || undefined,
-    str((body.sender as Record<string, unknown> | undefined)?.phone) || undefined,
+    quoteSenderPhone || undefined,
   );
   // Callers may pass either destination_country (resolved to its home currency)
   // or destination_currency directly. destination_country takes precedence when
@@ -180,7 +205,9 @@ export async function createQuote(
     const rates = await getFxRates(sourceCurrency);
     const destRates = await getDestinationRates(destinationCurrency);
     // transferCount drives the fee tier; a partner-API quote uses standard pricing.
-    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd);
+    // Fix 16b: the preview has no customer, so its ceiling is the PARTNER-level
+    // effective max; the mint itself applies any customer override.
+    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd, quoteCeilingUsd(resolveEffectiveSendLimits(partner, null)));
     return ok(200, {
       amount_source: q.amountSource,
       source_currency: sourceCurrency,
@@ -220,6 +247,10 @@ export async function createBeneficiary(
   const name = str(body.name);
   const country = str(body.country).toUpperCase() as CountryCode;
   if (!name) return err(400, 'name is required.');
+  // fix 5 (F43): a stored name is replayed into every later mint that cites it.
+  if (!isCleanName(name)) return err(400, nameError('name'));
+  const payoutMethod = parsePayoutMethod(body.payout_method);
+  if (payoutMethod === null) return err(400, methodError('payout_method'));
   if (!country) return err(400, 'country is required.');
   const fields = (body.fields && typeof body.fields === 'object' ? body.fields : {}) as Record<string, string>;
   const validation = validatePayoutFields(country, fields);
@@ -227,7 +258,7 @@ export async function createBeneficiary(
   const id = `ben_${(deps.genId ?? newTransferId)()}`;
   const ben: BeneficiaryRecord = {
     id, partnerId, name, country,
-    payoutMethod: (str(body.payout_method) as PayoutMethod) || 'bank',
+    payoutMethod: payoutMethod ?? 'bank',
     payoutDestination: validation.payoutDestination,
     recipientPhone: str(body.recipient_phone) || undefined,
     createdAt: (deps.now ?? (() => new Date().toISOString()))(),
@@ -276,28 +307,52 @@ export async function createTransaction(
   if (amount === null || amount <= 0) return err(400, 'amount_source must be a positive number.');
 
   const sender = (body.sender && typeof body.sender === 'object' ? body.sender : {}) as Record<string, unknown>;
-  const senderPhone = str(sender.phone);
-  if (!senderPhone) return err(400, 'sender.phone is required.');
+  if (!str(sender.phone)) return err(400, 'sender.phone is required.');
+  // Program fix 16 (review MUST 1): ONE identity per number. The cap day, the
+  // EDD month, the velocity count, the customers row and the per-sender lock
+  // are all keyed by this string, so "+1 555…", "1-555-…" and "1555…" must
+  // collapse to the same digits (the chat path already does this) — else a
+  // spelling is a fresh cap. Refused BEFORE ensureCustomer and the claim.
+  const senderPhone = normalizePhone(sender.phone);
+  if (!isValidPhone(senderPhone)) return err(400, 'sender.phone must be a valid E.164-style number.');
 
   // Beneficiary: by reference (partner-scoped) or inline. MOVED ABOVE the
   // customer write and the claim (on main it sits below both, :269-284): a
   // 404 / 400 here must leave NO customer row behind, or an API-keyed caller
   // could create unbounded customer rows under its tenant with rejected bodies.
   let benName = '', benPhone = '', payoutMethod: PayoutMethod = 'bank', payoutDestination = '';
+  let inlineMethod: PayoutMethod | null | undefined;
   const benId = str(body.beneficiary_id);
   if (benId) {
     const stored = await getStoredBeneficiary(deps, partner.id, benId);
     if (!stored) return err(404, 'Beneficiary not found.');
-    benName = stored.name; benPhone = stored.recipientPhone ?? '';
+    // fix 5: a pre-fix stored name was never checked — clamp it at read.
+    benName = boundUntrustedText(stored.name, NAME_MAX);
+    if (!benName) return err(422, 'The stored beneficiary has no usable name; re-create it.');
+    benPhone = stored.recipientPhone ?? '';
     payoutMethod = stored.payoutMethod; payoutDestination = stored.payoutDestination;
   } else {
     const ben = (body.beneficiary && typeof body.beneficiary === 'object' ? body.beneficiary : {}) as Record<string, unknown>;
     benName = str(ben.name);
     if (!benName) return err(400, 'beneficiary.name (or beneficiary_id) is required.');
     benPhone = str(ben.phone);
-    payoutMethod = (str(ben.payout_method) as PayoutMethod) || 'bank';
+    inlineMethod = parsePayoutMethod(ben.payout_method);
+    payoutMethod = inlineMethod ?? 'bank';
     payoutDestination = str(ben.payout_destination);
   }
+
+  // fix 5 (F43): partner-authored names reach the agent on the customer's next
+  // turn, so they are refused here — BEFORE the customer write and the claim,
+  // so a corrected retry under the same key mints normally.
+  if (!benId) {
+    if (!isCleanName(benName)) return err(400, nameError('beneficiary.name'));
+    if (inlineMethod === null) return err(400, methodError('beneficiary.payout_method'));
+    if (payoutDestination !== '' && !isBoundedPrintable(payoutDestination, INLINE_DESTINATION_MAX)) {
+      return err(400, `beneficiary.payout_destination must be at most ${INLINE_DESTINATION_MAX} printable characters.`);
+    }
+  }
+  const senderName = str(sender.name);
+  if (senderName && !isCleanName(senderName)) return err(400, nameError('sender.name'));
 
   // fix 6 (ctx-01): a masked display value is never an account. Refuse at the
   // edge — BEFORE the customer write and the idempotency claim — so a corrected
@@ -350,7 +405,7 @@ export async function createTransaction(
       partnerId: partner.id, // authoritative: from the key, not the body
       requiresKyc,
       senderKycStatus,
-      senderName: str(sender.name) || undefined,
+      senderName: senderName || undefined,
       recipientName: benName,
       recipientPhone: benPhone,
       payoutMethod,
@@ -360,6 +415,9 @@ export async function createTransaction(
       sourceCurrency,
       destinationCountry: destination.country,
       destinationCurrency: destination.currency,
+      // fix 5 (F43): an API mint never plants a saved recipient into the
+      // customer's WhatsApp picker.
+      saveRecipient: false,
     });
   } catch (e) {
     // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing
@@ -371,6 +429,15 @@ export async function createTransaction(
     if (e instanceof Error && e.message === 'kyc_required') {
       return err(422, 'Sender identity verification required (this partner runs SmartRemit KYC).');
     }
+    // Program fix 16: every partner-API mint is capped from the ledger. No
+    // figures in the response (the caps are policy, not a per-sender oracle).
+    // The key stays bound-but-unminted, so the same Idempotency-Key mints once
+    // there is headroom / the lock is free.
+    if (e instanceof SendCapError) return err(422, "This transfer exceeds the sender's current sending limit.");
+    if (e instanceof SendBusyError) return err(503, 'Another transfer for this sender is in progress. Please retry.');
+    // The claimed id already names another tenant's row (unreachable by
+    // provenance; never overwritten). The key stays bound; a new key mints.
+    if (e instanceof TransferIdConflictError) return err(409, 'Idempotency-Key conflict. Retry with a new key.');
     throw e;
   }
 
@@ -466,7 +533,7 @@ export async function confirmTransaction(
     const result = await settleOrHold(deps.db as Db, tr, integrations);
     // Fast-path drains, mirroring the pay route: the stage-1 message is READY
     // now; the mock rail's delivered message only becomes ready after its
-    // simulated DELIVERY_DELAY_MS. The 5-min heartbeat stays the guarantee.
+    // simulated DELIVERY_DELAY_MS. The per-minute cron still drains it.
     pokeWorker();
     if (result.kind === 'started' && !result.webhookDriven) {
       pokeWorkerDelayed(DELIVERY_DELAY_MS + 10_000);

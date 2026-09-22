@@ -115,6 +115,9 @@ curl -X POST $BASE/transactions \\
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
             watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code> or <code>b2binvoice:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account.
           </p>
+          <p className="text-sm text-muted-foreground">
+            Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
+          </p>
         </section>
 
         <Separator />
@@ -225,6 +228,19 @@ x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
             process asynchronously — and dedupe on <code>reference</code>, so a retry after a slow
             ack can never pay out twice.
           </p>
+          {/* keep in sync with src/lib/settlement-url.ts + src/lib/safe-fetch.ts (fix 22) */}
+          <p className="text-sm text-muted-foreground">
+            <strong>Endpoint requirements.</strong> Your <code>settlementUrl</code> must be a public{' '}
+            <code>https://</code> host on port 443 (no IP literals, no internal or single-label names,
+            no credentials in the URL). We follow at most two redirects, only <code>307</code>/
+            <code>308</code> to the same origin — never a <code>301</code>/<code>302</code>/
+            <code>303</code>, which would turn the signed POST into a GET. Your ack must be 64 KB or
+            less, uncompressed (we send <code>Accept-Encoding: identity</code> and never decompress),
+            and <code>providerRef</code> is at most 128 characters of <code>A–Z a–z 0–9 . _ : -</code>.
+            An endpoint that fails these checks is refused before the instruction is sent: the
+            instruction is retried with backoff and then raises an ops alert, so fix the endpoint in
+            Admin → Partners → Payment and the retries pick it up.
+          </p>
         </section>
 
         <Separator />
@@ -253,6 +269,17 @@ x-signature: 9c44…   # HMAC-SHA256(rawBody, webhookSecret)
                 <li><code>created</code> → awaiting payment (no-op transition)</li>
                 <li><code>funded</code> → paid (customer charged on your side)</li>
                 <li><code>paid_out</code> → delivered — triggers the branded WhatsApp delivery notifications</li>
+                <li>
+                  <code>failed</code> / <code>returned</code> → cancelled — the sender&apos;s charge is
+                  refunded (a partner-pulled debit gets a signed <code>reverse</code> instruction) and the
+                  customer is notified, in one transaction. An optional <code>reason</code> (string, ≤200
+                  characters) is stored on the transfer&apos;s note for your ops and ours.
+                </li>
+              </ul>
+              <ul className="mt-3 space-y-1.5 text-muted-foreground">
+                <li>A <code>failed</code> after <code>paid_out</code> is recorded for ops and never reverses a delivery.</li>
+                <li>A <code>paid_out</code> after a <code>failed</code> is refused and alerted — the transfer stays cancelled.</li>
+                <li>A <code>reverse</code> for a debit that never happened must be a no-op on your side.</li>
               </ul>
             </CardContent>
           </Card>
@@ -260,7 +287,10 @@ x-signature: 9c44…   # HMAC-SHA256(rawBody, webhookSecret)
             No rail yet? Point your integration at the <strong className="text-foreground">hosted
             reference rail</strong> (<code>providerType: simulator</code>) — it verifies your
             signatures, acks a providerRef, and calls the public webhook back ~12s later, running
-            the exact production loop end to end.
+            the exact production loop end to end. To exercise the failure path, pay to a bank
+            account that is all zeros (for India: account <code>000000000000</code>, IFSC{' '}
+            <code>HDFC0001234</code>): the reference rail acks, then reports{' '}
+            <code>failed</code> with reason <code>account_unreachable</code>.
           </p>
         </section>
 

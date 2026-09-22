@@ -7,7 +7,8 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedLedgerSpend } from './helpers-db';
+import { SendBusyError } from '@/lib/send-limits';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { Schedule } from '@/lib/types';
 import type { CustomerStore } from '@/lib/customer-store';
@@ -62,7 +63,7 @@ async function makeDeps() {
   const db = await freshDb(); // truncates + reseeds the 'default' partner
   const store = createStore(redis, db);
   const partnerStore = createPartnerStore(db);
-  const monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  const monthlyVolumeStore = createMonthlyVolumeStore(store);
   const customerStore = createCustomerStore(db, store);
   const scheduleStore = createScheduleStore(db);
   return { redis, db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore };
@@ -349,5 +350,66 @@ describe('runDueSchedules — pre-fix schedules (fix 6 / ctx-01)', () => {
     const { result, store } = await runOnly({ ...sched('pulled', 21), fundingMethod: 'bank_pull' });
     expect(result).toEqual({ fired: 0, failed: 1 });
     expect(await store.listTransfers()).toHaveLength(0);
+  });
+});
+
+// ── Program fix 16 (Task 10, test 13): cron mints are capped from the ledger ──
+describe('runDueSchedules — send cap (Program fix 16)', () => {
+  it('an owner at their cap ⇒ failed:1, no transfer, ONE deduped schedule-refused alert with send_cap, lastRunAt untouched', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore); // firstSeenAt 2026-01-01 ⇒ T1 ($2,999/day)
+    await scheduleStore.saveSchedule(sched('due', 21)); // $200
+    await seedLedgerSpend(db, { partnerId: 'default', phone: '15551234567', amountUsd: 2900, status: 'paid' }); // $2,900 today
+    const notified: string[] = [];
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(notified).toEqual([]);
+    expect(await store.listTransfers()).toHaveLength(1); // the seeded row only
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+    const alerts = (r as unknown as { rows: { dedupe_key: string; payload: { message: string } }[] }).rows;
+    expect(alerts.map((a) => a.dedupe_key)).toEqual(['schedule-refused:due:2026-05-21']);
+    expect(alerts[0].payload.message).toContain('(send_cap)');
+    expect(alerts[0].payload.message).not.toMatch(/2,?900|2,?999/); // no figures
+  });
+});
+
+describe('runDueSchedules — busy sender lock (review SHOULD 6)', () => {
+  it('a SendBusyError is retried ONCE in-process (nothing was written): the retry fires the schedule', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    const real = store.mintUnderSenderLock.bind(store);
+    const spy = vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValueOnce(new SendBusyError()).mockImplementation(real);
+    const notified: string[] = [];
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+    expect(result).toEqual({ fired: 1, failed: 0 });
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(notified).toHaveLength(1);
+    expect(await store.listTransfers()).toHaveLength(1);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeTruthy();
+  });
+
+  it('busy twice ⇒ failed:1 with reason busy, no transfer, one deduped alert', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.spyOn(store, 'mintUnderSenderLock').mockRejectedValue(new SendBusyError());
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(await store.listTransfers()).toHaveLength(0);
+    const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`);
+    const alerts = (r as unknown as { rows: { dedupe_key: string; payload: { message: string } }[] }).rows;
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].payload.message).toContain('(busy)');
   });
 });

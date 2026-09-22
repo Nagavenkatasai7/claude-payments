@@ -108,8 +108,8 @@ beforeEach(async () => {
   store = createStore(redis, db);
   customerStore = createCustomerStore(db, store);
   draftStore = createDraftStore(redis);
-  dailyVolumeStore = createDailyVolumeStore(redis);
-  monthlyVolumeStore = createMonthlyVolumeStore(redis);
+  dailyVolumeStore = createDailyVolumeStore(store);
+  monthlyVolumeStore = createMonthlyVolumeStore(store);
   const nowIso = new Date().toISOString();
   await customerStore.saveCustomer({
     senderPhone: PHONE, firstSeenAt: nowIso, kycStatus: 'verified',

@@ -45,7 +45,7 @@ flowchart LR
         persona["Identity verification (Persona)"]:::external
         railext["Partner payout rail"]:::external
         waext["WhatsApp (Meta)"]:::external
-        ghext["Schedulers - GitHub Actions 5-min heartbeat + Vercel daily cron (recurring transfers)"]:::external
+        ghext["Schedulers - Vercel per-minute worker cron + GitHub Actions hourly backup + Vercel daily cron (recurring transfers)"]:::external
     end
 
     customer -->|"1. chats to send money (via WhatsApp)"| wahook
@@ -75,7 +75,7 @@ flowchart LR
     staff -->|"reviews holds, approves refunds"| admin
     admin -->|"reads and updates the ledger"| ledger
     admin -->|"staff logins + sessions"| redis
-    ghext -->|"wakes the worker every 5 minutes"| outbox
+    ghext -->|"wakes the worker every minute"| outbox
 
     subgraph legend["Legend"]
         direction LR

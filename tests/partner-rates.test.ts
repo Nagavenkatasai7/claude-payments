@@ -99,6 +99,37 @@ describe('selectSettlementRoute (PGlite)', () => {
     expect(route.source).toBe('platform');
   });
 
+  it.each([
+    'https://10.1.1.1/x',
+    'http://rail.acme.com/x',
+    'https://169.254.169.254/latest',
+    'https://user:pw@rail.acme.com/x',
+    'https://rail.acme.com:8443/x',
+    'https://localhost/x',
+  ])('fix 22 (test 12): a contender with an http rail at %s is skipped and routing falls back to mid', async (url) => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 88, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db, stubIntegrations({ p1: { providerType: 'http', credentials: { settlementUrl: url, signingSecret: 's' } } }), 'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: MID, source: 'platform' });
+  });
+
+  it('fix 22: a bad-URL winner is skipped and the next-best contender with a PUBLIC https rail wins', async () => {
+    const repo = createPartnerRateRepo(db);
+    await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 86, expiresAt: inHours(1) });
+    await repo.upsertRate({ id: 'b', partnerId: 'p2', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: 87, expiresAt: inHours(1) });
+    const route = await selectSettlementRoute(
+      db,
+      stubIntegrations({
+        p1: ROUTABLE,
+        p2: { providerType: 'http', credentials: { settlementUrl: 'https://10.1.1.1/x', signingSecret: 's' } },
+      }),
+      'USD', 'INR', MID,
+    );
+    expect(route).toEqual({ fxRate: 86, source: 'partner', settlementPartnerId: 'p1' });
+  });
+
   it('a rate merely EQUAL to mid never wins (strictly better required)', async () => {
     const repo = createPartnerRateRepo(db);
     await repo.upsertRate({ id: 'a', partnerId: 'p1', sourceCurrency: 'USD', destinationCurrency: 'INR', effectiveRate: MID, expiresAt: inHours(1) });
