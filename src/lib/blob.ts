@@ -119,6 +119,40 @@ export function isPrivatePartnerDocRef(url: string, requestId: string): boolean 
   return u.pathname.startsWith(`/partner-applications/${requestId}/`);
 }
 
+/**
+ * The ONE host our private token may ever be sent to, derived from the token
+ * itself: a read-write token is `vercel_blob_rw_<storeId>_<secret>` and the SDK
+ * builds `https://<storeId>.<access>.blob.vercel-storage.com/…` from it
+ * (dist/chunk-CIIQSN42.js:119-122 `parseStoreIdFromReadWriteToken`, :338-339
+ * `constructBlobUrl`). Null when the token is unset or not of that shape — then
+ * no host is "ours" and nothing is read. Hostnames compare lower-case (the URL
+ * parser lower-cases them).
+ */
+export function privateStoreHostFromToken(token: string): string | null {
+  const storeId = token.split('_')[3] ?? '';
+  if (!/^[A-Za-z0-9]+$/.test(storeId)) return null;
+  return `${storeId.toLowerCase()}.private.blob.vercel-storage.com`;
+}
+
+/**
+ * True only when `url` is https on EXACTLY the private store our token opens.
+ * `isPrivatePartnerDocRef` pins the Vercel private-store domain and the request
+ * prefix; this pins the store id, so a ref on someone else's private store —
+ * valid shape, our request's prefix — is never handed to the SDK with our
+ * bearer token. The staff route checks it before the audit row and
+ * `streamPartnerDoc` checks it again where the token is actually sent.
+ */
+export function isOwnPrivateStoreRef(url: string): boolean {
+  const host = privateStoreHostFromToken(env.partnerDocsBlobToken);
+  if (!host) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && !u.username && !u.password && u.hostname === host;
+  } catch {
+    return false;
+  }
+}
+
 /** True when `url` parses to an https URL on the OLD public store (a not-yet-migrated ref). */
 export function isLegacyPublicPartnerDocRef(url: string): boolean {
   try {
@@ -141,9 +175,12 @@ export interface PartnerDocStream {
  * `get(url, { access: 'private', token })` (dist/index.d.ts:221; result union on
  * `statusCode` at :167-193) and returns null unless the store answered 200 with
  * a body. Throws the friendly error when unconfigured — never a fallback token.
+ * Refuses (null, no SDK call) any url that is not on OUR store's host: the
+ * token is sent to that host and nowhere else.
  */
 export async function streamPartnerDoc(url: string): Promise<PartnerDocStream | null> {
   const token = requireToken();
+  if (!isOwnPrivateStoreRef(url)) return null;
   const res = await get(url, { access: 'private', token });
   if (!res || res.statusCode !== 200 || !res.stream) return null;
   return { stream: res.stream, contentType: res.blob.contentType, size: res.blob.size };

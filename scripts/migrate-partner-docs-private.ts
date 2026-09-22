@@ -33,7 +33,7 @@ import { del as blobDel, put as blobPut } from '@vercel/blob';
 import { eq } from 'drizzle-orm';
 import { getDb, type Db } from '@/db/client';
 import { partnerApplications } from '@/db/schema';
-import { isLegacyPublicPartnerDocRef, isPrivatePartnerDocRef, sniffDocType, type PartnerDocType } from '@/lib/blob';
+import { isLegacyPublicPartnerDocRef, isPartnerDocType, isPrivatePartnerDocRef, sniffDocType, type PartnerDocType } from '@/lib/blob';
 import type { PartnerApplicationDocument } from '@/lib/types';
 
 export interface MigrateDeps {
@@ -150,7 +150,9 @@ export async function migratePartnerDocsPrivate(
       const sniffed = sniffDocType(bytes.subarray(0, 8));
       if (sniffed === null || sniffed !== d.contentType) {
         skipped += 1;
-        log(`  ${row.id} doc[${i}]: SKIP — bytes do not match declared type (declared ${d.contentType || '?'}, sniffed ${sniffed ?? 'unknown'}); left as-is, review by hand`);
+        // `d.contentType` on a pre-fix row is applicant-supplied text: print it only through the allow-list.
+        const declared = typeof d.contentType === 'string' && isPartnerDocType(d.contentType) ? d.contentType : 'other';
+        log(`  ${row.id} doc[${i}]: SKIP — bytes do not match declared type (declared ${declared}, sniffed ${sniffed ?? 'unknown'}); left as-is, review by hand`);
         continue;
       }
       migratable += 1;

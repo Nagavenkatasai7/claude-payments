@@ -90,7 +90,10 @@ const PRIVATE_URL = `https://abc123.private.blob.vercel-storage.com/partner-appl
 const LEGACY_PUBLIC_URL = 'https://abc123.public.blob.vercel-storage.com/partner-applications/aaaaaaaa-1-old-R4nd0m.pdf';
 const HOSTILE_URL = `https://evil.example/partner-applications/${REQ}/x.pdf`;
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a]);
-const PRIVATE_TOKEN = 'vercel_blob_rw_privstore_testtoken';
+// `vercel_blob_rw_<storeId>_<secret>` — OUR store is abc123, so PRIVATE_URL is on our host.
+const PRIVATE_TOKEN = 'vercel_blob_rw_abc123_testtoken';
+// A ref on SOMEONE ELSE's private store: valid shape, our request's prefix, wrong store id.
+const FOREIGN_STORE_URL = `https://zzz999.private.blob.vercel-storage.com/partner-applications/${REQ}/1-licence-R4nd0m.pdf`;
 
 function staff(o: Partial<Staff>): Staff {
   return {
@@ -280,6 +283,14 @@ describe('GET …/documents/[index] — refusals (test 8)', () => {
     ]);
     expect((await get(REQ, '0')).status).toBe(404);
     expect((await get(REQ, '1')).status).toBe(404);
+    expect(getMock).not.toHaveBeenCalled();
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('a ref on a DIFFERENT private store (not the one our token opens) → 404, get never called, no audit row', async () => {
+    await seed([{ label: 'Licence', url: FOREIGN_STORE_URL, size: 9, contentType: 'application/pdf' }]);
+    const res = await get(REQ, '0');
+    expect(res.status).toBe(404);
     expect(getMock).not.toHaveBeenCalled();
     expect(await auditRows()).toHaveLength(0);
   });

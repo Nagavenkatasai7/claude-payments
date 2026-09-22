@@ -2,7 +2,14 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { requireScope } from '@/lib/auth';
-import { isBlobNotConfigured, isPartnerDocType, isPrivatePartnerDocRef, streamPartnerDoc } from '@/lib/blob';
+import {
+  isBlobNotConfigured,
+  isOwnPrivateStoreRef,
+  isPartnerDocType,
+  isPrivatePartnerDocRef,
+  streamPartnerDoc,
+} from '@/lib/blob';
+import { env } from '@/lib/env';
 import { logError } from '@/lib/log';
 import { getStore } from '@/lib/store';
 
@@ -66,10 +73,15 @@ export async function GET(
   const doc = application.documents[index];
   if (!doc) return notFound();
   // The ledger value was client-submitted (through the bound submit action), so
-  // it is re-bound here: private store, this request's prefix. Anything else —
-  // a legacy public ref, another request's object, a foreign host — is 404 and
-  // the store (and our token) never sees it.
+  // it is re-bound here: the private-store domain + this request's prefix, AND
+  // exactly the store our token opens (isOwnPrivateStoreRef). Anything else —
+  // a legacy public ref, another request's object, a foreign host, someone
+  // else's private store — is 404 and the store (and our token) never sees it.
+  // With no private token there is no store to pin to and nothing can be read:
+  // 503 (the same "not enabled" the upload gives), before any audit row.
   if (!isPrivatePartnerDocRef(doc.url, id)) return notFound();
+  if (!env.partnerDocsBlobToken) return new NextResponse(null, { status: 503 });
+  if (!isOwnPrivateStoreRef(doc.url)) return notFound();
 
   // 3. Audit BEFORE any bytes. A failed audit write ⇒ 500, no read.
   try {
