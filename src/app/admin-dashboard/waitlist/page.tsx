@@ -50,12 +50,16 @@ export default async function WaitlistPage() {
             </div>
           </div>
           {staff.role === 'admin' && (
-            <a
-              href="/admin-dashboard/waitlist/export"
-              className="inline-flex h-9 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-secondary"
-            >
-              Export CSV (decrypted, audited)
-            </a>
+            // A POST (never a GET with a side effect): the browser downloads the
+            // attachment without leaving the page; the route checks same-origin.
+            <form method="post" action="/admin-dashboard/waitlist/export">
+              <button
+                type="submit"
+                className="inline-flex h-9 items-center rounded-md border border-border bg-background px-3 text-sm font-medium hover:bg-secondary"
+              >
+                Export CSV (decrypted, audited)
+              </button>
+            </form>
           )}
         </div>
 

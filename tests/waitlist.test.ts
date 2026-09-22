@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   WAITLIST_CONSENT_TEXT,
   WAITLIST_CONSENT_VERSION,
+  WAITLIST_CONSENT_VALUE,
   normalizeEmail,
   toE164,
   parseWaitlistSignup,
@@ -29,7 +30,7 @@ const VALID = {
   phone: '+1 (555) 123-4567',
   location: 'Fairfax, VA',
   destinations: ['IN', 'MX'],
-  consent: 'on',
+  consent: 'yes',
 };
 
 describe('consent constants', () => {
@@ -65,6 +66,22 @@ describe('normalizeEmail / toE164', () => {
     expect(toE164('abc')).toBeNull();
     expect(toE164('')).toBeNull();
   });
+  it('rejects a leading 0 or 00 outright (trunk prefixes / international dialling prefixes are not E.164)', () => {
+    expect(toE164('0044 7911 123456')).toBeNull(); // 00 + UK
+    expect(toE164('00919876543210')).toBeNull(); // 00 + IN
+    expect(toE164('07911 123456')).toBeNull(); // UK national format
+    expect(toE164('0555 123 4567')).toBeNull(); // 11 digits, leading 0
+  });
+  it('rejects a bare 10-digit number starting with 0 or 1 (not a valid NANP number)', () => {
+    expect(toE164('0555123456')).toBeNull();
+    expect(toE164('1555123456')).toBeNull();
+    expect(toE164('(571) 555-0123')).toBe('+15715550123');
+  });
+  it('dedupe equivalence: "+1 (571) 555-0123" and "5715550123" normalise to the same E.164', () => {
+    expect(toE164('+1 (571) 555-0123')).toBe('+15715550123');
+    expect(toE164('5715550123')).toBe('+15715550123');
+    expect(toE164('1-571-555-0123')).toBe('+15715550123');
+  });
 });
 
 describe('parseWaitlistSignup', () => {
@@ -92,8 +109,19 @@ describe('parseWaitlistSignup', () => {
     ['no destinations', { destinations: [] }],
     ['only unknown destinations', { destinations: ['XX', 'Other'] }],
     ['consent unchecked', { consent: '' }],
+    ['consent=no', { consent: 'no' }],
+    ['consent=on (not the checkbox value)', { consent: 'on' }],
+    ['consent=true', { consent: 'true' }],
+    ['consent=YES (case differs)', { consent: 'YES' }],
+    ['phone with 00 prefix', { phone: '00919876543210' }],
+    ['10-digit phone starting with 1', { phone: '1555123456' }],
   ])('rejects %s', (_label, over) => {
     expect(parseWaitlistSignup(form({ ...VALID, ...over }), ALLOWED).ok).toBe(false);
+  });
+
+  it('consent counts ONLY when the value is exactly the checkbox value', () => {
+    expect(WAITLIST_CONSENT_VALUE).toBe('yes');
+    expect(parseWaitlistSignup(form({ ...VALID, consent: WAITLIST_CONSENT_VALUE }), ALLOWED).ok).toBe(true);
   });
 
   it('drops destinations outside the allowed set and dedupes', () => {

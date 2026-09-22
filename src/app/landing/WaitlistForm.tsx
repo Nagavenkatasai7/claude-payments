@@ -1,6 +1,6 @@
 import { joinWaitlistAction } from '../waitlist-action';
 import { WAITLIST_DESTINATIONS } from './corridors';
-import { WAITLIST_CONSENT_TEXT, WAITLIST_LIMITS } from '@/lib/waitlist';
+import { WAITLIST_CONSENT_TEXT, WAITLIST_CONSENT_VALUE, WAITLIST_LIMITS } from '@/lib/waitlist';
 
 // WaitlistForm — the public "Join waitlist" section of the landing page.
 // A server component (no client state): the form posts to joinWaitlistAction
@@ -68,8 +68,9 @@ export default function WaitlistForm({ status, utmSource, utmCampaign }: Waitlis
               role="alert"
               className="mb-6 rounded-xl border border-[#f5c2c2] bg-[#fdecec] px-4 py-3 text-[14px] text-[#991b1b]"
             >
-              Please check the form — your name, a valid email, a WhatsApp number with country
-              code, your location, at least one country, and your consent are required.
+              Please check the form — your name, a valid email, your WhatsApp number, your
+              location, at least one country, and your consent are required. Include your
+              country code, e.g. +91…; US numbers can be entered without it.
             </p>
           )}
           {status === 'rate' && (
@@ -180,7 +181,7 @@ export default function WaitlistForm({ status, utmSource, utmCampaign }: Waitlis
               <input
                 type="checkbox"
                 name="consent"
-                value="yes"
+                value={WAITLIST_CONSENT_VALUE}
                 required
                 className="mt-0.5 h-4 w-4 shrink-0 accent-[#1e5fd6]"
               />

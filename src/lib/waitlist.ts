@@ -10,6 +10,8 @@ import { normalizePhone, isValidPhone } from '@/lib/phone';
 export const WAITLIST_CONSENT_TEXT =
   'I agree to receive SmartRemit updates by WhatsApp and email. I can opt out anytime.';
 export const WAITLIST_CONSENT_VERSION = 'v1';
+/** The consent checkbox's `value`; the server accepts consent only when the field equals it exactly. */
+export const WAITLIST_CONSENT_VALUE = 'yes';
 
 export const WAITLIST_LIMITS = {
   name: 120,
@@ -35,15 +37,26 @@ export function normalizeEmail(raw: string): string {
 
 /**
  * Normalise a phone to E.164 (`+` + 10..15 digits) on top of the shared
- * digit-only normaliser. A bare 10-digit number is ASSUMED US (+1): the
- * product launches US→India and the form's placeholder shows a US number.
- * Anything else must already carry its country code. Null ⇒ invalid.
+ * digit-only normaliser. Rules (each pinned by tests/waitlist.test.ts):
+ *   • a leading 0 or 00 is REJECTED outright — a trunk prefix (07911…) or an
+ *     international dialling prefix (0044…) is not E.164 and guessing the
+ *     intended country would silently mis-key the dedupe index; the form copy
+ *     asks for the country code instead;
+ *   • a bare 10-digit number is ASSUMED US (+1) — the product launches
+ *     US→India and the form's placeholder shows a US number — but only when
+ *     it can be a NANP number (area code 2-9); 0… / 1… are rejected;
+ *   • anything longer must already carry its country code (no leading 0).
+ * Null ⇒ invalid.
  */
 export function toE164(raw: string): string | null {
   const digits = normalizePhone(raw);
   if (!isValidPhone(digits)) return null;
-  const withCountry = digits.length === 10 ? `1${digits}` : digits;
-  return `+${withCountry}`;
+  if (digits.startsWith('0')) return null;
+  if (digits.length === 10) {
+    if (digits[0] === '1') return null; // NANP area codes are 2-9
+    return `+1${digits}`;
+  }
+  return `+${digits}`;
 }
 
 export interface WaitlistSignupInput {
@@ -78,7 +91,9 @@ export function parseWaitlistSignup(formData: FormData, allowedDestinations: Rea
         .filter((c) => allowedDestinations.has(c)),
     ),
   ];
-  const consent = String(formData.get('consent') ?? '').trim() !== '';
+  // Consent is given ONLY when the field carries the checkbox's exact value —
+  // never "any non-empty string" (a forged `consent=no` must not count).
+  const consent = formData.get('consent') === WAITLIST_CONSENT_VALUE;
   const utmSource = cleanText(formData.get('utm_source'), WAITLIST_LIMITS.utm) || undefined;
   const utmCampaign = cleanText(formData.get('utm_campaign'), WAITLIST_LIMITS.utm) || undefined;
 

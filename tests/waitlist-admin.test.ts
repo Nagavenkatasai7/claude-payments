@@ -49,7 +49,19 @@ vi.mock('@/db/client', async (orig) => ({
 }));
 
 import WaitlistPage from '@/app/admin-dashboard/waitlist/page';
-import { GET as exportGet } from '@/app/admin-dashboard/waitlist/export/route';
+import { POST as exportPost, GET as exportGet } from '@/app/admin-dashboard/waitlist/export/route';
+import { NextRequest } from 'next/server';
+
+const EXPORT_URL = 'https://smartremit.test/admin-dashboard/waitlist/export';
+/** A browser form POST from the dashboard: same-origin `origin` + `host`. */
+function postReq(over: Record<string, string | null> = {}): NextRequest {
+  const h = new Headers({ origin: 'https://smartremit.test', host: 'smartremit.test' });
+  for (const [k, v] of Object.entries(over)) {
+    if (v === null) h.delete(k);
+    else h.set(k, v);
+  }
+  return new NextRequest(EXPORT_URL, { method: 'POST', headers: h });
+}
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { visibleNavItems } from '@/app/admin-dashboard/nav';
@@ -132,29 +144,58 @@ describe('the page gate', () => {
   });
 });
 
-describe('GET /admin-dashboard/waitlist/export', () => {
-  it('anonymous → redirect to /login, no audit row', async () => {
-    await expect(exportGet()).rejects.toThrow('REDIRECT:/login');
+describe('/admin-dashboard/waitlist/export', () => {
+  it('GET never exports and never audits — even for a signed-in platform admin (no side effect on a GET)', async () => {
+    await signIn(staff({ username: 'admin' }));
+    const res = await exportGet();
+    expect(res.status).toBe(404);
+    expect(res.headers.get('content-type') ?? '').not.toMatch(/csv/);
+    expect(await res.text()).not.toContain('Asha');
     expect(await auditRows()).toHaveLength(0);
   });
 
-  it('partner-scoped admin → 404 body (not 403), no audit row', async () => {
+  it('POST anonymous → redirect to /login, no audit row', async () => {
+    await expect(exportPost(postReq())).rejects.toThrow('REDIRECT:/login');
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('POST partner-scoped admin → 404 body (not 403), no audit row', async () => {
     await signIn(staff({ username: 'pa', role: 'admin', partnerId: 'acme' }));
-    const res = await exportGet();
+    const res = await exportPost(postReq());
     expect(res.status).toBe(404);
     expect(res.headers.get('content-type') ?? '').not.toMatch(/csv/);
     expect(await auditRows()).toHaveLength(0);
   });
 
-  it('platform agent (not admin) → 404: the decrypted export is admin-only', async () => {
+  it('POST platform agent (not admin) → 404: the decrypted export is admin-only', async () => {
     await signIn(staff({ username: 'ag', role: 'agent' }));
-    expect((await exportGet()).status).toBe(404);
+    expect((await exportPost(postReq())).status).toBe(404);
     expect(await auditRows()).toHaveLength(0);
   });
 
-  it('platform admin → decrypted CSV as an attachment, no-store, and ONE waitlist.export audit row (row count, no PII)', async () => {
+  it.each([
+    ['a cross-site origin', { origin: 'https://evil.example' }],
+    ['a missing origin header (fail closed)', { origin: null }],
+    ['a malformed origin', { origin: 'not a url' }],
+    ['an origin matching host but not the proxy-set x-forwarded-host', { origin: 'https://smartremit.test', 'x-forwarded-host': 'smartremit.ai' }],
+  ])('POST by a platform admin with %s → 403, no export, no audit row (CSRF guard)', async (_l, over) => {
     await signIn(staff({ username: 'admin' }));
-    const res = await exportGet();
+    const res = await exportPost(postReq(over));
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain('Asha');
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('POST behind a proxy: origin matching x-forwarded-host is accepted (the Next.js server-action rule)', async () => {
+    await signIn(staff({ username: 'admin' }));
+    const res = await exportPost(postReq({ host: 'internal-fn.vercel', 'x-forwarded-host': 'smartremit.test' }));
+    expect(res.status).toBe(200);
+    expect(await auditRows()).toHaveLength(1);
+  });
+
+  it('POST platform admin → decrypted CSV as an attachment, no-store, and ONE waitlist.export audit row (row count, no PII)', async () => {
+    await signIn(staff({ username: 'admin' }));
+    const res = await exportPost(postReq());
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/^text\/csv/);
     expect(res.headers.get('content-disposition')).toMatch(/^attachment; filename="waitlist-.*\.csv"$/);

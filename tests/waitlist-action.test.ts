@@ -54,7 +54,7 @@ const VALID = {
   phone: '+1 (555) 123-4567',
   location: 'Fairfax, VA',
   destinations: ['IN', 'MX'],
-  consent: 'on',
+  consent: 'yes',
   utm_source: 'newsletter',
   utm_campaign: 'sept',
 };
@@ -109,11 +109,24 @@ describe('joinWaitlistAction', () => {
     ['no destinations', { destinations: [] }],
     ['unknown destinations only', { destinations: ['XX', 'Other'] }],
     ['no consent', { consent: '' }],
+    ['consent=no', { consent: 'no' }],
+    ['consent=on (a forged value, not the checkbox value)', { consent: 'on' }],
+    ['phone with a 00 international prefix', { phone: '0044 7911 123456' }],
     ['no location', { location: '' }],
     ['short name', { full_name: 'A' }],
   ])('rejects %s with ?waitlist=err and persists nothing', async (_l, over) => {
     await expect(joinWaitlistAction(form({ ...VALID, ...over }))).rejects.toThrow(ERR);
     expect(await rows()).toHaveLength(0);
+  });
+
+  it('dedupes "+1 (571) 555-0123" against a later bare "5715550123" (ok, one row)', async () => {
+    await expect(joinWaitlistAction(form({ ...VALID, phone: '+1 (571) 555-0123' }))).rejects.toThrow(OK);
+    await expect(
+      joinWaitlistAction(form({ ...VALID, email: 'other@example.com', phone: '5715550123' })),
+    ).rejects.toThrow(OK);
+    const all = await rows();
+    expect(all).toHaveLength(1);
+    expect(all[0].phone_bidx).toBe(blindIndex('phone', '+15715550123'));
   });
 
   it('dedupes silently on the same email in a different case/whitespace (ok, one row)', async () => {

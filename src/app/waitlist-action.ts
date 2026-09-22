@@ -5,7 +5,7 @@ import { redirect } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { createWaitlistRepo } from '@/db/repos/waitlist-repo';
 import { newTransferId } from '@/lib/id';
-import { checkIpRateLimit } from '@/lib/ip-rate-limit';
+import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
 import { getRedis } from '@/lib/redis';
 import { WAITLIST_CONSENT_VERSION, parseWaitlistSignup } from '@/lib/waitlist';
@@ -29,7 +29,7 @@ export async function joinWaitlistAction(formData: FormData): Promise<void> {
   }
 
   // ── RATE LIMIT — own scope ('waitlist'), never shared with the partner form. ──
-  const ip = (await headers()).get('x-forwarded-for')?.split(',')[0].trim() || 'unknown';
+  const ip = clientIpFrom(await headers());
   let allowed = true;
   try {
     const r = await checkIpRateLimit(getRedis(), 'waitlist', ip, { limit: 5, windowSec: 3600 });
