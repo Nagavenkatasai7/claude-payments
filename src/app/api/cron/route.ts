@@ -6,6 +6,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
+import { getDb } from '@/db/client';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
 import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
@@ -50,6 +51,7 @@ export async function GET(req: NextRequest) {
   };
 
   const result = await runDueSchedules({
+    db: getDb(),                  // Task 9: a refused run enqueues a deduped ops alert
     store,
     partnerStore,                 // NEW (P5): corridor-aware compliance
     customerStore,                // NEW (Item 4): skip opted-out customers
@@ -102,5 +104,5 @@ export async function GET(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({ ok: true, fired: result.fired });
+  return NextResponse.json({ ok: true, fired: result.fired, failed: result.failed });
 }

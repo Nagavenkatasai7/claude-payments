@@ -481,3 +481,25 @@ describe('SYSTEM_PROMPT — refunds & cancellations (shared region, both KYC var
     expect(p).toContain('request_refund');
   });
 });
+
+describe('SYSTEM_PROMPT — FX honesty (Task 9: live-02, money-07)', () => {
+  const variants = [
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true }),
+    buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false }),
+  ];
+
+  it('never lets the bot call the quoted rate mid-market or claim there is no markup (live-02)', () => {
+    for (const p of variants) {
+      expect(p).toContain('Describe the exchange rate only as the rate for this transfer, exactly as get_quote returned it.');
+      expect(p).toContain('Never call it the "mid-market", "interbank" or "real" rate');
+      expect(p).toContain('never claim there is "no markup" or "no spread" on it');
+    }
+  });
+
+  it('relays an FX-unavailable refusal and never estimates or reuses a rate', () => {
+    for (const p of variants) {
+      expect(p).toContain('If a tool returns that exchange rates are temporarily unavailable');
+      expect(p).toContain('Never estimate a rate yourself and never reuse a rate from an earlier message.');
+    }
+  });
+});

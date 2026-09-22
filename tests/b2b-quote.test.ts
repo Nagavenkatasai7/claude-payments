@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { billDenomination, quoteCrossBorderBill, quoteBuyerDenominatedBill } from '@/lib/b2b-quote';
 import { sourceForDest, QuoteError } from '@/lib/fx';
-import type { FxRates } from '@/lib/rate';
+import { FALLBACK_FX_RATES, FX_MAX_AGE_MS, RateUnavailableError, type FxRates } from '@/lib/rate';
 
 // Live rates are passed IN (the pure helper never fetches). These mirror the
 // offline fallback table shape: { toInr, toUsd }. HKD is USD-pegged (~7.8/USD).
@@ -207,5 +207,20 @@ describe('billDenomination — the ONE shared case-derivation authority (page + 
 
   it('a third currency (neither side) ⇒ null — never payable', () => {
     expect(billDenomination('GBP', 'USD', 'MXN')).toBeNull();
+  });
+});
+
+describe('Task 9: both bill quotes refuse the display table and rates beyond the ceiling', () => {
+  const base = { invoicedAmount: 1000, sellerCurrency: 'HKD' as const, buyerCurrency: 'USD' as const, sellerToUsd: HKD_TO_USD };
+  const stale: FxRates = { toInr: 85, toUsd: 1, fetchedAt: Date.now() - FX_MAX_AGE_MS - 1, source: 'cache' };
+
+  it('Case S (quoteCrossBorderBill) refuses', () => {
+    expect(() => quoteCrossBorderBill({ ...base, rates: FALLBACK_FX_RATES.USD })).toThrow(RateUnavailableError);
+    expect(() => quoteCrossBorderBill({ ...base, rates: stale })).toThrow(RateUnavailableError);
+  });
+
+  it('Case B (quoteBuyerDenominatedBill) refuses — it multiplies the cross-rate directly', () => {
+    expect(() => quoteBuyerDenominatedBill({ ...base, invoicedAmount: 500, rates: FALLBACK_FX_RATES.USD })).toThrow(RateUnavailableError);
+    expect(() => quoteBuyerDenominatedBill({ ...base, invoicedAmount: 500, rates: stale })).toThrow(RateUnavailableError);
   });
 });

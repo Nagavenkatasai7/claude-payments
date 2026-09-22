@@ -5,7 +5,7 @@ import type {
   CountryCode, CurrencyCode, KycStatus, Partner, PartnerId, PayoutMethod, Transfer,
 } from './types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
-import { getFxRates } from './rate';
+import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
 import { validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
@@ -170,12 +170,18 @@ export async function createQuote(
   // (default INR) is unchanged.
   const destCountryReq = str(body.destination_country);
   const destByCountry = destCountryReq ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryReq.toUpperCase() as CountryCode] : undefined;
-  const destinationCurrency = (destByCountry || str(body.destination_currency) || 'INR') as CurrencyCode;
+  // str() trims; upper-cased like pushPartnerRate so "gbp" quotes exactly like "GBP".
+  const destinationCurrency = (destByCountry || str(body.destination_currency).toUpperCase() || 'INR') as CurrencyCode;
+  // Validated at the edge (Task 9 security review): an unsupported code is the
+  // caller's error (400), never an FX-provider call or a misleading 503.
+  if (!SUPPORTED_CURRENCIES.has(destinationCurrency)) {
+    return err(400, `destination_currency must be one of: ${SUPPORTED_CURRENCIES_LIST}.`);
+  }
   try {
     const rates = await getFxRates(sourceCurrency);
-    const destRates = await getFxRates(destinationCurrency);
+    const destRates = await getDestinationRates(destinationCurrency);
     // transferCount drives the fee tier; a partner-API quote uses standard pricing.
-    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates.toUsd);
+    const q = quote(amount, sourceCurrency, rates, 'bank_transfer', 1, destinationCurrency, destRates?.toUsd);
     return ok(200, {
       amount_source: q.amountSource,
       source_currency: sourceCurrency,
@@ -186,6 +192,10 @@ export async function createQuote(
       fx_rate: q.fxRate,
     });
   } catch (e) {
+    // Task 9: the FX provider is down / beyond the ceiling ⇒ 503 (retryable).
+    // A QuoteError is the caller's request being invalid ⇒ 400. The two are
+    // sibling classes — RateUnavailableError is NOT a QuoteError.
+    if (e instanceof RateUnavailableError) return err(503, e.message);
     if (e instanceof QuoteError) return err(400, e.message);
     throw e;
   }
@@ -330,6 +340,11 @@ export async function createTransaction(
       destinationCurrency: destination.currency,
     });
   } catch (e) {
+    // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing
+    // was minted — exactly the crash-replay shape above: a retry with the SAME
+    // Idempotency-Key falls through and mints THAT id once FX is back, and a
+    // replay of an already-minted key never reaches this point (200 above).
+    if (e instanceof RateUnavailableError) return err(503, e.message);
     if (e instanceof QuoteError) return err(400, e.message);
     if (e instanceof Error && e.message === 'kyc_required') {
       return err(422, 'Sender identity verification required (this partner runs SmartRemit KYC).');

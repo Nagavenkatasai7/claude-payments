@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
-import { getFxRate, FALLBACK_FX_RATE } from '@/lib/rate';
+import { getFxRates, FALLBACK_FX_RATE } from '@/lib/rate';
 import { waLink, WA_MESSAGES, corridorMessage } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
 import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon } from './landing/TrustIcons';
@@ -25,8 +25,9 @@ export const metadata: Metadata = {
   },
 };
 
-// Rate refreshes hourly; getFxRate() already caches for 1h, so the page stays
-// fast and mostly static.
+// ISR revalidates hourly. getFxRates() caches 5 min with a 60-min ceiling, and
+// the ECB publishes one fixing per business day, so the figure below is always
+// printed WITH its fixing date (ui-08).
 export const revalidate = 3600;
 
 // `code` = ISO-3166 alpha-2, used to pick a self-hosted flag SVG from /public/flags.
@@ -133,15 +134,25 @@ export default async function LandingPage({
   // the post-submit note next to the "Partner with us" form.
   searchParams?: Promise<{ partner?: string }>;
 }) {
-  // getFxRate() never throws (internal try/catch → fallback), but wrap
-  // defensively so the page can never error if FX is down.
-  let liveRate = FALLBACK_FX_RATE;
+  // ui-08 (Task 9): the figure is shown ONLY with its provenance — live ⇒
+  // "mid-market rate, ECB fixing of <date>"; a cached rate ⇒ "indicative";
+  // refused (getFxRates throws RateUnavailableError) ⇒ no figure at all, never
+  // a constant labelled live. Any throw degrades — the page never errors on FX.
+  let fxRate: number | null = null;
+  let fxLive = false;
+  let fxAsOf: string | null = null;
   try {
-    const r = await getFxRate();
-    if (Number.isFinite(r) && r > 0) liveRate = r;
+    const fx = await getFxRates('USD');
+    fxRate = fx.toInr;
+    fxLive = fx.source === 'live';
+    fxAsOf = fx.asOf ?? null;
   } catch {
-    liveRate = FALLBACK_FX_RATE;
+    /* no figure */
   }
+  // The decorative hero + chat mock always draw A figure: the live mid when we
+  // have it, else the display table's illustrative one — and only a live figure
+  // is ever labelled live (HeroPipeline's `live`; ChatMock never claims it).
+  const illustrativeRate = fxRate ?? FALLBACK_FX_RATE;
 
   const partnerStatus = (await searchParams)?.partner;
 
@@ -253,7 +264,7 @@ export default async function LandingPage({
             </div>
 
             <div className={`mt-[clamp(44px,6vw,80px)] ${RISE}`}>
-              <HeroPipeline liveRate={liveRate} />
+              <HeroPipeline rate={illustrativeRate} live={fxLive} />
             </div>
           </div>
         </section>
@@ -310,7 +321,7 @@ export default async function LandingPage({
                     your funds.
                   </p>
                 </div>
-                <ChatMock liveRate={liveRate} />
+                <ChatMock rate={illustrativeRate} />
               </div>
 
               {/* (b) The ops dashboard */}
@@ -433,15 +444,24 @@ export default async function LandingPage({
                 The honest rate, before you send.
               </h2>
               <p className="mt-4 max-w-[46ch] text-[17px] leading-relaxed text-[#f5f7f8]">
-                Today, 1 USD = {fmtRate(liveRate)}{' '}
-                <span className="text-[#8b94a0]">(live mid-market rate).</span>
+                {fxRate === null ? (
+                  <>Live rate temporarily unavailable — you&apos;ll see the exact rate in chat before you confirm.</>
+                ) : (
+                  <>
+                    1 USD = {fmtRate(fxRate)}{' '}
+                    <span className="text-[#8b94a0]">
+                      ({fxLive ? 'mid-market rate' : 'indicative rate'}
+                      {fxAsOf ? `, ECB fixing of ${fxAsOf}` : ''}).
+                    </span>
+                  </>
+                )}
               </p>
               <p className="mt-2 max-w-[46ch] text-[15px] leading-relaxed text-[#8b94a0]">
                 No markup baked into the rate — your first transfer is free, then a flat $1.99
                 per bank transfer.
               </p>
             </div>
-            <RateCalculator liveRate={liveRate} />
+            <RateCalculator rate={fxRate} live={fxLive} asOf={fxAsOf} />
           </div>
         </section>
 

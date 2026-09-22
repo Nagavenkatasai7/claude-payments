@@ -6,7 +6,7 @@ import { createPartnerStore } from '@/lib/partner-store';
 import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { createB2bQuoteStore, resolveCheckoutBillQuote } from '@/lib/b2b-quote-store';
 import { quoteCrossBorderBill, quoteBuyerDenominatedBill, type CrossBorderBillQuote } from '@/lib/b2b-quote';
-import { FALLBACK_FX_RATES } from '@/lib/rate';
+import type { FxRates } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { fakeRedis } from './helpers';
@@ -28,14 +28,20 @@ const SELLER_PAYOUT = 'HK|024|388|987654321';
 const BUYER_PHONE = '15551112222'; // US → USD
 const INVOICED_AMOUNT = 1000; // HKD (the fixed obligation)
 
+// Offline FX literals. Task 9: the static display table in rate.ts is tagged
+// source:'fallback' and is UNQUOTABLE, so these fixtures pin the exact figures
+// it used to carry (USD→INR 85, HKD→USD 0.128 ⇒ 7.8125 HKD per USD).
+const OFFLINE_USD: FxRates = { toInr: 85, toUsd: 1 };
+const HKD_TO_USD = 0.128;
+
 /** The exact cross-border quote a USD buyer gets for the 1,000-HKD bill (offline FX). */
 function computeQuote(): CrossBorderBillQuote {
   return quoteCrossBorderBill({
     invoicedAmount: INVOICED_AMOUNT,
     sellerCurrency: 'HKD',
     buyerCurrency: 'USD',
-    rates: FALLBACK_FX_RATES.USD,
-    sellerToUsd: FALLBACK_FX_RATES.HKD.toUsd,
+    rates: OFFLINE_USD,
+    sellerToUsd: HKD_TO_USD,
     fundingMethod: 'bank_pull',
   });
 }
@@ -289,8 +295,8 @@ function computeCaseBQuote(): CrossBorderBillQuote {
     invoicedAmount: CASE_B_AMOUNT,
     sellerCurrency: 'HKD',
     buyerCurrency: 'USD',
-    rates: FALLBACK_FX_RATES.USD,
-    sellerToUsd: FALLBACK_FX_RATES.HKD.toUsd,
+    rates: OFFLINE_USD,
+    sellerToUsd: HKD_TO_USD,
     fundingMethod: 'bank_pull',
   });
 }

@@ -114,8 +114,9 @@ export default async function CrossBorderBillPayPage({
   const isBuyerDenominated = denomination === 'buyer';
 
   // Live-locked checkout quote — reused on reload, re-quoted on expiry. Wrapped:
-  // a QuoteError (bad/unavailable FX) degrades to the friendly Inactive sheet
-  // instead of a 500, matching the POST route's graceful failure.
+  // a QuoteError (bad FX input) or a RateUnavailableError (Task 9: provider
+  // down / no rate inside the ceiling) degrades to the friendly Inactive sheet
+  // instead of a 500, matching the POST route's 503.
   let quote: Awaited<ReturnType<typeof resolveCheckoutBillQuote>>;
   try {
     const buyerRates = await getFxRates(buyerCurrency);

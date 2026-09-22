@@ -79,7 +79,9 @@ export default function DocsPage() {
           <Code>{`Authorization: Bearer <your-api-key>`}</Code>
           <p className="text-sm text-muted-foreground">
             Rate limit: 120 requests/minute per partner (429 + <code>Retry-After</code> beyond it).
-            Errors are JSON: <code>{`{ "error": "…" }`}</code>.
+            Errors are JSON: <code>{`{ "error": "…" }`}</code>. <code>503</code> means live FX
+            is temporarily unavailable and nothing was minted — retry later (a{' '}
+            <code>POST /transactions</code> retry may reuse the same Idempotency-Key).
           </p>
           <Card>
             <CardContent className="divide-y divide-border pt-4">

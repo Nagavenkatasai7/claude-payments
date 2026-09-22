@@ -5,7 +5,7 @@ import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
-import { sweepStaleRates } from '@/lib/rate-staleness';
+import { sweepFxHealth, sweepStaleRates } from '@/lib/rate-staleness';
 import { logError } from '@/lib/log';
 import {
   sendText,
@@ -111,6 +111,21 @@ async function run(req: NextRequest): Promise<NextResponse> {
     logError('worker.rate-sweep', err);
   }
 
+  // Platform FX health (Task 9): one deduped ops alert per degraded/refusing
+  // currency per hour. The 5-minute heartbeat's GET only
+  // (.github/workflows/worker-heartbeat.yml) — never a POST poke
+  // (src/lib/outbox.ts): during an outage every poke would otherwise re-dial
+  // Frankfurter for 9 currencies. The probes run in parallel, each bounded by
+  // FX_FETCH_TIMEOUT_MS; a throw never blocks the drain.
+  let fxHealth = 0;
+  if (req.method === 'GET') {
+    try {
+      fxHealth = await sweepFxHealth(deps.db);
+    } catch (err) {
+      logError('worker.fx-sweep', err);
+    }
+  }
+
   const workerId = `w_${newTransferId()}`;
   const started = Date.now(); // drain-loop budget clock (after the sweeps)
   const hardStopAt = invocationStart + maxDuration * 1000 - HARD_STOP_MARGIN_MS;
@@ -140,7 +155,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
     if (drainedNothing || Date.now() >= stopAfter) break;
   }
 
-  return NextResponse.json({ ok: true, processed, failed, dead, released, sweep, staleRates });
+  return NextResponse.json({ ok: true, processed, failed, dead, released, sweep, staleRates, fxHealth });
 }
 
 export async function POST(req: NextRequest) {
