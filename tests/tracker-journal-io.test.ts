@@ -1,7 +1,7 @@
 // I/O side of the Program Ledger journal (scripts/tracker/journal.mjs), against a temp
 // SMARTREMIT_LEDGER_DIR: the agents.json lock, the journal-before-state write order of the
 // journal hook, and the unflushed-lines reader used by the Stop hook.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -43,10 +43,11 @@ describe('withAgentsLock', () => {
     mkdirSync(lockPath());
     writeFileSync(join(lockPath(), 'owner'), 'pid 1');
     utimesSync(lockPath(), minuteAgo(), minuteAgo());
-    const stale = statSync(lockPath()).ino;
-    let heldIno = -1;
-    withAgentsLock(() => { heldIno = statSync(lockPath()).ino; }, { waitMs: 1000, staleMs: 2000 });
-    expect(heldIno).not.toBe(stale);
+    // Compare owner tokens, not inodes: ext4 hands the freed inode number to the next mkdir at once.
+    let heldOwner = '';
+    withAgentsLock(() => { heldOwner = readFileSync(join(lockPath(), 'owner'), 'utf8'); }, { waitMs: 1000, staleMs: 2000 });
+    expect(heldOwner).not.toBe('');
+    expect(heldOwner).not.toBe('pid 1');
     expect(lockLeftovers()).toEqual([]);
   });
 
