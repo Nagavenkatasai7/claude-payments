@@ -242,23 +242,26 @@ export function memoizedPartnerContext(deps: WorkerDeps): PartnerResolver {
  * from `to`); its creds are resolved NOW, so a DB dump holds no bearer token
  * and a rotated token needs no re-enqueue. No partnerId ⇒ shared env number.
  *
- * TRANSITION SHIM (Task 8, wave 4, deletes it): a row the PREVIOUS release
- * enqueued carries `creds` and no `partnerId`; honour it so the deploy→migrate
- * window drains on the right number. drizzle/0016_scrub_outbox_secrets
- * back-fills partnerId from the phone number id and strips creds where that is
- * safe — but it deliberately LEAVES an UNSENT row whose number matches no
- * current partner (stripping it would move the send to the shared number), and
- * a stale old-deployment writer can add rows after it runs. So applying 0016
- * alone does NOT make this branch unreachable: remove it only once
- * `scripts/outbox-status.ts` "SECRETS AT REST" prints `none` on prod.
+ * A payload NEVER carries send credentials — they come only from the partner's
+ * integrations, resolved here at drain time. The fix 18 transition shim that
+ * honoured a pre-fix-11 `creds` object (Program-Fix 12, second PR, removed once
+ * `scripts/outbox-status.ts` "SECRETS AT REST" read `none` on prod) is gone.
+ * FAIL CLOSED: a row with a non-null `creds` and no resolvable partnerId
+ * (missing, null or "" — `str()` ⇒ '') is a legacy row or a regressed producer.
+ * Sending it on the persisted token would trust a secret at rest; sending it
+ * on the shared number would move a partner's message to the wrong sender. So
+ * it throws a FIXED reason code (no value from the payload), rides the ordinary
+ * backoff and dead-letters at MAX_ATTEMPTS with the single `dead:<id>` alert.
+ * `"creds": null` holds nothing (the same reading as listSecretsAtRest and
+ * drizzle 0016) and is not a legacy row. A partnerId row ignores any `creds`
+ * beside it: the ledger tenant wins, a payload can never pin a token. The
+ * regression detectors stay: enqueue's test-only tripwire refuses a creds
+ * payload, and listSecretsAtRest / the SECRETS AT REST section count survivors.
  */
 async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<WaCreds | undefined> {
   const partnerId = str(p.partnerId);
   if (partnerId) return (await partner(partnerId)).waCreds;
-  const legacy = p.creds as Partial<WaCreds> | null | undefined;
-  if (legacy && typeof legacy.phoneNumberId === 'string' && typeof legacy.token === 'string') {
-    return { phoneNumberId: legacy.phoneNumberId, token: legacy.token };
-  }
+  if (p.creds != null) throw new Error('legacy_creds_payload');
   return undefined;
 }
 

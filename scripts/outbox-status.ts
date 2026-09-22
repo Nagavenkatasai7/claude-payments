@@ -136,9 +136,12 @@ async function main() {
 
   // fix 11: secrets that pre-fix releases copied into payloads. COUNTS ONLY —
   // the payload itself is never selected. The 0016 gate: before /migrate-prod
-  // every row here must be done or dead (0016 leaves an UNSENT legacy row
-  // untouched so it still sends correctly — it would survive the scrub); after
-  // the apply this must print "none". The query is the PGlite-tested
+  // every row here must be done or dead (0016 leaves an UNSENT unresolvable
+  // legacy row untouched — it would survive the scrub); after the apply this
+  // must print "none". Since Program-Fix 12 (second PR) the worker has no shim
+  // for such a row: it fails closed (legacy_creds_payload), dead-letters and
+  // alerts, and stays counted here. A row here now means a regressed producer
+  // or a survivor to scrub by hand. The query is the PGlite-tested
   // outboxRepo.listSecretsAtRest (tests/outbox-payload-secrets.test.ts): it tests
   // a VALUE, not a key, so a `"creds": null` row never blocks the gate.
   const secretsAtRest: Row[] = await createOutboxRepo(db).listSecretsAtRest();

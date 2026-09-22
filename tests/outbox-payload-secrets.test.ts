@@ -369,7 +369,9 @@ describe('drizzle/0016_scrub_outbox_secrets (data-only) — scrubs legacy rows w
     // Finished ⇒ stripped (no current owner ⇒ no partnerId).
     expect(by['stage1:legacy_unknown_done']).toEqual({ to: '1', body: 'b' });
     expect(by['stage1:legacy_unknown_dead']).toEqual({ to: '1', body: 'c' });
-    // UNSENT and unresolvable ⇒ untouched, so the shim still sends it from its own number.
+    // UNSENT and unresolvable ⇒ untouched: 0016 never moves a send to the shared
+    // number. The worker now fails such a row closed (fix 12b: no shim) — it
+    // dead-letters with an alert, so listSecretsAtRest still reports it.
     expect(by['stage1:legacy_unknown_pending']).toEqual({ to: '1', body: 'd', creds: { phoneNumberId: 'pn_gone', token: 'KEEP4' } });
     // Finished legacy invites are redacted; an UNSENT one keeps its link (never emails the redaction).
     expect(by['partner_app_invite:preq_done'].text).toBe('[redacted by migration 0016: legacy partner-application link]');
@@ -388,8 +390,8 @@ describe('drizzle/0016_scrub_outbox_secrets (data-only) — scrubs legacy rows w
 
   // Review of PR #272: the checks must test whether a key has a VALUE, not
   // whether it is present. `"partnerId": null` / `""` is NOT a partner the
-  // worker can resolve (str() ⇒ '' ⇒ the legacy creds shim), and
-  // `"creds": null` is not a secret.
+  // worker can resolve (str() ⇒ '' ⇒ since fix 12b, a non-null creds beside it
+  // fails closed with legacy_creds_payload), and `"creds": null` is not a secret.
   it('a null/empty partnerId is NOT a resolvable partner: it is back-filled when matched and never lets an unsent row lose its creds', async () => {
     await db.execute(sql`INSERT INTO outbox (kind, payload, status, dedupe_key) VALUES
       ('whatsapp.text', '{"to":"1","body":"e","partnerId":null,"creds":{"phoneNumberId":"pn_gone","token":"KEEP5"}}'::jsonb, 'pending', 'stage1:null_pid_unknown_pending'),
@@ -401,7 +403,8 @@ describe('drizzle/0016_scrub_outbox_secrets (data-only) — scrubs legacy rows w
 
     await runMigration();
     const by = await payloads();
-    // Unsent + unresolvable ⇒ untouched: the shim still sends from the persisted number.
+    // Unsent + unresolvable ⇒ untouched (never moved to the shared number); the
+    // worker fails it closed (fix 12b) and listSecretsAtRest keeps counting it.
     expect(by['stage1:null_pid_unknown_pending']).toEqual({
       to: '1', body: 'e', partnerId: null, creds: { phoneNumberId: 'pn_gone', token: 'KEEP5' },
     });
