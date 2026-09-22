@@ -1,5 +1,7 @@
 import Link from 'next/link';
 import { SMARTREMIT_ICONS } from '../brand-icons';
+import { SHARE_IMAGE } from '../landing/share-image';
+import { SkipLink } from '@/components/skip-link';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -13,6 +15,8 @@ export const metadata = {
   title: 'SmartRemit — Partner API documentation',
   description:
     'Integrate the SmartRemit white-label remittance infrastructure: REST API, settlement webhooks, WhatsApp channel.',
+  // /docs is SmartRemit-owned, so its link preview may carry the share image.
+  openGraph: { images: [SHARE_IMAGE] },
   icons: SMARTREMIT_ICONS,
 };
 
@@ -42,12 +46,15 @@ function Endpoint({ method, path, desc }: { method: string; path: string; desc: 
 export default function DocsPage() {
   return (
     <div className="min-h-screen bg-background font-sans text-foreground antialiased">
+      <SkipLink />
       <header className="border-b border-border bg-card">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-6 py-4">
           <Link href="/" className="text-lg font-semibold tracking-tight">
             SmartRemit <span className="text-muted-foreground font-normal">/ docs</span>
           </Link>
-          <nav className="flex items-center gap-4 text-sm">
+          {/* Five links beside the brand overflow a phone (ui-05): below sm
+              only the brand shows; every section is still in the page. */}
+          <nav aria-label="Sections" className="hidden items-center gap-4 text-sm sm:flex">
             <a href="#api" className="text-muted-foreground hover:text-foreground">API</a>
             <a href="#rates" className="text-muted-foreground hover:text-foreground">Rates</a>
             <a href="#settlement" className="text-muted-foreground hover:text-foreground">Settlement</a>
@@ -57,7 +64,7 @@ export default function DocsPage() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-4xl space-y-10 px-6 py-10">
+      <main id="main" className="mx-auto max-w-4xl space-y-10 px-6 py-10">
         <section>
           <h1 className="text-3xl font-semibold tracking-tight">Partner integration guide</h1>
           <p className="mt-3 max-w-2xl text-muted-foreground">
