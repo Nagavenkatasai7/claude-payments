@@ -1076,10 +1076,10 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
     expect(reply).toBe('Sorry, let me try that again.');
   });
 
-  it('injects [RECIPIENT SELECTED] with full details on a recipient button tap', async () => {
+  it('a recipient button tap injects [RECIPIENT SELECTED] but never the decrypted payout (fix 5)', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
-    await store.upsertRecipient('default', PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@okhdfc', lastUsedAt: new Date().toISOString() });
+    await store.upsertRecipient('default', PHONE, { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '123456789012|HDFC0001234', lastUsedAt: new Date().toISOString() });
     const seen: ChatMessage[][] = [];
     const agent = createAgent({
       store, scheduleStore: freshScheduleStore(), draftStore: createDraftStore(fakeRedis()), ...extraDeps(redis, store),
@@ -1087,11 +1087,16 @@ describe('createAgent — bug fixes (crash-safety, recipient-tap, no double mess
     });
     const turn: TurnContext = { isNewConversation: false, buttonTap: { kind: 'recipient', recipientPhone: '919876543210' } };
     await agent.runAgentTurn(PHONE, '[Tapped: Send to recipient 919876543210]', turn);
-    // Match the INJECTED note by its data (the SYSTEM_PROMPT also mentions the tag as guidance).
-    const note = seen[0].filter((m) => m.role === 'system').map((m) => m.content as string).find((s) => s.includes('payout_destination=mom@okhdfc'));
+    // The INJECTED note is the system message that opens with the tag (the
+    // SYSTEM_PROMPT only mentions it mid-text as guidance).
+    const note = seen[0].filter((m) => m.role === 'system').map((m) => m.content as string).find((s) => s.startsWith('[RECIPIENT SELECTED]'));
     expect(note).toBeDefined();
-    expect(note).toContain('[RECIPIENT SELECTED]');
-    expect(note).toContain('name=Mom');
+    // No message sent to the model carries the stored account, in any role.
+    const everything = JSON.stringify(seen);
+    expect(everything).not.toContain('123456789012');
+    expect(everything).not.toContain('HDFC0001234');
+    expect(everything).not.toContain('payout_destination=');
+    expect(everything).not.toContain('payout_method=');
   });
 
   it('suppresses the trailing text when a tool sent an interactive (no double message)', async () => {

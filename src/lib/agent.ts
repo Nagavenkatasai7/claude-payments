@@ -207,11 +207,12 @@ export function createAgent(deps: AgentDeps) {
             // Any-to-any: infer the payout COUNTRY from the recipient's number
             // (a recipient-tap bypasses validate_phone, so surface it here too).
             const destCC = destinationCountryForRecipientPhone(norm);
+            // fix 5: the stored payout never rides this note — resolveStoredPayout
+            // (tools.ts) rehydrates it server-side for every chat mint.
             messages.push({
               role: 'system',
               content:
-                `[RECIPIENT SELECTED] name=${found.name}, recipient_phone=${found.recipientPhone}, ` +
-                `payout_method=${found.payoutMethod}, payout_destination=${found.payoutDestination}` +
+                `[RECIPIENT SELECTED] name=${found.name}, recipient_phone=${found.recipientPhone}` +
                 (destCC ? `, detected_destination_country=${destCC}` : '') + '. ' +
                 'You already have the recipient — do NOT call send_recipient_picker or ask who again. ' +
                 (destCC ? `Send to ${destCC} unless they say otherwise. ` : '') +
