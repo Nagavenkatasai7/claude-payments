@@ -266,11 +266,23 @@ describe('partner-api-service: createTransaction', () => {
     if (r.ok) expect(r.data).toMatchObject({ destination_country: 'IN', destination_currency: 'INR' });
   });
 
-  it('defaults to IN/INR when destination_country is INVALID (no 400)', async () => {
-    const { deps } = await harness();
+  it('an UNKNOWN destination_country is a 400 naming the list, and nothing is minted (Program-Fix 33, owner decision 2)', async () => {
+    const { deps, store } = await harness();
     const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'ZZ' }));
-    expect(r).toMatchObject({ ok: true, status: 201 });
-    if (r.ok) expect(r.data).toMatchObject({ destination_country: 'IN', destination_currency: 'INR' });
+    expect(r).toMatchObject({ ok: false, status: 400 });
+    if (!r.ok) for (const code of ['US', 'IN', 'HK', 'MX']) expect(r.error).toContain(code);
+    expect(await store.listTransfers()).toHaveLength(0);
+    // A corrected retry with the SAME key succeeds — the key was never bound.
+    const ok = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dest-bad', txBody({ destination_country: 'MX' }));
+    expect(ok).toMatchObject({ ok: true, status: 201 });
+    if (ok.ok) expect(ok.data).toMatchObject({ destination_country: 'MX', destination_currency: 'MXN' });
+  });
+
+  it('createQuote: an UNKNOWN destination_country is a 400, never a silent INR quote', async () => {
+    const { deps } = await harness();
+    const r = await createQuote(deps, DELEGATED, { amount_source: 500, destination_country: 'ZZ' });
+    expect(r).toMatchObject({ ok: false, status: 400 });
+    expect(vi.mocked(global.fetch).mock.calls.length).toBe(0);
   });
 });
 
