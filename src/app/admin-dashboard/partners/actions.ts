@@ -6,6 +6,8 @@ import { requireAdmin, requirePlatformAdmin } from '@/lib/auth';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { validateSendLimitInput } from '@/lib/send-limits';
 import { createPartnerStore, getPartnerStore } from '@/lib/partner-store';
 import { getAuthStore } from '@/lib/auth-store';
 import {
@@ -314,6 +316,51 @@ export async function savePricingAction(formData: FormData): Promise<void> {
     // keep) so a partner's pushed rate survives an admin margin save.
   });
   revalidatePath(`/admin-dashboard/partners/${id}`);
+}
+
+// ── Send limits: the audited PLATFORM-ADMIN partner default (Program fix 16b) ──
+// NOT gatePartnerConfig (which admits partner admins): a raise is platform
+// governance, like setPartnerStatusAction. Same steps as the customer action:
+// gate → validate (reason first) → re-read the target → ONE transaction with the
+// single-column UPDATE + the audit row (old, new, actor, reason, expiresAt).
+// The partner shape also carries T0, tighten-only (<= the platform $500).
+
+export async function setPartnerSendLimitAction(formData: FormData): Promise<void> {
+  const staff = await requirePlatformAdmin();
+  const validated = validateSendLimitInput(
+    {
+      perTransferUsd: String(formData.get('perTransferUsd') ?? ''),
+      t1DailyUsd: String(formData.get('t1DailyUsd') ?? ''),
+      t0DailyUsd: String(formData.get('t0DailyUsd') ?? ''),
+      expiresAt: String(formData.get('expiresAt') ?? ''),
+      reason: String(formData.get('reason') ?? ''),
+      clear: formData.get('clear') === 'on',
+    },
+    new Date(),
+    { allowT0: true },
+  );
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Partner id is required.');
+  const existing = await getPartnerStore().getPartner(id);
+  if (!existing) throw new Error('Partner not found.');
+
+  const nowIso = new Date().toISOString();
+  const value = validated.value === null ? null : { ...validated.value, setBy: staff.username, setAt: nowIso };
+  await getDb().transaction(async (tx) => {
+    // tx-bound repos ONLY inside the transaction (see the customer action).
+    const { found, previous } = await createPartnerStore(tx).setSendLimits(existing.id, value);
+    if (!found) throw new Error('Partner not found.'); // raced a delete ⇒ nothing written
+    await createAuditRepo(tx).record({
+      partnerId: existing.id,
+      actor: staff.username,
+      actorType: 'staff',
+      action: value === null ? 'send_limits.clear' : 'send_limits.set',
+      subjectId: existing.id,
+      meta: { scope: 'partner', old: previous, new: value, reason: validated.reason, expiresAt: validated.expiresAt ?? null },
+    });
+  });
+  revalidatePath('/admin-dashboard/partners');
+  revalidatePath(`/admin-dashboard/partners/${existing.id}`);
 }
 
 // ── Support: admin-controlled support behavior (PartnerSupportConfig) ───────

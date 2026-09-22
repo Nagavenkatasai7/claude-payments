@@ -285,6 +285,35 @@ describe('executeTool', () => {
     expect(result.error).toMatch(/between/i);
   });
 
+  // ── Program fix 16b (Task 10b, test 9): get_quote honors the sender's raise ──
+  it('get_quote for a RAISED customer ($5,000 / $5,000) quotes $4,000; a default customer gets the $2,999 per-transfer refusal', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    // Past the 3-day window + verified ⇒ T1; the raise is the single-column override.
+    await seedSender(db, { partnerId: 'default', phone: PHONE, firstSeenDaysAgo: 10, kycStatus: 'verified' });
+    const before = await executeTool('get_quote', { amount_usd: 4000, funding_method: 'bank_transfer' }, ctx);
+    expect(before.within_cap).toBe(false);
+    expect(before.reason).toBe('over_per_transfer_cap');
+    expect(before.per_transfer_cap_usd).toBe(2999);
+    expect(before.daily_cap_usd).toBe(2999);
+
+    await db.execute(sql`UPDATE customers SET send_limit_override = '{"perTransferCapCents":500000,"t1DailyCapCents":500000}'::jsonb WHERE partner_id = 'default' AND phone = ${PHONE}`);
+    const after = await executeTool('get_quote', { amount_usd: 4000, funding_method: 'bank_transfer' }, ctx);
+    expect(after.error).toBeUndefined();
+    expect(after.within_cap).toBeUndefined();
+    expect(after.amount_usd).toBe(4000);
+    expect(after.amount_inr).toBe(Math.round(4000 * MOCK_RATE));
+    // Still bounded: $5,001 is over the RAISED per-transfer cap (structured refusal, not the quote).
+    const over = await executeTool('get_quote', { amount_usd: 5001, funding_method: 'bank_transfer' }, ctx);
+    expect(over.within_cap).toBe(false);
+    expect(over.per_transfer_cap_usd).toBe(5000);
+    // A DIFFERENT phone under the same tenant is unchanged (tenant + phone scoped).
+    const other = await buildCtx(fakeRedis(), '15559990000');
+    await seedSender(db, { partnerId: 'default', phone: '15559990000', firstSeenDaysAgo: 10, kycStatus: 'verified' });
+    const r = await executeTool('get_quote', { amount_usd: 4000, funding_method: 'bank_transfer' }, other);
+    expect(r.within_cap).toBe(false);
+    expect(r.per_transfer_cap_usd).toBe(2999);
+  });
+
   // Regression for the 2026-06-16 prod bug: an Indian (+91) sender → US recipient
   // (₹→$). Stub Frankfurter so from=INR returns a live USD rate (toInr identity 1).
   function stubInrToUsd() {
