@@ -15,7 +15,7 @@ its own `component/<name>` branch on GitHub and a path map in `.claude/hooks/com
 | customer-portal | `src/app/account/` `api/account/` · `customer-*.ts` `otp-store.ts` `verify-link.ts` | `component/customer-portal` |
 | pay-page | `src/app/pay/` (hosted pay page UI; the finalize route is money-paths). Both `/pay/[id]` and `/pay/b2b/[id]` open with the fail-open per-IP page guard `isIpRateLimited` (`ip-rate-limit.ts`, platform-security, fix 23) before any read, and every dead link renders one generic default-branded sheet | `component/pay-page` |
 | b2b | `b2b-*.ts` · `src/app/pay/b2b/` `api/pay/b2b/` · dashboard b2b | `component/b2b` |
-| corridors-fx | `rate.ts` `fx.ts` `partner-rates.ts` `partner-currency.ts` `payout-format.ts` `corridor-*.ts` · dashboard corridors/rates · rate scripts | `component/corridors-fx` |
+| corridors-fx | `rate.ts` `fx.ts` `partner-rates.ts` `partner-currency.ts` `payout-format.ts` `destination-country.ts` `corridor-*.ts` · dashboard corridors/rates · rate scripts | `component/corridors-fx` |
 | landing-docs | `src/app/page.tsx` `landing/` `about/` `docs/` `partners/` · `public/` | `component/landing-docs` |
 | platform-security | `middleware.ts` `boot-assert.ts` `field-crypto.ts` `ip-rate-limit.ts` `redis.ts` `store.ts` · `settlement-url.ts` `safe-fetch.ts` (fix 22: the settlement-URL rule + the only rail client) · `scripts/audit-settlement-urls.ts` · `next.config` · `.github/` · `tests/e2e/` | `component/platform-security` |
 | db-layer | `src/db/**` `drizzle/**` `drizzle.config.ts` (schema + migrations are *shared*: editing them never warns, but the migration-reminder hook fires) | `component/db-layer` |
