@@ -36,15 +36,15 @@ function Node({
   const delay = delayStyle(index * STAGE_GAP_S);
   return (
     <div
-      className="lp-stage relative min-w-0 rounded-2xl border border-[rgba(37,211,102,0.5)] bg-[#0b0e12] p-4 shadow-[0_0_28px_-6px_rgba(37,211,102,0.4)] lg:flex-1"
+      className="lp-stage relative min-w-0 rounded-2xl border border-[rgba(17,161,198,0.55)] bg-white p-4 shadow-[0_0_28px_-8px_rgba(17,161,198,0.45)] lg:flex-1"
       style={delay}
     >
       <div className="mb-2.5 flex items-center gap-2">
         <span
-          className="lp-stage-dot h-2 w-2 shrink-0 rounded-full bg-[#25d366] shadow-[0_0_0_4px_rgba(37,211,102,0.18)]"
+          className="lp-stage-dot h-2 w-2 shrink-0 rounded-full bg-[#34d399] shadow-[0_0_0_4px_rgba(52,211,153,0.22)]"
           style={delay}
         />
-        <span className="truncate text-[11px] font-semibold uppercase tracking-[0.14em] text-[#8b94a0]">
+        <span className="truncate text-[11px] font-semibold uppercase tracking-[0.14em] text-[#52607a]">
           {step} · {label}
         </span>
       </div>
@@ -58,16 +58,16 @@ function Connector({ index }: { index: number }) {
   return (
     <div className="flex items-center justify-center lg:w-9 lg:shrink-0 lg:self-stretch">
       {/* Vertical connector (mobile stack) */}
-      <div className="relative h-9 w-[2px] overflow-hidden rounded-full bg-[linear-gradient(180deg,rgba(37,211,102,0.65),rgba(34,211,238,0.65))] lg:hidden">
+      <div className="relative h-9 w-[2px] overflow-hidden rounded-full bg-[linear-gradient(180deg,rgba(12,91,210,0.55),rgba(52,211,153,0.7))] lg:hidden">
         <span
-          className="lp-pulse-y absolute left-1/2 h-6 w-[3px] -translate-x-1/2 rounded-full bg-[linear-gradient(180deg,transparent,#25d366,#a7f3d0)] shadow-[0_0_12px_rgba(37,211,102,0.9)]"
+          className="lp-pulse-y absolute left-1/2 h-6 w-[3px] -translate-x-1/2 rounded-full bg-[linear-gradient(180deg,transparent,#48b3f5,#34d399)] shadow-[0_0_12px_rgba(72,179,245,0.9)]"
           style={delay}
         />
       </div>
       {/* Horizontal connector (desktop row) */}
-      <div className="relative hidden h-[2px] w-full overflow-hidden rounded-full bg-[linear-gradient(90deg,rgba(37,211,102,0.65),rgba(34,211,238,0.65))] lg:block">
+      <div className="relative hidden h-[2px] w-full overflow-hidden rounded-full bg-[linear-gradient(90deg,rgba(12,91,210,0.55),rgba(52,211,153,0.7))] lg:block">
         <span
-          className="lp-pulse-x absolute top-1/2 h-[3px] w-8 -translate-y-1/2 rounded-full bg-[linear-gradient(90deg,transparent,#25d366,#a7f3d0)] shadow-[0_0_12px_rgba(37,211,102,0.9)]"
+          className="lp-pulse-x absolute top-1/2 h-[3px] w-8 -translate-y-1/2 rounded-full bg-[linear-gradient(90deg,transparent,#48b3f5,#34d399)] shadow-[0_0_12px_rgba(72,179,245,0.9)]"
           style={delay}
         />
       </div>
@@ -92,19 +92,19 @@ export default function HeroPipeline({ rate, live }: Props) {
       >
         {/* 01 — the WhatsApp message */}
         <Node index={0} step="01" label="Chat">
-          <div className="inline-block max-w-full rounded-xl rounded-br-[4px] bg-[#128c7e] px-3 py-2 text-[13px] leading-snug font-medium text-[#f5f7f8]">
+          <div className="inline-block max-w-full rounded-xl rounded-br-[4px] bg-[#d9fdd3] px-3 py-2 text-[13px] leading-snug font-medium text-[#0b1b3f]">
             Send $200 to Mom
           </div>
-          <p className="mt-2 text-[11.5px] text-[#8b94a0]">Customer · WhatsApp</p>
+          <p className="mt-2 text-[11.5px] text-[#52607a]">Customer · WhatsApp</p>
         </Node>
         <Connector index={0} />
 
         {/* 02 — the AI quote */}
         <Node index={1} step="02" label="AI quote">
-          <p className="text-[16px] font-bold tracking-[-0.01em] text-[#25d366]">
+          <p className="text-[16px] font-bold tracking-[-0.01em] text-[#047857]">
             $200 → {payout}
           </p>
-          <p className="mt-1.5 text-[11.5px] leading-relaxed text-[#8b94a0]">
+          <p className="mt-1.5 text-[11.5px] leading-relaxed text-[#52607a]">
             1 USD = {rateText} · {rateLabel}
             <br />
             fee $0 on your first transfer
@@ -114,13 +114,13 @@ export default function HeroPipeline({ rate, live }: Props) {
 
         {/* 03 — the secure pay page */}
         <Node index={2} step="03" label="Pay">
-          <p className="flex items-center gap-1.5 text-[13px] font-semibold text-[#f5f7f8]">
+          <p className="flex items-center gap-1.5 text-[13px] font-semibold text-[#0b1b3f]">
             <svg
               width="13"
               height="13"
               viewBox="0 0 24 24"
               fill="none"
-              stroke="#22d3ee"
+              stroke="#0c5bd2"
               strokeWidth={2.4}
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -131,7 +131,7 @@ export default function HeroPipeline({ rate, live }: Props) {
             </svg>
             Secure pay page
           </p>
-          <p className="mt-1.5 truncate font-mono text-[11px] text-[#8b94a0]">
+          <p className="mt-1.5 truncate font-mono text-[11px] text-[#52607a]">
             smartremit.ai/pay/tr_8f3k
           </p>
         </Node>
@@ -139,25 +139,25 @@ export default function HeroPipeline({ rate, live }: Props) {
 
         {/* 04 — the signed settlement instruction */}
         <Node index={3} step="04" label="Settle">
-          <p className="font-mono text-[11px] leading-relaxed text-[#8b94a0]">
-            <span className="font-semibold text-[#22d3ee]">POST</span> partner-rail/instruct
+          <p className="font-mono text-[11px] leading-relaxed text-[#52607a]">
+            <span className="font-semibold text-[#0c5bd2]">POST</span> partner-rail/instruct
             <br />
-            <span className="text-[#25d366]">✓</span> sig v1=9f2c41…
+            <span className="text-[#047857]">✓</span> sig v1=9f2c41…
           </p>
-          <p className="mt-1.5 text-[11.5px] text-[#8b94a0]">Signed → partner&rsquo;s rail</p>
+          <p className="mt-1.5 text-[11.5px] text-[#52607a]">Signed → partner&rsquo;s rail</p>
         </Node>
         <Connector index={3} />
 
         {/* 05 — delivered */}
         <Node index={4} step="05" label="Delivered">
-          <p className="text-[16px] font-bold tracking-[-0.01em] text-[#25d366]">
+          <p className="text-[16px] font-bold tracking-[-0.01em] text-[#047857]">
             ✓ {payout} delivered
           </p>
-          <p className="mt-1.5 text-[11.5px] text-[#8b94a0]">Mom · HDFC ••6210 · in minutes</p>
+          <p className="mt-1.5 text-[11.5px] text-[#52607a]">Mom · HDFC ••6210 · in minutes</p>
         </Node>
       </div>
 
-      <p className="mt-5 text-center text-[12.5px] text-[#8b94a0]">
+      <p className="mt-5 text-center text-[12.5px] text-[#52607a]">
         A real transfer moving through SmartRemit — conversation, quote, pay, settle, delivered.
         Funds never touch us.
       </p>

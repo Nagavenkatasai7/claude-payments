@@ -79,3 +79,13 @@ Pass `model:` explicitly on every Agent call:
 - `main` deploys; never commit or push to it (GitHub-protected; local hook is advisory). PR + `ci / ci` → squash-merge → `/post-merge-check` → `/sync-branches`.
 - `component/<name>` (13 anchors, docs/COMPONENTS.md) stay equal to main. Cut `feat/<component>/<slug>` or `fix/<component>/<slug>` from the anchor; the prefix is what the boundary hook keys on.
 - Parallel work = one git worktree per component **outside iCloud** (`git worktree add ~/dev/wt/<component> origin/component/<component>`).
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

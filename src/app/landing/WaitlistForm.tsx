@@ -4,9 +4,9 @@ import { WAITLIST_CONSENT_TEXT, WAITLIST_CONSENT_VALUE, WAITLIST_LIMITS } from '
 
 // WaitlistForm — the public "Join waitlist" section of the landing page.
 // A server component (no client state): the form posts to joinWaitlistAction
-// and the page re-renders with ?waitlist=ok|err|rate. Styled in the light
-// brand look (off-white surface, navy text, #1e5fd6 buttons) so it reads the
-// same before and after the landing re-theme lands. Every input id is
+// and the page re-renders with ?waitlist=ok|err|rate. Styled with the light
+// theme's own recipes (PR #274): #eef4fc surface, navy #0b1b3f text, and the
+// #0c5bd2 deep-blue primary (BTN_PRIMARY in page.tsx). Every input id is
 // `wl-`-prefixed: the partner form on the same page already owns `email`,
 // `phone` and `website`, and ids must be unique per document.
 
@@ -20,9 +20,10 @@ export interface WaitlistFormProps {
 
 const LABEL = 'text-[13px] font-semibold text-[#0b1b3f]';
 const INPUT =
-  'min-h-[46px] rounded-xl border border-[#8391a8] bg-white px-4 text-[15px] text-[#0b1b3f] placeholder:text-[#667085] focus:border-[#1e5fd6]';
+  'min-h-[46px] rounded-xl border border-[#8391a8] bg-white px-4 text-[15px] text-[#0b1b3f] placeholder:text-[#667085]';
+// Identical to the theme's BTN_PRIMARY (src/app/page.tsx) so the two forms read as one brand.
 const BTN =
-  'mt-1 inline-flex min-h-[50px] items-center justify-center rounded-full bg-[#1e5fd6] px-7 text-[15px] font-bold text-white shadow-[0_10px_26px_-12px_rgba(30,95,214,0.7)] transition-[background-color,transform] duration-150 hover:bg-[#1a52ba] hover:[transform:translateY(-1px)]';
+  'mt-1 inline-flex min-h-[50px] items-center justify-center rounded-full bg-[#0c5bd2] px-7 text-[15px] font-bold text-white shadow-[0_10px_26px_-12px_rgba(12,91,210,0.7)] transition-[background-color,transform] duration-150 hover:bg-[#0a4fb8] hover:[transform:translateY(-1px)]';
 
 function utmValue(v: string | undefined): string {
   return (v ?? '').slice(0, WAITLIST_LIMITS.utm);
@@ -32,12 +33,12 @@ export default function WaitlistForm({ status, utmSource, utmCampaign }: Waitlis
   return (
     <section
       id="waitlist"
-      className="border-t border-[#dbe4f0] bg-[#f6f8fb] px-5 py-[clamp(64px,9vw,130px)] text-[#0b1b3f]"
+      className="scroll-mt-20 border-t border-[#dbe4f0] bg-[#eef4fc] px-5 py-[clamp(64px,9vw,130px)] text-[#0b1b3f]"
       aria-labelledby="waitlist-h"
     >
       <div className="mx-auto grid w-full max-w-[1080px] items-start gap-10 lg:grid-cols-2 lg:gap-20">
         <div>
-          <p className="mb-3 text-[13px] font-semibold uppercase tracking-[0.16em] text-[#1e5fd6]">
+          <p className="mb-3 text-[14px] font-semibold tracking-[-0.005em] text-[#0c5bd2]">
             Early access
           </p>
           <h2
@@ -169,7 +170,7 @@ export default function WaitlistForm({ status, utmSource, utmCampaign }: Waitlis
                       type="checkbox"
                       name="destinations"
                       value={c.value}
-                      className="h-4 w-4 accent-[#1e5fd6]"
+                      className="h-4 w-4 accent-[#0c5bd2]"
                     />
                     {c.label}
                   </label>
@@ -183,7 +184,7 @@ export default function WaitlistForm({ status, utmSource, utmCampaign }: Waitlis
                 name="consent"
                 value={WAITLIST_CONSENT_VALUE}
                 required
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[#1e5fd6]"
+                className="mt-0.5 h-4 w-4 shrink-0 accent-[#0c5bd2]"
               />
               <span>{WAITLIST_CONSENT_TEXT}</span>
             </label>

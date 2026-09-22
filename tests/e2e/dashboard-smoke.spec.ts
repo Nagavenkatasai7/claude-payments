@@ -50,10 +50,10 @@ test('public landing page renders at / without auth and links to WhatsApp', asyn
   expect(res?.status()).toBeLessThan(400);
   // Must stay on `/` (no auth bounce to /login or /admin-dashboard).
   await expect(page).toHaveURL(/\/$/);
-  // The single landing <h1> — B7 rebuild headline.
+  // The single landing <h1> — the light-brand hero headline.
   const h1 = page.getByRole('heading', { level: 1 });
   await expect(h1).toBeVisible();
-  await expect(h1).toContainText(/send money by chatting/i);
+  await expect(h1).toContainText(/global money transfers/i);
   // At least one WhatsApp CTA pointing at the bot number.
   const waCta = page
     .locator('a[href*="api.whatsapp.com/send/?phone=15556298293"]')
