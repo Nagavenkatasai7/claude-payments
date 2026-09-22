@@ -80,6 +80,11 @@ export interface CreateTransferInput {
   recipientBusinessName?: string;
   achTokenRef?: string;
   invoiceId?: string;
+  // fix 5 (F43): whether a real consumer destination refreshes the sender's
+  // personal address book (the WhatsApp recipient picker). Absent ⇒ true (every
+  // chat / pay-page / cron mint). The partner API passes false: an external
+  // caller must never plant a saved recipient into its customers' picker.
+  saveRecipient?: boolean;
 }
 
 /**
@@ -323,7 +328,12 @@ export async function createTransfer(
   // Refresh the sender's PERSONAL address book only with a real consumer
   // destination (fix 6): a '' mint must never erase a saved account, and a B2B
   // payee's account (seller profile / partner-held) is never a personal payout.
-  if (transfer.transferType !== 'b2b' && transfer.payoutDestination.trim() !== '') {
+  // A partner-API mint opts out entirely (fix 5, saveRecipient: false).
+  if (
+    transfer.transferType !== 'b2b' &&
+    transfer.payoutDestination.trim() !== '' &&
+    input.saveRecipient !== false
+  ) {
     try {
       await store.upsertRecipient(input.partnerId, input.phone, {
         name: input.recipientName,

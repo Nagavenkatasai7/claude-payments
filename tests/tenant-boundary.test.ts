@@ -111,7 +111,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     return { deps, store, customerStore };
   }
 
-  it('acme mint for default\'s number: default recipients/velocity/monthly untouched; acme gets its own', async () => {
+  it('acme mint for default\'s number: default recipients/velocity/monthly untouched; acme accrues its own (and, fix 5, writes no address book)', async () => {
     await seedDefaultOwner();
     const { deps, store } = await apiDeps();
     const r = await createTransaction(deps, ACME, 'pk_1', 'idem-tb-1', {
@@ -121,7 +121,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     });
     expect(r).toMatchObject({ ok: true, status: 201 });
     expect((await store.listRecipients('default', PHONE, 5))[0].payoutDestination).toBe('REAL-0001');
-    expect((await store.listRecipients('acme', PHONE, 5))[0].payoutDestination).toBe('PLANTED-9999');
+    expect(await store.listRecipients('acme', PHONE, 5)).toEqual([]); // fix 5: saveRecipient: false
     expect(await store.getTodayTransferCount('default', PHONE)).toBe(1); // the seeded one, unchanged
     expect(await store.getTodayTransferCount('acme', PHONE)).toBe(1);
     expect(await deps.monthlyVolumeStore.getMonthCents('default', PHONE)).toBe(0);
