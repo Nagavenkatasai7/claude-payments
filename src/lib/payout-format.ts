@@ -232,6 +232,43 @@ export function maskAccountDisplay(dest: string): string {
   return l4 ? `****${l4}` : (dest ?? '');
 }
 
+// ── Display placeholders are never payout accounts (fix 6 / ctx-01) ─────────
+//
+// Default ledger reads (mappers.rowToTransfer), the LLM-facing tool results
+// (tools.maskAccount), the approve card (tools.maskDestination) and staff views
+// (maskAccountDisplay) render a destination as a "****<last4>" mask. The audit
+// found that string minted, written over a saved recipient's real account and
+// sent to the partner rail. isMaskedDestination is the BACKSTOP every money
+// chokepoint uses (pay-finalize, createTransfer, pay route + page, partner-API
+// edge, rail instruction). The DEFENSE is structural: no chat tool reads a
+// model-supplied destination at all.
+//
+// '' is deliberately NOT masked: an empty destination means "collect on the
+// secure pay page" (Item 2), and each caller decides what '' means for it.
+
+/** Cold-start text for the approve card's "To:" line (moved from tools.ts, which re-exports it). */
+export const NO_BANK_DETAILS_PLACEHOLDER =
+  "their bank account (you'll enter the details on the secure page)";
+
+/** What tools.maskAccount renders for a bank destination that holds no digits. */
+export const ACCOUNT_ON_FILE_PLACEHOLDER = 'account on file';
+
+/** Three or more mask glyphs in a row: asterisk, bullet, black circle. No legal destination contains one. */
+const MASK_RUN = /[*•●]{3,}/;
+
+/**
+ * True when `dest` is display text rather than a payout account: anything that
+ * contains a mask-glyph run, or the two fixed placeholders, case-insensitively.
+ * Pure; trims; '' / whitespace / null / undefined → false.
+ */
+export function isMaskedDestination(dest: string | null | undefined): boolean {
+  const v = (dest ?? '').trim();
+  if (v === '') return false;
+  if (MASK_RUN.test(v)) return true;
+  const lower = v.toLowerCase();
+  return lower === ACCOUNT_ON_FILE_PLACEHOLDER || lower === NO_BANK_DETAILS_PLACEHOLDER.toLowerCase();
+}
+
 // ── USDC seller payout (2026-07-02 spec) ─────────────────────────────────────
 //
 // A cross-border SELLER may choose to receive payouts as USDC to a wallet

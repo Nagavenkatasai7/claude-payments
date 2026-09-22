@@ -34,6 +34,7 @@ import {
 import { screenTransfer } from './compliance';
 import { transferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -115,15 +116,13 @@ function accountLast4(dest: string): string {
 export function maskAccount(payoutMethod: PayoutMethod, payoutDestination: string): string {
   if (payoutMethod === 'upi') return payoutDestination;
   const last4 = accountLast4(payoutDestination);
-  return last4 ? `****${last4}` : 'account on file';
+  return last4 ? `****${last4}` : ACCOUNT_ON_FILE_PLACEHOLDER;
 }
 
-// Cold-start placeholder for the approve card's "To:" line when no bank details
-// have been collected yet (Item 2: the sender enters them on the secure pay
-// page, never in chat). A saved/known destination still renders the masked
-// "bank a/c ****<last4>" line.
-export const NO_BANK_DETAILS_PLACEHOLDER =
-  "their bank account (you'll enter the details on the secure page)";
+// Cold-start placeholder for the approve card's "To:" line (Item 2). The
+// literal lives in payout-format.ts so isMaskedDestination and the card share
+// ONE string; re-exported here so no importer changes.
+export { NO_BANK_DETAILS_PLACEHOLDER };
 
 /**
  * Masks a payout_destination for the customer-facing approval card. Shows ONLY
