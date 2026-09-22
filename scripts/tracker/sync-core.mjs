@@ -40,14 +40,22 @@ const isoNoMs = (iso) => new Date(iso).toISOString().replace('.000Z', 'Z');
 
 // ---------- scrub (port of scrub() in build-corpus.py, plus more token shapes) ----------
 const TOKEN_PATTERNS = [
+  /sk-ant-[A-Za-z0-9_-]{20,}/g, // Anthropic keys (sk-ant-api03-…): the hyphens defeat the generic sk- rule
   /sk-[A-Za-z0-9]{20,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g, // AWS access key ids
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JWTs (base64url header.payload.signature)
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
   /github_pat_[A-Za-z0-9_]{20,}/g,
   /EAA[A-Za-z0-9]{30,}/g,
   /xox[bp]-[A-Za-z0-9-]{20,}/g,
 ];
+// Bare runs of 10+ digits (phone and card numbers without "+"): keep the last 4. Not after a word
+// char, "/", "=", "#", "." or "+" (ids in URLs such as /actions/runs/35671070038, query values,
+// decimals, and +numbers, which the rule above handles); 1555… test numbers are kept.
+const BARE_DIGITS = /(?<![\w/=#.+])(?!1555)(\d{6,})(\d{4})(?!\w)/g;
 /**
- * Mask phone numbers (except +1555 test numbers), non-org emails and token-like strings.
+ * Mask phone numbers (except +1555 test numbers), bare 10+ digit numbers, non-org emails and
+ * token-like strings (API keys, AWS key ids, JWTs, bearer tokens).
  * @param {unknown} text
  * @returns {string}
  */
@@ -61,6 +69,8 @@ export function scrub(text) {
   );
   s = s.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g, 'Bearer <redacted-token>');
   for (const re of TOKEN_PATTERNS) s = s.replace(re, '<redacted-token>');
+  // Last, so a digit run inside a token is already gone with the token.
+  s = s.replace(BARE_DIGITS, (_, a, b) => `${'•'.repeat(a.length)}${b}`);
   return s;
 }
 
@@ -552,6 +562,24 @@ const isAgentTool = (input) => input.hook_event_name === 'PostToolUse' && (input
 const contentText = (content) => (Array.isArray(content) ? content.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n') : '');
 
 /**
+ * Exit code of a Bash call seen by PostToolUse. Claude Code's Bash tool_response has no exit code
+ * field ({stdout, stderr, interrupted, isImage, noOutputExpected, …}), but PostToolUse fires only
+ * after a tool completes successfully: a command that exits non-zero fires PostToolUseFailure,
+ * with "Exit code N" in `error` (https://code.claude.com/docs/en/hooks.md, PostToolUse and
+ * PostToolUseFailure). So no field means 0, except: interrupted → null (failed);
+ * backgroundTaskId (still running) or returnCodeInterpretation (a non-zero exit Claude Code
+ * read as benign, e.g. grep's "No matches found") → null (unknown). An explicit exit_code wins.
+ * @param {any} tr
+ * @returns {number|null}
+ */
+function bashExitCode(tr) {
+  if (Number.isInteger(tr.exit_code)) return tr.exit_code;
+  if (Number.isInteger(tr.exitCode)) return tr.exitCode;
+  if (tr.interrupted || tr.backgroundTaskId || tr.returnCodeInterpretation) return null;
+  return 0;
+}
+
+/**
  * True when the hook input needs the agents state (~/.smartremit-ledger/agents.json): a
  * main-thread Agent launch (no agent_id) or a SubagentStop. Other inputs skip the state file.
  * @param {any} input
@@ -637,7 +665,7 @@ export function hookToJournalEntries(input, now, agents = {}) {
   }
 
   if (input.tool_name === 'Bash') {
-    const code = Number.isInteger(tr.exit_code) ? tr.exit_code : Number.isInteger(tr.exitCode) ? tr.exitCode : null;
+    const code = bashExitCode(tr);
     const entries = parseGhPrCommands(String(ti.command ?? '')).map(({ verb, pr }) => ({
       at: now, kind: 'pr', actor: 'claude',
       title: `gh pr ${verb}${pr ? ` #${pr}` : ''} run in a session`,
@@ -671,13 +699,20 @@ export function pruneAgents(agents, now, { finishedTtlMs = 24 * HOUR_MS, openTtl
 }
 
 /** Journal kinds the owner wants on the page promptly: an unflushed one makes the Stop hook block at once. */
-export const URGENT_JOURNAL_KINDS = Object.freeze(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step']);
+export const URGENT_JOURNAL_KINDS = Object.freeze(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step', 'verify']);
+/**
+ * A session `gh pr merge` row that succeeded (kind pr, result ok, as hookToJournalEntries writes
+ * it): urgent like a merge row. The main-moved rule alone cannot catch it when ls-remote fails.
+ * @param {any} o a parsed journal line
+ */
+export const isSessionMerge = (o) => o?.kind === 'pr' && o.result === 'ok' && /^gh pr merge\b/.test(String(o.title ?? ''));
 /** Routine journal entries wait until the last sync is older than this. */
 export const SYNC_STALE_MS = 10 * 60 * 1000;
 const SYNC_DUE_TAIL = 'Run the tracker-sync skill (automated engine) now, then finish.';
 
 /**
- * The urgent kinds (URGENT_JOURNAL_KINDS) among journal lines, deduped and sorted. Bad lines are ignored.
+ * The urgent kinds (URGENT_JOURNAL_KINDS) among journal lines, deduped and sorted; a successful
+ * session `gh pr merge` row counts as 'merge'. Bad lines are ignored.
  * @param {string[]|undefined} lines
  * @returns {string[]}
  */
@@ -685,8 +720,9 @@ export function urgentJournalKinds(lines) {
   const found = new Set();
   for (const line of Array.isArray(lines) ? lines : []) {
     try {
-      const kind = JSON.parse(line)?.kind;
-      if (URGENT_JOURNAL_KINDS.includes(kind)) found.add(kind);
+      const o = JSON.parse(line);
+      if (URGENT_JOURNAL_KINDS.includes(o?.kind)) found.add(o.kind);
+      else if (isSessionMerge(o)) found.add('merge');
     } catch { /* not JSON: sync.mjs warns about it; it cannot make a sync urgent */ }
   }
   return [...found].sort();
@@ -694,7 +730,8 @@ export function urgentJournalKinds(lines) {
 
 /**
  * The ledger-sync-due Stop hook's decision. Blocks (once; stop_hook_active short-circuits) when
- * (c) an unflushed journal line is an urgent kind (URGENT_JOURNAL_KINDS), or
+ * (c) an unflushed journal line is an urgent kind (URGENT_JOURNAL_KINDS) or a successful session
+ *     `gh pr merge` (isSessionMerge), or
  * (b) the journal has unflushed bytes and the last sync (last-sync.json `at`) is more than
  *     10 minutes old or unknown, or
  * (a) main moved since the last recorded sync (remoteMainSha from ls-remote vs lastSyncMainSha).

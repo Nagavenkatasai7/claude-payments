@@ -34,6 +34,13 @@ import {
 } from '../scripts/tracker/sync-core.mjs';
 
 const REPO_URL = 'https://github.com/Nagavenkatasai7/claude-payments';
+// Secret shapes scrub() must redact (review of #273). Fake values.
+const SECRETS = {
+  anthropicKey: 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz_0123456789-abcdefXYZ',
+  awsKeyId: 'AKIAIOSFODNN7EXAMPLE',
+  jwt: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c',
+  barePhone: '919876543210',
+};
 const SHA_A = 'aaaaaaa1111111111111111111111111111111111'.slice(0, 40);
 const SHA_B = 'bbbbbbb2222222222222222222222222222222222'.slice(0, 40);
 const SHA_C = 'ccccccc3333333333333333333333333333333333'.slice(0, 40);
@@ -356,6 +363,16 @@ describe('journal slicing and events', () => {
     expect(s).not.toHaveProperty('prompt');
     expect(s.actor).toBe('claude');
   });
+
+  it('redacts every secret shape in journal titles and details', () => {
+    const all = Object.values(SECRETS).join(' | ');
+    const line = JSON.stringify({ at: '2026-09-22T02:00:00Z', kind: 'decision', title: `t ${all}`, detail: `d ${all}` });
+    const { events } = journalToEvents([line]);
+    for (const [name, secret] of Object.entries(SECRETS)) {
+      expect(events[0].data.title, name).not.toContain(secret);
+      expect(events[0].data.detail, name).not.toContain(secret);
+    }
+  });
 });
 
 describe('splitBatches', () => {
@@ -505,6 +522,21 @@ describe('scrub (port of build-corpus.py)', () => {
     expect(scrub('EAA' + 'x'.repeat(40))).toBe('<redacted-token>');
     expect(scrub('xoxb-1234567890-abcdefghijkl')).toBe('<redacted-token>');
   });
+  it('redacts Anthropic keys, AWS access key ids and JWTs', () => {
+    expect(scrub(`key ${SECRETS.anthropicKey} end`)).toBe('key <redacted-token> end');
+    expect(scrub(`aws ${SECRETS.awsKeyId} here`)).toBe('aws <redacted-token> here');
+    expect(scrub(`auth ${SECRETS.jwt} ok`)).toBe('auth <redacted-token> ok');
+    expect(scrub('Authorization: Bearer ' + SECRETS.jwt)).toBe('Authorization: Bearer <redacted-token>');
+  });
+  it('masks bare 10+ digit numbers (phones, card numbers) but keeps +1555 test numbers, ids in URLs and short numbers', () => {
+    expect(scrub(`call ${SECRETS.barePhone} now`)).toBe('call ••••••••3210 now');
+    expect(scrub('us 2025550123, card 4111111111111111')).toBe('us ••••••0123, card ••••••••••••1111');
+    expect(scrub('in +91-9876543210')).toBe('in +91-••••••3210');
+    expect(scrub('test +15551234567 and 15551234567')).toBe('test +15551234567 and 15551234567');
+    const run = 'https://github.com/o/r/actions/runs/35671070038';
+    expect(scrub(`CI failure: ${run}`)).toBe(`CI failure: ${run}`);
+    expect(scrub('PR #273, 2527 tests, 179 files, sha 2a23a11, agent a1f4204c6f0012488')).toBe('PR #273, 2527 tests, 179 files, sha 2a23a11, agent a1f4204c6f0012488');
+  });
   it('is safe on non-strings', () => {
     expect(scrub(undefined)).toBe('');
     expect(scrub(null)).toBe('');
@@ -631,6 +663,33 @@ describe('hookToJournalEntries', () => {
     expect(hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr view 260' }, tool_response: { exit_code: 0 } }, NOW, {}).entries).toEqual([]);
   });
 
+  it('reads a Bash PostToolUse with no exit code as exit 0 (a failed command fires PostToolUseFailure instead)', () => {
+    const bash = (command: string, tr: Record<string, unknown>) =>
+      hookToJournalEntries({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command }, tool_response: tr }, NOW, {}).entries[0];
+    // The shape Claude Code really sends for Bash: no exit code field.
+    const real = { stdout: 'Squashed and merged', stderr: '', interrupted: false, isImage: false, noOutputExpected: false };
+    const ok = bash('gh pr merge 273 --squash', real);
+    expect(ok).toMatchObject({ kind: 'pr', title: 'gh pr merge #273 run in a session', refs: { pr: [273] }, result: 'ok' });
+    expect(ok.detail).toMatch(/^Exit 0\b/);
+    expect(bash('gh pr merge 273 --squash', { ...real, interrupted: true }).result).toBe('failed');
+    // Still running in the background, or a non-zero exit Claude Code read as benign: exit unknown.
+    expect(bash('gh pr merge 273 --squash', { ...real, backgroundTaskId: 'b1' }).result).toBe('info');
+    expect(bash('gh pr merge 273 --squash', { ...real, returnCodeInterpretation: 'No matches found' }).result).toBe('info');
+  });
+
+  it('redacts each secret shape in the finish row AND in agents.json lastMessage (first and later stops, foreground runs)', () => {
+    for (const [name, secret] of Object.entries(SECRETS)) {
+      const first = hookToJournalEntries(stop('a1b2', `first ${secret} end`), NOW, launched());
+      const later = hookToJournalEntries(stop('a1b2', `later ${secret} end`), NOW, first.agents);
+      const fg = agentInput('completed');
+      fg.tool_response = { ...fg.tool_response, content: [{ type: 'text', text: `fg ${secret} end` }] } as typeof fg.tool_response;
+      const fgRun = hookToJournalEntries(fg, NOW, {});
+      const texts = [first.entries[0].detail, first.agents.a1b2.lastMessage, later.agents.a1b2.lastMessage, fgRun.entries[1].detail, fgRun.agents.a1b2.lastMessage];
+      expect(texts.every((t) => typeof t === 'string' && t.length > 0), name).toBe(true);
+      for (const t of texts) expect(t, name).not.toContain(secret);
+    }
+  });
+
   it('returns no entries and no change for malformed or unrelated input', () => {
     for (const input of [null, { hook_event_name: 'PostToolUse', tool_name: 'Edit' }, { hook_event_name: 'Stop' }]) {
       expect(hookToJournalEntries(input, NOW, {})).toEqual({ entries: [], agents: {}, changed: false });
@@ -672,7 +731,7 @@ describe('pruneAgents', () => {
 
 describe('urgentJournalKinds', () => {
   it('lists the urgent kinds among journal lines, ignoring other kinds and bad lines', () => {
-    expect([...URGENT_JOURNAL_KINDS].sort()).toEqual(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step']);
+    expect([...URGENT_JOURNAL_KINDS].sort()).toEqual(['approval', 'decision', 'incident', 'merge', 'migration', 'owner-step', 'verify']);
     const lines = [
       JSON.stringify({ kind: 'agent', title: 'Agent started: x' }),
       '{not json',
@@ -684,6 +743,15 @@ describe('urgentJournalKinds', () => {
     expect(urgentJournalKinds(lines)).toEqual(['approval', 'owner-step']);
     expect(urgentJournalKinds([JSON.stringify({ kind: 'pr' }), JSON.stringify({ kind: 'agent' })])).toEqual([]);
     expect(urgentJournalKinds(undefined)).toEqual([]);
+  });
+
+  it('counts a successful session `gh pr merge` row (kind pr) as a merge, and no other pr row', () => {
+    const row = (title: string, result?: string) => JSON.stringify({ kind: 'pr', actor: 'claude', title, ...(result ? { result } : {}) });
+    expect(urgentJournalKinds([row('gh pr merge #273 run in a session', 'ok')])).toEqual(['merge']);
+    expect(urgentJournalKinds([row('gh pr merge #273 run in a session', 'ok'), JSON.stringify({ kind: 'merge', title: 'm' })])).toEqual(['merge']);
+    // Exit unknown (rows written before this change), failed, or no result: not proof of a merge.
+    expect(urgentJournalKinds([row('gh pr merge #273 run in a session', 'info'), row('gh pr merge #274 run in a session', 'failed'), row('gh pr merge #275 run in a session')])).toEqual([]);
+    expect(urgentJournalKinds([row('gh pr close #258 run in a session', 'ok'), row('gh pr merged? no', 'ok')])).toEqual([]);
   });
 });
 
@@ -725,7 +793,7 @@ describe('stopDecision (ledger-sync-due)', () => {
     }
   });
 
-  it('(c) blocks at once when an unflushed line is an approval, decision, incident, merge, migration or owner-step', () => {
+  it('(c) blocks at once when an unflushed line is an approval, decision, incident, merge, migration, owner-step or verify', () => {
     for (const kind of URGENT_JOURNAL_KINDS) {
       const line = JSON.stringify({ at: NOW, kind, title: `a ${kind}` });
       const d = stopDecision({ ...base, journalSize: 400, pendingLines: [agentLine, line], lastSyncAt: minutesAgo(1) });
@@ -734,10 +802,29 @@ describe('stopDecision (ledger-sync-due)', () => {
     }
   });
 
-  it('(c) ignores urgent kinds that are already flushed, and non-urgent kinds', () => {
+  it('(c) blocks on a pending verify row with a fresh sync (the review repro)', () => {
+    const verify = JSON.stringify({ at: NOW, kind: 'verify', actor: 'claude', title: 'Chrome walk-through of /pay green', result: 'ok' });
+    expect(stopDecision({ ...base, journalSize: 300, pendingLines: [verify], lastSyncAt: minutesAgo(1) })).toEqual({
+      decision: 'block',
+      reason: 'Ledger sync due: the journal holds a new verify entry. Run the tracker-sync skill (automated engine) now, then finish.',
+    });
+  });
+
+  it('(c) blocks on a session gh pr merge row even when ls-remote failed (no main-moved signal)', () => {
+    const [row] = hookToJournalEntries({
+      hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'gh pr merge 273 --squash --delete-branch' },
+      tool_response: { stdout: '', stderr: '', interrupted: false, isImage: false, noOutputExpected: false },
+    }, NOW, {}).entries;
+    const d = stopDecision({ ...base, journalSize: 300, pendingLines: [JSON.stringify(row)], lastSyncAt: minutesAgo(1), remoteMainSha: null });
+    expect(d?.reason).toBe('Ledger sync due: the journal holds a new merge entry. Run the tracker-sync skill (automated engine) now, then finish.');
+  });
+
+  it('(c) ignores urgent kinds that are already flushed, and non-urgent rows', () => {
     const approval = JSON.stringify({ at: NOW, kind: 'approval', title: 'x' });
     expect(stopDecision({ ...base, pendingLines: [approval] })).toBeNull();
-    expect(stopDecision({ ...base, journalSize: 300, pendingLines: [JSON.stringify({ kind: 'pr', title: 'gh pr merge #1' }), '{bad'] })).toBeNull();
+    const unknownExitMerge = JSON.stringify({ kind: 'pr', title: 'gh pr merge #1 run in a session', result: 'info' });
+    const close = JSON.stringify({ kind: 'pr', title: 'gh pr close #2 run in a session', result: 'ok' });
+    expect(stopDecision({ ...base, journalSize: 300, pendingLines: [unknownExitMerge, close, '{bad'] })).toBeNull();
   });
 
   it('(a) blocks when main moved since the last sync, even with routine entries pending and a fresh sync', () => {

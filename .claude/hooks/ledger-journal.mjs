@@ -13,29 +13,20 @@
 //   Field names: https://code.claude.com/docs/en/hooks.md (Agent tool_response `agentId`;
 //   SubagentStop input `agent_id`, `last_assistant_message`; common field `agent_id` is present
 //   only inside a subagent).
-// - Bash: only `gh pr merge|close`, with the PR number and exit code; a subagent's calls are skipped.
-// agents.json is read-modify-written under a lock (withAgentsLock in journal.mjs), because
-// parallel subagents stop concurrently. Never fails the tool call: prints nothing, always exits 0.
+// - Bash: only `gh pr merge|close`, with the PR number and exit code; a subagent's calls are
+//   skipped. Bash tool_response has no exit code; PostToolUse fires only on success (a non-zero
+//   exit fires PostToolUseFailure), so a plain PostToolUse means exit 0 (bashExitCode in sync-core).
+// The I/O is recordHookEvent() in scripts/tracker/journal.mjs (tested in
+// tests/tracker-journal-io.test.ts): agents.json is read-modify-written under a lock
+// (withAgentsLock), because parallel subagents stop concurrently, and each journal row is
+// appended BEFORE agents.json is written, so a failed append never marks an agent finished.
+// Never fails the tool call: prints nothing, always exits 0.
 import { readFileSync } from 'node:fs';
 
 try {
   const input = JSON.parse(readFileSync(0, 'utf8'));
-  const core = await import(new URL('../../scripts/tracker/sync-core.mjs', import.meta.url).href);
-  const now = new Date().toISOString();
-  if (core.hookUsesAgents(input)) {
-    const journal = await import(new URL('../../scripts/tracker/journal.mjs', import.meta.url).href);
-    journal.withAgentsLock(() => {
-      const step = core.hookToJournalEntries(input, now, journal.readAgents());
-      if (step.changed) journal.writeAgents(core.pruneAgents(step.agents, now));
-      for (const e of step.entries) journal.appendJournal(e);
-    });
-  } else {
-    const { entries } = core.hookToJournalEntries(input, now, {});
-    if (entries.length) {
-      const journal = await import(new URL('../../scripts/tracker/journal.mjs', import.meta.url).href);
-      for (const e of entries) journal.appendJournal(e);
-    }
-  }
+  const journal = await import(new URL('../../scripts/tracker/journal.mjs', import.meta.url).href);
+  journal.recordHookEvent(input);
 } catch {
   // Journaling is best effort; the tool call it observes must never fail because of it.
 }
