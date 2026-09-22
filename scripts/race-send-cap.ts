@@ -8,8 +8,9 @@
  *      apply the migrations to it:
  *        set -a; source .env.local; set +a
  *        DATABASE_URL=<branch pooled url> DATABASE_URL_UNPOOLED=<branch direct url> npx drizzle-kit migrate
- *   2. Run:
- *        DATABASE_URL=<branch pooled url> node_modules/.bin/tsx scripts/race-send-cap.ts
+ *   2. Run (the POSITIVE gate: RACE_ALLOW_HOST must equal the branch host, so a
+ *      sourced prod .env.local can never be the target by accident):
+ *        DATABASE_URL=<branch pooled url> RACE_ALLOW_HOST=<that url's hostname> node_modules/.bin/tsx scripts/race-send-cap.ts
  *   3. Quote the output in the PR, then delete the branch.
  *
  * What it checks (all three MUST print PASS):
@@ -44,8 +45,12 @@ if (!url) {
   console.error('DATABASE_URL not set (point it at a THROWAWAY Neon branch, never prod).');
   process.exit(1);
 }
-if (/prod|main/i.test(process.env.NEON_BRANCH ?? '') ) {
-  console.error('Refusing: NEON_BRANCH looks like prod/main.');
+// Positive gate (security review): the script seeds a fake 'paid' row and
+// DELETEs rows for its synthetic phones, so it must never run against prod.
+// It runs ONLY when RACE_ALLOW_HOST names the exact host DATABASE_URL points at.
+const targetHost = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
+if (!targetHost || !process.env.RACE_ALLOW_HOST || process.env.RACE_ALLOW_HOST !== targetHost) {
+  console.error(`Refusing: set RACE_ALLOW_HOST to the throwaway branch host (DATABASE_URL points at "${targetHost || '?'}").`);
   process.exit(1);
 }
 

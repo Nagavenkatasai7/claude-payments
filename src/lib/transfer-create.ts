@@ -314,8 +314,14 @@ async function mintLocked(
 ): Promise<{ transfer: Transfer; replayed: boolean }> {
   const { input, q } = p;
   if (input.id) {
+    // A same-key re-mint (claim-first callers only). The row must belong to
+    // THIS tenant: an id that exists under another partner is neither replayed
+    // nor re-inserted (insertTransfer is an upsert) — refuse before any write.
     const existing = await ops.getTransfer(input.id);
-    if (existing) return { transfer: existing, replayed: true };
+    if (existing) {
+      if (existing.partnerId !== input.partnerId) throw new Error('transfer_id_conflict');
+      return { transfer: existing, replayed: true };
+    }
   }
   const now = new Date();
   const totals = await ops.totals(now);

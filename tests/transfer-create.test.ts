@@ -831,6 +831,17 @@ describe('createTransfer — send caps from the ledger (Program fix 16)', () => 
     expect(await store.listRecipients('default', T0_PHONE, 5)).toEqual(book);
   });
 
+  it('a same-id replay never returns or overwrites another tenant\'s row — it refuses before any write', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await seedPartner(db, 'acme');
+    await seedLedgerSpend(db, { partnerId: 'acme', phone: T0_PHONE, amountUsd: 10, id: 'cross_1' });
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, id: 'cross_1', phone: T0_PHONE }))
+      .rejects.toThrow('transfer_id_conflict');
+    const row = await store.getTransfer('cross_1');
+    expect([row?.partnerId, row?.amountUsd]).toEqual(['acme', 10]); // untouched
+    expect(await store.getTransferCount('default', T0_PHONE)).toBe(0);
+  });
+
   it('test 12: sanctions run first — a watchlisted recipient for a sender AT cap leaves a blocked row, not SendCapError, and the sums are unchanged', async () => {
     const { db, store, partnerStore, mvs } = await makeStores();
     await seedLedgerSpend(db, { partnerId: 'default', phone: T0_PHONE, amountUsd: 500 });
