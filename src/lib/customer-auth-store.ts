@@ -55,10 +55,19 @@ const SESSION_IDLE_SECONDS = IDLE_MS / 1000; // Redis ex (defense-in-depth; code
 const RESET_TTL_SECONDS = 30 * 60; // 30-min single-use reset token
 
 // ── Login brute-force throttle (OWASP/NIST: cap consecutive failures) ──
+// Program-Fix 19 (F71/F67): every password check RESERVES its attempt with an
+// atomic INCR before the Argon2 run (no read-then-bump race), under three caps.
+// The per-(phone, IP) cap is what a stranger hits; only reservations that pass
+// it count toward the per-phone day ceiling, so ten requests from one IP can no
+// longer lock the owner out of every device. A successful login clears the
+// phone's counters; a successful reset (WhatsApp OTP) clears the day ceiling.
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
-const LOGIN_FAIL_MAX_PER_PHONE_DAY = 10; // temp account lock after 10 failed/day
+const LOGIN_FAIL_MAX_PER_PHONE_IP_HOUR = 10; // per (phone, IP) per hour bucket
+const LOGIN_FAIL_MAX_PER_PHONE_DAY = 30; // per phone per day bucket, across all IPs
 const LOGIN_FAIL_MAX_PER_IP_HOUR = 50; // blunt distributed credential-stuffing
+const HOUR_BUCKET_TTL_S = 2 * 60 * 60;
+const DAY_BUCKET_TTL_S = 2 * 24 * 60 * 60;
 
 // ── Key schema (sr_* namespace, fully separate from staff `session:` keys) ──
 const sessionKey = (tokenHash: string) => `sr_sess:${tokenHash}`;
@@ -125,6 +134,13 @@ export function createCustomerAuthStore(
 
   async function saveCustomer(customer: Customer): Promise<void> {
     await customers.saveCustomer(customer);
+  }
+
+  /** Atomic increment + TTL on the bucket's first write (no read-then-set race). */
+  async function bumpCounter(key: string, ttlS: number): Promise<number> {
+    const n = await redis.incr(key);
+    if (n === 1) await redis.expire(key, ttlS);
+    return n;
   }
 
   return {
@@ -429,41 +445,45 @@ export function createCustomerAuthStore(
       return redis.getdel(resetKey(sha256hex(token)));
     },
 
-    // ── Login brute-force throttle (per-phone/day + per-IP/hour) ──
+    // ── Login brute-force throttle (reserve-before-compare; fix 19) ──
 
-    /** True if the account or the caller IP has exceeded the failed-login cap. */
-    async isLoginLocked(phoneRaw: string, ip?: string): Promise<boolean> {
+    /**
+     * Reserve ONE password attempt for (phone, ip). Returns true when the caller
+     * may run the compare; false means refuse without touching Argon2. Each cap
+     * is an atomic INCR with the TTL armed on the bucket's first write, checked
+     * in this order so a refused reservation never advances a later counter:
+     *   1. `sr_loginfail:pi:<phone>:<sha(ip)>:<hour>` — 10 per (phone, IP) per hour;
+     *   2. `sr_loginfail:p:<phone>:<day>`             — 30 per phone per day, all IPs;
+     *   3. `sr_loginfail:ip:<sha(ip)>:<hour>`         — 50 per IP per hour, all phones.
+     * The IP is hashed in the key; the password never reaches this method.
+     */
+    async reserveLoginAttempt(phoneRaw: string, ip: string): Promise<boolean> {
       const t = now();
       const phone = normalizePhone(phoneRaw);
-      const pc = Number((await redis.get(`sr_loginfail:p:${phone}:${Math.floor(t / DAY_MS)}`)) ?? 0);
-      if (pc >= LOGIN_FAIL_MAX_PER_PHONE_DAY) return true;
-      if (ip) {
-        const ic = Number(
-          (await redis.get(`sr_loginfail:ip:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`)) ?? 0,
-        );
-        if (ic >= LOGIN_FAIL_MAX_PER_IP_HOUR) return true;
-      }
-      return false;
+      const ipHash = sha256hex(ip);
+      const hour = Math.floor(t / HOUR_MS);
+      const day = Math.floor(t / DAY_MS);
+      const piN = await bumpCounter(`sr_loginfail:pi:${phone}:${ipHash}:${hour}`, HOUR_BUCKET_TTL_S);
+      if (piN > LOGIN_FAIL_MAX_PER_PHONE_IP_HOUR) return false;
+      const pN = await bumpCounter(`sr_loginfail:p:${phone}:${day}`, DAY_BUCKET_TTL_S);
+      if (pN > LOGIN_FAIL_MAX_PER_PHONE_DAY) return false;
+      const ipN = await bumpCounter(`sr_loginfail:ip:${ipHash}:${hour}`, HOUR_BUCKET_TTL_S);
+      return ipN <= LOGIN_FAIL_MAX_PER_IP_HOUR;
     },
 
-    /** Count a failed password attempt against both the account and the IP. */
-    async recordLoginFailure(phoneRaw: string, ip?: string): Promise<void> {
+    /**
+     * Clear the phone's counters after a proven login (phone + ip) or a proven
+     * reset (phone only — the WhatsApp OTP proved the number, so this is the
+     * owner's way out of a distributed lock). The per-IP hourly counter keeps
+     * counting successes too: an office NAT needs more than 50 logins an hour to notice.
+     */
+    async clearLoginFailures(phoneRaw: string, ip?: string): Promise<void> {
       const t = now();
       const phone = normalizePhone(phoneRaw);
-      const pKey = `sr_loginfail:p:${phone}:${Math.floor(t / DAY_MS)}`;
-      const pn = await redis.incr(pKey);
-      if (pn === 1) await redis.expire(pKey, 2 * 24 * 60 * 60);
       if (ip) {
-        const iKey = `sr_loginfail:ip:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`;
-        const inx = await redis.incr(iKey);
-        if (inx === 1) await redis.expire(iKey, 2 * 60 * 60);
+        await redis.del(`sr_loginfail:pi:${phone}:${sha256hex(ip)}:${Math.floor(t / HOUR_MS)}`);
       }
-    },
-
-    /** Clear the per-account failed-login counter (on a successful login). */
-    async clearLoginFailures(phoneRaw: string): Promise<void> {
-      const t = now();
-      await redis.del(`sr_loginfail:p:${normalizePhone(phoneRaw)}:${Math.floor(t / DAY_MS)}`);
+      await redis.del(`sr_loginfail:p:${phone}:${Math.floor(t / DAY_MS)}`);
     },
 
     // ── Per-IP OTP-send throttle (blunt number-rotation OTP/toll-fraud pumping) ──

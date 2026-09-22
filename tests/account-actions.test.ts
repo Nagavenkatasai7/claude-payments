@@ -27,9 +27,12 @@ const cookieDelete = vi.fn((name: string) => cookieJar.delete(name));
 const cookieGet = vi.fn((name: string) =>
   cookieJar.has(name) ? { name, value: cookieJar.get(name)! } : undefined,
 );
+// The client IP seen by the actions (fix 19 keys the login throttle on it);
+// null ⇒ the actions fall back to 'unknown', which every pre-fix test relies on.
+let clientIpHeader: string | null = null;
 vi.mock('next/headers', () => ({
   cookies: async () => ({ set: cookieSet, delete: cookieDelete, get: cookieGet }),
-  headers: async () => ({ get: (_n: string) => null }),
+  headers: async () => ({ get: (n: string) => (n === 'x-forwarded-for' ? clientIpHeader : null) }),
 }));
 
 const redirectMock = vi.fn((path: string) => {
@@ -41,7 +44,10 @@ vi.mock('next/navigation', () => ({ redirect: (p: string) => redirectMock(p) }))
 // test — module-scope `let` rebuilt in beforeEach (NEVER inside the hoisted
 // vi.mock factory; the closure below dereferences it at call time).
 let authStore: ReturnType<typeof createCustomerAuthStore>;
-const otpStore = createOtpStore(redis);
+// Relative clock seam for the OTP store so a test can step past the 30-s
+// per-phone resend cooldown (it spans purposes: register → reset).
+let otpNowMs = Date.now();
+const otpStore = createOtpStore(redis, { now: () => otpNowMs });
 const onboardStore = createOnboardingTokenStore(redis);
 const pendingStore = createPendingAuthStore(redis);
 vi.mock('@/lib/customer-auth-store', async () => {
@@ -80,6 +86,7 @@ import {
   loginAction,
   logoutAction,
   requestResetAction,
+  resetAction,
 } from '@/app/account/actions';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 
@@ -99,6 +106,8 @@ async function register() {
 beforeEach(async () => {
   redis.dump.clear();
   cookieJar.clear();
+  clientIpHeader = null;
+  otpNowMs = Date.now();
   sentCodes.length = 0;
   cookieSet.mockClear();
   cookieDelete.mockClear();
@@ -287,6 +296,97 @@ describe('loginAction', () => {
     expect(s.step).toBe('login');
     expect(s.error).toBeTruthy();
     expect(sentCodes).toHaveLength(0);
+  });
+});
+
+// Program-Fix 19 (F71/F67): the attempt is RESERVED before the Argon2 run under
+// 10/hour per (phone, IP), 30/day per phone, 50/hour per IP; a stranger from one
+// IP cannot lock the owner out, and a successful reset unlocks a distributed lock.
+describe('loginAction — attempt caps without third-party lockout (fix 19)', () => {
+  const NEW_PASSWORD = 'staple battery horse';
+  const IP_A = '198.51.100.1';
+  const IP_B = '198.51.100.2';
+
+  /** Register and complete the phone binding so a password login mints a session directly. */
+  async function registerVerified() {
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    cookieJar.clear();
+    cookieSet.mockClear();
+    sentCodes.length = 0;
+  }
+
+  it('10 failures from ip-A lock only (phone, ip-A); the right password from ip-B still logs in', async () => {
+    await registerVerified();
+    clientIpHeader = IP_A;
+    for (let i = 0; i < 10; i++) {
+      const s = await loginAction(null, form({ phone: PHONE, password: 'wrong' }));
+      expect(s.step).toBe('login');
+    }
+    // ip-A is locked: the RIGHT password is refused with the same generic error.
+    const lockedA = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    expect(lockedA.step).toBe('login');
+    expect(lockedA.error).toBe('Invalid phone or password.');
+    expect(cookieSet).not.toHaveBeenCalled();
+    // The owner on another IP is unaffected.
+    clientIpHeader = IP_B;
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow(
+      'REDIRECT:/account',
+    );
+    expect(cookieSet).toHaveBeenCalled();
+  });
+
+  it('30 reservations over 4 IPs lock the phone for every IP; a successful reset unlocks it the same day', async () => {
+    await registerVerified();
+    const ips = ['198.51.100.11', '198.51.100.12', '198.51.100.13', '198.51.100.14'];
+    for (let i = 0; i < 30; i++) expect(await authStore.reserveLoginAttempt(NORM, ips[i % 4])).toBe(true);
+    clientIpHeader = '198.51.100.99'; // an IP that never failed
+    const locked = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    expect(locked.step).toBe('login');
+    expect(locked.error).toBe('Invalid phone or password.');
+    expect(cookieSet).not.toHaveBeenCalled();
+
+    // The owner proves the phone over WhatsApp and resets the password.
+    otpNowMs += 31_000; // past the per-phone resend cooldown
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    expect(req.pendingToken).toBeTruthy();
+    expect(sentCodes).toHaveLength(1);
+    const reset = await resetAction(
+      null,
+      form({ pendingToken: req.pendingToken!, code: sentCodes[0].code, password: NEW_PASSWORD }),
+    );
+    expect(reset.step).toBe('login');
+    expect(reset.notice).toMatch(/password reset/i);
+
+    // Unlocked: the new password logs in from the same IP, same day.
+    await expect(loginAction(null, form({ phone: PHONE, password: NEW_PASSWORD }))).rejects.toThrow(
+      'REDIRECT:/account',
+    );
+  });
+
+  it('a successful login clears the (phone, IP) and phone/day counters', async () => {
+    await registerVerified();
+    clientIpHeader = IP_A;
+    for (let i = 0; i < 9; i++) await loginAction(null, form({ phone: PHONE, password: 'wrong' }));
+    expect([...redis.dump.keys()].some((k) => k.startsWith(`sr_loginfail:p:${NORM}:`))).toBe(true);
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow(
+      'REDIRECT:/account',
+    );
+    const keys = [...redis.dump.keys()];
+    expect(keys.some((k) => k.startsWith(`sr_loginfail:pi:${NORM}:`))).toBe(false);
+    expect(keys.some((k) => k.startsWith(`sr_loginfail:p:${NORM}:`))).toBe(false);
+  });
+
+  it('a malformed login (empty password) burns no reservation', async () => {
+    await registerVerified();
+    clientIpHeader = IP_A;
+    for (let i = 0; i < 20; i++) await loginAction(null, form({ phone: PHONE, password: '' }));
+    expect([...redis.dump.keys()].some((k) => k.startsWith('sr_loginfail:'))).toBe(false);
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow(
+      'REDIRECT:/account',
+    );
   });
 });
 

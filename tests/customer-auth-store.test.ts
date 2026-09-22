@@ -294,6 +294,96 @@ describe('reset tokens', () => {
   });
 });
 
+// Program-Fix 19 (F71/F67): every password check RESERVES its attempt with an
+// atomic INCR first; three ceilings — 10/hour per (phone, IP), 30/day per phone,
+// 50/hour per IP — and a stranger from one IP can no longer lock the owner out.
+describe('reserveLoginAttempt (fix 19)', () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const DAY_MS = 24 * HOUR_MS;
+
+  it('is atomic: 25 parallel reservations from one IP yield exactly 10 true', async () => {
+    const { s } = await mkAuth();
+    const results = await Promise.all(
+      Array.from({ length: 25 }, () => s.reserveLoginAttempt(PHONE, 'ip-A')),
+    );
+    expect(results.filter(Boolean)).toHaveLength(10);
+  });
+
+  it('locks (phone, ip-A) after 10 while (phone, ip-B) still proceeds — no third-party lockout', async () => {
+    const { s } = await mkAuth();
+    for (let i = 0; i < 10; i++) expect(await s.reserveLoginAttempt(PHONE, 'ip-A')).toBe(true);
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-A')).toBe(false);
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-B')).toBe(true);
+  });
+
+  it('a locked stranger IP hammering on does NOT advance the per-phone day counter', async () => {
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis);
+    for (let i = 0; i < 40; i++) await s.reserveLoginAttempt(PHONE, 'ip-A'); // 10 pass, 30 refused
+    const dayKey = [...redis.dump.keys()].find((k) => k.startsWith(`sr_loginfail:p:${NORM}:`));
+    expect(dayKey).toBeDefined();
+    expect(redis.dump.get(dayKey!)).toBe('10');
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-B')).toBe(true);
+  });
+
+  it('30 reservations over 4 IPs lock the phone for every IP until the day bucket rolls', async () => {
+    let now = 1_000_000;
+    const { s } = await mkAuth(fakeRedis(), () => now);
+    const ips = ['ip-A', 'ip-B', 'ip-C', 'ip-D'];
+    for (let i = 0; i < 30; i++) expect(await s.reserveLoginAttempt(PHONE, ips[i % 4])).toBe(true);
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-E')).toBe(false); // never seen this IP; phone ceiling
+    now += DAY_MS + 1000;
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-E')).toBe(true);
+  });
+
+  it('the (phone, IP) hourly bucket rolls after an hour; the phone/day ceiling still holds', async () => {
+    let now = 1_000_000;
+    const { s } = await mkAuth(fakeRedis(), () => now);
+    for (let i = 0; i < 10; i++) await s.reserveLoginAttempt(PHONE, 'ip-A');
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-A')).toBe(false);
+    now += HOUR_MS;
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-A')).toBe(true);
+  });
+
+  it('caps one IP at 50 reservations an hour across phones', async () => {
+    const { s } = await mkAuth();
+    let allowed = 0;
+    for (let i = 0; i < 60; i++) {
+      if (await s.reserveLoginAttempt(`1555010${String(2100 + i)}`, 'ip-A')) allowed += 1;
+    }
+    expect(allowed).toBe(50);
+  });
+
+  it('clearLoginFailures(phone, ip) after 9 failures + 1 success leaves (phone, ip) at 0 and deletes the day key', async () => {
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis);
+    for (let i = 0; i < 10; i++) expect(await s.reserveLoginAttempt(PHONE, 'ip-A')).toBe(true); // 9 failures + the success
+    await s.clearLoginFailures(PHONE, 'ip-A');
+    const keys = [...redis.dump.keys()];
+    expect(keys.some((k) => k.startsWith(`sr_loginfail:pi:${NORM}:`))).toBe(false);
+    expect(keys.some((k) => k.startsWith(`sr_loginfail:p:${NORM}:`))).toBe(false);
+    // The per-IP hourly counter keeps counting (documented): it is not cleared.
+    expect(keys.some((k) => k.startsWith('sr_loginfail:ip:'))).toBe(true);
+    for (let i = 0; i < 10; i++) expect(await s.reserveLoginAttempt(PHONE, 'ip-A')).toBe(true);
+  });
+
+  it('clearLoginFailures(phone) alone (the reset path) unlocks a phone locked from many IPs', async () => {
+    const { s } = await mkAuth();
+    const ips = ['ip-A', 'ip-B', 'ip-C', 'ip-D'];
+    for (let i = 0; i < 30; i++) await s.reserveLoginAttempt(PHONE, ips[i % 4]);
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-E')).toBe(false);
+    await s.clearLoginFailures(PHONE);
+    expect(await s.reserveLoginAttempt(PHONE, 'ip-E')).toBe(true);
+  });
+
+  it('never puts the raw IP in a key (hashed)', async () => {
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis);
+    await s.reserveLoginAttempt(PHONE, '203.0.113.7');
+    expect([...redis.dump.keys()].some((k) => k.includes('203.0.113.7'))).toBe(false);
+  });
+});
+
 describe('tenant binding (fix 1, D6)', () => {
   it('a session carries the tenant and resolveSession returns THAT row', async () => {
     const { s, customers, db } = await mkAuth();

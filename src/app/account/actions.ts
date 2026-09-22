@@ -33,8 +33,11 @@ import { encryptField, defaultProvider } from '@/lib/field-crypto';
  *    sessions ONLY from single-use 'register' pending-auth tokens; the phone is
  *    derived FROM THE TOKEN, never the form, and a 'reset' code can't log
  *    anyone in (purpose mismatch + purpose-namespaced OTP).
- *  - BRUTE FORCE: per-phone/day + per-IP/hour login lockout; per-IP OTP-send cap;
- *    plus the OTP store's per-number caps + daily fail lock.
+ *  - BRUTE FORCE (fix 19): every password check RESERVES its attempt atomically
+ *    before the Argon2 run — 10/hour per (phone, IP), 30/day per phone, 50/hour
+ *    per IP; a login clears the phone's counters, a reset clears the day
+ *    ceiling (so a stranger cannot lock the owner out). Per-IP OTP-send cap;
+ *    plus the OTP store's per-number send caps + reserved daily/per-code budgets.
  *  - The `__Host-` cookie is HttpOnly + Secure + SameSite=Lax + Path=/.
  */
 
@@ -178,17 +181,17 @@ export async function loginAction(
   if (!isValidPhone(phone) || password.length === 0) {
     return { step: 'login', error: GENERIC_LOGIN_ERROR };
   }
-  // Lockout BEFORE doing the (expensive) Argon2id verify — fail-closed, generic.
-  if (await auth.isLoginLocked(phone, ip)) {
+  // RESERVE the attempt (atomic INCR) BEFORE the expensive Argon2id verify —
+  // fail-closed, generic. A refused reservation never reaches the compare.
+  if (!(await auth.reserveLoginAttempt(phone, ip))) {
     return { step: 'login', error: GENERIC_LOGIN_ERROR };
   }
 
   const customer = await auth.verifyCustomerPassword(phone, password);
   if (!customer) {
-    await auth.recordLoginFailure(phone, ip);
-    return { step: 'login', error: GENERIC_LOGIN_ERROR };
+    return { step: 'login', error: GENERIC_LOGIN_ERROR }; // the reservation already counted it
   }
-  await auth.clearLoginFailures(phone);
+  await auth.clearLoginFailures(phone, ip);
 
   // Password-only login (owner decision 2026-06-12): the OTP second factor was
   // removed from LOGIN because free-form WhatsApp delivery fails outside
@@ -337,6 +340,10 @@ export async function resetAction(
   }
   if (!updated) return { step: 'login', error: SESSION_EXPIRED };
 
+  // The WhatsApp OTP proved the number: lift the phone's login lock (fix 19).
+  // This is the owner's way out of a lock that many strangers' IPs filled.
+  await authStore.clearLoginFailures(phone);
+
   await getPendingAuthStore().consume(pendingToken); // single-use
   return { step: 'login', notice: 'Password reset. Please sign in with your new password.' };
 }
@@ -400,15 +407,16 @@ export async function changePasswordAction(formData: FormData): Promise<void> {
   if (current.length === 0 || next.length === 0) {
     redirect(`${SETTINGS_PATH}?err=pw_current`);
   }
-  if (await auth.isLoginLocked(phone, ip)) {
+  // Same reserve-before-compare gate as login (fix 19): a refused reservation
+  // never reaches the Argon2 verify.
+  if (!(await auth.reserveLoginAttempt(phone, ip))) {
     redirect(`${SETTINGS_PATH}?err=pw_throttle`);
   }
   const verified = await auth.verifyCustomerPassword(phone, current);
   if (!verified) {
-    await auth.recordLoginFailure(phone, ip);
-    redirect(`${SETTINGS_PATH}?err=pw_current`);
+    redirect(`${SETTINGS_PATH}?err=pw_current`); // the reservation already counted it
   }
-  await auth.clearLoginFailures(phone);
+  await auth.clearLoginFailures(phone, ip);
 
   let dest = `${SETTINGS_PATH}?ok=password`;
   try {
