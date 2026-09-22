@@ -13,7 +13,7 @@ import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
 import { submitPartnerRequestAction } from './partners-action';
 import WaitlistForm from './landing/WaitlistForm';
-import { PARTNER_CORRIDORS } from './landing/corridors';
+import { PARTNER_CORRIDORS, WAITLIST_DESTINATIONS } from './landing/corridors';
 import { PARTNER_TYPES } from '@/lib/partner-type';
 
 // Self-hosted Inter, scoped to the landing tree only (applied on the landing
@@ -21,8 +21,10 @@ import { PARTNER_TYPES } from '@/lib/partner-type';
 const inter = Inter({ subsets: ['latin'], display: 'swap' });
 
 const TITLE = 'SmartRemit.ai — Global money transfers, made simpler.';
+// The corridor count follows ./landing/corridors (one list), never a literal.
+const CORRIDOR_COUNT = WAITLIST_DESTINATIONS.length;
 const DESCRIPTION =
-  'Send money across borders by chatting on WhatsApp. An AI agent quotes the live mid-market rate, a hosted page takes payment, and licensed partners settle. Non-custodial, sanctions-screened, 8 corridors — any direction.';
+  `Send money across borders by chatting on WhatsApp. An AI agent quotes the live mid-market rate, a hosted page takes payment, and licensed partners settle. Non-custodial, sanctions-screened, ${CORRIDOR_COUNT} corridors — any direction.`;
 
 export const metadata: Metadata = {
   title: TITLE,
@@ -30,7 +32,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: TITLE,
     description:
-      'Send money by chatting on WhatsApp. Live mid-market FX, licensed partners settle. Non-custodial remittance infrastructure across 8 corridors.',
+      `Send money by chatting on WhatsApp. Live mid-market FX, licensed partners settle. Non-custodial remittance infrastructure across ${CORRIDOR_COUNT} corridors.`,
     type: 'website',
     siteName: 'SmartRemit.ai',
     images: [SHARE_IMAGE],
@@ -54,6 +56,8 @@ const COUNTRIES = [
   { name: 'Australia', short: 'Australia', code: 'au' },
   { name: 'New Zealand', short: 'New Zealand', code: 'nz' },
   { name: 'India', short: 'India', code: 'in' },
+  { name: 'Hong Kong', short: 'Hong Kong', code: 'hk' },
+  { name: 'Mexico', short: 'Mexico', code: 'mx' },
 ];
 
 // Corridor checkbox options for the "Partner with us" form (and the waitlist's
@@ -472,7 +476,7 @@ export default async function LandingPage({
               id="corridors-h"
               className="text-[clamp(28px,4vw,46px)] font-semibold leading-[1.1] tracking-[-0.025em]"
             >
-              8 corridors. Any direction.
+              {CORRIDOR_COUNT} corridors. Any direction.
             </h2>
             <p className="mt-4 text-[16px] text-[#475569]">
               Send and receive between all of these — tap a country to start the chat.
