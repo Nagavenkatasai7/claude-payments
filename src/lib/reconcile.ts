@@ -4,7 +4,6 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { settleOrHold } from '@/lib/settlement';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every /api/worker
@@ -123,14 +122,12 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
   for (const t of victims) {
     // Rail-side config is the SETTLEMENT partner's when routed (same rule as
     // the re-instruct above); the customer-facing stage-1 message rides the
-    // OWNING partner's WhatsApp number (brand-side).
+    // OWNING partner's WhatsApp number — settleOrHold persists t.partnerId and
+    // the worker resolves the brand creds at drain time (fix 11), never here.
     const railIntegrations = await integrationsRepo.getIntegrations(
       t.settlementPartnerId ?? t.partnerId,
     );
-    const brandIntegrations = t.settlementPartnerId
-      ? await integrationsRepo.getIntegrations(t.partnerId)
-      : railIntegrations;
-    const result = await settleOrHold(db, t, railIntegrations, waCredsFrom(brandIntegrations));
+    const result = await settleOrHold(db, t, railIntegrations);
     const prefix = `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged (${t.fundingRef}) but never settled — `;
     switch (result.kind) {
       case 'started':
@@ -226,7 +223,7 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
   // STALE LOCKS (fix 7): leases the drain should have reclaimed but has not.
   // The alert is itself an outbox row — if the drain is dead it will not send,
   // which is why the ops page and scripts/outbox-status.ts read this out of
-  // band. Ids/kinds only: payloads may still carry creds (fix 11).
+  // band. Ids/kinds only — never print a payload.
   const staleLocks = await outbox.listStaleProcessing(STALE_LOCK_MINUTES);
   for (const row of staleLocks) {
     await outbox.enqueue(

@@ -113,6 +113,13 @@
       "when": 1789582583101,
       "tag": "0015_tenant_scoped_customers",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790041836606,
+      "tag": "0016_scrub_outbox_secrets",
+      "breakpoints": true
     }
   ]
 }

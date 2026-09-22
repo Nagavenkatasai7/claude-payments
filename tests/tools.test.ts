@@ -3060,6 +3060,33 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(rows.rows.every((x) => String(x.payload.body).includes(String(second.onboarding_url)))).toBe(true);
   });
 
+  it('a turn on a partner BYO number: the onboarding-link row names that partner and never carries ctx.waCreds (fix 11 / F58)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis(), PHONE, 'acme');
+    const r = await executeTool(
+      'register_seller',
+      { business_name: 'Acme Exports Inc' },
+      { ...ctx, waCreds: { phoneNumberId: 'pn_acme', token: 'tok_ctx' } },
+    );
+    expect(r.registered).toBe(true);
+    const rows = (await db.execute(
+      sql`SELECT payload FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown> }> };
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].payload.partnerId).toBe('acme');
+    expect('creds' in rows.rows[0].payload).toBe(false);
+    expect(JSON.stringify(rows.rows[0].payload)).not.toContain('tok_ctx');
+  });
+
+  it('a shared-number turn (no ctx.waCreds): the row carries neither partnerId nor creds ⇒ the worker uses the shared number, as before', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    const rows = (await db.execute(
+      sql`SELECT payload FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown> }> };
+    expect(Object.keys(rows.rows[0].payload).sort()).toEqual(['body', 'to']);
+  });
+
   it('is blocked at dispatch on the web channel (WhatsApp-only)', async () => {
     const ctx = await buildCtx(fakeRedis());
     const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, { ...ctx, channel: 'web' });
@@ -3142,6 +3169,29 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     const sellerPush = rows.rows.find((x) => x.dedupe_key === `sellerbill:${r.invoice_id}`)!;
     expect(sellerPush.payload.to).toBe(PHONE); // the seller's OWN number
     expect(String(sellerPush.payload.body)).toContain(String(r.pay_url));
+  });
+
+  it('billpush: and sellerbill: rows name the routed partner and never carry ctx.waCreds (fix 11 / F58)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx);
+    // 'default' reached on its OWN BYO number: the routed tenant and ctx.partnerId coincide.
+    const r = await executeTool(
+      'create_invoice',
+      { buyer_phone: '+1 555 987 6543', amount: 250, description: 'design work' },
+      { ...ctx, waCreds: { phoneNumberId: 'pn_default', token: 'tok_ctx' } },
+    );
+    expect(r.created).toBe(true);
+    const rows = (await db.execute(
+      sql`SELECT payload, dedupe_key FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ payload: Record<string, unknown>; dedupe_key: string }> };
+    expect(rows.rows.map((x) => x.dedupe_key).sort()).toEqual(
+      [`billpush:${r.invoice_id}`, `sellerbill:${r.invoice_id}`].sort(),
+    );
+    for (const row of rows.rows) {
+      expect(row.payload.partnerId).toBe('default');
+      expect('creds' in row.payload).toBe(false);
+      expect(JSON.stringify(row.payload)).not.toContain('tok_ctx');
+    }
   });
 
   it('is replay-safe: a duplicate call returns the SAME bill (one invoice, one buyer push)', async () => {
@@ -3677,6 +3727,70 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       const after = await owner.store.getTransfer(id); // owner's bill untouched
       expect(after?.status).toBe('paid');
       expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+
+    // ── Phase 1 Task 5 (money-05 class): the void is the guarded claim, never a full-row upsert ──
+    it('awaiting_payment but already CHARGED (card-funded bill, fundingRef set) ⇒ NOT cancelled; customer-safe reply; the charged row stays for the resume sweep', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      const t = (await ctx.store.getTransfer(id))!;
+      await ctx.store.saveTransfer({ ...t, fundingMethod: 'credit_card' }); // a B2B bill paid by card (pay-finalize.ts)
+      await createTransferRepo(db).setFundingRef(id, `mockfund-${id}`);   // the capture landed; settlement has not run yet
+      const r = await executeTool('cancel_bill', {}, ctx);
+      expect(r.cancelled).toBe(false);
+      expect(r.error_code).toBe('payment_processing');
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint).toLowerCase()).toContain('already being processed');
+      expect(String(r.reply_hint)).not.toMatch(/mockfund|partner|blocked|reversed/i); // no internal tokens, no promise
+      const after = await ctx.store.getTransfer(id);
+      expect(after?.status).toBe('awaiting_payment');
+      expect(after?.fundingRef).toBe(`mockfund-${id}`);
+      expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+
+    it('a bill that SETTLES between the read and the cancel is never overwritten (the old full-row upsert wrote cancelled over paid)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      let raced = false;
+      const racyStore: typeof ctx.store = {
+        ...ctx.store,
+        async listTransfersByPhone(partnerId, phone, limit) {
+          const snapshot = await ctx.store.listTransfersByPhone(partnerId, phone, limit); // sees awaiting_payment
+          if (!raced) {
+            raced = true;
+            await ctx.store.updateTransferFromWebhook(id, 'paid'); // the settlement wins after the read
+          }
+          return snapshot;
+        },
+      };
+      const r = await executeTool('cancel_bill', {}, { ...ctx, store: racyStore });
+      expect(r.cancelled).toBe(false);
+      expect(r.error_code).toBe('payment_processing');
+      const after = await ctx.store.getTransfer(id);
+      expect(after?.status).toBe('paid');                 // the instructed row stands
+      expect(after?.refundStatus ?? 'none').toBe('none');
+    });
+
+    it('a bill cancelled concurrently (e.g. by staff) answers "already cancelled" without writing again', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const id = await mintB2b(ctx);
+      let raced = false;
+      const racyStore: typeof ctx.store = {
+        ...ctx.store,
+        async listTransfersByPhone(partnerId, phone, limit) {
+          const snapshot = await ctx.store.listTransfersByPhone(partnerId, phone, limit);
+          if (!raced) {
+            raced = true;
+            expect(await ctx.store.cancelTransferIfUnfunded(id, ctx.partnerId)).not.toBeNull(); // a staff Cancel lands first
+          }
+          return snapshot;
+        },
+      };
+      const r = await executeTool('cancel_bill', {}, { ...ctx, store: racyStore });
+      expect(r.cancelled).toBe(true);
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint).toLowerCase()).toContain('already cancelled');
+      expect((await ctx.store.getTransfer(id))?.status).toBe('cancelled');
     });
   });
 

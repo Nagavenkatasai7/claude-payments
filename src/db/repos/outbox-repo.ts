@@ -34,6 +34,34 @@ export type OutboxKind =
 
 export type OutboxRow = typeof outbox.$inferSelect;
 
+// Keys that only a secret-bearing shape carries: WaCreds ({ phoneNumberId, token }),
+// the PartnerIntegrations sub-configs (apiKey, webhookSecret, credentials,
+// verifyToken, appSecret) and the pre-fix-11 `creds` envelope.
+const SECRET_SHAPE_KEYS: ReadonlySet<string> = new Set([
+  'creds', 'token', 'verifytoken', 'appsecret', 'apikey', 'webhooksecret',
+  'credentials', 'signingsecret', 'secret', 'password',
+]);
+
+/**
+ * Paths (never values) at which `value` carries a secret-bearing shape: a
+ * secret-named key anywhere, or a { kyc, payment, whatsapp } PartnerIntegrations
+ * object. Pure; used by enqueue's test-only tripwire (fix 11).
+ */
+export function secretShapePaths(value: unknown, path = '$', depth = 0, out: string[] = []): string[] {
+  if (depth > 6 || value === null || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    value.forEach((v, i) => secretShapePaths(v, `${path}[${i}]`, depth + 1, out));
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  if ('kyc' in obj && 'payment' in obj && 'whatsapp' in obj) out.push(`${path} (PartnerIntegrations shape)`);
+  for (const [k, v] of Object.entries(obj)) {
+    if (SECRET_SHAPE_KEYS.has(k.toLowerCase())) out.push(`${path}.${k}`);
+    secretShapePaths(v, `${path}.${k}`, depth + 1, out);
+  }
+  return out;
+}
+
 export const MAX_ATTEMPTS = 8;
 /**
  * Lease length for a claimed row. 5× the worker's hard ceiling (maxDuration =
@@ -57,6 +85,17 @@ export function createOutboxRepo(db: DbOrTx) {
       payload: Record<string, unknown>,
       opts: { delayMs?: number; dedupeKey?: string } = {},
     ): Promise<boolean> {
+      // TEST-ONLY tripwire (fix 11): a payload must never carry a secret-bearing
+      // shape — creds resolve at drain time, capabilities are sealed. Under
+      // vitest every producer the suite exercises is checked at runtime; in
+      // production this is a no-op (a new throw inside money transactions is not
+      // worth it — tests/outbox-payload-secrets.test.ts is the build gate).
+      if (process.env.VITEST) {
+        const paths = secretShapePaths(payload);
+        if (paths.length > 0) {
+          throw new Error(`outbox payload for ${kind} carries a secret-bearing shape at ${paths.join(', ')} (fix 11)`);
+        }
+      }
       const rows = await db
         .insert(outbox)
         .values({
@@ -195,7 +234,8 @@ export function createOutboxRepo(db: DbOrTx) {
      * STILL not reclaimed. The reclaim lives in claimBatch, so an expired lease
      * normally disappears within one drain; one that survives this long means
      * the drain itself is not running. Ids/kinds/timestamps only — callers must
-     * never print `payload` (it may carry creds until fix 11).
+     * never print `payload` (message bodies are customer-facing text; sealed
+     * email values are ciphertext — fix 11 keeps secrets out, not PII).
      */
     async listStaleProcessing(minutes: number, limit = 100): Promise<OutboxRow[]> {
       return db
@@ -206,6 +246,31 @@ export function createOutboxRepo(db: DbOrTx) {
         )
         .orderBy(sql`coalesce(${outbox.leaseUntil}, ${outbox.lockedAt} + make_interval(secs => ${LEASE_SEC}))`)
         .limit(limit);
+    },
+
+    /**
+     * fix 11: rows that still HOLD a secret a pre-fix release copied into the
+     * payload — an object `creds` (WhatsApp bearer token) or a cleartext
+     * partner-application link on an unsealed invite. COUNTS by kind/status
+     * only; no payload is ever selected. The drizzle 0016 runbook gate
+     * (scripts/outbox-status.ts "SECRETS AT REST"): before /migrate-prod every
+     * row here must be done/dead; after the apply this must be empty. Tests a
+     * VALUE, not a key: `"creds": null` holds nothing and is not counted
+     * (jsonb_typeof, same predicates as drizzle/0016_scrub_outbox_secrets.sql).
+     */
+    async listSecretsAtRest(): Promise<Array<{ kind: string; status: string; n: number }>> {
+      return db
+        .select({ kind: outbox.kind, status: outbox.status, n: sql<number>`count(*)::int`.mapWith(Number) })
+        .from(outbox)
+        .where(
+          sql`jsonb_typeof(${outbox.payload} -> 'creds') = 'object'
+            OR (${outbox.kind} = 'email.send'
+                AND starts_with(${outbox.dedupeKey}, 'partner_app_invite:')
+                AND jsonb_typeof(${outbox.payload} -> 'sealed') IS DISTINCT FROM 'object'
+                AND ${outbox.payload} ->> 'text' LIKE '%/partners/apply/%')`,
+        )
+        .groupBy(outbox.kind, outbox.status)
+        .orderBy(outbox.kind, outbox.status);
     },
 
     /** Dead letters for the ops page (+ manual retry). */

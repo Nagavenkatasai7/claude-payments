@@ -174,6 +174,50 @@ describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3
   });
 });
 
+async function stage1Payload(id: string): Promise<Record<string, unknown>> {
+  const r = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = ${'stage1:' + id}`);
+  return (r as unknown as { rows: Array<{ payload: Record<string, unknown> }> }).rows[0].payload;
+}
+
+describe('stage-1 payloads never carry a secret (fix 11 / F49)', () => {
+  it('beginSettlement: the stage-1 payload is exactly { to, body, partnerId } — the OWNING partner, no creds/token', async () => {
+    await store.saveTransfer(fixture());
+    await beginSettlement(db, fixture(), SIMULATOR);
+    const payload = await stage1Payload('st_t1');
+    expect(payload.partnerId).toBe('acme');
+    expect(payload.to).toBe('15551230000');
+    expect(Object.keys(payload).sort()).toEqual(['body', 'partnerId', 'to']);
+    expect(JSON.stringify(payload)).not.toMatch(/creds|token/i);
+  });
+
+  it('a ROUTED transfer: the stage-1 row names transfer.partnerId (the brand), never settlementPartnerId (the rail)', async () => {
+    await seedPartner(db, 'railp');
+    await store.saveTransfer({ ...fixture(), settlementPartnerId: 'railp' });
+    await beginSettlement(db, { ...fixture(), settlementPartnerId: 'railp' }, SIMULATOR);
+    expect((await stage1Payload('st_t1')).partnerId).toBe('acme');
+  });
+
+  it('dedupe keys are unchanged by the payload change (stage1:/mocksettle:)', async () => {
+    await store.saveTransfer(fixture());
+    await beginSettlement(db, fixture(), MOCK);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['stage1:st_t1', 'mocksettle:st_t1']);
+  });
+
+  it('no settlement entry point accepts a creds argument any more (compile-time guard — tsc fails if one is re-added)', () => {
+    // Never executed: exists so `tsc --noEmit` (CI + the Stop hook) reports an
+    // unused @ts-expect-error the moment a 4th/3rd creds parameter returns.
+    const neverRun = async () => {
+      // @ts-expect-error beginSettlement takes exactly (db, transfer, integrations)
+      await beginSettlement(db, fixture(), MOCK, { phoneNumberId: 'x', token: 'y' });
+      // @ts-expect-error beginHold takes exactly (db, transfer)
+      await beginHold(db, fixture(), { phoneNumberId: 'x', token: 'y' });
+      // @ts-expect-error settleOrHold takes exactly (db, transfer, integrations)
+      await settleOrHold(db, fixture(), MOCK, { phoneNumberId: 'x', token: 'y' });
+    };
+    expect(typeof neverRun).toBe('function');
+  });
+});
+
 async function stage1Body(id: string): Promise<string | null> {
   const r = await db.execute(sql`SELECT payload->>'body' AS body FROM outbox WHERE dedupe_key = ${'stage1:' + id}`);
   return (r as unknown as { rows: Array<{ body: string }> }).rows[0]?.body ?? null;
@@ -221,12 +265,13 @@ describe('beginHold — the transactional compliance hold', () => {
     expect(body).not.toContain('123456789012'); // PII: the destination never enters the payload
   });
 
-  it('carries the OWNER partner WhatsApp creds on the held message (same payload shape as the paid stage-1)', async () => {
+  it('the held stage-1 payload names the OWNER partnerId and carries NO creds (same shape as the paid stage-1 — fix 11)', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
-    await beginHold(db, { ...fixture(), complianceStatus: 'flagged' }, { phoneNumberId: 'pn_acme', token: 'tok_acme' });
-    const r = await db.execute(sql`SELECT payload->'creds'->>'phoneNumberId' AS pn, payload->>'to' AS "to" FROM outbox WHERE dedupe_key = 'stage1:st_t1'`);
-    const row = (r as unknown as { rows: Array<{ pn: string; to: string }> }).rows[0];
-    expect(row).toEqual({ pn: 'pn_acme', to: '15551230000' });
+    await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
+    const payload = await stage1Payload('st_t1');
+    expect(payload.partnerId).toBe('acme');
+    expect(payload.to).toBe('15551230000');
+    expect(Object.keys(payload).sort()).toEqual(['body', 'partnerId', 'to']);
   });
 
   it("is idempotent: a second call returns { kind: 'already' } and enqueues nothing", async () => {

@@ -1918,7 +1918,7 @@ async function createInvoiceTool(
       {
         to: buyerPhone,
         body: `You have a new bill from ${seller.businessName} — pay securely: ${payUrl}`,
-        ...(ctx.waCreds ? { creds: ctx.waCreds } : {}),
+        partnerId: routedSenderPartnerId(ctx),
       },
       { dedupeKey: `billpush:${invoiceId}` },
     );
@@ -1949,6 +1949,20 @@ async function createInvoiceTool(
   };
 }
 
+/**
+ * The tenant whose WhatsApp NUMBER this turn runs on, persisted on a system push
+ * so the worker re-resolves that tenant's creds at drain time (fix 11 / F58 —
+ * the payload never carries ctx.waCreds). A turn holds waCreds ONLY when it
+ * arrived on a partner's BYO number, and then ctx.partnerId IS that routed
+ * partner (src/app/api/worker/route.ts: both come from the agent.turn row's
+ * routedPartnerId). A shared-number turn has neither ⇒ undefined ⇒ the key is
+ * dropped by JSON serialization ⇒ the worker sends on the shared env number,
+ * exactly as before.
+ */
+function routedSenderPartnerId(ctx: ToolContext): PartnerId | undefined {
+  return ctx.waCreds ? ctx.partnerId : undefined;
+}
+
 // Seller-facing links (onboarding / pay) are delivered by the SYSTEM via the
 // durable outbox — NOT typed by the bot, which is globally barred from writing URLs
 // (the consumer pay link is system-delivered the same way). Best-effort + deduped:
@@ -1962,7 +1976,7 @@ async function enqueueSellerLink(
   try {
     await (ctx.outboxRepo ?? createOutboxRepo(getDb())).enqueue(
       'whatsapp.text',
-      { to, body, ...(ctx.waCreds ? { creds: ctx.waCreds } : {}) },
+      { to, body, partnerId: routedSenderPartnerId(ctx) },
       { dedupeKey },
     );
     pokeWorker();
@@ -2515,8 +2529,12 @@ async function checkBillStatusTool(
  * cancel_bill — buyer-initiated cancel/stop of their own B2B bill payment.
  * NON-CUSTODIAL: it never moves money. Routes on the most-recent ACTIONABLE B2B
  * transfer (own-phone):
- *   • awaiting_payment → flip to cancelled (nothing was debited — the ACH pull
- *     only fires after the buyer approves+pays).
+ *   • awaiting_payment → void through the SAME guarded claim staff Cancel uses
+ *     (store.cancelTransferIfUnfunded → transfer-repo.cancelIfCancellable;
+ *     Phase 1 Task 5). Only an UNFUNDED bill flips: nothing was debited, since
+ *     the ACH pull fires only after the buyer approves and pays. A card-funded
+ *     bill whose charge already landed, or a bill that settled after the read,
+ *     is NOT cancelled (error_code 'payment_processing'). Never a full-row upsert.
  *   • in_review        → DEFER to ops; never cancel from chat.
  *   • paid             → reuse request_refund's guarded refundStatus none→requested
  *     flag (REQUEST a reverse; a human approves). NEVER reverse directly.
@@ -2543,13 +2561,36 @@ async function cancelBillTool(
     // mutation — a B2B chat tool must never touch another buyer's row.
     if (active.phone === ctx.phone) {
       switch (active.status) {
-        case 'awaiting_payment':
-          await ctx.store.saveTransfer({ ...active, status: 'cancelled' });
+        case 'awaiting_payment': {
+          // Phase 1 Task 5 (money-05 class): ONE guarded claim, never a full-row
+          // upsert of the row read above. It voids only an UNFUNDED bill; a
+          // charged one is left for the funding-resume sweep, and a bill that
+          // settled after the read is never overwritten.
+          const voided = await ctx.store.cancelTransferIfUnfunded(active.id, ctx.partnerId); // tenant-scoped claim
+          if (voided) {
+            return {
+              cancelled: true,
+              transfer_id: active.id,
+              reply_hint: 'Cancelled — nothing was debited.',
+            };
+          }
+          // The claim missed: answer from the FRESH row and never fall back to a write.
+          const fresh = await ctx.store.getTransfer(active.id);
+          if (fresh?.status === 'cancelled') {
+            return {
+              cancelled: true,
+              transfer_id: active.id,
+              reply_hint: 'This bill payment is already cancelled.',
+            };
+          }
           return {
-            cancelled: true,
+            cancelled: false,
+            error_code: 'payment_processing',
             transfer_id: active.id,
-            reply_hint: 'Cancelled — nothing was debited.',
+            reply_hint:
+              "This payment is already being processed, so I can't cancel it right now. Ask me again once it settles and I can request a reversal for our team to review.",
           };
+        }
         case 'in_review':
           return {
             deferred: true,

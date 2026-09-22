@@ -212,7 +212,7 @@ describe('pay route — delayed best-effort poke for the delivered message', () 
     expect(workerCalls()).toBe(0);
   });
 
-  it("ROUTED transfer: the RAIL is the settlement partner's; stage-1 creds stay the OWNER's", async () => {
+  it("ROUTED transfer: the RAIL is the settlement partner's; the stage-1 row names the OWNER and carries no token (fix 11)", async () => {
     // Owner ('default') is a mock-rail partner with its own WhatsApp number;
     // the route says settle via 'railp', whose rail is webhook-driven.
     integrationsByPartner['default'] = {
@@ -237,10 +237,13 @@ describe('pay route — delayed best-effort poke for the delivered message', () 
 
     const rows = (await db.execute(
       sql`SELECT kind, payload FROM outbox ORDER BY id`,
-    )) as unknown as { rows: Array<{ kind: string; payload: { creds?: { phoneNumberId?: string } } }> };
+    )) as unknown as { rows: Array<{ kind: string; payload: { partnerId?: string; creds?: unknown } }> };
     expect(rows.rows.map((r) => r.kind)).toEqual(['whatsapp.text', 'settlement.instruct']);
-    // Brand-side: the stage-1 "payment received" goes from the OWNER's number.
-    expect(rows.rows[0].payload.creds).toMatchObject({ phoneNumberId: 'pn_owner' });
+    // Brand-side: the stage-1 "payment received" names the OWNER — never the
+    // rail partner — and the worker resolves the owner's creds at drain time.
+    expect(rows.rows[0].payload.partnerId).toBe('default');
+    expect(rows.rows[0].payload.creds).toBeUndefined();
+    expect(JSON.stringify(rows.rows[0].payload)).not.toMatch(/tok_owner|tok_rail|pn_rail/);
   });
 
   it('ROUTED transfer whose settlement partner has NO webhook-driven rail → 400 fail-closed, nothing charged', async () => {

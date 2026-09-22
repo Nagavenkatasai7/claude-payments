@@ -3,6 +3,7 @@
 import { useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
+import { showsStaffCancel } from '@/lib/dashboard-cancel-policy';
 import { money } from './format';
 import { MaskedDestination } from './masked-destination';
 import { ExpandableTable, type ExpandableColumn } from './expandable-table';
@@ -253,10 +254,18 @@ export function TransactionsTabs({
                   <button type="submit" className={MINI_BTN}>Resend link</button>
                 </form>
               )}
-              {(t.status === 'awaiting_payment' || t.status === 'paid') && canCancel && (
+              {showsStaffCancel(t) && canCancel && (
+                // money-05: only an UNCHARGED awaiting_payment row is voidable. A paid
+                // transfer is refunded (admin, Details page) or reversed, never cancelled.
                 <form action={cancelAction}>
                   <input type="hidden" name="id" value={t.id} />
-                  <button type="submit" className={MINI_BTN_DANGER}>Cancel</button>
+                  <button
+                    type="submit"
+                    className={MINI_BTN_DANGER}
+                    title="Voids this unpaid transfer. Nothing was charged."
+                  >
+                    Cancel
+                  </button>
                 </form>
               )}
               {canAssign && (
