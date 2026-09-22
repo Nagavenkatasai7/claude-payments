@@ -15,6 +15,7 @@ import {
   type PartnerApiDeps,
 } from '@/lib/partner-api-service';
 import type { Partner } from '@/lib/types';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
 
 // The hold path pokes the worker inside confirmTransaction — assert the poke
@@ -622,5 +623,30 @@ describe('partner-api-service: createQuote validates destination_currency at the
     expect(lower).toMatchObject({ ok: true, status: 200 });
     expect(lower).toEqual(upper);
     expect((lower as { data: { destination_currency: string } }).data.destination_currency).toBe('GBP');
+  });
+});
+
+describe('fix 6 (ctx-01): a masked payout_destination is refused at the edge, before the claim', () => {
+  it('inline masked destination → 422; no row, key unbound; the same key then mints with a real account', async () => {
+    const { deps, store, db } = await harness();
+    const masked = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-masked', txBody({
+      beneficiary: { name: 'Anita', phone: '919876543210', payout_method: 'bank', payout_destination: '****7890' },
+    }));
+    expect(masked).toMatchObject({ ok: false, status: 422 });
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect(await createIdempotencyRepo(db).find('acme', 'idem-masked')).toBeNull();
+    const retry = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-masked', txBody());
+    expect(retry).toMatchObject({ ok: true, status: 201 });
+    const [t] = await store.listTransfers();
+    expect((await store.getTransferDecrypted(t.id))?.payoutDestination).toBe('1234567890');
+  });
+
+  it("an Idempotency-Key in the pay page's / B2B checkout's reserved namespace ('draft:', 'b2binvoice:') → 400; nothing bound, nothing minted", async () => {
+    const { deps, store, db } = await harness();
+    for (const key of ['draft:abc', 'b2binvoice:inv_1']) {
+      expect(await createTransaction(deps, DELEGATED, 'pk_1', key, txBody()), key).toMatchObject({ ok: false, status: 400 });
+      expect(await createIdempotencyRepo(db).find('acme', key), key).toBeNull();
+    }
+    expect(await store.listTransfers()).toHaveLength(0);
   });
 });

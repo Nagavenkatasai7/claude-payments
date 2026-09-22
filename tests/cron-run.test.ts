@@ -321,3 +321,33 @@ describe('runDueSchedules — a refused scheduled send is loud (Task 9)', () => 
     expect(await opsAlerts(db)).toHaveLength(0);
   });
 });
+
+describe('runDueSchedules — pre-fix schedules (fix 6 / ctx-01)', () => {
+  async function runOnly(schedule: Schedule) {
+    // (db: Task 9 made the cron's ops-alert outbox a dependency — every caller passes it.)
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(schedule);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notified: string[] = [];
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+    return { result, notified, store, scheduleStore };
+  }
+
+  it('a masked destination is NOT fired: no transfer, no link, counted in failed, lastRunAt untouched', async () => {
+    const { result, notified, store, scheduleStore } = await runOnly({ ...sched('masked', 21), payoutMethod: 'bank', payoutDestination: '****9012' });
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(notified).toHaveLength(0);
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect((await scheduleStore.getSchedule('masked'))?.lastRunAt).toBeUndefined();
+  });
+
+  it('a partner-pulled funding method is NOT fired (a consumer row would never be charged)', async () => {
+    const { result, store } = await runOnly({ ...sched('pulled', 21), fundingMethod: 'bank_pull' });
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(await store.listTransfers()).toHaveLength(0);
+  });
+});

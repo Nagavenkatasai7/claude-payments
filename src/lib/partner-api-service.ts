@@ -7,7 +7,7 @@ import type {
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
-import { validatePayoutFields } from './payout-format';
+import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
 import { createTransfer } from './transfer-create';
 import { sendGateActive } from './kyc-gate';
@@ -257,6 +257,16 @@ export async function createTransaction(
   body: Record<string, unknown>,
 ): Promise<SvcResult<unknown>> {
   if (!idempotencyKey) return err(400, 'Idempotency-Key header is required.');
+  // fix 6 (ctx-01): 'draft:' and 'b2binvoice:' keys belong to the pay page
+  // (pay-finalize.ts, under the default tenant) and the B2B checkout
+  // (b2b-pay-finalize.ts). transfer-repo's payoutEditable reads a 'draft:'
+  // claim under default as "NOT partner-API-minted"; a partner key there (the
+  // default tenant can hold API keys — admin-dashboard/partners/actions.ts)
+  // would unlock the payout of a transfer the partner supplied. Refused before
+  // any read or write.
+  if (/^(draft|b2binvoice):/.test(idempotencyKey)) {
+    return err(400, "Idempotency-Key may not begin with 'draft:' or 'b2binvoice:' (reserved).");
+  }
 
   // Body validation + TENANT BINDING run BEFORE the idempotency claim (fix 1):
   // a refusal here never binds the key to a half-minted id. sender.phone is
@@ -288,6 +298,13 @@ export async function createTransaction(
     benPhone = str(ben.phone);
     payoutMethod = (str(ben.payout_method) as PayoutMethod) || 'bank';
     payoutDestination = str(ben.payout_destination);
+  }
+
+  // fix 6 (ctx-01): a masked display value is never an account. Refuse at the
+  // edge — BEFORE the customer write and the idempotency claim — so a corrected
+  // retry under the same key mints normally.
+  if (isMaskedDestination(payoutDestination)) {
+    return err(422, 'beneficiary payout_destination must be the recipient account, not a masked display value.');
   }
 
   // The LAST step before the claim, AFTER every body check (Task 2 Step 28
