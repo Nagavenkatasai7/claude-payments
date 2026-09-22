@@ -253,7 +253,9 @@ export function memoizedPartnerContext(deps: WorkerDeps): PartnerResolver {
  * it throws a FIXED reason code (no value from the payload), rides the ordinary
  * backoff and dead-letters at MAX_ATTEMPTS with the single `dead:<id>` alert.
  * `"creds": null` holds nothing (the same reading as listSecretsAtRest and
- * drizzle 0016) and is not a legacy row. A partnerId row ignores any `creds`
+ * drizzle 0016) and is not a legacy row; any OTHER non-null value fails closed
+ * here even where the detector's jsonb_typeof = 'object' test would not count
+ * it — stricter on purpose. A partnerId row ignores any `creds`
  * beside it: the ledger tenant wins, a payload can never pin a token. The
  * regression detectors stay: enqueue's test-only tripwire refuses a creds
  * payload, and listSecretsAtRest / the SECRETS AT REST section count survivors.
