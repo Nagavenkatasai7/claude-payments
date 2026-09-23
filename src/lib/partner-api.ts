@@ -67,6 +67,7 @@ export async function guardPartner(
     monthlyVolumeStore: getMonthlyVolumeStore(),
     integrationsStore: getPartnerIntegrationsStore(), // WL3 — per-partner rail/creds
     db: getDb(), // beneficiaries / idempotency / api audit (Stage 2a-3)
+    keyMode: auth.mode, // Program-Fix 44 P2: the key's environment (hash-covered prefix)
   };
   return { ok: true, ctx: { partner, keyId: auth.keyId, mode: auth.mode, scopes: auth.scopes, deps } };
 }

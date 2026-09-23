@@ -21,6 +21,7 @@ import type {
   KycStatus,                                                                 // NEW (Phase 3 gate)
   EntityType,                                                                // NEW (B2B)
   SendLimits,                                                                // Program fix 16
+  TransferEnvironment,                                                       // Program-Fix 44 P2
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
@@ -95,6 +96,11 @@ export interface CreateTransferInput {
   // a non-blocked mint is HELD (flagged + SENDER_IDENTITY_MISSING_REASON), in
   // the same transaction as the insert. Only the partner API sets it today.
   senderIdentityMissing?: boolean;
+  // Program-Fix 44 P2: 'test' ⇔ a sandbox (sr_test_) Partner API key minted
+  // it. Absent ⇒ 'live' (every other mint path). A test mint is never
+  // best-rate routed, and a claim-first same-id replay across environments is
+  // refused (TransferIdConflictError), never returned.
+  environment?: TransferEnvironment;
 }
 
 /**
@@ -283,7 +289,9 @@ export async function createTransferWithOutcome(
   // above — settling that through the winning partner's rail would pay out at
   // a rate that partner never offered, so the route is dropped with the stale
   // rate (platform settle via the customer's own partnerId).
-  const settlementPartnerId = input.quote ? input.settlementPartnerId : undefined;
+  // Program-Fix 44 P2: a sandbox mint is never routed to another partner's rail.
+  const settlementPartnerId =
+    input.quote && input.environment !== 'test' ? input.settlementPartnerId : undefined;
 
   // ── ONE locked mint per (partner, phone) ──────────────────────────────────
   // Sanctions → EDD → blocked row / placeholder refusal → cap → insert, all
@@ -373,6 +381,8 @@ async function mintLocked(
     const existing = await ops.getTransfer(input.id);
     if (existing) {
       if (existing.partnerId !== input.partnerId) throw new TransferIdConflictError();
+      // Program-Fix 44 P2: the same id in the OTHER environment is a conflict too.
+      if ((existing.environment ?? 'live') !== (input.environment ?? 'live')) throw new TransferIdConflictError();
       return { transfer: existing, replayed: true };
     }
   }
@@ -474,6 +484,7 @@ async function mintLocked(
     recipientBusinessName: input.recipientBusinessName,
     achTokenRef: input.achTokenRef,
     invoiceId: input.invoiceId,
+    environment: input.environment ?? 'live',        // Program-Fix 44 P2
   };
   // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
   // One sanctions.screen audit row per screened mint, written through the

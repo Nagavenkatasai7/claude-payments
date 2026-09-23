@@ -2,8 +2,9 @@ import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
 import type {
-  CountryCode, CurrencyCode, KycStatus, Partner, PartnerId, PayoutMethod, Transfer,
+  CountryCode, CurrencyCode, KycStatus, Partner, PartnerId, PayoutMethod, Transfer, TransferEnvironment,
 } from './types';
+import type { ApiKeyMode } from './partner-api-scopes';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
@@ -63,6 +64,13 @@ export interface PartnerApiDeps {
   integrationsStore: PartnerIntegrationsStore; // WL3 — per-partner rail + WhatsApp creds
   customerStore: CustomerStore; // fix 1 — sender rows are per tenant
   db: DbOrTx; // beneficiaries / idempotency keys / api audit (Stage 2a-3)
+  /**
+   * Program-Fix 44 P2: the AUTHENTICATED key's mode (guardPartner sets it from
+   * the hash-covered plaintext prefix; never from the request). It decides the
+   * environment a transfer is minted in and the ONLY environment the key can
+   * read, list or confirm. Required, so no caller can forget it.
+   */
+  keyMode: ApiKeyMode;
   // Injectable so the route uses the real provider while tests stub settlement
   // (the mock provider sends WhatsApp + arms a timer we don't want in unit tests).
   initiatePayment?: (transfer: Transfer) => Promise<void>;
@@ -71,6 +79,13 @@ export interface PartnerApiDeps {
 }
 
 const ok = <T>(status: number, data: T): SvcResult<T> => ({ ok: true, status, data });
+
+/** Program-Fix 44 P2: the environment a key operates in (test key ⇒ sandbox). */
+const envOf = (deps: Pick<PartnerApiDeps, 'keyMode'>): TransferEnvironment =>
+  deps.keyMode === 'test' ? 'test' : 'live';
+/** A ledger row belongs to the key's environment (absent ⇒ live). */
+const sameEnv = (deps: Pick<PartnerApiDeps, 'keyMode'>, t: Transfer): boolean =>
+  (t.environment ?? 'live') === envOf(deps);
 const err = (status: number, error: string): SvcResult<never> => ({ ok: false, status, error });
 
 const num = (v: unknown): number | null => {
@@ -398,20 +413,35 @@ export async function createTransaction(
   // later inserts its beneficiary name / destination edge validation ABOVE this
   // line — never below it). No WhatsApp opt-in is implied by an API mint
   // (ensureCustomer, not upsertOnFirstInbound).
-  await deps.customerStore.ensureCustomer(partner.id, senderPhone);
+  //
+  // Program-Fix 44 P2: a SANDBOX mint writes no customers row — creating one
+  // would start (or age) a live customer's T0 window. Sanctions, caps and the
+  // KYC attestation do not need it (capSubject falls back to live history).
+  const environment = envOf(deps);
+  if (environment === 'live') await deps.customerStore.ensureCustomer(partner.id, senderPhone);
 
   // CLAIM-FIRST idempotency (Stage 2c): pre-generate the transfer id and bind
   // the key BEFORE minting. PK(partner_id, key) means exactly one id can ever
   // own this key — a concurrent duplicate or crash-replay deterministically
   // converges on the winner, and a crash after the claim re-mints the SAME id.
+  //
+  // Program-Fix 44 P2: the claim key is NAMESPACED by environment — a test
+  // key claims `test:<key>` — so a sandbox replay can never resolve to (or
+  // block) a live transfer. A live key may literally send `test:<x>`, so the
+  // replay below ALSO checks the row's environment: a cross-environment hit
+  // is a 409, never a replay (mintLocked refuses the same way).
   const idem = createIdempotencyRepo(deps.db);
   const candidateId = (deps.genId ?? newTransferId)();
-  const reservedId = await idem.claim(partner.id, idempotencyKey, candidateId);
+  const claimKey = environment === 'test' ? `test:${idempotencyKey}` : idempotencyKey;
+  const reservedId = await idem.claim(partner.id, claimKey, candidateId);
   if (reservedId !== candidateId) {
     // The key was already bound — replay. (A bound-but-unminted id means a
     // prior attempt crashed mid-mint; fall through and mint THAT id.)
     const t = await deps.store.getTransfer(reservedId);
-    if (t && t.partnerId === partner.id) return ok(200, await transferViewWithName(deps, t));
+    if (t && t.partnerId === partner.id) {
+      if (!sameEnv(deps, t)) return err(409, 'Idempotency-Key conflict. Retry with a new key.');
+      return ok(200, await transferViewWithName(deps, t));
+    }
   }
 
   // senderPhone is required here (validated above), so an Indian sender with no
@@ -446,6 +476,7 @@ export async function createTransaction(
       // fix 5 (F43): an API mint never plants a saved recipient into the
       // customer's WhatsApp picker.
       saveRecipient: false,
+      environment, // Program-Fix 44 P2 — from the key, never the body
     }));
   } catch (e) {
     // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing
@@ -519,6 +550,7 @@ export async function listTransactions(
     limit,
     cursor: query.cursor ?? undefined,
     partnerId, // authoritative: from the API key, never the query
+    environment: envOf(deps), // Program-Fix 44 P2: only the key's own environment
   });
   // Resolve ALL sender names in ONE query (not N+1 per row), then project.
   const names = await resolveSenderNames(deps.db, page.items);
@@ -536,7 +568,8 @@ export async function getTransaction(
 ): Promise<SvcResult<unknown>> {
   const t = await deps.store.getTransfer(id);
   // 404 (never 403) for a missing OR out-of-scope transfer — don't disclose existence.
-  if (!t || t.partnerId !== partnerId) return err(404, 'Transaction not found.');
+  // Program-Fix 44 P2: another environment's row is out of scope too.
+  if (!t || t.partnerId !== partnerId || !sameEnv(deps, t)) return err(404, 'Transaction not found.');
   return ok(200, await transferViewWithName(deps, t));
 }
 
@@ -615,7 +648,9 @@ export async function confirmTransaction(
 ): Promise<SvcResult<unknown>> {
   const t = await deps.store.getTransfer(id);
   // 404 (never 403) BEFORE any read or mutation of another tenant's row.
-  if (!t || t.partnerId !== partner.id) return err(404, 'Transaction not found.');
+  // Program-Fix 44 P2: or of another ENVIRONMENT's row — a test key can never
+  // confirm (settle) a live transfer, nor a live key a sandbox one.
+  if (!t || t.partnerId !== partner.id || !sameEnv(deps, t)) return err(404, 'Transaction not found.');
   if (t.complianceStatus === 'blocked' || t.status === 'blocked') return err(422, 'This transfer was blocked by compliance screening.');
   // Idempotent replay: already settled OR already held → current truth, no second effect.
   if (t.status === 'paid' || t.status === 'delivered' || t.status === 'in_review') {

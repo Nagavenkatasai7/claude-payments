@@ -10,10 +10,13 @@
 // pk_test_) for display only; every pre-fix key id is a bare pk_<id>, which
 // reads as live (grandfathered, owner decision A1).
 //
-// Scopes are FIXED per mode until sandbox isolation (P2) adds a per-key scopes
-// column: live holds everything; test holds only the three read-only /
-// stateless scopes, because without an environment column on transfers a test
-// key could otherwise mint, confirm or read live money.
+// Scopes are a per-mode CEILING: live holds everything; test holds the three
+// read-only / stateless scopes plus, since sandbox isolation (P2: the
+// transfers.environment column), transactions:read and transactions:write —
+// a test key mints, confirms and reads ONLY sandbox transfers. It never holds
+// rates, beneficiaries:write or settlements. P2's api_keys.scopes column can
+// only NARROW a key below its mode's ceiling (effectiveScopes); NULL means
+// the full mode set, so every existing key is unchanged.
 
 export type ApiKeyMode = 'live' | 'test';
 
@@ -31,7 +34,13 @@ export const ALL_SCOPES = [
 
 export type ApiScope = (typeof ALL_SCOPES)[number];
 
-const TEST_SCOPES: readonly ApiScope[] = ['corridors:read', 'quote', 'beneficiaries:validate'];
+const TEST_SCOPES: readonly ApiScope[] = [
+  'corridors:read',
+  'quote',
+  'beneficiaries:validate',
+  'transactions:read', // P2: sandbox transfers only (transfers.environment)
+  'transactions:write', // P2: sandbox transfers only; always the mock rail
+];
 
 const PLAINTEXT_PREFIX: Record<ApiKeyMode, string> = {
   live: 'sr_live_',
@@ -59,6 +68,20 @@ export function displayKeyPrefix(mode: ApiKeyMode): string {
 /** The fixed scope set for a mode (a fresh copy). */
 export function scopesForMode(mode: ApiKeyMode): ApiScope[] {
   return mode === 'test' ? [...TEST_SCOPES] : [...ALL_SCOPES];
+}
+
+/**
+ * THE scope rule for an authenticated key (Program-Fix 44 P2): the stored
+ * api_keys.scopes value intersected with the mode's ceiling, in ALL_SCOPES
+ * order. NULL / undefined ⇒ the mode set (every pre-P2 key). Fails CLOSED:
+ * unknown entries are dropped and a non-array stored value grants nothing.
+ */
+export function effectiveScopes(mode: ApiKeyMode, stored: unknown): ApiScope[] {
+  const ceiling = scopesForMode(mode);
+  if (stored === null || stored === undefined) return ceiling;
+  if (!Array.isArray(stored)) return [];
+  const wanted = new Set(stored.filter((s): s is string => typeof s === 'string'));
+  return ALL_SCOPES.filter((s) => wanted.has(s) && ceiling.includes(s));
 }
 
 export function hasScope(scopes: readonly ApiScope[], scope: ApiScope): boolean {
