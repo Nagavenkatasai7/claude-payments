@@ -5,6 +5,8 @@ import {
   cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
 } from '@/lib/dashboard-ops';
+import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON } from '@/lib/compliance';
+import { AML_HOLD_REASON } from '@/lib/aml-hold';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -694,25 +696,38 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
 describe('canReleaseHeld — who may release a compliance hold (owner decision 2026-09-16)', () => {
   const PLATFORM = { kind: 'platform' } as const;
   const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
+  const AMOUNT = { complianceReasons: ['Large transfer amount.'] };
+  const SCREEN = { complianceReasons: ['Large transfer amount.', POSSIBLE_MATCH_REASON] };
 
   it("platform staff may release any hold (ours, delegated, or an unknown partner)", () => {
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' })).toBe(true);
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' })).toBe(true);
-    expect(canReleaseHeld(PLATFORM, null)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, AMOUNT)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, null, AMOUNT)).toBe(true);
   });
 
   it("a partner-scoped admin may NOT release a hold SmartRemit's own screening flagged (kycMode 'ours', or unset ⇒ 'ours')", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' })).toBe(false);
-    expect(canReleaseHeld(PARTNER, {})).toBe(false); // absent kycMode defaults to 'ours'
+    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' }, AMOUNT)).toBe(false);
+    expect(canReleaseHeld(PARTNER, {}, AMOUNT)).toBe(false); // absent kycMode defaults to 'ours'
   });
 
   it('fails CLOSED for a partner-scoped admin when the owning partner row is missing', () => {
-    expect(canReleaseHeld(PARTNER, null)).toBe(false);
-    expect(canReleaseHeld(PARTNER, undefined)).toBe(false);
+    expect(canReleaseHeld(PARTNER, null, AMOUNT)).toBe(false);
+    expect(canReleaseHeld(PARTNER, undefined, AMOUNT)).toBe(false);
   });
 
-  it("a partner-scoped admin may release a kycMode 'delegated' partner's hold", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' })).toBe(true);
+  it("a partner-scoped admin may release a kycMode 'delegated' partner's non-screening hold", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [AML_HOLD_REASON] })).toBe(true);
+  });
+
+  // Program-Fix 43 follow-up: sanctions / name-screening holds are PLATFORM-only,
+  // whatever the partner's KYC mode.
+  it("a partner-scoped admin may NOT release a delegated partner's SCREENING hold; platform still may", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, SCREEN)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [LIST_UNAVAILABLE_REASON] })).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [] })).toBe(false); // fail closed
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, SCREEN)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, SCREEN)).toBe(true);
   });
 });
 

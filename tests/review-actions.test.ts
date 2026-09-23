@@ -4,6 +4,7 @@ import { fakeRedis } from './helpers';
 import { createStore, type Store } from '@/lib/store';
 import { freshDb } from './helpers-db';
 import type { Transfer } from '@/lib/types';
+import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON } from '@/lib/compliance';
 import type { Db } from '@/db/client';
 
 // pg-backed store rebuilt per test (freshDb truncates); the hoisted mock
@@ -86,7 +87,7 @@ describe('releaseTransferAction', () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     await store.saveTransfer(makeTransfer({ id: 'rr1' }));
 
-    await releaseTransferAction(form({ id: 'rr1' }));
+    await releaseTransferAction(form({ id: 'rr1', note: 'docs verified' }));
 
     const loaded = await store.getTransfer('rr1');
     expect(loaded?.status).toBe('paid');
@@ -102,7 +103,7 @@ describe('releaseTransferAction', () => {
     mockRequireAdmin.mockResolvedValue({ username: 'admin', role: 'admin' });
     await store.saveTransfer(makeTransfer({ id: 'rr2', status: 'delivered' }));
 
-    await expect(releaseTransferAction(form({ id: 'rr2' }))).rejects.toThrow(/not in_review/i);
+    await expect(releaseTransferAction(form({ id: 'rr2', note: 'docs verified' }))).rejects.toThrow(/not in_review/i);
   });
 });
 
@@ -129,7 +130,7 @@ describe('releaseTransferAction — platform staff required for an ours-mode hol
     mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
     await store.saveTransfer(makeTransfer({ id: 'own2', partnerId: 'default' }));
 
-    await releaseTransferAction(form({ id: 'own2' }));
+    await releaseTransferAction(form({ id: 'own2', note: 'docs verified' }));
 
     expect((await store.getTransfer('own2'))?.status).toBe('paid');
     expect(await outboxRows()).toEqual([{ kind: 'mock.settle', dedupe_key: 'mocksettle:own2' }]);
@@ -141,10 +142,96 @@ describe('releaseTransferAction — platform staff required for an ours-mode hol
     mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
     await store.saveTransfer(makeTransfer({ id: 'del1', partnerId: 'delg' }));
 
-    await releaseTransferAction(form({ id: 'del1' }));
+    await releaseTransferAction(form({ id: 'del1', note: 'docs verified' }));
 
     expect((await store.getTransfer('del1'))?.status).toBe('paid');
     expect(await outboxRows()).toEqual([{ kind: 'mock.settle', dedupe_key: 'mocksettle:del1' }]);
+  });
+});
+
+// Program-Fix 43 follow-up (owner-directed): (1) every release records a
+// REASON — refused before any mutation when the bounded note is blank, for
+// platform and partner staff alike; (2) a hold that sanctions / name screening
+// raised is PLATFORM-only to release, even for a kycMode 'delegated' partner.
+describe('releaseTransferAction — mandatory reason + screening holds are platform-only', () => {
+  async function outboxRows() {
+    const r = await db.execute(sql`SELECT kind FROM outbox ORDER BY id`);
+    return (r as unknown as { rows: Array<{ kind: string }> }).rows;
+  }
+  async function auditRows() {
+    const r = await db.execute(sql`SELECT action FROM audit_events ORDER BY id`);
+    return (r as unknown as { rows: Array<{ action: string }> }).rows;
+  }
+  async function delegatedPartner() {
+    await db.execute(sql`INSERT INTO partners (id, name, status, countries, kyc_mode)
+      VALUES ('delg', 'Delegated Co', 'active', '["US"]'::jsonb, 'delegated')`);
+  }
+
+  it.each([
+    ['missing', undefined],
+    ['empty', ''],
+    ['whitespace', '   '],
+    ['control characters only', '\u0000 \u0007 '],
+  ])('refuses a PLATFORM admin release with a %s note: stays in_review, no outbox row, no audit row', async (_label, note) => {
+    mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
+    await store.saveTransfer(makeTransfer({ id: 'nr1' }));
+    const values: Record<string, string> = { id: 'nr1' };
+    if (note !== undefined) values.note = note;
+
+    await expect(releaseTransferAction(form(values))).rejects.toThrow(/reason is required/i);
+
+    expect((await store.getTransfer('nr1'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it("refuses a delegated partner's admin releasing a blank-note hold too", async () => {
+    await delegatedPartner();
+    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
+    await store.saveTransfer(makeTransfer({ id: 'nr2', partnerId: 'delg' }));
+
+    await expect(releaseTransferAction(form({ id: 'nr2', note: ' ' }))).rejects.toThrow(/reason is required/i);
+    expect((await store.getTransfer('nr2'))?.status).toBe('in_review');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it("a delegated partner's admin releasing with a reason writes transfer.release with actor + reason", async () => {
+    await delegatedPartner();
+    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
+    await store.saveTransfer(makeTransfer({ id: 'nr3', partnerId: 'delg' }));
+
+    await releaseTransferAction(form({ id: 'nr3', note: 'source of funds verified' }));
+
+    const r = await db.execute(sql`SELECT actor, action, meta FROM audit_events ORDER BY id`);
+    expect((r as unknown as { rows: unknown[] }).rows).toEqual([
+      { actor: 'dadmin', action: 'transfer.release', meta: expect.objectContaining({ reason: 'source of funds verified' }) },
+    ]);
+  });
+
+  it.each([
+    [POSSIBLE_MATCH_REASON],
+    [LIST_UNAVAILABLE_REASON],
+  ])("refuses a delegated partner's admin releasing a SCREENING hold (%s): stays in_review, no outbox, no audit", async (reason) => {
+    await delegatedPartner();
+    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
+    await store.saveTransfer(makeTransfer({ id: 'sc1', partnerId: 'delg', complianceReasons: ['Large transfer amount.', reason] }));
+
+    await expect(releaseTransferAction(form({ id: 'sc1', note: 'looks fine to us' }))).rejects.toThrow(/permission/i);
+
+    expect((await store.getTransfer('sc1'))?.status).toBe('in_review');
+    expect(await outboxRows()).toEqual([]);
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('a PLATFORM admin may still release a screening hold (with a reason)', async () => {
+    await delegatedPartner();
+    mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });
+    await store.saveTransfer(makeTransfer({ id: 'sc2', partnerId: 'delg', complianceReasons: [POSSIBLE_MATCH_REASON] }));
+
+    await releaseTransferAction(form({ id: 'sc2', note: 'false positive, cleared by platform compliance' }));
+
+    expect((await store.getTransfer('sc2'))?.status).toBe('paid');
+    expect(await auditRows()).toEqual([{ action: 'transfer.release' }]);
   });
 });
 
