@@ -117,6 +117,9 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
         <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" name="canAssign" defaultChecked={s.permissions.canAssign} /> Assign
         </label>
+        <label className="flex items-center gap-1.5 text-xs">
+          <input type="checkbox" name="canRevealPii" defaultChecked={s.permissions.canRevealPii === true} /> Reveal payout
+        </label>
         <Button type="submit" size="sm" variant="outline">Save</Button>
       </form>,
       opts.isSelf ? (

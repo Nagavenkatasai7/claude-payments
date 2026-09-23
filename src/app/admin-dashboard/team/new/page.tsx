@@ -99,6 +99,7 @@ export default async function NewTeammatePage() {
                   <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" name="canCancel" /> Cancel / refund</label>
                   <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" name="canResend" /> Resend link</label>
                   <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" name="canAssign" /> Assign</label>
+                  <label className="flex items-center gap-1.5 text-sm"><input type="checkbox" name="canRevealPii" /> Reveal payout details</label>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
                   Admins always have every permission; these apply to agents.

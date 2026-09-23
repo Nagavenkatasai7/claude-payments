@@ -2,22 +2,41 @@ import { env } from './env';
 import { hashPassword } from './password';
 import { getAuthStore, type AuthStore } from './auth-store';
 import { getPartnerStore } from './partner-store';
+import { logError } from './log';
 import type { Staff } from './types';
+
+/** The seed admin's credentials, or null when either variable is unset (env.ts `required()` throws). */
+function seedAdminCredentials(): { username: string; password: string } | null {
+  try {
+    return { username: env.seedAdminUsername, password: env.seedAdminPassword };
+  } catch {
+    return null;
+  }
+}
 
 export async function ensureSeedAdmin(
   store: AuthStore = getAuthStore(),
 ): Promise<void> {
   const existing = await store.listStaff();
   if (existing.length === 0) {
-    const admin: Staff = {
-      username: env.seedAdminUsername,
-      name: 'Main Admin',
-      role: 'admin',
-      permissions: { canCancel: true, canResend: true, canAssign: true },
-      passwordHash: await hashPassword(env.seedAdminPassword),
-      createdAt: new Date().toISOString(),
-    };
-    await store.saveStaff(admin);
+    const creds = seedAdminCredentials();
+    if (creds) {
+      const admin: Staff = {
+        username: creds.username,
+        name: 'Main Admin',
+        role: 'admin',
+        permissions: { canCancel: true, canResend: true, canAssign: true },
+        passwordHash: await hashPassword(creds.password),
+        createdAt: new Date().toISOString(),
+      };
+      await store.saveStaff(admin);
+    } else {
+      // Program-Fix 45 P1 (crypto-14): no staff at all AND no seed variables.
+      // Log it for ops and carry on: the login then answers with its ordinary
+      // generic error instead of crashing. (Deliberately NOT a boot-assert
+      // requirement: the variables are needed only on an empty keyspace.)
+      logError('seed', 'no staff exist and SEED_ADMIN_USERNAME / SEED_ADMIN_PASSWORD are not set; the seed admin was not created');
+    }
   }
 
   // P3: optional partner-staff seed.

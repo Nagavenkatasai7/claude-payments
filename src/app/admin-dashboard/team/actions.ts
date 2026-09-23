@@ -8,9 +8,9 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getAuditLogStore, type StaffAuditAction } from '@/lib/audit-log-store';
 import { requirePlatformAdmin, requireStaff } from '@/lib/auth';
 import { hashPassword, verifyPassword } from '@/lib/password';
-import { SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffRole } from '@/lib/types';
+import { SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffPermissions, type StaffRole } from '@/lib/types';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
-import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { getStaffLoginGuard, isSeedAdminRecord, seedAdminUsername } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import {
@@ -36,12 +36,25 @@ import {
  * scoped write surface) — see the design spec's flagged decisions.
  */
 
-function readPermissions(formData: FormData) {
+function readPermissions(formData: FormData): StaffPermissions {
   return {
     canCancel: formData.get('canCancel') === 'on',
     canResend: formData.get('canResend') === 'on',
     canAssign: formData.get('canAssign') === 'on',
+    canRevealPii: formData.get('canRevealPii') === 'on', // Program-Fix 45 P1
   };
+}
+
+const PERMISSION_KEYS = ['canCancel', 'canResend', 'canAssign', 'canRevealPii'] as const satisfies readonly (keyof StaffPermissions)[];
+
+/**
+ * Program-Fix 45 P1: did an edit change what the member may do? A missing flag
+ * (a record saved before it existed) counts as false, so a no-op save of an old
+ * record is not a change.
+ */
+function accessChanged(before: Staff, after: Staff): boolean {
+  if (before.role !== after.role || before.partnerId !== after.partnerId) return true;
+  return PERMISSION_KEYS.some((k) => (before.permissions[k] === true) !== (after.permissions[k] === true));
 }
 
 function isActivePlatformAdmin(s: Staff): boolean {
@@ -174,6 +187,10 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
     partnerId, // undefined ⇒ platform
   };
   await store.saveStaff(updated);
+  // Program-Fix 45 P1: a change to role, permissions or partner scope signs the
+  // member out everywhere (after the save), so no session keeps acting on the
+  // old access. A save that changes nothing leaves their sessions alone.
+  if (accessChanged(target, updated)) await store.deleteAllSessionsFor(username);
   await audit(actor.username, 'updated', username, `role ${role}, ${scopeLabel(partnerId)}`);
   revalidatePath('/admin-dashboard/team');
 }
@@ -240,14 +257,6 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
 // ── Program-Fix 17a: password change (self) + password reset (platform admin) ──
 // Both return a StaffPasswordFormState for their useActionState forms, so a
 // refusal (policy, throttle, a lost compare-and-set) is shown, never swallowed.
-
-const SESSION_COOKIE_OPTS = {
-  httpOnly: true,
-  secure: true,
-  sameSite: 'lax' as const,
-  path: '/',
-  maxAge: 7 * 24 * 60 * 60,
-};
 
 function policyRefusal(err: unknown): StaffPasswordFormState {
   if (err instanceof StaffPasswordPolicyError) return { ok: false, message: err.message };
@@ -333,7 +342,7 @@ export async function changeOwnPasswordAction(
   }
   await store.deleteAllSessionsFor(me.username);
   const token = await store.createSession(me.username);
-  (await cookies()).set(SESSION_COOKIE, token, SESSION_COOKIE_OPTS);
+  setStaffSessionCookie(await cookies(), token); // Program-Fix 45 P1: the __Host- cookie
   await audit.record({
     action: 'auth.password.change',
     actorType: 'staff',
