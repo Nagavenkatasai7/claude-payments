@@ -558,3 +558,72 @@ describe('customer session index holds hashes (fix 20)', () => {
     expect(redis.sets.has(`sr_sess_ix:${NORM}`)).toBe(false);
   });
 });
+
+// Program-Fix 20 review follow-up: a password change invalidates every session
+// minted before it, even one no index knows about (an old-build reset during a
+// rolling release / Skew Protection / rollback, or a lost index).
+describe('resolveSession rejects sessions older than the last password change (fix 20)', () => {
+  async function registered(now: () => number) {
+    const redis = fakeRedis();
+    const ctx = await mkAuth(redis, now);
+    await ctx.s.registerCustomer(
+      { phone: PHONE, email: 'a@example.com', password: 'correct horse battery' },
+      { pwnedCheck: neverPwned(), cryptoProvider: crypto },
+    );
+    return { ...ctx, redis };
+  }
+
+  it('a session created BEFORE a password update is rejected, even if no index points at it', async () => {
+    let t = Date.parse('2026-09-01T10:00:00.000Z');
+    const { s, customers } = await registered(() => t);
+    t += 60_000;
+    const token = await s.createSession(NORM, 'default');
+    expect((await s.resolveSession(token))?.senderPhone).toBe(NORM); // precondition
+    // An old build resets the password without seeing the new index.
+    t += 60_000;
+    const row = (await customers.getCustomer('default', NORM))!;
+    await customers.saveCustomer({ ...row, passwordUpdatedAt: new Date(t).toISOString() });
+    expect(await s.resolveSession(token)).toBeNull();
+  });
+
+  it('a session created AFTER the password update is accepted', async () => {
+    let t = Date.parse('2026-09-01T10:00:00.000Z');
+    const { s } = await registered(() => t);
+    t += 60_000;
+    expect(await s.setPassword(PHONE, 'another good one!!', { pwnedCheck: neverPwned() })).not.toBeNull();
+    t += 1;
+    const token = await s.createSession(NORM, 'default');
+    expect((await s.resolveSession(token))?.senderPhone).toBe(NORM);
+  });
+
+  it('a session minted in the same millisecond as the update is accepted (strictly-after rule)', async () => {
+    const t = Date.parse('2026-09-01T10:00:00.000Z');
+    const { s } = await registered(() => t);
+    const token = await s.createSession(NORM, 'default');
+    expect((await s.resolveSession(token))?.senderPhone).toBe(NORM);
+  });
+
+  it('a lazy scrypt→Argon2 rehash at login does NOT sign out the other devices (same password)', async () => {
+    let t = Date.parse('2026-09-01T10:00:00.000Z');
+    const { s, customers } = await registered(() => t);
+    const row = (await customers.getCustomer('default', NORM))!;
+    await customers.saveCustomer({ ...row, passwordHash: legacyScryptHash('legacy pass 123') });
+    t += 60_000;
+    const otherDevice = await s.createSession(NORM, 'default');
+    t += 60_000;
+    const upgraded = await s.verifyCustomerPassword(PHONE, 'legacy pass 123');
+    expect(upgraded?.passwordHash?.startsWith('$argon2id$')).toBe(true); // precondition: rehash ran
+    expect((await s.resolveSession(otherDevice))?.senderPhone).toBe(NORM);
+  });
+
+  it('a row with no passwordUpdatedAt never rejects', async () => {
+    let t = Date.parse('2026-09-01T10:00:00.000Z');
+    const { s, customers } = await registered(() => t);
+    const row = (await customers.getCustomer('default', NORM))!;
+    await customers.saveCustomer({ ...row, passwordUpdatedAt: undefined });
+    expect((await customers.getCustomer('default', NORM))?.passwordUpdatedAt).toBeUndefined(); // precondition
+    t -= 60 * 60_000; // the session is even OLDER than the register time: still no rejection without the field
+    const token = await s.createSession(NORM, 'default');
+    expect((await s.resolveSession(token))?.senderPhone).toBe(NORM);
+  });
+});

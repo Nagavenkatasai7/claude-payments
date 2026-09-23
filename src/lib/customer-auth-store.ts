@@ -162,6 +162,32 @@ export function createCustomerAuthStore(
     await redis.del(legacySessionIndexKey(phone));
   }
 
+  /**
+   * Resolve a token to its live record, enforcing the AAL2 lifetimes in code
+   * (Redis TTL is only a backstop) and sliding the idle window. A record without
+   * a tenant (pre-fix-1) is treated as expired.
+   */
+  async function readLiveSession(
+    token: string,
+  ): Promise<(SessionRecord & { partnerId: PartnerId }) | null> {
+    const keyHash = sha256hex(token);
+    const raw = await redis.get(sessionKey(keyHash));
+    if (!raw) return null;
+    let record: SessionRecord;
+    try {
+      record = JSON.parse(raw) as SessionRecord;
+    } catch {
+      return null;
+    }
+    if (!record.partnerId) return null;
+    const ts = now();
+    if (ts - record.createdAtMs > ABSOLUTE_MS) return null; // 12-h absolute
+    if (ts - record.lastSeenMs > IDLE_MS) return null; //      30-min idle
+    record.lastSeenMs = ts;
+    await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
+    return { ...record, partnerId: record.partnerId };
+  }
+
   return {
     /** The account-bearing Customer for a phone, or null (missing OR ambiguous). Used by password reset. */
     async getCustomer(phoneRaw: string): Promise<Customer | null> {
@@ -293,7 +319,8 @@ export function createCustomerAuthStore(
         const upgraded: Customer = {
           ...customer,
           passwordHash: await hashPassword(password),
-          passwordUpdatedAt: new Date(now()).toISOString(),
+          // passwordUpdatedAt is NOT bumped: the password is unchanged, and
+          // resolveSession (fix 20) kills every session older than that stamp.
           updatedAt: new Date(now()).toISOString(),
         };
         await saveCustomer(upgraded);
@@ -398,22 +425,8 @@ export function createCustomerAuthStore(
      * A record without a tenant (pre-fix-1) is treated as expired.
      */
     async getSessionIdentity(token: string): Promise<SessionIdentity | null> {
-      const keyHash = sha256hex(token);
-      const raw = await redis.get(sessionKey(keyHash));
-      if (!raw) return null;
-      let record: SessionRecord;
-      try {
-        record = JSON.parse(raw) as SessionRecord;
-      } catch {
-        return null;
-      }
-      if (!record.partnerId) return null;
-      const ts = now();
-      if (ts - record.createdAtMs > ABSOLUTE_MS) return null; // 12-h absolute
-      if (ts - record.lastSeenMs > IDLE_MS) return null; //      30-min idle
-      record.lastSeenMs = ts;
-      await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
-      return { phone: record.phone, partnerId: record.partnerId };
+      const live = await readLiveSession(token);
+      return live ? { phone: live.phone, partnerId: live.partnerId } : null;
     },
 
     /** Phone-only view of getSessionIdentity (kept for existing callers/tests). */
@@ -421,11 +434,21 @@ export function createCustomerAuthStore(
       return (await this.getSessionIdentity(token))?.phone ?? null;
     },
 
-    /** The Customer a live session belongs to — the (tenant, phone) row, never a phone-only guess. */
+    /**
+     * The Customer a live session belongs to — the (tenant, phone) row, never a
+     * phone-only guess. Fix 20 review: a session minted BEFORE the row's last
+     * password change is dead whether or not any revoke index still lists it
+     * (an old build's reset during a rolling release / Skew Protection /
+     * rollback, or a lost index write). No `passwordUpdatedAt` ⇒ no rejection.
+     */
     async resolveSession(token: string): Promise<Customer | null> {
-      const identity = await this.getSessionIdentity(token);
-      if (!identity) return null;
-      return customers.getCustomer(identity.partnerId, identity.phone);
+      const live = await readLiveSession(token);
+      if (!live) return null;
+      const customer = await customers.getCustomer(live.partnerId, live.phone);
+      if (!customer) return null;
+      const changedAt = customer.passwordUpdatedAt ? Date.parse(customer.passwordUpdatedAt) : NaN;
+      if (Number.isFinite(changedAt) && changedAt > live.createdAtMs) return null;
+      return customer;
     },
 
     async deleteSession(token: string): Promise<void> {
