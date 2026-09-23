@@ -19,6 +19,24 @@ export const env = {
   get opsAlertPhone(): string {
     return process.env.OPS_ALERT_PHONE ?? '';
   },
+  // Program-Fix 26 — the ops-alert MIRROR. Both OPTIONAL (never boot-asserted):
+  // unset ⇒ ops alerts go to OPS_ALERT_PHONE only, exactly as before.
+  /** Comma-separated mailbox(es) that also receive every ops alert by email. */
+  get opsAlertEmails(): string[] {
+    return (process.env.OPS_ALERT_EMAIL ?? '').split(',').map((e) => e.trim()).filter(Boolean);
+  },
+  /** Incoming-webhook URL (Slack/PagerDuty style, JSON `{text}`) — a bearer secret; https only. */
+  get opsAlertWebhookUrl(): string {
+    return process.env.OPS_ALERT_WEBHOOK_URL ?? '';
+  },
+  /**
+   * Sentry DSN for server error reports (Program-Fix 26). Documented here for the
+   * env contract only: src/lib/error-report.ts reads process.env.SENTRY_DSN
+   * DIRECTLY so it stays edge-safe. Unset ⇒ no error is ever sent.
+   */
+  get sentryDsn(): string {
+    return process.env.SENTRY_DSN ?? '';
+  },
   // Email (Hostinger SMTP, via nodemailer) — used for "Partner with us" lead
   // notifications. All OPTIONAL (NOT money-grade, so boot-assert never requires
   // them): unset ⇒ the email effect no-ops and the lead still lands in the admin

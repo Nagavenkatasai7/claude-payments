@@ -13,7 +13,8 @@ import { deriveTier } from '@/lib/tier-rules';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
-import { logWarn } from '@/lib/log';
+import { logWarn, scrub } from '@/lib/log';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { getRedis } from '@/lib/redis';
 import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
@@ -64,6 +65,24 @@ export async function processInboundWebhook(
           recipient: ev.recipientId,
           wamid: ev.wamid,
         });
+        // Program-Fix 26: persist the failure (no wamid→transfer map yet). Meta's
+        // code + title only — NEVER the recipient number, not even masked. A DB
+        // error must not turn this webhook into a non-200 (Meta would redeliver).
+        try {
+          await createAuditRepo(getDb()).record({
+            partnerId: routedPartnerId ?? DEFAULT_PARTNER_ID,
+            actor: 'whatsapp',
+            actorType: 'system',
+            action: 'whatsapp.delivery_failed',
+            subjectId: ev.wamid,
+            meta: {
+              code: ev.errorCode ?? null,
+              title: ev.errorTitle ? scrub(ev.errorTitle).slice(0, 200) : null,
+            },
+          });
+        } catch (err) {
+          logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
+        }
       } else {
         console.debug(`WhatsApp status ${ev.status} — wamid=${ev.wamid}`);
       }
