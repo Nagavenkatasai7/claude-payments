@@ -30,6 +30,16 @@ jobs:
       - name: Full test suite
         run: npx vitest run
 
+      # Program-Fix 49B (prompt-11): the real-model bot eval. The script itself
+      # no-ops (exit 0) when the secret is absent, so this step is a no-op until
+      # the owner adds EVAL_OLLAMA_API_KEY. A model failure is reported here but
+      # never fails the nightly (continue-on-error) and never gates a merge.
+      - name: Bot eval (real model, optional)
+        continue-on-error: true
+        env:
+          EVAL_OLLAMA_API_KEY: ${{ secrets.EVAL_OLLAMA_API_KEY }}
+        run: npx tsx scripts/eval-bot.ts
+
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10

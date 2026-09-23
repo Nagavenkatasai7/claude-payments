@@ -242,7 +242,7 @@ export function createAgent(deps: AgentDeps) {
         messages.push({
           role: 'system',
           content:
-            "[RECIPIENT SELECTED] The customer tapped a saved recipient — their name, number and country are in the get_customer_context result (selected_recipient). Do NOT call send_recipient_picker or ask who again. Send to that recipient's detected_destination_country unless they say otherwise. Just collect the amount and funding method, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).",
+            "[RECIPIENT SELECTED] The customer tapped a saved recipient — their name, number and country are in the get_customer_context result (selected_recipient). Do NOT call send_recipient_picker or ask who again. Send to that recipient's detected_destination_country unless they say otherwise. Just collect the amount, then send_approve_picker with recipient_name + recipient_phone — never payout_method or payout_destination (the stored payout details are reused automatically).",
         });
       }
       // These two notes LEAD with verify-before-send; only inject them when our

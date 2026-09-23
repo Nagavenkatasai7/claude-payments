@@ -4,7 +4,9 @@ import type { RedisLike } from './store';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Draft, PartnerId } from './types';
 
-const DRAFT_TTL_SECONDS = 1800; // 30 minutes
+/** A draft (and so its pay link and its locked quote) lives this long. Program-Fix 49B: the
+ *  approve card's rate-lock minutes derive from it (tools.ts RATE_LOCK_MINUTES). */
+export const DRAFT_TTL_SECONDS = 1800; // 30 minutes
 
 export function createDraftStore(redis: RedisLike) {
   return {
