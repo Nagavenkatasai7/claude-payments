@@ -53,7 +53,7 @@ export function ReceiptDisclosureCard({ disclosure }: { disclosure: ReceiptDiscl
           <Separator className="my-1" />
           {p.name && <Line label={L.provider} value={<span className="font-medium">{p.name}</span>} />}
           {p.licenseIds.length > 0 && <Line label={L.licences} value={p.licenseIds.join(', ')} />}
-          {p.phone && <Line label={L.providerPhone} value={p.phone} />}
+          {p.phone && <Line label={L.providerPhone} value={<span className="whitespace-nowrap">{p.phone}</span>} />}
           {p.website && <Line label={L.providerWebsite} value={<ExternalLink href={p.website} />} />}
           {p.stateRegulator && (
             <Line
@@ -61,7 +61,7 @@ export function ReceiptDisclosureCard({ disclosure }: { disclosure: ReceiptDiscl
               value={
                 <>
                   {p.stateRegulator.name}
-                  {p.stateRegulator.phone && <> · {p.stateRegulator.phone}</>}
+                  {p.stateRegulator.phone && <> · <span className="whitespace-nowrap">{p.stateRegulator.phone}</span></>}
                   {p.stateRegulator.website && (
                     <>
                       {' · '}
@@ -78,7 +78,7 @@ export function ReceiptDisclosureCard({ disclosure }: { disclosure: ReceiptDiscl
               <>
                 <ExternalLink href={disclosure.cfpb.website}>{disclosure.cfpb.websiteLabel}</ExternalLink>
                 {' · '}
-                {disclosure.cfpb.phone}
+                <span className="whitespace-nowrap">{disclosure.cfpb.phone}</span>
               </>
             }
           />

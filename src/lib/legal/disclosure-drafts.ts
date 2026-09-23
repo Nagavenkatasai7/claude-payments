@@ -57,7 +57,7 @@ export const PARTNER_DETAILS_PENDING = 'Partner licensing details pending (draft
 
 /** Short rights summary; the full text is REMITTANCE_RIGHTS_DRAFT on /legal#remittance-rights. */
 export const RIGHTS_SUMMARY =
-  'You have a right to dispute errors in your transaction, and you can cancel for a full refund within 30 minutes of payment unless the funds have already been picked up or deposited. To cancel or report a problem, contact the provider named here, or reply in the WhatsApp chat with your transfer ID.';
+  'You have a right to dispute errors in your transaction, and you can cancel for a full refund within 30 minutes of payment unless the funds have already been picked up or deposited. To cancel or report a problem, contact the licensed provider of your transfer, or reply in the WhatsApp chat with your transfer ID.';
 
 /** Receipt: the cancellation window line, shown while it is open. `until` is a formatted time. */
 export function cancelWindowLine(until: string): string {
