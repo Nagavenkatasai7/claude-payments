@@ -4,8 +4,10 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { createPartnerApplicationRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
+import { isPartnerDocType, isPrivatePartnerDocRef } from '@/lib/blob';
 import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
+import { logWarn } from '@/lib/log';
 import { hashApplicationToken, isApplicationTokenExpired } from '@/lib/partner-application-token';
 import { getRedis } from '@/lib/redis';
 import { getStore } from '@/lib/store';
@@ -73,23 +75,14 @@ const REQUIRED: (keyof PartnerApplicationDetails)[] = [
 const MAX_DOCS = 4;
 
 /**
- * True only when `url` is an https URL whose HOSTNAME is the Vercel Blob host
- * (….public.blob.vercel-storage.com). A substring check would pass attacker URLs
- * like `https://evil.com/?x=blob.vercel-storage.com`, `https://blob.vercel-
- * storage.com.evil.com/…`, or `https://blob.vercel-storage.com@evil.com/…` — so
- * we PARSE the URL and anchor on the hostname suffix instead.
+ * Parse the hidden `documents` JSON into a clean, bounded ref list (never trust
+ * shape). Fix 24: a ref is kept only when `isPrivatePartnerDocRef` binds it to
+ * THIS request — https, a PRIVATE Blob store host, and the pathname under
+ * `partner-applications/<requestId>/` (the upload route's output for this
+ * token). Public-store, other-request and spoofed hosts are dropped; the
+ * contentType is allow-listed (the staff route never trusts it anyway).
  */
-function isBlobUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    return u.protocol === 'https:' && /(^|\.)public\.blob\.vercel-storage\.com$/.test(u.hostname);
-  } catch {
-    return false;
-  }
-}
-
-/** Parse the hidden `documents` JSON into a clean, bounded ref list (never trust shape). */
-function parseDocuments(raw: string): PartnerApplicationDocument[] {
+function parseDocuments(raw: string, requestId: string): PartnerApplicationDocument[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -98,18 +91,27 @@ function parseDocuments(raw: string): PartnerApplicationDocument[] {
   }
   if (!Array.isArray(parsed)) return [];
   const out: PartnerApplicationDocument[] = [];
+  let dropped = 0;
   for (const item of parsed.slice(0, MAX_DOCS)) {
     if (!item || typeof item !== 'object') continue;
     const d = item as Record<string, unknown>;
     const url = typeof d.url === 'string' ? d.url : '';
-    // Only accept refs that point at our Blob store (the upload route's output).
-    if (!isBlobUrl(url)) continue;
+    if (!isPrivatePartnerDocRef(url, requestId)) {
+      dropped += 1;
+      continue;
+    }
+    const contentType = typeof d.contentType === 'string' && isPartnerDocType(d.contentType) ? d.contentType : '';
     out.push({
       label: typeof d.label === 'string' ? d.label.slice(0, 100) : 'Document',
       url,
       size: typeof d.size === 'number' && Number.isFinite(d.size) ? d.size : 0,
-      contentType: typeof d.contentType === 'string' ? d.contentType.slice(0, 100) : '',
+      contentType,
     });
+  }
+  if (dropped > 0) {
+    // Count only — never the ref. A silent drop of EVERY document would otherwise
+    // be invisible (e.g. an encoding mismatch in the store's returned pathname).
+    logWarn('partner-application', 'document refs rejected at submit', { requestId, dropped, kept: out.length });
   }
   return out;
 }
@@ -156,7 +158,7 @@ export async function submitPartnerApplicationAction(formData: FormData): Promis
     if (!details[field]) redirect(`${back}?error=missing`);
   }
 
-  const documents = parseDocuments(String(formData.get('documents') ?? '[]'));
+  const documents = parseDocuments(String(formData.get('documents') ?? '[]'), request.id);
 
   // ── PERSIST + single-use FLIP in ONE transaction ─────────────────────────
   // redirect() throws by design — keep it OUT of the transaction so it is never

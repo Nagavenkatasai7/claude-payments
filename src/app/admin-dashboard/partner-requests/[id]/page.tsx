@@ -203,15 +203,15 @@ export default async function PartnerApplicationPage({
                     <div className="text-[13px] text-muted-foreground">No documents uploaded.</div>
                   ) : (
                     <div className="flex flex-col">
+                      {/* Fix 24: the link is the AUDITED staff route, resolved by
+                          (requestId, index) — the private Blob URL is never rendered. */}
                       {application.documents.map((doc, i) => (
                         <div
-                          key={`${doc.url}-${i}`}
+                          key={i}
                           className="flex flex-wrap items-center justify-between gap-2 border-t border-muted py-2.5 first:border-t-0 first:pt-0"
                         >
                           <a
-                            href={doc.url}
-                            target="_blank"
-                            rel="noopener"
+                            href={`/admin-dashboard/partner-requests/${encodeURIComponent(request.id)}/documents/${i}`}
                             className="font-medium text-primary hover:underline"
                           >
                             {doc.label}

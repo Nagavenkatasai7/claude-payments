@@ -85,8 +85,17 @@ describe('partner-application repo (PGlite)', () => {
 });
 
 describe('uploadPartnerDoc — friendly error when unconfigured', () => {
-  it('throws a clear "not configured" error (not a generic crash) when BLOB_READ_WRITE_TOKEN is unset', async () => {
-    const file = new Blob(['hello'], { type: 'application/pdf' });
-    await expect(uploadPartnerDoc(file, 'test.pdf')).rejects.toThrow(/not configured/i);
+  it('throws a clear "not configured" error (not a generic crash) when PARTNER_DOCS_BLOB_READ_WRITE_TOKEN is unset', async () => {
+    const saved = process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;
+    delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;
+    try {
+      const file = new Blob(['%PDF-1.4'], { type: 'application/pdf' });
+      await expect(
+        uploadPartnerDoc(file, 'partner-applications/preq_x/1-test.pdf', 'application/pdf'),
+      ).rejects.toThrow(/not configured/i);
+    } finally {
+      if (saved === undefined) delete process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN;
+      else process.env.PARTNER_DOCS_BLOB_READ_WRITE_TOKEN = saved;
+    }
   });
 });

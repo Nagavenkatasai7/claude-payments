@@ -130,15 +130,29 @@ describe('submitPartnerApplicationAction', () => {
     expect(await requestStatus('preq_live')).toBe('completed');
   });
 
-  it('stores only Vercel-Blob-hosted document refs and rejects host-spoof bypasses', async () => {
+  it('stores only PRIVATE-store refs bound to THIS request; public-host, other-request and spoofed refs are dropped (fix 24)', async () => {
     await seedRequest({ token: LIVE_TOKEN, id: 'preq_docs' });
 
     const docs = JSON.stringify([
-      // Accepted: genuine Vercel Blob host.
+      // Accepted: the private store, under this request's prefix.
       {
         label: 'Money-transmitter license',
-        url: 'https://abc.public.blob.vercel-storage.com/partner-applications/x.pdf',
+        url: 'https://abc.private.blob.vercel-storage.com/partner-applications/preq_docs/1-x-R4nd0m.pdf',
         size: 1234,
+        contentType: 'application/pdf',
+      },
+      // Rejected: the old PUBLIC store (world-readable) — never accepted any more.
+      {
+        label: 'public',
+        url: 'https://abc.public.blob.vercel-storage.com/partner-applications/preq_docs/x.pdf',
+        size: 9,
+        contentType: 'application/pdf',
+      },
+      // Rejected: another applicant's prefix in the private store.
+      {
+        label: 'other',
+        url: 'https://abc.private.blob.vercel-storage.com/partner-applications/preq_other/x.pdf',
+        size: 9,
         contentType: 'application/pdf',
       },
       // Rejected: unrelated host.
@@ -146,21 +160,28 @@ describe('submitPartnerApplicationAction', () => {
       // Rejected: host string in the QUERY (substring-match bypass).
       {
         label: 'evil2',
-        url: 'https://evil.com/x?a=blob.vercel-storage.com',
+        url: 'https://evil.com/x?a=private.blob.vercel-storage.com',
         size: 9,
         contentType: 'application/pdf',
       },
       // Rejected: suffix-domain bypass.
       {
         label: 'evil3',
-        url: 'https://blob.vercel-storage.com.evil.com/x',
+        url: 'https://abc.private.blob.vercel-storage.com.evil.com/partner-applications/preq_docs/x.pdf',
         size: 9,
         contentType: 'application/pdf',
       },
       // Rejected: userinfo bypass.
       {
         label: 'evil4',
-        url: 'https://public.blob.vercel-storage.com@evil.com/x',
+        url: 'https://abc.private.blob.vercel-storage.com@evil.com/partner-applications/preq_docs/x.pdf',
+        size: 9,
+        contentType: 'application/pdf',
+      },
+      // Rejected: http.
+      {
+        label: 'http',
+        url: 'http://abc.private.blob.vercel-storage.com/partner-applications/preq_docs/x.pdf',
         size: 9,
         contentType: 'application/pdf',
       },
@@ -172,9 +193,30 @@ describe('submitPartnerApplicationAction', () => {
 
     const apps = await applicationRows();
     expect(apps[0].documents).toHaveLength(1);
-    expect((apps[0].documents[0] as { url: string }).url).toContain(
-      '.public.blob.vercel-storage.com',
+    const kept = apps[0].documents[0] as { label: string; url: string; contentType: string };
+    expect(kept.label).toBe('Money-transmitter license');
+    expect(kept.url).toBe(
+      'https://abc.private.blob.vercel-storage.com/partner-applications/preq_docs/1-x-R4nd0m.pdf',
     );
+    expect(kept.contentType).toBe('application/pdf');
+  });
+
+  it('a submitted contentType outside the allow-list is stored as an empty string (fix 24)', async () => {
+    await seedRequest({ token: LIVE_TOKEN, id: 'preq_ct' });
+    const docs = JSON.stringify([
+      {
+        label: 'Licence',
+        url: 'https://abc.private.blob.vercel-storage.com/partner-applications/preq_ct/1-x-R4nd0m.pdf',
+        size: 1234,
+        contentType: 'text/html',
+      },
+    ]);
+    await expect(
+      submitPartnerApplicationAction(form({ token: LIVE_TOKEN, ...VALID_DETAILS, documents: docs })),
+    ).rejects.toThrow(`REDIRECT:/partners/apply/${LIVE_TOKEN}`);
+    const apps = await applicationRows();
+    expect(apps[0].documents).toHaveLength(1);
+    expect((apps[0].documents[0] as { contentType: string }).contentType).toBe('');
   });
 
   it('missing required field → ?error=missing and persists nothing', async () => {

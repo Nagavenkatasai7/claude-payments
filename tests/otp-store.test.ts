@@ -90,6 +90,62 @@ describe('otp-store per-code burn + per-number daily fail-lock (resend cannot re
   });
 });
 
+// Program-Fix 19 (F71): the per-code and per-day counters are RESERVED with an
+// atomic INCR before any compare, so a parallel burst cannot all pass one read.
+describe('otp-store atomic attempt caps (fix 19)', () => {
+  it('a burst of 12 parallel wrong guesses gets at most 5 compares, the rest are locked', async () => {
+    const { store } = mk();
+    await store.issueOtp(US, 'login');
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () => store.verifyOtp(US, '000000', 'login')),
+    );
+    const rs = results.map((r) => (r.ok ? 'ok' : r.reason));
+    expect(rs.filter((r) => r === 'wrong').length).toBeLessThanOrEqual(5);
+    expect(rs.filter((r) => r === 'locked').length).toBeGreaterThanOrEqual(7);
+    expect(rs).not.toContain('ok');
+  });
+
+  it('a burst hiding the right code never returns ok once 5 compares have run', async () => {
+    const { store } = mk();
+    const issued = await store.issueOtp(US, 'login');
+    if (!issued.ok) throw new Error('expected ok');
+    const guesses = Array.from({ length: 12 }, (_, i) => (i === 8 ? issued.code : '000000'));
+    const results = await Promise.all(guesses.map((g) => store.verifyOtp(US, g, 'login')));
+    expect(results.map((r) => (r.ok ? 'ok' : r.reason))).not.toContain('ok');
+  });
+
+  it('after 10 reserved verifies in a day, issueOtp is locked (a burst counts every reservation)', async () => {
+    const { store, advance } = mk();
+    await store.issueOtp(US, 'login');
+    await Promise.all(Array.from({ length: 12 }, () => store.verifyOtp(US, '000000', 'login')));
+    advance(31_000);
+    expect(await store.issueOtp(US, 'login')).toEqual({ ok: false, reason: 'locked' });
+  });
+
+  it('a verify with no live code burns nothing (no reservation without a record)', async () => {
+    const { store, advance } = mk();
+    for (let i = 0; i < 20; i++) {
+      expect(await store.verifyOtp(US, '000000', 'login')).toEqual({ ok: false, reason: 'no_code' });
+    }
+    advance(31_000);
+    const issued = await store.issueOtp(US, 'login');
+    expect(issued.ok).toBe(true);
+    if (!issued.ok) return;
+    expect(await store.verifyOtp(US, issued.code, 'login')).toEqual({ ok: true });
+  });
+
+  it('a success consumes one daily reservation and clears the per-code counter', async () => {
+    const { store, redis } = mk();
+    const issued = await store.issueOtp(US, 'login');
+    if (!issued.ok) throw new Error('expected ok');
+    await store.verifyOtp(US, '000000', 'login');
+    expect(await store.verifyOtp(US, issued.code, 'login')).toEqual({ ok: true });
+    expect([...redis.dump.keys()].some((k) => k.startsWith('otp:att:'))).toBe(false);
+    const day = [...redis.dump.entries()].find(([k]) => k.startsWith('otp:faillock:'));
+    expect(day?.[1]).toBe('2');
+  });
+});
+
 describe('otp-store throttling', () => {
   it('enforces a 30s resend cooldown independent of the code record', async () => {
     const { store, advance } = mk();
