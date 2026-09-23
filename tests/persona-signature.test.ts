@@ -88,6 +88,13 @@ describe('verifyPersonaSignature', () => {
       expect(verifyPersonaSignature(body, header, [SECRET, NEW], now)).toBe(false);
     });
 
+    it('v1 before t inside one set, with a space after the comma, still verifies (`v1=…, t=…`)', () => {
+      expect(verifyPersonaSignature(body, `v1=${sign(t, SECRET)}, t=${t}`, [SECRET], now)).toBe(true);
+      expect(verifyPersonaSignature(body, `v1=${sign(t, SECRET)},t=${t}`, [SECRET], now)).toBe(true);
+      // …and as the first of two rotation sets
+      expect(verifyPersonaSignature(body, `v1=${sign(t, SECRET)}, t=${t} t=${t},v1=${sign(t, NEW)}`, [SECRET], now)).toBe(true);
+    });
+
     it('extra whitespace between the sets and around the header is tolerated', () => {
       const header = `  t=${t},v1=deadbeef \t  t=${t} , v1=${sign(t, NEW)}  `;
       expect(verifyPersonaSignature(body, header, [NEW], now)).toBe(true);

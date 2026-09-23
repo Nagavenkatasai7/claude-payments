@@ -12,7 +12,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
  * Program-Fix 35 — secret rotation: while a secret rotates Persona sends TWO
  * space-separated sets, `t=<t1>,v1=<a> t=<t2>,v1=<b>`
  * (https://docs.withpersona.com/webhooks-best-practices). The header is split
- * ONLY at whitespace immediately before `t=`; each set keeps the comma parse
+ * ONLY at whitespace immediately before `t=` (and not right after a comma, so
+ * `v1=…, t=…` stays one set); each set keeps the comma parse
  * (whitespace around parts and several `v1=` per set tolerated) and is checked
  * against ITS OWN `t` and its own ±5-minute window. A malformed set is skipped;
  * the header verifies only if some set verifies.
@@ -43,7 +44,9 @@ export function verifyPersonaSignature(
   const usableSecrets = (secrets ?? []).filter((s) => s && s.length > 0);
   if (!header || usableSecrets.length === 0) return false; // fail-closed
 
-  const sets = header.trim().split(/\s+(?=t=)/);
+  // Split at whitespace before `t=` that does NOT follow a comma: a space after
+  // a comma is inside one set (`v1=…, t=…`), a bare space separates two sets.
+  const sets = header.trim().split(/(?<!,)\s+(?=t=)/);
   for (const set of sets) {
     if (verifySet(rawBody, set, usableSecrets, nowMs)) return true;
   }
