@@ -68,6 +68,7 @@ vi.mock('@/lib/log', async () => {
 
 import { ensureSeedAdmin } from '@/lib/seed';
 import { login } from '@/app/login/actions';
+import { SESSION_COOKIE, LEGACY_SESSION_COOKIE } from '@/lib/session-cookie';
 import { createAuthStore } from '@/lib/auth-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { verifyPassword } from '@/lib/password';
@@ -144,5 +145,29 @@ describe('ensureSeedAdmin with SEED_ADMIN_* unset (Program-Fix 45 P1)', () => {
     fd.set('password', 'whatever-password');
     await expect(login(null, fd)).resolves.toBe('Invalid username or password.');
     expect(cookieJar.size).toBe(0);
+  });
+});
+
+// Program-Fix 45 P1: a fresh sign-in replaces the browser's session. The
+// sessions behind the cookies it presented (new or legacy) are revoked, not
+// just overwritten client-side.
+describe('login revokes the sessions behind the presented cookies (Program-Fix 45 P1)', () => {
+  it('both the __Host- and the legacy token stop resolving; the new cookie is set', async () => {
+    await ensureSeedAdmin(); // admin / 'pw' from the env mock
+    const store = createAuthStore(redis);
+    const oldNew = await store.createSession('admin');
+    const oldLegacy = await store.createSession('admin');
+    cookieJar.set(SESSION_COOKIE, oldNew);
+    cookieJar.set(LEGACY_SESSION_COOKIE, oldLegacy);
+    const fd = new FormData();
+    fd.set('username', 'admin');
+    fd.set('password', 'pw');
+    await expect(login(null, fd)).rejects.toThrow('REDIRECT:/admin-dashboard');
+    expect(await store.getSessionUser(oldNew)).toBeNull();
+    expect(await store.getSessionUser(oldLegacy)).toBeNull();
+    const fresh = cookieJar.get(SESSION_COOKIE);
+    expect(fresh && fresh !== oldNew).toBe(true);
+    expect(await store.getSessionUser(fresh!)).toBe('admin');
+    expect(cookieJar.has(LEGACY_SESSION_COOKIE)).toBe(false);
   });
 });
