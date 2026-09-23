@@ -121,6 +121,33 @@ function isWebChannel(ctx: ToolContext): boolean {
   return (ctx.channel ?? 'whatsapp') === 'web';
 }
 
+/**
+ * Program-Fix 49D (review r1): the portal chat (/api/account/chat, channel
+ * 'web') must not be a way around the receipt page's MFA step-up. On the web
+ * channel, when the customer has portal TOTP on — or CUSTOMER_MFA_REQUIRED is
+ * set — request_refund and open_recall_dispute refuse with a fixed
+ * `verify_on_receipt` and write nothing; the receipt form asks for the code.
+ * A failed enrolment lookup fails CLOSED. WhatsApp is unchanged (it has no
+ * portal session and no code step).
+ */
+async function webStepUpRefusal(ctx: ToolContext, transferId: string): Promise<ToolResult | null> {
+  if (!isWebChannel(ctx)) return null;
+  let required = env.customerMfaRequired;
+  if (!required) {
+    try {
+      required = await ctx.customerStore.isMfaEnrolled(ctx.partnerId, ctx.phone);
+    } catch {
+      required = true;
+    }
+  }
+  if (!required) return null;
+  return {
+    error_code: 'verify_on_receipt',
+    transfer_id: transferId,
+    reply_hint: `for their security this request needs a code from their authenticator app — ask them to open the receipt page /account/receipt/${transferId} and submit it there with the code; nothing has been requested yet`,
+  };
+}
+
 // ── Approve message helpers ──────────────────────────────────────────────────
 
 /**
@@ -2687,6 +2714,9 @@ async function requestRefundTool(
       };
   }
 
+  const stepUpRefusal = await webStepUpRefusal(ctx, transfer.id);
+  if (stepUpRefusal) return stepUpRefusal;
+
   // refundable: status 'paid' + refundStatus 'none'. The guarded none→requested
   // transition makes concurrent requests harmless: the loser gets null and we
   // answer as if the request already exists (it does).
@@ -2792,6 +2822,9 @@ async function openRecallDisputeTool(
         };
     }
   }
+
+  const stepUpRefusal = await webStepUpRefusal(ctx, transfer.id);
+  if (stepUpRefusal) return stepUpRefusal;
 
   // recall_eligible — open the case. Respect the per-customer open-case cap.
   const repo = ctx.ticketRepo ?? createTicketRepo(getDb());

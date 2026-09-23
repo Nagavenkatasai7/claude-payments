@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { getRedis } from './redis';
 import { getStore } from './store';
 import { getCustomerStore } from './customer-store';
@@ -41,6 +41,8 @@ const LAST_STEP_TTL_S = 24 * 60 * 60;
 /** Covers the ±1 window (a code is acceptable for at most 90 s) with margin. */
 const USED_STEP_TTL_S = 4 * TOTP_STEP_SECONDS;
 const PASSWORD_TAG_HEX = 32;
+/** The check-and-claim critical section is milliseconds; the TTL only bounds a crashed holder. */
+const CLAIM_LOCK_TTL_S = 5;
 
 export interface CustomerKey {
   partnerId: PartnerId;
@@ -55,6 +57,8 @@ export const customerMfaKeys = {
   enrollCount: (k: CustomerKey) => `sr_mfa_enroll_n:${rowHash(k)}`,
   last: (k: CustomerKey) => `sr_totp_last:${rowHash(k)}`,
   used: (k: CustomerKey, step: number) => `sr_totp_used:${rowHash(k)}:${step}`,
+  /** Review r1: a short per-row lock around check-and-claim (RedisLike has no Lua / CAS). */
+  lock: (k: CustomerKey) => `sr_totp_lock:${rowHash(k)}`,
 };
 
 /** The customer-repo methods this store needs (one mock point for tests). */
@@ -85,14 +89,27 @@ export function createCustomerMfaStore(redis: RedisLike, repo: CustomerMfaRepo, 
    * reverse, inside its 90-second life).
    */
   async function acceptCode(k: CustomerKey, secret: Buffer, code: string): Promise<boolean> {
-    const lastRaw = await redis.get(customerMfaKeys.last(k));
-    const lastStep = lastRaw !== null && /^\d+$/.test(lastRaw) ? Number(lastRaw) : null;
-    const step = verifyTotp(secret, code, now(), { lastStep });
-    if (step === null) return false;
-    const claimed = await redis.set(customerMfaKeys.used(k, step), '1', { nx: true, ex: USED_STEP_TTL_S });
-    if (claimed === null) return false;
-    await redis.set(customerMfaKeys.last(k), String(step), { ex: LAST_STEP_TTL_S });
-    return true;
+    // Review r1: the read of the last step, the per-step claim and the write of
+    // the new last step run under a per-row NX lock, so two DIFFERENT valid
+    // steps submitted concurrently can never both pass (RedisLike has no Lua or
+    // compare-and-set). A code that loses the lock is refused like a replay;
+    // the customer simply enters the next code.
+    const lockKey = customerMfaKeys.lock(k);
+    const owner = randomBytes(16).toString('hex');
+    if ((await redis.set(lockKey, owner, { nx: true, ex: CLAIM_LOCK_TTL_S })) === null) return false;
+    try {
+      const lastRaw = await redis.get(customerMfaKeys.last(k));
+      const lastStep = lastRaw !== null && /^\d+$/.test(lastRaw) ? Number(lastRaw) : null;
+      const step = verifyTotp(secret, code, now(), { lastStep });
+      if (step === null) return false;
+      const claimed = await redis.set(customerMfaKeys.used(k, step), '1', { nx: true, ex: USED_STEP_TTL_S });
+      if (claimed === null) return false;
+      await redis.set(customerMfaKeys.last(k), String(step), { ex: LAST_STEP_TTL_S });
+      return true;
+    } finally {
+      // Release only our own lock (one that expired and was re-taken is left alone).
+      if ((await redis.get(lockKey)) === owner) await redis.del(lockKey);
+    }
   }
 
   return {

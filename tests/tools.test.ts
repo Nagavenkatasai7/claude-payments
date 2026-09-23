@@ -5893,3 +5893,83 @@ describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () =>
     expect((await ctx.draftStore.consumeDraft(same.draft_id as string))?.recipient.payoutDestination).toBe(FIX6_REAL);
   });
 });
+
+// Program-Fix 49D review r1: the portal chat (/api/account/chat, channel 'web')
+// must not skip the receipt page's MFA step-up for refund / recall.
+describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D)', () => {
+  type Ctx = Awaited<ReturnType<typeof buildCtx>>;
+  const B32 = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+
+  async function mint(ctx: Ctx, deliver: boolean): Promise<string> {
+    const created = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 100,
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
+      },
+      ctx,
+    );
+    const id = created.transfer_id as string;
+    await ctx.store.updateTransferFromWebhook(id, 'paid');
+    if (deliver) await ctx.store.updateTransferFromWebhook(id, 'delivered');
+    return id;
+  }
+  const web = (ctx: Ctx) => ({ ...ctx, channel: 'web' as const });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('enrolled web customer: request_refund refuses with verify_on_receipt and writes nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, false);
+    expect(await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32)).toBe(true);
+    const r = await executeTool('request_refund', { transfer_id: id }, web(ctx));
+    expect(r.error_code).toBe('verify_on_receipt');
+    expect(String(r.reply_hint)).toContain(`/account/receipt/${id}`);
+    expect(r.requested).toBeUndefined();
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('enrolled web customer: open_recall_dispute refuses with verify_on_receipt and opens no case', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, true);
+    await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32);
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, web(ctx));
+    expect(r.error_code).toBe('verify_on_receipt');
+    expect(r.opened).toBeUndefined();
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('CUSTOMER_MFA_REQUIRED on: an unenrolled web customer is refused too (both tools)', async () => {
+    vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
+    const ctx = await buildCtx(fakeRedis());
+    const paid = await mint(ctx, false);
+    const r1 = await executeTool('request_refund', { transfer_id: paid }, web(ctx));
+    expect(r1.error_code).toBe('verify_on_receipt');
+    expect((await ctx.store.getTransfer(paid))?.refundStatus ?? 'none').toBe('none');
+    const delivered = await mint(ctx, true);
+    const r2 = await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, web(ctx));
+    expect(r2.error_code).toBe('verify_on_receipt');
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('unenrolled web customer with the flag off: unchanged (the refund is flagged)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, false);
+    const r = await executeTool('request_refund', { transfer_id: id }, web(ctx));
+    expect(r.requested).toBe(true);
+  });
+
+  it('WhatsApp channel is unchanged even when enrolled and the flag is on', async () => {
+    vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32);
+    const paid = await mint(ctx, false);
+    expect((await executeTool('request_refund', { transfer_id: paid }, ctx)).requested).toBe(true);
+    const delivered = await mint(ctx, true);
+    expect((await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, ctx)).opened).toBe(true);
+  });
+});

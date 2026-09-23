@@ -107,6 +107,39 @@ describe('customer-mfa store (Program-Fix 49D)', () => {
     expect(await store().verifyCode(WHO, '12345')).toBe(false);
   });
 
+  it('two DIFFERENT valid steps submitted concurrently: at most one passes (review r1)', async () => {
+    const secret = await enrol();
+    clock += 120_000;
+    const now = totpAt(secret, clock);
+    const next = totpAt(secret, clock + 30_000); // step+1 is inside the ±1 window
+    // Force a real overlap: the last-step read waits (up to 50 ms) until BOTH
+    // attempts have reached it, so without serialisation both would read the
+    // same "last step" and both would pass.
+    let arrived = 0;
+    const overlapping = {
+      ...redis,
+      async get(key: string) {
+        const value = await redis.get(key);
+        if (key.startsWith('sr_totp_last:')) {
+          arrived += 1;
+          for (let i = 0; i < 50 && arrived < 2; i++) await new Promise((r) => setTimeout(r, 1));
+        }
+        return value;
+      },
+    };
+    const s2 = createCustomerMfaStore(overlapping, repo, { now: () => clock });
+    const results = await Promise.all([s2.verifyCode(WHO, now), s2.verifyCode(WHO, next)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('sequential use of the next step still works (the lock is released)', async () => {
+    const secret = await enrol();
+    clock += 120_000;
+    expect(await store().verifyCode(WHO, totpAt(secret, clock))).toBe(true);
+    clock += 30_000;
+    expect(await store().verifyCode(WHO, totpAt(secret, clock))).toBe(true);
+  });
+
   it('the confirm code cannot be replayed at sign-in', async () => {
     const begun = await store().beginEnrolment(WHO);
     if (!begun.ok) throw new Error();
