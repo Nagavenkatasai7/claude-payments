@@ -228,8 +228,8 @@ async function alertScheduleNotCreated(
           (dedupePrefix === 'schedule-sender-name'
             ? `No sender legal name is on file; the schedule stays active and runs on its next due day ` +
               `once the customer gives their name in chat (or re-run /api/cron today after that).`
-            : `The 17:00 UTC catch-up run retries it today; if the cause has not cleared by then, re-run /api/cron ` +
-              `today once it does. Nothing retries it tomorrow.`),
+            : `Re-run /api/cron today once the cause clears; if this alert came from the 13:00 UTC run, the ` +
+              `17:00 UTC catch-up retries it automatically. Nothing retries it tomorrow.`),
       },
       { dedupeKey: `${dedupePrefix}:${scheduleId}:${day}` },
     );
