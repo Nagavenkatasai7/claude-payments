@@ -831,3 +831,36 @@ describe('Program-Fix 49B: prompt and tool schemas agree', () => {
     }
   });
 });
+
+describe('Program-Fix 49B (main-session decision): compliance and recall wording stays in English', () => {
+  const variants = [
+    SYSTEM_PROMPT,
+    buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'ours' }),
+    buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'delegated' }),
+  ];
+  const RULE =
+    'EXCEPTION (translation parked for counsel): compliance-block text (a tool result with blocked: true) and recall or refund text from request_refund or open_recall_dispute results are relayed VERBATIM IN ENGLISH, never translated.';
+  const PREFACE =
+    'In the customer\'s language you may add ONE short line before it saying the following is required wording in English.';
+
+  it('states the English-only exception and the one-line preface, once, in every variant', () => {
+    for (const p of variants) {
+      expect(p.split(RULE)).toHaveLength(2);
+      expect(p).toContain(PREFACE);
+    }
+  });
+
+  it('the exception follows the general translation rule (it narrows it)', () => {
+    for (const p of variants) {
+      const general = p.indexOf('translate it faithfully');
+      expect(general).toBeGreaterThan(-1);
+      expect(p.indexOf(RULE)).toBeGreaterThan(general);
+    }
+  });
+
+  it('COMPLIANCE BLOCKS says the relayed text stays in English', () => {
+    for (const p of variants) {
+      expect(p).toContain('relayed as-is and in English (see LANGUAGE & LENGTH)');
+    }
+  });
+});
