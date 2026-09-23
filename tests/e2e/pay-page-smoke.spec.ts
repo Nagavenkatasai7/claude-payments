@@ -76,6 +76,12 @@ test('/pay carries exactly one enforced CSP without unsafe-eval, plus the report
   expect(reportOnly).toHaveLength(1);
   expect(reportOnly[0]).toContain("'nonce-");
   expect(reportOnly[0]).toContain("'strict-dynamic'");
+  // Next actually stamped that nonce on its scripts (raw HTML: browsers hide
+  // nonce attribute values from the DOM).
+  const nonce = reportOnly[0].match(/'nonce-([^']+)'/)![1];
+  const html = await res.text();
+  expect(html).toContain(`nonce="${nonce}"`);
+  expect(html).not.toContain('nonce\\":\\"$undefined');
 });
 
 test('a random 22-character id renders the generic inactive sheet with a 200', async ({ page }) => {

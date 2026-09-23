@@ -130,5 +130,11 @@ for (const path of ['/login', '/account/login']) {
     expect(reportOnly).toHaveLength(1);
     expect(reportOnly[0]).toContain("'nonce-");
     expect(reportOnly[0]).toContain("'strict-dynamic'");
+    // Next actually stamped that nonce on its scripts. Raw HTML via request,
+    // not a locator: browsers hide nonce attribute values from the DOM.
+    const nonce = reportOnly[0].match(/'nonce-([^']+)'/)![1];
+    const html = await res.text();
+    expect(html).toContain(`nonce="${nonce}"`);
+    expect(html).not.toContain('nonce\\":\\"$undefined');
   });
 }
