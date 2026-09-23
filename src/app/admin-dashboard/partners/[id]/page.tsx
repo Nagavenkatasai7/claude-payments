@@ -19,6 +19,7 @@ import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
+import { displayKeyPrefix, keyModeFromId, scopesForMode } from '@/lib/partner-api-scopes';
 import { CopyField } from '../copy-field';
 import { LogoUpload } from '../logo-upload';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -645,6 +646,7 @@ export default async function PartnerDetailPage({
                   <CardTitle>API keys</CardTitle>
                   <CardDescription>
                     Connect your systems to the Partner API. Keys are shown once at issue and stored hashed.
+                    To rotate, issue a new key, switch over, then revoke the old one once its last use stops moving.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -654,14 +656,21 @@ export default async function PartnerDetailPage({
                     <dl className={DL_CLASS}>
                       {apiKeys.map((k) => (
                         <div key={k.keyId} className="contents">
-                          <dt><code>sr_live_…{k.last4}</code></dt>
+                          <dt><code>{displayKeyPrefix(keyModeFromId(k.keyId))}…{k.last4}</code></dt>
                           <dd className="flex flex-wrap items-center gap-2.5">
+                            <Badge variant={keyModeFromId(k.keyId) === 'live' ? 'secondary' : 'outline'}>{keyModeFromId(k.keyId)}</Badge>
                             {k.revokedAt ? (
                               <Badge variant="outline" className="text-muted-foreground">revoked</Badge>
                             ) : (
                               <Badge variant="secondary">active</Badge>
                             )}
                             <span className="text-xs text-muted-foreground">issued {new Date(k.createdAt).toLocaleDateString()}</span>
+                            <span className="text-xs text-muted-foreground">
+                              last used {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleDateString() : 'never'}
+                            </span>
+                            <span className="text-xs text-muted-foreground" title={scopesForMode(keyModeFromId(k.keyId)).join(', ')}>
+                              scopes: {keyModeFromId(k.keyId) === 'live' ? 'all' : scopesForMode(keyModeFromId(k.keyId)).join(', ')}
+                            </span>
                             {!k.revokedAt && (
                               <form action={revokeApiKeyAction.bind(null, partner.id)}>
                                 <input type="hidden" name="keyId" value={k.keyId} />

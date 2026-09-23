@@ -5,7 +5,7 @@ import { validateBeneficiary } from '@/lib/partner-api-service';
 // POST /api/partner/v1/beneficiaries/validate — stateless payout-field validation
 // (pre-check before creating a beneficiary or transaction).
 export async function POST(req: NextRequest) {
-  const g = await guardPartner(req);
+  const g = await guardPartner(req, 'beneficiaries:validate');
   if (!g.ok) return g.response;
   return svcResponse(validateBeneficiary(await readJson(req)));
 }

@@ -10,14 +10,14 @@ import { pushPartnerRate, listPartnerRates } from '@/lib/partner-api-service';
 // it with the partner's wholesale push would silently break existing
 // integrations and mismatch what createTransaction mints.
 export async function PUT(req: NextRequest) {
-  const g = await guardPartner(req);
+  const g = await guardPartner(req, 'rates:write');
   if (!g.ok) return g.response;
   return svcResponse(await pushPartnerRate(g.ctx.deps, g.ctx.partner, g.ctx.keyId, await readJson(req)));
 }
 
 // GET /api/partner/v1/rates — the partner's own rate sheet (key-scoped).
 export async function GET(req: NextRequest) {
-  const g = await guardPartner(req);
+  const g = await guardPartner(req, 'rates:read');
   if (!g.ok) return g.response;
   return svcResponse(await listPartnerRates(g.ctx.deps, g.ctx.partner.id));
 }
