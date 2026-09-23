@@ -1,9 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import {
   EnvKeyProvider,
   encryptField,
   decryptField,
+  aadFor,
+  sealFieldV2,
+  __setFieldCryptoWriteV2ForTests,
   type EncryptionKeyProvider,
 } from '@/lib/field-crypto';
 
@@ -218,3 +221,126 @@ describe('field-crypto lone surrogates — regression (bug-hunt)', () => {
   });
 });
 
+
+// ── Program-Fix 46A: v2 envelope, context bound into the AAD (reader side) ──
+describe('field-crypto v2 (context-bound AAD)', () => {
+  const p = fixedProvider(KEY_A);
+  const CTX = { table: 'customers', column: 'full_name_enc', row: ['acme', '15550001111'] };
+
+  afterEach(() => __setFieldCryptoWriteV2ForTests(false));
+
+  it('aadFor pins the exact AAD string (kid k0 bound in)', () => {
+    expect(aadFor(CTX)).toBe('v2|k0|customers|full_name_enc|acme|15550001111');
+    expect(aadFor({ table: 'transfers', column: 'payout_destination_enc', row: ['a|b c'] })).toBe(
+      'v2|k0|transfers|payout_destination_enc|a%7Cb%20c',
+    );
+    expect(aadFor({ table: 'purpose', column: 'customer_ref', row: [] })).toBe('v2|k0|purpose|customer_ref|');
+  });
+
+  it('sealFieldV2 emits v2.<kid>.<iv>.<tag>.<wdek>.<ct>', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX);
+    const parts = blob.split('.');
+    expect(parts).toHaveLength(6);
+    expect(parts[0]).toBe('v2');
+    expect(parts[1]).toBe('k0');
+  });
+
+  it('v2 opens only with its exact ctx', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX);
+    expect(decryptField(blob, p, CTX)).toBe('Jane Roe');
+    expect(decryptField(blob, p, { ...CTX, row: [...CTX.row] })).toBe('Jane Roe');
+  });
+
+  it('v2 moved to another column/row/table fails the GCM tag', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX);
+    expect(() => decryptField(blob, p, { ...CTX, column: 'date_of_birth_enc' })).toThrow();
+    expect(() => decryptField(blob, p, { ...CTX, row: ['acme', '15550002222'] })).toThrow();
+    expect(() => decryptField(blob, p, { ...CTX, row: ['other', '15550001111'] })).toThrow();
+    expect(() => decryptField(blob, p, { ...CTX, table: 'waitlist_signups' })).toThrow();
+    // Row-part boundaries are unambiguous: ['a|b'] never equals ['a','b'].
+    const joined = sealFieldV2('x', p, { table: 't', column: 'c', row: ['a|b'] });
+    expect(() => decryptField(joined, p, { table: 't', column: 'c', row: ['a', 'b'] })).toThrow();
+  });
+
+  it('a ctx-mismatch error never echoes the row key (no PII in errors)', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX);
+    let msg = '';
+    try {
+      decryptField(blob, p, { ...CTX, row: ['acme', '15550009999'] });
+    } catch (err) {
+      msg = String(err instanceof Error ? err.message : err);
+    }
+    expect(msg).not.toBe('');
+    expect(msg).not.toContain('1555000');
+    expect(msg).not.toContain('acme');
+  });
+
+  it('v2 without ctx throws', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX);
+    expect(() => decryptField(blob, p)).toThrow(/context/);
+  });
+
+  it('v2 with an unknown kid is refused', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX).replace(/^v2\.k0\./, 'v2.k1.');
+    expect(() => decryptField(blob, p, CTX)).toThrow();
+  });
+
+  it('v2 with the wrong number of segments is malformed', () => {
+    expect(() => decryptField('v2.k0.a.b.c', p, CTX)).toThrow(/malformed/);
+  });
+
+  it('v1 opens with any ctx (ctx ignored on legacy blobs)', () => {
+    const blob = encryptField('legacy', p);
+    expect(blob.startsWith('v1.')).toBe(true);
+    expect(decryptField(blob, p, CTX)).toBe('legacy');
+    expect(decryptField(blob, p, { table: 'x', column: 'y', row: ['z'] })).toBe('legacy');
+  });
+
+  it('v1 opens with a malformed or empty ctx (hot path never validates ctx on v1)', () => {
+    const blob = encryptField('legacy', p);
+    const junk = { table: 'BAD TABLE!', column: '', row: [undefined as unknown as string] };
+    expect(decryptField(blob, p, junk)).toBe('legacy');
+    expect(decryptField(blob, p, { table: '', column: '', row: [] })).toBe('legacy');
+  });
+
+  it('encryptField still writes v1 even when given a ctx (46A never writes v2)', () => {
+    const blob = encryptField('still v1', p, CTX);
+    expect(blob.startsWith('v1.')).toBe(true);
+    expect(blob.split('.')).toHaveLength(5);
+    expect(decryptField(blob, p, CTX)).toBe('still v1');
+  });
+
+  it('the test-only seam makes encryptField write v2 when a ctx is given', () => {
+    __setFieldCryptoWriteV2ForTests(true);
+    const blob = encryptField('seamed', p, CTX);
+    expect(blob.startsWith('v2.k0.')).toBe(true);
+    expect(decryptField(blob, p, CTX)).toBe('seamed');
+    // No ctx ⇒ the seam cannot bind anything, so it stays v1.
+    expect(encryptField('no ctx', p).startsWith('v1.')).toBe(true);
+  });
+
+  it('the seam refuses to turn on in production', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      expect(() => __setFieldCryptoWriteV2ForTests(true)).toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('v2 refuses an invalid ctx at seal and open time', () => {
+    expect(() => sealFieldV2('x', p, { table: 'Bad Table', column: 'c', row: [] })).toThrow();
+    expect(() => sealFieldV2('x', p, { table: 't', column: 'c', row: [undefined as unknown as string] })).toThrow();
+    const blob = sealFieldV2('x', p, { table: 't', column: 'c', row: ['r'] });
+    expect(() => decryptField(blob, p, { table: 't', column: '', row: ['r'] })).toThrow();
+  });
+
+  it('v2 tamper detection still holds', () => {
+    const blob = sealFieldV2('Jane Roe', p, CTX);
+    const parts = blob.split('.');
+    const ct = Buffer.from(parts[5], 'base64url');
+    ct[0] ^= 0x01;
+    parts[5] = ct.toString('base64url');
+    expect(() => decryptField(parts.join('.'), p, CTX)).toThrow();
+  });
+});

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -108,6 +108,12 @@ beforeEach(async () => {
   await db.execute(sql`TRUNCATE partner_requests, partner_applications RESTART IDENTITY CASCADE`);
   redis.dump.clear();
   redirectMock.mockClear();
+  // Program-Fix 46A (F73): submit keeps only refs on OUR private store, whose
+  // host is derived from this token's store id ('abc', as in the fixtures).
+  vi.stubEnv('PARTNER_DOCS_BLOB_READ_WRITE_TOKEN', 'vercel_blob_rw_abc_testonlynotasecret');
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe('submitPartnerApplicationAction', () => {
@@ -199,6 +205,44 @@ describe('submitPartnerApplicationAction', () => {
       'https://abc.private.blob.vercel-storage.com/partner-applications/preq_docs/1-x-R4nd0m.pdf',
     );
     expect(kept.contentType).toBe('application/pdf');
+  });
+
+  it('a ref on another private store is dropped (fix 46A / F73)', async () => {
+    await seedRequest({ token: LIVE_TOKEN, id: 'preq_store' });
+    const docs = JSON.stringify([
+      {
+        label: 'ours',
+        url: 'https://abc.private.blob.vercel-storage.com/partner-applications/preq_store/1-x-R4nd0m.pdf',
+        size: 1, contentType: 'application/pdf',
+      },
+      {
+        label: 'theirs',
+        url: 'https://zzz.private.blob.vercel-storage.com/partner-applications/preq_store/1-x-R4nd0m.pdf',
+        size: 1, contentType: 'application/pdf',
+      },
+    ]);
+    await expect(
+      submitPartnerApplicationAction(form({ token: LIVE_TOKEN, ...VALID_DETAILS, documents: docs })),
+    ).rejects.toThrow(`REDIRECT:/partners/apply/${LIVE_TOKEN}`);
+    const apps = await applicationRows();
+    expect((apps[0].documents as { label: string }[]).map((d) => d.label)).toEqual(['ours']);
+  });
+
+  it('with the partner-docs token unset, every document ref is dropped at submit (fix 46A / F73)', async () => {
+    vi.stubEnv('PARTNER_DOCS_BLOB_READ_WRITE_TOKEN', '');
+    await seedRequest({ token: LIVE_TOKEN, id: 'preq_notoken' });
+    const docs = JSON.stringify([
+      {
+        label: 'ours',
+        url: 'https://abc.private.blob.vercel-storage.com/partner-applications/preq_notoken/1-x-R4nd0m.pdf',
+        size: 1, contentType: 'application/pdf',
+      },
+    ]);
+    await expect(
+      submitPartnerApplicationAction(form({ token: LIVE_TOKEN, ...VALID_DETAILS, documents: docs })),
+    ).rejects.toThrow(`REDIRECT:/partners/apply/${LIVE_TOKEN}`);
+    const apps = await applicationRows();
+    expect(apps[0].documents).toEqual([]);
   });
 
   it('a submitted contentType outside the allow-list is stored as an empty string (fix 24)', async () => {

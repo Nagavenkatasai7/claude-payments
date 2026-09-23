@@ -3,6 +3,7 @@ import { partnerIntegrations } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { openOptional, sealOptional } from './mappers';
+import { ctx } from '@/lib/crypto-context';
 import {
   EMPTY_PARTNER_INTEGRATIONS,
   type PartnerIntegrations,
@@ -29,44 +30,45 @@ export function createIntegrationsRepo(
         .limit(1);
       const row = rows[0];
       if (!row) return EMPTY_PARTNER_INTEGRATIONS;
-      const credsJson = openOptional(row.paymentCredentialsEnc, provider);
+      const credsJson = openOptional(row.paymentCredentialsEnc, provider, ctx.integration(row.partnerId, 'payment_credentials_enc'));
       const compact = <T extends Record<string, unknown>>(o: T): T =>
         Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null)) as T;
       return {
         kyc: compact({
           providerType: row.kycProviderType as PartnerIntegrations['kyc']['providerType'],
-          apiKey: openOptional(row.kycApiKeyEnc, provider),
-          webhookSecret: openOptional(row.kycWebhookSecretEnc, provider),
+          apiKey: openOptional(row.kycApiKeyEnc, provider, ctx.integration(row.partnerId, 'kyc_api_key_enc')),
+          webhookSecret: openOptional(row.kycWebhookSecretEnc, provider, ctx.integration(row.partnerId, 'kyc_webhook_secret_enc')),
         }),
         payment: compact({
           providerType: row.paymentProviderType ?? undefined,
           credentials: credsJson ? (JSON.parse(credsJson) as Record<string, string>) : undefined,
-          webhookSecret: openOptional(row.paymentWebhookSecretEnc, provider),
+          webhookSecret: openOptional(row.paymentWebhookSecretEnc, provider, ctx.integration(row.partnerId, 'payment_webhook_secret_enc')),
         }),
         whatsapp: compact({
           phoneNumberId: row.waPhoneNumberId ?? undefined,
-          token: openOptional(row.waTokenEnc, provider),
-          verifyToken: openOptional(row.waVerifyTokenEnc, provider),
-          appSecret: openOptional(row.waAppSecretEnc, provider),
+          token: openOptional(row.waTokenEnc, provider, ctx.integration(row.partnerId, 'wa_token_enc')),
+          verifyToken: openOptional(row.waVerifyTokenEnc, provider, ctx.integration(row.partnerId, 'wa_verify_token_enc')),
+          appSecret: openOptional(row.waAppSecretEnc, provider, ctx.integration(row.partnerId, 'wa_app_secret_enc')),
         }),
       };
     },
 
     async saveIntegrations(id: PartnerId, config: PartnerIntegrations): Promise<void> {
+      const partnerId = id; // the row key AS WRITTEN (conflict target) — every sealed column binds to it
       const row = {
-        partnerId: id,
+        partnerId,
         kycProviderType: config.kyc?.providerType ?? null,
-        kycApiKeyEnc: sealOptional(config.kyc?.apiKey, provider) ?? null,
-        kycWebhookSecretEnc: sealOptional(config.kyc?.webhookSecret, provider) ?? null,
+        kycApiKeyEnc: sealOptional(config.kyc?.apiKey, provider, ctx.integration(partnerId, 'kyc_api_key_enc')) ?? null,
+        kycWebhookSecretEnc: sealOptional(config.kyc?.webhookSecret, provider, ctx.integration(partnerId, 'kyc_webhook_secret_enc')) ?? null,
         paymentProviderType: config.payment?.providerType ?? null,
         paymentCredentialsEnc: config.payment?.credentials
-          ? sealOptional(JSON.stringify(config.payment.credentials), provider)!
+          ? sealOptional(JSON.stringify(config.payment.credentials), provider, ctx.integration(partnerId, 'payment_credentials_enc'))!
           : null,
-        paymentWebhookSecretEnc: sealOptional(config.payment?.webhookSecret, provider) ?? null,
+        paymentWebhookSecretEnc: sealOptional(config.payment?.webhookSecret, provider, ctx.integration(partnerId, 'payment_webhook_secret_enc')) ?? null,
         waPhoneNumberId: config.whatsapp?.phoneNumberId ?? null,
-        waTokenEnc: sealOptional(config.whatsapp?.token, provider) ?? null,
-        waVerifyTokenEnc: sealOptional(config.whatsapp?.verifyToken, provider) ?? null,
-        waAppSecretEnc: sealOptional(config.whatsapp?.appSecret, provider) ?? null,
+        waTokenEnc: sealOptional(config.whatsapp?.token, provider, ctx.integration(partnerId, 'wa_token_enc')) ?? null,
+        waVerifyTokenEnc: sealOptional(config.whatsapp?.verifyToken, provider, ctx.integration(partnerId, 'wa_verify_token_enc')) ?? null,
+        waAppSecretEnc: sealOptional(config.whatsapp?.appSecret, provider, ctx.integration(partnerId, 'wa_app_secret_enc')) ?? null,
         updatedAt: new Date(),
       };
       await db

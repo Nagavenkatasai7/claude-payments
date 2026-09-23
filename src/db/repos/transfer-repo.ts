@@ -3,6 +3,7 @@ import { auditEvents, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
 import {
@@ -563,7 +564,9 @@ export function createTransferRepo(
         .update(transfers)
         .set({
           payoutMethod: payout.payoutMethod,
-          payoutDestinationEnc: payout.payoutDestination ? encryptField(payout.payoutDestination, provider) : '',
+          payoutDestinationEnc: payout.payoutDestination
+            ? encryptField(payout.payoutDestination, provider, ctx.transfer(id, 'payout_destination_enc')) // row id = the WHERE's id
+            : '',
           payoutDestinationLast4: last4(payout.payoutDestination),
         })
         .where(payoutEditable(id, partnerId))

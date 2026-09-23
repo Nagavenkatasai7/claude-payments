@@ -2,8 +2,10 @@ import {
   encryptField,
   decryptField,
   defaultProvider,
+  type CryptoContext,
   type EncryptionKeyProvider,
 } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import type { transfers } from '@/db/schema';
 import type {
   ComplianceStatus,
@@ -39,22 +41,27 @@ export function last4(value: string): string {
   return value ? tail : '';
 }
 
+// `context` (Program-Fix 46A): the storage context (src/lib/crypto-context.ts) —
+// built from the row AS WRITTEN on seal and from the FETCHED row on open.
 export function sealOptional(
   value: string | undefined,
   provider: EncryptionKeyProvider,
+  context?: CryptoContext,
 ): string | undefined {
   if (value === undefined || value === '') return value;
-  return encryptField(value, provider);
+  return encryptField(value, provider, context);
 }
 
 export function openOptional(
   blob: string | null | undefined,
   provider: EncryptionKeyProvider,
+  context?: CryptoContext,
 ): string | undefined {
-  // Decrypt failures THROW (tamper/key mismatch must be loud, never a silent
-  // fallback that quietly drops a bank account).
+  // Decrypt failures THROW (tamper/key mismatch/context mismatch must be loud,
+  // never a silent fallback that quietly drops a bank account or — on the
+  // sanctions path — a customer's name). Never wrap this in a catch.
   if (blob === null || blob === undefined || blob === '') return blob ?? undefined;
-  return decryptField(blob, provider);
+  return decryptField(blob, provider, context);
 }
 
 const num = (v: string): number => Number(v);
@@ -65,8 +72,10 @@ export function transferToRow(
   t: Transfer,
   provider: EncryptionKeyProvider = defaultProvider(),
 ): TransferInsert {
+  // The row key AS WRITTEN — every sealed column below binds to it.
+  const id = t.id;
   return {
-    id: t.id,
+    id,
     partnerId: t.partnerId,
     settlementPartnerId: t.settlementPartnerId ?? null,
     phone: t.phone,
@@ -88,7 +97,9 @@ export function transferToRow(
     recipientName: t.recipientName,
     recipientPhone: t.recipientPhone ?? '',
     payoutMethod: t.payoutMethod,
-    payoutDestinationEnc: t.payoutDestination ? encryptField(t.payoutDestination, provider) : '',
+    payoutDestinationEnc: t.payoutDestination
+      ? encryptField(t.payoutDestination, provider, ctx.transfer(id, 'payout_destination_enc'))
+      : '',
     payoutDestinationLast4: last4(t.payoutDestination ?? ''),
     fundingMethod: t.fundingMethod,
     paymentProviderRef: t.paymentProviderRef ?? null,
@@ -96,7 +107,7 @@ export function transferToRow(
     refundRef: t.refundRef ?? null,
     refundStatus: t.refundStatus ?? 'none',
     refundedAt: t.refundedAt ? new Date(t.refundedAt) : null,
-    recipientLegalNameEnc: sealOptional(t.recipientLegalName, provider) ?? null,
+    recipientLegalNameEnc: sealOptional(t.recipientLegalName, provider, ctx.transfer(id, 'recipient_legal_name_enc')) ?? null,
     relationship: t.relationship ?? null,
     purpose: t.purpose ?? null,
     eddRequired: t.eddRequired ?? null,
@@ -105,9 +116,10 @@ export function transferToRow(
     transferType: t.transferType ?? 'b2c',
     senderEntityType: t.senderEntityType ?? 'individual',
     recipientEntityType: t.recipientEntityType ?? 'individual',
-    senderBusinessNameEnc: sealOptional(t.senderBusinessName, provider) ?? null,
+    senderBusinessNameEnc: sealOptional(t.senderBusinessName, provider, ctx.transfer(id, 'sender_business_name_enc')) ?? null,
     senderBusinessNameLast4: t.senderBusinessName ? last4(t.senderBusinessName) : null,
-    recipientBusinessNameEnc: sealOptional(t.recipientBusinessName, provider) ?? null,
+    recipientBusinessNameEnc:
+      sealOptional(t.recipientBusinessName, provider, ctx.transfer(id, 'recipient_business_name_enc')) ?? null,
     recipientBusinessNameLast4: t.recipientBusinessName ? last4(t.recipientBusinessName) : null,
     achTokenRef: t.achTokenRef ?? null,
     invoiceId: t.invoiceId ?? null,
@@ -134,7 +146,7 @@ export interface RowToTransferOpts {
 export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): Transfer {
   const provider = opts.provider ?? defaultProvider();
   const payoutDestination = opts.decrypt
-    ? (openOptional(row.payoutDestinationEnc, provider) ?? '')
+    ? (openOptional(row.payoutDestinationEnc, provider, ctx.transfer(row.id, 'payout_destination_enc')) ?? '')
     : row.payoutDestinationLast4
       ? `****${row.payoutDestinationLast4}`
       : '';
@@ -176,7 +188,7 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   const refundedAt = isoOpt(row.refundedAt);
   if (refundedAt) t.refundedAt = refundedAt;
   if (opts.decrypt) {
-    const legal = openOptional(row.recipientLegalNameEnc, provider);
+    const legal = openOptional(row.recipientLegalNameEnc, provider, ctx.transfer(row.id, 'recipient_legal_name_enc'));
     if (legal) t.recipientLegalName = legal;
   }
   if (row.relationship) t.relationship = row.relationship as SenderRecipientRelationship;
@@ -190,13 +202,13 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   t.senderEntityType = (row.senderEntityType as EntityType) ?? 'individual';
   t.recipientEntityType = (row.recipientEntityType as EntityType) ?? 'individual';
   const senderBiz = opts.decrypt
-    ? openOptional(row.senderBusinessNameEnc, provider)
+    ? openOptional(row.senderBusinessNameEnc, provider, ctx.transfer(row.id, 'sender_business_name_enc'))
     : row.senderBusinessNameLast4
       ? `****${row.senderBusinessNameLast4}`
       : undefined;
   if (senderBiz) t.senderBusinessName = senderBiz;
   const recipientBiz = opts.decrypt
-    ? openOptional(row.recipientBusinessNameEnc, provider)
+    ? openOptional(row.recipientBusinessNameEnc, provider, ctx.transfer(row.id, 'recipient_business_name_enc'))
     : row.recipientBusinessNameLast4
       ? `****${row.recipientBusinessNameLast4}`
       : undefined;

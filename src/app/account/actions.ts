@@ -3,7 +3,13 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { after } from 'next/server';
-import { getCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
+import {
+  getCustomerAuthStore,
+  CustomerInputError,
+  EMAIL_MAX_LENGTH,
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+} from '@/lib/customer-auth-store';
 import { getOtpStore, type OtpPurpose } from '@/lib/otp-store';
 import { getPendingAuthStore } from '@/lib/pending-auth-store';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
@@ -22,7 +28,9 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { encryptField, defaultProvider } from '@/lib/field-crypto';
-import { clientIpFrom } from '@/lib/ip-rate-limit';
+import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
+import { getRedis } from '@/lib/redis';
+import { customerEmailCtx } from '@/lib/crypto-context';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -61,6 +69,9 @@ const GENERIC_LOGIN_ERROR = 'Invalid phone or password.';
 const GENERIC_OTP_NOTE = 'We sent a 6-digit code to your WhatsApp.';
 const SESSION_EXPIRED = 'Your session expired — please start again.';
 const COOKIE_MAX_AGE = 12 * 60 * 60; // 12h absolute (matches the session ceiling)
+// Program-Fix 46A (F70): registrations per client IP per hour (own scope).
+const REGISTER_IP_SCOPE = 'register';
+const REGISTER_IP_LIMIT = 10;
 
 function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? '');
@@ -162,7 +173,40 @@ export async function registerAction(
   const ip = await clientIp();
 
   if (!isValidPhone(phone)) return { step: 'register', error: 'Enter a valid phone number.' };
-  if (!email || !email.includes('@')) return { step: 'register', error: 'Enter a valid email address.' };
+  if (!email || !email.includes('@') || email.length > EMAIL_MAX_LENGTH) {
+    return { step: 'register', error: 'Enter a valid email address.' };
+  }
+  // The store's length policy, checked here too so a refusal never spends the
+  // per-IP budget below (same message registerCustomer uses).
+  if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+    return {
+      step: 'register',
+      error: `Password must be between ${PASSWORD_MIN} and ${PASSWORD_MAX} characters.`,
+    };
+  }
+
+  // Program-Fix 46A (F70): per-IP registration cap BEFORE any write — the same
+  // `ip` the OTP send keys on. Only attempts that reach registerCustomer count:
+  // phone / email / password-length refusals above return first, so a shared
+  // network full of typos cannot trip it. Skips an unknown IP (one shared bucket would lock
+  // out everyone behind a header-stripping proxy) and FAILS OPEN on any limiter
+  // error, as isIpRateLimited does (ip-rate-limit.ts).
+  if (ip !== 'unknown') {
+    let allowed = true;
+    try {
+      const r = await checkIpRateLimit(getRedis(), REGISTER_IP_SCOPE, ip, {
+        limit: REGISTER_IP_LIMIT,
+        windowSec: 3600,
+      });
+      allowed = r.allowed;
+    } catch (err) {
+      allowed = true; // availability wins — the per-phone OTP caps still hold
+      logWarn('portal.register_throttle', 'rate limiter unavailable; failing open', { error: err });
+    }
+    if (!allowed) {
+      return { step: 'register', error: 'Too many sign-up attempts. Please try again later.' };
+    }
+  }
 
   try {
     await getCustomerAuthStore().registerCustomer(
@@ -433,7 +477,7 @@ const SETTINGS_PATH = '/account/settings';
 export async function updateEmailAction(formData: FormData): Promise<void> {
   const customer = await requireCustomer();
   const email = field(formData, 'email').trim();
-  if (!email || !email.includes('@') || email.length > 254) {
+  if (!email || !email.includes('@') || email.length > EMAIL_MAX_LENGTH) {
     redirect(`${SETTINGS_PATH}?err=email`);
   }
 
@@ -449,7 +493,8 @@ export async function updateEmailAction(formData: FormData): Promise<void> {
       const nowIso = new Date().toISOString();
       await customers.saveCustomer({
         ...fresh,
-        email: encryptField(email, defaultProvider()),
+        // Sealed for the row it is saved into (the re-read `fresh` row's key).
+        email: encryptField(email, defaultProvider(), customerEmailCtx(fresh)),
         updatedAt: nowIso,
       });
     }

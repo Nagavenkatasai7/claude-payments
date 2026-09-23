@@ -1,6 +1,7 @@
 import { createHmac, hkdfSync } from 'node:crypto';
 import { decodeMasterKey, decryptField, encryptField } from '@/lib/field-crypto';
 import { env } from '@/lib/env';
+import { ctx } from '@/lib/crypto-context';
 import type { DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import type { Customer, PartnerId } from '@/lib/types';
@@ -12,7 +13,8 @@ import type { Customer, PartnerId } from '@/lib/types';
 // 1. The staff customer detail URL is `/admin-dashboard/customers/<ref>`, where
 //    ref = encryptField('cref1|<partnerId>|<phone>'). The phone never appears
 //    in a URL (Vercel request logs, browser history, referrers). The blob
-//    format `v1.<b64url>.<b64url>.<b64url>.<b64url>` is URL-safe. A fresh IV
+//    format `v1.<b64url>.<b64url>.<b64url>.<b64url>` (or, from fix 46B,
+//    `v2.<kid>.<b64url>…`) is URL-safe. A fresh IV
 //    and DEK per seal means a ref is not a stable identifier, which is why the
 //    audit subject below is a separate keyed HMAC.
 // 2. auditSubjectId is the stable, KEYED subject for audit rows about a
@@ -26,12 +28,17 @@ import type { Customer, PartnerId } from '@/lib/types';
 //    Pinned by a fixed-key vector in tests/customer-ref.test.ts.
 
 const REF_PREFIX = 'cref1|';
-const REF_SHAPE = /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+// v1: `v1.<iv>.<tag>.<wdek>.<ct>`; v2 (Program-Fix 46): `v2.<kid>.<iv>.<tag>.<wdek>.<ct>`.
+const REF_SHAPE =
+  /^(?:v1|v2\.[a-z0-9]+)\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+// The ref's storage context (a purpose, no row); a v2 ref opens only under it.
+// Permanently v1-exempt.
+const REF_CTX = ctx.purpose('customer_ref');
 const PHONE_SHAPE = /^\d{6,15}$/;
 
 /** Seal (partnerId, phone) into an opaque, URL-safe ref. */
 export function sealCustomerRef(partnerId: PartnerId, phone: string): string {
-  return encryptField(`${REF_PREFIX}${partnerId}|${phone}`);
+  return encryptField(`${REF_PREFIX}${partnerId}|${phone}`, undefined, REF_CTX);
 }
 
 /**
@@ -43,7 +50,7 @@ export function openCustomerRef(ref: string): { partnerId: PartnerId; phone: str
   if (typeof ref !== 'string' || ref.length > 1024 || !REF_SHAPE.test(ref)) return null;
   let plain: string;
   try {
-    plain = decryptField(ref);
+    plain = decryptField(ref, undefined, REF_CTX);
   } catch {
     return null;
   }
