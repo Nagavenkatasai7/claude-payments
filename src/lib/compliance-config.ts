@@ -44,6 +44,26 @@ export function isScreeningHold(t: { complianceReasons?: readonly string[] | nul
   return reasons.some((r) => SCREENING_REASONS.includes(r));
 }
 
+/**
+ * Program-Fix 43 follow-up: a CUSTOMER-level screening hold — a Persona
+ * watchlist/sanctions or PEP report matched (kyc-state-machine sets the flag).
+ * Deciding such a customer (approve / reject / manual override) is
+ * PLATFORM-only. Known residual: Persona "other" matches (e.g. adverse media)
+ * set needs_review with no flag, so they are not distinguishable here.
+ */
+export function isScreeningCustomerHold(c: { watchlistHit?: boolean | null; pepHit?: boolean | null }): boolean {
+  return c.watchlistHit === true || c.pepHit === true;
+}
+
+/** Who may decide a customer's KYC: platform staff always; partner staff only without a screening hit. */
+export function canDecideCustomerKyc(
+  scope: { kind: 'platform' | 'partner' },
+  c: { watchlistHit?: boolean | null; pepHit?: boolean | null },
+): boolean {
+  if (scope.kind === 'platform') return true;
+  return !isScreeningCustomerHold(c);
+}
+
 export interface ResolvedCorridorRules {
   baseWatchlist: string[];     // the screener's base list (today's WATCHLIST)
   watchlistExtra: string[];    // corridor-specific additions (possibly empty)

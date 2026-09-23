@@ -170,7 +170,13 @@ export function canReleaseHeld(
  * guarded claim inside releaseHold, so a race can never release twice.
  * Called by the compliance dashboard "Release" action (admin-gated, audited).
  */
-export async function releaseTransfer(store: Store, db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function releaseTransfer(store: Store, db: Db, id: string, audit: StaffAuditCtx): Promise<void> {
+  // Program-Fix 43 follow-up (defence in depth behind releaseTransferAction):
+  // every release records WHO and WHY, so no audit context or a blank reason
+  // is refused before any read or write.
+  if (!audit || typeof audit.reason !== 'string' || audit.reason.trim() === '') {
+    throw new Error('A release reason is required.');
+  }
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');

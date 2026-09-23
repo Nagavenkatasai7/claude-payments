@@ -217,6 +217,8 @@ export default async function CompliancePage() {
                             <Input
                               name="note"
                               required
+                              pattern=".*\S.*"
+                              title="Enter a reason (not just spaces)"
                               maxLength={500}
                               placeholder="Reason (required)"
                               aria-label="Release reason (required)"

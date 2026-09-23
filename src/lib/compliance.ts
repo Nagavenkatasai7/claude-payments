@@ -27,6 +27,8 @@ export {
   SENDER_WATCHLIST_REASON,
   SCREENING_REASONS,
   isScreeningHold,
+  isScreeningCustomerHold,
+  canDecideCustomerKyc,
 } from './compliance-config';
 
 export interface ComplianceResult {
