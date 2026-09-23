@@ -118,7 +118,7 @@ beforeEach(async () => {
   // Verified owner for the transfer's phone so the verify-before-send gate passes.
   const nowIso = new Date().toISOString();
   await customerStore.saveCustomer({
-    senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified',
+    senderPhone: '15551234567', firstSeenAt: nowIso, kycStatus: 'verified', fullName: 'Test Sender', // Program-Fix 14: a legal name on file
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
     createdAt: nowIso, updatedAt: nowIso,
   });
