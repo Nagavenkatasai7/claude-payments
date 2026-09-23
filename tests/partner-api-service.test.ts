@@ -959,7 +959,7 @@ describe('createTransaction — sender.phone normalization (review MUST 1) + typ
 // sender.name stays OPTIONAL (backward-compatible), but a mint without it can
 // not be name-screened on the sender side, so it is minted straight into the
 // existing compliance hold (flagged ⇒ confirm holds in_review), never rejected.
-describe('partner-api-service: a transfer without sender identity is held for review', () => {
+describe('partner-api-service: a transfer without sender identity is held for review', { retry: 0 }, () => {
   type View = { id: string; status: string; compliance_status: string };
   let warn: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
@@ -1060,5 +1060,19 @@ describe('partner-api-service: a transfer without sender identity is held for re
     // a different key logs its own line
     await createTransaction(deps, DELEGATED, 'pk_other', 'idem-dep-3', txBody({ sender: { phone: '15557772009' } }));
     expect(deprecationLines()).toHaveLength(2);
+  });
+
+  it('a concurrent loser that falls through to the mint and REPLAYS the winner never logs the warning', async () => {
+    const { deps } = await harness();
+    const first = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-race-nn', txBody({ sender: { phone: '15557772010' } }));
+    if (!first.ok) throw new Error('unexpected');
+    expect(deprecationLines()).toHaveLength(1);
+    resetSenderNameDeprecationLogForTests(); // so a second line could not be hidden by the dedupe
+    // The race window: the loser's replay read runs BEFORE the winner's row
+    // exists, so it falls through into createTransfer, which replays the row.
+    vi.spyOn(deps.store, 'getTransfer').mockResolvedValueOnce(null);
+    const loser = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-race-nn', txBody({ sender: { phone: '15557772010' } }));
+    expect(loser.ok && (loser.data as View).id).toBe((first.data as View).id);
+    expect(deprecationLines()).toHaveLength(1);
   });
 });
