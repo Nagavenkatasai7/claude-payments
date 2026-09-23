@@ -16,7 +16,7 @@ import type { RedisLike } from './store';
  *   staff_mfa_enroll_n:<username>     confirm attempts for that enrolment (10 min)
  *   staff_totp_last:<username>        last accepted step (replay guard, 1 day)
  *   staff_totp_used:<username>:<step> atomic per-step NX marker (replay guard, 2 min)
- *   staff_mfa_pending:<sha(token)>    username of a password-proven sign-in (5 min)
+ *   staff_mfa_pending:<sha(token)>    `<passwordTag>:<username>` of a password-proven sign-in (5 min)
  *   staff_mfa_pending_n:<sha(token)>  codes tried against that token (5 min)
  *
  * The secret (base32) is sealed with field-crypto's encryptField under
@@ -71,6 +71,20 @@ export interface StaffMfaStoreOptions {
 
 const versionOf = (blob: string) => blob.slice(0, blob.indexOf('.'));
 
+const PASSWORD_TAG_HEX = 32;
+
+export interface PendingSignIn {
+  username: string;
+  passwordTag: string;
+}
+
+function parsePending(raw: string | null): PendingSignIn | null {
+  if (!raw || raw.length < PASSWORD_TAG_HEX + 2 || raw[PASSWORD_TAG_HEX] !== ':') return null;
+  const passwordTag = raw.slice(0, PASSWORD_TAG_HEX);
+  if (!/^[0-9a-f]+$/.test(passwordTag)) return null;
+  return { passwordTag, username: raw.slice(PASSWORD_TAG_HEX + 1) };
+}
+
 function parseStored(raw: string | null): StoredSecret | null {
   if (!raw) return null;
   try {
@@ -104,8 +118,13 @@ export function createStaffMfaStore(redis: RedisLike, opts: StaffMfaStoreOptions
   }
 
   return {
+    /**
+     * PRESENT means enrolled, even when the record cannot be read: a corrupt
+     * record fails CLOSED (the code step then refuses every code) instead of
+     * silently turning the second factor off. Only a reset clears it.
+     */
     async isEnrolled(username: string): Promise<boolean> {
-      return parseStored(await redis.get(staffMfaKeys.secret(username))) !== null;
+      return (await redis.get(staffMfaKeys.secret(username))) !== null;
     },
 
     async enrolledAmong(usernames: string[]): Promise<Set<string>> {
@@ -144,10 +163,12 @@ export function createStaffMfaStore(redis: RedisLike, opts: StaffMfaStoreOptions
       }
       const secret = open(username, sealed);
       if (!(await acceptCode(username, secret, code))) return 'invalid';
+      // Take the pending secret atomically: a reset (or a restarted setup)
+      // that landed since the read above wins, and nothing is written.
+      if ((await redis.getdel(staffMfaKeys.enroll(username))) !== sealed) return 'expired';
+      await redis.del(staffMfaKeys.enrollCount(username));
       const stored: StoredSecret = { secretEnc: sealed, enrolledAt: new Date(now()).toISOString() };
       await redis.set(staffMfaKeys.secret(username), JSON.stringify(stored));
-      await redis.del(staffMfaKeys.enroll(username));
-      await redis.del(staffMfaKeys.enrollCount(username));
       return 'ok';
     },
 
@@ -176,16 +197,27 @@ export function createStaffMfaStore(redis: RedisLike, opts: StaffMfaStoreOptions
       for (const k of staffMfaKeys.perUser(username)) await redis.del(k);
     },
 
-    /** Mint the second-step token for a password-proven sign-in. */
-    async createPending(username: string): Promise<string> {
+    /** A short, non-reversible tag of the password hash a pending sign-in proved. */
+    passwordTag(passwordHash: string): string {
+      return sha256hex(`staff-mfa-pending|${passwordHash}`).slice(0, PASSWORD_TAG_HEX);
+    },
+
+    /**
+     * Mint the second-step token for a password-proven sign-in. The record
+     * holds `<passwordTag>:<username>`, so a password change or reset inside
+     * the 5-minute window voids it (the code step compares the tag with the
+     * FRESH record's hash).
+     */
+    async createPending(username: string, passwordHash: string): Promise<string> {
       const token = randomBytes(32).toString('hex');
-      await redis.set(staffMfaKeys.pending(token), username, { ex: STAFF_MFA_PENDING_TTL_S });
+      const value = `${this.passwordTag(passwordHash)}:${username}`;
+      await redis.set(staffMfaKeys.pending(token), value, { ex: STAFF_MFA_PENDING_TTL_S });
       return token;
     },
 
-    async pendingUser(token: string): Promise<string | null> {
+    async pendingUser(token: string): Promise<PendingSignIn | null> {
       if (!token) return null;
-      return redis.get(staffMfaKeys.pending(token));
+      return parsePending(await redis.get(staffMfaKeys.pending(token)));
     },
 
     /** Count one code against the token; false (and the token dropped) past the cap. */
@@ -200,11 +232,11 @@ export function createStaffMfaStore(redis: RedisLike, opts: StaffMfaStoreOptions
       return true;
     },
 
-    /** Single-use: the username, or null when already consumed or expired. */
-    async consumePending(token: string): Promise<string | null> {
-      const username = await redis.getdel(staffMfaKeys.pending(token));
+    /** Single-use: the pending sign-in, or null when already consumed or expired. */
+    async consumePending(token: string): Promise<PendingSignIn | null> {
+      const raw = await redis.getdel(staffMfaKeys.pending(token));
       await redis.del(staffMfaKeys.pendingCount(token));
-      return username;
+      return parsePending(raw);
     },
 
     async dropPending(token: string): Promise<void> {

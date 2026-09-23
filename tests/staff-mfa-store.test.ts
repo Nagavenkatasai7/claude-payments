@@ -178,17 +178,55 @@ describe('staff-mfa-store (Program-Fix 17b)', () => {
     expect([...(await store().enrolledAmong(['a', 'b']))]).toEqual(['a']);
   });
 
+  it('fails CLOSED on a present but unreadable record (never silently "not enrolled")', async () => {
+    redis.dump.set(staffMfaKeys.secret('ops'), 'not-json');
+    expect(await store().isEnrolled('ops')).toBe(true);
+    expect(await store().verifyCode('ops', '123456')).toBe(false);
+    expect((await store().beginEnrolment('ops')).ok).toBe(false);
+    await store().reset('ops');
+    expect(await store().isEnrolled('ops')).toBe(false);
+  });
+
+  it('a confirm racing a reset does not bring the enrolment back', async () => {
+    const begun = await store().beginEnrolment('ops');
+    if (!begun.ok) throw new Error();
+    const code = totpAt(base32Decode(begun.secretBase32), clock);
+    // The reset lands after confirm read the pending secret, before it writes.
+    const s = createStaffMfaStore(
+      {
+        ...redis,
+        incr: async (k: string) => {
+          const n = await redis.incr(k);
+          if (k === staffMfaKeys.enrollCount('ops')) await store().reset('ops');
+          return n;
+        },
+      },
+      { now: () => clock },
+    );
+    expect(await s.confirmEnrolment('ops', code)).toBe('expired');
+    expect(await store().isEnrolled('ops')).toBe(false);
+  });
+
   describe('pending second step', () => {
     it('stores only sha(token); the username comes back from the token', async () => {
-      const token = await store().createPending('ops');
+      const token = await store().createPending('ops', 'hash-1');
       expect(token).toMatch(/^[0-9a-f]{64}$/);
       expect([...redis.dump.keys()].some((k) => k.includes(token))).toBe(false);
-      expect(await store().pendingUser(token)).toBe('ops');
+      expect([...redis.dump.values()].some((v) => v.includes('hash-1'))).toBe(false);
+      expect(await store().pendingUser(token)).toEqual({ username: 'ops', passwordTag: expect.any(String) });
       expect(await store().pendingUser('nope')).toBeNull();
     });
 
+    it('binds the token to the password it proved (a later change/reset is detectable)', async () => {
+      const token = await store().createPending('o:ps', 'hash-1');
+      const p = await store().pendingUser(token);
+      expect(p?.username).toBe('o:ps');
+      expect(p?.passwordTag).toBe(store().passwordTag('hash-1'));
+      expect(p?.passwordTag).not.toBe(store().passwordTag('hash-2'));
+    });
+
     it(`allows ${STAFF_MFA_PENDING_MAX_CODES} codes per token, then drops it`, async () => {
-      const token = await store().createPending('ops');
+      const token = await store().createPending('ops', 'hash-1');
       for (let i = 0; i < STAFF_MFA_PENDING_MAX_CODES; i++) {
         expect(await store().countPendingAttempt(token)).toBe(true);
       }
@@ -197,9 +235,9 @@ describe('staff-mfa-store (Program-Fix 17b)', () => {
     });
 
     it('consumePending is single-use (two concurrent successes cannot both mint)', async () => {
-      const token = await store().createPending('ops');
+      const token = await store().createPending('ops', 'hash-1');
       const [a, b] = await Promise.all([store().consumePending(token), store().consumePending(token)]);
-      expect([a, b].filter((x) => x === 'ops')).toHaveLength(1);
+      expect([a, b].filter((x) => x?.username === 'ops')).toHaveLength(1);
       expect(await store().pendingUser(token)).toBeNull();
     });
   });

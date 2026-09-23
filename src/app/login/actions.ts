@@ -107,11 +107,14 @@ export async function login(
   // Fix 21: lazy upgrade of a legacy scrypt hash to Argon2id, only after every
   // refusal gate above. Program-Fix 17a: a compare-and-set against the hash this
   // login just verified, so a reset landing in between is never reverted.
+  // The hash now stored (the pending code step is bound to it, 17b).
+  let storedHash = staff.passwordHash;
   if (needsRehash(staff.passwordHash)) {
-    await getAuthStore().updatePasswordHash(username, staff.passwordHash, await hashPassword(password));
+    const upgraded = await hashPassword(password);
+    if (await getAuthStore().updatePasswordHash(username, staff.passwordHash, upgraded)) storedHash = upgraded;
   }
   if (enrolled) {
-    const pending = await getStaffMfaStore().createPending(staff.username);
+    const pending = await getStaffMfaStore().createPending(staff.username, storedHash);
     setMfaPendingCookie(await cookies(), pending);
     redirect('/login/mfa');
   }

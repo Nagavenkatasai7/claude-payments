@@ -10,6 +10,7 @@
  * clears them while a code is still owed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { randomBytes, scryptSync } from 'node:crypto';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
@@ -263,6 +264,26 @@ describe('staff sign-in second step (Program-Fix 17b)', { retry: 0 }, () => {
     expect(await code(goodCode('ops'))).toBe('Account unavailable. Contact SmartRemit support.');
     expect(cookieJar.has(SESSION_COOKIE)).toBe(false);
     expect(cookieJar.has(MFA_PENDING_COOKIE)).toBe(false);
+  });
+
+  it('a password change/reset inside the window voids the pending sign-in', async () => {
+    await enrol('ops');
+    await pw('ops');
+    const s = (await getAuthStore().getStaff('ops'))!;
+    await getAuthStore().setPasswordHash('ops', s.passwordHash, await hashPassword('another-password-123'));
+    expect(await code(goodCode('ops'))).toBe('REDIRECT:/login');
+    expect(cookieJar.has(SESSION_COOKIE)).toBe(false);
+    expect(cookieJar.has(MFA_PENDING_COOKIE)).toBe(false);
+  });
+
+  it('an enrolled member with a legacy scrypt hash (rehashed at the password step) completes the code step', async () => {
+    const salt = randomBytes(16).toString('hex');
+    const legacy = `${salt}:${scryptSync('legacy-pw-1234', salt, 64).toString('hex')}`;
+    await getAuthStore().saveStaff(row({ username: 'old', passwordHash: legacy }));
+    await enrol('old');
+    expect(await pw('old', 'legacy-pw-1234')).toBe(TO_MFA);
+    expect((await getAuthStore().getStaff('old'))!.passwordHash).not.toBe(legacy); // rehashed
+    expect(await code(goodCode('old'))).toBe(OK);
   });
 
   it('no pending cookie, or an unknown token → back to /login, nothing minted', async () => {

@@ -6,8 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
-// Program-Fix 17b: set up TOTP two-step verification. Step 1 asks the server
-// for a fresh secret (shown here once, never stored by the page); step 2
+// Program-Fix 17b: set up TOTP two-step verification. Step 1 re-proves the
+// current password and asks the server for a fresh secret (shown here once, never stored by the page); step 2
 // confirms it with one code from the authenticator app before it is turned on.
 
 const INITIAL: MfaEnrolState = { ok: false };
@@ -29,7 +29,18 @@ export function MfaEnrolForm() {
 
   return (
     <div className="max-w-md space-y-4">
-      <form action={beginAction}>
+      <form action={beginAction} className="space-y-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="mfa-enrol-password">Current password</Label>
+          <Input
+            id="mfa-enrol-password"
+            name="currentPassword"
+            type="password"
+            required
+            autoComplete="current-password"
+            className="max-w-sm"
+          />
+        </div>
         <Button type="submit" variant={begun.ok ? 'outline' : 'default'} disabled={beginning}>
           {beginning ? 'Preparing…' : begun.ok ? 'Start again with a new key' : 'Set up two-step verification'}
         </Button>

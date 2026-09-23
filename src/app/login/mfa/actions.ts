@@ -26,13 +26,14 @@ export async function verifyMfa(_prev: string | null, formData: FormData): Promi
   const jar = await cookies();
   const token = readMfaPendingToken(jar);
   const mfa = getStaffMfaStore();
-  const username = token ? await mfa.pendingUser(token) : null;
-  if (!username) {
+  const pending = token ? await mfa.pendingUser(token) : null;
+  if (!pending) {
     clearMfaPendingCookie(jar);
     redirect('/login');
   }
-  const staff = await getAuthStore().getStaff(username);
-  if (!staff) {
+  const staff = await getAuthStore().getStaff(pending.username);
+  // Gone, or its password changed/reset since this token was minted: start over.
+  if (!staff || mfa.passwordTag(staff.passwordHash) !== pending.passwordTag) {
     await mfa.dropPending(token);
     clearMfaPendingCookie(jar);
     redirect('/login');
@@ -93,7 +94,7 @@ export async function verifyMfa(_prev: string | null, formData: FormData): Promi
     return INVALID_CODE;
   }
   // Single use: of two concurrent successes on one token, only one mints.
-  if ((await mfa.consumePending(token)) !== staff.username) {
+  if ((await mfa.consumePending(token))?.username !== staff.username) {
     clearMfaPendingCookie(jar);
     redirect('/login');
   }
