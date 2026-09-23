@@ -108,15 +108,14 @@ describe('scrub — bounded work on hostile input (Program-Fix 47)', () => {
     }
   });
 
-  it('masks the whole local part, not just its last 64 characters', () => {
-    // Without the token-start anchor a bounded {1,64} local part would match
-    // only the tail of a longer one and leave the head in the log.
+  it('masks the whole address however long its parts are (no half-masking, no pass-through)', () => {
     expect(scrub(`id ${'b'.repeat(64)}@example.com x`)).toBe('id <email> x');
-    const long = `${'c'.repeat(10)}${'b'.repeat(64)}@example.com`;
-    expect(scrub(`id ${long} x`)).not.toContain('<email>');
-    // RFC 5321 caps a local part at 64 octets, so a 65+ char one is not a real
-    // address; it is left as-is rather than half-masked.
-    expect(scrub(`id ${long} x`)).toBe(`id ${long} x`);
+    // A local part longer than RFC 5321's 64 is still PII in a log line.
+    expect(scrub(`id ${'c'.repeat(10)}${'b'.repeat(64)}@example.com x`)).toBe('id <email> x');
+    // More than 8 domain labels.
+    expect(scrub(`id user@${'a.'.repeat(12)}example.com x`)).toBe('id <email> x');
+    // A domain label longer than 63 characters.
+    expect(scrub(`id user@${'d'.repeat(80)}.example.com x`)).toBe('id <email> x');
   });
 
   it('still masks ordinary and multi-label addresses', () => {

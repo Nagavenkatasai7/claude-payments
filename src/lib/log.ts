@@ -28,12 +28,13 @@ export function scrub(value: unknown): string {
   return capped.cut ? `${out}${TRUNCATED}` : out;
 }
 
-// Program-Fix 47 — bounded work on input we do not control. The email pattern
-// has bounded, non-overlapping parts (a domain label cannot contain the dot
-// that ends it), so it runs in linear time. The lookbehind makes a match start
-// only at the start of a token: a bounded {1,64} local part could otherwise
-// match just the tail of a longer run and leave its head in the log.
-const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9-]{1,63}\.){1,8}[A-Za-z]{2,24}/g;
+// Program-Fix 47 — bounded work on input we do not control. A domain label
+// cannot contain the dot that ends it, so the domain part never overlaps, and
+// the lookbehind lets a match start only at the start of a token (not at every
+// position inside a long run). With the 8 KB cap below, that bounds the work.
+// Parts are deliberately NOT length-bounded: an over-long local part or label
+// is still PII and must be masked whole.
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g;
 
 /** Longest input scrub() looks at; the rest is dropped with a visible marker. */
 export const SCRUB_MAX_CHARS = 8 * 1024;
