@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// Pass-through spy on logWarn so the body reader's warning fields can be pinned.
+const logSpy = vi.hoisted(() => ({ logWarn: vi.fn() }));
+vi.mock('@/lib/log', async (orig) => {
+  const real = await orig<typeof import('@/lib/log')>();
+  logSpy.logWarn.mockImplementation(real.logWarn);
+  return { ...real, logWarn: logSpy.logWarn };
+});
 import { freshDb, seedPartner } from './helpers-db';
 import { createTicketRepo, type TicketRepo } from '@/db/repos/ticket-repo';
 import type { Db } from '@/db/client';
@@ -224,6 +232,31 @@ describe('ticket-repo — body reader (fix 45 P3)', () => {
     const sealed = encryptField('under KEY', provider, ctx.ticketMessage(row.id));
     await setBody(row.id, sealed);
     expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe(sealed);
+  });
+
+  it('a failed open logs ticket.body_unreadable with ONLY the message id (never the body)', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'x' });
+    const row = await firstMessageRow(t.id);
+    const moved = encryptField('secret-ish text', provider, ctx.ticketMessage(row.id + 1000));
+    await setBody(row.id, moved);
+    logSpy.logWarn.mockClear();
+    await r.listMessages(t.id, { includeInternal: true });
+    const calls = logSpy.logWarn.mock.calls.filter((c) => c[0] === 'ticket.body_unreadable');
+    expect(calls).toHaveLength(1);
+    const [, message, fields] = calls[0];
+    expect(Object.keys(fields as object)).toEqual(['messageId']);
+    expect((fields as { messageId: number }).messageId).toBe(row.id);
+    expect(JSON.stringify([message, fields])).not.toContain(moved);
+    expect(JSON.stringify([message, fields])).not.toContain('secret-ish text');
+  });
+
+  it('plain text never logs', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    logSpy.logWarn.mockClear();
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'hello' });
+    await r.listMessages(t.id, { includeInternal: true });
+    expect(logSpy.logWarn.mock.calls.filter((c) => c[0] === 'ticket.body_unreadable')).toHaveLength(0);
   });
 
   it('plaintext rows never touch the key (no FIELD_ENCRYPTION_KEY needed)', async () => {

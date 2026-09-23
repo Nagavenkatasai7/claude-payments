@@ -125,6 +125,19 @@ describe('key ring — reads by the blob kid', () => {
     expect(() => decryptField(edited, otherKeyRing, C)).toThrow();
   });
 
+  it('a v2 blob relabelled as v1 (kid segment dropped) throws — no downgrade to the unbound path', () => {
+    const ring = new EnvKeyRing(KEY_0, `k1:${hex(KEY_1)}`);
+    for (const [blob, kid] of [
+      [sealByHand('x', KEY_0, 'k0', AAD_K0), 'k0'],
+      [sealByHand('x', KEY_1, 'k1', AAD_K1), 'k1'],
+    ] as const) {
+      const relabelled = blob.replace(new RegExp(`^v2\\.${kid}\\.`), 'v1.');
+      expect(relabelled.split('.')).toHaveLength(5);
+      expect(() => decryptField(relabelled, ring, C)).toThrow();
+      expect(() => decryptField(relabelled, ring)).toThrow();
+    }
+  });
+
   it('a kid edited k1 → k0 fails', () => {
     const ring = new EnvKeyRing(KEY_0, `k1:${hex(KEY_1)}`);
     const blob = sealByHand('x', KEY_1, 'k1', AAD_K1);

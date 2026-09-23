@@ -1,5 +1,15 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { randomBytes, scryptSync } from 'node:crypto';
+
+// Pass-through spy on hash-wasm (the tests/password.test.ts pattern) so the
+// dummy-verify parity below can COUNT the Argon2 verify work.
+const hw = vi.hoisted(() => ({ argon2Verify: vi.fn() }));
+vi.mock('hash-wasm', async (orig) => {
+  const real = await orig<typeof import('hash-wasm')>();
+  hw.argon2Verify.mockImplementation(real.argon2Verify);
+  return { ...real, argon2Verify: hw.argon2Verify };
+});
+
 import { hashPassword, needsRehash, verifyPassword, PEPPER_ID_CURRENT } from '@/lib/password';
 
 // Program-Fix 45 P3 — the pepper-id READER. verifyPassword/needsRehash accept
@@ -140,5 +150,34 @@ describe('needsRehash strips $pv=<id>$ first', () => {
   it('a malformed prefix or a wrapped legacy form → rehash', () => {
     expect(needsRehash('$pv=$')).toBe(true);
     expect(needsRehash('$pv=p0$salt:hash')).toBe(true);
+  });
+});
+
+describe('$pv= timing parity (fix 21): every path pays exactly one Argon2 verify', () => {
+  it('an unknown pepper id burns exactly one dummy verify and is false', async () => {
+    const bare = await hashUnder(PEPPER_A, PW_0);
+    vi.stubEnv('PASSWORD_PEPPER', PEPPER_A);
+    await verifyPassword(randomPw(), bare); // warm the per-instance dummy hash memo
+    hw.argon2Verify.mockClear();
+    expect(await verifyPassword(PW_0, `$pv=p9$${bare}`)).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+  });
+
+  it('a malformed prefix burns exactly one dummy verify and is false', async () => {
+    vi.stubEnv('PASSWORD_PEPPER', PEPPER_A);
+    hw.argon2Verify.mockClear();
+    expect(await verifyPassword(randomPw(), '$pv=$')).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+  });
+
+  it('the known-id path makes exactly one verify', async () => {
+    const bare = await hashUnder(PEPPER_A, PW_1);
+    vi.stubEnv('PASSWORD_PEPPER', PEPPER_A);
+    hw.argon2Verify.mockClear();
+    expect(await verifyPassword(PW_1, `$pv=p0$${bare}`)).toBe(true);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+    hw.argon2Verify.mockClear();
+    expect(await verifyPassword(randomPw(), `$pv=p0$${bare}`)).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
   });
 });
