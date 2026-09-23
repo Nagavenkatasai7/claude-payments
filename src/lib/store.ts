@@ -8,6 +8,7 @@ import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRep
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
+import { billExpiryCutoff, BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC } from './b2b-bill-expiry';
 import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
 
 /**
@@ -356,7 +357,7 @@ export function createStore(redis: RedisLike, db: Db) {
     // duplicate collides; a genuinely new bill (different amount/buyer, or after
     // the TTL) gets its own id.
     async claimBillInvoiceId(key: string, candidateId: string): Promise<string> {
-      const claimed = await redis.set(`billclaim:${key}`, candidateId, { ex: 120, nx: true });
+      const claimed = await redis.set(`billclaim:${key}`, candidateId, { ex: BILL_CLAIM_TTL_SEC, nx: true });
       if (claimed !== null) return candidateId;
       const existing = await redis.get(`billclaim:${key}`);
       return typeof existing === 'string' && existing ? existing : candidateId;
@@ -366,6 +367,18 @@ export function createStore(redis: RedisLike, db: Db) {
     // in a LATER step (after the insert) keeps the claim, so that retry stays deduped.
     async clearBillInvoiceClaim(key: string): Promise<void> {
       await redis.del(`billclaim:${key}`);
+    },
+    // Program-Fix 44: the seller re-asked for a bill that is still open, so its
+    // link is re-sent under `sellerbill:<id>:resend:<token>` (outbox dedupe keys
+    // are permanently unique). The token is claim-first like the bill claim: the
+    // first re-request binds it (SET NX EX), and an at-least-once replay of that
+    // turn reads the SAME token back, so its enqueue is a no-op instead of a
+    // second message. A genuine re-request after the window gets a new token.
+    async claimBillResendToken(invoiceId: string, candidate: string): Promise<string> {
+      const claimed = await redis.set(`billresend:${invoiceId}`, candidate, { ex: BILL_RESEND_WINDOW_SEC, nx: true });
+      if (claimed !== null) return candidate;
+      const existing = await redis.get(`billresend:${invoiceId}`);
+      return typeof existing === 'string' && existing ? existing : candidate;
     },
     async getLastInboundAt(partnerId: PartnerId, senderPhone: string): Promise<string | null> {
       return redis.get(`lastmsg:${partnerId}:${senderPhone}`); // no legacy read: a stale null only means "treat as a new conversation" once
@@ -432,7 +445,22 @@ export function createStore(redis: RedisLike, db: Db) {
       buyerPhone: string,
       partnerId: import('./types').PartnerId,
     ): Promise<import('./types').B2bInvoice | null> {
-      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId);
+      // Program-Fix 44: an unpaid bill past the TTL is dead — the bot never presents or disputes it.
+      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId, billExpiryCutoff());
+    },
+    // Program-Fix 44: the durable duplicate-bill check (see the repo's findOpenTwin).
+    async findOpenTwinInvoice(q: {
+      partnerId: import('./types').PartnerId;
+      sellerId: string;
+      buyerPhone: string;
+      invoicedAmount: number;
+      invoicedCurrency: import('./types').CurrencyCode;
+    }): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.findOpenTwin({ ...q, createdNotBefore: billExpiryCutoff() });
+    },
+    // Program-Fix 44: platform-only cross-tenant list (the B2B dashboard page gates on platform scope).
+    async listAllB2bInvoices(): Promise<import('./types').B2bInvoice[]> {
+      return b2bInvoiceRepo.listAllInvoices();
     },
     async getB2bInvoice(id: string): Promise<import('./types').B2bInvoice | null> {
       return b2bInvoiceRepo.getInvoice(id);

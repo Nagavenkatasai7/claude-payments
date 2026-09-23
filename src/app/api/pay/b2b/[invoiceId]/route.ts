@@ -8,6 +8,7 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { getB2bQuoteStore } from '@/lib/b2b-quote-store';
 import { billDenomination } from '@/lib/b2b-quote';
+import { isBillExpired } from '@/lib/b2b-bill-expiry';
 import { getFxRates, RateUnavailableError } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { settleOrHold } from '@/lib/settlement';
@@ -77,7 +78,9 @@ export async function POST(
       invoice.invoicedAmount !== undefined &&
       invoice.invoicedAmount > 0 &&
       !!invoice.invoicedCurrency;
-    if (!invoice || !isCrossBorder) {
+    // Program-Fix 44: an unpaid bill past the TTL is dead — refused BEFORE the
+    // code step, so an expired link never sends a code or reaches the mint.
+    if (!invoice || !isCrossBorder || isBillExpired(invoice)) {
       return NextResponse.json({ ok: false, error: 'This bill is no longer active.' }, { status: 404 });
     }
 

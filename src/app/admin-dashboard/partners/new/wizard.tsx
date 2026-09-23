@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
+import { wizardPrefillFromRequest } from '@/lib/partner-application-decision';
 
 // Partner setup wizard (Stage 5c). All steps accumulate CLIENT state; nothing
 // is persisted until Review → "Create partner", which commits partner +
@@ -69,9 +70,24 @@ function Field({
   );
 }
 
-export function PartnerSetupWizard() {
+/**
+ * Program-Fix 49C: an approved partner request the wizard starts from
+ * (/admin-dashboard/partners/new?fromRequest=<id>). Only the name and the
+ * source countries pre-fill; the lead's "I am a" answer is shown as a hint
+ * because the wizard has no partner-type field.
+ */
+export interface WizardSourceRequest {
+  id: string;
+  companyName: string;
+  corridors: string[];
+  partnerTypeLabel?: string;
+}
+
+export function PartnerSetupWizard({ fromRequest }: { fromRequest?: WizardSourceRequest } = {}) {
   const [step, setStep] = useState(0);
-  const [draft, setDraft] = useState<Draft>(EMPTY);
+  const [draft, setDraft] = useState<Draft>(() =>
+    fromRequest ? { ...EMPTY, ...wizardPrefillFromRequest(fromRequest, COUNTRIES) } : EMPTY,
+  );
   const [result, setResult] = useState<PartnerWizardResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -173,6 +189,12 @@ export function PartnerSetupWizard() {
       <CardContent className="space-y-4">
         {step === 0 && (
           <>
+            {fromRequest && (
+              <p className="rounded-lg border border-border bg-secondary/50 p-3 text-xs text-muted-foreground">
+                Pre-filled from partner request <code>{fromRequest.id}</code>
+                {fromRequest.partnerTypeLabel ? <> ({fromRequest.partnerTypeLabel})</> : null}. Check every field before creating.
+              </p>
+            )}
             <Field label="Partner name *">
               <Input value={draft.name} onChange={(e) => set({ name: e.target.value })} placeholder="Acme Remit Inc." />
             </Field>

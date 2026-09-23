@@ -76,7 +76,7 @@ function transferFixture(): Transfer {
   } as Transfer;
 }
 
-type Call = { url: string; headers: Record<string, string>; status: number };
+type Call = { url: string; headers: Record<string, string>; status: number; body: string };
 let calls: Call[];
 
 /** Route the worker's rail POSTs into the real handlers. */
@@ -86,7 +86,7 @@ const fetchFn = async (url: string, init: RequestInit): Promise<Response> => {
   if (url === RAIL_URL) res = await railPOST(req);
   else if (url === HOOK_URL) res = await webhookPOST(req, { params: Promise.resolve({ provider: 'simulator' }) });
   else throw new Error(`unexpected fetch ${url}`);
-  calls.push({ url, headers: { ...(init.headers as Record<string, string>) }, status: res.status });
+  calls.push({ url, headers: { ...(init.headers as Record<string, string>) }, status: res.status, body: String(init.body) });
   return res;
 };
 
@@ -139,6 +139,8 @@ describe('rail loop end to end (fix 29)', () => {
     expect(calls[0].headers['x-smartremit-signature']).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
     expect(calls[0].headers['x-signature']).toMatch(/^[0-9a-f]{64}$/);
     expect((await createStore(redis, db).getTransfer('e2e_t1'))!.paymentProviderRef).toBe('simrail-e2e_t1');
+    // fix 31: the simulator accepted the instruction WITH the additive compliance block.
+    expect((JSON.parse(calls[0].body) as { compliance?: { version?: number } }).compliance?.version).toBe(1);
 
     await releaseDelayedCallback();
     await drainOnce(deps(), 'w2');

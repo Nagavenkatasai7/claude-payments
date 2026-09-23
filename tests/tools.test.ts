@@ -5514,3 +5514,119 @@ describe('repeat_transfer — by transfer_id (fix 34B, prompt-09)', () => {
     expect(String(r.error)).toContain('recipient_phone');
   });
 });
+
+// Program-Fix 44 (P3, b2b-04): the bill TTL and the durable duplicate-bill check.
+describe('Program-Fix 44: bill expiry + durable open-twin check', { retry: 0 }, () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  beforeEach(async () => {
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  async function seedSeller(ctx: Awaited<ReturnType<typeof buildCtx>>) {
+    await ctx.store.createSeller({
+      id: 's_f44', partnerId: 'default', phone: PHONE, businessName: 'Acme Exports Inc', country: 'US', currency: 'USD',
+    });
+    expect((await ctx.store.completeSellerOnboarding(PHONE, 'default', '021000021|12345678'))?.status).toBe('active');
+  }
+  const twinRow = (id: string, createdAt: string) => ({
+    id, partnerId: 'default', businessName: 'Acme Exports Inc', buyerPhone: '15559876543',
+    lineItems: [{ description: 'Work', qty: 1, unitAmountUsd: 250 }], amountUsd: 250, currency: 'USD' as const,
+    sellerId: 's_f44', invoicedAmount: 250, invoicedCurrency: 'USD' as const, status: 'unpaid' as const, createdAt,
+  });
+  const countInvoices = async () =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM b2b_invoices`)) as unknown as { rows: { n: number }[] }).rows[0].n;
+
+  type OutRow = { payload: Record<string, unknown>; dedupe_key: string };
+  const textRows = async (): Promise<OutRow[]> =>
+    ((await db.execute(sql`SELECT payload, dedupe_key FROM outbox WHERE kind = 'whatsapp.text' ORDER BY dedupe_key`)) as unknown as { rows: OutRow[] }).rows;
+
+  it('a genuine re-request (identical open bill, older than the claim window) is refused honestly and RE-SENDS the link: one seller row, no insert, no buyer push, no claim', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date(Date.now() - 2 * DAY).toISOString()));
+    const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(r).toMatchObject({ created: false, already_open: true, invoice_id: 'inv_twin', amount: 250, currency: 'USD' });
+    expect(String(r.pay_url)).toMatch(/\/pay\/b2b\/inv_twin$/);
+    // Honest copy: never claims a NEW bill was made.
+    expect(String(r.reply_to_customer)).toMatch(/already have an open bill/);
+    expect(String(r.reply_to_customer)).toMatch(/re-sent/);
+    expect(String(r.reply_to_customer)).not.toMatch(/is ready/);
+    expect(claim).not.toHaveBeenCalled();
+    expect(await countInvoices()).toBe(1);
+    const rows = await textRows();
+    expect(rows).toHaveLength(1); // the seller's link only — no billpush
+    expect(rows[0].dedupe_key).toMatch(/^sellerbill:inv_twin:resend:/);
+    expect(rows[0].payload.to).toBe(PHONE);
+    expect(String(rows[0].payload.body)).toContain(String(r.pay_url));
+  });
+
+  it('a REPLAY of that re-request turn (at-least-once) returns the same result and adds NO row', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date(Date.now() - 2 * DAY).toISOString()));
+    const a = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    const b = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(b).toEqual(a);
+    expect(await textRows()).toHaveLength(1);
+  });
+
+  it('a REPLAY of the original creation turn (bill younger than the claim window) keeps the original result and adds NO row', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    const a = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(a.created).toBe(true);
+    const before = await textRows(); // billpush + sellerbill
+    expect(before.map((x) => x.dedupe_key)).toEqual([`billpush:${a.invoice_id}`, `sellerbill:${a.invoice_id}`]);
+    const b = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(b).toEqual(a);
+    expect(await textRows()).toHaveLength(2);
+    expect(await countInvoices()).toBe(1);
+  });
+
+  it('an EXPIRED unpaid twin does not block a new bill', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_dead', new Date(Date.now() - 31 * DAY).toISOString()));
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(r.created).toBe(true);
+    expect(r.invoice_id).not.toBe('inv_dead');
+    expect(await countInvoices()).toBe(2);
+  });
+
+  it('a different amount is a new bill, not a twin', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date().toISOString()));
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 251 }, ctx);
+    expect(r.created).toBe(true);
+    expect(r.invoice_id).not.toBe('inv_twin');
+  });
+
+  it('present_bill does not surface an expired bill', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_old', partnerId: 'default', businessName: 'Globex', buyerPhone: PHONE,
+      lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 40 }], amountUsd: 40, currency: 'USD',
+      status: 'unpaid', createdAt: new Date(Date.now() - 31 * DAY).toISOString(),
+    });
+    expect(await executeTool('present_bill', {}, ctx)).toEqual({ has_bill: false });
+  });
+
+  it('a chat B2B send naming an EXPIRED bill id is refused like a closed bill (the other pay path)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_old', partnerId: 'default', businessName: 'Globex Trading LLC', buyerPhone: PHONE,
+      lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }], amountUsd: 400, currency: 'USD',
+      status: 'unpaid', createdAt: new Date(Date.now() - 31 * DAY).toISOString(),
+    });
+    const r = await executeTool('create_transfer', {
+      amount_source: 400, recipient_name: 'Globex Trading LLC', recipient_phone: '919876543210',
+      funding_method: 'ach_pull', entity_type: 'business',
+      sender_business_name: 'Acme Imports Ltd', recipient_business_name: 'Globex Trading LLC',
+      invoice_id: 'inv_old',
+    }, ctx);
+    expect(r).toEqual({ error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' });
+  });
+});

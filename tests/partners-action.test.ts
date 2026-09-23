@@ -4,7 +4,8 @@ import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createStore } from '@/lib/store';
-import { decryptField } from '@/lib/field-crypto';
+import { decryptField, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { outboxSealedCtx } from '@/lib/crypto-context';
 import { hashApplicationToken } from '@/lib/partner-application-token';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { buildInviteEmail } from '@/lib/partner-invite-email';
@@ -297,6 +298,23 @@ describe('the partner-invite email never persists the raw capability token (fix 
     const delivered = sent.find((m) => m.to[0] === 'partners@acme.com')!;
     expect(delivered.text).toContain(link);
     expect(delivered.text).not.toContain('{{apply_link}}');
+  });
+
+  it('fix 46A: sealed under the apply_link purpose — a v2 link (forced in-test) is delivered rendered', async () => {
+    __setFieldCryptoWriteV2ForTests(true);
+    let invite: Awaited<ReturnType<typeof submitAndGetInvite>>['invite'];
+    try {
+      ({ invite } = await submitAndGetInvite());
+    } finally {
+      __setFieldCryptoWriteV2ForTests(false);
+    }
+    const blob = invite.payload.sealed!.apply_link;
+    expect(blob).toMatch(/^v2\.k0\./);
+    const link = decryptField(blob, undefined, outboxSealedCtx('apply_link'));
+    expect(() => decryptField(blob)).toThrow(); // a v2 blob never opens without its context
+    const sent: { to: string[]; subject: string; text: string }[] = [];
+    await drainOnce(workerDeps(sent), 'w1');
+    expect(sent.find((m) => m.to[0] === 'partners@acme.com')!.text).toContain(link);
   });
 
   it('a redelivered invite does NOT re-mint: the same link twice, application_token_hash unchanged', async () => {

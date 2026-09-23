@@ -2,6 +2,7 @@ import { and, eq, inArray, or } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { openOptional } from '@/db/repos/mappers';
+import { customerRowCtx } from '@/lib/crypto-context';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import type { PartnerId } from '@/lib/types';
 
@@ -57,7 +58,7 @@ export async function resolveSenderNames(
     .where(conds.length === 1 ? conds[0] : or(...conds));
 
   for (const r of rows) {
-    const name = openOptional(r.fullNameEnc, provider);
+    const name = openOptional(r.fullNameEnc, provider, customerRowCtx(r, 'full_name_enc'));
     if (name) out.set(senderNameKey(r.partnerId, r.phone), name);
   }
   return out;

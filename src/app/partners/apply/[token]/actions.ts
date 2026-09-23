@@ -4,7 +4,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { createPartnerApplicationRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
-import { isPartnerDocType, isPrivatePartnerDocRef } from '@/lib/blob';
+import { isOwnPrivateStoreRef, isPartnerDocType, isPrivatePartnerDocRef } from '@/lib/blob';
 import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
@@ -79,7 +79,8 @@ const MAX_DOCS = 4;
  * shape). Fix 24: a ref is kept only when `isPrivatePartnerDocRef` binds it to
  * THIS request — https, a PRIVATE Blob store host, and the pathname under
  * `partner-applications/<requestId>/` (the upload route's output for this
- * token). Public-store, other-request and spoofed hosts are dropped; the
+ * token) — and, fix 46A, on exactly OUR private store (isOwnPrivateStoreRef).
+ * Public-store, other-store, other-request and spoofed hosts are dropped; the
  * contentType is allow-listed (the staff route never trusts it anyway).
  */
 function parseDocuments(raw: string, requestId: string): PartnerApplicationDocument[] {
@@ -96,7 +97,11 @@ function parseDocuments(raw: string, requestId: string): PartnerApplicationDocum
     if (!item || typeof item !== 'object') continue;
     const d = item as Record<string, unknown>;
     const url = typeof d.url === 'string' ? d.url : '';
-    if (!isPrivatePartnerDocRef(url, requestId)) {
+    // Fix 46A (F73): also pin OUR store id (isOwnPrivateStoreRef), so a ref on
+    // another private store is never persisted. That helper is false when the
+    // partner-docs token is unset (previews/dev), which drops every document
+    // here — uploads need that token anyway.
+    if (!isPrivatePartnerDocRef(url, requestId) || !isOwnPrivateStoreRef(url)) {
       dropped += 1;
       continue;
     }
@@ -116,6 +121,9 @@ function parseDocuments(raw: string, requestId: string): PartnerApplicationDocum
   return out;
 }
 
+/** Internal rollback signal: the request left 'invited' mid-submit. */
+class LinkNoLongerOpen extends Error {}
+
 export async function submitPartnerApplicationAction(formData: FormData): Promise<void> {
   const token = String(formData.get('token') ?? '').trim();
   const back = `/partners/apply/${encodeURIComponent(token)}`;
@@ -126,7 +134,9 @@ export async function submitPartnerApplicationAction(formData: FormData): Promis
   if (
     !request ||
     isApplicationTokenExpired(request.tokenExpiresAt) ||
-    request.applicationStatus === 'completed'
+    // Refuse unless invited (Program-Fix 49C): completed, approved and rejected
+    // links are all dead — a staff decision must never reopen one.
+    request.applicationStatus !== 'invited'
   ) {
     redirect(back); // the page renders the friendly invalid/thank-you status
   }
@@ -163,16 +173,28 @@ export async function submitPartnerApplicationAction(formData: FormData): Promis
   // ── PERSIST + single-use FLIP in ONE transaction ─────────────────────────
   // redirect() throws by design — keep it OUT of the transaction so it is never
   // swallowed. A genuine DB failure should surface, not fake success.
-  await getDb().transaction(async (tx) => {
-    await createPartnerApplicationRepo(tx).saveApplication({
-      id: `papp_${newTransferId()}`,
-      partnerRequestId: request.id,
-      details,
-      documents,
-      submittedAt: new Date().toISOString(),
+  // The flip is conditional on 'invited' (fix 49C): if the row moved on since the
+  // check above (a concurrent submit or a staff decision), ROLL BACK the insert
+  // and let the page show the row's real status.
+  const saved = await getDb()
+    .transaction(async (tx) => {
+      await createPartnerApplicationRepo(tx).saveApplication({
+        id: `papp_${newTransferId()}`,
+        partnerRequestId: request.id,
+        details,
+        documents,
+        submittedAt: new Date().toISOString(),
+      });
+      if (!(await createPartnerRequestRepo(tx).markApplicationCompleted(request.id))) {
+        throw new LinkNoLongerOpen();
+      }
+      return true;
+    })
+    .catch((e: unknown) => {
+      if (e instanceof LinkNoLongerOpen) return false;
+      throw e;
     });
-    await createPartnerRequestRepo(tx).markApplicationCompleted(request.id);
-  });
+  if (!saved) redirect(back);
 
   redirect(back); // status is now 'completed' → page shows the thank-you card
 }

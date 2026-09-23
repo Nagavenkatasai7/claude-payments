@@ -721,6 +721,14 @@ export interface CorridorRequest {
   capturedAt: string;           // ISO-8601
 }
 
+/**
+ * Stage-2 application lifecycle (partner_requests.application_status is free
+ * text with no CHECK). invited = the emailed link is live; completed = the form
+ * was submitted; approved | rejected = a platform admin decided (Program-Fix 49C).
+ * Only 'invited' may use the link; only 'completed' may be decided.
+ */
+export type PartnerApplicationStatus = 'invited' | 'completed' | 'approved' | 'rejected';
+
 /** An inbound "Partner with us" lead from the public landing form. */
 export interface PartnerRequest {
   id: string;
@@ -731,7 +739,7 @@ export interface PartnerRequest {
   comments?: string;
   capturedAt: string;           // ISO-8601
   // Stage-2 detailed application (the emailed link → form).
-  applicationStatus?: string;   // 'invited' | 'completed'
+  applicationStatus?: PartnerApplicationStatus;
   tokenExpiresAt?: string;      // ISO-8601 — when the application link expires
   // "I am a:" (src/lib/partner-type.ts). Absent on rows captured before 0017.
   partnerType?: 'referral' | 'business' | 'licensed_mt';

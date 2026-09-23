@@ -17,6 +17,7 @@ import { isPartnerType } from '@/lib/partner-type';
 import { deriveInviteEmailStatus, inviteDedupeKey, type InviteEmailStatus } from '@/lib/partner-invite-email';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
+import { ctx, recipientRowCtx, sellerRowCtx } from '@/lib/crypto-context';
 import type {
   B2bInvoice,
   CorridorRequest,
@@ -27,6 +28,7 @@ import type {
   PartnerApplicationDetails,
   PartnerApplicationDocument,
   PartnerId,
+  PartnerApplicationStatus,
   PartnerRequest,
   PayoutMethod,
   Recipient,
@@ -45,13 +47,15 @@ export function createRecipientRepo(
 ) {
   return {
     async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<void> {
+      // The row key AS WRITTEN (the conflict target) — the sealed destination binds to it.
+      const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
       const row = {
-        partnerId,
-        senderPhone,
-        recipientPhone: r.recipientPhone,
+        ...key,
         name: r.name,
         payoutMethod: r.payoutMethod,
-        payoutDestinationEnc: r.payoutDestination ? encryptField(r.payoutDestination, provider) : '',
+        payoutDestinationEnc: r.payoutDestination
+          ? encryptField(r.payoutDestination, provider, recipientRowCtx(key))
+          : '',
         payoutDestinationLast4: last4(r.payoutDestination ?? ''),
         lastUsedAt: new Date(r.lastUsedAt),
       };
@@ -75,7 +79,7 @@ export function createRecipientRepo(
         name: row.name,
         recipientPhone: row.recipientPhone,
         payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+        payoutDestination: openOptional(row.payoutDestinationEnc, provider, recipientRowCtx(row)) ?? '',
         lastUsedAt: row.lastUsedAt.toISOString(),
       }));
     },
@@ -107,7 +111,9 @@ export function createBeneficiaryRepo(
         name: b.name,
         country: b.country,
         payoutMethod: b.payoutMethod,
-        payoutDestinationEnc: b.payoutDestination ? encryptField(b.payoutDestination, provider) : '',
+        payoutDestinationEnc: b.payoutDestination
+          ? encryptField(b.payoutDestination, provider, ctx.beneficiary(b.id))
+          : '',
         payoutDestinationLast4: last4(b.payoutDestination ?? ''),
         recipientPhone: b.recipientPhone ?? null,
         createdAt: new Date(b.createdAt),
@@ -129,7 +135,7 @@ export function createBeneficiaryRepo(
         name: row.name,
         country: row.country,
         payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+        payoutDestination: openOptional(row.payoutDestinationEnc, provider, ctx.beneficiary(row.id)) ?? '',
         recipientPhone: row.recipientPhone ?? undefined,
         createdAt: row.createdAt.toISOString(),
       };
@@ -180,7 +186,8 @@ function rowToPartnerRequest(row: PartnerRequestRow): PartnerRequest {
     phone: row.phone,
     corridors: (row.corridors as string[]) ?? [],
     capturedAt: row.capturedAt.toISOString(),
-    applicationStatus: row.applicationStatus,
+    // The raw stored value, never coerced: an unknown value must not read as 'invited' (open).
+    applicationStatus: row.applicationStatus as PartnerApplicationStatus,
   };
   if (row.comments) r.comments = row.comments;
   if (row.tokenExpiresAt) r.tokenExpiresAt = row.tokenExpiresAt.toISOString();
@@ -231,12 +238,33 @@ export function createPartnerRequestRepo(db: DbOrTx) {
       return rows[0] ? rowToPartnerRequest(rows[0]) : null;
     },
 
-    /** Single-use: flip to 'completed' so the link is dead. Idempotent. */
-    async markApplicationCompleted(id: string): Promise<void> {
-      await db
+    /**
+     * Single-use: flip invited → 'completed' so the link is dead. Conditional on
+     * 'invited' (Program-Fix 49C): a submit that raced a staff decision can never
+     * turn 'approved'/'rejected' back into 'completed'. Returns whether it flipped.
+     */
+    async markApplicationCompleted(id: string): Promise<boolean> {
+      const rows = await db
         .update(partnerRequests)
         .set({ applicationStatus: 'completed' })
-        .where(eq(partnerRequests.id, id));
+        .where(and(eq(partnerRequests.id, id), eq(partnerRequests.applicationStatus, 'invited')))
+        .returning({ id: partnerRequests.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Program-Fix 49C: the staff decision, atomically. completed → approved|rejected
+     * AND the link's token hash is cleared (a decided application's link can never
+     * resolve again). The WHERE is the guard: a second decision, or a decision on
+     * an application that was never submitted, updates nothing and returns false.
+     */
+    async decideApplication(id: string, decision: 'approved' | 'rejected'): Promise<boolean> {
+      const rows = await db
+        .update(partnerRequests)
+        .set({ applicationStatus: decision, applicationTokenHash: null })
+        .where(and(eq(partnerRequests.id, id), eq(partnerRequests.applicationStatus, 'completed')))
+        .returning({ id: partnerRequests.id });
+      return rows.length > 0;
     },
   };
 }
@@ -597,13 +625,22 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
      * `buyerPhone` is normalized on read too (defense-in-depth): match the
      * digits-only form we store, regardless of how the caller formatted it.
      */
-    async getUnpaidByBuyer(buyerPhone: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+    async getUnpaidByBuyer(
+      buyerPhone: string,
+      partnerId: PartnerId,
+      // Program-Fix 44: the oldest live created_at (inclusive). Omitted ⇒ no
+      // age filter (the store always passes the bill-TTL cutoff).
+      createdNotBefore?: Date,
+    ): Promise<B2bInvoice | null> {
       const phone = normalizePhone(buyerPhone);
+      const ageFilter = createdNotBefore
+        ? sql` AND ${b2bInvoices.createdAt} >= ${createdNotBefore.toISOString()}`
+        : sql``;
       const rows = await db
         .select()
         .from(b2bInvoices)
         .where(
-          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'`,
+          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'${ageFilter}`,
         )
         // id is the deterministic tiebreak when two invoices share a created_at.
         .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
@@ -613,6 +650,41 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
     async getInvoice(id: string): Promise<B2bInvoice | null> {
       const rows = await db.select().from(b2bInvoices).where(eq(b2bInvoices.id, id)).limit(1);
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /**
+     * Program-Fix 44 — the DURABLE duplicate-bill check: an open (unpaid, not
+     * older than `createdNotBefore`) bill from the SAME seller to the SAME buyer
+     * for the SAME obligation, tenant-scoped. create_invoice runs it before its
+     * 120 s Redis claim, so a duplicate is caught after the claim's TTL too. The
+     * amount compares as NUMERIC against the 2-dp string the write stored.
+     */
+    async findOpenTwin(q: {
+      partnerId: PartnerId;
+      sellerId: string;
+      buyerPhone: string;
+      invoicedAmount: number;
+      invoicedCurrency: CurrencyCode;
+      createdNotBefore: Date;
+    }): Promise<B2bInvoice | null> {
+      const phone = normalizePhone(q.buyerPhone);
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(
+          sql`${b2bInvoices.partnerId} = ${q.partnerId} AND ${b2bInvoices.sellerId} = ${q.sellerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.invoicedAmount} = ${q.invoicedAmount.toFixed(2)}::numeric AND ${b2bInvoices.invoicedCurrency} = ${q.invoicedCurrency} AND ${b2bInvoices.status} = 'unpaid' AND ${b2bInvoices.createdAt} >= ${q.createdNotBefore.toISOString()}`,
+        )
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /** Program-Fix 44 — every tenant's invoices, newest first (PLATFORM staff only; the caller gates). */
+    async listAllInvoices(limit = 500): Promise<B2bInvoice[]> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(limit);
+      return rows.map(toDomain);
     },
     async listInvoices(partnerId: PartnerId): Promise<B2bInvoice[]> {
       const rows = await db
@@ -810,7 +882,9 @@ export function createSellerRepo(db: DbOrTx) {
     ): Promise<(Seller & { payoutDestination: string }) | null> {
       const row = await fetchRow(phone, partnerId);
       if (!row) return null;
-      const payoutDestination = row.payoutDestinationEnc ? decryptField(row.payoutDestinationEnc) : '';
+      const payoutDestination = row.payoutDestinationEnc
+        ? decryptField(row.payoutDestinationEnc, undefined, sellerRowCtx(row))
+        : '';
       return { ...toDomain(row), payoutDestination };
     },
 
@@ -818,7 +892,8 @@ export function createSellerRepo(db: DbOrTx) {
       phone: string, partnerId: PartnerId, payoutDestination: string,
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
-      const enc = encryptField(payoutDestination);
+      // The UPDATE's WHERE key (partner_id, normalized phone) IS the row's key.
+      const enc = encryptField(payoutDestination, undefined, sellerRowCtx({ partnerId, phone: normalized }));
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)
@@ -877,7 +952,8 @@ export function createSellerRepo(db: DbOrTx) {
       payoutMethod: Seller['payoutMethod'] = 'bank',
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
-      const enc = encryptField(payoutDestination);
+      // The UPDATE's WHERE key (partner_id, normalized phone) IS the row's key.
+      const enc = encryptField(payoutDestination, undefined, sellerRowCtx({ partnerId, phone: normalized }));
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)

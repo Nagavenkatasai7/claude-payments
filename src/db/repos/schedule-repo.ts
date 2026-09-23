@@ -4,6 +4,7 @@ import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, openOptional } from './mappers';
 import { encryptField } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import type {
   CurrencyCode,
   FundingMethod,
@@ -32,7 +33,7 @@ export function createScheduleRepo(
       recipientName: row.recipientName,
       recipientPhone: row.recipientPhone,
       payoutMethod: row.payoutMethod as PayoutMethod,
-      payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+      payoutDestination: openOptional(row.payoutDestinationEnc, provider, ctx.schedule(row.id)) ?? '',
       fundingMethod: row.fundingMethod as FundingMethod,
       frequency: row.frequency as ScheduleFrequency,
       status: row.status as ScheduleStatus,
@@ -59,7 +60,9 @@ export function createScheduleRepo(
       recipientName: s.recipientName,
       recipientPhone: s.recipientPhone,
       payoutMethod: s.payoutMethod,
-      payoutDestinationEnc: s.payoutDestination ? encryptField(s.payoutDestination, provider) : '',
+      payoutDestinationEnc: s.payoutDestination
+        ? encryptField(s.payoutDestination, provider, ctx.schedule(s.id))
+        : '',
       payoutDestinationLast4: last4(s.payoutDestination ?? ''),
       fundingMethod: s.fundingMethod,
       frequency: s.frequency,

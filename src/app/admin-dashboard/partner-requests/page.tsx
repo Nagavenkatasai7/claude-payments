@@ -93,7 +93,10 @@ export default async function PartnerRequestsPage({
               columns={COLUMNS}
               empty={<>No partner requests yet.</>}
               rows={requests.map((r) => {
-                const completed = r.applicationStatus === 'completed';
+                // Any submitted application (completed, or decided: approved /
+                // rejected — Program-Fix 49C) has a detail page to open.
+                const status = r.applicationStatus ?? 'invited';
+                const completed = status !== 'invited';
                 return {
                 key: r.id,
                 label: r.companyName,
@@ -129,7 +132,9 @@ export default async function PartnerRequestsPage({
                   ),
                   completed ? (
                     <span key="app" className="flex items-center gap-2">
-                      <Badge variant="outline" className="border-success/50 text-success">Completed</Badge>
+                      <Badge variant="outline" className={status === 'rejected' ? 'text-muted-foreground' : 'border-success/50 text-success'}>
+                        {status === 'approved' ? 'Approved' : status === 'rejected' ? 'Rejected' : 'Completed'}
+                      </Badge>
                       <Link
                         href={`/admin-dashboard/partner-requests/${r.id}`}
                         className="text-xs text-primary hover:underline"

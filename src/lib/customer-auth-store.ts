@@ -14,6 +14,7 @@ import {
   defaultProvider,
   type EncryptionKeyProvider,
 } from './field-crypto';
+import { customerEmailCtx } from './crypto-context';
 
 /**
  * customer-auth-store — persistent CUSTOMER account auth (separate from staff).
@@ -50,8 +51,10 @@ export class CustomerInputError extends Error {
 }
 
 // ── Policy constants ──
-const PASSWORD_MIN = 8;
-const PASSWORD_MAX = 64;
+export const PASSWORD_MIN = 8;
+/** RFC 5321 forward-path limit; the settings action uses the same bound. */
+export const EMAIL_MAX_LENGTH = 254;
+export const PASSWORD_MAX = 64;
 const IDLE_MS = 30 * 60 * 1000; //   30-min idle window
 const ABSOLUTE_MS = 12 * 60 * 60 * 1000; // 12-h absolute window
 const SESSION_IDLE_SECONDS = IDLE_MS / 1000; // Redis ex (defense-in-depth; code is authoritative)
@@ -208,6 +211,12 @@ export function createCustomerAuthStore(
       if (!isValidPhone(phone)) {
         throw new CustomerInputError('Enter a valid phone number.');
       }
+      // Program-Fix 46A (F70): the RFC 5321 path limit, the same bound
+      // updateEmailAction applies — checked before any lookup, hash or encrypt,
+      // so an oversized value is never sealed or stored.
+      if (typeof input.email !== 'string' || input.email.length > EMAIL_MAX_LENGTH) {
+        throw new CustomerInputError('Enter a valid email address.');
+      }
 
       // Collision-before-create: never silently overwrite/hijack an existing
       // account. saveCustomer is an unconditional upsert, so this guard is mandatory.
@@ -257,8 +266,14 @@ export function createCustomerAuthStore(
 
       const passwordHash = await hashPassword(password);
       const provider = regOpts.cryptoProvider ?? defaultProvider();
-      const encryptedEmail = encryptField(input.email, provider);
       const nowIso = new Date(now()).toISOString();
+      // The row the email lands in: the existing row's own key (any tenant) or
+      // the lazily-created default-tenant row. customerEmailCtx applies the same
+      // key defaulting as customerToRow (Program-Fix 46A storage context).
+      const emailCtx = customerEmailCtx(
+        existing ? existing : { partnerId: DEFAULT_PARTNER_ID, senderPhone: phone },
+      );
+      const encryptedEmail = encryptField(input.email, provider, emailCtx);
 
       let customer: Customer;
       if (existing) {

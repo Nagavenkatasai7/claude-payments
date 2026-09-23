@@ -8,6 +8,7 @@ import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
@@ -28,6 +29,27 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
     createIntegrationsRepo: (...args: Parameters<typeof real.createIntegrationsRepo>) => {
       integrationsRepoSpy.calls++;
       return real.createIntegrationsRepo(...args);
+    },
+  };
+});
+
+// Program-Fix 31 PR B: a pass-through customer repo whose getCustomer can be
+// made to throw, proving the compliance block fails OPEN (the instruction
+// still goes out, originator null) and never dead-letters settlement.instruct.
+const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  return {
+    ...real,
+    createCustomerRepo: (...args: Parameters<typeof real.createCustomerRepo>) => {
+      const repo = real.createCustomerRepo(...args);
+      return {
+        ...repo,
+        getCustomer: async (...a: Parameters<typeof repo.getCustomer>) => {
+          if (customerRepoFault.throwOnGet) throw new Error('decrypt failed for 15551230000');
+          return repo.getCustomer(...a);
+        },
+      };
     },
   };
 });
@@ -194,6 +216,150 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
     // Re-dying the same row can never alert twice (dedupe key).
     const again = await outbox.enqueue('ops.alert', { message: 'dup' }, { dedupeKey: `dead:${(await outbox.listDead())[0].id}` });
     expect(again).toBe(false);
+  });
+});
+
+describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', { retry: 0 }, () => {
+  const SENDER_NAME = 'Test Sender Person';
+  beforeEach(async () => {
+    customerRepoFault.throwOnGet = false;
+    await store.saveTransfer({ ...transferFixture(), recipientLegalName: 'Anita Legal', purpose: 'family_support' });
+    const { createCustomerRepo } = await import('@/db/repos/customer-repo');
+    // Seeded under the OWNER ('acme') with the default key provider — the
+    // same one the worker's repo uses, so a positive read proves the wiring.
+    await createCustomerRepo(db, async () => null).saveCustomer({
+      senderPhone: '15551230000', firstSeenAt: '2026-01-01T00:00:00.000Z', kycStatus: 'verified',
+      kycVerifiedAt: '2026-01-05T00:00:00.000Z', fullName: SENDER_NAME, dateOfBirth: '1980-01-02',
+      residentialAddress: '1 Secret Lane', govIdType: 'passport', govIdNumber: 'X99887766',
+      idLast4: '7766', idDocType: 'passport', senderCountry: 'US', partnerId: 'acme',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    } as Parameters<ReturnType<typeof createCustomerRepo>['saveCustomer']>[0]);
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+  afterEach(() => {
+    customerRepoFault.throwOnGet = false;
+  });
+
+  it('the POSTed body = every legacy key unchanged + compliance v1 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    const raw = String(init.body);
+    const body = JSON.parse(raw) as Record<string, unknown> & { compliance: Record<string, unknown> };
+    const { buildSettlementInstruction } = await import('@/lib/providers/http-payment-provider');
+    const decrypted = await createTransferRepo(db).getTransfer('wk_t1', { decrypt: true });
+    const { compliance, ...legacy } = body;
+    expect(legacy).toEqual(JSON.parse(JSON.stringify({ ...buildSettlementInstruction(decrypted!), partner_id: 'acme' })));
+    expect(Object.keys(body).at(-1)).toBe('compliance');
+    expect(compliance.version).toBe(1);
+    expect(compliance.originator).toEqual({
+      entity_type: 'individual', name: SENDER_NAME, country: 'US', phone: '15551230000',
+      id_type: 'passport', id_last4: '7766',
+    });
+    expect(compliance.beneficiary).toMatchObject({ name: 'Anita Legal' });
+    expect(compliance.kyc).toMatchObject({ status: 'verified', tier: 'T1' });
+    expect(compliance.purpose_code).toBeNull();
+    for (const v of ['1980-01-02', 'Secret Lane', 'X99887766']) expect(raw).not.toContain(v);
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'sgn').update(raw).digest('hex'));
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-c1');
+  });
+
+  it('carries the fix 14 screening reference (list source/version/decision) when the evidence row exists — never the party hashes', async () => {
+    await createAuditRepo(db).record({
+      partnerId: 'acme', actor: 'system:sanctions', actorType: 'system', action: 'sanctions.screen', subjectId: 'wk_t1',
+      meta: {
+        listSource: 'mock-watchlist', listVersion: 'v-test', listHash: 'h'.repeat(64), screenedAt: '2026-06-09T00:00:00.000Z',
+        decision: 'clear', parties: [{ role: 'recipient', inputHash: 'f'.repeat(64), matched: false, matchScore: 0 }],
+      },
+    });
+    // Its createdAt window is the fixture's 2026-06-09; the audit row's `at`
+    // is now(), so move the transfer's createdAt to now to fall in the window.
+    await store.saveTransfer({ ...transferFixture(), createdAt: new Date().toISOString() });
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c2' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const raw = String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body);
+    const screening = (JSON.parse(raw) as { compliance: { screening: Record<string, unknown> } }).compliance.screening;
+    expect(screening).toMatchObject({
+      status: 'cleared', list_source: 'mock-watchlist', list_version: 'v-test', decision: 'clear',
+      screened_at: '2026-06-09T00:00:00.000Z',
+    });
+    expect(raw).not.toContain('f'.repeat(64));
+    expect(raw).not.toContain('h'.repeat(64));
+  });
+
+  it('no evidence row ⇒ the screening list fields are omitted', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c3' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const body = JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body)) as { compliance: { screening: Record<string, unknown> } };
+    expect(Object.keys(body.compliance.screening).sort()).toEqual(['reasons', 'screened_at', 'status']);
+  });
+
+  it('FAIL-OPEN: getCustomer throws ⇒ the instruction is STILL POSTed (originator null), the row is done, a warn names the transfer id only', async () => {
+    customerRepoFault.throwOnGet = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c4' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      const r = await drainOnce(deps(), 'w1');
+      expect(r.processed).toBe(1);
+      expect(r.failed).toBe(0);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      const raw = String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body);
+      const body = JSON.parse(raw) as { reference: string; compliance: Record<string, unknown> };
+      expect(body.reference).toBe('wk_t1');
+      expect(body.compliance.version).toBe(1);
+      expect(body.compliance.originator).toBeNull();
+      expect(raw).not.toContain(SENDER_NAME);
+      const rows = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
+      expect(rows.rows[0].status).toBe('done');
+      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('instruct.compliance_block'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('wk_t1');
+      expect(lines[0]).not.toContain('15551230000');
+      expect(lines[0]).not.toContain('decrypt failed');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ROUTED: the rail partner gets originator null + routed true, the kyc status still read under the OWNER, and no sender name or phone anywhere in the body', async () => {
+    await seedPartner(db, 'railp');
+    await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
+        webhookSecret: 'railp_whk',
+      },
+      whatsapp: {},
+    });
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'railp-c5' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://railp.example/settle');
+    const raw = String(init.body);
+    const body = JSON.parse(raw) as { partner_id: string; compliance: Record<string, unknown> };
+    expect(body.partner_id).toBe('railp');
+    expect(body.compliance.originator).toBeNull();
+    expect(body.compliance.routed).toBe(true);
+    expect(body.compliance.kyc).toMatchObject({ status: 'verified' });
+    expect(raw).not.toContain(SENDER_NAME);
+    expect(raw).not.toContain('15551230000');
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'railp_sgn').update(raw).digest('hex'));
   });
 });
 

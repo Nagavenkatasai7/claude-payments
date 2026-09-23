@@ -2,7 +2,8 @@ import { createHmac } from 'node:crypto';
 import type { Store } from '../store';
 import { isMaskedDestination, usdcAddressFromDestination } from '../payout-format';
 import { isPartnerPulled } from '../funding-method';
-import type { Transfer, TransferStatus } from '../types';
+import type { Customer, Transfer, TransferStatus } from '../types';
+import { deriveTier } from '../tier-rules';
 import type { PartnerPaymentConfig } from '../partner-integrations';
 import type {
   InitiateResult,
@@ -184,6 +185,97 @@ export function buildSettlementInstruction(transfer: Transfer) {
       : {}),
   };
 }
+
+/** A name-free reference to the Program-Fix 14 sanctions evidence for this transfer. */
+export interface ComplianceScreeningRef {
+  listSource: string;
+  listVersion: string;
+  decision: string;
+  screenedAt: string;
+}
+
+export interface ComplianceBlockOptions {
+  /** The OWNER partner's verify-before-send gate (kyc-gate sendGateActive). Unknown ⇒ tier null. */
+  kycGateActive?: boolean;
+  /** Fix 14 evidence when found; absent ⇒ the list fields are omitted, never guessed. */
+  screening?: ComplianceScreeningRef | null;
+  /** Worker fail-open path: the originator could not be loaded ⇒ originator null. */
+  omitOriginator?: boolean;
+}
+
+/**
+ * Program-Fix 31 PR B (rail-10): the ADDITIVE `compliance` block the worker
+ * spreads into the signed settlement instruction, after every legacy key.
+ * buildSettlementInstruction is unchanged; the HMAC covers this block because
+ * it signs the final serialised body.
+ *
+ * Data minimisation (owner decisions C1–C3, docs §3):
+ *   • the originator carries name, country, phone, id_type and id_last4 only —
+ *     never the full ID number, date of birth, residential address or email.
+ *     C1 (address at ≥ $3,000) is owner-pending, so no address is sent at all;
+ *   • purpose_code is null until counsel/the partner bank supplies codes (C2);
+ *   • a ROUTED row (settlementPartnerId set) goes to another tenant's rail, so
+ *     the sender identity is omitted: originator null, routed true (C3);
+ *   • the screening list fields come only from fix 14 evidence, never guessed.
+ * Pure: no DB, no clock (`now` is passed in).
+ */
+export function buildComplianceBlock(
+  transfer: Transfer,
+  customer: Customer | null,
+  now: Date,
+  opts: ComplianceBlockOptions = {},
+) {
+  const routed = Boolean(transfer.settlementPartnerId);
+  const senderIsBusiness = transfer.senderEntityType === 'business';
+  const recipientIsBusiness = transfer.recipientEntityType === 'business';
+  const originator =
+    routed || opts.omitOriginator
+      ? null
+      : {
+          entity_type: senderIsBusiness ? ('business' as const) : ('individual' as const),
+          name: (senderIsBusiness ? transfer.senderBusinessName : customer?.fullName) ?? null,
+          country: customer?.senderCountry ?? transfer.sourceCountry ?? null,
+          phone: transfer.phone,
+          // A business originator is the entity: no individual's ID is sent.
+          id_type: senderIsBusiness ? null : (customer?.idDocType ?? customer?.govIdType ?? null),
+          id_last4: senderIsBusiness ? null : (customer?.idLast4 ?? null),
+        };
+  const evidence = opts.screening;
+  return {
+    version: 1 as const,
+    ...(routed ? { routed: true as const } : {}),
+    originator,
+    beneficiary: {
+      entity_type: recipientIsBusiness ? ('business' as const) : ('individual' as const),
+      name:
+        (recipientIsBusiness ? transfer.recipientBusinessName : transfer.recipientLegalName) ??
+        transfer.recipientName,
+      relationship: transfer.relationship ?? null,
+      country: transfer.destinationCountry ?? null,
+    },
+    purpose: transfer.purpose ?? null,
+    purpose_code: null,
+    kyc: {
+      status: customer?.kycStatus ?? null,
+      tier:
+        customer && typeof opts.kycGateActive === 'boolean'
+          ? deriveTier(customer, now, opts.kycGateActive)
+          : null,
+      verified_at: customer?.kycVerifiedAt ?? null,
+    },
+    screening: {
+      status: transfer.complianceStatus,
+      reasons: [...(transfer.complianceReasons ?? [])],
+      screened_at: evidence?.screenedAt ?? transfer.createdAt,
+      ...(evidence
+        ? { list_source: evidence.listSource, list_version: evidence.listVersion, decision: evidence.decision }
+        : {}),
+    },
+    edd_required: transfer.eddRequired ?? false,
+  };
+}
+
+export type ComplianceBlock = ReturnType<typeof buildComplianceBlock>;
 
 /**
  * The SIGNED reverse instruction for a B2B ach_pull cancel. NON-CUSTODIAL: when a
