@@ -11,7 +11,9 @@ import { randomBytes } from 'node:crypto';
 // (src/middleware.ts) redirects an anonymous /admin-dashboard and /account to
 // their sign-in pages and leaves /account/login public — the guard for the
 // middleware → proxy rename. Program-Fix 47 adds: exactly one enforced CSP per
-// page, with https: images and object-src 'none'.
+// page, with https: images and object-src 'none'. Program-Fix 15 PR A adds:
+// /terms, /privacy and /legal show the draft banner, fit a 390px phone, have one
+// h1 and a skip link, and carry the enforced CSP.
 
 test('robots.txt is served and keeps crawlers off the pay links', async ({ request }) => {
   const res = await request.get('/robots.txt');
@@ -54,9 +56,27 @@ test.describe('at a 390px phone viewport', () => {
     }));
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
   });
+
+  // Program-Fix 15 PR A: the legal drafts, each with the visible draft banner.
+  for (const path of ['/terms', '/privacy', '/legal']) {
+    test(`${path} shows the draft banner and does not scroll sideways`, async ({ page }) => {
+      const res = await page.goto(path);
+      expect(res?.status()).toBe(200);
+      await expect(page.getByText('Draft — for counsel review; not legal advice and not yet approved')).toBeVisible();
+      // Measured on <main>, not the document: the page wrapper clips x-overflow,
+      // which would hide content that is wider than the phone.
+      const { scrollWidth, clientWidth, innerWidth } = await page.locator('main').evaluate((el) => ({
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+        innerWidth: window.innerWidth,
+      }));
+      expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+      expect(clientWidth).toBeLessThanOrEqual(innerWidth);
+    });
+  }
 });
 
-for (const path of ['/account/login', '/login']) {
+for (const path of ['/account/login', '/login', '/terms', '/privacy', '/legal']) {
   test(`${path} has exactly one h1 and a skip link to #main`, async ({ page }) => {
     const res = await page.goto(path);
     expect(res?.status()).toBe(200);
@@ -102,7 +122,7 @@ test('anonymous /account/login stays public (200, no redirect)', async ({ reques
 // types.d.ts:19866-19870), and the single value must hold one default-src, so
 // a comma-merged pair of policies is caught too. The /pay check lives in
 // pay-page-smoke.spec.ts: this spec never opens a /pay link.
-for (const path of ['/', '/about', '/docs', '/login', '/account/login']) {
+for (const path of ['/', '/about', '/docs', '/login', '/account/login', '/terms', '/privacy', '/legal']) {
   test(`${path} has exactly one enforced CSP, with the Program-Fix 47 additions`, async ({ request }) => {
     const res = await request.get(path);
     expect(res.status()).toBe(200);

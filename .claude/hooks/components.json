@@ -67,6 +67,7 @@
     ]},
     "landing-docs": { "branch": "component/landing-docs", "paths": [
       "src/app/page.tsx", "src/app/landing/", "src/app/about/", "src/app/docs/", "src/app/partners/", "src/app/partners-action.ts",
+      "src/app/terms/", "src/app/privacy/", "src/app/legal/", "src/lib/legal/", "tests/legal-*",
       "src/lib/logo.ts", "src/lib/email.ts", "public/"
     ]},
     "platform-security": { "branch": "component/platform-security", "paths": [
