@@ -134,6 +134,13 @@
       "when": 1790056747009,
       "tag": "0018_send_limits",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790166710163,
+      "tag": "0019_audit_append_only",
+      "breakpoints": true
     }
   ]
 }
