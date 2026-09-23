@@ -463,7 +463,7 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     expect((await s.getStaff('priya'))?.status).toBe('suspended');
   });
 
-  it('role takes the lower rank (support < agent < admin); a support result gets no permissions', async () => {
+  it('role: admin vs a lower role takes the lower role; a support result gets no permissions', async () => {
     const { r, repo, s } = setup();
     await r.set('staff:priya', JSON.stringify(agent({ role: 'admin' })));
     await repo.upsert(agent({ role: 'agent' }));
@@ -471,7 +471,27 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     await repo.upsert(agent({ role: 'support' }));
     const got = await s.getStaff('priya');
     expect(got?.role).toBe('support');
+    expect(got?.status ?? 'active').toBe('active');
     expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false, canRevealPii: false });
+    // Row admin, Redis lower: Redis's lower role stands.
+    await r.set('staff:priya', JSON.stringify(agent({ role: 'support' })));
+    await repo.upsert(agent({ role: 'admin' }));
+    expect((await s.getStaff('priya'))?.role).toBe('support');
+  });
+
+  it('role: agent and support are incomparable (each has surfaces the other lacks), so a disagreement SUSPENDS and keeps the Redis role', async () => {
+    const { r, repo, s } = setup();
+    await r.set('staff:priya', JSON.stringify(agent({ role: 'agent' })));
+    await repo.upsert(agent({ role: 'support' }));
+    let got = await s.getStaff('priya');
+    expect(got?.status).toBe('suspended');
+    expect(got?.role).toBe('agent');
+
+    await r.set('staff:priya', JSON.stringify(agent({ role: 'support', permissions: { canCancel: false, canResend: false, canAssign: false } })));
+    await repo.upsert(agent({ role: 'agent' }));
+    got = await s.getStaff('priya');
+    expect(got?.status).toBe('suspended');
+    expect(got?.role).toBe('support');
   });
 
   it('permissions are the per-key AND of both stores (absent = false)', async () => {
@@ -652,6 +672,55 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     await bad.s.saveStaff(agent({ passwordHash: 'h1' }));
     expect(await bad.s.setPasswordHash('priya', 'h1', 'h2')).toBe(true);
     expect(await bad.s.updatePasswordHash('priya', 'h2', 'h3')).toBe(true);
+  });
+
+  it('a ledger write failure never carries the hash, username or name (thrown message, cause, or log)', async () => {
+    const { s } = setup();
+    const HASH = '$argon2id$SECRET-HASH-FIXTURE';
+    const spyErr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const spyWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spyLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // A real database refusal (FK: the partner does not exist) → DrizzleQueryError with params.
+    const err = await s
+      .saveStaff(agent({ username: 'leaky-user', name: 'Leaky Name', passwordHash: HASH, partnerId: 'p_missing' }))
+      .then(() => null, (e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).toBe('staff ledger write failed');
+    expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
+    const logged = JSON.stringify([spyErr.mock.calls, spyWarn.mock.calls, spyLog.mock.calls]);
+    for (const secret of [HASH, 'SECRET-HASH', 'leaky-user', 'Leaky Name']) {
+      expect(err!.message + String(err!.stack)).not.toContain(secret);
+      expect(logged).not.toContain(secret);
+    }
+    spyErr.mockRestore();
+    spyWarn.mockRestore();
+    spyLog.mockRestore();
+  });
+
+  it('listStaff: one record whose partner is missing does not stop the others being copied in', async () => {
+    const { r, repo, s } = setup();
+    await r.set('staff:priya', JSON.stringify(agent({ partnerId: 'p_missing' })));
+    await r.set('staff:ravi', JSON.stringify(agent({ username: 'ravi' })));
+    await r.sadd('staff:index', 'priya');
+    await r.sadd('staff:index', 'ravi');
+    expect((await s.listStaff()).map((x) => x.username).sort()).toEqual(['priya', 'ravi']);
+    expect(await repo.get('ravi')).not.toBeNull();
+    expect(await repo.get('priya')).toBeNull();
+  });
+
+  it('the restricted warning carries a hashed username indicator, never the username', async () => {
+    const { r, repo, s } = setup();
+    const spyWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spyLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await r.set('staff:priya', JSON.stringify(agent()));
+    await repo.upsert(agent({ status: 'suspended' }));
+    await s.getStaff('priya');
+    const logged = JSON.stringify([spyWarn.mock.calls, spyLog.mock.calls]);
+    expect(logged).toContain('staff_ledger.restricted');
+    expect(logged).toContain(createHash('sha256').update('priya').digest('hex').slice(0, 12));
+    expect(logged).not.toContain('"priya"');
+    spyWarn.mockRestore();
+    spyLog.mockRestore();
   });
 
   it('without a ledger the store is Redis-only, exactly as before', async () => {

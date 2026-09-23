@@ -3,7 +3,7 @@ import { freshDb } from './helpers-db';
 import { createStaffRepo } from '@/db/repos/staff-repo';
 import type { Db } from '@/db/client';
 import { fakeRedis } from './helpers';
-import { runStaffBreakGlass, parseBreakGlassArgs, type BreakGlassRedis } from '../scripts/staff-break-glass';
+import { runStaffBreakGlass, parseBreakGlassArgs, BreakGlassError, type BreakGlassRedis } from '../scripts/staff-break-glass';
 import { createAuthStore } from '@/lib/auth-store';
 import { createStaffLoginGuard, staffLoginKeys } from '@/lib/staff-login-guard';
 import { hashPassword, verifyPassword } from '@/lib/password';
@@ -252,5 +252,20 @@ describe('staff-break-glass and the staff ledger (Program-Fix 45 P5)', () => {
     await expect(
       runStaffBreakGlass(redis, { ...baseOpts, username: SEED, syncLedger: true, apply: true }, () => {}),
     ).rejects.toThrow(/DATABASE_URL/);
+  });
+
+  it('--sync-ledger-from-redis: a database refusal never carries the hash or username', async () => {
+    const { r, redis } = withScan();
+    const repo = createStaffRepo(db);
+    // partner p_missing does not exist → the FK refuses → DrizzleQueryError with params.
+    await createAuthStore(r).saveStaff(seedRecord({ partnerId: 'p_missing', passwordHash: 'SECRET-HASH-FIXTURE' }));
+    const err = await runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: SEED, syncLedger: true, apply: true }, () => {}).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    expect(err).toBeInstanceOf(BreakGlassError);
+    expect(String(err!.message)).not.toContain('SECRET-HASH');
+    expect(String(err!.message)).not.toContain(SEED);
+    expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
   });
 });

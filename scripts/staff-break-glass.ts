@@ -243,7 +243,13 @@ export async function runStaffBreakGlass(
     const row = await opts.ledger.get(opts.username);
     report.ledgerRow = !row ? 'missing' : sameRecord(fromRedis, row) ? 'match' : 'differs';
     if (opts.apply && report.ledgerRow !== 'match') {
-      await opts.ledger.upsert(fromRedis);
+      try {
+        await opts.ledger.upsert(fromRedis);
+      } catch {
+        // A DrizzleQueryError message carries the query params (hash, name):
+        // never surface it. The usual cause is a partner id with no partners row.
+        throw new BreakGlassError('The ledger write was refused by the database (check the partner id exists); nothing changed.');
+      }
       report.ledgerSynced = true;
     }
     log(`  ledger row: ${report.ledgerRow}; ${report.ledgerSynced ? 'rewritten from Redis' : report.ledgerRow === 'match' ? 'nothing to write' : 'would be rewritten from Redis (dry run)'}`);

@@ -103,7 +103,20 @@ export interface SaveStaffOptions {
   ledgerBestEffort?: boolean;
 }
 
-const ROLE_RANK: Record<StaffRole, number> = { support: 0, agent: 1, admin: 2 };
+/**
+ * Role merge. admin is above both others, but agent and support are
+ * INCOMPARABLE: support has surfaces agents lack (the global ticket queue,
+ * requireSupportOrAdmin, the copilot triage/review routes) and agents have
+ * money surfaces support lacks. So admin vs X → X, and agent vs support is a
+ * disagreement that fails closed (suspended, Redis role kept), like partner
+ * scope. Returns the role and whether to suspend.
+ */
+function mergeRole(fromRedis: StaffRole, fromLedger: StaffRole): { role: StaffRole; suspend: boolean } {
+  if (fromRedis === fromLedger) return { role: fromRedis, suspend: false };
+  if (fromRedis === 'admin') return { role: fromLedger, suspend: false };
+  if (fromLedger === 'admin') return { role: fromRedis, suspend: false };
+  return { role: fromRedis, suspend: true };
+}
 
 function andPermissions(a: StaffPermissions, b: StaffPermissions): StaffPermissions {
   return {
@@ -117,8 +130,9 @@ function andPermissions(a: StaffPermissions, b: StaffPermissions): StaffPermissi
 /**
  * The most restrictive view of one staff member across the two stores.
  * Identity, name, password hash and timestamps come from Redis (the store both
- * builds write). Status: suspended if either says so. Role: the lower rank
- * (support < agent < admin); a support result carries no permissions.
+ * builds write). Status: suspended if either says so. Role: admin vs a lower
+ * role takes the lower one; agent vs support (incomparable) suspends and keeps
+ * the Redis role; a support result carries no permissions.
  * Permissions: per-key AND. Partner scope: Redis's; a row naming a different
  * partner (or one where Redis says platform) fails closed (suspended). The seed admin's
  * platform-admin record is returned unchanged.
@@ -126,11 +140,13 @@ function andPermissions(a: StaffPermissions, b: StaffPermissions): StaffPermissi
 export function mergeStaffRecords(fromRedis: Staff, fromLedger: Staff | null, seedName: string): Staff {
   if (!fromLedger || isSeedAdminRecord(fromRedis, seedName)) return fromRedis;
   const merged: Staff = { ...fromRedis };
-  const role = ROLE_RANK[fromLedger.role] < ROLE_RANK[fromRedis.role] ? fromLedger.role : fromRedis.role;
+  const { role, suspend: roleConflict } = mergeRole(fromRedis.role, fromLedger.role);
   merged.role = role;
   merged.permissions =
     role === 'support' ? { ...SUPPORT_DEFAULT_PERMISSIONS } : andPermissions(fromRedis.permissions, fromLedger.permissions);
-  if (fromRedis.status === 'suspended' || fromLedger.status === 'suspended') merged.status = 'suspended';
+  if (fromRedis.status === 'suspended' || fromLedger.status === 'suspended' || roleConflict) {
+    merged.status = 'suspended';
+  }
   // Partner scope always comes from Redis. A row that disagrees (a different
   // partner, or a partner where Redis says platform) fails closed: suspended,
   // never re-scoped, so a merged record can never pass as another tenant's
@@ -151,6 +167,11 @@ function sameAccess(a: Staff, b: Staff): boolean {
     JSON.stringify(andPermissions(a.permissions, a.permissions)) ===
       JSON.stringify(andPermissions(b.permissions, b.permissions))
   );
+}
+
+/** A short, non-reversible tag so ops can tell restricted members apart without a name in the logs. */
+function userTag(username: string): string {
+  return sha256hex(username).slice(0, 12);
 }
 
 function errName(e: unknown): string {
@@ -185,8 +206,18 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
     if (missing.length > 0) {
       try {
         await ledger()!.insertIfMissing(missing);
-      } catch (e) {
-        logWarn('staff_ledger.copy_failed', 'staff ledger copy-on-read failed', { error: errName(e), count: missing.length });
+      } catch {
+        // One bad record (e.g. a partner id with no partners row) must not
+        // stop the rest: retry row by row, counting the refusals.
+        let failed = 0;
+        for (const m of missing) {
+          try {
+            await ledger()!.insertIfMissing([m]);
+          } catch {
+            failed++;
+          }
+        }
+        if (failed > 0) logWarn('staff_ledger.copy_failed', 'staff ledger copy-on-read failed', { count: failed });
       }
     }
     const seed = seedName();
@@ -194,9 +225,11 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
       const merged = mergeStaffRecords(r, rows.get(r.username) ?? null, seed);
       const row = rows.get(r.username);
       if (row && !sameAccess(merged, r)) {
-        logWarn('staff_ledger.restricted', 'staff record restricted by the ledger row');
+        logWarn('staff_ledger.restricted', 'staff record restricted by the ledger row', { user: userTag(r.username) });
       } else if (row && isSeedAdminRecord(r, seed) && !sameAccess(r, row)) {
-        logWarn('staff_ledger.seed_divergence', 'seed admin ledger row differs from Redis; Redis record used');
+        logWarn('staff_ledger.seed_divergence', 'seed admin ledger row differs from Redis; Redis record used', {
+          user: userTag(r.username),
+        });
       }
       return merged;
     });
@@ -223,7 +256,17 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
       // unless the caller is the seed path, which must always land.
       if (opts.ledger) {
         if (saveOpts.ledgerBestEffort) await mirror('seed upsert', (l) => l.upsert(staff));
-        else await ledger()!.upsert(staff);
+        else {
+          try {
+            await ledger()!.upsert(staff);
+          } catch (e) {
+            // drizzle's DrizzleQueryError message carries the query PARAMS
+            // (password hash, username, name). Never let it reach a caller or
+            // a log: rethrow a bare error with no cause, log the class only.
+            logWarn('staff_ledger.write_failed', 'staff ledger write failed', { error: errName(e) });
+            throw new Error('staff ledger write failed');
+          }
+        }
       }
       await redis.set(`staff:${staff.username}`, JSON.stringify(staff));
       await redis.sadd('staff:index', staff.username);
