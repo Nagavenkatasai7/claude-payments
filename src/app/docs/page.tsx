@@ -211,7 +211,8 @@ curl -X POST $BASE/transactions \\
 # The same page as CSV
 curl -OJ "$BASE/settlements?from=2026-09-01&to=2026-09-08&format=csv" \\
   -H "Authorization: Bearer $KEY"`}</Code>
-              <table className="w-full text-left">
+              <div className="-mx-1 overflow-x-auto px-1">
+                <table className="w-full min-w-[560px] text-left">
                 <thead>
                   <tr className="border-b border-border text-muted-foreground">
                     <th className="py-1.5 pr-4 font-medium">Field</th>
@@ -277,6 +278,7 @@ curl -OJ "$BASE/settlements?from=2026-09-01&to=2026-09-08&format=csv" \\
                   </tr>
                 </tbody>
               </table>
+              </div>
               <p className="text-muted-foreground">
                 The statement never includes payout account details, recipient or sender identity.
               </p>
