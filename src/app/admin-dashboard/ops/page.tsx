@@ -6,6 +6,8 @@ import { requireScope } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { getOpsSnapshot, STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { isEscalated } from '@/lib/stale-money';
+import { emailConfigured } from '@/lib/email';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getCadenceSnapshot, cadenceRedis, DRAIN_SLA_MINUTES, CRON_QUIET_MINUTES } from '@/lib/worker-cadence';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
@@ -56,6 +58,10 @@ export default async function OpsPage() {
     ? Math.max(0, Math.round((Date.now() - cadence.lastCronAt.getTime()) / 60_000))
     : null;
   const cronQuiet = lastCronMin === null || lastCronMin > CRON_QUIET_MINUTES;
+  // Program-Fix 39: is partner email actually going out? Presence of the SMTP
+  // trio only (never a value), plus how many sends were skipped this week.
+  const mailConfigured = emailConfigured();
+  const emailSkipped7d = await createAuditRepo(getDb()).countByAction('email.skipped', 7);
   const senderNames = await resolveSenderNames(
     getDb(),
     [
@@ -156,6 +162,21 @@ export default async function OpsPage() {
             </CardContent>
           </Card>
         </section>
+
+        {/* Program-Fix 39: email is honest — a skipped send is audited, not hidden. */}
+        <Card className={`mb-6 ${!mailConfigured || emailSkipped7d > 0 ? 'border-warning/50' : ''}`}>
+          <CardHeader className="pb-2">
+            <CardDescription>Email</CardDescription>
+            <CardTitle className="text-xl">
+              {mailConfigured ? 'Configured' : 'NOT configured (partner emails are skipped)'}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-xs text-muted-foreground">
+            {emailSkipped7d} email{emailSkipped7d === 1 ? '' : 's'} skipped in the last 7 days
+            (<code>email.skipped</code> audit rows). Partner lead alerts and application invites
+            are skipped while SMTP_HOST / SMTP_USER / SMTP_PASS are unset.
+          </CardContent>
+        </Card>
 
         {healthy && (
           <Card className="mb-6">

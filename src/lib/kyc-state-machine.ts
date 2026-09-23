@@ -1,5 +1,6 @@
 import type { Customer, KycReviewState } from './types';
-import type { PersonaEvent } from './providers/persona-webhook-parse';
+import type { PersonaEvent, PersonaMatchKind } from './providers/persona-webhook-parse';
+import { isReportEventName, reportMatchKind } from './providers/persona-webhook-parse';
 
 /**
  * applyKycEvent — pure Persona-event → field delta (Phase 2, Task 6).
@@ -29,20 +30,43 @@ export function applyKycEvent(
   event: PersonaEvent,
   nowIso: string = new Date().toISOString(),
 ): KycDelta {
-  // A human's terminal decision is final — ignore any later Persona event.
+  // Program-Fix 35: any `report/*.matched` (PEP, watchlist, adverse media, …)
+  // is a HOLD. Derived purely from the event, before anything else.
+  const matchKind: PersonaMatchKind | undefined =
+    event.matchKind ??
+    reportMatchKind(event.name) ??
+    (event.watchlistMatched === true ? 'watchlist' : undefined);
+  const isHoldEvent = matchKind !== undefined;
+  const flag: KycDelta =
+    matchKind === 'pep' ? { pepHit: true } : matchKind === 'watchlist' ? { watchlistHit: true } : {};
+
+  // A human's terminal decision is final — ignore any later NON-match Persona
+  // event. A later match on an approved/rejected customer records only its
+  // flag (C2 default: flag + ops alert, staff decide); it never moves
+  // kycReviewState and never writes the inquiry id.
   if (customer.kycReviewState && HUMAN_TERMINAL.includes(customer.kycReviewState)) {
-    return {};
+    return isHoldEvent ? flag : {};
   }
 
-  const isWatchlistEvent =
-    event.watchlistMatched === true || event.name === 'report/watchlist.matched';
-
   // HOLD LOCK: once a customer is in needs_review (a watchlist/PEP hold, or a
-  // failed inquiry awaiting a human), no later NON-watchlist Persona event may
+  // failed inquiry awaiting a human), no later NON-match Persona event may
   // touch it — only a human via kyc-case-store.review() can clear it. Return an
   // empty delta so a clean inquiry.approved/completed delivered out of order
   // cannot silently downgrade (or even partially overwrite) the hold.
-  if (customer.kycReviewState === 'needs_review' && !isWatchlistEvent) {
+  if (customer.kycReviewState === 'needs_review' && !isHoldEvent) {
+    return {};
+  }
+
+  // A match is a hard hold regardless of inquiry status. It can only ever set
+  // needs_review (plus its flag): never approve, never downgrade. A report
+  // event never writes kycInquiryId/kycProviderRef (its id is a rep_ id).
+  if (isHoldEvent) {
+    return { ...flag, kycReviewState: 'needs_review' };
+  }
+
+  // Any other report event (.ready/.dismissed/.errored/…) moves nothing: a
+  // dismissed match does not clear a hold — a human does.
+  if (isReportEventName(event.name) || event.reportId !== undefined) {
     return {};
   }
 
@@ -52,13 +76,6 @@ export function applyKycEvent(
     delta.kycProviderRef = event.inquiryId;
   }
   if (event.idLast4) delta.idLast4 = event.idLast4;
-
-  // Watchlist/PEP match is a hard hold regardless of inquiry status.
-  if (isWatchlistEvent) {
-    delta.watchlistHit = true;
-    delta.kycReviewState = 'needs_review';
-    return delta;
-  }
 
   switch (event.name) {
     case 'inquiry.created':
