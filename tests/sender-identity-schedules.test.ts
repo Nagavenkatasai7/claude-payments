@@ -209,6 +209,7 @@ describe('scheduled sends screen the sender name — cron run', { retry: 0 }, ()
     expect(alerts.map((a) => a.dedupe_key)).toEqual(['schedule-sender-name:due:2026-05-21']);
     expect(alerts[0].payload.message).toContain('due');
     expect(alerts[0].payload.message).toContain('sender_name_missing');
+    expect(alerts[0].payload.message).toContain('No sender legal name is on file; the schedule stays active');
     expect(alerts[0].payload.message).not.toMatch(/\d{7,}/); // never the customer's phone
     expect(await sanctionsRows()).toHaveLength(0);
   });

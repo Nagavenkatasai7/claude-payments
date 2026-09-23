@@ -218,8 +218,11 @@ async function alertScheduleNotCreated(
       {
         message:
           `⚠️ SmartRemit ops: scheduled send ${scheduleId} was NOT created on ${day} (${reason}) — ` +
-          `the customer got no pay link. Re-run /api/cron today once the cause clears; ` +
-          `the daily cron does not retry it tomorrow.`,
+          `the customer got no pay link. ` +
+          (dedupePrefix === 'schedule-sender-name'
+            ? `No sender legal name is on file; the schedule stays active and runs on its next due day ` +
+              `once the customer gives their name in chat (or re-run /api/cron today after that).`
+            : `Re-run /api/cron today once the cause clears; the daily cron does not retry it tomorrow.`),
       },
       { dedupeKey: `${dedupePrefix}:${scheduleId}:${day}` },
     );
