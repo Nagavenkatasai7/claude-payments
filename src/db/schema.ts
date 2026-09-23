@@ -434,6 +434,8 @@ export const recipients = pgTable(
   (t) => [primaryKey({ columns: [t.partnerId, t.senderPhone, t.recipientPhone] })],
 );
 
+// Append-only IN THE DATABASE (Program-Fix 28, drizzle/0019): a BEFORE UPDATE
+// OR DELETE row trigger rejects any change to an existing row. Only INSERT.
 export const auditEvents = pgTable(
   'audit_events',
   {
@@ -446,7 +448,12 @@ export const auditEvents = pgTable(
     meta: jsonb('meta'),
     at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('audit_partner_at').on(t.partnerId, t.at.desc())],
+  (t) => [
+    index('audit_partner_at').on(t.partnerId, t.at.desc()),
+    // Program-Fix 28 PR B: the per-subject trails (listKycForSubject,
+    // lastSendLimitChange) filter on (partner_id, subject_id).
+    index('audit_partner_subject').on(t.partnerId, t.subjectId),
+  ],
 );
 
 // The duplicate-window killer: PK (partner_id, key) makes a replayed create
