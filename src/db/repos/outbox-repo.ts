@@ -256,7 +256,12 @@ export function createOutboxRepo(db: DbOrTx) {
           attempts: sql`greatest(${outbox.attempts} - 1, 0)`,
           leaseUntil: null,
           leaseOwner: null,
-          lockedAt: null,
+          // Program-Fix 15 PR C: locked_at is KEPT — it is the "was ever
+          // claimed" evidence the sender cancel's never-claimed proof reads
+          // (sender-cancel.ts). A row that was retried by staff after an
+          // earlier real run, then claimed and released here, has attempts 0
+          // again; clearing locked_at too would make it look never-run. Nothing
+          // else reads locked_at on a non-processing row.
           lockedBy: null,
         })
         .where(and(inArray(outbox.id, ids), eq(outbox.status, 'processing'), eq(outbox.leaseOwner, owner)))

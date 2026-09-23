@@ -31,6 +31,7 @@ export const CANCEL_NOTICE = {
   cancelled: 'This transfer is cancelled. We have sent you a confirmation on WhatsApp.',
   requested:
     'We received your cancellation request. If the money has not been delivered yet, you will get a full refund within 3 business days. Our team will confirm on WhatsApp.',
+  received: 'We received your request. Our team will follow up with you on WhatsApp shortly.',
   closed: 'The 30-minute cancellation window has closed. You can still request a refund below.',
   ineligible: 'This transfer can no longer be cancelled here. Please message us on WhatsApp.',
 } as const;
@@ -55,4 +56,6 @@ export const CANCEL_REPLY_HINT = {
   requested:
     'cancellation request received — if the money has not been delivered yet they get a full refund within 3 business days; our team will confirm',
   heldRequested: 'request received — our team will follow up with them about this transfer shortly',
+  confirm:
+    'this transfer is within 30 minutes of payment and can be cancelled for a full refund if the money has not gone out yet — name it (recipient, amount, date) and ask the customer to confirm they want to cancel it; only after a clear yes, call request_refund again with this transfer_id and confirm: true',
 } as const;

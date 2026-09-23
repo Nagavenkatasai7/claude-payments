@@ -121,13 +121,13 @@ export async function cancelTransferAction(formData: FormData): Promise<void> {
   });
   if (gate !== 'ok') back(`error=${STEP_UP_ERROR[gate]}`);
 
-  let code: 'cancelled' | 'requested' | 'closed' | 'ineligible';
+  let code: 'cancelled' | 'requested' | 'received' | 'closed' | 'ineligible';
   try {
     const res = await cancelWithinWindow(getDb(), customer.partnerId, id, { via: 'receipt' });
     if (res.kind === 'not_found') refuse();
     code =
       res.kind === 'cancelled' ? 'cancelled'
-      : res.kind === 'escalated' ? 'requested'
+      : res.kind === 'escalated' ? (res.held ? 'received' : 'requested')
       : res.kind === 'window_passed' ? 'closed'
       : 'ineligible';
   } catch (err) {

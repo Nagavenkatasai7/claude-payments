@@ -734,7 +734,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'request_refund',
       description:
-        "Request a refund when the customer asks for their money back. transfer_id is OPTIONAL — omit it and we resolve the customer's most recent refund-relevant transfer automatically. For a transfer the customer has PAID for but that has NOT been delivered yet, this flags it for our team to review (it never moves money itself, and approval is not guaranteed). If the money was ALREADY DELIVERED but within the last 24 hours, this returns error_code 'use_recall' — call open_recall_dispute instead to open a recall case.",
+        "Request a refund when the customer asks for their money back. transfer_id is OPTIONAL — omit it and we resolve the customer's most recent refund-relevant transfer automatically. For a transfer the customer has PAID for but that has NOT been delivered yet, this flags it for our team to review (it never moves money itself, and approval is not guaranteed). EXCEPTION — within 30 minutes of payment the transfer can be CANCELLED for a full refund: the tool first returns error_code 'confirm_cancel' with the transfer_id; confirm with the customer that they want to cancel THAT transfer, then call again with that transfer_id and confirm: true (this can cancel the transfer for good). If the money was ALREADY DELIVERED but within the last 24 hours, this returns error_code 'use_recall' — call open_recall_dispute instead to open a recall case.",
       parameters: {
         type: 'object',
         properties: {
@@ -742,6 +742,11 @@ export const toolSchemas: ChatTool[] = [
             type: 'string',
             description:
               "Optional. The specific transfer the refund is for. Omit to use the customer's most recent refund-relevant transfer.",
+          },
+          confirm: {
+            type: 'boolean',
+            description:
+              "Only after the customer explicitly confirmed they want to CANCEL the transfer named by a confirm_cancel result. Requires transfer_id.",
           },
         },
       },
@@ -2707,6 +2712,12 @@ async function requestRefundTool(
       // cancelled when no rail instruction can have gone out, else escalated.
       // window_passed (e.g. a released hold charged earlier) falls through to
       // the ordinary refund request below.
+      // A cancel is final, so it needs an explicit transfer id AND the
+      // customer's confirmation (a hypothetical "could I get a refund?" or an
+      // ambiguous "cancel my transfer" must never cancel the wrong one).
+      if (args.confirm !== true || normalizeTransferId(args.transfer_id) !== transfer.id) {
+        return { error_code: 'confirm_cancel', transfer_id: transfer.id, reply_hint: CANCEL_REPLY_HINT.confirm };
+      }
       const stepUp = await webStepUpRefusal(ctx, transfer.id);
       if (stepUp) return stepUp;
       const res = await runSenderCancel(ctx, transfer.id);

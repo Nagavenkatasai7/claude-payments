@@ -284,13 +284,26 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'escalated' });
   });
 
-  it('a row claimed but released unstarted (never ran: attempts and locked_at reset) is still cancellable', async () => {
+  it('a row claimed then released unstarted escalates (fail closed: a release never erases the claim evidence)', async () => {
     await paidOnSimulator();
     const outbox = createOutboxRepo(db);
     const [row] = (await outbox.claimBatch(10, 'w1')).filter((r) => r.dedupeKey === `instruct:${ID}`);
     await outbox.releaseUnstarted([row.id], 'w1');
     expect(await byKey(`instruct:${ID}`)).toMatchObject({ status: 'pending', attempts: 0 });
-    expect((await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).kind).toBe('cancelled');
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'escalated' });
+  });
+
+  it('(h) dead → staff Retry → claimed → released unstarted: still escalates (the rail may hold an earlier POST)', async () => {
+    await paidOnSimulator();
+    const outbox = createOutboxRepo(db);
+    const [row] = (await outbox.claimBatch(10, 'w1')).filter((r) => r.dedupeKey === `instruct:${ID}`);
+    await db.execute(sql`UPDATE outbox SET status = 'dead', attempts = 8, lease_owner = NULL, lease_until = NULL WHERE id = ${row.id}`);
+    await outbox.retryDead(row.id);
+    const [again] = (await outbox.claimBatch(10, 'w2')).filter((r) => r.dedupeKey === `instruct:${ID}`);
+    await outbox.releaseUnstarted([again.id], 'w2');
+    expect(await byKey(`instruct:${ID}`)).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'escalated' });
+    expect((await store.getTransfer(ID))?.status).toBe('paid');
   });
 
   it('no rail row at all escalates (never cancel what we cannot prove un-instructed)', async () => {
@@ -327,7 +340,7 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     await store.saveTransfer(fixture({ complianceStatus: 'flagged' }));
     await createTransferRepo(db).setFundingRef(ID, 'fund-1');
     await beginHold(db, fixture({ complianceStatus: 'flagged' }));
-    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated' });
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated', held: true });
     const t = await store.getTransfer(ID);
     expect(t?.status).toBe('in_review');
     expect(t?.refundStatus).toBe('requested');
@@ -361,7 +374,7 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
   it('C4 legacy: an in_review row with NO stage1 but paid_at inside the window escalates', async () => {
     await store.saveTransfer(fixture({ status: 'in_review', complianceStatus: 'flagged' }));
     await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '5 minutes' WHERE id = ${ID}`);
-    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated' });
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated', held: true });
     expect((await store.getTransfer(ID))?.status).toBe('in_review');
   });
 
@@ -370,6 +383,8 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     await beginSettlement(db, fixture(), SIMULATOR); // no funding_ref
     expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'cancelled', refundQueued: false });
     expect(await byKey(`refund:${ID}`)).toBeUndefined();
+    // Ops are told to have the payment returned (nothing shows on Refunds).
+    expect(await byKey(`sendercancelfunds:${ID}`)).toMatchObject({ kind: 'ops.alert' });
     const body = String((await byKey(`sendercancel:${ID}`))!.payload.body);
     expect(body).not.toMatch(/refund/i);
   });
@@ -378,6 +393,7 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     await paidOnSimulator();
     await createTransferRepo(db).updateRefund(ID, { refundStatus: 'requested' });
     expect(await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).toEqual({ kind: 'cancelled', refundQueued: true });
+    expect(await byKey(`sendercancelfunds:${ID}`)).toBeUndefined();
     expect((await store.getTransfer(ID))?.refundStatus).toBe('pending');
   });
 

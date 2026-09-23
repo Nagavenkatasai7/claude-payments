@@ -72,7 +72,8 @@ vi.mock('@/lib/customer-auth-store', async () => {
 vi.mock('next/headers', () => ({ headers: async () => ({ get: (n: string) => (n === 'x-forwarded-for' ? '198.51.100.7' : null) }) }));
 
 import { cancelTransferAction, requestRefundAction } from '@/app/account/receipt/refund-actions';
-import { beginSettlement } from '@/lib/settlement';
+import { beginHold, beginSettlement } from '@/lib/settlement';
+import { CANCEL_NOTICE } from '@/lib/legal/cancel-drafts';
 import { sql } from 'drizzle-orm';
 
 const OWNER = '15551230000';
@@ -340,6 +341,17 @@ describe('cancelTransferAction (Program-Fix 15 PR C)', { retry: 0 }, () => {
       /REDIRECT:\/account\/receipt\/tr_refund_1\?error=mfa_/,
     );
     expect(await statusOf('tr_refund_1')).toBe('paid');
+  });
+
+  it('a held (in_review) transfer: escalates with the NEUTRAL cancel=received notice, never a refund promise', async () => {
+    const t = transfer({ status: 'awaiting_payment', paidAt: undefined, complianceStatus: 'flagged' });
+    await store.saveTransfer(t);
+    await beginHold(db, t);
+    await expect(cancelTransferAction(form({ transferId: 'tr_refund_1' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/tr_refund_1?cancel=received',
+    );
+    expect(await statusOf('tr_refund_1')).toBe('in_review');
+    expect(CANCEL_NOTICE.received).not.toMatch(/refund|review|compliance/i);
   });
 
   it('an already-cancelled transfer: redirects with cancel=ineligible', async () => {

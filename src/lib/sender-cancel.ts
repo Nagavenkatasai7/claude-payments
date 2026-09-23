@@ -31,8 +31,8 @@ import type { PartnerId, Transfer } from '@/lib/types';
 //      flips a row to processing with attempts+1 and locked_at in ONE
 //      autocommit UPDATE, so a claimed row is always seen as claimed.
 //   4. Cancel only if ≥1 row exists and EVERY row is pending, attempts 0 and
-//      locked_at NULL (never claimed — retryDead resets attempts but keeps
-//      locked_at, releaseUnstarted clears both because the row never ran),
+//      locked_at NULL (never claimed — retryDead and releaseUnstarted reset
+//      attempts but KEEP locked_at, so a row that ever ran never looks unrun),
 //      and no rail ack ref is recorded. Those rows go `done` in this
 //      transaction, then the transfer flips through failPaidFromRail's guarded
 //      CASE (cancelled; refund → pending only when a charge was captured).
@@ -46,7 +46,7 @@ export type SenderCancelVia = 'receipt' | 'bot';
 
 export type SenderCancelResult =
   | { kind: 'cancelled'; refundQueued: boolean }
-  | { kind: 'escalated' }
+  | { kind: 'escalated'; held?: true } // held: the transfer is under review (C4) — neutral customer copy
   | { kind: 'window_passed' }
   | { kind: 'ineligible' }
   | { kind: 'not_found' };
@@ -174,6 +174,20 @@ export async function cancelWithinWindow(
           },
           { dedupeKey: `sendercancel:${updated.id}` },
         );
+        if (!refundQueued) {
+          // Nothing was captured here (partner-funded) or a staff refund owns
+          // it: the customer is told the team will contact them, and nothing
+          // shows on Refunds — so ops are told, once (mirrors rail-failure).
+          await outbox.enqueue(
+            'ops.alert',
+            {
+              message:
+                `⚠️ SmartRemit ops: the sender cancelled transfer ${updated.id} (partner ${updated.partnerId}) within 30 minutes of payment (Reg E). ` +
+                'No refund was queued here (funds not captured by SmartRemit) — have the partner return the payment in full, including fees, within 3 business days, and contact the customer.',
+            },
+            { dedupeKey: `sendercancelfunds:${updated.id}` },
+          );
+        }
         await audit.record({
           partnerId: updated.partnerId,
           actor: 'system:customer-cancel',
@@ -196,7 +210,7 @@ export async function cancelWithinWindow(
           subjectId: t.id,
           meta: { via: opts.via, reason: claim.reason, msSinceCharge: claim.msSinceCharge },
         });
-        return { kind: 'escalated' };
+        return claim.reason === 'in_review' ? { kind: 'escalated', held: true } : { kind: 'escalated' };
       }
     }
   });
