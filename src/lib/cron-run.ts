@@ -50,8 +50,10 @@ export async function runDueSchedules(
     if (schedule.endDate) {
       const endTs = Date.parse(schedule.endDate);
       if (!isNaN(endTs) && deps.now > endTs) {
-        schedule.status = 'cancelled';
-        await deps.scheduleStore.saveSchedule(schedule);
+        // Program-Fix 36: a CONDITIONAL single-column cancel (from 'active'
+        // only) — never a whole-row upsert from this run's stale read, which
+        // would write a staff pause landing mid-run back over.
+        await deps.scheduleStore.setStatusIf(schedule.id, schedule.partnerId, ['active'], 'cancelled');
         continue;
       }
     }
@@ -62,9 +64,17 @@ export async function runDueSchedules(
     const owner = await deps.customerStore.getCustomer(schedule.partnerId, schedule.phone);
     if (owner?.optedOutAt) continue;
     // WL1: resolve the schedule's partner — drives the gate toggle + requiresKyc.
-    const partner =
-      (await deps.partnerStore.getPartner(schedule.partnerId)) ??
-      (await deps.partnerStore.ensureDefaultPartner());
+    // Program-Fix 36: FAIL CLOSED on the partner. A missing row or a partner
+    // that is not 'active' (every other surface refuses a suspended partner)
+    // mints nothing and does NOT bump lastRunAt — the schedule stays active,
+    // so reactivating the partner resumes it with no data change. Ops is paged
+    // ONCE per partner per Eastern day (not per schedule); not counted as
+    // failed, because the refusal is the intended state of the tenant.
+    const partner = await deps.partnerStore.getPartner(schedule.partnerId);
+    if (!partner || partner.status !== 'active') {
+      await alertSuspendedPartner(deps, schedule.partnerId, partner ? partner.status : 'missing');
+      continue;
+    }
     // Phase 3 verify-before-send gate — skip an unverified owner's scheduled send
     // and notify them. Do NOT createTransfer and do NOT bump lastRunAt, so the
     // schedule stays active and resumes automatically once they verify.
@@ -84,6 +94,12 @@ export async function runDueSchedules(
       }
       continue;
     }
+    // Program-Fix 36: re-read the status just before the mint. A staff pause
+    // (or a customer cancel) landing after listActiveSchedules must win: the
+    // list copy in hand is stale, and a mint on a paused schedule would be a
+    // pay link the customer was told would not come.
+    const current = await deps.scheduleStore.getSchedule(schedule.id);
+    if (!current || current.status !== 'active') continue;
     try {
       const mint = () => createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
         phone: schedule.phone,
@@ -112,8 +128,9 @@ export async function runDueSchedules(
         const url = `${env.appBaseUrl}/pay/${transfer.id}`;
         await deps.sendScheduledLink(schedule, transfer, url);
       }
-      schedule.lastRunAt = new Date(deps.now).toISOString();
-      await deps.scheduleStore.saveSchedule(schedule);
+      // Program-Fix 36: touch ONLY last_run_at (never a whole-row save, which
+      // would resurrect a pause that landed during the mint).
+      await deps.scheduleStore.markRun(schedule.id, new Date(deps.now));
       fired++;
     } catch (err) {
       // A refused mint (Task 9: FX unavailable; or any other refusal) is LOUD:
@@ -130,8 +147,7 @@ export async function runDueSchedules(
         : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out twice (once retried above)
         : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
-      // YYYY-MM-DD for the same Eastern day isScheduleDueToday matches.
-      const day = new Date(deps.now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const day = easternDay(deps.now);
       try {
         await createOutboxRepo(deps.db).enqueue(
           'ops.alert',
@@ -149,4 +165,35 @@ export async function runDueSchedules(
     }
   }
   return { fired, failed };
+}
+
+/** YYYY-MM-DD for the same Eastern day isScheduleDueToday matches. */
+function easternDay(now: number): string {
+  return new Date(now).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+/**
+ * Program-Fix 36: one deduped ops alert per partner per Eastern day when its
+ * due schedules are being held back. The message names the partner and the
+ * reason only — never a schedule owner's phone or destination.
+ */
+async function alertSuspendedPartner(
+  deps: Pick<CronDeps, 'db' | 'now'>,
+  partnerId: string,
+  reason: string,
+): Promise<void> {
+  const day = easternDay(deps.now);
+  try {
+    await createOutboxRepo(deps.db).enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: partner ${partnerId} is ${reason} — its due recurring schedules were NOT run on ${day}. ` +
+          `No pay links were sent. They resume automatically once the partner is active again (nothing to re-run).`,
+      },
+      { dedupeKey: `schedule-suspended:${partnerId}:${day}` },
+    );
+  } catch (alertErr) {
+    logError('cron.schedule-suspended-alert', alertErr, { partnerId });
+  }
 }

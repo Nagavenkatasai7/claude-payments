@@ -413,3 +413,167 @@ describe('runDueSchedules — busy sender lock (review SHOULD 6)', () => {
     expect(alerts[0].payload.message).toContain('(busy)');
   });
 });
+
+// Program-Fix 36 (schedules-02): the staff kill switch and the partner gate.
+// A paused schedule never fires; a suspended (or missing) partner's schedules
+// never fire and page ops once per partner per Eastern day; a pause landing
+// mid-run is honoured by a pre-mint re-read; and the cron's writes are
+// column-targeted, so they can never resurrect a paused row.
+describe('runDueSchedules — kill switch + partner gate (Program-Fix 36)', () => {
+  async function opsAlerts(db: Awaited<ReturnType<typeof makeDeps>>['db']) {
+    const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> }).rows;
+  }
+
+  it('test 4: a due PAUSED schedule gives fired 0, no transfer, lastRunAt unchanged', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule({ ...sched('due', 21), status: 'paused' });
+    const notified: string[] = [];
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+    expect(result).toEqual({ fired: 0, failed: 0 });
+    expect(notified).toHaveLength(0);
+    expect(await store.listTransfers()).toHaveLength(0);
+    const row = await scheduleStore.getSchedule('due');
+    expect(row?.status).toBe('paused');
+    expect(row?.lastRunAt).toBeUndefined();
+  });
+
+  it('test 5a: a SUSPENDED partner: no transfer, no lastRunAt, exactly ONE schedule-suspended:<partnerId>:<day> alert across two runs; not counted as failed', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    await scheduleStore.saveSchedule(sched('due2', 21));
+    const partner = (await partnerStore.getPartner('default'))!;
+    await partnerStore.savePartner({ ...partner, status: 'suspended' });
+    const notified: string[] = [];
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s: Schedule, _t: unknown, url: string) => { notified.push(url); },
+    };
+    const first = await runDueSchedules(deps);
+    const second = await runDueSchedules(deps);
+    expect(first).toEqual({ fired: 0, failed: 0 });
+    expect(second).toEqual({ fired: 0, failed: 0 });
+    expect(notified).toHaveLength(0);
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    expect((await scheduleStore.getSchedule('due2'))?.lastRunAt).toBeUndefined();
+    // Both schedules stay ACTIVE — reactivating the partner resumes them with no data change.
+    expect((await scheduleStore.getSchedule('due'))?.status).toBe('active');
+    const alerts = await opsAlerts(db);
+    expect(alerts.map((a) => a.dedupe_key)).toEqual(['schedule-suspended:default:2026-05-21']);
+    expect(alerts[0].payload.message).toContain('default');
+    expect(alerts[0].payload.message).not.toMatch(/\d{7,}/); // never the customer's phone
+  });
+
+  it('test 5b: a MISSING partner row is skipped the same way (fail closed, no default fallback)', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    // schedules.partner_id FKs partners.id, so the row cannot be deleted in
+    // PGlite — stub the read instead.
+    const missing = { ...partnerStore, getPartner: async () => null };
+    const ensureDefault = vi.spyOn(missing, 'ensureDefaultPartner');
+    const result = await runDueSchedules({
+      db, store, partnerStore: missing, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(result).toEqual({ fired: 0, failed: 0 });
+    expect(ensureDefault).not.toHaveBeenCalled();
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    expect((await opsAlerts(db)).map((a) => a.dedupe_key)).toEqual(['schedule-suspended:default:2026-05-21']);
+  });
+
+  it('test 5c: reactivating the partner lets the next due run fire', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    const partner = (await partnerStore.getPartner('default'))!;
+    await partnerStore.savePartner({ ...partner, status: 'suspended' });
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    };
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 0 });
+    await partnerStore.savePartner({ ...partner, status: 'active' });
+    expect(await runDueSchedules(deps)).toEqual({ fired: 1, failed: 0 });
+    expect(await store.listTransfers()).toHaveLength(1);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeTruthy();
+  });
+
+  it('test 6: a pause landing between listActiveSchedules and the mint is honoured (pre-mint re-read): no transfer', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    // The list read returns the row as active; staff pause it right after.
+    const racing = {
+      ...scheduleStore,
+      listActiveSchedules: async () => {
+        const rows = await scheduleStore.listActiveSchedules();
+        await scheduleStore.setStatusIf('due', 'default', ['active'], 'paused');
+        return rows;
+      },
+    };
+    const notified: string[] = [];
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore: racing, kycProvider, now: NOW,
+      sendScheduledLink: async (_s, _t, url) => { notified.push(url); },
+    });
+    expect(result).toEqual({ fired: 0, failed: 0 });
+    expect(notified).toHaveLength(0);
+    expect(await store.listTransfers()).toHaveLength(0);
+    const row = await scheduleStore.getSchedule('due');
+    expect(row?.status).toBe('paused');
+    expect(row?.lastRunAt).toBeUndefined();
+  });
+
+  it('test 7: no resurrection — the fired bump touches only last_run_at, and the end-date cancel is conditional', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    await scheduleStore.saveSchedule({ ...sched('ended', 21), endDate: '2026-05-20' });
+    // Staff pause BOTH rows after the cron's list read (the cron holds stale
+    // 'active' copies of each).
+    const racing = {
+      ...scheduleStore,
+      listActiveSchedules: async () => {
+        const rows = await scheduleStore.listActiveSchedules();
+        await scheduleStore.setStatusIf('due', 'default', ['active'], 'paused');
+        await scheduleStore.setStatusIf('ended', 'default', ['active'], 'paused');
+        return rows;
+      },
+    };
+    const saveSpy = vi.spyOn(racing, 'saveSchedule');
+    const result = await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore: racing, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(result).toEqual({ fired: 0, failed: 0 });
+    // The cron never writes a whole row any more.
+    expect(saveSpy).not.toHaveBeenCalled();
+    // The paused-after-read row is still paused (the re-read skipped it)…
+    expect((await scheduleStore.getSchedule('due'))?.status).toBe('paused');
+    // …and the end-dated row, paused after the read, was NOT cancelled by a
+    // whole-row upsert from the stale copy: the conditional cancel (from
+    // 'active' only) lost the race and wrote nothing.
+    expect((await scheduleStore.getSchedule('ended'))?.status).toBe('paused');
+  });
+
+  it('test 7b: the end-date cancel still lands through setStatusIf when the row IS active', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule({ ...sched('ended', 21), endDate: '2026-05-20' });
+    const setSpy = vi.spyOn(scheduleStore, 'setStatusIf');
+    await runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    });
+    expect(setSpy).toHaveBeenCalledWith('ended', 'default', ['active'], 'cancelled');
+    expect((await scheduleStore.getSchedule('ended'))?.status).toBe('cancelled');
+  });
+});

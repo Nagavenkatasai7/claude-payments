@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { createScheduleStore } from '@/lib/schedule-store';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import type { Schedule } from '@/lib/types';
 
 function schedule(id: string, status: Schedule['status'] = 'active'): Schedule {
@@ -64,3 +65,68 @@ describe('schedule-store', () => {
 // Postgres cutover: legacy Redis records no longer exist and every schedule
 // row is born complete (NOT NULL columns). Round-trip coverage above asserts
 // the fields persist as written.
+
+// Program-Fix 36 (schedules-02): status writes are column-targeted and
+// CONDITIONAL, and the cron's lastRunAt bump touches only last_run_at — so a
+// staff pause can never be resurrected by a stale whole-row save.
+describe('schedule-store — setStatusIf / markRun (Program-Fix 36)', () => {
+  async function rawRow(db: Awaited<ReturnType<typeof freshDb>>, id: string) {
+    const r = await db.execute(
+      sql`SELECT status, payout_destination_enc, last_run_at FROM schedules WHERE id = ${id}`,
+    );
+    return (r as unknown as { rows: Array<{ status: string; payout_destination_enc: string; last_run_at: string | null }> }).rows[0];
+  }
+
+  it('setStatusIf on an active row flips it and returns the row; a second identical call returns null', async () => {
+    const db = await freshDb();
+    const s = createScheduleStore(db);
+    await s.saveSchedule(schedule('a'));
+    const flipped = await s.setStatusIf('a', 'default', ['active'], 'paused');
+    expect(flipped?.id).toBe('a');
+    expect(flipped?.status).toBe('paused');
+    expect((await s.getSchedule('a'))?.status).toBe('paused');
+    expect(await s.setStatusIf('a', 'default', ['active'], 'paused')).toBeNull();
+  });
+
+  it('setStatusIf with the wrong partnerId returns null and writes nothing (tenant guard in the WHERE)', async () => {
+    const db = await freshDb();
+    await seedPartner(db, 'B');
+    const s = createScheduleStore(db);
+    await s.saveSchedule(schedule('a'));
+    expect(await s.setStatusIf('a', 'B', ['active'], 'paused')).toBeNull();
+    expect((await rawRow(db, 'a')).status).toBe('active');
+  });
+
+  it('setStatusIf accepts a multi-value from list (cancel from active OR paused)', async () => {
+    const db = await freshDb();
+    const s = createScheduleStore(db);
+    await s.saveSchedule(schedule('a', 'paused'));
+    const r = await s.setStatusIf('a', 'default', ['active', 'paused'], 'cancelled');
+    expect(r?.status).toBe('cancelled');
+  });
+
+  it('listActiveSchedules excludes paused too', async () => {
+    const s = await makeStore();
+    await s.saveSchedule(schedule('a', 'active'));
+    await s.saveSchedule(schedule('b', 'paused'));
+    expect((await s.listActiveSchedules()).map((x) => x.id)).toEqual(['a']);
+  });
+
+  it('markRun changes only last_run_at: status and the encrypted destination bytes are untouched', async () => {
+    const db = await freshDb();
+    const s = createScheduleStore(db);
+    await s.saveSchedule(schedule('a'));
+    // A staff pause lands between the cron's read and its bump…
+    await s.setStatusIf('a', 'default', ['active'], 'paused');
+    const before = await rawRow(db, 'a');
+    expect(before.last_run_at).toBeNull();
+    const at = new Date('2026-05-21T16:00:00.000Z');
+    await s.markRun('a', at);
+    const after = await rawRow(db, 'a');
+    expect(after.status).toBe('paused'); // …and is NOT resurrected
+    // saveSchedule would re-encrypt with a fresh nonce; identical bytes prove
+    // the write named only last_run_at.
+    expect(after.payout_destination_enc).toBe(before.payout_destination_enc);
+    expect((await s.getSchedule('a'))?.lastRunAt).toBe(at.toISOString());
+  });
+});
