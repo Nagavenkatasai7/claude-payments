@@ -37,6 +37,7 @@ import { screenTransfer } from './compliance';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { hasSenderName, normalizeSenderName, SENDER_NAME_QUESTION } from './sender-identity';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
@@ -75,6 +76,10 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   // fix 5: the round-0 synthetic call names this tool on BOTH channels, so it
   // must be a real, dispatchable tool on each.
   'get_customer_context',
+  // Program-Fix 14: repeat_transfer (web) asks a nameless sender for their
+  // legal name first, so the answer must be storable here too. Own tenant,
+  // own phone, set-once — it can never replace a name already on file.
+  'set_sender_name',
 ]);
 
 /**
@@ -972,6 +977,21 @@ export const toolSchemas: ChatTool[] = [
       parameters: { type: 'object', properties: {} },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'set_sender_name',
+      description:
+        "Save the customer's OWN full legal name (as on their ID). Call this ONLY after a tool returned needs_sender_name: true and the customer replied with their name. Pass exactly what the customer typed as their own name — never a WhatsApp profile name, never the recipient's name, never a guess. It never replaces a name already on file. After it returns saved: true, call the tool that returned needs_sender_name again with the same details.",
+      parameters: {
+        type: 'object',
+        properties: {
+          full_name: { type: 'string', description: "The customer's full legal name, exactly as they typed it." },
+        },
+        required: ['full_name'],
+      },
+    },
+  },
 ];
 
 export interface ToolContext {
@@ -1283,6 +1303,8 @@ export async function executeTool(
       return repeatTransferTool(args, ctx);
     case 'capture_corridor_request':
       return captureCorridorRequestTool(args, ctx);
+    case 'set_sender_name':
+      return setSenderNameTool(args, ctx);
     case 'get_customer_context':
       return { ...(await buildCustomerContext(ctx)) };
     default:
@@ -1492,6 +1514,13 @@ async function createTransferTool(
       const start = await startVerificationForTurn(ctx);
       return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
     }
+    // Program-Fix 14 (defense in depth): never mint a consumer transfer whose
+    // sender cannot be screened by name. The draft goes back untouched, so the
+    // same card works once the name is on file.
+    if (draft.transferType !== 'b2b' && !hasSenderName(customer)) {
+      await ctx.draftStore.restoreDraft(draft, ctxDraftId);
+      return senderNameRequired();
+    }
     {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
       const requestedCents = Math.round(draft.amountUsd * 100);
@@ -1633,6 +1662,8 @@ async function createTransferTool(
     const start = await startVerificationForTurn(ctx);
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
+  // Program-Fix 14: a consumer mint needs a screenable sender name.
+  if (!legacyB2b && !hasSenderName(legacyCustomer)) return senderNameRequired();
   const amountSource = Number(args.amount_source ?? args.amount_usd);
   if (legacyB2b) {
     const notOwnBill = await refuseUnlessOwnOpenBill(ctx, args, legacyB2b, amountSource, sourceCurrency);
@@ -3394,6 +3425,50 @@ async function sendRecipientPickerTool(
   return { sent: true };
 }
 
+// ── Sender identity (Program-Fix 14) ─────────────────────────────────────────
+// Sanctions screening covers BOTH parties, so a consumer send needs the
+// sender's legal name on file before any card, draft or mint. The B2B paths
+// already refuse a nameless payer (b2b-pay-finalize buyer_unscreened).
+function senderNameRequired(): ToolResult {
+  return { needs_sender_name: true, reply_to_customer: SENDER_NAME_QUESTION };
+}
+
+async function setSenderNameTool(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const fullName = normalizeSenderName(args.full_name);
+  if (fullName === null) {
+    return { error: "That doesn't look like a full legal name. Ask the customer for their full name exactly as it appears on their ID." };
+  }
+  // Own tenant + own phone only (fix 1). Re-read so a concurrent write is
+  // never clobbered by a stale copy (the updateEmailAction pattern).
+  const current =
+    (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
+    (await ctx.customerStore.upsertOnFirstInbound(ctx.partnerId, ctx.phone)).customer;
+  // Set-once: a name on file is never replaced from chat (a changed legal name
+  // goes through support), so a screened identity cannot be swapped out.
+  if (hasSenderName(current)) {
+    return {
+      already_on_file: true,
+      reply_hint: 'A legal name is already on file for this customer; it cannot be changed in chat. Continue the send.',
+    };
+  }
+  try {
+    // saveCustomer seals fullName (field-crypto envelope) — never stored in clear.
+    await ctx.customerStore.saveCustomer({ ...current, fullName, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    // Only the error NAME: a driver error can echo the insert's parameters.
+    logWarn('sender-name.save-failed', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+    return { error: "I couldn't save that just now. Please ask the customer to try again in a moment." };
+  }
+  // The name is NOT echoed back into the model context.
+  return {
+    saved: true,
+    reply_hint: 'Name saved. Now call the tool that asked for it again with the same details to continue the send.',
+  };
+}
+
 async function sendApprovePickerTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
@@ -3444,6 +3519,10 @@ async function sendApprovePickerTool(
     const start = await startVerificationForTurn(ctx);
     return { error: 'Identity verification required before sending.', reason: SEND_GATE_REASON, kyc_required: true, kyc_url: start.url };
   }
+  // Program-Fix 14: the sender's legal name is screened with the recipient's,
+  // so a consumer send without one stops here — no quote, no draft, no card.
+  // (B2B screens the payer business name instead.)
+  if (!b2b && !hasSenderName(customer)) return senderNameRequired();
   const amountSource = Number(args.amount_source ?? args.amount_usd);
   if (b2b) {
     const notOwnBill = await refuseUnlessOwnOpenBill(ctx, args, b2b, amountSource, sourceCurrency);
