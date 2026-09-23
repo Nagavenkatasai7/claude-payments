@@ -12,7 +12,7 @@
 //    with the customer's acknowledgement (audit `remittance.disclosure_ack`), so
 //    the version identifies the exact text the customer saw.
 
-export const DISCLOSURE_DRAFT_VERSION = 'disclosure-draft-2026-09-23' as const;
+export const DISCLOSURE_DRAFT_VERSION = 'disclosure-draft-2026-09-23b' as const;
 
 /** Shown above every disclosure block. */
 export const DISCLOSURE_DRAFT_BADGE = 'Draft disclosure — for counsel review';
@@ -61,7 +61,7 @@ export const RIGHTS_SUMMARY =
 
 /** Receipt: the cancellation window line, shown while it is open. `until` is a formatted time. */
 export function cancelWindowLine(until: string): string {
-  return `To cancel, contact the provider before ${until} (30 minutes after payment).`;
+  return `To cancel, reply in the WhatsApp chat or contact the licensed provider of your transfer before ${until} (30 minutes after payment).`;
 }
 
 export const CFPB_CONTACT = {

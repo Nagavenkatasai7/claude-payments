@@ -177,20 +177,24 @@ export function buildReceiptDisclosure(t: ReceiptTransfer, d: ResolvedDisclosure
   const deadlineMs = paidMs + CANCEL_WINDOW_MS;
   const cancelDeadline =
     t.status === 'paid' && Number.isFinite(paidMs) && nowMs < deadlineMs ? new Date(deadlineMs).toISOString() : null;
+  // A cancelled or blocked transfer is never delivered: no date-available
+  // estimate under "this transfer was cancelled" (the rights and CFPB rows stay).
+  const neverDelivered = t.status === 'cancelled' || t.status === 'blocked';
+  const lines = coreLines(
+    {
+      sourceAmount: t.amountSource,
+      sourceFee: t.feeSource,
+      sourceTotalCharge: t.totalChargeSource,
+      sourceCurrency: t.sourceCurrency,
+      destAmount: t.amountInr,
+      destCurrency: t.destinationCurrency,
+      fxRate: t.fxRate,
+    },
+    dateAvailable,
+  ).filter((l) => !(neverDelivered && l.label === L.dateAvailable));
   return {
     version: DISCLOSURE_DRAFT_VERSION,
-    lines: coreLines(
-      {
-        sourceAmount: t.amountSource,
-        sourceFee: t.feeSource,
-        sourceTotalCharge: t.totalChargeSource,
-        sourceCurrency: t.sourceCurrency,
-        destAmount: t.amountInr,
-        destCurrency: t.destinationCurrency,
-        fxRate: t.fxRate,
-      },
-      dateAvailable,
-    ),
+    lines,
     thirdPartyFeeNote: THIRD_PARTY_FEE_STATEMENT,
     provider: providerBlock(d),
     rightsSummary: RIGHTS_SUMMARY,

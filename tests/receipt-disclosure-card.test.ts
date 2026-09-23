@@ -64,12 +64,12 @@ describe('ReceiptDisclosureCard', { retry: 0 }, () => {
   });
 
   it('inside the window on a paid transfer: the cancellation line with a time', () => {
-    expect(html(partner({ supportConfig: { disclosure: FULL } }))).toMatch(/To cancel, contact the provider before \d{1,2}:\d{2}\s?[AP]M UTC/);
+    expect(html(partner({ supportConfig: { disclosure: FULL } }))).toMatch(/To cancel, reply in the WhatsApp chat or contact the licensed provider of your transfer before \d{1,2}:\d{2}\s?[AP]M UTC/);
   });
 
   it('past the window, or delivered: no cancellation line', () => {
-    expect(html(null, { paidAt: new Date(NOW - 45 * 60_000).toISOString() })).not.toContain('To cancel, contact');
-    expect(html(null, { status: 'delivered', deliveredAt: new Date(NOW).toISOString() })).not.toContain('To cancel, contact');
+    expect(html(null, { paidAt: new Date(NOW - 45 * 60_000).toISOString() })).not.toContain('To cancel,');
+    expect(html(null, { status: 'delivered', deliveredAt: new Date(NOW).toISOString() })).not.toContain('To cancel,');
   });
 
   it('the demo tenant: the demo note, no Provider row, and never SmartRemit', () => {
@@ -79,6 +79,19 @@ describe('ReceiptDisclosureCard', { retry: 0 }, () => {
     expect(out).not.toContain('Acme Money Services LLC');
     expect(out).not.toMatch(/SmartRemit/);
     expect(out).toContain('855-411-2372'); // the CFPB contact is always shown
+    expect(out).not.toMatch(/contact the provider/i); // no provider is named on the demo
+    expect(out).toContain('To cancel, reply in the WhatsApp chat'); // inside the window
+  });
+
+  it('cancelled or blocked: no date-available estimate, but the rights and CFPB rows stay', () => {
+    for (const status of ['cancelled', 'blocked']) {
+      const out = html(null, { status });
+      expect(out).not.toContain('Date available');
+      expect(out).not.toContain('(estimate)');
+      expect(out).not.toContain('To cancel,');
+      expect(out).toContain('855-411-2372');
+      expect(out).toContain('href="/legal#remittance-rights"');
+    }
   });
 
   it('an unconfigured real partner: brand + pending line', () => {

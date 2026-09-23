@@ -129,7 +129,7 @@ describe('/pay/[transferId] — Reg E pre-payment disclosure', { retry: 0 }, () 
     expect(html).toContain('href="/legal#remittance-rights"');
     expect(html).toContain('href="/terms"');
     expect(html).toContain('href="/privacy"');
-    expect(html).toContain('data-disclosure-version="disclosure-draft-2026-09-23"');
+    expect(html).toContain('data-disclosure-version="disclosure-draft-2026-09-23b"');
   });
 
   it('the existing summary is unchanged (same rows and values)', async () => {

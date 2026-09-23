@@ -40,7 +40,9 @@ vi.mock('@/lib/store', async (orig) => ({ ...(await orig<typeof import('@/lib/st
 vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig<typeof import('@/lib/customer-store')>()), getCustomerStore: () => customerStore }));
 vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import('@/lib/transaction-otp')>()), getTransactionOtpStore: () => txOtp }));
 // No draft for these ids → otpPhone resolves from the existing transfer.
-vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
+// Program-Fix 15 PR B: one case below serves a DRAFT id (bot pay links are drafts).
+const drafts = vi.hoisted(() => new Map<string, unknown>());
+vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async (id: string) => drafts.get(id) ?? null }) }));
 // WL1: existing-transfer branch resolves the owning partner for the gate toggle
 // (default ⇒ gate ON). Plain-object stub — no partner row ⇒ ensureDefaultPartner's
 // default (kycMode 'ours' ⇒ gate ON).
@@ -92,6 +94,7 @@ beforeEach(async () => {
   await store.saveTransfer(transfer);
   await customerStore.saveCustomer(customer);
   sendTransactionOtp.mockClear();
+  drafts.clear();
 });
 
 const status = async () => (await store.getTransfer(TID))?.status;
@@ -145,5 +148,33 @@ describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', {
     const res = await POST(req({ action: 'request_otp', disclosureVersion: 'disclosure-draft-2026-09-23' }), ctx);
     expect(res.status).toBe(200);
     expect(await ackRows()).toEqual([]);
+  });
+
+  it('a DRAFT link: the ack is recorded under the draft id and the draft tenant, before finalize', async () => {
+    const DRAFT_ID = 'draft_ack_1';
+    drafts.set(DRAFT_ID, {
+      senderPhone: PHONE,
+      partnerId: 'p_draft_tenant',
+      recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
+      amountUsd: 100, amountSource: 100, sourceCurrency: 'USD', destinationCountry: 'IN', destinationCurrency: 'INR',
+      fundingMethod: 'bank_transfer',
+      quote: { feeUsd: 0, fxRate: 85, amountInr: 8500 },
+    });
+    await txOtp.issue(DRAFT_ID, PHONE);
+    const draftReq = new NextRequest('http://x/api/pay/' + DRAFT_ID, {
+      method: 'POST',
+      body: JSON.stringify({ otp: '654321', disclosureVersion: 'disclosure-draft-2026-09-23b' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    // The payment outcome is not under test here (this harness has no finalize
+    // stores); the ack row is written right after the OTP check, before finalize.
+    await POST(draftReq, { params: Promise.resolve({ transferId: DRAFT_ID }) });
+    const rows = await ackRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      partner_id: 'p_draft_tenant',
+      subject_id: DRAFT_ID,
+      meta: { version: 'disclosure-draft-2026-09-23b' },
+    });
   });
 });

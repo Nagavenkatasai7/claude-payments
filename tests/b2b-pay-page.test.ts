@@ -115,6 +115,9 @@ describe('/pay/b2b/[invoiceId] — payable bill (sanity for the mocks)', () => {
     expect(html).toContain('Acme Money Co');
     expect(html).toContain('Seller Ltd');
     expect(getPartner).toHaveBeenCalledWith('p_acme');
+    // Program-Fix 15 PR B: a B2B bill is not a consumer remittance (§1005.30) — no Reg E card or acknowledgement.
+    expect(html).not.toContain('Before you pay');
+    expect(html).not.toContain('I have read this disclosure.');
   });
 });
 
