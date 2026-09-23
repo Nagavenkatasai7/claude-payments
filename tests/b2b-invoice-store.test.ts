@@ -42,7 +42,7 @@ beforeEach(async () => {
   store = createStore(fakeRedis(), db);
 });
 
-describe('getUnpaidInvoiceByBuyer applies the bill TTL (Program-Fix 44)', () => {
+describe('getUnpaidInvoiceByBuyer applies the bill TTL (Program-Fix 44)', { retry: 0 }, () => {
   it('an unpaid bill 31 days old is not surfaced', async () => {
     await store.saveB2bInvoice(inv({ id: 'inv_old', createdAt: daysAgo(31) }));
     expect(await store.getUnpaidInvoiceByBuyer('15550002222', DEFAULT_PARTNER_ID)).toBeNull();
@@ -60,7 +60,7 @@ describe('getUnpaidInvoiceByBuyer applies the bill TTL (Program-Fix 44)', () => 
   });
 });
 
-describe('findOpenTwinInvoice — durable duplicate-bill check (Program-Fix 44)', () => {
+describe('findOpenTwinInvoice — durable duplicate-bill check (Program-Fix 44)', { retry: 0 }, () => {
   beforeEach(async () => {
     await seedPartner(db, 'tenant_b');
     await createSellerRepo(db).createSeller({
@@ -107,12 +107,20 @@ describe('findOpenTwinInvoice — durable duplicate-bill check (Program-Fix 44)'
   });
 });
 
-describe('listAllB2bInvoices — platform cross-tenant list (Program-Fix 44)', () => {
+describe('listAllB2bInvoices — platform cross-tenant list (Program-Fix 44)', { retry: 0 }, () => {
   it('lists every tenant, newest first', async () => {
     await seedPartner(db, 'tenant_b');
     await store.saveB2bInvoice(inv({ id: 'inv_def', createdAt: daysAgo(3) }));
     await store.saveB2bInvoice(inv({ id: 'inv_b', partnerId: 'tenant_b', createdAt: daysAgo(1) }));
     const all = await store.listAllB2bInvoices();
     expect(all.map((i) => i.id)).toEqual(['inv_b', 'inv_def']);
+  });
+});
+
+describe('claimBillResendToken — replay-stable re-send token (Program-Fix 44 r1)', { retry: 0 }, () => {
+  it('the first claim binds the candidate; a replay reads the SAME token back; another bill is independent', async () => {
+    expect(await store.claimBillResendToken('inv_x', 't1')).toBe('t1');
+    expect(await store.claimBillResendToken('inv_x', 't2')).toBe('t1');
+    expect(await store.claimBillResendToken('inv_y', 't3')).toBe('t3');
   });
 });

@@ -80,7 +80,7 @@ beforeEach(async () => {
   currentStaff = staff();
 });
 
-describe('voidB2bInvoiceAction: tenant resolved from the invoice (Program-Fix 44)', () => {
+describe('voidB2bInvoiceAction: tenant resolved from the invoice (Program-Fix 44)', { retry: 0 }, () => {
   it('platform staff voids a NON-default tenant bill; the audit row names that tenant', async () => {
     await store.saveB2bInvoice(invoice({ id: 'inv_a', partnerId: 'tenant_a' }));
     await voidB2bInvoiceAction(form({ id: 'inv_a' }));
@@ -126,7 +126,7 @@ describe('voidB2bInvoiceAction: tenant resolved from the invoice (Program-Fix 44
   });
 });
 
-describe('reissueB2bInvoiceAction: tenant resolved from the invoice (Program-Fix 44)', () => {
+describe('reissueB2bInvoiceAction: tenant resolved from the invoice (Program-Fix 44)', { retry: 0 }, () => {
   it('platform staff reissues a NON-default tenant voided bill; the clone stays on that tenant', async () => {
     await store.saveB2bInvoice(invoice({ id: 'inv_a', partnerId: 'tenant_a', status: 'voided' }));
     await reissueB2bInvoiceAction(form({ id: 'inv_a' }));
