@@ -25,6 +25,7 @@ import { LogoUpload } from '../logo-upload';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { gateOffOnLiveRail, sendGateActive } from '@/lib/kyc-gate';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -310,6 +311,17 @@ export default async function PartnerDetailPage({
                   <dt>Countries</dt><dd>{partner.countries.join(', ')}</dd>
                   <dt>KYC mode</dt>
                   <dd>{partner.kycMode === 'delegated' ? 'partner-run (delegated)' : 'SmartRemit-run'}</dd>
+                  {/* Program-Fix 35: the verify-before-send gate state, read-only (changed on the Settings tab). */}
+                  <dt>Verify-before-send</dt>
+                  <dd>
+                    {sendGateActive(partner) ? 'ON' : 'OFF (customers can send without verification)'}
+                    {gateOffOnLiveRail(partner, integrations) ? (
+                      <>
+                        {' '}
+                        <Badge variant="destructive">Live rail with verification off</Badge>
+                      </>
+                    ) : null}
+                  </dd>
                   {/* Program fix 16b: the send-limits ladder moved to its own card (Settings tab). */}
                   <dt>Primary color</dt>
                   <dd>

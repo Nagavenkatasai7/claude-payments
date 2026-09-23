@@ -385,3 +385,29 @@ describe('tenant-scoped identity (fix 1 / F44): upsertOnFirstInbound never re-ho
     expect(second.customer.updatedAt).toBe(first.customer.updatedAt);
   });
 });
+
+describe('findByKycInquiryId (Program-Fix 35: Persona report events bind by inquiry)', () => {
+  const ISO = '2026-06-01T00:00:00.000Z';
+  const base = { firstSeenAt: ISO, kycStatus: 'pending', senderCountry: 'US', createdAt: ISO, updatedAt: ISO } as const;
+
+  it('returns every tenant row that recorded the inquiry id, and none for an unknown id', async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    await cs.saveCustomer({ ...base, senderPhone: PHONE, partnerId: 'default', kycInquiryId: 'inq_A' } as never);
+    await cs.saveCustomer({ ...base, senderPhone: '15550001111', partnerId: 'acme', kycInquiryId: 'inq_B' } as never);
+    await cs.saveCustomer({ ...base, senderPhone: '15550002222', partnerId: 'acme' } as never);
+
+    const hit = await cs.findByKycInquiryId('inq_A');
+    expect(hit.map((c) => [c.partnerId, c.senderPhone])).toEqual([['default', PHONE]]);
+    expect(await cs.findByKycInquiryId('inq_missing')).toEqual([]);
+    expect(await cs.findByKycInquiryId('')).toEqual([]);
+  });
+
+  it('returns both rows when two tenants share an inquiry id (the caller must refuse to guess)', async () => {
+    await seedPartner(db, 'acme');
+    const { cs } = mkStores();
+    await cs.saveCustomer({ ...base, senderPhone: PHONE, partnerId: 'default', kycInquiryId: 'inq_dup' } as never);
+    await cs.saveCustomer({ ...base, senderPhone: PHONE, partnerId: 'acme', kycInquiryId: 'inq_dup' } as never);
+    expect((await cs.findByKycInquiryId('inq_dup')).length).toBe(2);
+  });
+});
