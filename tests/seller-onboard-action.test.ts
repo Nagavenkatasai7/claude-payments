@@ -217,3 +217,21 @@ describe('requestSellerOtpAction', () => {
     expect(sendTransactionOtp).not.toHaveBeenCalled();
   });
 });
+
+// Program-Fix 45 (P2): an issue refused at a cap (`locked`) maps to the same
+// bare { ok: false } as a cooldown; nothing is sent.
+describe('requestSellerOtpAction — issue cap (fix 45)', { retry: 0 }, () => {
+  it('past the lifetime cap → { ok: false } and no send', async () => {
+    const id = await seedPendingSeller();
+    let nowMs = Date.now();
+    txOtp = createTransactionOtpStore(redis, { now: () => nowMs });
+    for (let i = 0; i < 10; i++) {
+      if (i > 0) nowMs += 31_000;
+      expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    }
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
+    nowMs += 31_000;
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
+  });
+});

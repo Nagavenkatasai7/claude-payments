@@ -377,3 +377,78 @@ describe('enforceIpRateLimit — Retry-After uses the normalised window (Program
     expect(ra).toBeLessThanOrEqual(60);
   });
 });
+
+// ── Program-Fix 45 (P2): a limiter error raises an ops signal ────────────────
+// Both guards still FAIL OPEN, but a Redis error now raises the deduped
+// `limiter-down` ops alert (fire-and-forget: never awaited on the request path).
+describe('limiter errors raise an ops alert and still fail open (Program-Fix 45)', () => {
+  const throwing = (): RedisLike => ({
+    ...fakeRedis(),
+    async incr() {
+      throw new Error('upstash down');
+    },
+  });
+
+  it('isIpRateLimited: a throwing Redis calls deps.alert with the scope and returns false', async () => {
+    const alert = vi.fn();
+    await expect(
+      isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing(), alert }),
+    ).resolves.toBe(false);
+    expect(alert).toHaveBeenCalledWith(PAY_PAGE_SCOPE);
+  });
+
+  it('isIpRateLimited: an alert that throws or rejects never breaks fail-open', async () => {
+    const sync = vi.fn(() => { throw new Error('alert down'); });
+    await expect(
+      isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing(), alert: sync }),
+    ).resolves.toBe(false);
+    const async_ = vi.fn(async () => { throw new Error('alert down'); });
+    await expect(
+      isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing(), alert: async_ }),
+    ).resolves.toBe(false);
+  });
+
+  it('isIpRateLimited: a healthy limiter never alerts', async () => {
+    const alert = vi.fn();
+    await isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 60, 60, { redis: fakeRedis(), now: () => T0, alert });
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  describe('enforceIpRateLimit', () => {
+    afterEach(() => {
+      vi.doUnmock('@upstash/redis');
+      vi.doUnmock('@/lib/limiter-alert');
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    async function enforceWith(incr: () => Promise<number>) {
+      vi.resetModules();
+      vi.stubEnv('KV_REST_API_URL', 'https://kv.example.test');
+      vi.stubEnv('KV_REST_API_TOKEN', 'test-token');
+      const raise = vi.fn().mockResolvedValue(undefined);
+      vi.doMock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert: raise }));
+      vi.doMock('@upstash/redis', () => ({
+        Redis: class {
+          incr = incr;
+          expire = async () => 1;
+        },
+      }));
+      const mod = await import('@/lib/ip-rate-limit');
+      const req = { headers: new Headers({ 'x-forwarded-for': '1.2.3.4' }) } as unknown as NextRequest;
+      return { res: await mod.enforceIpRateLimit(req, 'pay', 3, 60), raise };
+    }
+
+    it('a throwing Redis fails open (null) and raises a fail-open limiter alert for the scope', async () => {
+      const { res, raise } = await enforceWith(async () => { throw new Error('upstash down'); });
+      expect(res).toBeNull();
+      expect(raise).toHaveBeenCalledWith('pay', 'fail-open');
+    });
+
+    it('a healthy limiter never alerts', async () => {
+      const { res, raise } = await enforceWith(async () => 1);
+      expect(res).toBeNull();
+      expect(raise).not.toHaveBeenCalled();
+    });
+  });
+});

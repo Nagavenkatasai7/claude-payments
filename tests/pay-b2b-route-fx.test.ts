@@ -44,8 +44,15 @@ vi.mock('@/lib/partner-store', () => ({
 vi.mock('@/lib/monthly-volume-store', () => ({ getMonthlyVolumeStore: () => ({}) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 const verify = vi.hoisted(() => vi.fn());
+const issue = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/transaction-otp', () => ({
-  getTransactionOtpStore: () => ({ issue: async () => ({ ok: true, code: '123456' }), verify }),
+  getTransactionOtpStore: () => ({ issue, verify }),
+}));
+// Program-Fix 45: spy on delivery so the request_otp mapping can be pinned.
+const sendTransactionOtp = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/whatsapp', async (orig) => ({ ...(await orig<typeof import('@/lib/whatsapp')>()), sendTransactionOtp }));
+vi.mock('@/lib/partner-integrations-store', () => ({
+  getPartnerIntegrationsStore: () => ({ getIntegrations: async () => ({ kyc: {}, payment: {}, whatsapp: {} }) }),
 }));
 const finalizeCrossBorderBillPayment = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/b2b-pay-finalize', () => ({ finalizeCrossBorderBillPayment }));
@@ -65,6 +72,8 @@ const post = (fields: Record<string, string>) =>
 beforeEach(() => {
   resetRateCacheForTests();
   verify.mockReset().mockResolvedValue({ ok: true });
+  issue.mockReset().mockResolvedValue({ ok: true, code: '123456' });
+  sendTransactionOtp.mockReset().mockResolvedValue(undefined);
   finalizeCrossBorderBillPayment.mockReset().mockResolvedValue({ ok: false, error: 'seller_unavailable' });
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net'))); // FX provider down
 });
@@ -86,5 +95,36 @@ describe('POST /api/pay/b2b/[invoiceId] — FX before OTP (Task 9)', () => {
     expect(finalizeCrossBorderBillPayment).toHaveBeenCalledOnce();
     expect(finalizeCrossBorderBillPayment.mock.calls[0][1]).toMatchObject({ buyerToUsd: 1 });
     expect(res.status).toBe(400); // the stubbed finalize refusal — the FX gate did not fire
+  });
+});
+
+// Program-Fix 45 (P2): an issue refused at a cap (`locked`) answers exactly like
+// a sent code, so the buyer's page cannot tell a cap from a send; nothing is sent.
+describe('POST /api/pay/b2b/[invoiceId] — request_otp at an issue cap (fix 45)', { retry: 0 }, () => {
+  const requestOtp = () =>
+    POST(
+      new NextRequest('http://x/api/pay/b2b/inv_1', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'request_otp' }),
+        headers: { 'content-type': 'application/json' },
+      }),
+      { params: Promise.resolve({ invoiceId: 'inv_1' }) },
+    );
+
+  it('a normal request sends the code and answers {ok:true,sent:true}', async () => {
+    buyerPhone = '15551112222';
+    const res = await requestOtp();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledOnce();
+  });
+
+  it('locked → the same 200 {ok:true,sent:true}, and no code is sent', async () => {
+    buyerPhone = '15551112222';
+    issue.mockResolvedValue({ ok: false, reason: 'locked' });
+    const res = await requestOtp();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
   });
 });
