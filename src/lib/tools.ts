@@ -40,6 +40,7 @@ import { logWarn } from './log';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
+import { isBillExpired } from './b2b-bill-expiry';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -357,7 +358,8 @@ async function refuseUnlessOwnOpenBill(
     return { error: 'A business bill payment needs entity_type business, funding_method ach_pull and the invoice_id from present_bill.' };
   }
   const invoice = await ctx.store.getB2bInvoiceScoped(b2b.invoiceId, ctx.partnerId);
-  if (!invoice || invoice.status !== 'unpaid' || invoice.buyerPhone !== ctx.phone) {
+  // Program-Fix 44: an unpaid bill past the TTL is closed on this pay path too.
+  if (!invoice || invoice.status !== 'unpaid' || invoice.buyerPhone !== ctx.phone || isBillExpired(invoice)) {
     return { error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' };
   }
   if (invoice.sellerId) {
@@ -2079,15 +2081,42 @@ async function createInvoiceTool(
   // send_approve_picker's content-keyed card dedup. Keyed on the RESOLVED
   // denomination so a 500-USD bill and a 500-MXN bill to the same buyer are
   // distinct claims (Case S keys are byte-identical to before).
-  const billKey = `${seller.id}|${buyerPhone}|${amount}|${invoicedCurrency}`;
-  const candidateId = `inv_${newTransferId()}`;
-  const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
-  const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
   // Case B copy is explicit that the seller's side floats: the customer pays the
   // exact billed figure; the seller receives the converted amount at payment.
   const sellerReply = buyerDenominated
     ? `Your bill for ${amount} ${invoicedCurrency} is ready — your customer pays exactly ${amount} ${invoicedCurrency}, and you'll receive the converted ${seller.currency} amount at payment time. I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`
     : `Your bill for ${amount} ${invoicedCurrency} is ready — I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`;
+
+  // Program-Fix 44 (b2b-04): the DURABLE duplicate check, read from the ledger
+  // BEFORE the claim. The 120 s Redis claim below only catches a replay inside
+  // its TTL; an identical bill (same tenant, seller, buyer, amount, currency)
+  // that is still unpaid and not expired is returned instead of minting a
+  // second payable twin — after any TTL. Checked before the claim so a hit never
+  // leaves the claim bound to an id that was never inserted. Concurrent first
+  // mints still collapse on the claim. A paid (or expired) twin does not block
+  // a legitimate repeat bill.
+  const openTwin = await ctx.store.findOpenTwinInvoice({
+    partnerId: seller.partnerId,
+    sellerId: seller.id,
+    buyerPhone,
+    invoicedAmount: amount,
+    invoicedCurrency,
+  });
+  if (openTwin) {
+    return {
+      created: true,
+      invoice_id: openTwin.id,
+      pay_url: `${env.appBaseUrl}/pay/b2b/${openTwin.id}`,
+      amount,
+      currency: invoicedCurrency,
+      reply_to_customer: sellerReply,
+    };
+  }
+
+  const billKey = `${seller.id}|${buyerPhone}|${amount}|${invoicedCurrency}`;
+  const candidateId = `inv_${newTransferId()}`;
+  const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
+  const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
 
   if (invoiceId !== candidateId) {
     // Duplicate within the TTL — the original run already created the bill and
