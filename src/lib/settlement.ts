@@ -1,5 +1,6 @@
-import type { Db } from '@/db/client';
+import type { Db, DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { buildStage1Message } from '@/lib/payment';
@@ -28,6 +29,41 @@ import type { Transfer } from '@/lib/types';
 //
 // NON-CUSTODIAL: SmartRemit never holds funds — `paid` mirrors the charge the
 // PARTNER captured on their rail; the instruction tells their rail to pay out.
+
+/**
+ * Program-Fix 28 (compliance-03/-08): WHO made a staff money decision, and why.
+ * `actor` is the session's stable staff username (never a form field); `reason`
+ * is the optional, bounded staff note (null when none was typed). Passed as an
+ * OPTIONAL trailing argument: a caller without it keeps the exact pre-fix
+ * semantics and writes no audit row.
+ */
+export interface StaffAuditCtx {
+  actor: string;
+  reason?: string | null;
+}
+
+/**
+ * Write the ONE audit_events row for a staff transfer/refund decision, on the
+ * TRANSACTION handle, after the guarded claim. If this insert throws, the whole
+ * transaction (the money move and its outbox effect) rolls back: no decision
+ * without its durable record (the fix-16b rule).
+ */
+export async function recordStaffTransferAudit(
+  tx: DbOrTx,
+  audit: StaffAuditCtx,
+  action: string,
+  transfer: Pick<Transfer, 'id' | 'partnerId'>,
+  meta: Record<string, unknown>,
+): Promise<void> {
+  await createAuditRepo(tx).record({
+    partnerId: transfer.partnerId,
+    actor: audit.actor,
+    actorType: 'staff',
+    action,
+    subjectId: transfer.id,
+    meta: { ...meta, reason: audit.reason ?? null },
+  });
+}
 
 export type SettlementResult =
   | { kind: 'started'; webhookDriven: boolean }
@@ -212,10 +248,19 @@ export async function releaseHold(
   db: Db,
   transfer: Transfer,
   integrations: PartnerIntegrations,
+  audit?: StaffAuditCtx,
 ): Promise<ReleaseResult> {
   return db.transaction(async (tx): Promise<ReleaseResult> => {
     const paid = await createTransferRepo(tx).markPaidIfInReview(transfer.id);
-    if (!paid) return { kind: 'already' };
+    if (!paid) return { kind: 'already' }; // nothing moved ⇒ nothing audited
+    // Program-Fix 28: the staff decision's durable row, keyed on the OWNING
+    // partner, in THIS transaction (a failed insert rolls the release back).
+    if (audit) {
+      await recordStaffTransferAudit(tx, audit, 'transfer.release', paid, {
+        previousStatus: 'in_review',
+        newStatus: paid.status,
+      });
+    }
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
     return { kind: 'released', webhookDriven };
   });
