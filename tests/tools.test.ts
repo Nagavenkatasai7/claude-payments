@@ -739,6 +739,7 @@ describe('schedule tools', () => {
       kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'acme',
+      fullName: SENDER_FULL_NAME, // Program-Fix 14: a schedule needs the sender's legal name
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
     });

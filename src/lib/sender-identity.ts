@@ -1,5 +1,5 @@
 import type { Customer } from './types';
-import { hasWebAddress, isCleanName, NAME_MAX } from './untrusted-text';
+import { hasOverridePhrase, hasWebAddress, isCleanName, NAME_MAX } from './untrusted-text';
 
 // Sender identity is required before screening (Program-Fix 14). Sanctions
 // screening covers BOTH parties, so a consumer send needs the sender's legal
@@ -17,13 +17,14 @@ export function hasSenderName(customer: Pick<Customer, 'fullName'> | null | unde
 /**
  * Normalise a customer-typed legal name: NFKC, whitespace collapsed, trimmed.
  * null ⇒ not a plausible name (empty, one character, no letter, longer than
- * NAME_MAX, a control / format / markup character, or a web address).
+ * NAME_MAX, a control / format / markup character, a web address, or a
+ * rule-override phrase).
  */
 export function normalizeSenderName(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const n = v.normalize('NFKC').replace(/\s+/gu, ' ').trim();
   if (n.length < 2 || !/\p{L}/u.test(n)) return null;
-  if (!isCleanName(n, NAME_MAX) || hasWebAddress(n) || /[<>]/.test(n)) return null;
+  if (!isCleanName(n, NAME_MAX) || hasWebAddress(n) || hasOverridePhrase(n) || /[<>]/.test(n)) return null;
   return n;
 }
 

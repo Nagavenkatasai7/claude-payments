@@ -3239,7 +3239,11 @@ async function createScheduleTool(
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
   // No FX here (Task 9): a schedule prices at RUN time, so a provider outage must
   // not stop the customer from setting one up.
-  const { sourceCurrency } = await resolveSender(ctx, args.source_currency);
+  const { customer, sourceCurrency } = await resolveSender(ctx, args.source_currency);
+  // Program-Fix 14: every scheduled run is screened with the sender's legal
+  // name, so a schedule is set up only once one is on file — nothing is saved
+  // until then (the same needs_sender_name flow as send_approve_picker).
+  if (!hasSenderName(customer)) return senderNameRequired();
   const partnerId = ctx.partnerId;
   const amountSource = Number(args.amount_source ?? args.amount_usd);
   // Validate optional end_date: must be a parseable ISO date string; ignore if not.
@@ -3441,25 +3445,31 @@ async function setSenderNameTool(
   if (fullName === null) {
     return { error: "That doesn't look like a full legal name. Ask the customer for their full name exactly as it appears on their ID." };
   }
-  // Own tenant + own phone only (fix 1). Re-read so a concurrent write is
-  // never clobbered by a stale copy (the updateEmailAction pattern).
+  const alreadyOnFile: ToolResult = {
+    already_on_file: true,
+    reply_hint: 'A legal name is already on file for this customer; it cannot be changed in chat. Continue the send.',
+  };
+  // Own tenant + own phone only (fix 1); the row exists before the write.
   const current =
     (await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone)) ??
     (await ctx.customerStore.upsertOnFirstInbound(ctx.partnerId, ctx.phone)).customer;
   // Set-once: a name on file is never replaced from chat (a changed legal name
   // goes through support), so a screened identity cannot be swapped out.
-  if (hasSenderName(current)) {
-    return {
-      already_on_file: true,
-      reply_hint: 'A legal name is already on file for this customer; it cannot be changed in chat. Continue the send.',
-    };
-  }
+  if (hasSenderName(current)) return alreadyOnFile;
+  let written: boolean;
   try {
-    // saveCustomer seals fullName (field-crypto envelope) — never stored in clear.
-    await ctx.customerStore.saveCustomer({ ...current, fullName, updatedAt: new Date().toISOString() });
+    // A single-column conditional write, sealed (field-crypto envelope) and
+    // landing only while no name is on file: a name that arrived after the
+    // read above is never replaced, and no other column is rewritten.
+    written = await ctx.customerStore.setFullNameIfUnset(ctx.partnerId, ctx.phone, fullName);
   } catch (err) {
-    // Only the error NAME: a driver error can echo the insert's parameters.
+    // Only the error NAME: a driver error can echo the statement's parameters.
     logWarn('sender-name.save-failed', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
+    return { error: "I couldn't save that just now. Please ask the customer to try again in a moment." };
+  }
+  if (!written) {
+    // Lost the race to another writer: report what is on file now.
+    if (hasSenderName(await ctx.customerStore.getCustomer(ctx.partnerId, ctx.phone))) return alreadyOnFile;
     return { error: "I couldn't save that just now. Please ask the customer to try again in a moment." };
   }
   // The name is NOT echoed back into the model context.
