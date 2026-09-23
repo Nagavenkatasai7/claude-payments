@@ -41,6 +41,14 @@ export interface Quote {
 
 export type RefundStatus = 'none' | 'requested' | 'pending' | 'completed' | 'failed';
 
+/**
+ * Program-Fix 44 P2: which world a transfer lives in. 'test' ⇔ minted by a
+ * sandbox (sr_test_) Partner API key — it settles ONLY through the platform
+ * mock rail, never messages a customer, and never counts toward a live
+ * customer's caps, velocity, fee tier or AML aggregates. Write-once.
+ */
+export type TransferEnvironment = 'live' | 'test';
+
 export interface Transfer {
   id: string;
   phone: string;
@@ -102,6 +110,8 @@ export interface Transfer {
   achTokenRef?: string;                   // partner's opaque ACH-pull mandate token (B2B ach_pull)
   invoiceId?: string;                     // the B2bInvoice this transfer pays
   kybReviewNotes?: string;
+  // Program-Fix 44 P2 — absent ⇒ 'live'. Always set on a ledger read.
+  environment?: TransferEnvironment;
 }
 
 // ── B2B mock invoices (the "ERP" stand-in) ──
@@ -248,6 +258,12 @@ export interface StaffPermissions {
   canCancel: boolean;
   canResend: boolean;
   canAssign: boolean;
+  /**
+   * Program-Fix 45 P1: may reveal a full payout destination (the audited
+   * decrypt). OPTIONAL because records saved before it lack the key; absent
+   * means no. Admins keep it through hasPermission's admin bypass.
+   */
+  canRevealPii?: boolean;
 }
 
 // Support staff get no money permissions — hasPermission() must resolve false
@@ -256,6 +272,7 @@ export const SUPPORT_DEFAULT_PERMISSIONS: StaffPermissions = {
   canCancel: false,
   canResend: false,
   canAssign: false,
+  canRevealPii: false,
 };
 
 export interface Staff {
@@ -507,6 +524,10 @@ export interface Customer {
   passwordHash?: string;     // Argon2id PHC string (the hash itself; not extra-encrypted)
   passwordUpdatedAt?: string;// ISO — set on register / password change
   phoneVerifiedAt?: string;  // ISO — set when the WhatsApp OTP is verified
+  // Program-Fix 49D: set when portal TOTP is ON (customers.mfa_enrolled_at).
+  // READ-ONLY here (mapped in rowToCustomer only, never in customerToRow): the
+  // secret itself never enters this object; customer-repo's MFA methods own it.
+  mfaEnrolledAt?: string;
   // ── Customer onboarding Phase 2 — Persona KYC (data-minimized; raw ID/SSN/images never stored) ──
   kycInquiryId?: string;     // Persona inquiry id (inq_…); also mirrored to kycProviderRef
   kycReviewState?: KycReviewState;
@@ -719,7 +740,12 @@ export interface CorridorRequest {
   approxAmount?: number;
   approxCurrency?: string;
   capturedAt: string;           // ISO-8601
+  /** Program-Fix 49D (0020): the lead's review state; absent (NULL) = 'open'. */
+  status?: CorridorRequestStatus;
 }
+
+/** corridor_requests.status values (no CHECK in the DB; NULL means 'open'). */
+export type CorridorRequestStatus = 'open' | 'planned' | 'launched' | 'declined';
 
 /**
  * Stage-2 application lifecycle (partner_requests.application_status is free

@@ -113,7 +113,7 @@ describe('scripts/reencrypt-aad-v2 (fix 46A)', { retry: 0 }, () => {
       [
         'beneficiaries.payout_destination_enc',
         'customers.date_of_birth_enc', 'customers.email_enc', 'customers.full_name_enc',
-        'customers.gov_id_number_enc', 'customers.residential_address_enc',
+        'customers.gov_id_number_enc', 'customers.mfa_totp_enc', 'customers.residential_address_enc',
         'partner_integrations.kyc_api_key_enc', 'partner_integrations.kyc_webhook_secret_enc',
         'partner_integrations.payment_credentials_enc', 'partner_integrations.payment_webhook_secret_enc',
         'partner_integrations.wa_app_secret_enc', 'partner_integrations.wa_token_enc', 'partner_integrations.wa_verify_token_enc',

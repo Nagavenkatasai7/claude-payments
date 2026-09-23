@@ -7,7 +7,7 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
 import { payoutMethodLabel } from '@/lib/payout-format';
-import { isRecallEligible } from '@/lib/refund-policy';
+import { isRecallEligible, refundDisposition } from '@/lib/refund-policy';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { AccountShell, PageHeader } from '../../shell';
 import { money, transferAmount, transferStatusLabel, transferStatusTone } from '../../format';
@@ -16,7 +16,8 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
-import { requestRefundAction } from '../refund-actions';
+import { cancelTransferAction, requestRefundAction } from '../refund-actions';
+import { CANCEL_CARD_BODY, CANCEL_CARD_TITLE, CANCEL_NOTICE, cancelButtonLabel } from '@/lib/legal/cancel-drafts';
 import { requestRecallAction } from '../recall-actions';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
@@ -47,6 +48,37 @@ const RECALL_ERROR_MSG: Record<string, string> = {
   cap: 'You already have 5 open requests. Reply on one of those, or wait for one to be resolved first.',
 };
 
+// Program-Fix 49D: the step-up refusals (customer-mfa STEP_UP_ERROR), shared
+// by the refund and recall cards. Fixed copy only; the URL never supplies text.
+const STEP_UP_ERROR_MSG: Record<string, string> = {
+  mfa_code: 'Enter the 6-digit code from your authenticator app.',
+  mfa_invalid:
+    'That code is not valid. Wait for the next code in your app (a code you just used to sign in cannot be used again) and try again.',
+  mfa_throttled: 'Too many attempts. Please try again later.',
+  mfa_required: 'Turn on two-step verification in Settings first, then try again.',
+};
+
+/** The authenticator-code field of a step-up form (only when MFA is on). */
+function StepUpCodeField({ id }: { id: string }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
+        Code from your authenticator app
+      </label>
+      <input
+        id={id}
+        name="code"
+        required
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        pattern="[0-9 ]{6,7}"
+        maxLength={7}
+        className="h-9 w-40 rounded-md border border-input bg-transparent px-3 py-1 text-base tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 md:text-sm"
+      />
+    </div>
+  );
+}
+
 // A short, human one-liner under the status pill, by current state.
 const STATUS_SUMMARY: Record<string, string> = {
   awaiting_payment: 'Waiting for payment to clear.',
@@ -56,6 +88,9 @@ const STATUS_SUMMARY: Record<string, string> = {
   in_review: 'This transfer is being reviewed. We will be in touch shortly.',
   blocked: 'This transfer could not be completed and you were not charged.',
 };
+
+// The cancel deadline, in the same zone the disclosure card uses (UTC).
+const CANCEL_TIME_FMT = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC', timeZoneName: 'short' });
 
 function fmtWhen(iso?: string): string {
   return iso
@@ -93,11 +128,11 @@ export default async function ReceiptPage({
   searchParams,
 }: {
   params: Promise<{ transferId: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; cancel?: string }>;
 }) {
   const customer = await requireCustomer();
   const { transferId } = await params;
-  const { error } = await searchParams;
+  const { error, cancel } = await searchParams;
   const store = getStore();
   const t = await store.getTransfer(transferId);
   if (!t || t.phone !== customer.senderPhone || t.partnerId !== customer.partnerId) notFound();
@@ -134,9 +169,24 @@ export default async function ReceiptPage({
   // CTA). refundDisposition already requires refundStatus 'none', so this never
   // collides with the refund block above.
   const canRecall = isRecallEligible(t, Date.now());
-  const recallErrorMsg = error ? RECALL_ERROR_MSG[error] : undefined;
+  const stepUpErrorMsg = error ? STEP_UP_ERROR_MSG[error] : undefined;
+  const recallErrorMsg = error ? (RECALL_ERROR_MSG[error] ?? stepUpErrorMsg) : undefined;
+  // Program-Fix 49D: with two-step verification on, both requests ask for a
+  // fresh code (the server action enforces it; this only renders the field).
+  const mfaOn = Boolean(customer.mfaEnrolledAt);
 
   const statusSummary = STATUS_SUMMARY[t.status] ?? 'In progress.';
+
+  // Program-Fix 15 PR C: the 30-minute sender cancel. paid_at is only the
+  // HINT here (the action's locked service re-checks the charge time by the
+  // database clock); the notice maps a FIXED code to fixed copy.
+  const cancelDisp = refundDisposition(t, Date.now());
+  const cancelUntil =
+    cancelDisp.kind === 'cancellable' ? CANCEL_TIME_FMT.format(new Date(Date.now() + cancelDisp.msLeft)) : null;
+  const cancelNotice =
+    cancel && Object.prototype.hasOwnProperty.call(CANCEL_NOTICE, cancel)
+      ? CANCEL_NOTICE[cancel as keyof typeof CANCEL_NOTICE]
+      : undefined;
 
   // Program-Fix 15 PR B: the Reg E receipt disclosure (null for B2B). The
   // provider of record is the OWNING partner (t.partnerId, ownership-checked
@@ -279,6 +329,38 @@ export default async function ReceiptPage({
 
         {disclosure && <ReceiptDisclosureCard disclosure={disclosure} />}
 
+        {cancelNotice && (
+          <Alert className="sm:col-span-2">
+            <AlertTitle>{CANCEL_CARD_TITLE}</AlertTitle>
+            <AlertDescription>{cancelNotice}</AlertDescription>
+          </Alert>
+        )}
+
+        {/* Program-Fix 15 PR C: cancel within 30 minutes of payment (consumer). */}
+        {cancelUntil && (
+          <Card className="sm:col-span-2">
+            <CardHeader>
+              <CardTitle>{CANCEL_CARD_TITLE}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {stepUpErrorMsg ? (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertTitle>We couldn&rsquo;t send that request</AlertTitle>
+                  <AlertDescription>{stepUpErrorMsg}</AlertDescription>
+                </Alert>
+              ) : null}
+              <form action={cancelTransferAction} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="max-w-prose text-sm text-muted-foreground">{CANCEL_CARD_BODY}</p>
+                <input type="hidden" name="transferId" value={t.id} />
+                {mfaOn ? <StepUpCodeField id="cancel-code" /> : null}
+                <Button type="submit" variant="destructive" className="shrink-0">
+                  {cancelButtonLabel(cancelUntil)}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Request a refund — only on a paid transfer with no refund in flight. */}
         {canRequestRefund && (
           <Card className="sm:col-span-2">
@@ -286,12 +368,19 @@ export default async function ReceiptPage({
               <CardTitle>Request a refund</CardTitle>
             </CardHeader>
             <CardContent>
+              {stepUpErrorMsg ? (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertTitle>We couldn&rsquo;t send that request</AlertTitle>
+                  <AlertDescription>{stepUpErrorMsg}</AlertDescription>
+                </Alert>
+              ) : null}
               <form action={requestRefundAction} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="max-w-prose text-sm text-muted-foreground">
                   Our team reviews every refund request — refunds arrive in 3–5 business days
                   once approved.
                 </p>
                 <input type="hidden" name="transferId" value={t.id} />
+                {mfaOn ? <StepUpCodeField id="refund-code" /> : null}
                 <Button type="submit" variant="outline" className="shrink-0">
                   Request a refund
                 </Button>
@@ -338,6 +427,7 @@ export default async function ReceiptPage({
                     ))}
                   </select>
                 </div>
+                {mfaOn ? <StepUpCodeField id="recall-code" /> : null}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="max-w-prose text-sm text-muted-foreground">
                     Once money is delivered we can&rsquo;t guarantee recovery, but our team will

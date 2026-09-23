@@ -189,7 +189,8 @@ async function handleVerified(
         logWarn('b2b.invoice_mark_paid', err, { transferId: updated.id });
       }
     }
-    after(async () => {
+    // Program-Fix 44 P2: a sandbox transfer never messages a real phone.
+    if (updated.environment !== 'test') after(async () => {
       try {
         // Brand + send from the OWNING partner's identity (default ⇒ SmartRemit + env number).
         // Routed transfers: the verified integrations above are the SETTLEMENT

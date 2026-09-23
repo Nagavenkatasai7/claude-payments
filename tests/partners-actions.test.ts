@@ -56,6 +56,11 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(sharedRedis) };
 });
+// Program-Fix 17b: creating/removing a member clears its MFA keys.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(sharedRedis) };
+});
 
 vi.mock('next/navigation', () => ({
   redirect: vi.fn(),
@@ -499,7 +504,7 @@ describe('createPartnerStaffAction roles', () => {
     const got = await getAuthStore().getStaff('p1sup');
     expect(got?.role).toBe('support');
     expect(got?.partnerId).toBe('p1');
-    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false });
+    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false, canRevealPii: false });
   });
 
   it('still rejects unknown roles', async () => {
@@ -1060,16 +1065,32 @@ describe('savePaymentConfigAction — rail secret rotation (Program-Fix 29)', ()
   });
 });
 
-// Program-Fix 44 P1: test keys are NOT issuable until sandbox isolation (P2)
-// ships. The action is a public POST endpoint, so a crafted extra argument must
-// never mint a test key — only the repo's issue(partner, 'test') can.
-describe('issueApiKeyAction — live keys only until sandbox isolation ships', () => {
-  it('issues an sr_live_ / pk_live_ key, ignoring a crafted mode argument', async () => {
+// Program-Fix 44 P2: sandbox isolation shipped, so test keys ARE issuable. The
+// action is a public POST endpoint: the mode is a strict allowlist (absent ⇒
+// live; anything but 'live' / 'test' is refused before any write).
+describe('issueApiKeyAction — mode is live by default, test on request, nothing else', () => {
+  it('no mode ⇒ an sr_live_ / pk_live_ key (every existing caller unchanged)', async () => {
     await seedPartner(db, 'acme');
-    const crafted = issueApiKeyAction as unknown as (id: string, mode: string) => ReturnType<typeof issueApiKeyAction>;
-    const r = await crafted('acme', 'test');
+    const r = await issueApiKeyAction('acme');
     expect(r.plaintext.startsWith('sr_live_')).toBe(true);
     expect(r.keyId.startsWith('pk_live_')).toBe(true);
+  });
+
+  it("mode 'test' ⇒ an sr_test_ / pk_test_ sandbox key", async () => {
+    await seedPartner(db, 'acme');
+    const r = await issueApiKeyAction('acme', 'test');
+    expect(r.plaintext.startsWith('sr_test_')).toBe(true);
+    expect(r.keyId.startsWith('pk_test_')).toBe(true);
+  });
+
+  it('a crafted mode outside the allowlist is refused and issues NOTHING', async () => {
+    await seedPartner(db, 'acme');
+    const crafted = issueApiKeyAction as unknown as (id: string, mode: unknown) => ReturnType<typeof issueApiKeyAction>;
+    for (const bad of ['TEST', 'admin', '', 1, { mode: 'test' }]) {
+      await expect(crafted('acme', bad)).rejects.toThrow('Invalid key mode.');
+    }
+    const keys = await db.execute(sql`SELECT id FROM api_keys WHERE partner_id = 'acme'`);
+    expect((keys as unknown as { rows: unknown[] }).rows).toEqual([]);
   });
 
   it('the setup wizard\'s first key is live', async () => {

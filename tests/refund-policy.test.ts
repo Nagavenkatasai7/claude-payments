@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { refundDisposition, isRecallEligible, isRefundable, RECALL_WINDOW_MS } from '@/lib/refund-policy';
+import { refundDisposition, isRecallEligible, isRefundable, RECALL_WINDOW_MS, CANCEL_WINDOW_MS } from '@/lib/refund-policy';
 import type { Transfer, TransferStatus, RefundStatus } from '@/lib/types';
 
 const NOW = Date.parse('2026-06-17T12:00:00Z');
@@ -100,5 +100,72 @@ describe('refundDisposition', () => {
   it('defaults now to Date.now() when omitted (delivered just now is recall-eligible)', () => {
     const d = refundDisposition(transfer({ status: 'delivered', deliveredAt: new Date().toISOString() }));
     expect(d.kind).toBe('recall_eligible');
+  });
+});
+
+// Program-Fix 15 PR C: the Reg E 30-minute cancellation window (12 CFR
+// 1005.34). Keyed on CHARGE time (the stage1:<id> row's created_at, supplied
+// by the caller); paid_at is only the fallback hint. Relative dates only.
+describe('refundDisposition — cancellable (Program-Fix 15 PR C)', { retry: 0 }, () => {
+  const minsAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
+
+  it('paid, charged 10 min ago, refund none → cancellable with msLeft', () => {
+    const d = refundDisposition(transfer({ status: 'paid', paidAt: minsAgo(60) }), NOW, minsAgo(10));
+    expect(d).toEqual({ kind: 'cancellable', msLeft: 20 * 60_000 });
+    expect(CANCEL_WINDOW_MS).toBe(30 * 60_000);
+  });
+
+  it('isRefundable stays true for cancellable (the refund request still works)', () => {
+    const t = transfer({ status: 'paid' });
+    expect(refundDisposition(t, NOW, minsAgo(5)).kind).toBe('cancellable');
+    expect(isRefundable(t, NOW, minsAgo(5))).toBe(true);
+  });
+
+  it('refund already requested inside the window → still cancellable', () => {
+    const d = refundDisposition(transfer({ status: 'paid', refundStatus: 'requested' }), NOW, minsAgo(1));
+    expect(d.kind).toBe('cancellable');
+  });
+
+  it('refund pending / completed / failed inside the window → the refund pipeline state wins', () => {
+    expect(refundDisposition(transfer({ status: 'paid', refundStatus: 'pending' }), NOW, minsAgo(1)).kind).toBe('in_progress');
+    expect(refundDisposition(transfer({ status: 'paid', refundStatus: 'failed' }), NOW, minsAgo(1)).kind).toBe('in_progress');
+    expect(refundDisposition(transfer({ status: 'paid', refundStatus: 'completed' }), NOW, minsAgo(1)).kind).toBe('completed');
+  });
+
+  it('exactly 30 min after the charge → refundable as today (the window is open strictly before)', () => {
+    expect(refundDisposition(transfer({ status: 'paid' }), NOW, minsAgo(30))).toEqual({ kind: 'refundable' });
+  });
+
+  it('chargedAt absent → falls back to paid_at', () => {
+    expect(refundDisposition(transfer({ status: 'paid', paidAt: minsAgo(29) }), NOW).kind).toBe('cancellable');
+    expect(refundDisposition(transfer({ status: 'paid', paidAt: minsAgo(31) }), NOW).kind).toBe('refundable');
+  });
+
+  it('no charge time and no paid_at → refundable (never a guessed window)', () => {
+    expect(refundDisposition(transfer({ status: 'paid', paidAt: undefined }), NOW)).toEqual({ kind: 'refundable' });
+  });
+
+  it('an explicit chargedAt wins over a later paid_at (a released hold resets paid_at)', () => {
+    const t = transfer({ status: 'paid', paidAt: minsAgo(2) });
+    expect(refundDisposition(t, NOW, minsAgo(45)).kind).toBe('refundable');
+  });
+
+  it('in_review inside the window → under_review (C4: never auto-cancelled)', () => {
+    expect(refundDisposition(transfer({ status: 'in_review', paidAt: minsAgo(1) }), NOW, minsAgo(1))).toEqual({ kind: 'under_review' });
+  });
+
+  it('delivered inside the window → never cancellable', () => {
+    const d = refundDisposition(transfer({ status: 'delivered', deliveredAt: minsAgo(1), paidAt: minsAgo(2) }), NOW, minsAgo(2));
+    expect(d.kind).toBe('recall_eligible');
+  });
+
+  it('a B2B transfer is never cancellable (not a consumer sender under 1005.30)', () => {
+    const d = refundDisposition(transfer({ status: 'paid', transferType: 'b2b' }), NOW, minsAgo(1));
+    expect(d).toEqual({ kind: 'refundable' });
+  });
+
+  it('a future charge time (clock skew) is treated as inside the window, capped at the full window', () => {
+    const d = refundDisposition(transfer({ status: 'paid' }), NOW, new Date(NOW + 60_000).toISOString());
+    expect(d).toEqual({ kind: 'cancellable', msLeft: CANCEL_WINDOW_MS });
   });
 });

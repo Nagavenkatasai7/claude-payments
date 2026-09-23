@@ -3,7 +3,7 @@ import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { settleOrHold } from '@/lib/settlement';
+import { isSandbox, settleOrHold } from '@/lib/settlement';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
@@ -49,6 +49,22 @@ export interface SweepResult {
   staleLocks?: number;
 }
 
+/**
+ * Program-Fix 15 PR C: the ONE recovery re-instruction, serialized with a
+ * sender cancel (sender-cancel.ts). A short transaction takes the transfer
+ * `FOR UPDATE` (transfer → outbox, the lock order every writer uses) and
+ * re-checks paid + refund none on the LOCKED row before enqueueing
+ * `reinstruct:<id>`: findStuckPaid's read may predate a cancel or a refund
+ * request that has since committed. True when a new row was created.
+ */
+export async function enqueueReinstructLocked(db: Db, transferId: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const cur = await createTransferRepo(tx).getTransferForUpdate(transferId);
+    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none') return false;
+    return createOutboxRepo(tx).enqueue('settlement.instruct', { transferId }, { dedupeKey: `reinstruct:${transferId}` });
+  });
+}
+
 export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<SweepResult> {
   const transfers = createTransferRepo(db);
   const outbox = createOutboxRepo(db);
@@ -72,22 +88,21 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       t.settlementPartnerId ?? t.partnerId,
     );
     const providerType = integrations.payment.providerType;
-    const webhookDriven = providerType === 'http' || providerType === 'simulator';
+    // Program-Fix 44 P2: a sandbox transfer settles on the mock rail only, so
+    // it is never re-instructed, whatever the rail config says.
+    const webhookDriven = !isSandbox(t) && (providerType === 'http' || providerType === 'simulator');
     // fix 29 (money-09): the rail reported a DIFFERENT amount for this row — it
     // is held for staff (cancel/refund), never re-instructed. It keeps showing
     // here every sweep; the recon: alert below is still deduped (fires once).
     const held = await outbox.hasDedupeKey(`railamount:${t.id}`);
+    let reinstructedNow = false;
     if (webhookDriven && !held) {
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a
       // different key from the original `instruct:` row, which is done/dead by
       // now). The instruct handler itself is idempotent on the partner side —
       // the reference is the transfer id, so their rail dedupes a replay.
-      const fresh = await outbox.enqueue(
-        'settlement.instruct',
-        { transferId: t.id },
-        { dedupeKey: `reinstruct:${t.id}` },
-      );
-      if (fresh) reinstructed++;
+      reinstructedNow = await enqueueReinstructLocked(db, t.id);
+      if (reinstructedNow) reinstructed++;
     }
     // Mock-rail transfers land here too if their delayed settle died — the
     // dead-letter alert already fired for that row; this is the money-state view.
@@ -103,7 +118,11 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
           `'paid' for >${STUCK_PAID_MINUTES}min with no delivery confirmation.` +
           (held
             ? ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.'
-            : webhookDriven ? ' Re-instructed the partner rail once.' : ''),
+            : webhookDriven
+              ? reinstructedNow
+                ? ' Re-instructed the partner rail once.'
+                : ' Not re-instructed: on the locked re-check the transfer was no longer payable (cancelled, or a refund requested/in flight).'
+              : ''),
       },
       { dedupeKey: `recon:${t.id}` },
     );

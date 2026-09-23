@@ -24,6 +24,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
+import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
 import {
@@ -38,6 +39,8 @@ import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store'
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
 import { finalizeDraftPayment } from '@/lib/pay-finalize';
+import { cancelWithinWindow } from '@/lib/sender-cancel';
+import { beginHold, beginSettlement } from '@/lib/settlement';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
 const PHONE = '15551234567';
@@ -88,7 +91,14 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
     // out-of-band 'ticket.triage' effect on, bound to the PGlite db (the prod
     // fallback would build one over getDb()'s Neon Pool).
     outboxRepo: createOutboxRepo(db),
+    // Program-Fix 15 PR C seam: the locked sender cancel, bound to PGlite.
+    senderCancel: (p: string, id: string) => cancelWithinWindow(db, p, id, { via: 'bot' }),
   };
+}
+
+/** Program-Fix 15 PR C: move a paid transfer's paid_at past the 30-minute cancel window. */
+async function pastCancelWindow(id: string): Promise<void> {
+  await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '1 hour' WHERE id = ${id}`);
 }
 
 function stubFetch(rate: number = MOCK_RATE) {
@@ -165,7 +175,9 @@ describe('toolSchemas', () => {
     // refund-relevant transfer when it is omitted.
     expect(rr.function.parameters.required ?? []).not.toContain('transfer_id');
     const props = rr.function.parameters.properties as Record<string, unknown>;
-    expect(Object.keys(props)).toEqual(['transfer_id']);
+    // Program-Fix 15 PR C: `confirm` (optional) gates the 30-minute cancel.
+    expect(Object.keys(props)).toEqual(['transfer_id', 'confirm']);
+    expect(rr.function.parameters.required ?? []).not.toContain('confirm');
   });
 
   it('open_recall_dispute schema requires reason and makes transfer_id optional', () => {
@@ -1414,6 +1426,27 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     expect(metaText).not.toContain('doe');
   });
 
+  // Program-Fix 14 PR C (review r1): the quote-time screen warms the OFAC list first.
+  it('quote-time screen uses a newly activated OFAC version (warmed before the screen)', async () => {
+    const original = process.env.SANCTIONS_LIST;
+    try {
+      const ctx = await buildClearedCtx();
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+      await primeStaleOfacSource();
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 200,
+        funding_method: 'bank_transfer',
+        recipient_name: NEWLY_LISTED_PERSON,
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'newly@upi',
+      }, ctx);
+      expect(r.blocked).toBe(true);
+    } finally {
+      restoreOfacSource(original);
+    }
+  });
+
   it('BLOCKED for a formatting variant of a listed name (prs-03)', async () => {
     const ctx = await buildClearedCtx();
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
@@ -2326,7 +2359,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
   });
 });
 
-describe('request_refund (customer-facing refund request — suggest-only, ops approves)', () => {
+describe('request_refund (customer-facing refund request — suggest-only, ops approves)', { retry: 0 }, () => {
   type Ctx = Awaited<ReturnType<typeof buildCtx>>;
 
   // Mint an awaiting_payment transfer owned by ctx.phone via the real tool path.
@@ -2347,10 +2380,28 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     return created.transfer_id as string;
   }
 
+  // Paid OUTSIDE the 30-minute cancel window (Program-Fix 15 PR C): these
+  // cases pin the ordinary ops-reviewed refund request.
   async function mintPaid(ctx: Ctx): Promise<string> {
     const id = await mintTransfer(ctx);
     expect(await ctx.store.updateTransferFromWebhook(id, 'paid')).not.toBeNull();
+    await pastCancelWindow(id);
     return id;
+  }
+
+  // Paid INSIDE the window through the real settlement transaction (stage1 +
+  // the mock rail's mocksettle row), optionally with a captured charge.
+  async function mintPaidInWindow(ctx: Ctx, opts: { charged?: boolean } = {}): Promise<string> {
+    const id = await mintTransfer(ctx);
+    if (opts.charged) await createTransferRepo(db).setFundingRef(id, 'fund-t');
+    const t = (await ctx.store.getTransfer(id))!;
+    expect((await beginSettlement(db, t, { kyc: {}, payment: {}, whatsapp: {} })).kind).toBe('started');
+    return id;
+  }
+
+  async function outboxKeys(): Promise<string[]> {
+    const r = await db.execute(sql`SELECT dedupe_key FROM outbox WHERE dedupe_key IS NOT NULL ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string }> }).rows.map((x) => x.dedupe_key);
   }
 
   // Force a status the webhook machine can't reach (cancelled/blocked/in_review).
@@ -2365,7 +2416,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     // transfer_id is the customer's OWN id (no PII) — safe to surface so the bot
     // can name the specific transfer. opened/case_id belong to open_recall_dispute.
     const allowed = new Set([
-      'error', 'error_code', 'message', 'requested', 'reply_hint',
+      'error', 'error_code', 'message', 'requested', 'cancelled', 'reply_hint',
       'transfer_id', 'opened', 'case_id',
     ]);
     for (const k of Object.keys(result)) {
@@ -2525,7 +2576,20 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expectCustomerSafe(r);
   });
 
-  it('in_review: not refundable yet — the established "under review" wording only', async () => {
+  it('in_review past the 30-minute window: not refundable yet — the established "under review" wording only', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    const t = (await ctx.store.getTransfer(id))!;
+    expect((await beginHold(db, t)).kind).toBe('held');
+    await db.execute(sql`UPDATE outbox SET created_at = now() - interval '31 minutes' WHERE dedupe_key = ${`stage1:${id}`}`);
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('under_review');
+    expect(String(r.message).toLowerCase()).toContain('under review');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('in_review legacy row (no stage1, forced status): the established "under review" wording, nothing flagged or alerted', async () => {
     const ctx = await buildCtx(fakeRedis());
     const id = await mintTransfer(ctx);
     await forceStatus(ctx, id, 'in_review');
@@ -2533,6 +2597,134 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expect(r.error_code).toBe('under_review');
     expect(String(r.message).toLowerCase()).toContain('under review');
     expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
+  });
+
+  // ── Program-Fix 15 PR C: the 30-minute sender cancel (12 CFR 1005.34) ──
+
+  it('cancellable + no rail instruction out: CANCELS, queues the full refund, confirms', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx, { charged: true });
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(r.cancelled).toBe(true);
+    expect(r.transfer_id).toBe(id);
+    expect(String(r.reply_hint)).toContain('30-minute window');
+    expect(String(r.reply_hint)).toContain('refunded');
+    expectCustomerSafe(r);
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('cancelled');
+    expect(after?.refundStatus).toBe('pending');
+    expect(await outboxKeys()).toEqual(expect.arrayContaining([`refund:${id}`, `sendercancel:${id}`]));
+  });
+
+  it('cancellable, nothing captured here (partner-funded): cancels with NO refund promise', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx);
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(r.cancelled).toBe(true);
+    expect(String(r.reply_hint)).not.toMatch(/refund/i);
+    expect(await outboxKeys()).not.toContain(`refund:${id}`);
+  });
+
+  it('cancellable but the rail row was already claimed: ESCALATES — requested, no flip, the cancel-request hint', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx, { charged: true });
+    await db.execute(sql`UPDATE outbox SET status = 'processing', attempts = 1, locked_at = now() WHERE dedupe_key = ${`mocksettle:${id}`}`);
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(r.requested).toBe(true);
+    expect(String(r.reply_hint)).toContain('cancellation request received');
+    expectCustomerSafe(r);
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('paid');
+    expect(after?.refundStatus).toBe('requested');
+    expect(await outboxKeys()).toContain(`regecancel:${id}`);
+  });
+
+  it('paid inside the window with NO stage1 row (funded-callback path): fails closed and escalates', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await ctx.store.updateTransferFromWebhook(id, 'paid'); // paid_at = now(), no stage1:<id>
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(r.requested).toBe(true);
+    expect(String(r.reply_hint)).toContain('cancellation request received');
+    expect((await ctx.store.getTransfer(id))?.status).toBe('paid');
+    expect(await outboxKeys()).toContain(`regecancel:${id}`);
+  });
+
+  it('paid_at recent but the CHARGE was 45 min ago (a released hold): window_passed → the ordinary refund flag', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    const t = (await ctx.store.getTransfer(id))!;
+    await beginHold(db, t);
+    await db.execute(sql`UPDATE outbox SET created_at = now() - interval '45 minutes' WHERE dedupe_key = ${`stage1:${id}`}`);
+    await createTransferRepo(db).markPaidIfInReview(id);
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(r.requested).toBe(true);
+    expect(String(r.reply_hint)).toContain('3-5 business days once approved');
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('paid');
+    expect(after?.refundStatus).toBe('requested');
+    expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
+  });
+
+  it('C4: in_review inside the window ESCALATES with a neutral reply — no flip, no refund promise, no review wording', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    const t = (await ctx.store.getTransfer(id))!;
+    expect((await beginHold(db, t)).kind).toBe('held');
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(r.requested).toBe(true);
+    const text = JSON.stringify(r).toLowerCase();
+    expect(text).not.toMatch(/refund|review|compliance|screen|sanction/);
+    expectCustomerSafe(r);
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('in_review');
+    expect(after?.refundStatus).toBe('requested');
+    expect(await outboxKeys()).toContain(`regecancel:${id}`);
+    expect(await outboxKeys()).not.toContain(`refund:${id}`);
+  });
+
+  it('no transfer_id: prefers the latest CANCELLABLE transfer', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const deliveredId = await mintSmall(ctx);
+    await ctx.store.updateTransferFromWebhook(deliveredId, 'delivered');
+    await ctx.store.saveTransfer({ ...(await ctx.store.getTransfer(deliveredId))!, deliveredAt: new Date(Date.now() - 25 * 3_600_000).toISOString() });
+    const id = await mintSmall(ctx);
+    const t = (await ctx.store.getTransfer(id))!;
+    await beginSettlement(db, t, { kyc: {}, payment: {}, whatsapp: {} });
+    const r = await executeTool('request_refund', {}, ctx);
+    // No id ⇒ never a cancel: the tool names the transfer and asks to confirm.
+    expect(r.error_code).toBe('confirm_cancel');
+    expect(r.transfer_id).toBe(id);
+    expect((await ctx.store.getTransfer(id))?.status).toBe('paid');
+    const ok = await executeTool('request_refund', { transfer_id: id, confirm: true }, ctx);
+    expect(ok.cancelled).toBe(true);
+  });
+
+  it('cancellable WITHOUT confirm (or confirm without the id): confirm_cancel and nothing moves', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx, { charged: true });
+    for (const args of [{ transfer_id: id }, { confirm: true }, { transfer_id: id, confirm: 'true' }]) {
+      const r = await executeTool('request_refund', args, ctx);
+      expect(r.error_code).toBe('confirm_cancel');
+      expect(r.transfer_id).toBe(id);
+      expect(String(r.reply_hint)).toContain('confirm: true');
+      expectCustomerSafe(r);
+    }
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('paid');
+    expect(after?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
+  });
+
+  it('web + enrolled MFA: a confirmed cancel still needs the receipt step-up (nothing cancelled)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx, { charged: true });
+    expect(await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP')).toBe(true);
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, { ...ctx, channel: 'web' as const });
+    expect(r.error_code).toBe('verify_on_receipt');
+    expect((await ctx.store.getTransfer(id))?.status).toBe('paid');
   });
 
   // ── transfer_id OMITTED: resolve from the customer's own recent transfers ──
@@ -2569,6 +2761,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     });
     const paidId = await mintSmall(ctx);
     expect(await ctx.store.updateTransferFromWebhook(paidId, 'paid')).not.toBeNull();
+    await pastCancelWindow(paidId);
 
     const r = await executeTool('request_refund', {}, ctx);
     expect(r.requested).toBe(true);
@@ -2607,7 +2800,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
   });
 });
 
-describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () => {
+describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { retry: 0 }, () => {
   type Ctx = Awaited<ReturnType<typeof buildCtx>>;
 
   async function mintDelivered(ctx: Ctx): Promise<string> {
@@ -2903,6 +3096,7 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
 
     // Paid + owned ⇒ the one eligible state — works identically on web.
     await owner.store.updateTransferFromWebhook(id, 'paid');
+    await pastCancelWindow(id);
     const ok = await executeTool('request_refund', { transfer_id: id }, { ...owner, channel: 'web' as const });
     expect(ok.requested).toBe(true);
   });
@@ -3272,6 +3466,20 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(rows[0].subject_id).toBe(sellerId);
     expect(rows[0].meta).toMatchObject({ decision: 'clear', listSource: 'mock-watchlist' });
     expect(JSON.stringify(rows[0].meta).toLowerCase()).not.toContain('acme');
+  });
+
+  // Program-Fix 14 PR C (review r1): register_seller warms the OFAC list first.
+  it('register_seller screens against a newly activated OFAC version (warmed before the screen)', async () => {
+    const original = process.env.SANCTIONS_LIST;
+    try {
+      const ctx = await buildCtx(fakeRedis());
+      await primeStaleOfacSource();
+      const r = await executeTool('register_seller', { business_name: NEWLY_LISTED_BUSINESS }, ctx);
+      expect(r.registered).toBe(false);
+      expect((await ctx.store.getSeller(PHONE, 'default'))?.kycReviewState).toBe('needs_review');
+    } finally {
+      restoreOfacSource(original);
+    }
   });
 
   it('evidence: a hit writes decision "match"', async () => {
@@ -5891,5 +6099,86 @@ describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () =>
     }, ctx);
     expect(same.draft_id).toBeDefined();
     expect((await ctx.draftStore.consumeDraft(same.draft_id as string))?.recipient.payoutDestination).toBe(FIX6_REAL);
+  });
+});
+
+// Program-Fix 49D review r1: the portal chat (/api/account/chat, channel 'web')
+// must not skip the receipt page's MFA step-up for refund / recall.
+describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D)', { retry: 0 }, () => {
+  type Ctx = Awaited<ReturnType<typeof buildCtx>>;
+  const B32 = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+
+  async function mint(ctx: Ctx, deliver: boolean): Promise<string> {
+    const created = await executeTool(
+      'create_transfer',
+      {
+        amount_usd: 100,
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
+        funding_method: 'bank_transfer',
+      },
+      ctx,
+    );
+    const id = created.transfer_id as string;
+    await ctx.store.updateTransferFromWebhook(id, 'paid');
+    if (deliver) await ctx.store.updateTransferFromWebhook(id, 'delivered');
+    else await pastCancelWindow(id); // the ordinary refund path (Program-Fix 15 PR C)
+    return id;
+  }
+  const web = (ctx: Ctx) => ({ ...ctx, channel: 'web' as const });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('enrolled web customer: request_refund refuses with verify_on_receipt and writes nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, false);
+    expect(await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32)).toBe(true);
+    const r = await executeTool('request_refund', { transfer_id: id }, web(ctx));
+    expect(r.error_code).toBe('verify_on_receipt');
+    expect(String(r.reply_hint)).toContain(`/account/receipt/${id}`);
+    expect(r.requested).toBeUndefined();
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('enrolled web customer: open_recall_dispute refuses with verify_on_receipt and opens no case', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, true);
+    await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32);
+    const r = await executeTool('open_recall_dispute', { transfer_id: id, reason: 'not_received' }, web(ctx));
+    expect(r.error_code).toBe('verify_on_receipt');
+    expect(r.opened).toBeUndefined();
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('CUSTOMER_MFA_REQUIRED on: an unenrolled web customer is refused too (both tools)', async () => {
+    vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
+    const ctx = await buildCtx(fakeRedis());
+    const paid = await mint(ctx, false);
+    const r1 = await executeTool('request_refund', { transfer_id: paid }, web(ctx));
+    expect(r1.error_code).toBe('verify_on_receipt');
+    expect((await ctx.store.getTransfer(paid))?.refundStatus ?? 'none').toBe('none');
+    const delivered = await mint(ctx, true);
+    const r2 = await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, web(ctx));
+    expect(r2.error_code).toBe('verify_on_receipt');
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('unenrolled web customer with the flag off: unchanged (the refund is flagged)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, false);
+    const r = await executeTool('request_refund', { transfer_id: id }, web(ctx));
+    expect(r.requested).toBe(true);
+  });
+
+  it('WhatsApp channel is unchanged even when enrolled and the flag is on', async () => {
+    vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, B32);
+    const paid = await mint(ctx, false);
+    expect((await executeTool('request_refund', { transfer_id: paid }, ctx)).requested).toBe(true);
+    const delivered = await mint(ctx, true);
+    expect((await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, ctx)).opened).toBe(true);
   });
 });

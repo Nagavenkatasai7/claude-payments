@@ -2,6 +2,7 @@ import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { screenTransfer } from './compliance';
+import { warmSanctionsList } from './providers/sanctions-provider';
 import { SCREENING_REASONS, type ResolvedCorridorRules } from './compliance-config';
 import { sanctionsAuditEvent } from './sanctions/evidence';
 import type { Transfer } from './types';
@@ -34,6 +35,10 @@ export async function rescreenBeforePay(
   names: { senderName: string; recipientName: string },
   rules: ResolvedCorridorRules,
 ): Promise<RescreenOutcome> {
+  // Program-Fix 14 PR C: refresh the OFAC list (no-op unless
+  // SANCTIONS_LIST=ofac-sdn) — here, OUTSIDE the transaction below, never
+  // inside screenTransfer (the mint calls that under its sender lock).
+  await warmSanctionsList();
   const result = await screenTransfer({
     amountUsd: transfer.amountUsd,
     recipientName: names.recipientName,

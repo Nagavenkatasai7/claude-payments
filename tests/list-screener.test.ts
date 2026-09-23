@@ -2,7 +2,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
-import { ListSanctionsScreener, SanctionsListUnavailableError, jaroWinkler } from '@/lib/sanctions/list-screener';
+import {
+  ListSanctionsScreener,
+  SanctionsListUnavailableError,
+  jaroWinkler,
+  listIndexBuildsForTests,
+} from '@/lib/sanctions/list-screener';
 import type { SanctionsListSource } from '@/lib/sanctions/list-source';
 
 const LIST = parseOfacSdnXml(readFileSync(join(__dirname, 'fixtures', 'ofac-sdn-sample.xml'), 'utf8'));
@@ -67,12 +72,57 @@ describe('ListSanctionsScreener', () => {
     expect(extra.listInfo().hash).not.toBe(plain.listInfo().hash);
   });
 
-  it('loads the list once and reuses it', async () => {
+  // PR C: the SOURCE owns caching (the Postgres source serves its cached
+  // active version), so the screener asks it on every screen and re-indexes
+  // only when it hands back a different list (a newly activated version).
+  it('asks the source each screen but indexes a list once, shared across screeners', async () => {
     const src = fixtureSource();
+    const a = new ListSanctionsScreener(src);
+    const b = new ListSanctionsScreener(src, { extraNames: ['john doe'] });
+    await a.screen({ name: 'a', sourceCountry: 'US' });
+    await a.screen({ name: 'b', sourceCountry: 'US' });
+    await b.screen({ name: 'c', sourceCountry: 'US' });
+    expect(src.load).toHaveBeenCalledTimes(3);
+    expect(listIndexBuildsForTests(LIST)).toBe(1);
+  });
+
+  it('picks up a newly activated list version on the next screen', async () => {
+    const next = { ...LIST, version: '2026-09-22', hash: 'f'.repeat(64), entries: [
+      ...LIST.entries,
+      { id: 'sdn:2001', names: ['Newly Listed Person'], type: 'Individual', programs: ['SDGT'] },
+    ] };
+    const src = { load: vi.fn().mockResolvedValueOnce(LIST).mockResolvedValue(next) };
     const s = new ListSanctionsScreener(src);
-    await s.screen({ name: 'a', sourceCountry: 'US' });
-    await s.screen({ name: 'b', sourceCountry: 'US' });
-    expect(src.load).toHaveBeenCalledTimes(1);
+    expect(await s.screen({ name: 'Newly Listed Person', sourceCountry: 'US' })).toEqual({ matched: false });
+    expect(s.listInfo().version).toBe('2026-09-18');
+    expect(await s.screen({ name: 'Newly Listed Person', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'sdn:2001' });
+    expect(s.listInfo().version).toBe('2026-09-22');
+  });
+
+  it('a WEAK a.k.a. exact match is a possible match for review (score 1), never a block', async () => {
+    const s = new ListSanctionsScreener(fixtureSource());
+    const hit = await s.screen({ name: 'Ben', sourceCountry: 'US' });
+    expect(hit).toMatchObject({ matched: false, possibleMatch: true, matchScore: 1, entryId: 'sdn:1002' });
+  });
+
+  it('a very long name is screened fast (keys that cannot reach the threshold are skipped) and still fuzzy-matches', async () => {
+    const s = new ListSanctionsScreener(fixtureSource());
+    const t0 = performance.now();
+    expect(await s.screen({ name: 'x'.repeat(4000), sourceCountry: 'US' })).toEqual({ matched: false });
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect((await s.screen({ name: 'Banco Ejemplo Nacionel', sourceCountry: 'US' })).possibleMatch).toBe(true);
+  });
+
+  it('length-ratio skip boundary: a 6-char name vs a 10-char entry sharing a 4-char prefix still fuzzy-matches (JW ≈ 0.92)', async () => {
+    // ratio 0.6 — above the provable 0.5 bound; any tighter skip (e.g. < 0.83) would lose this match.
+    expect(jaroWinkler('abcdef', 'abcdefghij')).toBeGreaterThanOrEqual(0.9);
+    const s = new ListSanctionsScreener(fixtureSource(), { extraNames: ['abcdefghij'] });
+    expect(await s.screen({ name: 'abcdef', sourceCountry: 'US' })).toMatchObject({ possibleMatch: true, entryId: 'extra:0' });
+  });
+
+  it('weak a.k.a.s are exact-only: a near miss on one is not a hit', async () => {
+    const s = new ListSanctionsScreener(fixtureSource());
+    expect(await s.screen({ name: 'Benn', sourceCountry: 'US' })).toEqual({ matched: false });
   });
 
   it('a load failure FAILS CLOSED: screen rejects with SanctionsListUnavailableError (never a pass) and retries next time', async () => {

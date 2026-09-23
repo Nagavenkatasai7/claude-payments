@@ -68,6 +68,6 @@ describe('support role — command palette', () => {
 
 describe('support role — defaults', () => {
   it('SUPPORT_DEFAULT_PERMISSIONS grants no money permission', () => {
-    expect(SUPPORT_DEFAULT_PERMISSIONS).toEqual({ canCancel: false, canResend: false, canAssign: false });
+    expect(SUPPORT_DEFAULT_PERMISSIONS).toEqual({ canCancel: false, canResend: false, canAssign: false, canRevealPii: false });
   });
 });

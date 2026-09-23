@@ -128,6 +128,12 @@ export async function resendPaymentLink(
   if (!transfer) {
     throw new Error('Transfer not found');
   }
+  // Program-Fix 44 P2: a sandbox (test-key) transfer is never payable on the
+  // hosted page and must never message a real phone. Refused before any read
+  // of consent and before any send.
+  if (transfer.environment === 'test') {
+    throw new Error('Sandbox transfers have no payment link.');
+  }
   if (consent && (await suppressForOptOut(consent, transfer.partnerId, transfer.phone, 'nonessential'))) {
     throw new Error('Cannot resend: this customer has opted out of WhatsApp messages (replied STOP).');
   }

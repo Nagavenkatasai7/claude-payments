@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { NextRequest } from 'next/server';
 import { freshDb, seedPartner } from './helpers-db';
 import { fakeRedis } from './helpers';
+import { eq } from 'drizzle-orm';
 import { apiKeys } from '@/db/schema';
 import type { Db } from '@/db/client';
 import type { ApiScope } from '@/lib/partner-api-scopes';
@@ -15,7 +16,8 @@ import type { ApiScope } from '@/lib/partner-api-scopes';
 //   • the route table below equals the handlers actually exported under
 //     src/app/api/partner/v1 (a new route without a scope fails this file);
 //   • each handler passes exactly its scope to guardPartner;
-//   • a test key gets 403 on the 8 out-of-scope handlers (no service call);
+//   • a test key gets 403 on the 4 out-of-scope handlers (no service call);
+//     P2 (sandbox isolation) gave it the 4 transactions handlers;
 //   • a PRE-FIX legacy key (pk_<id> id + sr_live_ plaintext) and a new live key
 //     pass all 11.
 
@@ -23,6 +25,7 @@ const h = vi.hoisted(() => ({
   db: null as unknown as Db,
   redis: null as unknown as ReturnType<typeof import('./helpers').fakeRedis>,
   scopesSeen: [] as string[],
+  modesSeen: [] as string[],
   svcCalls: 0,
 }));
 
@@ -69,10 +72,10 @@ vi.mock('@/lib/partner-api-service', () => {
     createQuote: async () => ok(),
     validateBeneficiary: () => ok(),
     createBeneficiary: async () => ok(),
-    createTransaction: async () => ok(),
-    listTransactions: async () => ok(),
-    getTransaction: async () => ok(),
-    confirmTransaction: async () => ok(),
+    createTransaction: async (d: { keyMode: string }) => (h.modesSeen.push(d.keyMode), ok()),
+    listTransactions: async (d: { keyMode: string }) => (h.modesSeen.push(d.keyMode), ok()),
+    getTransaction: async (d: { keyMode: string }) => (h.modesSeen.push(d.keyMode), ok()),
+    confirmTransaction: async (d: { keyMode: string }) => (h.modesSeen.push(d.keyMode), ok()),
     pushPartnerRate: async () => ok(),
     listPartnerRates: async () => ok(),
     listSettlements: async () => {
@@ -107,10 +110,10 @@ const ROUTES: Row[] = [
   { route: 'quote', method: 'POST', scope: 'quote', handler: quote.POST as Handler, testKey: 'allowed' },
   { route: 'beneficiaries/validate', method: 'POST', scope: 'beneficiaries:validate', handler: validate.POST as Handler, testKey: 'allowed' },
   { route: 'beneficiaries', method: 'POST', scope: 'beneficiaries:write', handler: beneficiaries.POST as Handler, testKey: 'denied' },
-  { route: 'transactions', method: 'GET', scope: 'transactions:read', handler: transactions.GET as Handler, testKey: 'denied' },
-  { route: 'transactions', method: 'POST', scope: 'transactions:write', handler: transactions.POST as Handler, testKey: 'denied' },
-  { route: 'transactions/[id]', method: 'GET', scope: 'transactions:read', handler: transaction.GET as Handler, testKey: 'denied' },
-  { route: 'transactions/[id]/confirm', method: 'POST', scope: 'transactions:write', handler: confirm.POST as Handler, testKey: 'denied' },
+  { route: 'transactions', method: 'GET', scope: 'transactions:read', handler: transactions.GET as Handler, testKey: 'allowed' },
+  { route: 'transactions', method: 'POST', scope: 'transactions:write', handler: transactions.POST as Handler, testKey: 'allowed' },
+  { route: 'transactions/[id]', method: 'GET', scope: 'transactions:read', handler: transaction.GET as Handler, testKey: 'allowed' },
+  { route: 'transactions/[id]/confirm', method: 'POST', scope: 'transactions:write', handler: confirm.POST as Handler, testKey: 'allowed' },
   { route: 'rates', method: 'GET', scope: 'rates:read', handler: rates.GET as Handler, testKey: 'denied' },
   { route: 'rates', method: 'PUT', scope: 'rates:write', handler: rates.PUT as Handler, testKey: 'denied' },
   { route: 'settlements', method: 'GET', scope: 'settlements:read', handler: settlements.GET as Handler, testKey: 'denied' },
@@ -188,9 +191,9 @@ describe('partner API route scopes (Program-Fix 44 P1)', () => {
     }
   });
 
-  it('a TEST key is 403 on the 8 out-of-scope handlers and never reaches the service', async () => {
+  it('a TEST key is 403 on the 4 out-of-scope handlers and never reaches the service', async () => {
     const denied = ROUTES.filter((r) => r.testKey === 'denied');
-    expect(denied).toHaveLength(8);
+    expect(denied).toHaveLength(4);
     for (const row of denied) {
       h.svcCalls = 0;
       const res = await call(row, testKey);
@@ -200,11 +203,36 @@ describe('partner API route scopes (Program-Fix 44 P1)', () => {
     }
   });
 
-  it('a TEST key passes corridors, quote and beneficiaries/validate', async () => {
-    for (const row of ROUTES.filter((r) => r.testKey === 'allowed')) {
+  it('a TEST key passes corridors, quote, beneficiaries/validate and the 4 transactions handlers (P2)', async () => {
+    const allowed = ROUTES.filter((r) => r.testKey === 'allowed');
+    expect(allowed).toHaveLength(7);
+    for (const row of allowed) {
       const res = await call(row, testKey);
       expect(res.status, `${row.method} ${row.route}`).toBe(200);
     }
+  });
+
+  it('the service receives the KEY mode as deps.keyMode (test key ⇒ sandbox, live and legacy ⇒ live)', async () => {
+    const txRoutes = ROUTES.filter((r) => r.route.startsWith('transactions'));
+    expect(txRoutes).toHaveLength(4);
+    for (const [bearer, mode] of [[testKey, 'test'], [liveKey, 'live'], [LEGACY_PLAINTEXT, 'live']] as const) {
+      for (const row of txRoutes) {
+        h.modesSeen = [];
+        await call(row, bearer);
+        expect(h.modesSeen, `${row.method} ${row.route} ${mode}`).toEqual([mode]);
+      }
+    }
+  });
+
+  it('a stored api_keys.scopes set narrows a key (P2): quote-only key is 403 on corridors', async () => {
+    const { createPartnerApiKeyStore } = await import('@/lib/partner-api-key');
+    const narrow = (await createPartnerApiKeyStore(h.db, { pepper: PEPPER }).issue('acme')).plaintext;
+    const hash = createHash('sha256').update(`${narrow}${PEPPER}`).digest('hex');
+    await h.db.update(apiKeys).set({ scopes: ['quote'] }).where(eq(apiKeys.keyHash, hash));
+    const q = ROUTES.find((r) => r.route === 'quote')!;
+    const c = ROUTES.find((r) => r.route === 'corridors')!;
+    expect((await call(q, narrow)).status).toBe(200);
+    expect((await call(c, narrow)).status).toBe(403);
   });
 
   it('PINNED: a pre-fix legacy key (pk_<id> + sr_live_) passes ALL 11 handlers', async () => {

@@ -17,6 +17,7 @@ import type {
   RefundStatus,
   SenderRecipientRelationship,
   Transfer,
+  TransferEnvironment,
   TransferPurpose,
   TransferStatus,
 } from '@/lib/types';
@@ -126,6 +127,9 @@ export function transferToRow(
     kybReviewNotes: t.kybReviewNotes ?? null,
     assignedTo: t.assignedTo ?? null,
     adminNote: t.adminNote ?? null,
+    // Program-Fix 44 P2: write-once — saveTransfer strips it from its
+    // conflict-update, so only the first insert ever sets it.
+    environment: t.environment ?? 'live',
     createdAt: new Date(t.createdAt),
     paidAt: t.paidAt ? new Date(t.paidAt) : null,
     deliveredAt: t.deliveredAt ? new Date(t.deliveredAt) : null,
@@ -175,6 +179,9 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
     amountSource: num(row.amountSource),
     feeSource: num(row.feeSource),
     totalChargeSource: num(row.totalChargeSource),
+    // Program-Fix 44 P2: ALWAYS set (never inside an if) — the rail chokepoint
+    // reads it off every RETURNING row. Anything but 'test' is live.
+    environment: (row.environment === 'test' ? 'test' : 'live') as TransferEnvironment,
   };
   const paidAt = isoOpt(row.paidAt);
   if (paidAt) t.paidAt = paidAt;

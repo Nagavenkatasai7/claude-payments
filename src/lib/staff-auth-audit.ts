@@ -29,7 +29,10 @@ export type StaffAuthAction =
   | 'auth.login.throttled'
   | 'auth.logout'
   | 'auth.password.change'
-  | 'auth.password.reset';
+  | 'auth.password.reset'
+  | 'auth.mfa.enroll'
+  | 'auth.mfa.failed'
+  | 'auth.mfa.reset';
 
 export interface StaffAuthEvent {
   action: StaffAuthAction;

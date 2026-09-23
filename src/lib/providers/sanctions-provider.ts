@@ -4,7 +4,10 @@ import { env } from '../env';
 import { logWarn } from '../log';
 import { normalizeName, tokenKey } from '../sanctions/normalize';
 import { ListSanctionsScreener } from '../sanctions/list-screener';
-import type { SanctionsList, SanctionsListSource } from '../sanctions/list-source';
+import type { SanctionsListSource } from '../sanctions/list-source';
+import { PostgresSanctionsListSource } from '../sanctions/pg-list-source';
+import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
+import { getDb } from '@/db/client';
 
 export interface SanctionsHit {
   matched: boolean;
@@ -92,35 +95,18 @@ export class MockSanctionsScreener implements SanctionsScreener {
 
 // ── The list selector (Program-Fix 14 step 8) ────────────────────────────────
 // SANCTIONS_LIST picks WHICH list is screened, never WHETHER: every value maps
-// to a screener. Unset / 'mock' → the mock; 'ofac-sdn' → the bundled snapshot
-// (fails closed to `flagged` if it cannot load); anything else → the mock plus
-// one warning. It is optional, not in boot-assert, and unset in production.
+// to a screener. Unset / 'mock' → the mock; 'ofac-sdn' → the OFAC SDN list the
+// daily loader stored in Postgres (PR C, migration 0023; fails closed to
+// `flagged` when no version is loaded); anything else → the mock plus one
+// warning. It is optional, not in boot-assert, and unset in production.
 
-/** Where the (uncommitted) snapshot script writes the OFAC list. */
-export const OFAC_SNAPSHOT_RELATIVE_PATH = 'src/lib/sanctions/data/ofac-snapshot.json';
-
-/**
- * Reads the snapshot lazily (node:fs is imported at call time, and the JSON is
- * never statically imported, so a missing file breaks neither the build nor
- * any request that does not select the OFAC list). Only a successful load is
- * memoised; a failure is retried on the next screen.
- */
-class SnapshotFileListSource implements SanctionsListSource {
-  private cached: SanctionsList | null = null;
-  async load(): Promise<SanctionsList> {
-    if (this.cached) return this.cached;
-    const [{ readFile }, { join }] = await Promise.all([import('node:fs/promises'), import('node:path')]);
-    const raw = await readFile(join(process.cwd(), OFAC_SNAPSHOT_RELATIVE_PATH), 'utf8');
-    const list = JSON.parse(raw) as SanctionsList;
-    if (!list || typeof list.version !== 'string' || !Array.isArray(list.entries) || list.entries.length === 0) {
-      throw new Error('invalid OFAC snapshot');
-    }
-    this.cached = list;
-    return list;
-  }
+function defaultOfacSource(): SanctionsListSource {
+  // getDb() is resolved lazily (at the first cold load), so selecting the mock
+  // — the default — never opens a pool.
+  return new PostgresSanctionsListSource(() => createSanctionsListRepo(getDb()), { source: 'ofac-sdn' });
 }
 
-let ofacSource: SanctionsListSource = new SnapshotFileListSource();
+let ofacSource: SanctionsListSource = defaultOfacSource();
 let warnedUnknown = false;
 // The factory runs on EVERY screen; indexing the SDN list (~44k names) per call
 // would be wasteful, so a list screener is kept per distinct base list (the
@@ -128,11 +114,32 @@ let warnedUnknown = false;
 const ofacScreeners = new Map<string, ListSanctionsScreener>();
 const MAX_CACHED_SCREENERS = 64;
 
-/** Test seam: replace the OFAC list source (null restores the snapshot file) and reset the one-time warning. */
+/** Test seam: replace the OFAC list source (null restores the Postgres source) and reset the one-time warning. */
 export function setOfacListSourceForTests(src: SanctionsListSource | null): void {
-  ofacSource = src ?? new SnapshotFileListSource();
+  ofacSource = src ?? defaultOfacSource();
   warnedUnknown = false;
   ofacScreeners.clear();
+}
+
+/** Test seam: the OFAC list source currently in use. */
+export function ofacListSourceForTests(): SanctionsListSource {
+  return ofacSource;
+}
+
+/**
+ * PR C: refresh the OFAC list BEFORE a mint takes its sender lock
+ * (transfer-create.ts), so the screen inside the mint transaction reads the
+ * cached list and never needs a second pool connection. A no-op unless
+ * SANCTIONS_LIST=ofac-sdn. Never throws: a failed refresh keeps the last
+ * loaded version, and a process with none fails closed at screen time.
+ */
+export async function warmSanctionsList(): Promise<void> {
+  if (env.sanctionsList !== 'ofac-sdn') return;
+  try {
+    await ofacSource.warm?.();
+  } catch {
+    // warm() is contractually non-throwing; a custom source is guarded here.
+  }
 }
 
 function ofacScreener(baseList: string[]): ListSanctionsScreener {

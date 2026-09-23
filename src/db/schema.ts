@@ -112,6 +112,23 @@ export const transfers = pgTable(
     kybReviewNotes: text('kyb_review_notes'),
     assignedTo: text('assigned_to'),
     adminNote: text('admin_note'),
+    // Program-Fix 44 P2: 'live' | 'test'. A 'test' row was minted by a sandbox
+    // (sr_test_) Partner API key: it never reaches a real rail, never messages a
+    // customer, and never counts toward a live customer's caps, velocity or AML
+    // aggregates. Write-once (saveTransfer's conflict-update never touches it).
+    // A constant DEFAULT is catalog-only on PG11+ (no table rewrite). The union
+    // is enforced in code (types.ts TransferEnvironment); no CHECK, so the
+    // migration never scans the table.
+    environment: text('environment').notNull().default('live'),
+    // Program-Fix 14 PR C (0023, B3): the mint's sanctions screening evidence
+    // (ScreeningEvidence: list source/version/hash, decision, per-party KEYED
+    // input hash + score + list entry id — never a name). INSERT-ONLY: the
+    // mint and the quote-time blocked row set it; saveTransfer's
+    // conflict-update never touches it, and it is NOT mapped onto the domain
+    // Transfer (so it never reaches an API response). NULL = pre-0023 row or
+    // an old-build mint (the audit_events 'sanctions.screen' row is the other
+    // record).
+    screening: jsonb('screening'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -240,6 +257,13 @@ export const customers = pgTable(
     phoneVerifiedAt: timestamp('phone_verified_at', { withTimezone: true }),
     optInAt: timestamp('opt_in_at', { withTimezone: true }),
     optedOutAt: timestamp('opted_out_at', { withTimezone: true }),
+    // Program-Fix 49D (0020, portal-03): opt-in portal TOTP. The base32 secret
+    // is ENCRYPTED (field-crypto, customerRowCtx(row, 'mfa_totp_enc')). Present
+    // = enrolled. NEITHER column is in customerToRow: saveCustomer's whole-row
+    // upsert never names them, so only customer-repo's single-column MFA
+    // writers can set or clear an enrolment.
+    mfaTotpEnc: text('mfa_totp_enc'), // ENCRYPTED
+    mfaEnrolledAt: timestamp('mfa_enrolled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -367,6 +391,10 @@ export const apiKeys = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    // Program-Fix 44 P2: an explicit scope set (JSON array of ApiScope). NULL ⇒
+    // the key mode's default set, so every existing key keeps its full live
+    // scope. Never widens a mode: authenticate() intersects it with the mode's set.
+    scopes: jsonb('scopes'),
   },
   (t) => [
     uniqueIndex('api_keys_hash').on(t.keyHash), // O(1) auth lookup
@@ -434,6 +462,8 @@ export const recipients = pgTable(
   (t) => [primaryKey({ columns: [t.partnerId, t.senderPhone, t.recipientPhone] })],
 );
 
+// Append-only IN THE DATABASE (Program-Fix 28, drizzle/0019): a BEFORE UPDATE
+// OR DELETE row trigger rejects any change to an existing row. Only INSERT.
 export const auditEvents = pgTable(
   'audit_events',
   {
@@ -446,7 +476,18 @@ export const auditEvents = pgTable(
     meta: jsonb('meta'),
     at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('audit_partner_at').on(t.partnerId, t.at.desc())],
+  (t) => [
+    index('audit_partner_at').on(t.partnerId, t.at.desc()),
+    // Program-Fix 28 PR B: the per-subject trails (listKycForSubject,
+    // lastSendLimitChange) filter on (partner_id, subject_id).
+    index('audit_partner_subject').on(t.partnerId, t.subjectId),
+    // Program-Fix 14 PR C (0023): every mint now writes a sanctions.screen row,
+    // so the per-subject look-ups by action (the pay-page 'transaction.create'
+    // NOT EXISTS, a sanctions look-back) and the system-actor timelines get
+    // their own indexes as the table grows.
+    index('audit_subject_action').on(t.subjectId, t.action),
+    index('audit_actor_type_at').on(t.actorType, t.at.desc()),
+  ],
 );
 
 // The duplicate-window killer: PK (partner_id, key) makes a replayed create
@@ -484,6 +525,10 @@ export const corridorRequests = pgTable('corridor_requests', {
   approxAmount: numeric('approx_amount', { precision: 12, scale: 2 }),
   approxCurrency: text('approx_currency'),
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
+  // Program-Fix 49D (0020, partner-02): the lead's review state. NULLABLE with
+  // no default and no CHECK: NULL means 'open' (every row captured so far);
+  // the values are CorridorRequestStatus (src/lib/types.ts).
+  status: text('status'),
 });
 
 // Inbound "Partner with us" leads from the public landing form. A durable record
@@ -604,5 +649,75 @@ export const outbox = pgTable(
       .on(t.status, t.nextAttemptAt)
       .where(sql`${t.status} IN ('pending','failed','processing')`),
     index('outbox_lease').on(t.leaseUntil).where(sql`${t.status} = 'processing'`),
+  ],
+);
+
+// ── Program-Fix 14 PR C (0023): the loaded sanctions lists ────────────────────
+// One row per DISTINCT published list (source + content hash). The daily loader
+// (src/lib/sanctions/list-loader.ts, OFF unless SANCTIONS_LOADER_ENABLED) inserts
+// a new version with its entries and flips `active` in ONE transaction; the
+// partial unique index keeps at most one active version per source. The
+// screener (SANCTIONS_LIST=ofac-sdn) reads only the active version and FAILS
+// CLOSED (every transfer to review) when there is none. Public-domain list data
+// only — no customer data lives in these tables.
+export const sanctionsListVersions = pgTable(
+  'sanctions_list_versions',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    source: text('source').notNull(),            // 'ofac-sdn'
+    version: text('version').notNull(),          // the publish date (YYYY-MM-DD)
+    hash: text('hash').notNull(),                // sha256 over the canonical entries
+    entryCount: integer('entry_count').notNull(),
+    nameCount: integer('name_count').notNull(),
+    active: boolean('active').notNull().default(false),
+    loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp('activated_at', { withTimezone: true }),
+    checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('sanctions_list_versions_source_hash').on(t.source, t.hash),
+    uniqueIndex('sanctions_list_versions_one_active').on(t.source).where(sql`${t.active}`),
+  ],
+);
+
+export const sanctionsListEntries = pgTable(
+  'sanctions_list_entries',
+  {
+    versionId: bigint('version_id', { mode: 'number' })
+      .notNull()
+      .references(() => sanctionsListVersions.id, { onDelete: 'cascade' }),
+    entryId: text('entry_id').notNull(),         // 'sdn:<uid>'
+    type: text('type').notNull(),                // 'Individual' | 'Entity' | …
+    programs: jsonb('programs').notNull(),       // string[]
+    names: jsonb('names').notNull(),             // string[]: primary name first, then strong AKAs
+    weakNames: jsonb('weak_names').notNull().default([]), // string[]: weak AKAs (review, never block)
+  },
+  (t) => [primaryKey({ columns: [t.versionId, t.entryId] })],
+);
+
+// Program-Fix 45 P5 (crypto-03, migration 0022): the staff ledger. Staff
+// records lived only in Redis (auth-store `staff:<username>`, no TTL). During
+// the dual-write release auth-store writes BOTH stores and a record exists only
+// while its Redis record exists; this row can only RESTRICT it (status, role,
+// permissions, partner scope). password_hash is a mirror that is NOT read yet
+// (the PG-first flip is a later PR). partner_id NULL = platform staff.
+export const staff = pgTable(
+  'staff',
+  {
+    username: text('username').primaryKey(),
+    partnerId: text('partner_id').references(() => partners.id),
+    name: text('name').notNull(),
+    role: text('role').notNull(),
+    permissions: jsonb('permissions').notNull(),
+    passwordHash: text('password_hash').notNull(),
+    status: text('status').notNull().default('active'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('staff_role_check', sql`${t.role} IN ('admin','agent','support')`),
+    check('staff_status_check', sql`${t.status} IN ('active','suspended')`),
+    index('staff_partner').on(t.partnerId),
   ],
 );

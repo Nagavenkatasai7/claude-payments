@@ -118,6 +118,8 @@ These are mostly partnerships and licensing, not code. The provider seams (`Paym
 6. **AI schedule suggestions** — propose a recurring schedule from repeat sends.
 7. **Feature flags** — staged rollouts and per-partner gating.
 
+**Launch gates (Program-Fix 27), before any partner go-live:** Vercel **Pro** (not a trial), since the per-minute worker cron and Rolling Releases need it. Neon **Launch** with **7-day** restore history. The log Drain (fix 26). The least-privilege database role for the app, with migrations kept on the owner role.
+
 ---
 
 ## How to use this document

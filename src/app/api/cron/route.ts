@@ -9,8 +9,10 @@ import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
 import { expireUnpaidLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
+import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
 import { logError } from '@/lib/log';
 import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
 import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
@@ -129,5 +131,43 @@ export async function GET(req: NextRequest) {
     logError('cron.outbox-scrub', err);
   }
 
-  return NextResponse.json({ ok: true, fired: result.fired, failed: result.failed, expired, scrubbed });
+  // Program-Fix 27 (vercel-09): ONE append-only audit row per authorized run
+  // (13:00 UTC, the 17:00 UTC catch-up, or a manual re-run). Counts only: no
+  // phone, name, schedule or transfer id. INSERT only (migration 0019 makes
+  // audit_events append-only). Fail-soft: a throw never costs the results.
+  try {
+    await createAuditRepo(getDb()).record({
+      actor: 'system',
+      actorType: 'system',
+      action: 'cron.run',
+      meta: { fired: result.fired, failed: result.failed, expired, scrubbed },
+    });
+  } catch (err) {
+    logError('cron.audit', err);
+  }
+
+  // Program-Fix 14 PR C: the daily OFAC SDN list load, ONLY when
+  // SANCTIONS_LOADER_ENABLED is set (OFF by default). It runs LAST, after the
+  // cron.run row, so a timeout/OOM kill during the ~30 MB download cannot
+  // cost that row. It fails soft twice over: runOfacSdnLoad never throws by
+  // contract (it alerts ops through the outbox itself), and a throw anyway is
+  // logged here. When OFF the response and the cron.run row are unchanged.
+  let sanctionsList: string | null | undefined;
+  if (env.sanctionsLoaderEnabled) {
+    try {
+      sanctionsList = (await runOfacSdnLoad({ db: getDb() })).status;
+    } catch (err) {
+      sanctionsList = null;
+      logError('cron.sanctions-list', err);
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    fired: result.fired,
+    failed: result.failed,
+    expired,
+    scrubbed,
+    ...(sanctionsList !== undefined ? { sanctionsList } : {}),
+  });
 }

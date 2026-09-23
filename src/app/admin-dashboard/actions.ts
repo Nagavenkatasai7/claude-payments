@@ -224,13 +224,21 @@ export async function retryRefundAction(formData: FormData): Promise<void> {
  * Reveal the FULL payout destination of one transfer (Stage 3 audited reveal).
  * List reads are masked at the repo layer (****last4), so this action is the
  * ONLY path from a staff view to the decrypted value — self-gated (staff
- * session + partner scope) and every call writes an append-only audit_events
+ * session + canRevealPii + partner scope) and every call writes an append-only audit_events
  * row. The decrypted value is returned to the caller, never logged.
  */
 export async function revealDestinationAction(
   transferId: string,
 ): Promise<{ destination: string } | { error: string }> {
   const staff = await requireStaff();
+  // Program-Fix 45 P1 (authz-06): revealing needs canRevealPii (admins pass
+  // through hasPermission's bypass; support never reveals). Checked BEFORE any
+  // read or decrypt, and refused with the same shape as a missing or
+  // out-of-scope transfer. It returns rather than throws, so
+  // masked-destination.tsx shows its "Reveal failed" state.
+  if (staff.role === 'support' || !hasPermission(staff, 'canRevealPii')) {
+    return { error: 'Transfer not found' };
+  }
   try {
     const { store, transfer } = await getScopedTransfer(staff, transferId);
     const full = await store.getTransferDecrypted(transferId);

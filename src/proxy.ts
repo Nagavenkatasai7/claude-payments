@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { hasStaffSessionCookie } from '@/lib/session-cookie';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 
 // Edge gate for the two signed-in surfaces (Stage 3 expanded to /account).
@@ -10,7 +10,7 @@ import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 /** /account sub-paths that must stay PUBLIC (they ARE the auth entry points). */
 const PUBLIC_ACCOUNT_PATHS = ['/account/login', '/account/register', '/account/reset', '/account/verify'];
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (pathname === '/account' || pathname.startsWith('/account/')) {
@@ -26,8 +26,9 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
-  // Staff dashboard (unchanged).
-  if (!req.cookies.get(SESSION_COOKIE)?.value) {
+  // Staff dashboard. Program-Fix 45 P1: either the __Host- cookie or the
+  // legacy one (a session minted before the rename) passes the edge gate.
+  if (!hasStaffSessionCookie(req.cookies)) {
     const url = req.nextUrl.clone();
     url.pathname = '/login';
     return NextResponse.redirect(url);

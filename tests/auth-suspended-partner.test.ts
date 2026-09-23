@@ -10,7 +10,7 @@ vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (name: string) => cookieJar.has(name) ? { value: cookieJar.get(name) } : undefined,
     set: (name: string, value: string) => cookieJar.set(name, value),
-    delete: (name: string) => cookieJar.delete(name),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
 }));
 const { redirectMock } = vi.hoisted(() => ({

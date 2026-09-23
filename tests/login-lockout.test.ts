@@ -24,7 +24,7 @@ vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n) } : undefined),
     set: (n: string, v: string) => cookieJar.set(n, v),
-    delete: (n: string) => cookieJar.delete(n),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
   headers: async () => new Headers({ 'x-forwarded-for': currentIp }),
 }));
@@ -37,6 +37,11 @@ vi.mock('next/navigation', () => ({ redirect: redirectMock }));
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
+});
+// Program-Fix 17b: login() asks whether the account enrolled in TOTP.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');

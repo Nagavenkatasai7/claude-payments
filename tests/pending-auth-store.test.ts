@@ -46,4 +46,26 @@ describe('pending-auth-store', () => {
     expect(await store.peek(token)).toBeNull();
     expect(await store.consume(token)).toBeNull();
   });
+
+  // Program-Fix 49D: the TOTP step of a password-proven sign-in.
+  it("an 'mfa' token carries its password binding; tokens without one keep the old shape", async () => {
+    const { store } = mk();
+    const mfa = await store.create('+12025550123', 'mfa', { bind: 'a'.repeat(32) });
+    expect(await store.peek(mfa)).toEqual({ phone: '+12025550123', purpose: 'mfa', bind: 'a'.repeat(32) });
+    const reg = await store.create('+12025550123', 'register');
+    expect(await store.peek(reg)).toEqual({ phone: '+12025550123', purpose: 'register' });
+  });
+
+  it('counts code attempts per token and refuses past the cap (the token is dropped)', async () => {
+    const { store } = mk();
+    const token = await store.create('+12025550123', 'mfa', { bind: 'b'.repeat(32) });
+    for (let i = 0; i < 5; i++) expect(await store.countAttempt(token)).toBe(true);
+    expect(await store.countAttempt(token)).toBe(false);
+    expect(await store.peek(token)).toBeNull();
+  });
+
+  it('countAttempt refuses a missing token', async () => {
+    const { store } = mk();
+    expect(await store.countAttempt('')).toBe(false);
+  });
 });

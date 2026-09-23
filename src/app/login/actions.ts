@@ -3,13 +3,15 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getAuthStore } from '@/lib/auth-store';
-import { getPartnerStore } from '@/lib/partner-store';
 import { ensureSeedAdmin } from '@/lib/seed';
 import { hashPassword, needsRehash, verifyPasswordOrDummy } from '@/lib/password';
-import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { clearStaffSessionCookies, staffSessionTokens } from '@/lib/session-cookie';
 import { clientIpFrom, isIpRateLimited } from '@/lib/ip-rate-limit';
 import { getStaffLoginGuard, isSeedAdminRecord } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { setMfaPendingCookie } from '@/lib/staff-mfa-cookie';
+import { completeStaffSignIn, staffSignInBlocked } from '@/lib/staff-sign-in';
 
 // Program-Fix 17a: ONE refusal string for every throttle (known and unknown
 // usernames alike, outer ring or reservation), so it says nothing about
@@ -79,8 +81,10 @@ export async function login(
     });
     return INVALID;
   }
-  // Team: a suspended staff member cannot log in. Generic message (no leak).
-  if (staff.status === 'suspended') {
+  // Team: a suspended staff member cannot log in; P3: nor one whose partner is
+  // suspended or missing. Generic message so credential validity isn't leaked.
+  const blocked = await staffSignInBlocked(staff);
+  if (blocked) {
     await audit.record({
       action: 'auth.login.failed',
       actorType: 'system',
@@ -88,80 +92,61 @@ export async function login(
       subjectId: staff.username,
       partnerId: staff.partnerId,
       ip,
-      meta: { reason: 'suspended' },
+      meta: { reason: blocked },
     });
     return UNAVAILABLE;
   }
-  // P3: block login if the staff's partner is suspended or missing.
-  // Generic error so credential validity isn't leaked.
-  if (staff.partnerId) {
-    const partner = await getPartnerStore().getPartner(staff.partnerId);
-    if (!partner || partner.status !== 'active') {
-      await audit.record({
-        action: 'auth.login.failed',
-        actorType: 'system',
-        actor: 'login',
-        subjectId: staff.username,
-        partnerId: staff.partnerId,
-        ip,
-        meta: { reason: 'partner_inactive' },
-      });
-      return UNAVAILABLE;
-    }
-  }
-  // Proven login: give this attempt's reservation back, then clear the
-  // username's counters, so successes never consume the budget.
+  // Program-Fix 17b: an enrolled account owes a TOTP code before any session.
+  const enrolled = await getStaffMfaStore().isEnrolled(staff.username);
+  // Proven password: give this attempt's reservation back, so successes never
+  // consume the budget. The username's counters are CLEARED only when no code
+  // is owed; otherwise re-entering the password would wipe the failed-code
+  // count (the code step reserves on the same buckets and clears on success).
   await guard.refund(reservation.keys);
-  await guard.clear(username, ip);
+  if (!enrolled) await guard.clear(username, ip);
   // Fix 21: lazy upgrade of a legacy scrypt hash to Argon2id, only after every
   // refusal gate above. Program-Fix 17a: a compare-and-set against the hash this
   // login just verified, so a reset landing in between is never reverted.
+  // The hash now stored (the pending code step is bound to it, 17b).
+  let storedHash = staff.passwordHash;
   if (needsRehash(staff.passwordHash)) {
-    await getAuthStore().updatePasswordHash(username, staff.passwordHash, await hashPassword(password));
+    const upgraded = await hashPassword(password);
+    if (await getAuthStore().updatePasswordHash(username, staff.passwordHash, upgraded)) storedHash = upgraded;
   }
-  // Record an "active" signal for the Team page (re-reads fresh; won't clobber a
-  // concurrent suspend/edit — see auth-store.recordLogin).
-  await getAuthStore().recordLogin(username);
-  const token = await getAuthStore().createSession(username);
-  (await cookies()).set(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 7 * 24 * 60 * 60,
-  });
-  // Best-effort and time-bounded (staff-auth-audit never throws); the
-  // redirect below stays outside any try/catch.
-  await audit.record({
-    action: 'auth.login',
-    actorType: 'staff',
-    actor: staff.username,
-    subjectId: staff.username,
-    partnerId: staff.partnerId,
-    ip,
-  });
+  if (enrolled) {
+    const pending = await getStaffMfaStore().createPending(staff.username, storedHash);
+    setMfaPendingCookie(await cookies(), pending);
+    redirect('/login/mfa');
+  }
+  // Records the login, replaces the browser's session (Program-Fix 45 P1:
+  // __Host- cookie, idle/absolute windows) and audits auth.login.
+  // Best-effort audit; the redirect below stays outside any try/catch.
+  await completeStaffSignIn(staff, ip);
   redirect('/admin-dashboard');
 }
 
 export async function logout(): Promise<void> {
   const jar = await cookies();
-  const token = jar.get(SESSION_COOKIE)?.value;
-  if (token) {
-    const store = getAuthStore();
-    const username = await store.getSessionUser(token);
+  // Program-Fix 45 P1: revoke the session behind EITHER cookie (the __Host-
+  // one and a legacy one may both be present), then expire both cookies with
+  // Path=/ and Secure, which a browser needs to drop a __Host- cookie.
+  const store = getAuthStore();
+  let username: string | null = null;
+  for (const { token } of staffSessionTokens(jar)) {
+    username ??= await store.getSessionUser(token);
     await store.deleteSession(token);
-    if (username) {
-      const staff = await store.getStaff(username);
-      await getStaffAuthAudit().record({
-        action: 'auth.logout',
-        actorType: 'staff',
-        actor: username,
-        subjectId: username,
-        partnerId: staff?.partnerId,
-        ip: clientIpFrom(await headers()),
-      });
-    }
   }
-  jar.delete(SESSION_COOKIE);
+  if (username) {
+    const staff = await store.getStaff(username);
+    await getStaffAuthAudit().record({
+      action: 'auth.logout',
+      actorType: 'staff',
+      actor: username,
+      subjectId: username,
+      partnerId: staff?.partnerId,
+      ip: clientIpFrom(await headers()),
+    });
+  }
+  clearStaffSessionCookies(jar);
   redirect('/login');
 }

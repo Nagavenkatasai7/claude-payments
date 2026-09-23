@@ -149,6 +149,29 @@ export const env = {
   get seedPartnerId() {
     return process.env.SEED_PARTNER_ID ?? '';
   },
+  // ── Program-Fix 17b: staff TOTP MFA (both OPTIONAL; never in boot-assert) ──
+  get staffMfaRequired(): boolean {
+    // 'true' ⇒ an unenrolled PLATFORM admin is sent to enrol on the
+    // platform-admin surfaces. Default false: MFA stays opt-in. The seed admin
+    // and STAFF_MFA_EXEMPT names are never required (staff-mfa-policy.ts).
+    return process.env.STAFF_MFA_REQUIRED === 'true';
+  },
+  get staffMfaExempt(): string[] {
+    // Comma-separated usernames exempt from ENFORCEMENT only (e.g. the e2e
+    // smoke account). Never skips the code step for someone who enrolled.
+    return (process.env.STAFF_MFA_EXEMPT ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  },
+  // ── Program-Fix 49D: customer portal TOTP (OPTIONAL; never in boot-assert) ──
+  get customerMfaRequired(): boolean {
+    // 'true' ⇒ refund and recall requests from the portal require the customer
+    // to have turned on two-step verification (customer-mfa.ts stepUp). Default
+    // false: portal MFA stays opt-in. Someone who HAS enrolled always gets the
+    // code step at sign-in and before those actions, whatever this says.
+    return process.env.CUSTOMER_MFA_REQUIRED === 'true';
+  },
   get paymentProviderMode(): PaymentProviderMode {
     // Default + only supported value in v1 — a forward hook, not a live switch.
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';
@@ -172,9 +195,19 @@ export const env = {
   get sanctionsList(): string {
     // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER
     // screening runs (it always runs). '' / 'mock' ⇒ the mock watchlist;
-    // 'ofac-sdn' ⇒ the OFAC SDN snapshot (fails closed to review if it cannot
-    // load); anything else ⇒ the mock plus a warning. Optional; unset in prod.
+    // 'ofac-sdn' ⇒ the OFAC SDN list loaded into Postgres by the daily loader
+    // (PR C; fails closed to review while no version is loaded); anything else
+    // ⇒ the mock plus a warning. Optional; unset in prod.
     return (process.env.SANCTIONS_LIST ?? '').trim().toLowerCase();
+  },
+  get sanctionsLoaderEnabled(): boolean {
+    // Program-Fix 14 PR C: '1' / 'true' ⇒ /api/cron downloads the OFAC SDN list
+    // from Treasury's Sanctions List Service and stores a new version when it
+    // changed. OFF by default (unset in prod until the owner flips it). It
+    // loads the list only; it never turns screening on or off. Optional, NOT in
+    // boot-assert.
+    const v = (process.env.SANCTIONS_LOADER_ENABLED ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true';
   },
   get passwordPepper(): string {
     // HMAC pepper applied before Argon2id. '' ⇒ no pepper (keeps existing staff

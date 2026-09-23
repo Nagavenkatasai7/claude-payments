@@ -2,6 +2,7 @@ import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
+import { warmSanctionsList } from './providers/sanctions-provider';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
@@ -21,6 +22,7 @@ import type {
   KycStatus,                                                                 // NEW (Phase 3 gate)
   EntityType,                                                                // NEW (B2B)
   SendLimits,                                                                // Program fix 16
+  TransferEnvironment,                                                       // Program-Fix 44 P2
 } from './types';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 
@@ -95,6 +97,11 @@ export interface CreateTransferInput {
   // a non-blocked mint is HELD (flagged + SENDER_IDENTITY_MISSING_REASON), in
   // the same transaction as the insert. Only the partner API sets it today.
   senderIdentityMissing?: boolean;
+  // Program-Fix 44 P2: 'test' ⇔ a sandbox (sr_test_) Partner API key minted
+  // it. Absent ⇒ 'live' (every other mint path). A test mint is never
+  // best-rate routed, and a claim-first same-id replay across environments is
+  // refused (TransferIdConflictError), never returned.
+  environment?: TransferEnvironment;
 }
 
 /**
@@ -283,7 +290,9 @@ export async function createTransferWithOutcome(
   // above — settling that through the winning partner's rail would pay out at
   // a rate that partner never offered, so the route is dropped with the stale
   // rate (platform settle via the customer's own partnerId).
-  const settlementPartnerId = input.quote ? input.settlementPartnerId : undefined;
+  // Program-Fix 44 P2: a sandbox mint is never routed to another partner's rail.
+  const settlementPartnerId =
+    input.quote && input.environment !== 'test' ? input.settlementPartnerId : undefined;
 
   // ── ONE locked mint per (partner, phone) ──────────────────────────────────
   // Sanctions → EDD → blocked row / placeholder refusal → cap → insert, all
@@ -291,6 +300,11 @@ export async function createTransferWithOutcome(
   // both spend the same headroom. A SendCapError / MaskedDestinationError
   // throws out of the transaction (nothing written); a lock wait past 5 s is
   // the retryable SendBusyError (store.mintUnderSenderLock).
+  // Program-Fix 14 PR C: refresh the OFAC list (a no-op unless
+  // SANCTIONS_LIST=ofac-sdn) BEFORE the lock, so the screen inside the mint
+  // transaction reads a cached list and never needs a second pool connection.
+  // Never throws; a missing list fails the screen closed (flagged).
+  await warmSanctionsList();
   const minted = await store.mintUnderSenderLock(input.partnerId, input.phone, (ops) =>
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
@@ -355,7 +369,8 @@ interface PreparedMint {
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
  *   2a. the optional AML hold (Program-Fix 43 PR B: OFF by default, never
  *       demo, cleared → flagged only, never throws);
- *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction;
+ *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction
+ *       (PR C: the same evidence is stored on the inserted row, transfers.screening);
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
  *   5. evaluateCap on today's ledger spend → SendCapError (rolls back);
@@ -373,6 +388,8 @@ async function mintLocked(
     const existing = await ops.getTransfer(input.id);
     if (existing) {
       if (existing.partnerId !== input.partnerId) throw new TransferIdConflictError();
+      // Program-Fix 44 P2: the same id in the OTHER environment is a conflict too.
+      if ((existing.environment ?? 'live') !== (input.environment ?? 'live')) throw new TransferIdConflictError();
       return { transfer: existing, replayed: true };
     }
   }
@@ -474,6 +491,7 @@ async function mintLocked(
     recipientBusinessName: input.recipientBusinessName,
     achTokenRef: input.achTokenRef,
     invoiceId: input.invoiceId,
+    environment: input.environment ?? 'live',        // Program-Fix 44 P2
   };
   // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
   // One sanctions.screen audit row per screened mint, written through the
@@ -498,7 +516,7 @@ async function mintLocked(
     const blockedRow: Transfer = isMaskedDestination(transfer.payoutDestination)
       ? { ...transfer, payoutDestination: '' }
       : transfer;
-    await ops.insertTransfer(blockedRow);
+    await ops.insertTransfer(blockedRow, { screening: compliance.evidence });
     return { transfer: blockedRow, replayed: false };
   }
 
@@ -520,7 +538,7 @@ async function mintLocked(
   const ev = evaluateCap(p.subject, now, totals.todayUsdCents, requestedCents, p.kycGateActive, p.limits);
   if (!ev.withinCap) throw new SendCapError(ev);
 
-  await ops.insertTransfer(transfer);
+  await ops.insertTransfer(transfer, { screening: compliance.evidence });
   return { transfer, replayed: false };
 }
 

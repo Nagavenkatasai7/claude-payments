@@ -2,14 +2,30 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getAuthStore } from './auth-store';
 import { getPartnerStore } from './partner-store';
-import { SESSION_COOKIE } from './session-cookie';
+import { staffSessionTokens } from './session-cookie';
+import { logWarn } from './log';
 import { scopeOf, type Scope } from './staff-scope';
+import { mfaEnrolmentRequired } from './staff-mfa-policy';
+import { getStaffMfaStore } from './staff-mfa-store';
 import type { Staff } from './types';
 
+/**
+ * Program-Fix 45 P1: the session's username from the `__Host-` cookie, else the
+ * legacy cookie (a session minted before the rename, or by the previous build
+ * during a rolling release). The store enforces the idle and absolute windows.
+ */
+async function currentSessionUser(): Promise<string | null> {
+  for (const { token, legacy } of staffSessionTokens(await cookies())) {
+    const username = await getAuthStore().getSessionUser(token);
+    if (!username) continue;
+    if (legacy) logWarn('auth.legacy_cookie', 'staff session read from the legacy cookie');
+    return username;
+  }
+  return null;
+}
+
 export async function getCurrentStaff(): Promise<Staff | null> {
-  const token = (await cookies()).get(SESSION_COOKIE)?.value;
-  if (!token) return null;
-  const username = await getAuthStore().getSessionUser(token);
+  const username = await currentSessionUser();
   if (!username) return null;
   const staff = await getAuthStore().getStaff(username);
   if (!staff) return null;
@@ -41,10 +57,19 @@ export async function requireAdmin(): Promise<Staff> {
 
 // P3: a platform admin = role:'admin' AND no partnerId. Used by /admin-dashboard/team
 // and partner-staff CRUD actions.
+//
+// Program-Fix 17b: with STAFF_MFA_REQUIRED=true (default off) an UNENROLLED
+// platform admin is sent to enrol first. The Account page uses requireStaff,
+// so there is no redirect loop. Never the seed admin or a STAFF_MFA_EXEMPT
+// name (staff-mfa-policy). The flag is read before any Redis call, so with
+// it off nothing changes.
 export async function requirePlatformAdmin(): Promise<Staff> {
   const staff = await requireStaff();
   if (staff.role !== 'admin' || staff.partnerId !== undefined) {
     redirect('/admin-dashboard');
+  }
+  if (mfaEnrolmentRequired(staff) && !(await getStaffMfaStore().isEnrolled(staff.username))) {
+    redirect('/admin-dashboard/account?enroll=1');
   }
   return staff;
 }

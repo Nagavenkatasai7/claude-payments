@@ -11,6 +11,7 @@ import { Separator } from '@/components/ui/separator';
 import { AccountShell, PageHeader } from '../shell';
 import { maskPhone } from '../format';
 import { updateEmailAction, changePasswordAction } from '../actions';
+import { CustomerMfaEnrolForm } from './mfa-enrol-form';
 
 export const dynamic = 'force-dynamic';
 
@@ -167,6 +168,31 @@ export default async function AccountSettingsPage({
                 <Button type="submit">Change password</Button>
               </div>
             </form>
+          </CardContent>
+        </Card>
+
+        {/* Program-Fix 49D (portal-03): opt-in two-step verification (TOTP). */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Two-step verification</CardTitle>
+            <CardDescription>
+              Ask for a code from an authenticator app when you sign in, request a refund or report a problem.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {customer.mfaEnrolledAt ? (
+              <>
+                <p className="text-sm text-foreground" role="status">
+                  On since {new Date(customer.mfaEnrolledAt).toLocaleDateString('en-US', { dateStyle: 'medium' })}.
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Lost your phone? Reset your password from the sign-in page with a code sent to your WhatsApp. That
+                  also turns two-step verification off, so you can set it up again.
+                </p>
+              </>
+            ) : (
+              <CustomerMfaEnrolForm />
+            )}
           </CardContent>
         </Card>
 

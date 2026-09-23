@@ -49,6 +49,7 @@ async function harness() {
     monthlyVolumeStore: createMonthlyVolumeStore(store),
     integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
     db,
+    keyMode: 'live', // Program-Fix 44 P2
     now: () => NOW,
     genId: () => `b${n++}`,
     // Deterministic settlement: mark paid without WhatsApp/timers. Read the

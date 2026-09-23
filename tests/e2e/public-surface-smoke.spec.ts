@@ -8,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 // served, an unknown URL is a real 404 on the neutral page, x-powered-by is
 // gone, /docs does not scroll sideways on a phone, and the two sign-in pages
 // have one h1 and a skip link. Program-Fix 40 adds: the auth gate
-// (src/middleware.ts) redirects an anonymous /admin-dashboard and /account to
+// (src/proxy.ts) redirects an anonymous /admin-dashboard and /account to
 // their sign-in pages and leaves /account/login public — the guard for the
 // middleware → proxy rename. Program-Fix 47 adds: exactly one enforced CSP per
 // page, with https: images and object-src 'none'. Program-Fix 15 PR A adds:
@@ -134,5 +134,7 @@ for (const path of ['/', '/about', '/docs', '/login', '/account/login', '/terms'
     expect(enforced[0].match(/default-src/g)).toHaveLength(1);
     expect(enforced[0]).toContain("img-src 'self' data: blob: https:");
     expect(enforced[0]).toContain("object-src 'none'");
+    // Program-Fix 47 PR2: production ships no 'unsafe-eval'.
+    expect(enforced[0]).not.toContain('unsafe-eval');
   });
 }

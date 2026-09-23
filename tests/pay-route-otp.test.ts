@@ -122,6 +122,31 @@ describe('POST /api/pay/[transferId] — per-transaction OTP', () => {
   });
 });
 
+// Program-Fix 44 P2: a SANDBOX transfer (minted by a test key) is never payable
+// on the hosted page — no OTP is sent to the partner-supplied phone and no
+// funds are captured. Same answer as an unknown link.
+describe('POST /api/pay/[transferId] — sandbox transfers are not payable (Program-Fix 44 P2)', { retry: 0 }, () => {
+  beforeEach(async () => {
+    const { sql } = await import('drizzle-orm');
+    await db.execute(sql`UPDATE transfers SET environment = 'test' WHERE id = ${TID}`);
+  });
+
+  it('request_otp → 404 expired_or_used, no OTP sent', async () => {
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('expired_or_used');
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+  });
+
+  it('a pay with a valid code → 404, never charged', async () => {
+    await txOtp.issue(TID, PHONE);
+    const res = await POST(req({ otp: '654321' }), ctx);
+    expect(res.status).toBe(404);
+    expect(await status()).toBe('awaiting_payment');
+    expect((await store.getTransfer(TID))?.fundingRef).toBeUndefined();
+  });
+});
+
 // Program-Fix 45 (P2): past the lifetime issue cap the route still answers the
 // generic {ok:true,sent:true} (the page cannot tell a cap from a send), and no
 // code is delivered. A normal single request still sends (pinned above).

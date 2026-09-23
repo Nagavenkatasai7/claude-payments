@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-// Program-Fix 28 (compliance-12, the no-migration part): audit_events is
-// append-only. Until PR B's trigger lands, this static guard fails the build if
-// any src/ code updates or deletes audit rows. Comment lines (`//`, `*`, `/*`)
-// are skipped, so prose that names the table (customers/actions.ts) is fine.
+// Program-Fix 28 (compliance-12): audit_events is append-only. The database
+// enforces it (drizzle/0019 trigger, pinned by tests/audit-append-only-db.test.ts);
+// this static guard keeps failing the build early if any src/ code tries to
+// update or delete audit rows. Comment lines (`//`, `*`, `/*`) are skipped, so
+// prose that names the table (customers/actions.ts) is fine.
 
 const ROOT = join(__dirname, '..', 'src');
 const AUDIT_MUTATION_PATTERNS: RegExp[] = [

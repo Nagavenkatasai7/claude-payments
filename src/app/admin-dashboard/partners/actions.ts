@@ -16,8 +16,10 @@ import {
   partnerForPhoneNumberId,
 } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
+import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
 import { assertStaffPasswordPolicy } from '@/lib/staff-password';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
 import {
@@ -202,6 +204,7 @@ export async function createPartnerStaffAction(
   }
 
   await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
+  await getStaffMfaStore().reset(username); // Program-Fix 17b: no stale enrolment on a re-used name
   await authStore.saveStaff({
     username,
     name,
@@ -211,7 +214,7 @@ export async function createPartnerStaffAction(
     permissions:
       role === 'support'
         ? { ...SUPPORT_DEFAULT_PERMISSIONS }
-        : { canCancel: false, canResend: false, canAssign: false },
+        : { canCancel: false, canResend: false, canAssign: false, canRevealPii: false },
     passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     partnerId,                  // taken from URL, not form
@@ -234,6 +237,7 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   }
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);
+  await getStaffMfaStore().reset(username); // Program-Fix 17b
   revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
 }
 
@@ -617,12 +621,21 @@ export async function saveDisclosureConfigAction(formData: FormData): Promise<vo
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
-/** Issue a new API key. Returns the plaintext ONCE — the client surfaces it then discards it. */
+/**
+ * Issue a new API key. Returns the plaintext ONCE — the client surfaces it then discards it.
+ * Program-Fix 44 P2: `mode` is 'live' (default — every existing caller) or
+ * 'test' (a sandbox key: its transfers settle only on the mock rail and never
+ * message a customer). This is a public POST endpoint, so the mode is a STRICT
+ * allowlist checked after the gate and before any write.
+ */
 export async function issueApiKeyAction(
   partnerId: PartnerId,
+  mode?: ApiKeyMode,
 ): Promise<{ plaintext: string; keyId: string; last4: string }> {
   await gatePartnerConfig(partnerId);
-  const issued = await getPartnerApiKeyStore().issue(partnerId);
+  const m: unknown = mode ?? 'live';
+  if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
+  const issued = await getPartnerApiKeyStore().issue(partnerId, m);
   revalidatePath(`/admin-dashboard/partners/${partnerId}`);
   return { plaintext: issued.plaintext, keyId: issued.keyId, last4: issued.last4 };
 }

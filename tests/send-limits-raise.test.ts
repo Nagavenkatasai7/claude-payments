@@ -120,13 +120,18 @@ describe('single-column writers (fix 16b)', () => {
   it('auditRepo.lastSendLimitChange: the newest send_limits.* row for (partner, scope, subject), never another tenant’s or another scope’s', async () => {
     const audit = createAuditRepo(db);
     expect(await audit.lastSendLimitChange('A', 'customer', PHONE)).toBeNull();
-    await audit.record({ partnerId: 'A', actor: 'root', actorType: 'staff', action: 'send_limits.set', subjectId: PHONE, meta: { scope: 'customer', old: null, new: { perTransferCapCents: 500_000 }, reason: 'first' } });
     await audit.record({ partnerId: 'A', actor: 'root', actorType: 'staff', action: 'pii.reveal', subjectId: PHONE, meta: { field: 'x' } });
     await audit.record({ partnerId: 'B', actor: 'root', actorType: 'staff', action: 'send_limits.set', subjectId: PHONE, meta: { scope: 'customer', reason: 'other tenant' } });
     await audit.record({ partnerId: 'A', actor: 'root', actorType: 'staff', action: 'send_limits.set', subjectId: 'A', meta: { scope: 'partner', reason: 'partner-level' } });
-    // Force a later timestamp so the ordering is by `at`, not insertion luck.
-    await db.execute(sql`UPDATE audit_events SET at = at - interval '1 minute' WHERE meta->>'reason' = 'first'`);
     await audit.record({ partnerId: 'A', actor: 'ops', actorType: 'staff', action: 'send_limits.clear', subjectId: PHONE, meta: { scope: 'customer', old: { perTransferCapCents: 500_000 }, new: null, reason: 'lapse' } });
+    // audit_events is append-only (drizzle/0019 rejects UPDATE): the OLDER row
+    // is inserted LAST with an explicit earlier `at`, so id order and `at`
+    // order disagree and the read must order by `at`, not insertion luck.
+    await db.execute(sql`
+      INSERT INTO audit_events (partner_id, actor, actor_type, action, subject_id, meta, at)
+      VALUES ('A', 'root', 'staff', 'send_limits.set', ${PHONE},
+              ${JSON.stringify({ scope: 'customer', old: null, new: { perTransferCapCents: 500_000 }, reason: 'first' })}::jsonb,
+              now() - interval '1 minute')`);
 
     const last = await audit.lastSendLimitChange('A', 'customer', PHONE);
     expect(last).toMatchObject({ actor: 'ops', action: 'send_limits.clear', meta: { scope: 'customer', reason: 'lapse' } });

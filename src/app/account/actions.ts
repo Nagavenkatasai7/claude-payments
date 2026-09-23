@@ -31,6 +31,7 @@ import { encryptField, defaultProvider } from '@/lib/field-crypto';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import { customerEmailCtx } from '@/lib/crypto-context';
+import { getCustomerMfaStore, customerKey, recordCustomerMfaAudit } from '@/lib/customer-mfa';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -54,7 +55,8 @@ import { customerEmailCtx } from '@/lib/crypto-context';
  *  - The `__Host-` cookie is HttpOnly + Secure + SameSite=Lax + Path=/.
  */
 
-export type AccountStep = 'register' | 'login' | 'otp';
+/** 'mfa' (Program-Fix 49D): the authenticator-code step of an enrolled customer's sign-in. */
+export type AccountStep = 'register' | 'login' | 'otp' | 'mfa';
 
 export interface AccountState {
   step: AccountStep;
@@ -71,6 +73,10 @@ const GENERIC_LOGIN_ERROR = 'Invalid phone or password.';
 const GENERIC_OTP_NOTE =
   "We sent a 6-digit code to your WhatsApp. Didn't get it? Message us on WhatsApp first, then Resend.";
 const SESSION_EXPIRED = 'Your session expired — please start again.';
+// Program-Fix 49D: the code step's fixed copy (nothing dynamic is reflected).
+const MFA_INVALID = 'That code is not valid. Check the time on your phone and try again.';
+const MFA_THROTTLED = 'Too many attempts. Try again later.';
+const MFA_TOO_MANY = 'Too many codes. Please sign in again.';
 const COOKIE_MAX_AGE = 12 * 60 * 60; // 12h absolute (matches the session ceiling)
 // Program-Fix 46A (F70): registrations per client IP per hour (own scope).
 const REGISTER_IP_SCOPE = 'register';
@@ -261,7 +267,6 @@ export async function loginAction(
   if (!customer) {
     return { step: 'login', error: GENERIC_LOGIN_ERROR }; // the reservation already counted it
   }
-  await auth.clearLoginFailures(phone, ip);
 
   // Password-only login (owner decision 2026-06-12): the OTP second factor was
   // removed from LOGIN because free-form WhatsApp delivery fails outside
@@ -278,11 +283,80 @@ export async function loginAction(
   // the abandoned registration binding must be completed first (same OTP the
   // register flow would have sent — a one-time event, not a login factor).
   if (!customer.phoneVerifiedAt) {
+    await auth.clearLoginFailures(phone, ip);
     const pendingToken = await getPendingAuthStore().create(phone, 'register');
     await issueAndSend(phone, 'register', ip);
     return { step: 'otp', phone, pendingToken, notice: GENERIC_OTP_NOTE };
   }
 
+  // Program-Fix 49D (portal-03): a customer who turned on two-step
+  // verification proves the authenticator code next. The failure counters are
+  // NOT cleared here — only after the code (verifyMfaAction) — so re-entering
+  // a known password can never buy more code guesses. The token is bound to
+  // the password hash just proven, so a reset inside the window voids it.
+  const mfa = getCustomerMfaStore();
+  if (await mfa.isEnrolled(customerKey(customer))) {
+    const pendingToken = await getPendingAuthStore().create(phone, 'mfa', {
+      bind: mfa.passwordTag(customer.passwordHash ?? ''),
+    });
+    return { step: 'mfa', phone, pendingToken };
+  }
+
+  await auth.clearLoginFailures(phone, ip);
+  const token = await auth.createSession(phone, customer.partnerId);
+  setSessionCookie(await cookies(), token);
+  redirect('/account');
+}
+
+/**
+ * Program-Fix 49D: sign-in step 2 for an enrolled customer. WHO signs in comes
+ * ONLY from the single-use 'mfa' pending token (minted after a proven
+ * password); the form carries just the code. Each code attempt reserves on the
+ * SAME buckets as a password attempt (10/h per phone+IP, 30/day per phone,
+ * 50/h per IP) and counts against the token (5 per token), so a code is never
+ * cheaper to guess than a password. Success clears the counters and mints the
+ * session.
+ */
+export async function verifyMfaAction(
+  _prev: AccountState | null,
+  formData: FormData,
+): Promise<AccountState> {
+  const pendingToken = field(formData, 'pendingToken');
+  // A pasted code may carry spaces ("123 456"); nothing else is normalised.
+  const code = field(formData, 'code').replace(/\s+/g, '');
+  const pendingStore = getPendingAuthStore();
+  const pending = await pendingStore.peek(pendingToken);
+  if (!pending || pending.purpose !== 'mfa' || !pending.bind) {
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
+  const phone = pending.phone;
+  const auth = getCustomerAuthStore();
+  const mfa = getCustomerMfaStore();
+
+  // Re-read the account: gone, ambiguous, or its password changed since this
+  // token was minted ⇒ start over.
+  const customer = await auth.getCustomer(phone);
+  if (!customer?.passwordHash || mfa.passwordTag(customer.passwordHash) !== pending.bind) {
+    await pendingStore.drop(pendingToken);
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
+
+  const ip = await clientIp();
+  if (!(await auth.reserveLoginAttempt(phone, ip))) {
+    return { step: 'mfa', phone, pendingToken, error: MFA_THROTTLED };
+  }
+  if (!(await pendingStore.countAttempt(pendingToken))) {
+    return { step: 'login', error: MFA_TOO_MANY };
+  }
+  if (!(await mfa.verifyCode(customerKey(customer), code))) {
+    return { step: 'mfa', phone, pendingToken, error: MFA_INVALID }; // the reservation already counted it
+  }
+  // Single use: of two concurrent successes on one token, only one mints.
+  const consumed = await pendingStore.consume(pendingToken);
+  if (!consumed || consumed.purpose !== 'mfa' || consumed.phone !== phone) {
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
+  await auth.clearLoginFailures(phone, ip);
   const token = await auth.createSession(phone, customer.partnerId);
   setSessionCookie(await cookies(), token);
   redirect('/account');
@@ -368,9 +442,14 @@ export async function resendOtpAction(
 ): Promise<AccountState> {
   const pendingToken = field(formData, 'pendingToken');
   const pending = await getPendingAuthStore().peek(pendingToken);
-  if (!pending) return { step: 'login', error: SESSION_EXPIRED };
+  // Only the two flows that send a WhatsApp code may resend one. An 'mfa'
+  // token (Program-Fix 49D) never becomes a WhatsApp code, and neither does a
+  // stale 'login' one.
+  if (!pending || (pending.purpose !== 'register' && pending.purpose !== 'reset')) {
+    return { step: 'login', error: SESSION_EXPIRED };
+  }
   const { phone } = pending;
-  const purpose = pending.purpose as OtpPurpose;
+  const purpose: OtpPurpose = pending.purpose;
   const ip = await clientIp();
   await afterResponse('otp.resend', phone, async () => {
     const customer = await getCustomerAuthStore().getCustomer(phone);
@@ -461,6 +540,22 @@ export async function resetAction(
   // resetter's own (phone, IP) hourly bucket is cleared too — it is their IP, and
   // otherwise the NEW password would be refused at home for the rest of the hour.
   await authStore.clearLoginFailures(phone, await clientIp());
+
+  // Program-Fix 49D recovery: the WhatsApp OTP proved the number, so a reset
+  // also turns portal two-step verification off (a lost phone app is the
+  // common reason to be here). Cleared first, then one INSERT-only audit row.
+  // A failure here never undoes the password reset; it is logged, and the
+  // customer can reset again.
+  try {
+    const key = customerKey(updated);
+    if (await getCustomerMfaStore().reset(key)) {
+      await recordCustomerMfaAudit('customer.mfa.reset', key, { via: 'password_reset' });
+    }
+  } catch (err) {
+    logWarn('customer.mfa', 'reset could not clear two-step verification', {
+      error: err instanceof Error ? err.name : 'unknown',
+    });
+  }
 
   await getPendingAuthStore().consume(pendingToken); // single-use
   return { step: 'login', notice: 'Password reset. Please sign in with your new password.' };

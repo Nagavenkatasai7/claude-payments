@@ -5,7 +5,7 @@ import { PRIVACY_DRAFT } from '@/lib/legal/drafts';
 
 // /privacy — Program-Fix 15 PR A. A DRAFT for counsel review (GLBA-style notice
 // plus a WhatsApp data section); the text lives in src/lib/legal/drafts.ts.
-// Public (src/middleware.ts gates only /account and /admin-dashboard).
+// Public (src/proxy.ts gates only /account and /admin-dashboard).
 
 export const metadata: Metadata = {
   title: 'Privacy Notice (draft) — SmartRemit',

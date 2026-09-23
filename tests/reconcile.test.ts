@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { reconcileSweep, getOpsSnapshot, STALE_LOCK_MINUTES } from '@/lib/reconcile';
@@ -12,6 +12,26 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
+import { cancelPaidBySenderLocked } from '@/lib/sender-cancel';
+import { captureQueries } from './helpers-db';
+
+// Program-Fix 15 PR C: a switch that makes findStuckPaid return a STALE
+// snapshot (read before a concurrent sender cancel committed). Off (null) by
+// default, so every other case runs the real repo unchanged.
+const stuckSnapshot = vi.hoisted(() => ({ rows: null as Transfer[] | null }));
+vi.mock('@/db/repos/transfer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/transfer-repo')>();
+  return {
+    ...real,
+    createTransferRepo: (...args: Parameters<typeof real.createTransferRepo>) => {
+      const repo = real.createTransferRepo(...args);
+      return {
+        ...repo,
+        findStuckPaid: async (m: number) => stuckSnapshot.rows ?? repo.findStuckPaid(m),
+      };
+    },
+  };
+});
 
 // reconcileSweep — the Stage-2d safety net. Stuck/stale money states surface as
 // EXACTLY-ONCE deduped outbox effects, no matter how often the sweep runs.
@@ -43,6 +63,7 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  stuckSnapshot.rows = null;
 });
 
 describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
@@ -117,6 +138,87 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
 
 // Program-Fix 8: a rail-failed transfer is invisible to EVERY sweep that
 // could move or mis-alert on it.
+describe('reconcileSweep — re-instruction vs a sender cancel (Program-Fix 15 PR C)', { retry: 0 }, () => {
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 's' },
+        webhookSecret: 'w',
+      },
+      whatsapp: {},
+    });
+  });
+
+  /** A paid row with a charge inside the window and a never-claimed instruct row. */
+  async function paidWithUnrunInstruct(): Promise<Transfer> {
+    const t = fixture({ paidAt: new Date(Date.now() - 20 * 60_000).toISOString() });
+    await store.saveTransfer(t);
+    const outbox = createOutboxRepo(db);
+    await outbox.enqueue('whatsapp.text', { to: t.phone, body: 'x', partnerId: 'acme' }, { dedupeKey: 'stage1:rc_t1' });
+    await db.execute(sql`UPDATE outbox SET created_at = now() - interval '20 minutes' WHERE dedupe_key = 'stage1:rc_t1'`);
+    await outbox.enqueue('settlement.instruct', { transferId: t.id }, { dedupeKey: 'instruct:rc_t1' });
+    return (await store.getTransfer(t.id))!;
+  }
+
+  it('a STALE stuck-paid snapshot of a transfer the sender has since cancelled enqueues NO reinstruct row', async () => {
+    const snapshot = await paidWithUnrunInstruct();
+    await db.transaction(async (tx) => {
+      expect((await cancelPaidBySenderLocked(tx, 'acme', 'rc_t1')).kind).toBe('cancelled');
+    });
+    stuckSnapshot.rows = [snapshot]; // findStuckPaid ran before the cancel committed
+    const r = await reconcileSweep(db);
+    expect(r.reinstructed).toBe(0);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('reinstruct:rc_t1');
+    // The recon alert must not claim a re-instruction that never happened.
+    const alert = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'recon:rc_t1'`);
+    const msg = String((alert as unknown as { rows: Array<{ payload: { message: string } }> }).rows[0]?.payload.message);
+    expect(msg).not.toContain('Re-instructed');
+    expect(msg).toContain('Not re-instructed');
+  });
+
+  it('a real re-instruction still says so in the recon alert', async () => {
+    await store.saveTransfer(fixture());
+    expect((await reconcileSweep(db)).reinstructed).toBe(1);
+    const alert = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'recon:rc_t1'`);
+    expect(String((alert as unknown as { rows: Array<{ payload: { message: string } }> }).rows[0].payload.message)).toContain('Re-instructed the partner rail once.');
+  });
+
+  it('a sweep that starts while the cancel holds its locks re-instructs nothing (it runs after the commit)', async () => {
+    const snapshot = await paidWithUnrunInstruct();
+    stuckSnapshot.rows = [snapshot];
+    let sweep: ReturnType<typeof reconcileSweep> | null = null;
+    await db.transaction(async (tx) => {
+      await cancelPaidBySenderLocked(tx, 'acme', 'rc_t1');
+      sweep = reconcileSweep(db); // attempted between the cancel's lock and its commit
+    });
+    expect((await sweep!).reinstructed).toBe(0);
+    expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('reinstruct:rc_t1');
+    expect((await store.getTransfer('rc_t1'))?.status).toBe('cancelled');
+  });
+
+  it('the reinstruct enqueue locks the transfer FOR UPDATE first (transfer → outbox lock order)', async () => {
+    await store.saveTransfer(fixture());
+    const stop = captureQueries();
+    const r = await reconcileSweep(db);
+    const q = stop().map((x) => x.sql.toLowerCase());
+    expect(r.reinstructed).toBe(1);
+    const lock = q.findIndex((s) => s.includes('from "transfers"') && s.includes('for update'));
+    const insert = q.findIndex((s) => s.startsWith('insert into "outbox"'));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(insert).toBeGreaterThan(lock);
+  });
+
+  it('a stuck row whose refund was requested since the snapshot is not re-instructed', async () => {
+    await store.saveTransfer(fixture());
+    const snapshot = (await store.getTransfer('rc_t1'))!;
+    await createTransferRepo(db).updateRefund('rc_t1', { refundStatus: 'requested' });
+    stuckSnapshot.rows = [snapshot];
+    expect((await reconcileSweep(db)).reinstructed).toBe(0);
+  });
+});
+
 describe('reconcileSweep — after a rail failure (fix 8)', () => {
   beforeEach(async () => {
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {

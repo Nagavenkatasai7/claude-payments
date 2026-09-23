@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { outbox } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 
@@ -256,7 +256,12 @@ export function createOutboxRepo(db: DbOrTx) {
           attempts: sql`greatest(${outbox.attempts} - 1, 0)`,
           leaseUntil: null,
           leaseOwner: null,
-          lockedAt: null,
+          // Program-Fix 15 PR C: locked_at is KEPT — it is the "was ever
+          // claimed" evidence the sender cancel's never-claimed proof reads
+          // (sender-cancel.ts). A row that was retried by staff after an
+          // earlier real run, then claimed and released here, has attempts 0
+          // again; clearing locked_at too would make it look never-run. Nothing
+          // else reads locked_at on a non-processing row.
           lockedBy: null,
         })
         .where(and(inArray(outbox.id, ids), eq(outbox.status, 'processing'), eq(outbox.leaseOwner, owner)))
@@ -421,6 +426,63 @@ export function createOutboxRepo(db: DbOrTx) {
         .where(eq(outbox.dedupeKey, key))
         .limit(1);
       return rows.length > 0;
+    },
+
+    /**
+     * Program-Fix 15 PR C: how long ago the customer was CHARGED, by the
+     * database clock — the age of the `stage1:<id>` row, written in the same
+     * transaction as the paid flip or the hold and never rewritten (deduped),
+     * so a released hold keeps its original charge time. Null when no such row
+     * exists (the rail `funded` callback path writes none): the caller must
+     * fail closed. Milliseconds; compare against the window in the caller.
+     */
+    async chargeAgeMs(transferId: string): Promise<number | null> {
+      const res = await db.execute(sql`
+        SELECT floor(extract(epoch FROM (now() - created_at)) * 1000)::bigint AS age_ms
+        FROM outbox WHERE dedupe_key = ${`stage1:${transferId}`}
+        LIMIT 1
+      `);
+      const r = (res as unknown as { rows: Array<Record<string, unknown>> }).rows[0];
+      return r ? Number(r.age_ms) : null;
+    },
+
+    /**
+     * Program-Fix 15 PR C: lock EVERY rail-effect row of one transfer —
+     * `instruct:` (the original signed instruction), `reinstruct:` (reconcile's
+     * one recovery re-instruction) and `mocksettle:` (the mock rail's delayed
+     * settle) — with a BLOCKING `FOR UPDATE`, never SKIP LOCKED: an in-flight
+     * claimBatch UPDATE commits first and is then seen as claimed
+     * ('processing', attempts+1, locked_at set). Ordered by id so every locker
+     * takes them in the same order. Call inside a transaction that already
+     * holds the transfer row lock (transfer → outbox is the lock order).
+     * Drizzle 0.45.2: select().…().for('update') —
+     * node_modules/drizzle-orm/pg-core/query-builders/select.d.ts:586.
+     */
+    async lockRailRowsForTransfer(
+      transferId: string,
+    ): Promise<Array<{ id: number; status: string; attempts: number; lockedAt: Date | null }>> {
+      return db
+        .select({ id: outbox.id, status: outbox.status, attempts: outbox.attempts, lockedAt: outbox.lockedAt })
+        .from(outbox)
+        .where(inArray(outbox.dedupeKey, [`instruct:${transferId}`, `reinstruct:${transferId}`, `mocksettle:${transferId}`]))
+        .orderBy(outbox.id)
+        .for('update');
+    },
+
+    /**
+     * Program-Fix 15 PR C: mark locked, NEVER-CLAIMED rows done without running
+     * them (status 'pending', attempts 0, locked_at NULL — re-checked in the
+     * WHERE). `note` goes to last_error for the ops trail. Returns how many
+     * rows moved; the caller treats a short count as "not provably unrun".
+     */
+    async markDoneLocked(ids: number[], note: string): Promise<number> {
+      if (ids.length === 0) return 0;
+      const rows = await db
+        .update(outbox)
+        .set({ status: 'done', lastError: note.slice(0, 1000), leaseUntil: null, leaseOwner: null })
+        .where(and(inArray(outbox.id, ids), eq(outbox.status, 'pending'), eq(outbox.attempts, 0), isNull(outbox.lockedAt)))
+        .returning({ id: outbox.id });
+      return rows.length;
     },
 
     /** Dead letters for the ops page (+ manual retry). */

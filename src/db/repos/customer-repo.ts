@@ -1,7 +1,7 @@
-import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
-import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { openOptional, sealOptional } from './mappers';
 import { customerRowCtx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
@@ -88,6 +88,9 @@ export function createCustomerRepo(
     set('passwordHash', row.passwordHash);
     set('passwordUpdatedAt', isoOpt(row.passwordUpdatedAt));
     set('phoneVerifiedAt', isoOpt(row.phoneVerifiedAt));
+    // Program-Fix 49D: ON = a secret is stored (a stamp without a secret is not
+    // enrolment). The secret is NOT opened here — readMfa does that on demand.
+    if (row.mfaTotpEnc) set('mfaEnrolledAt', isoOpt(row.mfaEnrolledAt) ?? row.updatedAt.toISOString());
     set('kycInquiryId', row.kycInquiryId);
     set('kycReviewState', (row.kycReviewState ?? undefined) as KycReviewState | undefined);
     set('idLast4', row.idLast4);
@@ -405,6 +408,82 @@ export function createCustomerRepo(
           updatedAt: new Date(),
         })
         .where(tenantKey(partnerId, senderPhone));
+    },
+
+    // ── Program-Fix 49D: portal TOTP (customers.mfa_totp_enc / mfa_enrolled_at) ──
+    // The ONLY writers of these two columns: single-column UPDATEs keyed
+    // (partner_id, phone). customerToRow never names them, so no whole-row
+    // saveCustomer (this build's or the previous one's) can set or clear an
+    // enrolment. The base32 secret is sealed with encryptField under
+    // customerRowCtx({partnerId, phone}, 'mfa_totp_enc') — v1 until 46B flips
+    // writes to v2 — and opened under the FETCHED row's own key.
+
+    /** ON = a secret is stored (no decrypt: a blob that no longer opens still counts, so it fails closed). */
+    async isMfaEnrolled(partnerId: PartnerId, senderPhone: string): Promise<boolean> {
+      const rows = await db
+        .select({ on: sql<boolean>`${customers.mfaTotpEnc} IS NOT NULL` })
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1);
+      return rows[0]?.on === true;
+    },
+
+    /**
+     * The stored secret, or null when MFA is off. Throws when the blob does not
+     * open (tamper, a moved blob, a key mismatch): callers fail CLOSED.
+     */
+    async readMfa(
+      partnerId: PartnerId,
+      senderPhone: string,
+    ): Promise<{ secretBase32: string; sealed: string } | null> {
+      const rows = await db
+        .select({ partnerId: customers.partnerId, phone: customers.phone, mfaTotpEnc: customers.mfaTotpEnc })
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1);
+      const row = rows[0];
+      if (!row?.mfaTotpEnc) return null;
+      const secretBase32 = decryptField(row.mfaTotpEnc, provider, customerRowCtx(row, 'mfa_totp_enc'));
+      return { secretBase32, sealed: row.mfaTotpEnc };
+    },
+
+    /** Turn MFA on. Never replaces an existing enrolment; false for a missing row or one already on. */
+    async enableMfa(partnerId: PartnerId, senderPhone: string, secretBase32: string): Promise<boolean> {
+      const sealed = encryptField(secretBase32, provider, customerRowCtx({ partnerId, phone: senderPhone }, 'mfa_totp_enc'));
+      const at = new Date();
+      const rows = await db
+        .update(customers)
+        .set({ mfaTotpEnc: sealed, mfaEnrolledAt: at, updatedAt: at })
+        .where(and(tenantKey(partnerId, senderPhone), isNull(customers.mfaTotpEnc)))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /** Turn MFA off (recovery). Returns whether it was on. */
+    async clearMfa(partnerId: PartnerId, senderPhone: string): Promise<boolean> {
+      const rows = await db
+        .update(customers)
+        .set({ mfaTotpEnc: null, mfaEnrolledAt: null, updatedAt: new Date() })
+        .where(and(tenantKey(partnerId, senderPhone), isNotNull(customers.mfaTotpEnc)))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
+     * Re-seal after a successful verify when a fresh seal would be a different
+     * version (v1 → v2 once 46B flips writes; a no-op before). Compare-and-set
+     * on the blob that was read, so a reset or re-enrolment in between wins.
+     */
+    async resealMfa(partnerId: PartnerId, senderPhone: string, oldSealed: string, secretBase32: string): Promise<boolean> {
+      const fresh = encryptField(secretBase32, provider, customerRowCtx({ partnerId, phone: senderPhone }, 'mfa_totp_enc'));
+      const version = (b: string) => b.slice(0, b.indexOf('.'));
+      if (version(fresh) === version(oldSealed)) return false;
+      const rows = await db
+        .update(customers)
+        .set({ mfaTotpEnc: fresh })
+        .where(and(tenantKey(partnerId, senderPhone), eq(customers.mfaTotpEnc, oldSealed)))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
     },
 
     /** Platform-wide when partnerId is absent; tenant-scoped at the WHERE otherwise. */

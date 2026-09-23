@@ -26,7 +26,7 @@ vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n) } : undefined),
     set: (n: string, v: string) => cookieJar.set(n, v),
-    delete: (n: string) => cookieJar.delete(n),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
   headers: async () => new Headers({ 'x-forwarded-for': '198.51.100.20' }),
 }));
@@ -48,9 +48,20 @@ vi.mock('@/lib/pwned', async () => {
   const actual = await vi.importActual<typeof import('@/lib/pwned')>('@/lib/pwned');
   return { ...actual, pwnedPasswordStatus: pwnedStatus };
 });
+// Program-Fix 45 P5: `ledgerOn` gives the actions the real Postgres staff ledger.
+let ledgerOn = false;
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
-  return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
+  const { createStaffRepo } = await vi.importActual<typeof import('@/db/repos/staff-repo')>('@/db/repos/staff-repo');
+  return {
+    ...actual,
+    getAuthStore: () => actual.createAuthStore(redis, ledgerOn ? { ledger: () => createStaffRepo(db) } : {}),
+  };
+});
+// Program-Fix 17b: creating/removing a member clears its MFA keys.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
 });
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
@@ -73,6 +84,7 @@ import {
 } from '@/app/admin-dashboard/team/actions';
 import { hashPassword, verifyPassword } from '@/lib/password';
 import { staffLoginKeys } from '@/lib/staff-login-guard';
+import { SESSION_COOKIE } from '@/lib/session-cookie';
 
 const authStore = createAuthStore(redis);
 
@@ -105,6 +117,7 @@ beforeEach(async () => {
   authAudited.length = 0;
   pwnedStatus.mockReset();
   pwnedStatus.mockImplementation(async () => 'clean');
+  ledgerOn = false;
   db = await freshDb();
   partnerStore = createPartnerStore(db);
   auditStore = createAuditLogStore(db);
@@ -197,6 +210,64 @@ describe('updateStaffAction', () => {
     await authStore.saveStaff(staff({ username: 'boss2', role: 'admin' }));
     await updateStaffAction(form({ username: 'boss2', role: 'agent' }));
     expect((await authStore.getStaff('boss2'))?.role).toBe('agent');
+  });
+});
+
+// Program-Fix 45 P1: a change to what a member may do (role, permissions,
+// partner scope) signs out their existing sessions, so the change applies at
+// once rather than when the old session expires. A no-op save keeps them.
+describe('updateStaffAction session rotation (Program-Fix 45 P1)', () => {
+  it('reads the canRevealPii checkbox', async () => {
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent' }));
+    await updateStaffAction(form({ username: 'a', role: 'agent', canRevealPii: 'on' }));
+    expect((await authStore.getStaff('a'))?.permissions.canRevealPii).toBe(true);
+    await updateStaffAction(form({ username: 'a', role: 'agent' }));
+    expect((await authStore.getStaff('a'))?.permissions.canRevealPii).toBe(false);
+  });
+
+  it('createStaffAction reads canRevealPii; support never gets it', async () => {
+    await createStaffAction(
+      form({ username: 'ag', name: 'Ag', password: 'a-long-password-1', role: 'agent', canRevealPii: 'on' }),
+    );
+    expect((await authStore.getStaff('ag'))?.permissions.canRevealPii).toBe(true);
+    await createStaffAction(
+      form({ username: 'sp', name: 'Sp', password: 'a-long-password-1', role: 'support', canRevealPii: 'on' }),
+    );
+    expect((await authStore.getStaff('sp'))?.permissions.canRevealPii).toBe(false);
+  });
+
+  it('a permission change revokes the member’s sessions', async () => {
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent' }));
+    const token = await authStore.createSession('a');
+    await updateStaffAction(form({ username: 'a', role: 'agent', canCancel: 'on' }));
+    expect(await authStore.getSessionUser(token)).toBeNull();
+    expect((await authStore.getStaff('a'))?.permissions.canCancel).toBe(true);
+  });
+
+  it('a role change revokes the member’s sessions', async () => {
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent' }));
+    const token = await authStore.createSession('a');
+    await updateStaffAction(form({ username: 'a', role: 'support' }));
+    expect(await authStore.getSessionUser(token)).toBeNull();
+  });
+
+  it('a partner-scope change revokes the member’s sessions', async () => {
+    await partnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent' }));
+    const token = await authStore.createSession('a');
+    await updateStaffAction(form({ username: 'a', role: 'agent', partnerId: 'acme' }));
+    expect(await authStore.getSessionUser(token)).toBeNull();
+  });
+
+  it('a save that changes nothing keeps the sessions (a missing flag counts as false)', async () => {
+    // Stored before the reveal flag existed: no canRevealPii key at all.
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent', permissions: { canCancel: true, canResend: false, canAssign: false } }));
+    const token = await authStore.createSession('a');
+    await updateStaffAction(form({ username: 'a', role: 'agent', canCancel: 'on' }));
+    expect(await authStore.getSessionUser(token)).toBe('a');
   });
 });
 
@@ -380,7 +451,7 @@ describe('changeOwnPasswordAction', () => {
     const r = await change('old-password-123', 'fresh-password-456');
     expect(r).toMatchObject({ ok: true });
     expect(await authStore.getSessionUser(old)).toBeNull();
-    const cookie = cookieJar.get('sendhome_session');
+    const cookie = cookieJar.get(SESSION_COOKIE);
     expect(cookie).toBeTruthy();
     expect(await authStore.getSessionUser(cookie!)).toBe('mem');
     expect(await verifyPassword('fresh-password-456', (await authStore.getStaff('mem'))!.passwordHash)).toBe(true);
@@ -462,5 +533,32 @@ describe('the seed admin record is guarded like reset (Program-Fix 17a follow-up
     await authStore.saveStaff(staff({ username: 'a3', role: 'agent' }));
     await setStaffStatusAction(form({ username: 'a3', status: 'suspended' }));
     expect((await authStore.getStaff('a3'))?.status).toBe('suspended');
+  });
+});
+
+// Program-Fix 45 P5 (review): agent and support are incomparable, so a row
+// that disagrees suspends the member. The Team actions save the MERGED record
+// back; that must never turn the disagreement into a role change or a grant.
+describe('Team actions over a role disagreement with the staff ledger (Program-Fix 45 P5)', () => {
+  async function disagree() {
+    ledgerOn = true;
+    const { createStaffRepo } = await import('@/db/repos/staff-repo');
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent', permissions: { canCancel: false, canResend: true, canAssign: false } }));
+    await createStaffRepo(db).upsert(staff({ username: 'a', role: 'support' }));
+    return createStaffRepo(db);
+  }
+
+  it('suspend saves the Redis role (agent) as suspended to both stores; no role change', async () => {
+    const repo = await disagree();
+    await setStaffStatusAction(form({ username: 'a', status: 'suspended' }));
+    expect(JSON.parse(redis.dump.get('staff:a')!)).toMatchObject({ role: 'agent', status: 'suspended' });
+    expect(await repo.get('a')).toMatchObject({ role: 'agent', status: 'suspended' });
+  });
+
+  it('an edit keeps the member suspended (the merged status is saved): fail closed until an explicit reactivate', async () => {
+    const repo = await disagree();
+    await updateStaffAction(form({ username: 'a', role: 'agent', canResend: 'on' }));
+    expect(JSON.parse(redis.dump.get('staff:a')!)).toMatchObject({ role: 'agent', status: 'suspended' });
+    expect(await repo.get('a')).toMatchObject({ role: 'agent', status: 'suspended' });
   });
 });

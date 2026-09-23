@@ -39,6 +39,7 @@ beforeEach(async () => {
     monthlyVolumeStore: createMonthlyVolumeStore(store),
     integrationsStore: createPartnerIntegrationsStore(db, provider),
     db,
+    keyMode: 'live', // Program-Fix 44 P2
     now: () => NOW,
   };
 });
