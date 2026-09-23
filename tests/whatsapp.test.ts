@@ -3,6 +3,8 @@ import {
   parseIncoming,
   parseStatusEvent,
   sendText,
+  splitWhatsAppText,
+  WA_TEXT_CHUNK_MAX,
   sendTemplate,
   sendInteractive,
   sendCtaUrl,
@@ -854,5 +856,59 @@ describe('sendVerificationStatus free-form failure log is scrubbed (Program-Fix 
     expect(text).not.toMatch(/\d{7,}/);
     expect(text).toContain('4567');
     expect(text).toContain('whatsapp.verification-status');
+  });
+});
+
+// ── Program-Fix 49B (prompt-08): Meta caps a text body at 4,096 characters ──
+describe('splitWhatsAppText', () => {
+  it('leaves a body at or under the chunk limit untouched (one part)', () => {
+    expect(WA_TEXT_CHUNK_MAX).toBe(4000);
+    expect(splitWhatsAppText('hi')).toEqual(['hi']);
+    const exact = 'a'.repeat(4000);
+    expect(splitWhatsAppText(exact)).toEqual([exact]);
+  });
+  it('splits a long body at the last line break before the limit', () => {
+    const first = 'x'.repeat(3000);
+    const second = 'y'.repeat(2000);
+    expect(splitWhatsAppText(`${first}\n${second}`)).toEqual([first, second]);
+  });
+  it('falls back to a space, then a hard cut, and every part fits the limit', () => {
+    const words = Array.from({ length: 1500 }, () => 'word').join(' '); // 7,499 chars, no newline
+    const parts = splitWhatsAppText(words);
+    expect(parts.length).toBeGreaterThan(1);
+    for (const part of parts) expect(part.length).toBeLessThanOrEqual(4000);
+    expect(parts.join(' ')).toBe(words);
+    const solid = 'z'.repeat(9000);
+    const hard = splitWhatsAppText(solid);
+    expect(hard.map((x) => x.length)).toEqual([4000, 4000, 1000]);
+    expect(hard.join('')).toBe(solid);
+  });
+  it('never splits a surrogate pair on a hard cut', () => {
+    const body = 'a'.repeat(3999) + '😀' + 'b'.repeat(10); // the emoji straddles index 4000
+    const parts = splitWhatsAppText(body);
+    expect(parts.join('')).toBe(body);
+    for (const part of parts) {
+      expect(part.length).toBeLessThanOrEqual(4000);
+      expect(/[\uD800-\uDBFF]$/.test(part)).toBe(false);
+    }
+  });
+});
+
+describe('sendText splits an over-long body (Program-Fix 49B)', () => {
+  it('a normal body is still exactly one POST', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendText('15551234567', 'hello');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+  it('a 5,000-character body is sent as two in-order messages, each under the limit', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const first = 'x'.repeat(3000);
+    const second = 'y'.repeat(2000);
+    await sendText('15551234567', `${first}\n${second}`);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const bodies = fetchMock.mock.calls.map((c) => JSON.parse((c as unknown as [string, RequestInit])[1].body as string).text.body);
+    expect(bodies).toEqual([first, second]);
   });
 });

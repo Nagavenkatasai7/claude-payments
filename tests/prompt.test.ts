@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { SYSTEM_PROMPT, VOICE_TRAILER, buildSystemPrompt } from '@/lib/prompt';
 import { resolveEffectiveSendLimits } from '@/lib/send-limits';
+import { toolSchemasForChannel, RATE_LOCK_MINUTES } from '@/lib/tools';
+import { DRAFT_TTL_SECONDS } from '@/lib/draft-store';
 
 describe('SYSTEM_PROMPT', () => {
   it('names the tools the agent must use', () => {
@@ -741,5 +743,91 @@ describe('gate-off onboarding copy depends on who runs KYC (Program-Fix 35, prom
 
   it('the default SmartRemit prompt (gate on) stays byte-for-byte', () => {
     expect(SYSTEM_PROMPT).toBe(buildSystemPrompt({ brand: 'SmartRemit', kycMode: 'ours' }));
+  });
+});
+
+// ── Program-Fix 49B (prompt-05/07/08/10, live-05, #324 follow-up) ────────────
+describe('Program-Fix 49B: prompt and tool schemas agree', () => {
+  const variants = [
+    SYSTEM_PROMPT,
+    buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'ours' }),
+    buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'delegated' }),
+  ];
+
+  it('prompt-05: no WhatsApp tool schema offers a card funding method', () => {
+    const json = JSON.stringify(toolSchemasForChannel('whatsapp'));
+    expect(json).not.toContain('credit_card');
+    expect(json).not.toContain('debit_card');
+    expect(json).not.toContain('The fee depends on this choice');
+  });
+
+  it('prompt-05: funding_method is optional in every WhatsApp schema (the server defaults to bank_transfer)', () => {
+    for (const t of toolSchemasForChannel('whatsapp')) {
+      const required = (t.function.parameters as { required?: string[] }).required ?? [];
+      expect(required, t.function.name).not.toContain('funding_method');
+    }
+  });
+
+  it('prompt-05: the list_saved_recipients and cancel_draft descriptions match the prompt', () => {
+    const desc = (n: string) =>
+      toolSchemasForChannel('whatsapp').find((t) => t.function.name === n)!.function.description;
+    expect(desc('list_saved_recipients')).not.toMatch(/first message/i);
+    expect(desc('list_saved_recipients')).toMatch(/wants to send/i);
+    expect(desc('cancel_draft')).not.toContain('[Cancel]');
+    expect(desc('cancel_draft')).toMatch(/replies "cancel"/i);
+  });
+
+  it('prompt-05: the rate-lock minutes are derived from the draft TTL, never a literal', () => {
+    expect(RATE_LOCK_MINUTES).toBe(DRAFT_TTL_SECONDS / 60);
+    expect(RATE_LOCK_MINUTES).toBe(30);
+  });
+
+  it('prompt-08: LANGUAGE mirrors the customer, names Spanish, and allows faithful translation', () => {
+    for (const p of variants) {
+      expect(p).toContain('Spanish');
+      expect(p).not.toContain('Reply in English, Hindi, or Hinglish to match them.');
+      expect(p).toMatch(/translate/i);
+      expect(p).toContain('same meaning');
+    }
+  });
+
+  it('prompt-08: a hard length bound, with relayed tool text and asked-for lists exempt', () => {
+    expect(SYSTEM_PROMPT).toContain('600 characters');
+    expect(SYSTEM_PROMPT).toContain('6 lines');
+  });
+
+  it('live-05: typed bank or UPI details are acknowledged as not taken in chat', () => {
+    for (const p of variants) {
+      expect(p).toContain("If the customer types bank or UPI details, say you can't take them in chat");
+    }
+  });
+
+  it('prompt-10: the send-currency switch rule is stated once, not twice', () => {
+    const RULE = 'ONLY if the sender explicitly asks to send in a different LISTED currency';
+    for (const p of variants) {
+      expect(p.split(RULE)).toHaveLength(2);
+      expect(p.split('If a tool replies asking which currency')).toHaveLength(2);
+      // The unique lines of both old blocks survive the merge.
+      expect(p).toContain('NEVER write, type, paraphrase, or guess any URL or link yourself.');
+      expect(p).toContain("Never tell a user they \"can't send\" because of where they are.");
+      expect(p).toContain('amount_source_display');
+    }
+  });
+
+  it('prompt-07: the prompt no longer tells the model to pass arguments to create_transfer', () => {
+    expect(SYSTEM_PROMPT).not.toContain('send_approve_picker, and create_transfer');
+  });
+
+  it('#324 follow-up: create_invoice already_open is relayed as-is — no currency question, no re-bill', () => {
+    for (const p of variants) {
+      const openIdx = p.indexOf('If it returns already_open: true');
+      const genericIdx = p.indexOf('If it returns created: false with a reply_to_customer');
+      expect(openIdx).toBeGreaterThan(-1);
+      expect(genericIdx).toBeGreaterThan(openIdx); // the specific rule comes first
+      const bullet = p.slice(openIdx, genericIdx);
+      expect(bullet).toContain('relay reply_to_customer as-is');
+      expect(bullet).toMatch(/do NOT ask for a currency/);
+      expect(bullet).toMatch(/do NOT call create_invoice again/);
+    }
   });
 });
