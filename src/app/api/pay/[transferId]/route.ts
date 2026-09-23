@@ -27,6 +27,7 @@ import { sendTransactionOtp, type WaCreds } from '@/lib/whatsapp';
 import { validatePayoutFields, BANK_FIELDS_BY_COUNTRY, isMaskedDestination, accountLast4 } from '@/lib/payout-format';
 import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
+import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
@@ -288,9 +289,8 @@ async function processTransferPayment(
   }
 }
 
-const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
-  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN', 'HK', 'MX',
-]);
+// Program-Fix 33: derived from the ONE country authority, never hand-typed.
+const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>(SUPPORTED_DESTINATIONS);
 
 /**
  * Validate the payer's ACH bank-debit fields (the US business bank we instruct

@@ -7,6 +7,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { runDueSchedules } from '@/lib/cron-run';
+import { expireUnpaidLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { logError } from '@/lib/log';
 import { getDb } from '@/db/client';
@@ -105,10 +106,21 @@ export async function GET(req: NextRequest) {
     },
   });
 
+  // Program-Fix 32 (neon-09): expire unfunded pay links older than 7 days
+  // (guarded cancel + audit row per link; never a charged row, never a customer
+  // message). Runs AFTER the schedules and fail-soft: a throw never costs the
+  // schedule result. `expired` is null when the sweep failed (logged).
+  let expired: number | null = null;
+  try {
+    expired = await expireUnpaidLinks(getDb());
+  } catch (err) {
+    logError('cron.expire-links', err);
+  }
+
   // Program-Fix 37 (ctx-03): empty the payload of 'done' outbox rows older
   // than 7 days (rows and dedupe keys stay; see src/lib/outbox-retention.ts).
-  // Fail-soft and after the schedules: a throw never costs the schedule
-  // result. `scrubbed` is null when the sweep failed (logged).
+  // Fail-soft and after the expiry: a throw never costs the earlier results.
+  // `scrubbed` is null when the sweep failed (logged).
   let scrubbed: number | null = null;
   try {
     scrubbed = await scrubOldOutboxPayloads(getDb());
@@ -116,5 +128,5 @@ export async function GET(req: NextRequest) {
     logError('cron.outbox-scrub', err);
   }
 
-  return NextResponse.json({ ok: true, fired: result.fired, failed: result.failed, scrubbed });
+  return NextResponse.json({ ok: true, fired: result.fired, failed: result.failed, expired, scrubbed });
 }
