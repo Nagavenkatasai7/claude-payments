@@ -1292,6 +1292,46 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     const blocked = (await ctx.store.listTransfers()).filter((t) => t.status === 'blocked');
     expect(blocked).toHaveLength(1);
     expect(blocked[0].recipientName).toBe('John Doe');
+    // Program-Fix 14: ...with its sanctions.screen evidence row (same transaction),
+    // subject = the blocked transfer, and no name anywhere in meta.
+    const ev = (await db.execute(
+      sql`SELECT partner_id, actor, actor_type, subject_id, meta FROM audit_events WHERE action = 'sanctions.screen'`,
+    )) as unknown as { rows: Array<{ partner_id: string; actor: string; actor_type: string; subject_id: string; meta: Record<string, unknown> }> };
+    expect(ev.rows).toHaveLength(1);
+    expect(ev.rows[0]).toMatchObject({ partner_id: 'default', actor: 'system:sanctions', actor_type: 'system', subject_id: blocked[0].id });
+    expect(ev.rows[0].meta).toMatchObject({ decision: 'match', listSource: 'mock-watchlist' });
+    expect((ev.rows[0].meta.parties as Array<Record<string, unknown>>)[0]).toMatchObject({ role: 'recipient', matched: true, matchScore: 1 });
+    const metaText = JSON.stringify(ev.rows[0].meta).toLowerCase();
+    expect(metaText).not.toContain('john');
+    expect(metaText).not.toContain('doe');
+  });
+
+  it('BLOCKED for a formatting variant of a listed name (prs-03)', async () => {
+    const ctx = await buildClearedCtx();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'John  Doe',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'john@upi',
+    }, ctx);
+    expect(r.blocked).toBe(true);
+    expect(r.draft_id).toBeUndefined();
+  });
+
+  it('BLOCKED whose evidence write fails: the customer still gets the blocked reply, and a name-free sanctions.evidence-lost warning is logged', async () => {
+    const ctx = await buildClearedCtx();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    vi.spyOn(ctx.store, 'recordBlockedWithEvidence').mockRejectedValueOnce(new Error('insert failed for John Doe'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await executeTool('send_approve_picker', {
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'John Doe',
+      recipient_phone: '919876543210', payout_method: 'upi', payout_destination: 'john@upi',
+    }, ctx);
+    expect(r.blocked).toBe(true);
+    const lines = warn.mock.calls.map((c) => c.map(String).join(' '));
+    const lost = lines.filter((l) => l.includes('sanctions.evidence-lost'));
+    expect(lost).toHaveLength(1);
+    expect(lost[0]).not.toMatch(/john|doe/i);
+    expect(lost[0]).toContain('default');
   });
 });
 
@@ -3098,6 +3138,64 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(seller).not.toBeNull();
     expect(seller?.status).toBe('pending');
     expect(seller?.kycReviewState).toBe('needs_review');
+  });
+
+  // Program-Fix 14 step 6: every register_seller screen leaves a sanctions.screen row.
+  async function sellerScreenRows() {
+    const r = (await db.execute(
+      sql`SELECT subject_id, meta FROM audit_events WHERE action = 'sanctions.screen' ORDER BY id`,
+    )) as unknown as { rows: Array<{ subject_id: string; meta: Record<string, unknown> }> };
+    return r.rows;
+  }
+
+  it('evidence: a clean seller screen writes one sanctions.screen row on the seller id', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    const sellerId = String(r.onboarding_url).split('/').pop();
+    const rows = await sellerScreenRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBe(sellerId);
+    expect(rows[0].meta).toMatchObject({ decision: 'clear', listSource: 'mock-watchlist' });
+    expect(JSON.stringify(rows[0].meta).toLowerCase()).not.toContain('acme');
+  });
+
+  it('evidence: a hit writes decision "match"', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await executeTool('register_seller', { business_name: 'Test  Blocked' }, ctx);
+    const rows = await sellerScreenRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ decision: 'match' });
+    expect((await ctx.store.getSeller(PHONE, 'default'))?.kycReviewState).toBe('needs_review');
+  });
+
+  it('evidence: a screener error fails closed (needs_review) and records decision "error" with no scores', async () => {
+    const { MockSanctionsScreener } = await import('@/lib/providers/sanctions-provider');
+    vi.spyOn(MockSanctionsScreener.prototype, 'screen').mockRejectedValueOnce(new Error('boom'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+    expect(r.onboarding_url).toBeUndefined();
+    expect((await ctx.store.getSeller(PHONE, 'default'))?.kycReviewState).toBe('needs_review');
+    const rows = await sellerScreenRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ decision: 'error', parties: [] });
+  });
+
+  it('a "flagged" screen (the list could not load) is NOT clean: the seller lands in review', async () => {
+    const { setOfacListSourceForTests } = await import('@/lib/providers/sanctions-provider');
+    const prev = process.env.SANCTIONS_LIST;
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    setOfacListSourceForTests({ load: async () => { throw new Error('no snapshot'); } });
+    try {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('register_seller', { business_name: 'Acme Exports Inc' }, ctx);
+      expect(r.onboarding_url).toBeUndefined();
+      expect((await ctx.store.getSeller(PHONE, 'default'))?.kycReviewState).toBe('needs_review');
+      expect((await sellerScreenRows())[0].meta).toMatchObject({ decision: 'list_unavailable' });
+    } finally {
+      if (prev === undefined) delete process.env.SANCTIONS_LIST; else process.env.SANCTIONS_LIST = prev;
+      setOfacListSourceForTests(null);
+    }
   });
 
   it('asks which country when the calling code is unknown (never guesses)', async () => {
