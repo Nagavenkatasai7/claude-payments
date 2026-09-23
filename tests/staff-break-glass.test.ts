@@ -5,6 +5,8 @@ import { createAuthStore } from '@/lib/auth-store';
 import { createStaffLoginGuard, staffLoginKeys } from '@/lib/staff-login-guard';
 import { hashPassword, verifyPassword } from '@/lib/password';
 import type { Staff } from '@/lib/types';
+import { createStaffMfaStore } from '@/lib/staff-mfa-store';
+import { base32Decode, totpAt } from '@/lib/totp';
 
 /**
  * Program-Fix 17a — the owner-run break-glass script. Dry run by default
@@ -157,5 +159,31 @@ describe('staff-break-glass', () => {
     expect(readFileSync(join(root, 'package.json'), 'utf8')).not.toContain('staff-break-glass');
     const wf = join(root, '.github', 'workflows');
     for (const f of readdirSync(wf)) expect(readFileSync(join(wf, f), 'utf8')).not.toContain('staff-break-glass');
+  });
+  // ── Program-Fix 17b: --clear-mfa (the owner's way back in after losing the device) ──
+  it('parses --clear-mfa on its own', () => {
+    expect(parseBreakGlassArgs([SEED, '--clear-mfa'])).toMatchObject({ username: SEED, clearMfa: true, apply: false });
+  });
+
+  it('--clear-mfa dry run counts and writes nothing; --apply turns MFA off; output never carries the username', async () => {
+    const { r, redis } = withScan();
+    await createAuthStore(r).saveStaff(seedRecord());
+    const mfa = createStaffMfaStore(r, { now: () => NOW });
+    const b = await mfa.beginEnrolment(SEED);
+    if (!b.ok) throw new Error('enrol refused');
+    expect(await mfa.confirmEnrolment(SEED, totpAt(base32Decode(b.secretBase32), NOW))).toBe('ok');
+
+    const before = new Map(r.dump);
+    const lines: string[] = [];
+    const dry = await runStaffBreakGlass(redis, { ...baseOpts, username: SEED, clearMfa: true, apply: false }, (l) => lines.push(l));
+    expect(dry.mfaKeys).toBeGreaterThanOrEqual(1);
+    expect(r.dump).toEqual(before);
+    expect(await mfa.isEnrolled(SEED)).toBe(true);
+
+    const applied = await runStaffBreakGlass(redis, { ...baseOpts, username: SEED, clearMfa: true, apply: true }, (l) => lines.push(l));
+    expect(applied.mfaKeys).toBe(dry.mfaKeys);
+    expect(await mfa.isEnrolled(SEED)).toBe(false);
+    expect(lines.join('\n')).not.toContain(SEED);
+    expect(lines.join('\n')).not.toContain(b.secretBase32);
   });
 });

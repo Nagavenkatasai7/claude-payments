@@ -13,6 +13,7 @@ import { clientIpFrom } from '@/lib/ip-rate-limit';
 import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { getStaffLoginGuard, isSeedAdminRecord, seedAdminUsername } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import {
   assertStaffPasswordPolicy,
   PASSWORD_CHANGED_CONCURRENTLY,
@@ -144,6 +145,9 @@ export async function createStaffAction(formData: FormData): Promise<void> {
     status: 'active',
     ...(partnerId ? { partnerId } : {}),
   };
+  // Program-Fix 17b: a re-used username never inherits a stale MFA enrolment
+  // (e.g. one left behind by a removal on the previous build).
+  await getStaffMfaStore().reset(username);
   await store.saveStaff(staff);
   await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`);
   revalidatePath('/admin-dashboard/team');
@@ -250,6 +254,7 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
 
   await store.deleteStaff(username);
   await store.deleteAllSessionsFor(username);
+  await getStaffMfaStore().reset(username); // Program-Fix 17b
   await audit(actor.username, 'removed', username, `was ${target.role}, ${scopeLabel(target.partnerId)}`);
   revalidatePath('/admin-dashboard/team');
 }
@@ -400,4 +405,33 @@ export async function resetStaffPasswordAction(
   });
   revalidatePath('/admin-dashboard/team');
   return { ok: true, message: `Password reset for ${target.username}. Their sessions were signed out.` };
+}
+
+/**
+ * Program-Fix 17b: turn a member's TOTP MFA off (lost device). Platform admin
+ * only; the target must exist; only the seed admin may reset the seed admin
+ * (the same guard as every other seed-targeting action). Also revokes the
+ * target's sessions, so a session opened with the old factor does not
+ * outlive the reset. Audited as auth.mfa.reset. The owner's break-glass for a
+ * seed admin who cannot sign in at all is `scripts/staff-break-glass.ts
+ * <username> --clear-mfa --apply`.
+ */
+export async function resetStaffMfaAction(formData: FormData): Promise<void> {
+  const actor = await requirePlatformAdmin();
+  const username = String(formData.get('username') ?? '').trim();
+  const store = getAuthStore();
+  const target = username ? await store.getStaff(username) : null;
+  if (!target) return;
+  assertMayTargetSeed(actor, target.username);
+  await getStaffMfaStore().reset(target.username);
+  await store.deleteAllSessionsFor(target.username);
+  await getStaffAuthAudit().record({
+    action: 'auth.mfa.reset',
+    actorType: 'staff',
+    actor: actor.username,
+    subjectId: target.username,
+    partnerId: target.partnerId,
+    ip: clientIpFrom(await headers()),
+  });
+  revalidatePath('/admin-dashboard/team');
 }
