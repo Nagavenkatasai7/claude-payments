@@ -5,7 +5,9 @@ import { isSendVerified, sendGateActive } from './kyc-gate';
 import { env } from './env';
 import { logError } from './log';
 import { RateUnavailableError } from './rate';
+import { newTransferId } from './id';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
 import type { PartnerStore } from './partner-store';
@@ -101,7 +103,38 @@ export async function runDueSchedules(
     const current = await deps.scheduleStore.getSchedule(schedule.id);
     if (!current || current.status !== 'active') continue;
     try {
+      // Program-Fix 32 (neon-08): CLAIM-FIRST, the pay-finalize.ts pattern.
+      // Bind sched:<scheduleId>:<YYYY-MM-DD Eastern day — the day
+      // isScheduleDueToday matches> (under the schedule's partner;
+      // PK (partner_id, key)) to a pre-generated id BEFORE the mint, so a
+      // same-day replay — a failed link send, or a crash between the mint and
+      // markRun — re-mints the SAME row or finds it: at most one transfer per
+      // schedule per Eastern day. A refused mint leaves the key bound but
+      // unminted; the re-run mints THAT id. The claim sits outside the sender
+      // lock (as in pay-finalize), and inside this try so a failing claim is
+      // counted and alerted like any other refusal.
+      const candidateId = newTransferId();
+      const reservedId = await createIdempotencyRepo(deps.db).claim(
+        schedule.partnerId,
+        `sched:${schedule.id}:${easternDay(deps.now)}`,
+        candidateId,
+      );
+      if (reservedId !== candidateId) {
+        const existing = await deps.store.getTransfer(reservedId);
+        if (existing) {
+          // Already minted today: re-send the SAME link only while it is
+          // still payable (never for a blocked, cancelled or already-paid
+          // row), record the run, and count it — no second mint.
+          if (existing.status === 'awaiting_payment') {
+            await deps.sendScheduledLink(schedule, existing, `${env.appBaseUrl}/pay/${existing.id}`);
+          }
+          await deps.scheduleStore.markRun(schedule.id, new Date(deps.now));
+          fired++;
+          continue;
+        }
+      }
       const mint = () => createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
+        id: reservedId,
         phone: schedule.phone,
         amountSource: schedule.amountSource,
         sourceCurrency: schedule.sourceCurrency,

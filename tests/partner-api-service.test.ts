@@ -661,9 +661,9 @@ describe('fix 6 (ctx-01): a masked payout_destination is refused at the edge, be
     expect((await store.getTransferDecrypted(t.id))?.payoutDestination).toBe('1234567890');
   });
 
-  it("an Idempotency-Key in the pay page's / B2B checkout's reserved namespace ('draft:', 'b2binvoice:') → 400; nothing bound, nothing minted", async () => {
+  it("an Idempotency-Key in the pay page's / B2B checkout's / schedule cron's reserved namespace ('draft:', 'b2binvoice:', 'sched:') → 400; nothing bound, nothing minted", async () => {
     const { deps, store, db } = await harness();
-    for (const key of ['draft:abc', 'b2binvoice:inv_1']) {
+    for (const key of ['draft:abc', 'b2binvoice:inv_1', 'sched:s_1:2026-06-09']) {
       expect(await createTransaction(deps, DELEGATED, 'pk_1', key, txBody()), key).toMatchObject({ ok: false, status: 400 });
       expect(await createIdempotencyRepo(db).find('acme', key), key).toBeNull();
     }

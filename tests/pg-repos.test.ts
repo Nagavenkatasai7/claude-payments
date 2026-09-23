@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { freshDb, seedPartner } from './helpers-db';
+import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { sql } from 'drizzle-orm';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -430,5 +431,27 @@ describe('outbox-repo (durability backbone)', () => {
     const ageMin = (Date.now() - s.oldestDueAt!.getTime()) / 60_000;
     expect(ageMin).toBeGreaterThan(19);
     expect(ageMin).toBeLessThan(21);
+  });
+});
+
+// Program-Fix 32 (neon-09): the expiry sweep's read — unfunded awaiting_payment
+// rows created before the cutoff, oldest first, bounded. A charged row
+// (funding_ref set) belongs to the funding-resume sweep and is never listed.
+describe('transfer-repo listStaleUnfunded (Program-Fix 32)', () => {
+  it('lists only unfunded awaiting_payment rows older than the cutoff, oldest first, up to the limit', async () => {
+    await seedPartner(db, 'acme');
+    const day = 86_400_000;
+    const ago = (days: number) => new Date(Date.now() - days * day);
+    const old1 = await seedLedgerSpend(db, { partnerId: 'default', phone: '15550000001', amountUsd: 10, createdAt: ago(9) });
+    const old2 = await seedLedgerSpend(db, { partnerId: 'acme', phone: '15550000002', amountUsd: 10, createdAt: ago(8) });
+    await seedLedgerSpend(db, { partnerId: 'default', phone: '15550000003', amountUsd: 10, createdAt: ago(6) }); // too young
+    const charged = await seedLedgerSpend(db, { partnerId: 'default', phone: '15550000004', amountUsd: 10, createdAt: ago(30) });
+    await createTransferRepo(db).setFundingRef(charged, 'mockfund-x');
+    for (const status of ['in_review', 'paid', 'delivered', 'cancelled', 'blocked'] as const) {
+      await seedLedgerSpend(db, { partnerId: 'default', phone: '15550000005', amountUsd: 10, createdAt: ago(20), status });
+    }
+    const repo = createTransferRepo(db);
+    expect((await repo.listStaleUnfunded(ago(7))).map((t) => t.id)).toEqual([old1, old2]);
+    expect((await repo.listStaleUnfunded(ago(7), 1)).map((t) => t.id)).toEqual([old1]);
   });
 });

@@ -65,8 +65,13 @@ export function createTransferRepo(
   // partner API refuses at its edge (createTransaction, fix 6), so a 'draft:'
   // key under default is never a partner claim. ('b2binvoice:<id>' claims need
   // no exemption: those mints are always transfer_type 'b2b',
-  // b2b-pay-finalize.ts, and fail the b2c test below.) Either partner-API
-  // marker locks the payout the partner supplied.
+  // b2b-pay-finalize.ts, and fail the b2c test below.) Program-Fix 32: a
+  // recurring-schedule mint claims 'sched:<scheduleId>:<easternDay>' under the
+  // schedule's partner (cron-run.ts) and is exempt too — a scheduled link is
+  // often minted with an EMPTY destination the customer enters on this page.
+  // The partner API refuses the 'sched:' prefix at its edge as well
+  // (createTransaction), so a 'sched:' key is never a partner claim. Either
+  // partner-API marker locks the payout the partner supplied.
   const payoutEditable = (id: string, partnerId: PartnerId) =>
     and(
       eq(transfers.id, id),
@@ -74,7 +79,7 @@ export function createTransferRepo(
       eq(transfers.status, 'awaiting_payment'),
       isNull(transfers.fundingRef),
       eq(transfers.transferType, 'b2c'),
-      sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%'))`,
+      sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%')`,
       sql`NOT EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key')`,
     );
 
@@ -346,6 +351,29 @@ export function createTransferRepo(
           lt(transfers.createdAt, cutoff),
         ))
         .limit(50);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
+     * Program-Fix 32 (neon-09): the unpaid-link expiry read — UNFUNDED
+     * (funding_ref IS NULL) awaiting_payment rows created before `cutoff`,
+     * oldest first, bounded. The same shape as listAwaitingWithFunding with the
+     * funding predicate inverted: a charged row belongs to the funding-resume
+     * sweep and is never listed here. Served by transfers_status_paid (leading
+     * `status`, schema.ts). Cross-tenant by design (a system sweep); every
+     * write the caller makes is tenant-scoped (cancelIfCancellable).
+     */
+    async listStaleUnfunded(cutoff: Date, limit = 100): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.fundingRef),
+          lt(transfers.createdAt, cutoff),
+        ))
+        .orderBy(transfers.createdAt)
+        .limit(limit);
       return rows.map((r) => toDomain(r));
     },
 

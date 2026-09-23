@@ -577,3 +577,149 @@ describe('runDueSchedules — kill switch + partner gate (Program-Fix 36)', () =
     expect((await scheduleStore.getSchedule('ended'))?.status).toBe('cancelled');
   });
 });
+
+// Program-Fix 32 (neon-08): the cron mint is CLAIM-FIRST. The key
+// sched:<scheduleId>:<YYYY-MM-DD Eastern day> is bound (under the schedule's partner)
+// to a pre-generated id BEFORE createTransfer, so a same-day replay re-mints
+// the SAME row or finds it — at most one transfer per schedule per Eastern day.
+describe('runDueSchedules — claim-first replay safety (Program-Fix 32)', () => {
+  async function schedKeys(db: Awaited<ReturnType<typeof makeDeps>>['db']) {
+    const r = await db.execute(sql`SELECT partner_id, key, transfer_id FROM idempotency_keys WHERE key LIKE 'sched:%' ORDER BY created_at, key`);
+    return (r as unknown as { rows: Array<{ partner_id: string; key: string; transfer_id: string }> }).rows;
+  }
+
+  it('test 1: a replay after a FAILED link send mints nothing new — one transfer, key bound to it, same link re-sent, lastRunAt set', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sent: string[] = [];
+    let failSend = true;
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s: Schedule, t: { id: string }, url: string) => {
+        if (failSend) throw new Error('graph api down');
+        sent.push(`${t.id} ${url}`);
+      },
+    };
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeUndefined();
+    failSend = false;
+    expect(await runDueSchedules(deps)).toEqual({ fired: 1, failed: 0 });
+
+    const transfers = await store.listTransfers();
+    expect(transfers).toHaveLength(1);
+    const keys = await schedKeys(db);
+    expect(keys).toEqual([{ partner_id: 'default', key: 'sched:due:2026-05-21', transfer_id: transfers[0].id }]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain(`/pay/${transfers[0].id}`);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeTruthy();
+  });
+
+  it('test 2: two concurrent runs give ONE transfer', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async () => {},
+    };
+    await Promise.all([runDueSchedules(deps), runDueSchedules(deps)]);
+    const transfers = await store.listTransfers();
+    expect(transfers).toHaveLength(1);
+    expect((await schedKeys(db)).map((k) => k.transfer_id)).toEqual([transfers[0].id]);
+  });
+
+  it('test 3: a REFUSED mint (FX unavailable) leaves the key bound and no row; a same-day re-run after the cause clears mints THAT id', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
+    const notified: string[] = [];
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s: Schedule, _t: unknown, url: string) => { notified.push(url); },
+    };
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    const [bound] = await schedKeys(db);
+    expect(bound.key).toBe('sched:due:2026-05-21');
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect(await store.getTransfer(bound.transfer_id)).toBeNull();
+
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ rates: { INR: 85 } }) }));
+    expect(await runDueSchedules(deps)).toEqual({ fired: 1, failed: 0 });
+    const transfers = await store.listTransfers();
+    expect(transfers.map((t) => t.id)).toEqual([bound.transfer_id]);
+    expect(notified).toEqual([expect.stringContaining(`/pay/${bound.transfer_id}`)]);
+    expect(await schedKeys(db)).toHaveLength(1);
+  });
+
+  it('test 4: the next due day gets a NEW key and a second transfer', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    const base = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider,
+      sendScheduledLink: async () => {},
+    };
+    const nextDue = NOW + 31 * 86_400_000; // May has 31 days ⇒ the 21st of the next month, same hour
+    const easternDay = (ms: number) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    expect(await runDueSchedules({ ...base, now: NOW })).toEqual({ fired: 1, failed: 0 });
+    expect(await runDueSchedules({ ...base, now: nextDue })).toEqual({ fired: 1, failed: 0 });
+    const keys = await schedKeys(db);
+    expect(keys.map((k) => k.key)).toEqual([
+      `sched:due:${easternDay(NOW)}`,
+      `sched:due:${easternDay(nextDue)}`,
+    ]);
+    expect(new Set(keys.map((k) => k.transfer_id)).size).toBe(2);
+    expect(await store.listTransfers()).toHaveLength(2);
+  });
+
+  it('test 5b: a replay onto a row that is no longer awaiting payment (e.g. cancelled) sends no link and still records lastRunAt', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let failSend = true;
+    const notified: string[] = [];
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s: Schedule, _t: unknown, url: string) => {
+        if (failSend) throw new Error('graph api down');
+        notified.push(url);
+      },
+    };
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    const [t] = await store.listTransfers();
+    await db.execute(sql`UPDATE transfers SET status = 'cancelled' WHERE id = ${t.id}`); // staff cancelled it
+    failSend = false;
+    expect(await runDueSchedules(deps)).toEqual({ fired: 1, failed: 0 });
+    expect(notified).toHaveLength(0);
+    expect(await store.listTransfers()).toHaveLength(1);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeTruthy();
+  });
+
+  it('test 5: a replay onto an existing BLOCKED row sends no link and still records lastRunAt', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule({ ...sched('b', 21), recipientName: 'John Doe' }); // on the watchlist
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The first run mints the blocked row, then dies before recording the run.
+    vi.spyOn(scheduleStore, 'markRun').mockRejectedValueOnce(new Error('db blip'));
+    const notified: string[] = [];
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s: Schedule, _t: unknown, url: string) => { notified.push(url); },
+    };
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    expect(await runDueSchedules(deps)).toEqual({ fired: 1, failed: 0 });
+    const transfers = await store.listTransfers();
+    expect(transfers).toHaveLength(1);
+    expect(transfers[0].status).toBe('blocked');
+    expect(notified).toHaveLength(0);
+    expect((await scheduleStore.getSchedule('b'))?.lastRunAt).toBeTruthy();
+  });
+});
