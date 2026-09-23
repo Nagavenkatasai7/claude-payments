@@ -4,7 +4,7 @@ import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { createPartnerApplicationRepo, createPartnerRequestRepo } from '@/db/repos/aux-repos';
-import { isPartnerDocType, isPrivatePartnerDocRef } from '@/lib/blob';
+import { isOwnPrivateStoreRef, isPartnerDocType, isPrivatePartnerDocRef } from '@/lib/blob';
 import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
@@ -79,7 +79,8 @@ const MAX_DOCS = 4;
  * shape). Fix 24: a ref is kept only when `isPrivatePartnerDocRef` binds it to
  * THIS request — https, a PRIVATE Blob store host, and the pathname under
  * `partner-applications/<requestId>/` (the upload route's output for this
- * token). Public-store, other-request and spoofed hosts are dropped; the
+ * token) — and, fix 46A, on exactly OUR private store (isOwnPrivateStoreRef).
+ * Public-store, other-store, other-request and spoofed hosts are dropped; the
  * contentType is allow-listed (the staff route never trusts it anyway).
  */
 function parseDocuments(raw: string, requestId: string): PartnerApplicationDocument[] {
@@ -96,7 +97,11 @@ function parseDocuments(raw: string, requestId: string): PartnerApplicationDocum
     if (!item || typeof item !== 'object') continue;
     const d = item as Record<string, unknown>;
     const url = typeof d.url === 'string' ? d.url : '';
-    if (!isPrivatePartnerDocRef(url, requestId)) {
+    // Fix 46A (F73): also pin OUR store id (isOwnPrivateStoreRef), so a ref on
+    // another private store is never persisted. That helper is false when the
+    // partner-docs token is unset (previews/dev), which drops every document
+    // here — uploads need that token anyway.
+    if (!isPrivatePartnerDocRef(url, requestId) || !isOwnPrivateStoreRef(url)) {
       dropped += 1;
       continue;
     }

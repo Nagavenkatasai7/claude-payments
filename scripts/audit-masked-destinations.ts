@@ -21,7 +21,8 @@
 import { and, eq, inArray, lt, ne } from 'drizzle-orm';
 import { getDb, type DbOrTx } from '@/db/client';
 import { recipients, schedules, transfers } from '@/db/schema';
-import { defaultProvider } from '@/lib/field-crypto';
+import { defaultProvider, type CryptoContext } from '@/lib/field-crypto';
+import { ctx, recipientRowCtx } from '@/lib/crypto-context';
 import { openOptional } from '@/db/repos/mappers';
 import { isMaskedDestination } from '@/lib/payout-format';
 
@@ -42,7 +43,8 @@ export async function findMaskedDestinationRows(
   opts: { before?: Date } = {},
 ): Promise<MaskedRowsReport> {
   const provider = defaultProvider();
-  const masked = (blob: string | null) => isMaskedDestination(openOptional(blob, provider));
+  // Each blob opens under the context built from ITS OWN row (Program-Fix 46A).
+  const masked = (blob: string | null, c: CryptoContext) => isMaskedDestination(openOptional(blob, provider, c));
 
   const tRows = await db
     .select({ id: transfers.id, partnerId: transfers.partnerId, status: transfers.status, createdAt: transfers.createdAt, enc: transfers.payoutDestinationEnc })
@@ -66,12 +68,12 @@ export async function findMaskedDestinationRows(
     : [];
 
   return {
-    transfers: tRows.filter((r) => masked(r.enc)).map((r) => ({ id: r.id, partner_id: r.partnerId, status: r.status, created_at: r.createdAt.toISOString() })),
-    recipients: rRows.filter((r) => masked(r.enc)).map((r) => ({
+    transfers: tRows.filter((r) => masked(r.enc, ctx.transfer(r.id, 'payout_destination_enc'))).map((r) => ({ id: r.id, partner_id: r.partnerId, status: r.status, created_at: r.createdAt.toISOString() })),
+    recipients: rRows.filter((r) => masked(r.enc, recipientRowCtx(r))).map((r) => ({
       partner_id: r.partnerId, sender_last4: r.senderPhone.slice(-4), recipient_last4: r.recipientPhone.slice(-4),
       last_used_at: r.lastUsedAt.toISOString(),
     })),
-    schedules: sRows.filter((r) => masked(r.enc)).map((r) => ({ id: r.id, partner_id: r.partnerId, status: r.status })),
+    schedules: sRows.filter((r) => masked(r.enc, ctx.schedule(r.id))).map((r) => ({ id: r.id, partner_id: r.partnerId, status: r.status })),
     pulledConsumerTransfers: pRows.map((r) => ({
       id: r.id, partner_id: r.partnerId, status: r.status, funding_method: r.fundingMethod, created_at: r.createdAt.toISOString(),
     })),

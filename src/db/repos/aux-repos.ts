@@ -17,6 +17,7 @@ import { isPartnerType } from '@/lib/partner-type';
 import { deriveInviteEmailStatus, inviteDedupeKey, type InviteEmailStatus } from '@/lib/partner-invite-email';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
+import { ctx, recipientRowCtx, sellerRowCtx } from '@/lib/crypto-context';
 import type {
   B2bInvoice,
   CorridorRequest,
@@ -45,13 +46,15 @@ export function createRecipientRepo(
 ) {
   return {
     async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<void> {
+      // The row key AS WRITTEN (the conflict target) — the sealed destination binds to it.
+      const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
       const row = {
-        partnerId,
-        senderPhone,
-        recipientPhone: r.recipientPhone,
+        ...key,
         name: r.name,
         payoutMethod: r.payoutMethod,
-        payoutDestinationEnc: r.payoutDestination ? encryptField(r.payoutDestination, provider) : '',
+        payoutDestinationEnc: r.payoutDestination
+          ? encryptField(r.payoutDestination, provider, recipientRowCtx(key))
+          : '',
         payoutDestinationLast4: last4(r.payoutDestination ?? ''),
         lastUsedAt: new Date(r.lastUsedAt),
       };
@@ -75,7 +78,7 @@ export function createRecipientRepo(
         name: row.name,
         recipientPhone: row.recipientPhone,
         payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+        payoutDestination: openOptional(row.payoutDestinationEnc, provider, recipientRowCtx(row)) ?? '',
         lastUsedAt: row.lastUsedAt.toISOString(),
       }));
     },
@@ -107,7 +110,9 @@ export function createBeneficiaryRepo(
         name: b.name,
         country: b.country,
         payoutMethod: b.payoutMethod,
-        payoutDestinationEnc: b.payoutDestination ? encryptField(b.payoutDestination, provider) : '',
+        payoutDestinationEnc: b.payoutDestination
+          ? encryptField(b.payoutDestination, provider, ctx.beneficiary(b.id))
+          : '',
         payoutDestinationLast4: last4(b.payoutDestination ?? ''),
         recipientPhone: b.recipientPhone ?? null,
         createdAt: new Date(b.createdAt),
@@ -129,7 +134,7 @@ export function createBeneficiaryRepo(
         name: row.name,
         country: row.country,
         payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+        payoutDestination: openOptional(row.payoutDestinationEnc, provider, ctx.beneficiary(row.id)) ?? '',
         recipientPhone: row.recipientPhone ?? undefined,
         createdAt: row.createdAt.toISOString(),
       };
@@ -810,7 +815,9 @@ export function createSellerRepo(db: DbOrTx) {
     ): Promise<(Seller & { payoutDestination: string }) | null> {
       const row = await fetchRow(phone, partnerId);
       if (!row) return null;
-      const payoutDestination = row.payoutDestinationEnc ? decryptField(row.payoutDestinationEnc) : '';
+      const payoutDestination = row.payoutDestinationEnc
+        ? decryptField(row.payoutDestinationEnc, undefined, sellerRowCtx(row))
+        : '';
       return { ...toDomain(row), payoutDestination };
     },
 
@@ -818,7 +825,8 @@ export function createSellerRepo(db: DbOrTx) {
       phone: string, partnerId: PartnerId, payoutDestination: string,
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
-      const enc = encryptField(payoutDestination);
+      // The UPDATE's WHERE key (partner_id, normalized phone) IS the row's key.
+      const enc = encryptField(payoutDestination, undefined, sellerRowCtx({ partnerId, phone: normalized }));
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)
@@ -877,7 +885,8 @@ export function createSellerRepo(db: DbOrTx) {
       payoutMethod: Seller['payoutMethod'] = 'bank',
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
-      const enc = encryptField(payoutDestination);
+      // The UPDATE's WHERE key (partner_id, normalized phone) IS the row's key.
+      const enc = encryptField(payoutDestination, undefined, sellerRowCtx({ partnerId, phone: normalized }));
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)
