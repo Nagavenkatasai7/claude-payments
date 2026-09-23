@@ -7,6 +7,7 @@ import BrandLogo from './landing/BrandLogo';
 import SocialLinks from './landing/SocialLinks';
 import { SHARE_IMAGE } from './landing/share-image';
 import { SMARTREMIT_ICONS } from './brand-icons';
+import { SkipLink } from '@/components/skip-link';
 import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon, BoltIcon, GlobeIcon } from './landing/TrustIcons';
 import RateCalculator from './landing/RateCalculator';
 import HeroPipeline from './landing/HeroPipeline';
@@ -181,6 +182,7 @@ export default async function LandingPage({
     <div
       className={`${inter.className} min-h-svh overflow-x-clip bg-[#f5f9ff] leading-[1.6] text-[#0b1b3f] antialiased max-[600px]:pb-[84px] [--lp-bg-800:#eef4fc] [--lp-bg-900:#ffffff] [--lp-border:#8391a8] [--lp-text-100:#0b1b3f] [--lp-text-300:#475569] [--lp-wa-deep:#1fbd5d] [--lp-green-text:#047857] [--lp-wa:#25d366] [&_:focus-visible]:rounded-[6px] [&_:focus-visible]:[outline-offset:3px] [&_:focus-visible]:[outline:2px_solid_#0c5bd2]`}
     >
+      <SkipLink />
       {/* ============ NAV ============ */}
       <nav
         className="sticky top-0 z-50 border-b border-[#dbe4f0] bg-[rgba(245,249,255,0.85)] backdrop-blur-[12px]"
@@ -253,8 +255,10 @@ export default async function LandingPage({
 
       <main id="top">
         {/* ============ HERO — customer first: the promise + the live chat ============ */}
+        {/* id="main" is the skip link's target; <main id="top"> stays for the logo's #top. */}
         <section
-          className="relative overflow-hidden px-5 pt-[clamp(40px,6vw,88px)] pb-[clamp(56px,7vw,104px)]"
+          id="main"
+          className="relative scroll-mt-20 overflow-hidden px-5 pt-[clamp(40px,6vw,88px)] pb-[clamp(56px,7vw,104px)]"
           aria-labelledby="hero-h"
         >
           {/* Backdrop (decorative): soft sky/green light and a dotted "globe"
