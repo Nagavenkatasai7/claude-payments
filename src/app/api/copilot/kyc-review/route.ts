@@ -8,6 +8,7 @@ import { createScopedStore } from '@/lib/scoped-store';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { checkCopilotRateLimit } from '@/lib/ticket-ai';
 import { suggestKycReview } from '@/lib/kyc-review-ai';
+import { auditSubjectId } from '@/lib/customer-ref';
 
 export const dynamic = 'force-dynamic';
 
@@ -81,7 +82,9 @@ export async function POST(req: NextRequest) {
       actor: staff.username,
       actorType: 'staff',
       action: 'copilot.kyc_review',
-      subjectId: customer.senderPhone,
+      // Program-Fix 37: the keyed, stable subject of the RESOLVED row, never
+      // the raw phone (older rows keep a raw phone: an accepted residual).
+      subjectId: auditSubjectId(customer.partnerId, customer.senderPhone),
     });
     return NextResponse.json({ ok: true, suggestion });
   } catch {

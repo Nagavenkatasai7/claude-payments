@@ -1,4 +1,5 @@
 import { env } from './env';
+import { logError, logWarn } from './log';
 import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
@@ -452,11 +453,13 @@ export async function sendTemplateOrText(
   try {
     await send();
   } catch (err) {
-    console.warn('Template send failed; falling back to free-form text:', err);
+    // Program-Fix 37 (obs-13): the scrubbing logger only, with a masked phone
+    // (a Graph error can echo the recipient back inside `err`).
+    logWarn('whatsapp.template-fallback', err, { to: maskPhone(to) });
     try {
       await sendText(to, fallbackText, creds);
     } catch (textErr) {
-      console.error('Fallback sendText also failed for', to, textErr);
+      logError('whatsapp.fallback', textErr, { to: maskPhone(to) });
     }
   }
 }
@@ -570,7 +573,9 @@ export async function sendCtaUrl(
   // window 470, unsupported type, etc.), degrade gracefully to a plain text with
   // the link inline rather than throwing — the customer still gets a tappable link.
   const body = await res.text().catch(() => '');
-  console.warn(`sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`);
+  logWarn('whatsapp.cta-url-fallback', `sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`, {
+    to: maskPhone(to),
+  });
   await sendText(to, fallbackText, creds);
 }
 

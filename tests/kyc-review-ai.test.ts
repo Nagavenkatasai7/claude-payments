@@ -194,7 +194,7 @@ describe('suggestKycReview — output clamped to the closed lists', () => {
 });
 
 describe('suggestKycReview — what the model sees', () => {
-  it('includes the screening result, declared name, and audit trail in the user message', async () => {
+  it('includes the screening result, the declared-name STATE (never the name, fix 37) and the audit trail', async () => {
     chatMock.mockResolvedValue(reply(GOOD));
     await suggestKycReview(
       { ...customer, watchlistHit: true },
@@ -202,7 +202,61 @@ describe('suggestKycReview — what the model sees', () => {
     );
     const sent = JSON.stringify(chatMock.mock.calls[0][0]);
     expect(sent).toContain('WATCHLIST HIT');
-    expect(sent).toContain('Jane Q. Sender');
+    expect(sent).toContain('Declared full name: provided');
+    expect(sent).not.toContain('Jane Q. Sender');
     expect(sent).toContain('inquiry.completed');
+  });
+});
+
+// Program-Fix 37 (ctx-07): the model sees STATES, never identity values. The
+// decision needs "name/DOB provided or missing", the ID type + last 4, the
+// screening and review state — not the full name, DOB, phone or address.
+describe('suggestKycReview — identity minimisation (Program-Fix 37)', () => {
+  const full: Customer = {
+    ...customer,
+    fullName: 'Asha Ramanathan',
+    dateOfBirth: '1987-03-14',
+    residentialAddress: '42 Elm Street, Springfield',
+    govIdType: 'passport',
+    idLast4: '4242',
+    nationality: 'IN',
+  };
+
+  async function sentText(c: Customer): Promise<string> {
+    chatMock.mockResolvedValueOnce(reply(GOOD));
+    await suggestKycReview(c, audit);
+    const messages = chatMock.mock.calls[0][0];
+    return messages.map((m) => m.content ?? '').join('\n');
+  }
+
+  it('sends no full name, DOB, phone or address, and no run of 7+ digits', async () => {
+    const text = await sentText(full);
+    for (const v of ['Asha', 'Ramanathan', '1987-03-14', '1987', '15551230000', '1230000', 'Elm Street']) {
+      expect(text).not.toContain(v);
+    }
+    expect(text).not.toMatch(/\d{7,}/);
+  });
+
+  it('keeps the states the decision needs: provided, ID type + last 4, screening, review state', async () => {
+    const text = await sentText(full);
+    expect(text).toContain('Declared full name: provided');
+    expect(text).toContain('Declared date of birth: provided');
+    expect(text).toContain('passport ending 4242');
+    expect(text).toContain('Screening: clear');
+    expect(text).toContain('Review state: pending_review');
+    expect(text).toContain('Persona inquiry: inq_abc');
+  });
+
+  it('prints missing when a name or DOB is absent', async () => {
+    const text = await sentText({ ...full, fullName: undefined, dateOfBirth: undefined });
+    expect(text).toContain('Declared full name: missing');
+    expect(text).toContain('Declared date of birth: missing');
+  });
+
+  it('a mock provider ref (mock-<phone>) never reaches the model; only an inquiry id is printed', async () => {
+    const text = await sentText({ ...full, kycInquiryId: undefined, kycProviderRef: 'mock-15551230000' });
+    expect(text).not.toContain('15551230000');
+    expect(text).not.toMatch(/\d{7,}/);
+    expect(text).toContain('Persona inquiry: on file');
   });
 });

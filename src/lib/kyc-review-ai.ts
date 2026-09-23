@@ -43,19 +43,29 @@ Lean toward "need_more" when the case is ambiguous or data is missing — never 
 
 ${GUARDRAILS}`;
 
+// Program-Fix 37 (ctx-07): the model gets STATES, never identity values. The
+// decision needs "name/DOB provided or missing", the ID type + last 4, the
+// screening and review state, and the declared enums; it never needs the full
+// name, DOB, phone or address, so none of them leaves for the external model.
+// Only a real inquiry id is printed: a provider ref can be `mock-<phone>`.
+function providedOrMissing(value: string | undefined | null): 'provided' | 'missing' {
+  return value && value.trim() ? 'provided' : 'missing';
+}
+
 function fieldLines(customer: Customer): string {
   const screening = customer.watchlistHit
     ? 'WATCHLIST HIT (hard hold)'
     : customer.pepHit
       ? 'PEP HIT'
       : 'clear';
+  const inquiry = customer.kycInquiryId ?? (customer.kycProviderRef ? 'on file' : 'none');
   return [
     `KYC status: ${customer.kycStatus}`,
     `Review state: ${customer.kycReviewState ?? 'none'}`,
     `Screening: ${screening}`,
-    `Persona inquiry: ${customer.kycInquiryId ?? customer.kycProviderRef ?? 'none'}`,
-    `Declared full name: ${customer.fullName ?? 'unknown'}`,
-    `Declared date of birth: ${customer.dateOfBirth ?? 'unknown'}`,
+    `Persona inquiry: ${inquiry}`,
+    `Declared full name: ${providedOrMissing(customer.fullName)}`,
+    `Declared date of birth: ${providedOrMissing(customer.dateOfBirth)}`,
     `Declared occupation: ${customer.occupation ?? 'unknown'}`,
     `Declared source of funds: ${customer.sourceOfFunds ?? 'unknown'}`,
     `Self-declared PEP: ${customer.pepDeclared ? 'yes' : 'no'}`,
@@ -96,7 +106,6 @@ export async function suggestKycReview(
   const user: ChatMessage = {
     role: 'user',
     content:
-      `Customer phone: ${customer.senderPhone}\n` +
       `First seen: ${customer.firstSeenAt}\n\n` +
       `KYC fields:\n${fieldLines(customer)}\n\n` +
       `KYC audit trail (oldest first):\n${auditLines(audit)}\n\n` +
