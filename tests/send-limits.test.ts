@@ -8,6 +8,11 @@ import {
   validateSendLimitInput,
   SendBusyError,
   SendCapError,
+  boundReason,
+  boundStaffNote,
+  requireStaffReason,
+  STAFF_REASON_MAX,
+  STAFF_REASON_MIN,
 } from '@/lib/send-limits';
 import { MAX_USD } from '@/lib/fx';
 import { T0_DAILY_CAP_CENTS, T1_DAILY_CAP_CENTS } from '@/lib/tier-rules';
@@ -291,5 +296,29 @@ describe('SendCapError / SendBusyError', () => {
     expect(e.name).toBe('SendBusyError');
     expect(e.message).toBe('send_busy');
     expect(e.retryable).toBe(true);
+  });
+});
+
+// ── Program-Fix 28: the staff-typed text bounds shared by the audited decisions ──
+describe('boundReason / boundStaffNote / requireStaffReason (Program-Fix 28)', () => {
+  it('boundReason is exported: strips control characters and collapses whitespace', () => {
+    expect(boundReason(' a\u0000b \n\t c ')).toBe('a b c');
+  });
+
+  it('boundStaffNote: optional — blank or missing ⇒ null; cut at 500 characters', () => {
+    expect(boundStaffNote(null)).toBeNull();
+    expect(boundStaffNote('   \n ')).toBeNull();
+    expect(boundStaffNote(' checked\u0007 docs ')).toBe('checked docs');
+    expect(boundStaffNote('x'.repeat(900))).toHaveLength(STAFF_REASON_MAX);
+  });
+
+  it('requireStaffReason: mandatory, at least 10 characters after bounding, cut at 500', () => {
+    expect(() => requireStaffReason(null)).toThrow(/reason is required/i);
+    expect(() => requireStaffReason('   ')).toThrow(/reason is required/i);
+    expect(() => requireStaffReason('too short')).toThrow(/at least 10 characters/i); // 9 chars
+    expect(() => requireStaffReason('  a\u0000\u0000b  ')).toThrow(/at least 10/i); // bounding runs first
+    expect(requireStaffReason('docs checked offline')).toBe('docs checked offline');
+    expect(requireStaffReason('y'.repeat(900))).toHaveLength(500);
+    expect(STAFF_REASON_MIN).toBe(10);
   });
 });

@@ -13,10 +13,37 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import type { Transfer } from '@/lib/types';
 
+// Program-Fix 28: the audit repo is the real one, with a switch that forces its
+// insert to fail (a failed audit insert must roll the money move back). Off by
+// default, so every pre-existing case runs against the real repo unchanged.
+let failAudit = false;
+vi.mock('@/db/repos/aux-repos', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/aux-repos')>();
+  return {
+    ...real,
+    createAuditRepo: (dbx: Parameters<typeof real.createAuditRepo>[0]) => {
+      const r = real.createAuditRepo(dbx);
+      return {
+        ...r,
+        record: async (e: Parameters<typeof r.record>[0]) => {
+          if (failAudit) throw new Error('audit insert failed');
+          return r.record(e);
+        },
+      };
+    },
+  };
+});
+
 let db: Db;
 beforeEach(async () => {
   db = await freshDb();
+  failAudit = false;
 });
+
+async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
+  const r = await db.execute(sql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events ORDER BY id`);
+  return (r as unknown as { rows: Array<{ partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> }> }).rows;
+}
 
 async function outboxRows(): Promise<Array<{ kind: string; dedupe_key: string | null }>> {
   const r = await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
@@ -719,5 +746,125 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     const loaded = await store.getTransfer('race_asg');
     expect(loaded?.status).toBe('paid');
     expect(loaded?.assignedTo).toBeUndefined();
+  });
+});
+
+// ── Program-Fix 28 (compliance-03/-08): every staff money decision writes ONE
+// audit_events row INSIDE its existing transaction. A failing audit insert rolls
+// the money move back (status unchanged, no outbox row). Calls without the
+// audit context behave exactly as before (the cases above).
+describe('staff audit rows on the money transitions (Program-Fix 28)', () => {
+  const AUDIT = { actor: 'plat', reason: 'checked source of funds' };
+
+  it('releaseTransfer writes exactly one transfer.release row (partner, staff actor, transferId subject, statuses, reason)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_rel', status: 'in_review', complianceStatus: 'flagged' }));
+    await releaseTransfer(store, db, 'a_rel', AUDIT);
+    expect(await auditRows()).toEqual([{
+      partner_id: 'default', actor: 'plat', actor_type: 'staff', action: 'transfer.release', subject_id: 'a_rel',
+      meta: { previousStatus: 'in_review', newStatus: 'paid', reason: 'checked source of funds' },
+    }]);
+  });
+
+  it('releaseTransfer: a failing audit insert rolls the release back — still in_review, NO outbox row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_rel2', status: 'in_review', complianceStatus: 'flagged' }));
+    failAudit = true;
+    await expect(releaseTransfer(store, db, 'a_rel2', AUDIT)).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a_rel2'))?.status).toBe('in_review');
+    expect(await outboxRows()).toHaveLength(0);
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('rejectTransfer (UNCHARGED early return) still writes its transfer.reject row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_rej', status: 'in_review' }));
+    await rejectTransfer(store, db, 'a_rej', { actor: 'plat', reason: null });
+    expect(await auditRows()).toEqual([{
+      partner_id: 'default', actor: 'plat', actor_type: 'staff', action: 'transfer.reject', subject_id: 'a_rej',
+      meta: { previousStatus: 'in_review', newStatus: 'cancelled', refundStatus: 'none', reason: null },
+    }]);
+  });
+
+  it('rejectTransfer (CHARGED) writes one row with refundStatus pending; a failing audit leaves it in_review with no refund effect', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_rej2', status: 'in_review', fundingRef: 'mockfund-a_rej2' }));
+    failAudit = true;
+    await expect(rejectTransfer(store, db, 'a_rej2', AUDIT)).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a_rej2'))?.status).toBe('in_review');
+    expect((await store.getTransfer('a_rej2'))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+    failAudit = false;
+    await rejectTransfer(store, db, 'a_rej2', AUDIT);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'transfer.reject', meta: { newStatus: 'cancelled', refundStatus: 'pending' } });
+  });
+
+  it('issueRefund writes one refund.issue row; a failing audit leaves refundStatus none and no outbox row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_iss', status: 'paid', fundingRef: 'mockfund-a_iss' }));
+    failAudit = true;
+    await expect(issueRefund(db, 'a_iss', { actor: 'plat', reason: null })).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a_iss'))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxRows()).toHaveLength(0);
+    failAudit = false;
+    await issueRefund(db, 'a_iss', { actor: 'plat', reason: null });
+    expect(await auditRows()).toEqual([{
+      partner_id: 'default', actor: 'plat', actor_type: 'staff', action: 'refund.issue', subject_id: 'a_iss',
+      meta: { previousStatus: 'paid', newStatus: 'paid', previousRefundStatus: 'none', refundStatus: 'pending', reason: null },
+    }]);
+  });
+
+  it('approveRefund writes one refund.approve row; a failing audit leaves it requested with no outbox row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_apr', status: 'cancelled', fundingRef: 'f', refundStatus: 'requested' }));
+    failAudit = true;
+    await expect(approveRefund(db, 'a_apr', AUDIT)).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a_apr'))?.refundStatus).toBe('requested');
+    expect(await outboxRows()).toHaveLength(0);
+    failAudit = false;
+    await approveRefund(db, 'a_apr', AUDIT);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'refund.approve', subject_id: 'a_apr', meta: { previousRefundStatus: 'requested', refundStatus: 'pending', reason: AUDIT.reason } });
+  });
+
+  it('dismissRefund writes one refund.dismiss row; a failing audit leaves it requested', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_dis', status: 'cancelled', fundingRef: 'f', refundStatus: 'requested' }));
+    failAudit = true;
+    await expect(dismissRefund(db, 'a_dis', AUDIT)).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a_dis'))?.refundStatus).toBe('requested');
+    failAudit = false;
+    await dismissRefund(db, 'a_dis', AUDIT);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'refund.dismiss', meta: { previousRefundStatus: 'requested', refundStatus: 'none' } });
+  });
+
+  it('retryRefund writes one refund.retry row; a failing audit leaves it failed with no outbox row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'a_rty', status: 'cancelled', fundingRef: 'f', refundStatus: 'failed' }));
+    failAudit = true;
+    await expect(retryRefund(db, 'a_rty', AUDIT)).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('a_rty'))?.refundStatus).toBe('failed');
+    expect(await outboxRows()).toHaveLength(0);
+    failAudit = false;
+    await retryRefund(db, 'a_rty', AUDIT);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'refund.retry', meta: { previousRefundStatus: 'failed', refundStatus: 'pending' } });
+  });
+
+  it('calls WITHOUT an audit context write no audit row (existing semantics)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'n_rel', status: 'in_review', complianceStatus: 'flagged' }));
+    await store.saveTransfer(makeTransfer({ id: 'n_rej', status: 'in_review' }));
+    await store.saveTransfer(makeTransfer({ id: 'n_iss', status: 'paid', fundingRef: 'f' }));
+    await releaseTransfer(store, db, 'n_rel');
+    await rejectTransfer(store, db, 'n_rej');
+    await issueRefund(db, 'n_iss');
+    expect(await auditRows()).toHaveLength(0);
   });
 });

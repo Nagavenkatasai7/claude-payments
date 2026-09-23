@@ -1,0 +1,120 @@
+<?xml version="1.0" standalone="yes"?>
+<!-- Program-Fix 14: 5 SYNTHETIC entries (every name, uid and address is made up)
+     in the legacy SDN.XML schema that OFAC's Sanctions List Service publishes.
+     The element layout mirrors the live export (checked 2026-09-23), including
+     the nested lists the loader must skip. -->
+<sdnList xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>09/18/2026</Publish_Date>
+    <Record_Count>5</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>1001</uid>
+    <lastName>EXAMPLE AIRWAYS LTD</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>CUBA</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>9001</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>EXAMPLE-AIR</lastName>
+      </aka>
+    </akaList>
+    <addressList>
+      <address>
+        <uid>9002</uid>
+        <city>Example City</city>
+        <country>Exampleland</country>
+      </address>
+    </addressList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>1002</uid>
+    <lastName>BANCO EJEMPLO NACIONAL</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>CUBA</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>9003</uid>
+        <type>a.k.a.</type>
+        <category>weak</category>
+        <lastName>BEN</lastName>
+      </aka>
+      <aka>
+        <uid>9004</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>NATIONAL EXAMPLE BANK</lastName>
+      </aka>
+    </akaList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>1003</uid>
+    <firstName>Testa</firstName>
+    <lastName>FIXTURELLI</lastName>
+    <title>Director of EXAMPLE HOLDINGS</title>
+    <sdnType>Individual</sdnType>
+    <programList>
+      <program>SDGT</program>
+    </programList>
+    <idList>
+      <id>
+        <uid>9005</uid>
+        <idType>Secondary sanctions risk:</idType>
+        <idNumber>section 1(b) of Executive Order 13224, as amended by Executive Order 13886</idNumber>
+      </id>
+    </idList>
+    <akaList>
+      <aka>
+        <uid>9006</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>PLACEHOLDER</lastName>
+        <firstName>Sample</firstName>
+      </aka>
+    </akaList>
+    <dateOfBirthList>
+      <dateOfBirthItem>
+        <uid>9007</uid>
+        <dateOfBirth>01 Jan 1970</dateOfBirth>
+        <mainEntry>true</mainEntry>
+      </dateOfBirthItem>
+    </dateOfBirthList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>1004</uid>
+    <lastName>SEA FIXTURE</lastName>
+    <sdnType>Vessel</sdnType>
+    <programList>
+      <program>CUBA</program>
+    </programList>
+    <vesselInfo>
+      <callSign>XX0000</callSign>
+      <vesselType>Tug</vesselType>
+      <vesselFlag>Exampleland</vesselFlag>
+      <vesselOwner>Example Shipping S.A.</vesselOwner>
+      <grossRegisteredTonnage>212</grossRegisteredTonnage>
+    </vesselInfo>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>1005</uid>
+    <lastName>ALPHA &amp; OMEGA TEST FOUNDATION : SAMPLE BRANCH</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>SDGT</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>9008</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>ALPHA OMEGA TEST FOUNDATION</lastName>
+      </aka>
+    </akaList>
+  </sdnEntry>
+</sdnList>

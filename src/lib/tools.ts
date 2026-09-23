@@ -34,6 +34,7 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
+import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
@@ -1866,7 +1867,14 @@ async function registerSellerTool(
   // 'none' row therefore provably means a CLEAN screen completed — so a blocked
   // or never-screened business can never look clean and self-activate via the
   // re-offer branch above. Never name sanctions/watchlist to the customer.
+  //
+  // Program-Fix 14: only a `cleared` screen is clean. A `flagged` one (a fuzzy
+  // possible match, or a list that could not load) lands in review too —
+  // equivalent to the old `!== 'blocked'` for the mock (amount 0 and velocity 0
+  // never flag), and closed for the list screener. The screen's evidence (or
+  // decision 'error' when the screener threw) is recorded on the seller id below.
   let cleared: boolean;
+  let screenEvidence: ScreeningEvidence;
   try {
     const screen = await screenTransfer({
       amountUsd: 0,
@@ -1874,10 +1882,12 @@ async function registerSellerTool(
       transfersToday: 0,
       sourceCountry: country,
     });
-    cleared = screen.status !== 'blocked';
+    cleared = screen.status === 'cleared';
+    screenEvidence = screen.evidence ?? errorEvidence();
   } catch (err) {
     console.warn('register_seller sanctions screen failed (fail-closed → review):', err);
     cleared = false;
+    screenEvidence = errorEvidence();
   }
 
   const sellerId = `s_${newTransferId()}`;
@@ -1899,6 +1909,15 @@ async function registerSellerTool(
       reply_to_customer:
         "I couldn't complete your seller registration just now — please try again in a moment.",
     };
+  }
+
+  // Program-Fix 14 step 6: the screen's evidence on the new seller id. Best-
+  // effort (the seller row and its fail-closed review state are already
+  // committed); a lost row is logged without the business name.
+  try {
+    await ctx.store.recordAudit(sanctionsAuditEvent(partnerId, sellerId, screenEvidence));
+  } catch (err) {
+    logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId });
   }
 
   if (!cleared) {
@@ -3449,9 +3468,16 @@ async function sendApprovePickerTool(
           destinationCurrency,
           partnerId: ctx.partnerId,
           reasons: screen.reasons,
+          // Program-Fix 14: the blocked row and its sanctions.screen evidence
+          // commit together (recordBlockedWithEvidence, one transaction).
+          evidence: screen.evidence,
         });
       } catch (err) {
-        console.warn('recordBlockedAttempt failed (non-fatal):', err);
+        // Still best-effort: the customer gets the blocked reply either way.
+        // Only the error NAME is logged — a driver error can echo the insert's
+        // parameters (recipient name) in its message (drizzle-orm
+        // DrizzleQueryError carries query + params, errors.d.ts:9-14).
+        logWarn('sanctions.evidence-lost', err instanceof Error ? err.name : 'unknown', { partnerId: ctx.partnerId });
       }
       return {
         blocked: true,

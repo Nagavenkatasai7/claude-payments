@@ -5,7 +5,8 @@ import { pokeWorker } from './outbox';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { releaseHold } from './settlement';
+import { releaseHold, recordStaffTransferAudit, type StaffAuditCtx } from './settlement';
+export type { StaffAuditCtx } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
@@ -152,7 +153,7 @@ export function canReleaseHeld(
  * guarded claim inside releaseHold, so a race can never release twice.
  * Called by the compliance dashboard "Release" action (admin-gated, audited).
  */
-export async function releaseTransfer(store: Store, db: Db, id: string): Promise<void> {
+export async function releaseTransfer(store: Store, db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
@@ -161,7 +162,8 @@ export async function releaseTransfer(store: Store, db: Db, id: string): Promise
     throw new Error(`Cannot release: transfer is not in_review (current status: ${transfer.status})`);
   }
   const railIntegrations = await createIntegrationsRepo(db).getIntegrations(transfer.settlementPartnerId ?? transfer.partnerId);
-  const r = await releaseHold(db, transfer, railIntegrations);
+  // Program-Fix 28: the audit row is written INSIDE releaseHold's transaction.
+  const r = await releaseHold(db, transfer, railIntegrations, audit);
   if (r.kind === 'already') {
     throw new Error('Cannot release: transfer is not in_review (it moved concurrently)');
   }
@@ -177,7 +179,7 @@ export async function releaseTransfer(store: Store, db: Db, id: string): Promise
  * Called by the compliance dashboard "Reject" action.
  * Throws if the transfer is not exactly in_review.
  */
-export async function rejectTransfer(store: Store, db: Db, id: string): Promise<void> {
+export async function rejectTransfer(store: Store, db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
@@ -196,6 +198,15 @@ export async function rejectTransfer(store: Store, db: Db, id: string): Promise<
     const cancelled = await repo.updateIfStatus(id, 'in_review', { status: 'cancelled', adminNote: 'rejected in review' });
     if (!cancelled) {
       throw new Error('Cannot reject: transfer is not in_review (it moved concurrently)');
+    }
+    // Program-Fix 28: the audit row BEFORE the uncharged early return, so both
+    // branches record the decision in this transaction.
+    if (audit) {
+      await recordStaffTransferAudit(tx, audit, 'transfer.reject', cancelled, {
+        previousStatus: 'in_review',
+        newStatus: 'cancelled',
+        refundStatus: cancelled.fundingRef ? 'pending' : 'none',
+      });
     }
     if (!cancelled.fundingRef) return false; // uncharged legacy row: cancel-only
     await repo.updateRefund(id, { refundStatus: 'pending' });
@@ -223,7 +234,7 @@ export async function rejectTransfer(store: Store, db: Db, id: string): Promise<
  * pending flip if not — so a stale `refund:<id>` row can never leave a transfer
  * flipped-to-pending with no effect to drain (a state no sweep would heal).
  */
-export async function issueRefund(db: Db, id: string): Promise<void> {
+export async function issueRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
     const transfer = await repo.getTransfer(id);
@@ -250,6 +261,14 @@ export async function issueRefund(db: Db, id: string): Promise<void> {
     if (!fresh) {
       throw new Error('Cannot refund: a refund effect already exists for this transfer.');
     }
+    if (audit) {
+      await recordStaffTransferAudit(tx, audit, 'refund.issue', transfer, {
+        previousStatus: transfer.status,
+        newStatus: transfer.status,
+        previousRefundStatus: 'none',
+        refundStatus: 'pending',
+      });
+    }
   });
   pokeWorker();
 }
@@ -260,7 +279,7 @@ export async function issueRefund(db: Db, id: string): Promise<void> {
  * transaction, so a double-click (or a refund never requested) throws and
  * enqueues nothing — refunds are never minted from thin air.
  */
-export async function approveRefund(db: Db, id: string): Promise<void> {
+export async function approveRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
     const transfer = await repo.getTransfer(id);
@@ -273,6 +292,14 @@ export async function approveRefund(db: Db, id: string): Promise<void> {
       { transferId: id },
       { dedupeKey: `refund:${id}` },
     );
+    if (audit) {
+      await recordStaffTransferAudit(tx, audit, 'refund.approve', transfer, {
+        previousStatus: transfer.status,
+        newStatus: transfer.status,
+        previousRefundStatus: 'requested',
+        refundStatus: 'pending',
+      });
+    }
   });
   pokeWorker();
 }
@@ -282,7 +309,7 @@ export async function approveRefund(db: Db, id: string): Promise<void> {
  * The guarded updateRefund (legal only from 'requested') is the gate — an
  * in-flight or completed refund can never be "dismissed" away.
  */
-export async function dismissRefund(db: Db, id: string): Promise<void> {
+export async function dismissRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
     const updated = await repo.updateRefund(id, { refundStatus: 'none' });
@@ -296,6 +323,14 @@ export async function dismissRefund(db: Db, id: string): Promise<void> {
       ...updated,
       adminNote: prior === '' ? 'refund request dismissed' : `${prior} | refund request dismissed`,
     });
+    if (audit) {
+      await recordStaffTransferAudit(tx, audit, 'refund.dismiss', updated, {
+        previousStatus: updated.status,
+        newStatus: updated.status,
+        previousRefundStatus: 'requested',
+        refundStatus: 'none',
+      });
+    }
   });
 }
 
@@ -305,7 +340,7 @@ export async function dismissRefund(db: Db, id: string): Promise<void> {
  * provider reported failure), so each retry mints a unique key — while the
  * failed-state check inside the transaction keeps double-clicks to one.
  */
-export async function retryRefund(db: Db, id: string): Promise<void> {
+export async function retryRefund(db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
   await db.transaction(async (tx) => {
     const repo = createTransferRepo(tx);
     const transfer = await repo.getTransfer(id);
@@ -318,6 +353,14 @@ export async function retryRefund(db: Db, id: string): Promise<void> {
       { transferId: id },
       { dedupeKey: `refund:${id}:retry:${Date.now()}` },
     );
+    if (audit) {
+      await recordStaffTransferAudit(tx, audit, 'refund.retry', transfer, {
+        previousStatus: transfer.status,
+        newStatus: transfer.status,
+        previousRefundStatus: 'failed',
+        refundStatus: 'pending',
+      });
+    }
   });
   pokeWorker();
 }

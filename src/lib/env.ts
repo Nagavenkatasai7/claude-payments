@@ -143,6 +143,13 @@ export const env = {
     // so a real KMS replaces this later without touching call sites.
     return process.env.FIELD_ENCRYPTION_KEY ?? '';
   },
+  get sanctionsList(): string {
+    // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER
+    // screening runs (it always runs). '' / 'mock' ⇒ the mock watchlist;
+    // 'ofac-sdn' ⇒ the OFAC SDN snapshot (fails closed to review if it cannot
+    // load); anything else ⇒ the mock plus a warning. Optional; unset in prod.
+    return (process.env.SANCTIONS_LIST ?? '').trim().toLowerCase();
+  },
   get passwordPepper(): string {
     // HMAC pepper applied before Argon2id. '' ⇒ no pepper (keeps existing staff
     // scrypt hashes verifying). Kept out of Redis; lives only in this secret.

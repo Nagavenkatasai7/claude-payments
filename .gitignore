@@ -16,3 +16,5 @@ playwright-report
 test-results
 /playwright/.cache
 .gstack/
+# Program-Fix 14: OFAC snapshot output (scripts/sanctions/build-ofac-snapshot.ts) is never committed
+src/lib/sanctions/data/

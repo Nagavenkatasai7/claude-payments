@@ -122,6 +122,7 @@ export default function DocsPage() {
               <Endpoint method="POST" path="/transactions" desc="Mint a transfer — Idempotency-Key header REQUIRED" />
               <Endpoint method="GET" path="/transactions" desc="List your transfers (keyset: ?limit=&cursor=)" />
               <Endpoint method="GET" path="/transactions/:id" desc="Fetch one transfer (404 outside your scope)" />
+              <Endpoint method="GET" path="/settlements" desc="Settlements statement for reconciliation (?from=&to=&limit=&cursor=&format=json|csv)" />
               <Endpoint method="POST" path="/transactions/:id/confirm" desc="Confirm funds captured → settlement begins (a flagged transfer is held in_review for compliance release; a blocked one is 422)" />
               <Endpoint method="PUT" path="/rates" desc="Push one corridor's wholesale conversion rate" />
               <Endpoint method="GET" path="/rates" desc="Your current rate sheet (freshness + margin)" />
@@ -146,6 +147,143 @@ curl -X POST $BASE/transactions \\
           <p className="text-sm text-muted-foreground">
             Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
           </p>
+
+          <Card id="settlements">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">GET /settlements — settlements statement</CardTitle>
+              <CardDescription>
+                Reconcile your book against ours: every transfer of yours that was paid and sent for settlement in a time window.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <p className="text-muted-foreground">
+                SmartRemit is non-custodial, so this is the <strong className="text-foreground">instruction ledger</strong>{' '}
+                (what was paid and instructed to a rail), not a record of funds held. In today&apos;s demonstration the
+                payout rail is the reference simulator, so <code>provider_ref</code> values and delivery are simulated.
+              </p>
+              <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+                <li>
+                  The window is half-open <code>[from, to)</code> on <code>paid_at</code>, in UTC. <code>from</code>/<code>to</code>{' '}
+                  take a date (<code>2026-09-01</code>, midnight UTC) or a datetime (no zone means UTC). Default: yesterday.
+                  At most 31 days; a longer or reversed window is 400.
+                </li>
+                <li>
+                  Listed: <code>paid</code> and <code>delivered</code> transfers, and <code>cancelled</code> ones only if a rail was
+                  instructed (see <code>refund_status</code>). A transfer held for compliance review (<code>in_review</code>) is never
+                  listed; once released it appears on its release day.
+                </li>
+                <li>
+                  Oldest first. <code>limit</code> 1–500 (default 100). Pass <code>next_cursor</code> back as <code>cursor</code>{' '}
+                  to get the next page; treat it as opaque. <code>null</code> means the last page.
+                </li>
+                <li>
+                  <code>totals</code> cover <strong className="text-foreground">this page only</strong> (every listed row,
+                  cancelled included), per currency, in integer minor units (cents: <code>20000</code> = 200.00).
+                </li>
+                <li>
+                  <code>format=csv</code> returns <code>text/csv</code> as an attachment, and the next cursor in the{' '}
+                  <code>X-Next-Cursor</code> header. A text cell starting with <code>{'= + - @'}</code>, a tab or a carriage return is
+                  prefixed with <code>&apos;</code> so a spreadsheet never runs it as a formula.
+                </li>
+                <li>Results are always scoped to your API key&apos;s partner; any <code>partner_id</code> parameter is ignored.</li>
+              </ul>
+              <Code>{`curl "$BASE/settlements?from=2026-09-01&to=2026-09-08&limit=100" \\
+  -H "Authorization: Bearer $KEY"
+
+{
+  "settlements": [
+    { "reference": "Qm9…", "status": "delivered", "compliance_status": "cleared",
+      "refund_status": "none", "amount_source": 200, "source_currency": "USD",
+      "fee_source": 1.99, "total_charge_source": 201.99, "fx_rate": 85.2,
+      "amount_destination": 17040, "destination_currency": "INR",
+      "destination_country": "IN", "payout_rail": "bank",
+      "provider_ref": "simrail-Qm9…", "funding_ref": null, "refund_ref": null,
+      "created_at": "2026-09-02T10:00:00.000Z", "paid_at": "2026-09-02T10:01:12.345Z",
+      "delivered_at": "2026-09-02T10:01:20.000Z", "refunded_at": null }
+  ],
+  "next_cursor": null,
+  "totals": { "count": 1,
+              "amount_source_minor_by_currency": { "USD": 20000 },
+              "amount_destination_minor_by_currency": { "INR": 1704000 } },
+  "window": { "from": "2026-09-01T00:00:00.000Z", "to": "2026-09-08T00:00:00.000Z" }
+}
+
+# The same page as CSV
+curl -OJ "$BASE/settlements?from=2026-09-01&to=2026-09-08&format=csv" \\
+  -H "Authorization: Bearer $KEY"`}</Code>
+              <div className="-mx-1 overflow-x-auto px-1">
+                <table className="w-full min-w-[560px] text-left">
+                <thead>
+                  <tr className="border-b border-border text-muted-foreground">
+                    <th className="py-1.5 pr-4 font-medium">Field</th>
+                    <th className="py-1.5 pr-4 font-medium">Type</th>
+                    <th className="py-1.5 font-medium">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`reference`}</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5">The transaction id (the same id as <code>/transactions/:id</code>).</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`status`}</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5"><code>paid</code>, <code>delivered</code>, or <code>cancelled</code> (only a cancelled transfer that was instructed to a rail).</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`compliance_status`}</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5"><code>cleared</code> or <code>flagged</code> (a flagged transfer appears once staff released it).</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`refund_status`}</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5"><code>none</code>, <code>requested</code>, <code>pending</code>, <code>completed</code> or <code>failed</code>.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`amount_source · fee_source · total_charge_source`}</code></td>
+                    <td className="py-1.5 pr-4">number</td>
+                    <td className="py-1.5">Major units in <code>source_currency</code>.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`fx_rate · amount_destination`}</code></td>
+                    <td className="py-1.5 pr-4">number</td>
+                    <td className="py-1.5">Destination units per 1 source unit; the payout amount in <code>destination_currency</code>.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`source_currency · destination_currency · destination_country`}</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5">ISO 4217 / ISO 3166-1 alpha-2.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`payout_rail`}</code></td>
+                    <td className="py-1.5 pr-4">string</td>
+                    <td className="py-1.5"><code>bank</code>, <code>upi</code> or <code>usdc</code>.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`provider_ref`}</code></td>
+                    <td className="py-1.5 pr-4">string | null</td>
+                    <td className="py-1.5">The rail&apos;s settlement reference. On the reference simulator rail it is simulated.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`funding_ref · refund_ref`}</code></td>
+                    <td className="py-1.5 pr-4">string | null</td>
+                    <td className="py-1.5">The funding charge and refund references, when present.</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1.5 pr-4"><code>{`created_at · paid_at · delivered_at · refunded_at`}</code></td>
+                    <td className="py-1.5 pr-4">string | null</td>
+                    <td className="py-1.5">ISO 8601 UTC. For a released compliance hold, <code>paid_at</code> is the release time.</td>
+                  </tr>
+                </tbody>
+              </table>
+              </div>
+              <p className="text-muted-foreground">
+                The statement never includes payout account details, recipient or sender identity.
+              </p>
+            </CardContent>
+          </Card>
         </section>
 
         <Separator />
