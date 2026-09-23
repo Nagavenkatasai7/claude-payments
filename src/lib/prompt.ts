@@ -1,6 +1,6 @@
 import { MIN_USD } from './fx';
 import { PLATFORM_SEND_LIMITS } from './send-limits';
-import type { SendLimits } from './types';
+import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, PERSONA_MAX, safeDisplayText } from './untrusted-text';
 
 /**
@@ -23,6 +23,13 @@ export interface SystemPromptBrand {
    * verification link. Default true (back-compat for the SYSTEM_PROMPT export).
    */
   kycGateActive?: boolean;
+  /**
+   * Program-Fix 35 (prompt-04): who runs identity checks (resolveKycMode's
+   * mode). Used ONLY by the gate-off copy so the bot answers truthfully:
+   * 'delegated' ⇒ the partner verifies separately; 'ours' ⇒ verification is
+   * not required before sending. Default 'ours'. The gate-ON prompt ignores it.
+   */
+  kycMode?: KycMode;
   /**
    * The send limits this bot states (Program fix 16/16b): resolveEffectiveSendLimits of the
    * routed tenant. Default: the platform ladder (T0 $500/day, T1 $2,999/day,
@@ -59,6 +66,11 @@ export function buildSystemPrompt(
   // address or a rule-override phrase is refused at save.)
   const persona = safeDisplayText(b.botPersona, PERSONA_MAX);
   const kycGateActive = b.kycGateActive ?? true;
+  // Program-Fix 35: the gate-off identity line is truthful per KYC mode.
+  const gateOffIdentityLine =
+    b.kycMode === 'delegated'
+      ? `Identity checks for this service are handled by ${brand} separately; if asked, say so and help them send.`
+      : 'Verification is not required before sending on this service.';
   const limits = b.limits ?? PLATFORM_SEND_LIMITS;
   const MAX_USD_TXT = `$${usd(limits.maxUsd)}`;
   const T0_CAP_TXT = `$${usd(limits.t0DailyCapCents / 100)}`;
@@ -254,12 +266,13 @@ VERIFY-BEFORE-SEND GATE (applies to EVERYONE, including existing/long-time custo
   not "your verification is in progress".
 - RESEND / RESET / "I didn't get the link": if the user asks you to resend, reset, or send the
   verification link again, call check_send_limit({amount_usd: 0}) to fetch a fresh kyc_url and share it.
-  NEVER retype or paste a link from earlier in the chat — always obtain a fresh one from the tool.` : `NEW-CUSTOMER ONBOARDING & SENDING LIMITS (no identity verification is required on this service)
+  NEVER retype or paste a link from earlier in the chat — always obtain a fresh one from the tool.` : `NEW-CUSTOMER ONBOARDING & SENDING LIMITS
+- ${gateOffIdentityLine}
 - The system may inject these synthetic prefixes as system messages:
     [NEW CUSTOMER]          — first inbound ever from this phone
     [TIER_REMINDER day N/3] — first message of a new conversation (24h+ gap) while still in the 3-day window
-- For [NEW CUSTOMER]: greet warmly and help immediately — quote and send right away. You may mention they can send up to ${T0_CAP_TXT}/day during their first 3 days (then ${T1_CAP_TXT}/day). NEVER ask them to verify their identity, NEVER mention KYC or verification links.
-- For [TIER_REMINDER]: a one-line note of which intro day they're on (1/3, 2/3, 3/3), then continue the normal flow. No verification talk.
+- For [NEW CUSTOMER]: greet warmly and help immediately — quote and send right away. You may mention they can send up to ${T0_CAP_TXT}/day during their first 3 days (then ${T1_CAP_TXT}/day). NEVER ask them to verify their identity; do not push a verification link; if asked, answer truthfully.
+- For [TIER_REMINDER]: a one-line note of which intro day they're on (1/3, 2/3, 3/3), then continue the normal flow. No verification talk unless they ask.
 
 - BEFORE you call get_quote, ALWAYS call check_send_limit with the amount the user requested. If within_cap is false, do NOT call get_quote. Instead reply explaining:
     over_per_transfer_cap → the amount is above the PER-TRANSFER limit. State it with per_transfer_cap_usd: "The most you can send in one transfer right now is $X" (use per_transfer_cap_usd as $X) and offer $X as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."

@@ -107,6 +107,14 @@ export function createKycCaseStore(
       return r !== null;
     },
 
+    /**
+     * Program-Fix 35: release an event id marked by markEventSeen, so Persona's
+     * retry of an event whose processing THREW is processed instead of deduped.
+     */
+    async unmarkEventSeen(eventId: string): Promise<void> {
+      await redis.del(evtKey(eventId));
+    },
+
     async applyDelta(partnerId: PartnerId, phone: string, delta: KycDelta, meta: AuditMeta): Promise<Customer | null> {
       const c = await customers.getCustomer(partnerId, phone);
       if (!c) return null;

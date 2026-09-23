@@ -1,5 +1,6 @@
 import type { KycStatus, Partner } from './types';
 import { resolveKycMode } from './partner-config';
+import type { PartnerIntegrations } from './partner-integrations';
 
 /** The single machine-readable reason a send is gated for missing KYC. */
 export const SEND_GATE_REASON = 'kyc_required' as const;
@@ -49,4 +50,17 @@ export function isB2bSendVerified<T extends { kycStatus: KycStatus }>(
 /** Whether the partner enforces our KYB gate before a B2B send (mirrors sendGateActive). */
 export function requiresKyb(partner: Partner | null | undefined): boolean {
   return sendGateActive(partner);
+}
+
+/**
+ * Program-Fix 35 (read-only partner-page warning): the verify-before-send gate
+ * is OFF while the partner settles on a provider other than the mock rail
+ * (absent or blank ⇒ mock). Display only — it never changes the gate.
+ */
+export function gateOffOnLiveRail(
+  partner: Partner | null | undefined,
+  integrations: Pick<PartnerIntegrations, 'payment'>,
+): boolean {
+  const provider = (integrations.payment.providerType ?? '').trim() || 'mock';
+  return !sendGateActive(partner) && provider !== 'mock';
 }

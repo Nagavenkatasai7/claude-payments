@@ -43,4 +43,54 @@ describe('verifyPersonaSignature', () => {
   it('tolerates whitespace around the comma-separated parts', () => {
     expect(verifyPersonaSignature(body, ` t=${t} , v1=${sign(t, SECRET)} `, [SECRET], now)).toBe(true);
   });
+
+  // Program-Fix 35: during a secret rotation Persona sends TWO space-separated
+  // `t=…,v1=…` sets (https://docs.withpersona.com/webhooks-best-practices).
+  describe('secret rotation: space-separated signature sets', () => {
+    const NEW = 'wbhsec_new';
+
+    it('two sets, only set 1\'s secret configured → true', () => {
+      const header = `t=${t},v1=${sign(t, SECRET)} t=${t},v1=${sign(t, NEW)}`;
+      expect(verifyPersonaSignature(body, header, [SECRET], now)).toBe(true);
+    });
+
+    it('two sets, only set 2\'s secret configured → true', () => {
+      const header = `t=${t},v1=${sign(t, SECRET)} t=${t},v1=${sign(t, NEW)}`;
+      expect(verifyPersonaSignature(body, header, [NEW], now)).toBe(true);
+    });
+
+    it('set 2 garbage → still true via set 1', () => {
+      const header = `t=${t},v1=${sign(t, SECRET)} t=garbage,v1`;
+      expect(verifyPersonaSignature(body, header, [SECRET], now)).toBe(true);
+    });
+
+    it('set 1 stale t, set 2 fresh and valid → true (each set uses its own t and window)', () => {
+      const old = t - 10 * 60;
+      const header = `t=${old},v1=${sign(old, SECRET)} t=${t},v1=${sign(t, NEW)}`;
+      expect(verifyPersonaSignature(body, header, [SECRET, NEW], now)).toBe(true);
+    });
+
+    it('set 1 stale t (valid for its own t) and set 2 wrong → false', () => {
+      const old = t - 10 * 60;
+      const header = `t=${old},v1=${sign(old, SECRET)} t=${t},v1=${'0'.repeat(64)}`;
+      expect(verifyPersonaSignature(body, header, [SECRET], now)).toBe(false);
+    });
+
+    it('a v1 is only checked against its OWN set\'s t (no cross-set mixing)', () => {
+      const old = t - 10 * 60;
+      // set 2 is fresh but carries set 1's stale signature: must not verify.
+      const header = `t=${old},v1=${sign(old, SECRET)} t=${t},v1=${sign(old, SECRET)}`;
+      expect(verifyPersonaSignature(body, header, [SECRET], now)).toBe(false);
+    });
+
+    it('no set verifies → false', () => {
+      const header = `t=${t},v1=${sign(t, 'wbhsec_x')} t=${t},v1=${sign(t, 'wbhsec_y')}`;
+      expect(verifyPersonaSignature(body, header, [SECRET, NEW], now)).toBe(false);
+    });
+
+    it('extra whitespace between the sets and around the header is tolerated', () => {
+      const header = `  t=${t},v1=deadbeef \t  t=${t} , v1=${sign(t, NEW)}  `;
+      expect(verifyPersonaSignature(body, header, [NEW], now)).toBe(true);
+    });
+  });
 });

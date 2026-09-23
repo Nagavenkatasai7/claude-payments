@@ -9,12 +9,20 @@ import { parsePersonaEvent } from '@/lib/providers/persona-webhook-parse';
 import { applyKycEvent } from '@/lib/kyc-state-machine';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
+import { getDb } from '@/db/client';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { auditSubjectId } from '@/lib/customer-ref';
+import { logError, logWarn } from '@/lib/log';
+import type { PersonaEvent } from '@/lib/providers/persona-webhook-parse';
+import type { KycCaseStore } from '@/lib/kyc-case-store';
+import type { Customer, KycReviewState } from '@/lib/types';
 
 /**
  * Persona webhook (Phase 2, Task 10) — the SOURCE OF TRUTH for KYC state.
  *
  * Flow: read raw body → verify HMAC (fail-closed) → parse → idempotency-dedupe by
- * event id → load the customer by reference-id → applyKycEvent (Persona NEVER
+ * event id → bind ONE customer (inquiry events: reference-id phone + recorded
+ * inquiry; report events: the inquiry relationship, Program-Fix 35) → applyKycEvent (Persona NEVER
  * sets the gate-driving kycStatus; human-review-only) → persist + audit →
  * fast 2xx, then a fail-soft WhatsApp status nudge in after().
  *
@@ -46,25 +54,35 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, deduped: true });
   }
 
-  const phone = event.referenceId;
-  if (!phone) return NextResponse.json({ ok: true, ignored: true });
-
-  // Tenant resolution (fix 1, D7): the Persona reference-id is the phone
-  // (persona-kyc-provider.ts:47) and a phone may have a row under several
-  // partners. Bind by the inquiry id the row recorded when verification started;
-  // fall back to the single row only when the phone is unambiguous. Never guess.
-  const rows = await getCustomerStore(getStore()).findByPhone(phone);
-  const customer =
-    rows.find((c) => Boolean(event.inquiryId) && c.kycInquiryId === event.inquiryId) ??
-    (rows.length === 1 ? rows[0] : null);
-  if (!customer) return NextResponse.json({ ok: true, ignored: true });
-
-  const delta = applyKycEvent(customer, event);
-  let nextState = customer.kycReviewState;
-  if (Object.keys(delta).length > 0) {
-    const updated = await cases.applyDelta(customer.partnerId, phone, delta, { actor: 'persona', action: event.name });
-    nextState = updated?.kycReviewState ?? nextState;
+  // Program-Fix 35 — RELEASE ON FAILURE: everything from the mark above through
+  // the state apply and the match alert runs inside ONE try. If any of it
+  // throws, the mark is released and we answer 500 so Persona's retry is
+  // processed instead of deduped (before this, a throw lost the event).
+  //
+  // Why a re-apply after a release is safe (a retry may re-run a partly
+  // applied event, e.g. "save ok, audit throws"): applyKycEvent is a pure
+  // function of (customer, event) and converges —
+  //   • the hold lock and the monotone rank guard stop any backward move;
+  //   • fix 48's kycSubmittedAt guard stops a re-stamp;
+  //   • a repeat hold is a no-op (same needs_review + same flag);
+  //   • the alert dedupes on `kycmatch:<eventId>`.
+  // The only double effect possible is a second `kyc` audit line (append-only).
+  let applied: Applied | null;
+  try {
+    applied = await applyEvent(event, cases);
+  } catch (err) {
+    logError('persona.webhook.apply', err, { name: event.name });
+    try {
+      await cases.unmarkEventSeen(event.eventId);
+    } catch (releaseErr) {
+      logError('persona.webhook.release', releaseErr, { name: event.name });
+    }
+    return NextResponse.json({ ok: false }, { status: 500 });
   }
+  if (!applied) return NextResponse.json({ ok: true, ignored: true });
+  const { customer, nextState } = applied;
+  // The phone is ALWAYS the bound customer's own (a report event carries none).
+  const phone = customer.senderPhone;
 
   // KYC is partner OPT-IN: resolve the owning partner so the after() nudge can
   // be suppressed when the verify-before-send gate is OFF. State application
@@ -80,7 +98,9 @@ export async function POST(req: NextRequest) {
   // Gated on sendGateActive: a gate-OFF partner's customers never hear about KYC.
   after(async () => {
     try {
-      if (sendGateActive(partner)) {
+      // Report events never message the customer: a match is a hold (staff
+      // handle it) and any other report event moves nothing.
+      if (!isReportEvent(event) && sendGateActive(partner)) {
         if (nextState === 'inquiry_started') {
           await sendVerificationStatus(phone, 'in_progress', customer.fullName);
         } else if (nextState === 'pending_review') {
@@ -93,4 +113,78 @@ export async function POST(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true });
+}
+
+interface Applied {
+  customer: Customer;
+  nextState: KycReviewState | undefined;
+}
+
+function isReportEvent(event: PersonaEvent): boolean {
+  return event.name.startsWith('report/') || event.reportId !== undefined;
+}
+
+/**
+ * Bind the event to exactly ONE customer row, or null (never guess a tenant).
+ *   • inquiry events: the Persona reference-id is the phone
+ *     (persona-kyc-provider.ts) and a phone may have a row under several
+ *     partners — bind by the inquiry id the row recorded when verification
+ *     started; fall back to the single row only when the phone is unambiguous
+ *     (fix 1, D7).
+ *   • report events (Program-Fix 35) carry no phone: bind by the inquiry
+ *     relationship through findByKycInquiryId — exactly one row, else ignored.
+ */
+async function bindCustomer(event: PersonaEvent): Promise<Customer | null> {
+  const customers = getCustomerStore(getStore());
+  if (event.referenceId) {
+    const rows = await customers.findByPhone(event.referenceId);
+    return (
+      rows.find((c) => Boolean(event.inquiryId) && c.kycInquiryId === event.inquiryId) ??
+      (rows.length === 1 ? rows[0] : null)
+    );
+  }
+  if (event.inquiryId) {
+    const rows = await customers.findByKycInquiryId(event.inquiryId);
+    if (rows.length === 1) return rows[0];
+    logWarn('persona.webhook.unbound', event.name, { candidates: rows.length });
+  }
+  return null;
+}
+
+/** Bind → pure delta → persist + audit → (on a match) the deduped ops alert. Throws are the caller's to release. */
+async function applyEvent(event: PersonaEvent, cases: KycCaseStore): Promise<Applied | null> {
+  const matchKind = event.matchKind;
+  if (matchKind) logWarn('persona.event', event.name, { matchKind });
+
+  const customer = await bindCustomer(event);
+  if (!customer) return null;
+  const phone = customer.senderPhone;
+
+  const delta = applyKycEvent(customer, event);
+  let nextState = customer.kycReviewState;
+  if (Object.keys(delta).length > 0) {
+    const updated = await cases.applyDelta(customer.partnerId, phone, delta, { actor: 'persona', action: event.name });
+    nextState = updated?.kycReviewState ?? nextState;
+  }
+
+  if (matchKind) {
+    // Ids only — never a phone, a name or a Persona id. The keyed audit subject
+    // is how staff find the customer's audit trail.
+    const subject = auditSubjectId(customer.partnerId, phone);
+    const stillTerminal = nextState === 'approved' || nextState === 'rejected';
+    await createOutboxRepo(getDb()).enqueue(
+      'ops.alert',
+      {
+        message:
+          `🔎 SmartRemit KYC: Persona reported a ${matchKind} match (${event.name}) for customer ${subject} ` +
+          `(partner ${customer.partnerId}). ` +
+          (stillTerminal
+            ? `The customer's review is already ${nextState}; the flag is recorded and sending is NOT blocked. Staff decide.`
+            : 'The customer is held for review (needs_review). Open the KYC review queue.'),
+      },
+      { dedupeKey: `kycmatch:${event.eventId}` },
+    );
+  }
+
+  return { customer, nextState };
 }

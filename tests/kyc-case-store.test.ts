@@ -65,6 +65,13 @@ describe('kyc-case-store', () => {
     expect(await store.markEventSeen('evt_1')).toBe(false);
   });
 
+  it('unmarkEventSeen releases the id so a retry processes it (Program-Fix 35)', async () => {
+    expect(await store.markEventSeen('evt_rel')).toBe(true);
+    await store.unmarkEventSeen('evt_rel');
+    expect(await store.markEventSeen('evt_rel')).toBe(true);
+    expect(await store.markEventSeen('evt_rel')).toBe(false);
+  });
+
   it('applyDelta merges fields + appends an audit entry', async () => {
     await seed();
     await store.applyDelta('default', PHONE, { kycReviewState: 'pending_review', idLast4: '6789', kycInquiryId: 'inq_1' }, { actor: 'persona', action: 'inquiry.completed' });
