@@ -12,10 +12,11 @@
 //  - Rule references are to 12 CFR Part 1005, Subpart B (Regulation E,
 //    remittance transfers): §1005.30-.36.
 //  - Bump LEGAL_DRAFT_VERSION on any change to the text, so the version shown on
-//    the page (and, from PR B, recorded with a disclosure acknowledgement)
-//    identifies the exact wording.
+//    the page identifies the exact wording. (The pay-page disclosure copy is
+//    versioned separately: DISCLOSURE_DRAFT_VERSION in ./disclosure-drafts.ts,
+//    which the pay page records with the customer's acknowledgement.)
 
-export const LEGAL_DRAFT_VERSION = 'draft-2026-09-23' as const;
+export const LEGAL_DRAFT_VERSION = 'draft-2026-09-23b' as const;
 
 /** Shown verbatim at the top of every legal page. */
 export const LEGAL_DRAFT_BANNER = 'Draft — for counsel review; not legal advice and not yet approved';
@@ -60,7 +61,7 @@ export const TERMS_DRAFT: LegalDraft = {
       heading: 'Who provides your transfer',
       paragraphs: [
         PROVIDER_OF_RECORD,
-        'The partner is responsible for receiving your payment, delivering the funds to your recipient, and handling refunds. Its name and contact details will appear on your receipt once partner disclosures are enabled.',
+        'The partner is responsible for receiving your payment, delivering the funds to your recipient, and handling refunds. The pay page and your receipt name the partner, with the contact, licence and state-regulator details the partner has supplied.',
       ],
     },
     {
@@ -283,7 +284,7 @@ export const REMITTANCE_RIGHTS_DRAFT: LegalDraft = {
       id: 'complaints',
       heading: 'Complaints',
       paragraphs: [
-        'If you have a complaint, contact the licensed partner named on your receipt first. Once partner disclosures are enabled, your receipt will also name the state regulator that licenses the partner, where the partner has supplied it.',
+        'If you have a complaint, contact the licensed partner named on your receipt first. Your receipt also names the state regulator that licenses the partner, where the partner has supplied it.',
         'You can also contact the Consumer Financial Protection Bureau at consumerfinance.gov/complaint or 855-411-2372.',
       ],
     },
@@ -301,7 +302,7 @@ export const LICENSING_DRAFT: LegalDraft = {
       heading: 'Who provides your transfer',
       paragraphs: [
         'Transfers are provided by the licensed partner named on your receipt. That partner is the money transmitter for your transfer and holds the licences required to provide it.',
-        'Once partner disclosures are enabled, your receipt will show the partner’s name and contact details, and its licence and state-regulator details where the partner has supplied them. Where a detail has not been supplied, nothing will be shown in its place.',
+        'The pay page and your receipt show the partner’s name, and its contact, licence and state-regulator details where the partner has supplied them. Where a detail has not been supplied, nothing is shown in its place, and a note says the partner’s licensing details are pending.',
         DEMO_NO_PARTNER_NOTE,
       ],
     },

@@ -9,7 +9,7 @@ import { retryDeadAction, dismissDeadAction } from './actions';
 // never touches a row itself — but its recommendation is now WIRED to the
 // existing audited Retry/Dismiss levers: after a diagnosis the recommended
 // action is highlighted for a one-click apply. And for a PERMANENT send error
-// (e.g. 131030 — recipient not on Meta's allow-list) Retry is DISABLED and the
+// (e.g. 131030 — recipient not on Meta's allow-list; 132001 — template missing) Retry is DISABLED and the
 // panel steers to Dismiss + the out-of-band Meta step, since no in-app retry can
 // ever clear it. AI failure still degrades to a quiet "AI unavailable"; the
 // Retry/Dismiss buttons work regardless.
@@ -81,7 +81,7 @@ export function DiagnosePanel({
               variant={recommendRetry ? 'default' : 'outline'}
               disabled={permanent}
               title={
-                permanent ? 'Retry can’t succeed — fix the recipient in Meta first' : undefined
+                permanent ? 'Retry can’t succeed — fix it in Meta first' : undefined
               }
             >
               Retry
@@ -114,7 +114,8 @@ export function DiagnosePanel({
           {kind === 'dead_letter' && (
             <p className="mt-2 font-medium text-foreground">
               {permanent
-                ? 'Recommended: Dismiss. A Retry can’t clear this — add the recipient in Meta (API Setup → Manage phone number list), then Retry.'
+                ? // Program-Fix 25 PR B: every permanent code, not only the allow-list one.
+                  'Recommended: Dismiss. A Retry can’t clear a permanent WhatsApp rejection — fix it in Meta first (e.g. add the recipient to the test allow-list, approve the template, or resolve an account restriction), then Retry.'
                 : recommendRetry
                   ? 'Recommended: Retry — the highlighted button above.'
                   : recommendDismiss

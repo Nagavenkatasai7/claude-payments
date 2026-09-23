@@ -17,7 +17,9 @@ import { getFundingProvider } from '@/lib/providers/funding-provider';
 import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
-import { logError } from '@/lib/log';
+import { logError, logWarn } from '@/lib/log';
+import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { settleOrHold } from '@/lib/settlement';
@@ -318,6 +320,38 @@ function validateAndTokenizeAch(
   return { ok: true, token: `ach_${randomBytes(24).toString('hex')}` };
 }
 
+/**
+ * Program-Fix 15 PR B: one `remittance.disclosure_ack` audit row — subject the
+ * route id (the transfer, or the draft before it is minted), meta the version + provider kind
+ * only (no PII). Tenant: the transfer's partner, else the draft's (the same
+ * resolution the request_otp branch uses). Never throws.
+ */
+async function recordDisclosureAck(
+  store: ReturnType<typeof getStore>,
+  routeId: string,
+  draft: Awaited<ReturnType<ReturnType<typeof getDraftStore>['getDraft']>>,
+  version: string,
+): Promise<void> {
+  try {
+    const partnerId = draft
+      ? await draftTenant(draft, store.legacyTenantOf)
+      : (await store.getTransfer(routeId))?.partnerId ?? DEFAULT_PARTNER_ID;
+    // Which provider block the page showed (demo | pending | configured),
+    // resolved server-side from the tenant's current config — never client input.
+    const providerKind = disclosureProviderKind(resolvePartnerDisclosure(await getPartnerStore().getPartner(partnerId)));
+    await createAuditRepo(getDb()).record({
+      partnerId,
+      actor: 'pay-page',
+      actorType: 'system',
+      action: 'remittance.disclosure_ack',
+      subjectId: routeId,
+      meta: { version, providerKind },
+    });
+  } catch (err) {
+    logWarn('pay.disclosure_ack', err, { transferId: routeId });
+  }
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ transferId: string }> },
@@ -347,6 +381,7 @@ export async function POST(
       fields?: unknown;
       action?: unknown;
       otp?: unknown;
+      disclosureVersion?: unknown; // Program-Fix 15 PR B: OPTIONAL (old pages never send it)
       ach?: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown };
     } = {};
     try {
@@ -373,10 +408,16 @@ export async function POST(
           ? await draftTenant(otpDraft, store.legacyTenantOf)
           : (await store.getTransfer(transferId))?.partnerId;
       } catch { /* budget falls back to the default partner; send to the shared env number */ }
-      const issued = await getTransactionOtpStore().issue(transferId, otpPhone, {
+      const otpStore = getTransactionOtpStore();
+      const issued = await otpStore.issue(transferId, otpPhone, {
         kind: 'pay',
         partnerId: otpPartnerId ?? DEFAULT_PARTNER_ID,
       });
+      // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
+      // 429; a cooldown stays 200 sent:true because an earlier code WAS sent.
+      if (!issued.ok && issued.reason === 'locked') {
+        return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
+      }
       if (issued.ok) {
         // WL2: the code arrives from the number the customer is mid-payment with.
         let otpCreds: WaCreds | undefined;
@@ -385,7 +426,14 @@ export async function POST(
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
           }
         } catch { /* fall back to the shared env number */ }
-        try { await sendTransactionOtp(otpPhone, issued.code, otpCreds); } catch { /* generic surface; never log the code */ }
+        try {
+          await sendTransactionOtp(otpPhone, issued.code, otpCreds);
+        } catch {
+          // Program-Fix 25 PR B: honest — the code never arrived. Shorten the
+          // cooldown to a ~10-s floor so Resend works soon but cannot be hammered. Never log the code.
+          try { await otpStore.shortenCooldown(transferId); } catch { /* the 30-s cooldown simply runs out */ }
+          return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
+        }
       }
       return NextResponse.json({ ok: true, sent: true });
     }
@@ -399,6 +447,13 @@ export async function POST(
         { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' },
         { status: 403 },
       );
+    }
+
+    // Program-Fix 15 PR B: the customer ticked "I have read this disclosure" on
+    // the page. Recorded AFTER the OTP passed, best-effort: a failed audit write
+    // never changes the payment outcome, and an absent/junk field records nothing.
+    if (isDisclosureAckVersion(body.disclosureVersion)) {
+      await recordDisclosureAck(store, transferId, otpDraft, body.disclosureVersion);
     }
 
     const country =

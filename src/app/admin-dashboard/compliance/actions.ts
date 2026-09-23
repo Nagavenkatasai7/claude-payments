@@ -1,7 +1,10 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { requireScope } from '@/lib/auth';
+import { requirePlatformAdmin, requireScope } from '@/lib/auth';
+import { createPartnerStore } from '@/lib/partner-store';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import type { CountryCode } from '@/lib/types';
 import { boundStaffNote } from '@/lib/send-limits';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
@@ -70,5 +73,63 @@ export async function reviewAmlAlertAction(formData: FormData): Promise<void> {
       meta: { alertId, disposition, note },
     });
   }
+  revalidatePath('/admin-dashboard/compliance');
+}
+
+/**
+ * Program-Fix 43 PR B: the per-partner × corridor AML HOLD switch
+ * (partners.corridor_compliance[<country>].amlHolds). OFF by default; when ON,
+ * a cleared transfer on that partner's real `http` rail that hits R1/R2 in the
+ * mint is flagged for review instead of settling (transfer-create.ts).
+ *
+ * Server actions are PUBLIC POST endpoints, so this self-gates in order:
+ *   1. requirePlatformAdmin — platform admins only (never partner staff: a
+ *      partner cannot switch its own compliance holds off);
+ *   2. `on` is exactly 'on' | 'off'; the partner id is bounded;
+ *   3. the default (demo) tenant is REFUSED — demo transfers are never held
+ *      (mintLocked's amlHoldGate ignores it structurally too);
+ *   4. the partner must exist ('Partner not found') and the corridor must be
+ *      one it serves as a SOURCE (never IN);
+ *   5. the column-targeted, row-locked write (updateCorridorCompliance) and
+ *      the `aml.holds_set` audit row commit in ONE transaction. OFF removes
+ *      the key (and an emptied corridor entry), so the stored jsonb returns to
+ *      what it was before the switch was first turned on.
+ */
+export async function setAmlHoldsAction(formData: FormData): Promise<void> {
+  const staff = await requirePlatformAdmin();
+  const onRaw = String(formData.get('on') ?? '');
+  if (onRaw !== 'on' && onRaw !== 'off') throw new Error('Invalid setting');
+  const on = onRaw === 'on';
+  const partnerId = String(formData.get('partnerId') ?? '').trim();
+  if (!partnerId || partnerId.length > 100) throw new Error('Partner not found');
+  if (partnerId === DEFAULT_PARTNER_ID) throw new Error('The default (demo) tenant is never held');
+  const countryRaw = String(formData.get('country') ?? '');
+  if (!/^[A-Z]{2}$/.test(countryRaw) || countryRaw === 'IN') throw new Error('Invalid corridor');
+  const country = countryRaw as CountryCode;
+
+  await getDb().transaction(async (tx) => {
+    const partners = createPartnerStore(tx);
+    const partner = await partners.getPartner(partnerId);
+    if (!partner) throw new Error('Partner not found');
+    if (!(partner.countries ?? []).includes(country)) throw new Error('Invalid corridor');
+    const { found, previous } = await partners.updateCorridorCompliance(partnerId, (prev) => {
+      const entry = { ...(prev[country] ?? {}) };
+      if (on) entry.amlHolds = true;
+      else delete entry.amlHolds;
+      const next = { ...prev };
+      if (Object.keys(entry).length === 0) delete next[country];
+      else next[country] = entry;
+      return next;
+    });
+    if (!found) throw new Error('Partner not found');
+    await createAuditRepo(tx).record({
+      partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'aml.holds_set',
+      subjectId: partnerId,
+      meta: { country, from: previous[country]?.amlHolds === true, to: on },
+    });
+  });
   revalidatePath('/admin-dashboard/compliance');
 }

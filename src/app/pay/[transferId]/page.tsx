@@ -2,13 +2,16 @@ import { getStore } from '@/lib/store';
 import { getDraftStore } from '@/lib/draft-store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { getPartnerStore } from '@/lib/partner-store';
-import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-config';
+import { resolvePartnerBranding, resolvePartnerDisclosure, type ResolvedBranding } from '@/lib/partner-config';
+import { buildPrepaymentDisclosure } from '@/lib/remittance-disclosure';
+import type { Partner } from '@/lib/types';
 import type { CountryCode } from '@/lib/types';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { accountLast4, isMaskedDestination } from '@/lib/payout-format';
 import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { PayForm } from './pay-form';
+import { RemittanceDisclosure } from './remittance-disclosure';
 import { headers } from 'next/headers';
 import { isIpRateLimited, PAY_PAGE_IP_LIMIT, PAY_PAGE_SCOPE } from '@/lib/ip-rate-limit';
 
@@ -40,9 +43,10 @@ function Brand({ branding }: { branding: ResolvedBranding }) {
   );
 }
 
-async function resolveBrandFor(partnerId: string | null): Promise<ResolvedBranding> {
-  if (!partnerId) return resolvePartnerBranding(null);
-  return resolvePartnerBranding(await getPartnerStore().getPartner(partnerId));
+// ONE partner read feeds both the branding and the Reg E disclosure.
+async function loadPartner(partnerId: string | null): Promise<Partner | null> {
+  if (!partnerId) return null;
+  return getPartnerStore().getPartner(partnerId);
 }
 
 /**
@@ -131,6 +135,9 @@ export default async function PayPage({
     sourceTotalCharge: number;
     sourceCurrency: string;
     fundingMethod: string;
+    // Program-Fix 15 PR B: the disclosure's rate row and its B2B exclusion.
+    fxRate: number;
+    transferType: 'b2c' | 'b2b';
     awaitingPayment: boolean;
     // Item 2 (two-step pay page): true whenever no bank string exists yet (a
     // cold-start DRAFT, or a SCHEDULED/cron transfer created with an empty
@@ -175,6 +182,8 @@ export default async function PayPage({
       sourceTotalCharge: transfer.totalChargeSource ?? transfer.totalChargeUsd,
       sourceCurrency,
       fundingMethod: transfer.fundingMethod,
+      fxRate: transfer.fxRate,
+      transferType: transfer.transferType ?? 'b2c',
       awaitingPayment: transfer.status === 'awaiting_payment',
       // Usually a re-opened link with the destination already set → skip Step 1.
       // But a SCHEDULED/cron transfer is created with an EMPTY destination (Item
@@ -212,6 +221,8 @@ export default async function PayPage({
         sourceTotalCharge: totalChargeSource,
         sourceCurrency,
         fundingMethod: draft.fundingMethod,
+        fxRate: draft.quote.fxRate,
+        transferType: draft.transferType ?? 'b2c',
         awaitingPayment: true, // a draft is always awaiting payment
         needsBankDetails: !hasStoredDest,
         savedAccountLabel: hasStoredDest && draft.transferType !== 'b2b' ? savedAccountLabelFor(storedDraftDest) : null,
@@ -219,11 +230,18 @@ export default async function PayPage({
     }
   }
 
-  const branding = await resolveBrandFor(brandPartnerId);
+  const partner = await loadPartner(brandPartnerId);
+  const branding = resolvePartnerBranding(partner);
 
   if (!view) {
     return <InactiveSheet branding={branding} />;
   }
+
+  // Program-Fix 15 PR B: the Reg E pre-payment disclosure (null for B2B). The
+  // amounts are the view's own — the card can never disagree with the form.
+  const disclosure = view.awaitingPayment
+    ? buildPrepaymentDisclosure(view, resolvePartnerDisclosure(partner))
+    : null;
 
   const feeLabel =
     view.sourceFee === 0
@@ -256,8 +274,10 @@ export default async function PayPage({
             value={view.fundingMethod === 'ach_pull' ? 'ACH bank debit' : 'Bank transfer'}
           />
         </div>
+        {disclosure && <RemittanceDisclosure disclosure={disclosure} />}
         {view.awaitingPayment ? (
           <PayForm
+            disclosureVersion={disclosure?.version ?? null}
             transferId={view.id}
             destinationCountry={view.destinationCountry}
             needsBankDetails={view.needsBankDetails}

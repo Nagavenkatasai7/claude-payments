@@ -8,6 +8,7 @@ import { DEFAULT_PARTNER_COUNTRIES } from '@/lib/defaults';
 // listPartners / ensureDefaultPartner) so the cutover is a drop-in swap.
 
 type PartnerRow = typeof partners.$inferSelect;
+type CorridorComplianceMap = Partial<Record<CountryCode, CorridorComplianceRule>>;
 
 function rowToPartner(row: PartnerRow): Partner {
   const p: Partner = {
@@ -71,7 +72,18 @@ export function createPartnerRepo(db: DbOrTx) {
 
     async savePartner(partner: Partner): Promise<void> {
       const row = partnerToRow(partner);
-      await db.insert(partners).values(row).onConflictDoUpdate({ target: partners.id, set: row });
+      // Program-Fix 15 PR B (review r1): support_config is written on INSERT
+      // only. On an existing row its ONE writer is updateSupportConfig (locked,
+      // audited); a full-row upsert from an unlocked read (updatePartnerAction,
+      // setPartnerStatusAction) must never roll back a disclosure or support
+      // save that committed in between.
+      // Program-Fix 43 PR B: corridor_compliance (which carries the per-partner
+      // AML hold switch) is insert-only here for the same reason; its ONE
+      // writer on an existing row is updateCorridorCompliance.
+      const { supportConfig: _insertOnly, corridorCompliance: _insertOnlyCc, ...update } = row;
+      void _insertOnly;
+      void _insertOnlyCc;
+      await db.insert(partners).values(row).onConflictDoUpdate({ target: partners.id, set: update });
     },
 
     /**
@@ -97,6 +109,61 @@ export function createPartnerRepo(db: DbOrTx) {
       const previous = prev && typeof prev === 'object' ? (prev as PartnerSendLimits) : null;
       await db.update(partners).set({ sendLimits: value, updatedAt: new Date() }).where(eq(partners.id, id));
       return { found: true, previous };
+    },
+
+    /**
+     * Program-Fix 15 PR B: the column-targeted writer of partners.support_config.
+     * Reads the stored jsonb under FOR UPDATE, hands it to `merge` (which returns
+     * the whole next value, built by SPREADING the previous one — a support save
+     * never erases the disclosure block and vice versa), and writes only that
+     * column. Call it inside the caller's transaction so the audit row commits
+     * with the write. An unknown id ⇒ { found: false } and nothing written.
+     */
+    async updateSupportConfig(
+      id: PartnerId,
+      merge: (previous: PartnerSupportConfig) => PartnerSupportConfig,
+    ): Promise<{ found: boolean; previous: PartnerSupportConfig; next: PartnerSupportConfig }> {
+      const rows = await db
+        .select({ supportConfig: partners.supportConfig })
+        .from(partners)
+        .where(eq(partners.id, id))
+        .limit(1)
+        .for('update');
+      if (!rows[0]) return { found: false, previous: {}, next: {} };
+      const raw = rows[0].supportConfig;
+      const previous: PartnerSupportConfig =
+        raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as PartnerSupportConfig) : {};
+      const next = merge(previous);
+      await db.update(partners).set({ supportConfig: next, updatedAt: new Date() }).where(eq(partners.id, id));
+      return { found: true, previous, next };
+    },
+
+    /**
+     * Program-Fix 43 PR B: the column-targeted writer of
+     * partners.corridor_compliance (the per-corridor overrides, including the
+     * AML hold switch). Same shape as updateSupportConfig: the stored jsonb is
+     * read under FOR UPDATE, `merge` returns the whole next value (built by
+     * spreading the previous one), and only that column is written. Call it
+     * inside the caller's transaction so the audit row commits with it. An
+     * unknown id ⇒ { found: false } and nothing written.
+     */
+    async updateCorridorCompliance(
+      id: PartnerId,
+      merge: (previous: CorridorComplianceMap) => CorridorComplianceMap,
+    ): Promise<{ found: boolean; previous: CorridorComplianceMap; next: CorridorComplianceMap }> {
+      const rows = await db
+        .select({ corridorCompliance: partners.corridorCompliance })
+        .from(partners)
+        .where(eq(partners.id, id))
+        .limit(1)
+        .for('update');
+      if (!rows[0]) return { found: false, previous: {}, next: {} };
+      const raw = rows[0].corridorCompliance;
+      const previous: CorridorComplianceMap =
+        raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as CorridorComplianceMap) : {};
+      const next = merge(previous);
+      await db.update(partners).set({ corridorCompliance: next, updatedAt: new Date() }).where(eq(partners.id, id));
+      return { found: true, previous, next };
     },
 
     async listPartners(): Promise<Partner[]> {

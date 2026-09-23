@@ -35,6 +35,8 @@ import { suppressForOptOut } from '@/lib/consent-gate';
 import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { sendBusinessInitiated, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
@@ -164,6 +166,17 @@ export class RowDeadlineError extends Error {
 
 /** Kinds whose handler is NOT idempotent: a deadline is terminal, never a retry. */
 const TERMINAL_ON_DEADLINE: ReadonlySet<string> = new Set(['agent.turn']);
+
+/**
+ * Program-Fix 25: kinds whose handler is ONE WhatsApp send, so a PERMANENT Graph
+ * rejection (131030 not allow-listed, 132001 no such template, …) is dead at
+ * attempt 1 instead of burning 8 retries. NEVER mock.settle: it marks the
+ * transfer delivered BEFORE sending, and its retry finishes cleanly through the
+ * idempotent stage 2. Accepted trade-off: a recipient allow-listed mid-backoff
+ * no longer gets the late retry.
+ */
+const PERMANENT_DEAD_KINDS: ReadonlySet<string> = new Set(['whatsapp.text', 'whatsapp.template', 'ops.alert']);
+const OPS_ALERT_TEMPLATE_LANG = 'en';
 
 /**
  * Program-Fix 34A: how long a turn waits (uncharged) before it is re-tried when
@@ -679,7 +692,25 @@ async function handle(
       await enqueueAlertMirror(deps, row, str(p.message));
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)
-      await deps.sendText(to, str(p.message));
+      // Program-Fix 25: unset ⇒ free-form exactly as before. alertDead skips
+      // ops.alert, so a skipped call would be a SILENT alert — never skip here.
+      const opsTemplate = env.whatsappOpsAlertTemplate;
+      if (!opsTemplate) {
+        await deps.sendText(to, str(p.message));
+        return;
+      }
+      const out = await sendBusinessInitiated(
+        to,
+        {
+          template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(str(p.message))] },
+          fallbackText: str(p.message),
+        },
+        undefined, // the platform number, as the free-form path
+        { partnerId: DEFAULT_PARTNER_ID, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },
+      );
+      // Rethrow the ORIGINAL Graph error so the catch classifies it (and
+      // last_error keeps the parseable message).
+      if (!out.ok) throw out.error ?? new Error(`ops.alert not sent: ${out.reason}`);
       return;
     }
 
@@ -954,7 +985,7 @@ export interface DrainOptions {
  * dedupe key. Never recursive — a dead ops.alert row (or its mirror copy)
  * does not alert about itself. Ids, kinds, counts and a trimmed error only; never the payload.
  */
-async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Promise<void> {
+async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string, dedupeKey = `dead:${row.id}`): Promise<void> {
   if (row.kind === 'ops.alert') return;
   // Program-Fix 26: nor does a dead mirror row (email/webhook copy of an alert).
   // Each dead:<id> key is new, so a dead SMTP would otherwise loop forever:
@@ -963,9 +994,18 @@ async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Prom
   await outbox.enqueue(
     'ops.alert',
     { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${text}` },
-    { dedupeKey: `dead:${row.id}` },
+    { dedupeKey },
   );
 }
+
+/**
+ * Program-Fix 25 PR B: a PERMANENT WhatsApp death is dead at attempt 1, so one
+ * misconfiguration (a missing template, 132001; a sandbox number, 131030) would
+ * otherwise raise one alert PER ROW and flood the ops phone. Coalesce per code
+ * per hour: the FIRST death of a code in an hour alerts (never silenced), the
+ * rest of that hour stay visible on the dashboard's dead-letter list.
+ */
+const deadCodeKey = (code: number): string => `deadcode:${code}:${hourBucket()}`;
 
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
 export async function drainOnce(
@@ -1060,7 +1100,14 @@ export async function drainOnce(
       // never be retried beside its own ghost — force the dead ceiling so the
       // ordinary dead-letter path (one deduped dead:<id> alert) handles it.
       const deadline = err instanceof RowDeadlineError;
-      const terminal = deadline && TERMINAL_ON_DEADLINE.has(row.kind);
+      const terminalDeadline = deadline && TERMINAL_ON_DEADLINE.has(row.kind);
+      // Program-Fix 25: a PERMANENT WhatsApp rejection on a single-send row is
+      // forced to the dead ceiling too — the same path, one dead:<id> alert.
+      const permanentCode =
+        err instanceof WhatsAppSendError && err.kind === 'permanent' && PERMANENT_DEAD_KINDS.has(row.kind)
+          ? err.code
+          : undefined;
+      const terminal = terminalDeadline || permanentCode !== undefined;
       // A RETRYABLE deadline: the abandoned handler may still be running in this
       // invocation (withRowDeadline cannot cancel it). Park the row for a full
       // LEASE_MS — past maxDuration — so no other worker runs it concurrently
@@ -1078,11 +1125,22 @@ export async function drainOnce(
       }
       if (status === 'dead') {
         result.dead++;
-        // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
+        // A terminal row (deadline / permanent WhatsApp code) is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
         await alertDead(
           outbox,
           row,
-          `${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}`,
+          `${
+            terminalDeadline
+              ? 'DEAD (terminal: row deadline exceeded)'
+              : permanentCode !== undefined
+                ? `DEAD (terminal: WhatsApp #${permanentCode})`
+                : `DEAD after ${row.attempts} attempts`
+          }: ${message.slice(0, 140)}${
+            permanentCode !== undefined
+              ? ` — further #${permanentCode} deaths this hour are coalesced into this alert; see the dead-letter list`
+              : ''
+          }`,
+          permanentCode !== undefined && !terminalDeadline ? deadCodeKey(permanentCode) : undefined,
         );
       } else {
         result.failed++;

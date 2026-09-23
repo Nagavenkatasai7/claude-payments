@@ -1,5 +1,6 @@
 import { env } from './env';
 import { logError, logWarn } from './log';
+import { WhatsAppSendError, isSendOutcome, sendOutcomeFromError, type SendOutcome } from './whatsapp-errors';
 import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
@@ -275,7 +276,8 @@ async function postWithBackoff(
     }
     break;
   }
-  throw new Error(`${errLabel} (${lastStatus}): ${lastBody}`);
+  // Program-Fix 25: typed (code / kind) with the SAME message string.
+  throw WhatsAppSendError.fromResponse(errLabel, lastStatus, lastBody);
 }
 
 /**
@@ -539,20 +541,27 @@ export async function sendOtpCode(
  */
 export async function sendTemplateOrText(
   to: string,
-  send: () => Promise<void>,
+  send: () => Promise<void | SendOutcome>,
   fallbackText: string,
   creds?: WaCreds,
-): Promise<void> {
+): Promise<SendOutcome> {
+  // Program-Fix 25 PR B: the SAME send order, but the outcome is RETURNED (still
+  // never thrown). Opaque-thunk rule: a thunk that resolves counts as the
+  // template landing, unless it returns its own SendOutcome (sendVerificationStatus
+  // handles its own fallback), which is forwarded as-is.
   try {
-    await send();
+    const result = await send();
+    return isSendOutcome(result) ? result : { ok: true, via: 'template' };
   } catch (err) {
     // Program-Fix 37 (obs-13): the scrubbing logger only, with a masked phone
     // (a Graph error can echo the recipient back inside `err`).
     logWarn('whatsapp.template-fallback', err, { to: maskPhone(to) });
     try {
       await sendText(to, fallbackText, creds);
+      return { ok: true, via: 'text' };
     } catch (textErr) {
       logError('whatsapp.fallback', textErr, { to: maskPhone(to) });
+      return sendOutcomeFromError(textErr);
     }
   }
 }
@@ -605,16 +614,18 @@ export async function sendInteractive(
 
   if (res.ok) return;
 
-  if (res.status === 470) {
+  // Program-Fix 25: the window signal is code 131047 (Meta: key on codes), with
+  // the legacy HTTP 470 kept alongside it. 470 falls back WITHOUT a body read.
+  const body = res.status === 470 ? '' : await res.text().catch(() => '');
+  const err = WhatsAppSendError.fromResponse('WhatsApp interactive send failed', res.status, body);
+  if (res.status === 470 || err.kind === 'window') {
     console.warn(
       'sendInteractive hit 24h-window error; falling back to sendText',
     );
     await sendText(to, fullBody, creds);
     return;
   }
-
-  const body = await res.text();
-  throw new Error(`WhatsApp interactive send failed (${res.status}): ${body}`);
+  throw err;
 }
 
 export interface CtaButton {
@@ -683,7 +694,7 @@ export async function sendVerificationStatus(
   state: VerificationState,
   name?: string,
   creds?: WaCreds, // Program-Fix 49A: the owning partner's number on every path
-): Promise<void> {
+): Promise<SendOutcome> {
   const params = verificationStatusParams(name ?? 'there', state);
   const templateName = {
     needed: env.whatsappVerificationNeededTemplate,
@@ -699,6 +710,7 @@ export async function sendVerificationStatus(
   if (!templateName) {
     try {
       await sendText(phone, fallbackText, creds);
+      return { ok: true, via: 'text' };
     } catch (err) {
       // Program-Fix 37: scrubbing logger, masked phone.
       logWarn(
@@ -706,10 +718,10 @@ export async function sendVerificationStatus(
         `sendVerificationStatus free-form send failed (out of 24h window?): ${err instanceof Error ? err.message : 'unknown error'}`,
         { to: maskPhone(phone) },
       );
+      return sendOutcomeFromError(err); // Program-Fix 25 PR B: reported, still never thrown
     }
-    return;
   }
-  await sendTemplateOrText(
+  return sendTemplateOrText(
     phone,
     () => sendTemplate(phone, templateName, TEMPLATE_LANG, params, creds),
     fallbackText,
@@ -718,11 +730,17 @@ export async function sendVerificationStatus(
 }
 
 /**
- * Phase 3 — deliver a per-transaction step-up OTP. A send is in-session (the
- * customer is actively paying), so free-form text works without an
- * AUTHENTICATION template. Never logs the code. Throws on a hard delivery
- * failure (the caller surfaces a generic error; the pay route still won't
- * finalize without a verified code, so a failed send never lets money through).
+ * Phase 3 — deliver a per-transaction step-up OTP. Never logs the code. Throws
+ * on a hard delivery failure (the routes answer 502 otp_send_failed; the pay
+ * route still won't finalize without a verified code, so a failed send never
+ * lets money through).
+ *
+ * Program-Fix 25 PR B (absorbs PR #207): on the SHARED env number (no partner
+ * creds) and only when WHATSAPP_AUTH_TEMPLATE is set, the approved
+ * AUTHENTICATION template carries the code (it reaches a customer outside the
+ * 24h window), with the free-form text as the fallback — the same shape as
+ * sendOtpCode. A partner's BYO number has no approved template, so it stays
+ * free-form. Template unset ⇒ one free-form text, byte-for-byte as before.
  */
 export async function sendTransactionOtp(
   phone: string,
@@ -730,5 +748,20 @@ export async function sendTransactionOtp(
   creds?: WaCreds,
   brand?: string, // Program-Fix 49A: absent ⇒ "SmartRemit" (callers unchanged)
 ): Promise<void> {
-  await sendText(phone, transactionOtpMessage(code, brand), creds);
+  const authTemplate = env.whatsappAuthTemplate;
+  if (!authTemplate || creds) {
+    await sendText(phone, transactionOtpMessage(code, brand), creds);
+    return;
+  }
+  try {
+    await sendAuthTemplate(phone, authTemplate, OTP_TEMPLATE_LANG, authenticationTemplateParams(code));
+  } catch (err) {
+    // The Graph error never echoes the params; the code is never passed to the logger.
+    logWarn(
+      'whatsapp.txotp-fallback',
+      `transaction OTP template send failed; falling back to free-form text: ${err instanceof Error ? err.message : 'unknown error'}`,
+      { to: maskPhone(phone) },
+    );
+    await sendText(phone, transactionOtpMessage(code, brand));
+  }
 }

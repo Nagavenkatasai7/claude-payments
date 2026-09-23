@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -17,6 +17,7 @@ import type { Transfer } from '@/lib/types';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
 import { createCustomerStore } from '@/lib/customer-store';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -2165,5 +2166,174 @@ describe('whatsapp.* rows honour opt-out by category (Program-Fix 49A)', { retry
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     await drainOnce(deps(), 'w1');
     expect(sendText).not.toHaveBeenCalled();
+  });
+});
+
+// Program-Fix 25 PR A: a PERMANENT Graph rejection (131030 not allow-listed,
+// 132001 template missing, …) is dead at attempt 1 — for whatsapp.text,
+// whatsapp.template and ops.alert ONLY. mock.settle keeps its normal retry
+// (attempt 2 finishes cleanly through the idempotent stage 2).
+describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)', { retry: 0 }, () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const graphErr = (code: number, label = 'WhatsApp send failed') =>
+    WhatsAppSendError.fromResponse(label, 400, JSON.stringify({ error: { message: `(#${code}) x`, code } }));
+  type AlertRow = { dedupe_key: string; payload: { message: string } };
+  async function alerts(): Promise<AlertRow[]> {
+    const r = (await db.execute(
+      sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`,
+    )) as unknown as { rows: AlertRow[] };
+    return r.rows;
+  }
+  async function statusOf(kind: string): Promise<{ status: string; attempts: number }> {
+    const r = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE kind = ${kind} ORDER BY id LIMIT 1`)) as unknown as {
+      rows: { status: string; attempts: number }[];
+    };
+    return r.rows[0];
+  }
+
+  it('a 131030 whatsapp.text row is dead at attempt 1 with exactly one per-code alert naming the code', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1 });
+    expect(await statusOf('whatsapp.text')).toMatchObject({ status: 'dead', attempts: 1 });
+    const a = await alerts();
+    expect(a).toHaveLength(1);
+    // PR B (d): coalesced per code per hour, so a template misconfig cannot flood the ops phone.
+    expect(a[0].dedupe_key).toMatch(/^deadcode:131030:\d+$/);
+    expect(a[0].payload.message).toContain('DEAD (terminal: WhatsApp #131030)');
+    expect(a[0].payload.message).toMatch(/coalesced/i);
+  });
+
+  it('PR B (d): two 131030 deaths in the same hour raise ONE alert; a different code still gets its own', async () => {
+    // Pinned mid-hour (after freshDb in beforeEach; Date only) so the hour
+    // bucket can never roll over between the two deaths.
+    const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hour + 30 * 60_000);
+    onTestFinished(() => { vi.useRealTimers(); });
+    sendText.mockRejectedValueOnce(graphErr(131030)).mockRejectedValueOnce(graphErr(131030));
+    sendTemplate.mockRejectedValueOnce(graphErr(132001, 'WhatsApp template send failed'));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'a', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.text', { to: '15550002222', body: 'b', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.template', { to: '15550001111', template: 't', lang: 'en', params: [], partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 3 });
+    const keys = (await alerts()).map((x) => x.dedupe_key.replace(/:\d+$/, ''));
+    expect(keys.sort()).toEqual(['deadcode:131030', 'deadcode:132001']);
+  });
+
+  it('PR B (d): a non-permanent death (retries exhausted) keeps its own dead:<id> alert', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131049));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    await db.execute(sql`UPDATE outbox SET attempts = 7 WHERE kind = 'whatsapp.text'`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1 });
+    const a = await alerts();
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupe_key).toMatch(/^dead:\d+$/);
+  });
+
+  it('a 132001 whatsapp.template row is dead at attempt 1', async () => {
+    sendTemplate.mockRejectedValueOnce(graphErr(132001, 'WhatsApp template send failed'));
+    await outbox.enqueue('whatsapp.template', { to: '15550001111', template: 't', lang: 'en', params: [], partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1, failed: 0 });
+    expect((await alerts())[0].payload.message).toContain('DEAD (terminal: WhatsApp #132001)');
+  });
+
+  it('a 131030 ops.alert row is dead at attempt 1 and never alerts about itself', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:991' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1 });
+    expect(await alerts()).toHaveLength(1); // only the row itself
+  });
+
+  it.each([131047, 131049, 131056, 190])('a %i whatsapp.text row RETRIES (not terminal)', async (code) => {
+    sendText.mockRejectedValueOnce(graphErr(code));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    expect(await alerts()).toEqual([]);
+  });
+
+  it('a plain Error (no Graph code) still retries', async () => {
+    sendText.mockRejectedValueOnce(new Error('WhatsApp send failed (400): <html/>'));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ failed: 1, dead: 0 });
+  });
+
+  it('a 131030 thrown inside mock.settle still retries normally (never dead at attempt 1)', async () => {
+    await store.saveTransfer(transferFixture());
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    expect(await statusOf('mock.settle')).toMatchObject({ status: 'failed', attempts: 1 });
+    expect(await alerts()).toEqual([]);
+  });
+});
+
+// Program-Fix 25 PR A (§3.10): ops alerts on a production number. UNCHANGED
+// unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
+// skipping the free-form call would silence alerts.
+describe('drainOnce — ops.alert template path (Program-Fix 25)', { retry: 0 }, () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('WHATSAPP_OPS_ALERT_TEMPLATE unset → one free-form sendText exactly as today', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
+    vi.stubEnv('WHATSAPP_WINDOW_AWARE', 'true'); // the flag alone changes nothing here
+    await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText.mock.calls).toEqual([['15550000001', 'hello ops']]);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('template set → the ops_alert template is sent with the message as its one body param; the mirror is still enqueued', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', 'ops_alert');
+    await outbox.enqueue('ops.alert', { message: 'stuck money\n  on  #12' }, { dedupeKey: 'dead:2' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBeGreaterThanOrEqual(1);
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    const [to, name, lang, params] = sendTemplate.mock.calls[0] as unknown[];
+    expect([to, name, lang]).toEqual(['15550000001', 'ops_alert', 'en']);
+    // Meta: a template parameter may not hold new-lines/tabs or >4 consecutive spaces.
+    expect(params).toEqual(['stuck money on #12']);
+    expect(sendText).not.toHaveBeenCalled();
+    const mirror = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'email.send'`)) as unknown as {
+      rows: { dedupe_key: string }[];
+    };
+    expect(mirror.rows).toHaveLength(1);
+  });
+
+  it('template set and BOTH sends fail → the row fails with the ORIGINAL Graph error (retry / terminal as classified)', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', 'ops_alert');
+    sendTemplate.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp template send failed', 404, JSON.stringify({ error: { code: 132001 } })),
+    );
+    sendText.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { code: 131049 } })),
+    );
+    await outbox.enqueue('ops.alert', { message: 'm' }, { dedupeKey: 'dead:3' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    const le = (await db.execute(sql`SELECT last_error FROM outbox WHERE kind = 'ops.alert'`)) as unknown as {
+      rows: { last_error: string }[];
+    };
+    expect(le.rows[0].last_error).toContain('WhatsApp send failed (400)');
   });
 });

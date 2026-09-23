@@ -3,6 +3,8 @@
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
 import { payOkStatus } from '@/lib/pay-outcome';
+import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
+import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 import {
   BANK_FIELDS_BY_COUNTRY,
   composePayoutDestination,
@@ -66,6 +68,7 @@ export function PayForm({
   fundingMethod,
   summary,
   savedAccountLabel = null,
+  disclosureVersion = null,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
@@ -74,6 +77,8 @@ export function PayForm({
   fundingMethod: string;
   summary: PaySummary;
   savedAccountLabel?: string | null;
+  /** Program-Fix 15 PR B: non-null ⇒ the page shows the Reg E disclosure and "Pay now" needs the acknowledgement. */
+  disclosureVersion?: string | null;
 }) {
   // fix 6: the sender may replace a prefilled (server-rehydrated) destination.
   const [editBankDetails, setEditBankDetails] = useState(false);
@@ -97,6 +102,7 @@ export function PayForm({
     return (
       <SimplePayForm
         transferId={transferId}
+        disclosureVersion={disclosureVersion}
         savedAccountLabel={savedAccountLabel}
         onEditBankDetails={savedAccountLabel ? () => setEditBankDetails(true) : undefined}
       />
@@ -106,6 +112,7 @@ export function PayForm({
   return (
     <BankDetailsPayForm
       transferId={transferId}
+      disclosureVersion={disclosureVersion}
       destinationCountry={destinationCountry}
       recipientName={recipientName}
       summary={summary}
@@ -134,18 +141,27 @@ function OtpFields({
   otpError?: string;
 }) {
   const [requesting, setRequesting] = useState(false);
+  // Program-Fix 25 PR B: a refused code request says why (send failed / locked).
+  const [requestError, setRequestError] = useState('');
 
   async function requestCode() {
     setRequesting(true);
+    setRequestError('');
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'request_otp' }),
       });
-      if (res.ok) setSent(true);
+      if (res.ok) {
+        setSent(true);
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { reason?: unknown };
+        setRequestError(otpRequestErrorMessage(data.reason));
+      }
     } catch {
       /* leave !sent so the button stays available to retry */
+      setRequestError(otpRequestErrorMessage(undefined));
     } finally {
       setRequesting(false);
     }
@@ -153,9 +169,12 @@ function OtpFields({
 
   if (!sent) {
     return (
-      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-        {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
-      </button>
+      <div>
+        <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
+          {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+        </button>
+        {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+      </div>
     );
   }
   return (
@@ -178,8 +197,34 @@ function OtpFields({
       <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
         {requesting ? 'Sending…' : 'Resend code'}
       </button>
+      {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
     </div>
   );
+}
+
+// ── Program-Fix 15 PR B: Reg E disclosure acknowledgement ────────────────────
+// Rendered only when the page shows a disclosure (consumer transfers). The pay
+// button stays disabled until it is ticked; the POST then carries the OPTIONAL
+// `disclosureVersion` (the server records it, never requires it — B3).
+
+function DisclosureAck({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="mt-3 mb-3 flex items-start gap-2 text-[13px] leading-normal text-[#e9edef]">
+      <input
+        type="checkbox"
+        name="disclosureAck"
+        className="mt-0.5 size-4 shrink-0 accent-[#25d366]"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{ACKNOWLEDGEMENT_LABEL}</span>
+    </label>
+  );
+}
+
+/** The optional POST field: sent only when a disclosure was shown AND acknowledged. */
+function ackField(disclosureVersion: string | null, acked: boolean): { disclosureVersion?: string } {
+  return disclosureVersion && acked ? { disclosureVersion } : {};
 }
 
 // ── Single-step path (scheduled / re-opened links) ──────────────────────────
@@ -188,25 +233,30 @@ function SimplePayForm({
   transferId,
   savedAccountLabel = null,
   onEditBankDetails,
+  disclosureVersion = null,
 }: {
   transferId: string;
   savedAccountLabel?: string | null;
   onEditBankDetails?: () => void;
+  disclosureVersion?: string | null;
 }) {
   const [status, setStatus] = useState<Status>('idle');
+  const [acked, setAcked] = useState(false);
+  const ackMissing = disclosureVersion !== null && !acked;
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const [otpError, setOtpError] = useState('');
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (ackMissing) return; // the button is disabled too; this covers implicit (Enter) submission
     setStatus('paying');
     setOtpError('');
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ otp: code }),
+        body: JSON.stringify({ otp: code, ...ackField(disclosureVersion, acked) }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
@@ -266,7 +316,8 @@ function SimplePayForm({
         </div>
       )}
       <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
-      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6}>
+      {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
+      <button type="submit" className={primaryBtnClasses} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
         {status === 'paying' ? 'Processing…' : 'Pay now'}
       </button>
       {onEditBankDetails && (
@@ -288,11 +339,13 @@ function BankDetailsPayForm({
   destinationCountry,
   recipientName,
   summary,
+  disclosureVersion = null,
 }: {
   transferId: string;
   destinationCountry: CountryCode;
   recipientName: string;
   summary: PaySummary;
+  disclosureVersion?: string | null;
 }) {
   const defs: Field[] = BANK_FIELDS_BY_COUNTRY[destinationCountry] ?? [];
 
@@ -305,6 +358,8 @@ function BankDetailsPayForm({
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const [otpError, setOtpError] = useState('');
+  const [acked, setAcked] = useState(false);
+  const ackMissing = disclosureVersion !== null && !acked;
 
   function setField(key: string, v: string) {
     setValues((prev) => ({ ...prev, [key]: v }));
@@ -328,13 +383,14 @@ function BankDetailsPayForm({
   // canonical payoutDestination server-side (it never trusts a client-composed
   // string), so we send the raw fields, not the composed string.
   async function handlePay() {
+    if (ackMissing) return;
     setStatus('paying');
     setOtpError('');
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ country: destinationCountry, fields: values, otp: code }),
+        body: JSON.stringify({ country: destinationCountry, fields: values, otp: code, ...ackField(disclosureVersion, acked) }),
       });
       if (res.ok) {
         // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
@@ -414,7 +470,8 @@ function BankDetailsPayForm({
           </div>
         </div>
         <OtpFields transferId={transferId} code={code} setCode={setCode} sent={sent} setSent={setSent} otpError={otpError} />
-        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6}>
+        {disclosureVersion !== null && <DisclosureAck checked={acked} onChange={setAcked} />}
+        <button type="button" className={primaryBtnClasses} onClick={handlePay} disabled={status === 'paying' || !sent || code.length !== 6 || ackMissing}>
           {status === 'paying' ? 'Processing…' : 'Pay now'}
         </button>
         <button

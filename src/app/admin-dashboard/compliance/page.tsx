@@ -8,7 +8,8 @@ import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
-import { reviewAmlAlertAction } from './actions';
+import { reviewAmlAlertAction, setAmlHoldsAction } from './actions';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
@@ -51,6 +52,7 @@ const CORRIDOR_COLUMNS: ExpandableColumn[] = [
   { label: 'Large-amount (USD)' },
   { label: 'Velocity / day' },
   { label: 'Watchlist' },
+  { label: 'AML holds' },
 ];
 
 const AML_COLUMNS: ExpandableColumn[] = [
@@ -154,8 +156,11 @@ export default async function CompliancePage() {
       .map((country) => {
         const rules = resolveCorridorRules(p, country);
         return {
+          partnerId: p.id,
+          country,
           partnerName: p.name ?? '',
           corridor: `${country} → IN`,
+          amlHolds: rules.amlHolds,
           largeAmountUsd: rules.largeAmountUsd,
           velocityLimit: rules.velocityLimit,
           watchlistSize: rules.baseWatchlist.length + rules.watchlistExtra.length,
@@ -163,6 +168,9 @@ export default async function CompliancePage() {
         };
       }),
   );
+  // Program-Fix 43 PR B: only platform admins may switch a partner's AML
+  // holds (setAmlHoldsAction re-checks — the action is the authority).
+  const canSetAmlHolds = staff.role === 'admin' && scoped.scope.kind !== 'partner';
   corridorRows.sort((a, b) => (a.partnerName + a.corridor).localeCompare(b.partnerName + b.corridor));
 
   return (
@@ -338,7 +346,9 @@ export default async function CompliancePage() {
           <CardHeader>
             <CardTitle>Corridor rules</CardTitle>
             <CardDescription>
-              Resolved compliance rules per corridor (read-only). Full rule-creation UI is deferred.
+              Resolved compliance rules per corridor. AML holds are OFF by default: when ON, a transfer on
+              that partner&apos;s live (http) rail that trips a behavioural rule is held for review. Demo
+              transfers are never held.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -364,6 +374,23 @@ export default async function CompliancePage() {
                       </div>
                     )}
                   </span>,
+                  r.partnerId === DEFAULT_PARTNER_ID ? (
+                    <span key="aml-holds" className="text-muted-foreground">Never (demo)</span>
+                  ) : (
+                    <span key="aml-holds" className="inline-flex flex-wrap items-center gap-2">
+                      <Badge variant={r.amlHolds ? 'destructive' : 'outline'}>{r.amlHolds ? 'On' : 'Off'}</Badge>
+                      {canSetAmlHolds && (
+                        <form action={setAmlHoldsAction}>
+                          <input type="hidden" name="partnerId" value={r.partnerId} />
+                          <input type="hidden" name="country" value={r.country} />
+                          <input type="hidden" name="on" value={r.amlHolds ? 'off' : 'on'} />
+                          <Button type="submit" size="sm" variant="outline">
+                            {r.amlHolds ? 'Turn off' : 'Turn on'}
+                          </Button>
+                        </form>
+                      )}
+                    </span>
+                  ),
                 ],
               }))}
             />

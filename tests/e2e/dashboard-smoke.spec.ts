@@ -54,9 +54,10 @@ test('public landing page renders at / without auth and links to WhatsApp', asyn
   const h1 = page.getByRole('heading', { level: 1 });
   await expect(h1).toBeVisible();
   await expect(h1).toContainText(/global money transfers/i);
-  // At least one WhatsApp CTA pointing at the bot number.
+  // At least one WhatsApp CTA pointing at the bot number. Program-Fix 25 PR B:
+  // any number — the owner moves it with NEXT_PUBLIC_WHATSAPP_NUMBER.
   const waCta = page
-    .locator('a[href*="api.whatsapp.com/send/?phone=15556298293"]')
+    .locator('a[href*="api.whatsapp.com/send/?phone="]')
     .first();
   await expect(waCta).toBeVisible();
   await expect(waCta).toHaveAttribute('target', '_blank');
