@@ -251,6 +251,17 @@ export function createStore(redis: RedisLike, db: Db) {
     async cancelTransferIfUnfunded(id: string, partnerId: PartnerId): Promise<Transfer | null> {
       return transfersRepo.cancelIfCancellable(id, partnerId);
     },
+    /** update_recipient_phone: sets ONLY recipient_phone, scoped to tenant +
+     *  owning sender (transfer-repo.updateRecipientPhone). Null ⇒ no such row
+     *  for this owner now; the caller refuses and never falls back to saveTransfer. */
+    async updateRecipientPhone(
+      id: string,
+      partnerId: PartnerId,
+      ownerPhone: string,
+      recipientPhone: string,
+    ): Promise<Transfer | null> {
+      return transfersRepo.updateRecipientPhone(id, partnerId, ownerPhone, recipientPhone);
+    },
     async updateTransferFromWebhook(
       transferId: string,
       status: TransferStatus,
