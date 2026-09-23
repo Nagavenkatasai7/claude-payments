@@ -146,6 +146,7 @@ curl -X POST $BASE/transactions \\
           </p>
           <p className="text-sm text-muted-foreground">
             Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
+            <code>sender.name</code> is optional today but strongly recommended: a transaction created without it is held for manual review (it is created with <code>compliance_status</code> <code>flagged</code>, and confirming it returns <code>in_review</code> until compliance staff release it). <code>sender.name</code> will become required in a future version.
           </p>
 
           <Card id="settlements">

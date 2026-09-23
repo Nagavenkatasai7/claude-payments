@@ -189,14 +189,15 @@ export async function completePaymentStage1(
     return { transfer, senderMessages: [] };
   }
 
-  const now = new Date().toISOString();
-  const updated: Transfer = {
-    ...transfer,
-    status: 'paid',
-    paidAt: now,
-  };
-  await store.saveTransfer(updated);
-
+  // Program-Fix 14: status updates respect compliance holds. ONE guarded,
+  // forward-only UPDATE (transfer-repo.updateTransferFromWebhook) instead of a
+  // full-row save of this read: only a compliance-cleared awaiting_payment row
+  // becomes paid; held (in_review / flagged / blocked) or cancelled rows stay
+  // exactly as they are and get no message.
+  const updated = await store.updateTransferFromWebhook(transferId, 'paid');
+  if (!updated) {
+    return { transfer: (await store.getTransfer(transferId)) ?? transfer, senderMessages: [] };
+  }
   return { transfer: updated, senderMessages: [buildStage1Message(updated, opts)] };
 }
 
@@ -228,14 +229,17 @@ export async function completePaymentStage2(
     return { transfer, senderMessages: [] };
   }
 
-  const now = new Date().toISOString();
-  const updated: Transfer = {
-    ...transfer,
-    status: 'delivered',
-    paidAt: transfer.paidAt ?? now,
-    deliveredAt: now,
-  };
-  await store.saveTransfer(updated);
+  // Program-Fix 14: status updates respect compliance holds. ONE guarded,
+  // forward-only UPDATE (transfer-repo.updateTransferFromWebhook — the same
+  // gate as the rail callback) instead of a full-row save of this read: a row
+  // under compliance review (in_review, blocked, or awaiting_payment and not
+  // cleared) is never delivered; a paid row — cleared, or a released hold that
+  // keeps compliance_status 'flagged' — delivers exactly as before. paid_at /
+  // delivered_at are COALESCEd, so an earlier value is never overwritten.
+  const updated = await store.updateTransferFromWebhook(transferId, 'delivered');
+  if (!updated) {
+    return { transfer: (await store.getTransfer(transferId)) ?? transfer, senderMessages: [] };
+  }
 
   const destCurrency = updated.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(updated.amountInr, destCurrency);
