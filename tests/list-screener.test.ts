@@ -113,6 +113,13 @@ describe('ListSanctionsScreener', () => {
     expect((await s.screen({ name: 'Banco Ejemplo Nacionel', sourceCountry: 'US' })).possibleMatch).toBe(true);
   });
 
+  it('length-ratio skip boundary: a 6-char name vs a 10-char entry sharing a 4-char prefix still fuzzy-matches (JW ≈ 0.92)', async () => {
+    // ratio 0.6 — above the provable 0.5 bound; any tighter skip (e.g. < 0.83) would lose this match.
+    expect(jaroWinkler('abcdef', 'abcdefghij')).toBeGreaterThanOrEqual(0.9);
+    const s = new ListSanctionsScreener(fixtureSource(), { extraNames: ['abcdefghij'] });
+    expect(await s.screen({ name: 'abcdef', sourceCountry: 'US' })).toMatchObject({ possibleMatch: true, entryId: 'extra:0' });
+  });
+
   it('weak a.k.a.s are exact-only: a near miss on one is not a hit', async () => {
     const s = new ListSanctionsScreener(fixtureSource());
     expect(await s.screen({ name: 'Benn', sourceCountry: 'US' })).toEqual({ matched: false });

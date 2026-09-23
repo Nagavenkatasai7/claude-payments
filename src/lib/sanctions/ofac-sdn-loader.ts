@@ -127,6 +127,21 @@ function parseUnchecked(xml: string): SanctionsList {
   return { source: 'ofac-sdn', version, hash: hashEntries(entries), entries };
 }
 
+const SLS_HOST = new URL(OFAC_SDN_XML_URL).hostname;
+
+function allowedFinalUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname;
+    // SLS itself, or an S3 endpoint: s3.amazonaws.com, <bucket>.s3.amazonaws.com,
+    // <bucket>.s3.<region>.amazonaws.com, <bucket>.s3-<region>.amazonaws.com.
+    return h === SLS_HOST || /^(?:[a-z0-9.-]+\.)?s3[.-](?:[a-z0-9-]+\.)?amazonaws\.com$/.test(h) || h === 's3.amazonaws.com';
+  } catch {
+    return false;
+  }
+}
+
 /** The live SDN.XML is ~30 MB (2026); anything past this is not the list. */
 export const OFAC_SDN_MAX_BYTES = 150 * 1024 * 1024;
 /** A hung download must not eat the cron's 300 s budget. */
@@ -149,6 +164,10 @@ export async function fetchOfacSdn(
     signal: AbortSignal.timeout(opts.timeoutMs ?? OFAC_SDN_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`OFAC SDN fetch failed: HTTP ${res.status}`);
+  // Redirect pinning: SLS answers 302 to a signed S3 download (verified
+  // 2026-09-23), so the final URL may be the SLS host itself or an Amazon S3
+  // host over https — never anything else. (A stub without res.url is a test.)
+  if (res.url && !allowedFinalUrl(res.url)) throw new Error('OFAC SDN fetch failed: unexpected host after redirect');
   const declared = Number(res.headers?.get?.('content-length') ?? NaN);
   if (Number.isFinite(declared) && declared > maxBytes) throw new Error('OFAC SDN fetch failed: body too large');
   const body = await res.text();

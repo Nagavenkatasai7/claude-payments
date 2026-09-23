@@ -93,6 +93,16 @@ describe('fetchOfacSdn (never called in prod unless SANCTIONS_LIST is set; here 
     await expect(fetchOfacSdn(actual as unknown as typeof fetch, { maxBytes: 100 })).rejects.toThrow(/too large/);
   });
 
+  it('refuses a download that was redirected off the Sanctions List Service host', async () => {
+    const res = (url: string) => vi.fn(async () => ({ ok: true, status: 200, url, headers: new Headers(), text: async () => FIXTURE }));
+    await expect(fetchOfacSdn(res('https://evil.example/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
+    await expect(fetchOfacSdn(res('http://sanctionslistservice.ofac.treas.gov/x') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
+    await expect(fetchOfacSdn(res(OFAC_SDN_XML_URL) as unknown as typeof fetch)).resolves.toMatchObject({ source: 'ofac-sdn' });
+    // SLS 302s to a signed S3 download (verified 2026-09-23).
+    await expect(fetchOfacSdn(res('https://some-bucket.s3.us-east-1.amazonaws.com/SDN.XML?X-Amz-Signature=x') as unknown as typeof fetch)).resolves.toMatchObject({ source: 'ofac-sdn' });
+    await expect(fetchOfacSdn(res('https://amazonaws.com.evil.example/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
+  });
+
   it('throws on a non-2xx response', async () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 403, text: async () => '' }));
     await expect(fetchOfacSdn(fetchImpl as unknown as typeof fetch)).rejects.toThrow(/403/);
