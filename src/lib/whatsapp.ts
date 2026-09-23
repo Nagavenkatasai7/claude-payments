@@ -1,5 +1,6 @@
 import { env } from './env';
 import { logError, logWarn } from './log';
+import { WhatsAppSendError } from './whatsapp-errors';
 import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
@@ -275,7 +276,8 @@ async function postWithBackoff(
     }
     break;
   }
-  throw new Error(`${errLabel} (${lastStatus}): ${lastBody}`);
+  // Program-Fix 25: typed (code / kind) with the SAME message string.
+  throw WhatsAppSendError.fromResponse(errLabel, lastStatus, lastBody);
 }
 
 export async function sendText(to: string, text: string, creds?: WaCreds): Promise<void> {
@@ -563,16 +565,18 @@ export async function sendInteractive(
 
   if (res.ok) return;
 
-  if (res.status === 470) {
+  // Program-Fix 25: the window signal is code 131047 (Meta: key on codes), with
+  // the legacy HTTP 470 kept alongside it. 470 falls back WITHOUT a body read.
+  const body = res.status === 470 ? '' : await res.text().catch(() => '');
+  const err = WhatsAppSendError.fromResponse('WhatsApp interactive send failed', res.status, body);
+  if (res.status === 470 || err.kind === 'window') {
     console.warn(
       'sendInteractive hit 24h-window error; falling back to sendText',
     );
     await sendText(to, fullBody, creds);
     return;
   }
-
-  const body = await res.text();
-  throw new Error(`WhatsApp interactive send failed (${res.status}): ${body}`);
+  throw err;
 }
 
 export interface CtaButton {
