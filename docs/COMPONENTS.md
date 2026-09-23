@@ -6,7 +6,7 @@ its own `component/<name>` branch on GitHub and a path map in `.claude/hooks/com
 
 | Component | Owns (representative paths) | Branch |
 |---|---|---|
-| whatsapp-agent | `src/lib/agent.ts` `prompt.ts` `tools.ts` `ollama.ts` `whatsapp*.ts` `web-chat.ts` · `src/app/api/whatsapp/` `api/copilot/` | `component/whatsapp-agent` |
+| whatsapp-agent | `src/lib/agent.ts` `agent-fallback.ts` `prompt.ts` `tools.ts` `ollama.ts` `whatsapp*.ts` `inbound-throttle.ts` (fix 34A: 20/min, 300/day per sender) `web-chat.ts` · `src/app/api/whatsapp/` `api/copilot/` | `component/whatsapp-agent` |
 | money-paths | `settlement.ts` `rail-failure.ts` `pay-finalize.ts` `transfer-create.ts` `payment.ts` `refund-policy.ts` `schedule*.ts` · providers (payment/funding/webhook-verify) · `api/pay/` `api/payment-webhook/` `api/funding-webhook/` `api/partner-rail/` · dashboard transactions/refunds/schedules | `component/money-paths` |
 | outbox-worker | `outbox.ts` `outbox-worker.ts` `reconcile.ts` `worker-cadence.ts` `cron-run.ts` · `api/worker/` `api/cron/` · `worker-heartbeat.yml` · `scripts/outbox-status.ts` | `component/outbox-worker` |
 | compliance-kyc | `compliance*.ts` `kyc-*.ts` `consent.ts` `tier-rules.ts` · providers (kyc/persona/sanctions) · `api/persona-webhook/` · dashboard compliance/kyc | `component/compliance-kyc` |
@@ -15,7 +15,7 @@ its own `component/<name>` branch on GitHub and a path map in `.claude/hooks/com
 | customer-portal | `src/app/account/` `api/account/` · `customer-*.ts` `otp-store.ts` `verify-link.ts` | `component/customer-portal` |
 | pay-page | `src/app/pay/` (hosted pay page UI; the finalize route is money-paths). Both `/pay/[id]` and `/pay/b2b/[id]` open with the fail-open per-IP page guard `isIpRateLimited` (`ip-rate-limit.ts`, platform-security, fix 23) before any read, and every dead link renders one generic default-branded sheet | `component/pay-page` |
 | b2b | `b2b-*.ts` · `src/app/pay/b2b/` `api/pay/b2b/` · dashboard b2b | `component/b2b` |
-| corridors-fx | `rate.ts` `fx.ts` `partner-rates.ts` `partner-currency.ts` `payout-format.ts` `corridor-*.ts` · dashboard corridors/rates · rate scripts | `component/corridors-fx` |
+| corridors-fx | `rate.ts` `fx.ts` `partner-rates.ts` `partner-currency.ts` `payout-format.ts` `destination-country.ts` `corridor-*.ts` · dashboard corridors/rates · rate scripts | `component/corridors-fx` |
 | landing-docs | `src/app/page.tsx` `landing/` `about/` `docs/` `partners/` · `public/` | `component/landing-docs` |
 | platform-security | `middleware.ts` `boot-assert.ts` `field-crypto.ts` `ip-rate-limit.ts` `redis.ts` `store.ts` · `settlement-url.ts` `safe-fetch.ts` (fix 22: the settlement-URL rule + the only rail client) · `scripts/audit-settlement-urls.ts` · `blob.ts` + `admin-dashboard/partner-requests/[id]/documents/[index]/` (fix 24: partner documents in a PRIVATE Blob store, read only through this audited platform-staff route; `scripts/migrate-partner-docs-private.ts` re-issues the old public objects) · `next.config` · `.github/` · `tests/e2e/` | `component/platform-security` |
 | db-layer | `src/db/**` `drizzle/**` `drizzle.config.ts` (schema + migrations are *shared*: editing them never warns, but the migration-reminder hook fires) | `component/db-layer` |

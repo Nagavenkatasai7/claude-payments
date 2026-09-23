@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
+import { payOkStatus } from '@/lib/pay-outcome';
 import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields, type Field } from '@/lib/payout-format';
 
 // Cross-border B2B buyer pay form (Plan 4). The buyer authorizes a debit of THEIR
@@ -10,7 +11,7 @@ import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields, type Field } from '@/lib/
 // signed instruction — SmartRemit never captures. Self-contained WhatsApp-dark
 // theme so /pay/[transferId] stays byte-unchanged.
 
-type Status = 'idle' | 'paying' | 'done' | 'error';
+type Status = 'idle' | 'paying' | 'done' | 'inactive' | 'error';
 type Step = 'details' | 'review';
 
 const inputClasses =
@@ -176,7 +177,8 @@ export function BillPayForm({
         body: JSON.stringify({ country: buyerCountry, fields: values, otp: code }),
       });
       if (res.ok) {
-        setStatus('done');
+        // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
+        setStatus(payOkStatus(await res.json().catch(() => null)));
         return;
       }
       try {
@@ -200,6 +202,10 @@ export function BillPayForm({
     } catch {
       setStatus('error');
     }
+  }
+
+  if (status === 'inactive') {
+    return <p className={formErrorClasses}>This bill is no longer active.</p>;
   }
 
   if (status === 'done') {

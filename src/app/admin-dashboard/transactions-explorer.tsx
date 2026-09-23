@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
+import type { Partner, Tier, Transfer } from '@/lib/types';
+import type { StaffOption } from '@/lib/staff-options';
 import { accountLast4 } from '@/lib/payout-format';
 import { Input } from '@/components/ui/input';
 import { TransactionsTabs } from './transactions-tabs';
@@ -18,7 +19,8 @@ const SELECT_CLASS =
 
 export interface TransactionsExplorerProps {
   transfers: Transfer[];
-  staff: Staff[];
+  /** Fix 20: the {username, name} projection only — never a full Staff (it carries passwordHash). */
+  staff: StaffOption[];
   staffByUsername: Record<string, string>;
   tierByPhone: Record<string, Tier>;
   kycByPhone: Record<string, KycInfo>;

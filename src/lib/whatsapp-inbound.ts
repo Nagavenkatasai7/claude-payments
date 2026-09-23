@@ -15,6 +15,8 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn } from '@/lib/log';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { getRedis } from '@/lib/redis';
+import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
@@ -97,6 +99,24 @@ export async function processInboundWebhook(
       await sendText(incoming.from, OPT_OUT_REMINDER, waCreds);
       return { ok: true };
     }
+  }
+
+  // Program-Fix 34A: per-(tenant, phone) inbound throttle — 20 a minute, 300 a
+  // day. AFTER consent (STOP/START always work) and BEFORE any enqueue: over
+  // the limit nothing is queued, and one short note goes out per window. The
+  // throttle never throws (fails open); the note send has its own catch so a
+  // Meta error can never turn a refused message back into a queued turn.
+  const throttle = await checkInboundThrottle(getRedis(), tenantId, incoming.from);
+  if (!throttle.allowed) {
+    logWarn('whatsapp.throttled', `inbound over the ${throttle.window} limit — not enqueued`, { tenant: tenantId });
+    if (throttle.notify) {
+      try {
+        await sendText(incoming.from, SLOW_DOWN_REPLY, waCreds);
+      } catch {
+        logWarn('whatsapp.throttled', 'slow-down note failed to send', { tenant: tenantId });
+      }
+    }
+    return { ok: true };
   }
 
   // D12: the "is this a new conversation" marker is per (tenant, phone) too —

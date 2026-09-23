@@ -1,6 +1,7 @@
-import { and, desc, eq, asc, sql, count } from 'drizzle-orm';
+import { and, desc, eq, asc, sql, count, inArray, or } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
+import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
 import type {
   PartnerId,
   Ticket,
@@ -125,6 +126,30 @@ export function createTicketRepo(db: DbOrTx) {
         .orderBy(desc(tickets.updatedAt))
         .limit(limit);
       return rows.map(rowToTicket);
+    },
+
+    /**
+     * Program-Fix 34B: the customer's OPEN help case under ONE tenant — the one
+     * request_human_help reuses. Tenant-scoped in SQL (never a phone-only page
+     * filtered in JS). A help case is category human_help OR the fixed help
+     * subject (staff may re-categorise it; nothing updates a subject).
+     */
+    async findOpenHumanHelpCase(partnerId: PartnerId, customerPhone: string): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, customerPhone),
+            eq(tickets.kind, 'customer'),
+            inArray(tickets.status, ['open', 'pending', 'waiting_admin']),
+            or(eq(tickets.category, HUMAN_HELP_CATEGORY), eq(tickets.subject, HUMAN_HELP_SUBJECT)),
+          ),
+        )
+        .orderBy(desc(tickets.createdAt))
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
     },
 
     /** Dashboard queue. partnerId undefined ⇒ platform staff see all partners. */

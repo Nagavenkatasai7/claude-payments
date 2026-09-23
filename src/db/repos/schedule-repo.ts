@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { schedules } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -7,6 +7,7 @@ import { encryptField } from '@/lib/field-crypto';
 import type {
   CurrencyCode,
   FundingMethod,
+  PartnerId,
   PayoutMethod,
   Schedule,
   ScheduleFrequency,
@@ -14,7 +15,7 @@ import type {
 } from '@/lib/types';
 
 // schedule-repo — mirrors schedule-store (getSchedule / saveSchedule /
-// listSchedules / listActiveSchedules). Payout destinations encrypted at rest
+// listSchedules / listActiveSchedules / setStatusIf / markRun). Payout destinations encrypted at rest
 // (recurring sends carry full bank accounts too); the cron run decrypts.
 
 type ScheduleRow = typeof schedules.$inferSelect;
@@ -80,6 +81,37 @@ export function createScheduleRepo(
     async saveSchedule(schedule: Schedule): Promise<void> {
       const row = scheduleToRow(schedule);
       await db.insert(schedules).values(row).onConflictDoUpdate({ target: schedules.id, set: row });
+    },
+
+    /**
+     * Program-Fix 36: the ONE writer of a status transition — a single-column,
+     * CONDITIONAL update: `SET status = to WHERE id AND partner_id AND status IN
+     * (from)`. The tenant is in the WHERE, so an out-of-scope id writes nothing;
+     * a lost race (the row already left `from`) returns null and writes nothing.
+     * `inArray`: drizzle-orm/sql/expressions/conditions.d.ts:170.
+     */
+    async setStatusIf(
+      id: string,
+      partnerId: PartnerId,
+      from: ScheduleStatus[],
+      to: ScheduleStatus,
+    ): Promise<Schedule | null> {
+      if (from.length === 0) return null;
+      const rows = await db
+        .update(schedules)
+        .set({ status: to })
+        .where(and(eq(schedules.id, id), eq(schedules.partnerId, partnerId), inArray(schedules.status, from)))
+        .returning();
+      return rows[0] ? rowToSchedule(rows[0]) : null;
+    },
+
+    /**
+     * Program-Fix 36: the cron's "fired" mark touches ONLY last_run_at, so a
+     * staff pause landing mid-run is never written back to `active` by a stale
+     * whole-row save (and the encrypted destination is not re-encrypted).
+     */
+    async markRun(id: string, at: Date): Promise<void> {
+      await db.update(schedules).set({ lastRunAt: at }).where(eq(schedules.id, id));
     },
 
     async listSchedules(): Promise<Schedule[]> {

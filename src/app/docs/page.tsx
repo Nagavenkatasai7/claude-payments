@@ -5,6 +5,7 @@ import { SkipLink } from '@/components/skip-link';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { destinationListText } from '@/lib/destination-country';
 
 // /docs — the public partner integration hub (Stage 5, Tailwind-native).
 // Every endpoint, header, and payload shape on this page mirrors the actual
@@ -77,6 +78,26 @@ export default function DocsPage() {
           </p>
         </section>
 
+        {/* Program-Fix 42 (docs-04): the honest status note, worded as on /about
+            (src/app/about/page.tsx "Honest status note" and "Sanctions screening
+            always on"), so a partner reading the API guide is not left to assume
+            a live rail, a live identity vendor or a commercial sanctions feed. */}
+        <Card role="note" aria-labelledby="docs-status-title" className="border-primary/30 bg-primary/5">
+          <CardHeader className="pb-2">
+            <CardTitle id="docs-status-title" className="text-base">
+              Where we are today
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>
+              {`SmartRemit is a working demonstration of production-grade remittance infrastructure. The AI conversation, live FX quoting, signed instruction-and-callback loop, durable processing, dashboards and WhatsApp notifications are real. Actual fund movement, the production identity-verification vendor, a commercial sanctions feed, and a live payout rail are simulated today — a reference "simulator" rail runs the exact signed loop a production rail would. We'll only describe those as live once they are.`}
+            </p>
+            <p>
+              {`Sanctions screening runs on every transfer and is structurally impossible to switch off, in every mode. (In today's demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.)`}
+            </p>
+          </CardContent>
+        </Card>
+
         <Separator />
 
         <section id="api" className="space-y-4">
@@ -120,10 +141,10 @@ curl -X POST $BASE/transactions \\
   }'`}</Code>
           <p className="text-sm text-muted-foreground">
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
-            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code> or <code>b2binvoice:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account.
+            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code> or <code>sched:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
           </p>
           <p className="text-sm text-muted-foreground">
-            Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
+            Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
           </p>
         </section>
 

@@ -39,6 +39,9 @@ describe('isScheduleDueToday', () => {
   it('cancelled schedules are never due', () => {
     expect(isScheduleDueToday(sched({ status: 'cancelled' }), NOW)).toBe(false);
   });
+  it('paused schedules are never due (Program-Fix 36: only active fires)', () => {
+    expect(isScheduleDueToday(sched({ status: 'paused' }), NOW)).toBe(false);
+  });
   it('not due again if it already ran today', () => {
     expect(isScheduleDueToday(
       sched({ lastRunAt: new Date(NOW).toISOString() }), NOW,

@@ -3,6 +3,7 @@ import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import type { Scope } from '@/lib/staff-scope';
+import { ticketCategoryLabel } from '@/lib/ticket-category';
 import type { Staff, Ticket, TicketPriority, TicketStatus } from '@/lib/types';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { Card } from '@/components/ui/card';
@@ -122,7 +123,7 @@ export async function TicketQueueView({
       </Link>,
       <TicketStatusPill key="status" status={t.status} />,
       <TicketPriorityPill key="priority" priority={t.priority} />,
-      <span key="category" className="text-muted-foreground">{t.category ?? '—'}</span>,
+      <span key="category" className="text-muted-foreground">{ticketCategoryLabel(t.category)}</span>,
       <span key="customer" className="text-xs text-muted-foreground">{t.customerPhone || '—'}</span>,
       ...(isPlatform
         ? [<span key="partner" className="text-xs">{partnerName[t.partnerId] ?? t.partnerId}</span>]

@@ -2,6 +2,8 @@ import type { RedisLike } from '@/lib/store';
 
 export interface FakeRedis extends RedisLike {
   dump: Map<string, string>;
+  /** Read-only view of every set (key → members), for "no raw token anywhere" scans. */
+  sets: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export function fakeRedis(): FakeRedis {
@@ -10,6 +12,7 @@ export function fakeRedis(): FakeRedis {
   const hashes = new Map<string, Map<string, string>>();
   return {
     dump: map,
+    sets,
     async get(key: string) {
       return map.has(key) ? map.get(key)! : null;
     },

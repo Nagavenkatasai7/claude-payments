@@ -1,6 +1,5 @@
 export const dynamic = 'force-dynamic';
 
-import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { scopeOf } from '@/lib/staff-scope';
@@ -23,6 +22,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { markCustomerVerifiedAction, markCustomerRejectedAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
+import { CustomerLink } from '../../customer-link';
+import { openCustomerRef, auditIdentityView } from '@/lib/customer-ref';
 import { SendLimitsCard } from '../../send-limits-card';
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
@@ -37,22 +38,29 @@ const DL_CLASS =
 
 export default async function CustomerDetailPage({
   params,
-  searchParams,
 }: {
-  params: Promise<{ phone: string }>;
-  searchParams: Promise<{ partner?: string }>;
+  params: Promise<{ ref: string }>;
 }) {
   const { staff } = await requireScope();
   const isAdmin = staff.role === 'admin';
   // Program fix 16b: the raise form is PLATFORM-admin only (the action self-gates too).
   const isPlatformAdmin = isAdmin && scopeOf(staff).kind === 'platform';
-  const { phone } = await params;
-  const { partner: partnerHint } = await searchParams;
+  // Program-Fix 37 (dash-04): the URL carries a sealed ref of (tenant, phone),
+  // never the phone. Anything else (a raw phone from an old bookmark, a
+  // tampered or foreign blob) is a 404. The scope check below is unchanged:
+  // the ref only names the row; createScopedStore decides who may see it.
+  const opened = openCustomerRef((await params).ref);
+  if (!opened) notFound();
+  const { phone, partnerId: partnerHint } = opened;
 
   const scoped = createScopedStore(staff);
   const dailyVolumeStore = getDailyVolumeStore();
   const customer = await scoped.getCustomer(phone, { partnerId: partnerHint || undefined });
   if (!customer) notFound();
+  // Program-Fix 37 (dash-05): this page renders decrypted identity, so every
+  // view writes one pii.view audit row (field names only, keyed subject).
+  // Awaited and not caught: no audit row, no identity on screen.
+  await auditIdentityView(getDb(), staff, customer);
   const siblingTenants = (await scoped.customerTenants(phone)).filter((id) => id !== customer.partnerId);
 
   const [mine, todayUsedCents, partner, kycAudit, lastLimitChange] = await Promise.all([
@@ -90,13 +98,14 @@ export default async function CustomerDetailPage({
               <p className="sh-page-sub">
                 This number also exists under:{' '}
                 {siblingTenants.map((id) => (
-                  <Link
+                  <CustomerLink
                     key={id}
-                    href={`/admin-dashboard/customers/${phone}?partner=${encodeURIComponent(id)}`}
-                    className="mr-2 underline-offset-2 hover:underline"
+                    phone={phone}
+                    partnerId={id}
+                    className="mr-2 cursor-pointer border-0 bg-transparent p-0 underline-offset-2 hover:underline"
                   >
                     {id}
-                  </Link>
+                  </CustomerLink>
                 ))}
               </p>
             )}

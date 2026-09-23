@@ -82,9 +82,16 @@ vi.mock('@/lib/tier-rules', () => ({ deriveTier: () => 'T1' }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 vi.mock('@/db/repos/outbox-repo', () => ({ createOutboxRepo: () => ({ enqueue }) }));
 vi.mock('@/lib/outbox', () => ({ pokeWorker: vi.fn() }));
+// Program-Fix 34A: the inbound throttle reads getRedis(). A fresh in-memory
+// fake per test (never the real Upstash client, which would retry against the
+// dud test URL).
+const throttleRedis = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock('@/lib/redis', () => ({ getRedis: () => throttleRedis.current }));
 
 import { GET, POST } from '@/app/api/whatsapp/route';
 import { OPT_OUT_REPLY, OPT_IN_REPLY, OPT_OUT_REMINDER } from '@/lib/consent';
+import { SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
+import { fakeRedis } from './helpers';
 
 const SECRET = 'meta-app-secret';
 const inboundBody = JSON.stringify({
@@ -116,6 +123,7 @@ function post(raw: string, signature?: string) {
 }
 
 beforeEach(() => {
+  throttleRedis.current = fakeRedis();
   markMessageSeen.mockClear().mockResolvedValue(true);
   getLastInboundAt.mockClear();
   recordInboundNow.mockClear();
@@ -420,5 +428,48 @@ describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret
     expect(res.status).toBe(200);
     expect(partnerForPhoneNumberId).not.toHaveBeenCalled();
     expect(enqueue).toHaveBeenCalledWith('agent.turn', expect.objectContaining({ routedPartnerId: null }), expect.anything());
+  });
+});
+
+describe('POST /api/whatsapp — per-sender inbound throttle (Program-Fix 34A: 20/min, 300/day)', () => {
+  // Pin the clock to the START of a minute (and of a UTC day) so the burst never straddles a window.
+  const T0 = Date.UTC(2026, 8, 22, 0, 0, 0);
+  const agentTurns = () => (enqueue.mock.calls as unknown[][]).filter((c) => c[0] === 'agent.turn');
+  const slowNotes = () => (sendText.mock.calls as unknown[][]).filter((c) => c[1] === SLOW_DOWN_REPLY);
+
+  it('the 21st text in a minute enqueues NO agent.turn and sends ONE slow-down note; the 22nd sends none', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(T0);
+    for (let i = 1; i <= 20; i++) await post(textBody(`m${i}`, `wamid.T${i}`));
+    expect(agentTurns()).toHaveLength(20);
+    await post(textBody('m21', 'wamid.T21'));
+    expect(agentTurns()).toHaveLength(20);
+    expect(slowNotes()).toHaveLength(1);
+    expect(slowNotes()[0][0]).toBe('15551230000');
+    await post(textBody('m22', 'wamid.T22'));
+    expect(agentTurns()).toHaveLength(20);
+    expect(slowNotes()).toHaveLength(1);
+  });
+
+  it('another phone is unaffected', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(T0);
+    for (let i = 1; i <= 22; i++) await post(textBody(`m${i}`, `wamid.A${i}`));
+    await post(textBody('hello', 'wamid.B1', '15559990000'));
+    const last = agentTurns().at(-1)!;
+    expect((last[1] as { phone: string }).phone).toBe('15559990000');
+    expect(agentTurns()).toHaveLength(21);
+  });
+
+  it('a throwing Redis enqueues normally (fail open)', async () => {
+    throttleRedis.current = { ...fakeRedis(), incr: async () => { throw new Error('upstash down'); } };
+    await post(textBody('hi', 'wamid.F1'));
+    expect(agentTurns()).toHaveLength(1);
+  });
+
+  it('STOP still works when the sender is over the limit (consent runs first)', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(T0);
+    for (let i = 1; i <= 21; i++) await post(textBody(`m${i}`, `wamid.S${i}`));
+    await post(textBody('STOP', 'wamid.STOPX'));
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
   });
 });

@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAgent, sanitizeReply } from '@/lib/agent';
+import { createAgent, sanitizeReply, FALLBACK_REPLY } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -113,7 +113,7 @@ describe('createAgent', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
     expect(reply).not.toContain('model-made-up.example'); // model's invented URL stripped
-    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical kyc_url appended
+    expect(reply).toContain('https://example.com/admin-dashboard/customers'); // canonical kyc_url appended
   });
 
   it('gate OFF: no verify link is ever appended, even when the model writes a verify-style reply', async () => {
@@ -174,7 +174,7 @@ describe('createAgent', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'resend the verify link');
     expect(reply).not.toContain('stale-from-history.example'); // model's echoed URL stripped
-    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical link appended by the backstop
+    expect(reply).toContain('https://example.com/admin-dashboard/customers'); // canonical link appended by the backstop
   });
 
   it('backstop does NOT fire for a verified customer (no spurious verify link)', async () => {
@@ -194,7 +194,7 @@ describe('createAgent', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'am I verified?');
     expect(reply).toBe("You're all set — your identity is verified!");
-    expect(reply).not.toContain('/admin-dashboard/customers/'); // no link appended
+    expect(reply).not.toContain('/admin-dashboard/customers'); // no link appended
   });
 
   it('graceful error: a chat() failure returns the fallback line AND preserves history', async () => {
@@ -514,6 +514,31 @@ describe('createAgent — web history link (list_recent_transfers)', () => {
     const reply = await agent.runAgentTurn(PHONE, 'show my recent transactions');
     expect(reply).not.toContain('model-made-up.example'); // model URL stripped
     expect(reply).toContain('https://smartremit.test/account/history'); // code link appended
+  });
+
+  it('fix 34B: on WhatsApp the tool RUNS (not blocked) and the web history link is not appended', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerified(deps);
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_recent_transfers', arguments: '{}' } }],
+      },
+      { role: 'assistant', content: "You haven't sent anything yet." },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, chat: async () => responses[i++], // default channel ⇒ whatsapp
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'what did I send recently?');
+    expect(reply).not.toContain('/account/history');
+    const toolMsg = (await store.getConversation('default', PHONE)).find((m) => m.role === 'tool');
+    const result = JSON.parse(toolMsg!.content!) as Record<string, unknown>;
+    expect(result.error).toBeUndefined();
+    expect(result.transfers).toEqual([]);
   });
 
   it('a pay link ALWAYS wins the single append slot over the history link', async () => {
@@ -1302,7 +1327,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).toContain('open_recall_dispute');
     expect(names).toContain('list_recent_transfers'); // web-only history lookup
     expect(names).toContain('get_customer_context'); // fix 5: the round-0 context tool
-    expect(names).toHaveLength(13);
+    expect(names).toContain('request_human_help'); // fix 34B: a signed-in customer can ask for a person
+    expect(names).toHaveLength(14);
   });
 
   it('default channel: the model still sees the full WhatsApp tool set (call sites unchanged)', async () => {
@@ -1317,7 +1343,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(26);
+    expect(seenTools).toHaveLength(28); // fix 34B: + request_human_help, + list_recent_transfers
     const dn = seenTools.map((t) => t.function.name);
     expect(dn).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(dn).toContain('send_approve_picker');
@@ -1327,7 +1353,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(dn).toContain('cancel_bill'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).toContain('check_bill_status'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).toContain('dispute_bill'); // B2B lifecycle (L1) — WhatsApp channel
-    expect(dn).not.toContain('list_recent_transfers'); // web-only — never on WhatsApp
+    expect(dn).toContain('list_recent_transfers'); // fix 34B: history comes from the tool on WhatsApp too
+    expect(dn).toContain('request_human_help'); // fix 34B
   });
 
   it("channel 'web': injects the [WEB CHAT] note; default channel does not", async () => {
@@ -1449,7 +1476,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
     expect(reply).not.toContain('model-made-up.example');
-    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`);
+    expect(reply).toContain('https://example.com/admin-dashboard/customers');
   });
 });
 
@@ -1657,5 +1684,52 @@ describe('fix 5 (F43): outsider-written text never reaches the system role; cont
       expect(call.filter((m) => m.tool_calls?.some((c) => c.id === 'ctx_r0'))).toHaveLength(1);
     }
     expect(JSON.stringify(await store.getConversation('default', PHONE))).not.toContain('ctx_r0');
+  });
+});
+
+describe('Program-Fix 34A: every inbound text gets exactly one visible answer', () => {
+  const MOM = '919876543210';
+
+  function build(chat: (messages: ChatMessage[]) => Promise<ChatMessage>, redis = fakeRedis()) {
+    const store = createStore(redis, db);
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store), chat,
+    });
+    return { agent, store };
+  }
+
+  it('a DUPLICATE approve card (same card within the dedupe TTL) is not silence: the tool says sent:false/duplicate and the model text is the reply', async () => {
+    const redis = fakeRedis();
+    const pickerCall = (id: string): ChatMessage => ({
+      role: 'assistant', content: null,
+      tool_calls: [{ id, type: 'function', function: { name: 'send_approve_picker', arguments: JSON.stringify({ amount_source: 100, recipient_name: 'Mom', recipient_phone: MOM, destination_country: 'IN' }) } }],
+    });
+    // Turn 1: the card is sent; the card IS the reply ('').
+    let round = 0;
+    const first = build(async () => (++round === 1 ? pickerCall('a1') : { role: 'assistant', content: '' }), redis);
+    expect(await first.agent.runAgentTurn(PHONE, 'send $100 to Mom')).toBe('');
+    // Turn 2 (same card, inside 120 s): the send is deduped, so the tool must NOT report sent:true.
+    round = 0;
+    const toolResults: string[] = [];
+    const second = build(async (messages) => {
+      round++;
+      if (round === 1) return pickerCall('a2');
+      toolResults.push(String(messages.filter((m) => m.role === 'tool' && m.tool_call_id === 'a2').pop()?.content));
+      return { role: 'assistant', content: 'The payment card is above — tap Approve & Pay.' };
+    }, redis);
+    const reply = await second.agent.runAgentTurn(PHONE, 'send $100 to Mom');
+    const result = JSON.parse(toolResults[0]) as Record<string, unknown>;
+    expect(result.sent).toBe(false);
+    expect(result.duplicate).toBe(true);
+    expect(typeof result.draft_id).toBe('string');
+    expect(String(result.reply_hint)).toMatch(/already above/);
+    expect(reply).toBe('The payment card is above — tap Approve & Pay.');
+  });
+
+  it('a reply that sanitizeReply empties (URL-only) becomes FALLBACK_REPLY, never an empty string', async () => {
+    const { agent } = build(async () => ({ role: 'assistant', content: 'https://x.y' }));
+    const reply = await agent.runAgentTurn(PHONE, 'link please');
+    expect(reply).toBe(FALLBACK_REPLY);
+    expect(reply.trim()).not.toBe('');
   });
 });

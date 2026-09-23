@@ -7,6 +7,7 @@ import {
   completePaymentStage2,
   recipientTemplateParams,
   recipientDeliveredFallbackText,
+  recipientDisplayName,
 } from '@/lib/payment';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -540,5 +541,70 @@ describe('buildRailFailureMessage (fix 8)', () => {
     const msg = buildRailFailureMessage(awaitingTransfer(), 'contact');
     expect(msg).toMatch(/contact you/i);
     expect(msg.toLowerCase()).not.toContain('refund');
+  });
+});
+
+// Program-Fix 38: an outsider-written recipient name (a partner-API mint) never
+// carries a web address into a system-sent message — pre-fix rows included.
+describe('fix 38: recipient names are display-clamped at render', () => {
+  const hostile = (recipientName: string): Transfer => ({ ...awaitingTransfer(), recipientName });
+
+  it('recipientDisplayName strips the address, and an all-address name falls back to "your recipient"', () => {
+    expect(recipientDisplayName(hostile('Mom www.x.io'))).toBe('Mom');
+    expect(recipientDisplayName(hostile('Mom\nwww.x.io'))).toBe('Mom');
+    expect(recipientDisplayName(hostile('www.x.io'))).toBe('your recipient');
+    expect(recipientDisplayName(hostile('https://evil.example/x'))).toBe('your recipient');
+    expect(recipientDisplayName(awaitingTransfer())).toBe('Mom');
+  });
+
+  it('template params: 4 params in the same order, no address, never empty, no newline', () => {
+    for (const name of ['Mom www.x.io', 'Mom\nwww.x.io', 'www.x.io']) {
+      const params = recipientTemplateParams(hostile(name));
+      expect(params).toHaveLength(4);
+      expect(params[0]).toBe(name === 'www.x.io' ? 'your recipient' : 'Mom');
+      expect(params[3]).toBe('bank account');
+      for (const p of params) {
+        expect(p).not.toBe('');
+        expect(p).not.toContain('x.io');
+        expect(p).not.toMatch(/[\n\r]/);
+      }
+    }
+  });
+
+  it('the recipient fallback text, the stage-1 line and the rail-failure line carry no address', () => {
+    const t = hostile('Mom www.x.io');
+    for (const msg of [
+      recipientDeliveredFallbackText(t, 'Acme Remit'),
+      buildStage1Message(t),
+      buildRailFailureMessage(t, 'refund'),
+    ]) {
+      expect(msg).not.toContain('x.io');
+      expect(msg).toContain('Mom');
+    }
+    expect(buildStage1Message(hostile('www.x.io'))).toContain('your recipient will get');
+  });
+
+  it('the B2B stage-1 line clamps the recipient business name too', () => {
+    const t: Transfer = {
+      ...awaitingTransfer(), transferType: 'b2b', fundingMethod: 'ach_pull',
+      recipientEntityType: 'business', recipientBusinessName: 'Mumbai Textiles acme.com',
+    };
+    const msg = buildStage1Message(t);
+    expect(msg).toContain('Mumbai Textiles will receive');
+    expect(msg).not.toContain('acme.com');
+  });
+
+  it('the stage-2 sender line carries no address (a pre-fix row)', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer({ ...hostile('Mom www.x.io'), status: 'paid' });
+    const result = await completePaymentStage2(store, 'pay12345');
+    expect(result.senderMessages[0]).toContain('delivered to Mom via bank transfer');
+    expect(result.senderMessages[0]).not.toContain('x.io');
+  });
+
+  it('a clean name is byte-identical to before (control)', () => {
+    expect(buildStage1Message(awaitingTransfer())).toBe(
+      '✅ Payment received — $500.00 charged. Mom will get ₹42,600 within ~10 minutes. Transfer ID: pay12345',
+    );
   });
 });

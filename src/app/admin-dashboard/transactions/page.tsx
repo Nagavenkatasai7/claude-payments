@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 
 import Link from 'next/link';
 import { getAuthStore } from '@/lib/auth-store';
+import { toStaffOptions } from '@/lib/staff-options';
 import { requireScope } from '@/lib/auth';
 import { createScopedStore } from '@/lib/scoped-store';
 import { getStore } from '@/lib/store';
@@ -103,7 +104,7 @@ export default async function TransactionsPage({
         <Card className="overflow-hidden py-0">
           <TransactionsExplorer
             transfers={transfers}
-            staff={allStaff}
+            staff={toStaffOptions(allStaff)}
             staffByUsername={Object.fromEntries(
               allStaff.map((s) => [s.username, s.name]),
             )}

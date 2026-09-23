@@ -2,6 +2,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { after } from 'next/server';
 import { getCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
 import { getOtpStore, type OtpPurpose } from '@/lib/otp-store';
 import { getPendingAuthStore } from '@/lib/pending-auth-store';
@@ -260,7 +261,38 @@ export async function verifyOtpAction(
   redirect('/account');
 }
 
-/** Resend the OTP for the in-flight pending-auth token (does NOT consume it). */
+/**
+ * Run `task` AFTER the response has gone out (`after()` from next/server), so
+ * its cost — the OTP issue writes and the WhatsApp round trip — never shapes
+ * the response time a caller can measure (fix 21). Errors are caught inside
+ * the task: post-response there is nothing to reflect, but ops must still see
+ * them (scrubbed). If there is no request scope (tests / non-request context)
+ * the task runs inline: availability over timing.
+ */
+async function afterResponse(label: string, phone: string, task: () => Promise<void>): Promise<void> {
+  const safe = async () => {
+    try {
+      await task();
+    } catch (err) {
+      logWarn(label, err, { phone });
+    }
+  };
+  try {
+    after(safe);
+  } catch {
+    logWarn(label, 'after() unavailable, running inline', { phone });
+    await safe();
+  }
+}
+
+/**
+ * Resend the OTP for the in-flight pending-auth token (does NOT consume it).
+ * ENUMERATION-SAFE (fix 21): a 'reset' token exists for EVERY valid phone, so
+ * the pre-response work here is the same for every token (peek + reply), the
+ * send happens after the response, and the account check lives INSIDE the
+ * post-response task — a number with no account never receives a code, and
+ * the caller cannot tell from the timing that it was skipped.
+ */
 export async function resendOtpAction(
   _prev: AccountState | null,
   formData: FormData,
@@ -268,8 +300,15 @@ export async function resendOtpAction(
   const pendingToken = field(formData, 'pendingToken');
   const pending = await getPendingAuthStore().peek(pendingToken);
   if (!pending) return { step: 'login', error: SESSION_EXPIRED };
-  await issueAndSend(pending.phone, pending.purpose as OtpPurpose, await clientIp());
-  return { step: 'otp', phone: pending.phone, pendingToken, notice: GENERIC_OTP_NOTE };
+  const { phone } = pending;
+  const purpose = pending.purpose as OtpPurpose;
+  const ip = await clientIp();
+  await afterResponse('otp.resend', phone, async () => {
+    const customer = await getCustomerAuthStore().getCustomer(phone);
+    if (!customer?.passwordHash) return; // no account ⇒ nothing to send (silent by design)
+    await issueAndSend(phone, purpose, ip);
+  });
+  return { step: 'otp', phone, pendingToken, notice: GENERIC_OTP_NOTE };
 }
 
 /** Sign out: revoke the current session + clear the cookie. */
@@ -281,29 +320,37 @@ export async function logoutAction(): Promise<void> {
   redirect('/account/login');
 }
 
-/** Request a reset: for a real account, mint a 'reset' pending-auth token + OTP.
- * Enumeration-safe — identical neutral response regardless of account existence. */
+/**
+ * Request a reset. ENUMERATION-SAFE (fix 21, F55): every VALID phone gets the
+ * same reply — `step:'otp'`, the phone, a FRESH 'reset' pending-auth token and
+ * the same notice — whether or not an account exists. The reset code is issued
+ * and sent only for a real account, and only AFTER the response has gone out
+ * (`after()` from next/server), so neither the body nor the response time says
+ * whether the number is a customer. A token minted for an unregistered number
+ * is harmless: resetAction reaches verifyOtp, which finds no code (`no_code`)
+ * and answers exactly like a wrong code — no password is ever set, no row is
+ * ever created. The Postgres lookup itself still runs for every valid phone.
+ * An invalid phone keeps the neutral no-token reply (it says nothing about
+ * existence either).
+ */
 export async function requestResetAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
   const phone = normalizePhone(field(formData, 'phone'));
   const ip = await clientIp();
-  let pendingToken: string | undefined;
-  if (isValidPhone(phone)) {
-    const auth = getCustomerAuthStore();
-    const customer = await auth.getCustomer(phone);
-    if (customer?.passwordHash) {
-      pendingToken = await getPendingAuthStore().create(phone, 'reset');
-      await issueAndSend(phone, 'reset', ip);
-    }
+  const notice = 'If that number has an account, we sent a reset code.';
+  if (!isValidPhone(phone)) {
+    return { step: 'otp', phone: undefined, pendingToken: undefined, notice };
   }
-  return {
-    step: 'otp',
-    phone: isValidPhone(phone) ? phone : undefined,
-    pendingToken,
-    notice: 'If that number has an account, we sent a reset code.',
-  };
+  // Both of these run for EVERY valid phone — the same Redis write and the same
+  // Postgres read — so the account lookup cannot be told apart from outside.
+  const pendingToken = await getPendingAuthStore().create(phone, 'reset');
+  const customer = await getCustomerAuthStore().getCustomer(phone);
+  if (customer?.passwordHash) {
+    await afterResponse('otp.reset', phone, () => issueAndSend(phone, 'reset', ip));
+  }
+  return { step: 'otp', phone, pendingToken, notice };
 }
 
 /** Confirm a reset: consume the 'reset' pending-auth token, verify the

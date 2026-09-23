@@ -19,7 +19,13 @@ import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
-import { boundUntrustedText, BRAND_MAX, PERSONA_MAX } from '@/lib/untrusted-text';
+import {
+  boundUntrustedText,
+  BRAND_MAX,
+  hasOverridePhrase,
+  hasWebAddress,
+  PERSONA_MAX,
+} from '@/lib/untrusted-text';
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
@@ -39,6 +45,31 @@ import { DEFAULT_CURRENCY_FOR_COUNTRY, SUPPORT_DEFAULT_PERMISSIONS } from '@/lib
 function keepOrUpdate(submitted: string, existing: string | undefined): string | undefined {
   const v = submitted.trim();
   return v !== '' ? v : existing;
+}
+
+// Program-Fix 38: the bot persona is partner-written text that lands in the
+// bot's SYSTEM prompt. After fix 5's clamp it may set tone only — a web address
+// or a rule-override phrase ("ignore the rules above") is REFUSED before any
+// write. One generic message, whichever check tripped.
+const PERSONA_REFUSAL = 'Bot voice can describe tone only — no web addresses or instructions about rules.';
+function boundedPersona(raw: unknown): string | undefined {
+  const persona = boundUntrustedText(raw, PERSONA_MAX);
+  if (persona !== '' && (hasWebAddress(persona) || hasOverridePhrase(persona))) {
+    throw new Error(PERSONA_REFUSAL);
+  }
+  return persona || undefined;
+}
+
+/** The audit row for a persona change: who, which tenant, and the lengths — never the text. */
+function personaAuditEvent(partnerId: string, actor: string, oldPersona: string | undefined, newPersona: string | undefined) {
+  return {
+    partnerId,
+    actor,
+    actorType: 'staff' as const,
+    action: 'partner.persona.update',
+    subjectId: partnerId,
+    meta: { oldLength: [...(oldPersona ?? '')].length, newLength: [...(newPersona ?? '')].length },
+  };
 }
 
 // Shared gate for every partner-config action: admin role + same-partner scope
@@ -82,6 +113,9 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
   // characters, line separators and []{}<> and cap it (60 / 500). Stripped, not
   // refused, so an existing value still saves. buildSystemPrompt clamps again at
   // read for pre-fix rows.
+  // Program-Fix 38: the persona is then refused (before any write) if it
+  // carries a web address or a rule-override phrase.
+  const botPersona = boundedPersona(formData.get('botPersona'));
   const updated: Partner = {
     ...existing,
     name: String(formData.get('name') ?? existing.name).trim() || existing.name,
@@ -89,7 +123,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     brandName: boundUntrustedText(formData.get('brandName'), BRAND_MAX) || undefined,
     displayName: boundUntrustedText(formData.get('displayName'), BRAND_MAX) || undefined,
     supportContact: String(formData.get('supportContact') ?? '').trim() || undefined,
-    botPersona: boundUntrustedText(formData.get('botPersona'), PERSONA_MAX) || undefined,
+    botPersona,
     primaryColor: String(formData.get('primaryColor') ?? '').trim() || undefined,
     logoUrl: sanitizeLogoValue(formData.get('logoUrl')),
     adminNote: String(formData.get('adminNote') ?? '').trim() || undefined,
@@ -97,7 +131,15 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
     requireKycBeforeSend,
     updatedAt: new Date().toISOString(),
   };
-  await ps.savePartner(updated);
+  // Program-Fix 38: a persona change is audited in the SAME transaction as the
+  // save (tx-bound repos only inside it), so a saved change always has its row.
+  const personaChanged = (existing.botPersona ?? '') !== (botPersona ?? '');
+  await getDb().transaction(async (tx) => {
+    await createPartnerStore(tx).savePartner(updated);
+    if (personaChanged) {
+      await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, existing.botPersona, botPersona));
+    }
+  });
   revalidatePath('/admin-dashboard/partners');
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
@@ -484,7 +526,7 @@ const clean = (v: unknown): string | undefined => {
 export async function wizardCreatePartnerAction(
   input: PartnerWizardInput,
 ): Promise<PartnerWizardResult> {
-  await requirePlatformAdmin();
+  const staff = await requirePlatformAdmin();
 
   const name = clean(input.name);
   if (!name) throw new Error('Partner name is required.');
@@ -494,6 +536,8 @@ export async function wizardCreatePartnerAction(
   if (countries.length === 0) throw new Error('At least one country is required.');
   const kycMode: KycMode = input.kycMode === 'delegated' ? 'delegated' : 'ours';
 
+  // Program-Fix 38: the same persona refusal as updatePartnerAction, before any write.
+  const botPersona = boundedPersona(input.botPersona);
   const id = newTransferId();
   const now = new Date().toISOString();
   const partner: Partner = {
@@ -505,7 +549,7 @@ export async function wizardCreatePartnerAction(
     brandName: boundUntrustedText(input.brandName, BRAND_MAX) || undefined,
     displayName: boundUntrustedText(input.displayName, BRAND_MAX) || undefined,
     supportContact: clean(input.supportContact),
-    botPersona: boundUntrustedText(input.botPersona, PERSONA_MAX) || undefined,
+    botPersona,
     primaryColor: clean(input.primaryColor),
     logoUrl: sanitizeLogoValue(input.logoUrl),
     kycMode,
@@ -546,6 +590,7 @@ export async function wizardCreatePartnerAction(
   try {
     await getDb().transaction(async (tx) => {
       await createPartnerStore(tx).savePartner(partner);
+      if (botPersona) await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, undefined, botPersona));
       await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
         kyc: {},
         whatsapp: {
