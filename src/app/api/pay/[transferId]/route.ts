@@ -429,9 +429,9 @@ export async function POST(
         try {
           await sendTransactionOtp(otpPhone, issued.code, otpCreds);
         } catch {
-          // Program-Fix 25 PR B: honest — the code never arrived. Release the
-          // cooldown so Resend really sends. Never log the code.
-          try { await otpStore.releaseCooldown(transferId); } catch { /* the 30-s TTL expires it anyway */ }
+          // Program-Fix 25 PR B: honest — the code never arrived. Shorten the
+          // cooldown to a ~10-s floor so Resend works soon but cannot be hammered. Never log the code.
+          try { await otpStore.shortenCooldown(transferId); } catch { /* the 30-s cooldown simply runs out */ }
           return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
         }
       }

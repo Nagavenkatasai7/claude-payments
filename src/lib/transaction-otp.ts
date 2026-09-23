@@ -38,6 +38,8 @@ import { DEFAULT_PARTNER_ID } from './defaults';
  */
 const TTL_S = 10 * 60;
 const COOLDOWN_S = 30;
+/** Program-Fix 25 PR B: the cooldown floor after a code whose send failed. */
+const SEND_FAIL_COOLDOWN_S = 10;
 const MAX_ATTEMPTS = 5;
 export const TXOTP_MAX_FAILS_PER_DAY = 15;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -174,13 +176,24 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
     },
 
     /**
-     * Program-Fix 25 PR B (cooldown trap): the code issued last never reached the
-     * customer (the WhatsApp send threw), so drop ONLY the 30-s cooldown marker
-     * and a Resend really sends. Every issue/verify budget is kept, so the issue
-     * caps still bound a send that keeps failing.
+     * Program-Fix 25 PR B (cooldown trap, review r1): the code issued last never
+     * reached the customer (the WhatsApp send threw). SHORTEN the 30-s cooldown
+     * to a floor of SEND_FAIL_COOLDOWN_S from now: a retry works soon, but Resend
+     * cannot be hammered through the lifetime issue budget during a WhatsApp
+     * outage (deleting it would let 10 taps lock the link in seconds). Never
+     * lengthens a cooldown with less left; touches ONLY the cooldown marker.
      */
-    async releaseCooldown(txId: string): Promise<void> {
-      await redis.del(cdKey(txId));
+    async shortenCooldown(txId: string): Promise<void> {
+      const t = now();
+      const cdRaw = await redis.get(cdKey(txId));
+      if (!cdRaw) return;
+      const startedAt = cdRaw === '1' ? t : Number(cdRaw); // pre-fix-19 marker: a full cooldown
+      const remainingMs = startedAt + COOLDOWN_S * 1000 - t;
+      if (!(remainingMs > SEND_FAIL_COOLDOWN_S * 1000)) return;
+      // The in-code check reads the start time; back-date it so exactly the floor remains.
+      await redis.set(cdKey(txId), String(t - (COOLDOWN_S - SEND_FAIL_COOLDOWN_S) * 1000), {
+        ex: SEND_FAIL_COOLDOWN_S,
+      });
     },
 
     async verify(txId: string, phone: string, code: string): Promise<VerifyResult> {

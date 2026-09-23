@@ -228,15 +228,19 @@ async function handleVerified(
 
 /**
  * Program-Fix 25 PR B (§3.7): a delivered notice that did not reach the sender or
- * the recipient raises ONE deduped ops alert per transfer (`notifyfail:<id>`).
- * EXCEPT 131030 (recipient not on the sandbox allow-list): it fires on every demo
- * delivery through the simulator callback, so it stays log-only. The message
- * carries the transfer id and the numeric Graph code only — no phone, no name.
+ * the recipient raises an ops alert, COALESCED per Graph code per hour (review
+ * r1: on a production number the notice often hits 131047, window closed, so a
+ * per-transfer alert would be one alert per transfer). The first failure of a
+ * code in an hour alerts and names its transfer; the rest of that hour fold into
+ * it. EXCEPT 131030 (recipient not on the sandbox allow-list): it fires on every
+ * demo delivery through the simulator callback, so it stays log-only. The
+ * message carries the transfer id and the numeric code only — no phone, no name.
  * Best-effort: an enqueue error is logged, never thrown (this runs in after()).
  */
 const NOTIFY_ALERT_EXEMPT_CODE = 131030;
 async function alertNotifyFailed(transferId: string, code: number | undefined): Promise<void> {
   if (code === NOTIFY_ALERT_EXEMPT_CODE) return;
+  const hourBucket = Math.floor(Date.now() / 3_600_000);
   try {
     await createOutboxRepo(getDb()).enqueue(
       'ops.alert',
@@ -244,9 +248,10 @@ async function alertNotifyFailed(transferId: string, code: number | undefined): 
         message:
           `⚠️ SmartRemit ops: transfer ${transferId} was delivered, but the WhatsApp "delivered" notice ` +
           `did not reach the customer${code !== undefined ? ` (WhatsApp #${code})` : ''}. ` +
+          `Further failures with the same code this hour are coalesced into this alert. ` +
           `Check the template / number in WhatsApp Manager.`,
       },
-      { dedupeKey: `notifyfail:${transferId}` },
+      { dedupeKey: `notifyfail:${code ?? 'none'}:${hourBucket}` },
     );
   } catch (err) {
     logError('payment-webhook.notify-alert', err, { transferId });

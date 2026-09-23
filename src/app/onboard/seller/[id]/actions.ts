@@ -59,9 +59,9 @@ export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean;
     try {
       await sendTransactionOtp(seller.phone, issued.code, creds);
     } catch {
-      // Program-Fix 25 PR B: the code never arrived — release the cooldown so a
-      // Resend really sends, and tell the form. Never log the code.
-      try { await otpStore.releaseCooldown(sellerId); } catch { /* the 30-s TTL expires it anyway */ }
+      // Program-Fix 25 PR B: the code never arrived — shorten the cooldown to a
+      // ~10-s floor so a Resend works soon, and tell the form. Never log the code.
+      try { await otpStore.shortenCooldown(sellerId); } catch { /* the 30-s cooldown simply runs out */ }
       return { ok: false, reason: 'otp_send_failed' };
     }
     return { ok: true };

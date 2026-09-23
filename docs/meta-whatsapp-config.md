@@ -233,7 +233,7 @@ Every code path below is already built and is a **no-op until the matching env v
    - `NEXT_PUBLIC_WHATSAPP_NUMBER=<digits only, e.g. country code + number>`, then **redeploy**: `NEXT_PUBLIC_*` is inlined at build time. The post-deploy smoke already accepts any number.
 7. Close PR #207 as superseded by Program-Fix 25.
 
-**What changes live without any env var** (Program-Fix 25): a permanent Graph rejection (131030, 131031, 131026, 132000, 132001, 133010) on a `whatsapp.text` / `whatsapp.template` / `ops.alert` row is dead at attempt 1, and its alert is coalesced per code per hour; a pay / bill / seller confirmation code that fails to send answers "we couldn't send the code" (and Resend really re-sends); a failed "delivered" notice raises one ops alert per transfer, except 131030 (the sandbox allow-list), which stays log-only.
+**What changes live without any env var** (Program-Fix 25): a permanent Graph rejection (131030, 131031, 131026, 132000, 132001, 133010) on a `whatsapp.text` / `whatsapp.template` / `ops.alert` row is dead at attempt 1, and its alert is coalesced per code per hour; a pay / bill / seller confirmation code that fails to send answers "we couldn't send the code" (Resend works again after a ~10-s floor, never hammered through the code budget); a failed "delivered" notice raises one ops alert per WhatsApp code per hour, except 131030 (the sandbox allow-list), which stays log-only.
 
 ---
 
