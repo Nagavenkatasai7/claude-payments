@@ -409,6 +409,54 @@ x-signature: 3f1a…                              # deprecated — HMAC-SHA256 o
             instruction is retried with backoff and then raises an ops alert, so fix the endpoint in
             Admin → Partners → Payment and the retries pick it up.
           </p>
+          {/* keep in sync with buildComplianceBlock in src/lib/providers/http-payment-provider.ts (Program-Fix 31) */}
+          <div id="compliance-block" className="space-y-3">
+            <h3 className="text-base font-semibold">Compliance block (additive)</h3>
+            <p className="text-sm text-muted-foreground">
+              Instructions also carry a top-level <code>compliance</code> object after the fields
+              above. It is <strong className="text-foreground">additive and optional</strong>: ignore
+              unknown keys, and do not reject an instruction that lacks it (instructions sent by an
+              older release, or where the data could not be loaded, have no block or{' '}
+              <code>originator: null</code>). The signatures cover it, like every other byte of the
+              body.
+            </p>
+            <Code>{`"compliance": {
+  "version": 1,
+  "originator": {                     // null when routed or unavailable
+    "entity_type": "individual",      // or "business" (name = the business)
+    "name": "Ravi Kumar", "country": "US", "phone": "15551230000",
+    "id_type": "passport", "id_last4": "1234"
+  },
+  "beneficiary": { "entity_type": "individual", "name": "Anita Sharma",
+                   "relationship": "parent", "country": "IN" },
+  "purpose": "family_support",
+  "purpose_code": null,
+  "kyc": { "status": "verified", "tier": "T1", "verified_at": "2026-09-01T12:00:00.000Z" },
+  "screening": { "status": "cleared", "reasons": [],
+                 "screened_at": "2026-09-23T10:00:00.000Z",
+                 "list_source": "…", "list_version": "…", "decision": "clear" },
+  "edd_required": false
+}`}</Code>
+            <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
+              <li>
+                <strong>Never sent:</strong> the full ID number, date of birth, email or residential
+                address. The originator&apos;s address is not included yet.
+              </li>
+              <li>
+                <code>purpose</code> is our purpose value. <code>purpose_code</code> (for example an
+                RBI purpose code) is always <code>null</code> for now: a draft, for counsel review.
+              </li>
+              <li>
+                <code>list_source</code>, <code>list_version</code> and <code>decision</code> appear only
+                when a sanctions screening record exists for the transfer.
+              </li>
+              <li>
+                When a transfer is settled on a rail other than the owning partner&apos;s, the block
+                carries <code>&quot;routed&quot;: true</code> and <code>originator: null</code>: the
+                sender&apos;s identity is not shared with another partner.
+              </li>
+            </ul>
+          </div>
           {/* keep in sync with src/lib/providers/rail-signature.ts (Program-Fix 29) */}
           <div id="signatures" className="space-y-3">
             <h3 className="text-base font-semibold">Signatures (both directions)</h3>
