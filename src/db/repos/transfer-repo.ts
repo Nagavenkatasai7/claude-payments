@@ -555,8 +555,14 @@ export function createTransferRepo(
           // Program-Fix 7: a charge later RETURNED is not a victim to resume
           // (the claim gate would refuse it anyway); its dispute alert owns it.
           fundingGate(),
+          // Review L-a: a Stripe-funded row the pre-settlement re-screen
+          // BLOCKED already raised its fundblocked alert and can never settle;
+          // re-listing it would re-screen it every minute and could starve
+          // real victims. Legacy blocked rows keep today's refused path.
+          sql`NOT (${transfers.fundingProvider} IS NOT DISTINCT FROM 'stripe' AND ${transfers.complianceStatus} = 'blocked')`,
           lt(transfers.createdAt, cutoff),
         ))
+        .orderBy(transfers.createdAt)
         .limit(50);
       return rows.map((r) => toDomain(r));
     },

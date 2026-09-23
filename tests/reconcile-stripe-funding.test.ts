@@ -57,3 +57,34 @@ describe('reconcile — stale Stripe intents', () => {
     expect((await alerts()).find((a) => a.dedupe_key === 'fundstale:old1')?.payload.message).toContain('pi_old1');
   });
 });
+
+describe('reconcile — crash-resume of Stripe-funded rows (review L-a / L-b)', () => {
+  async function fundedRow(id: string, o: Partial<Transfer> = {}) {
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    await repo.saveTransfer(makeTransfer({ id, createdAt: old, ...o }));
+    await repo.bindFundingIntent(id, 'acme', 'stripe', `pi_${id}`);
+    await repo.markFundingSucceeded(id, 'acme', `pi_${id}`);
+  }
+
+  it('a charged-but-BLOCKED Stripe row is not re-listed for resume every minute (its fundblocked alert already fired)', async () => {
+    await fundedRow('blk');
+    await repo.applyRescreenIfAwaiting('blk', 'acme', 'blocked', ['sanctions_match']);
+    const listed = (await repo.listAwaitingWithFunding(10 * 60_000)).map((t) => t.id);
+    expect(listed).not.toContain('blk');
+  });
+
+  it('a legacy (non-Stripe) charged-but-blocked row is STILL listed (its fundblocked alert path is unchanged)', async () => {
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    await repo.saveTransfer(makeTransfer({ id: 'leg', createdAt: old, partnerId: 'default', fundingRef: 'mockfund-leg', complianceStatus: 'blocked' }));
+    expect((await repo.listAwaitingWithFunding(10 * 60_000)).map((t) => t.id)).toContain('leg');
+  });
+
+  it('a stripe row whose re-screen throws is left awaiting (retried next sweep), no alert', async () => {
+    await fundedRow('thr');
+    // The default re-screen reads Redis-backed stores that are not wired in this
+    // suite, so it throws — exactly the "screening unavailable" branch.
+    await reconcileSweep(db);
+    expect((await repo.getTransfer('thr'))?.status).toBe('awaiting_payment');
+    expect((await alerts()).map((a) => a.dedupe_key).filter((k) => k.endsWith(':thr'))).toEqual([]);
+  });
+});
