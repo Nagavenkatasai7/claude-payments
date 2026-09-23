@@ -38,6 +38,7 @@ import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
+const SENDER_FULL_NAME = 'Alex Rivera';
 
 // Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
@@ -55,9 +56,11 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
   // Customers live in Postgres now, so the seed is an awaited saveCustomer;
   // tests that want a different status saveCustomer() over it afterward.
   const nowIso = new Date().toISOString();
+  // Program-Fix 14: a consumer send needs the sender's legal name on file
+  // (sender identity is required before screening), so the seed carries one.
   await customerStore.saveCustomer({
     senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
-    senderCountry: 'US', partnerId, optInAt: nowIso,
+    senderCountry: 'US', partnerId, optInAt: nowIso, fullName: SENDER_FULL_NAME,
     createdAt: nowIso, updatedAt: nowIso,
   });
   return {
@@ -117,7 +120,7 @@ async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'def
 }
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-eight tools', () => {
+  it('exposes all twenty-nine tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -146,6 +149,7 @@ describe('toolSchemas', () => {
       'resolve_recipient',
       'send_approve_picker',
       'send_recipient_picker',
+      'set_sender_name',
       'update_recipient_phone',
       'validate_phone',
     ]);
@@ -843,6 +847,7 @@ describe('create_transfer — daily volume increment', () => {
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
       partnerId: 'default',
+      fullName: SENDER_FULL_NAME,
     });
     await executeTool('create_transfer', {
       amount_usd: 100,
@@ -870,6 +875,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
       partnerId: 'default',
+      fullName: SENDER_FULL_NAME,
     });
   }
 
@@ -2132,7 +2138,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     const nowIso = new Date().toISOString();
     await ctx.customerStore.saveCustomer({
       senderPhone: '15558887777', firstSeenAt: nowIso, kycStatus: 'verified',
-      senderCountry: 'US', partnerId: 'acme', optInAt: nowIso,
+      senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, fullName: SENDER_FULL_NAME,
       createdAt: nowIso, updatedAt: nowIso,
     });
     const spy = vi.fn(async () => WIN);
@@ -2641,7 +2647,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the fourteen read-only/refund/recall/help/pay-link tools', () => {
+  it('the allowlist is exactly the fifteen read-only/refund/recall/help/pay-link/sender-name tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
@@ -2656,6 +2662,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
       'request_human_help',
       'request_refund',
       'resolve_recipient',
+      'set_sender_name',
       'validate_phone',
     ]);
   });

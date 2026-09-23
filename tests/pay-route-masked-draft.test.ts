@@ -113,7 +113,7 @@ beforeEach(async () => {
   const nowIso = new Date().toISOString();
   await customerStore.saveCustomer({
     senderPhone: PHONE, firstSeenAt: nowIso, kycStatus: 'verified',
-    senderCountry: 'US', partnerId: 'default', optInAt: nowIso, createdAt: nowIso, updatedAt: nowIso,
+    senderCountry: 'US', partnerId: 'default', optInAt: nowIso, fullName: 'Alex Rivera', createdAt: nowIso, updatedAt: nowIso,
   });
 });
 
@@ -162,5 +162,26 @@ describe('POST /api/pay/<draftId> — fix 6 (ctx-01)', () => {
     const full = await store.getTransferDecrypted((await minted(draftId))!);
     expect(full?.payoutDestination).toBe('');
     expect(full?.achTokenRef).toMatch(/^ach_[0-9a-f]+$/);
+  });
+});
+
+describe('POST /api/pay/<draftId> — sender identity is required before screening', { retry: 0 }, () => {
+  it('a sender with no legal name on file answers 400 sender_name_required and mutates nothing', async () => {
+    const c = await customerStore.getCustomer('default', PHONE);
+    await customerStore.saveCustomer({ ...c!, fullName: undefined });
+    const draftId = await makeDraftWith('HDFC0001234 123456789012');
+    const res = await post(draftId);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; reason?: string; error?: string };
+    expect(body).toMatchObject({ ok: false, reason: 'sender_name_required' });
+    expect(body.error).toContain('full legal name');
+    expect(await store.listTransfers()).toHaveLength(0);
+    expect(await minted(draftId)).toBeNull();
+    expect(await draftStore.getDraft(draftId)).not.toBeNull();
+
+    // The SAME link works once the name is on file.
+    await customerStore.saveCustomer({ ...c!, fullName: 'Alex Rivera' });
+    expect((await post(draftId)).status).toBe(200);
+    expect(await minted(draftId)).not.toBeNull();
   });
 });
