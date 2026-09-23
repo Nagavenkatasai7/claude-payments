@@ -120,6 +120,15 @@ export const transfers = pgTable(
     // is enforced in code (types.ts TransferEnvironment); no CHECK, so the
     // migration never scans the table.
     environment: text('environment').notNull().default('live'),
+    // Program-Fix 14 PR C (0023, B3): the mint's sanctions screening evidence
+    // (ScreeningEvidence: list source/version/hash, decision, per-party KEYED
+    // input hash + score + list entry id — never a name). INSERT-ONLY: the
+    // mint and the quote-time blocked row set it; saveTransfer's
+    // conflict-update never touches it, and it is NOT mapped onto the domain
+    // Transfer (so it never reaches an API response). NULL = pre-0023 row or
+    // an old-build mint (the audit_events 'sanctions.screen' row is the other
+    // record).
+    screening: jsonb('screening'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -472,6 +481,12 @@ export const auditEvents = pgTable(
     // Program-Fix 28 PR B: the per-subject trails (listKycForSubject,
     // lastSendLimitChange) filter on (partner_id, subject_id).
     index('audit_partner_subject').on(t.partnerId, t.subjectId),
+    // Program-Fix 14 PR C (0023): every mint now writes a sanctions.screen row,
+    // so the per-subject look-ups by action (the pay-page 'transaction.create'
+    // NOT EXISTS, a sanctions look-back) and the system-actor timelines get
+    // their own indexes as the table grows.
+    index('audit_subject_action').on(t.subjectId, t.action),
+    index('audit_actor_type_at').on(t.actorType, t.at.desc()),
   ],
 );
 
@@ -635,4 +650,47 @@ export const outbox = pgTable(
       .where(sql`${t.status} IN ('pending','failed','processing')`),
     index('outbox_lease').on(t.leaseUntil).where(sql`${t.status} = 'processing'`),
   ],
+);
+
+// ── Program-Fix 14 PR C (0023): the loaded sanctions lists ────────────────────
+// One row per DISTINCT published list (source + content hash). The daily loader
+// (src/lib/sanctions/list-loader.ts, OFF unless SANCTIONS_LOADER_ENABLED) inserts
+// a new version with its entries and flips `active` in ONE transaction; the
+// partial unique index keeps at most one active version per source. The
+// screener (SANCTIONS_LIST=ofac-sdn) reads only the active version and FAILS
+// CLOSED (every transfer to review) when there is none. Public-domain list data
+// only — no customer data lives in these tables.
+export const sanctionsListVersions = pgTable(
+  'sanctions_list_versions',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    source: text('source').notNull(),            // 'ofac-sdn'
+    version: text('version').notNull(),          // the publish date (YYYY-MM-DD)
+    hash: text('hash').notNull(),                // sha256 over the canonical entries
+    entryCount: integer('entry_count').notNull(),
+    nameCount: integer('name_count').notNull(),
+    active: boolean('active').notNull().default(false),
+    loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp('activated_at', { withTimezone: true }),
+    checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('sanctions_list_versions_source_hash').on(t.source, t.hash),
+    uniqueIndex('sanctions_list_versions_one_active').on(t.source).where(sql`${t.active}`),
+  ],
+);
+
+export const sanctionsListEntries = pgTable(
+  'sanctions_list_entries',
+  {
+    versionId: bigint('version_id', { mode: 'number' })
+      .notNull()
+      .references(() => sanctionsListVersions.id, { onDelete: 'cascade' }),
+    entryId: text('entry_id').notNull(),         // 'sdn:<uid>'
+    type: text('type').notNull(),                // 'Individual' | 'Entity' | …
+    programs: jsonb('programs').notNull(),       // string[]
+    names: jsonb('names').notNull(),             // string[]: primary name first, then strong AKAs
+    weakNames: jsonb('weak_names').notNull().default([]), // string[]: weak AKAs (review, never block)
+  },
+  (t) => [primaryKey({ columns: [t.versionId, t.entryId] })],
 );

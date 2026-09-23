@@ -8,6 +8,12 @@ import { SendBusyError, SendCapError } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
 import { captureQueries, freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
+import { PostgresSanctionsListSource } from '@/lib/sanctions/pg-list-source';
+import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
+import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
 
 function stubFetch85() {
   vi.stubGlobal(
@@ -1096,5 +1102,121 @@ describe('store.recordAudit (root handle; register_seller evidence)', () => {
     const { db, store } = await makeStores();
     await store.recordAudit({ partnerId: 'default', actor: 'system:sanctions', actorType: 'system', action: 'sanctions.screen', subjectId: 's_1', meta: { decision: 'clear' } });
     expect(await screenRows(db)).toHaveLength(1);
+  });
+});
+
+// ── Program-Fix 14 PR C: transfers.screening (migration 0023, B3) ─────────────
+async function screeningOf(db: Awaited<ReturnType<typeof freshDb>>, id: string): Promise<Record<string, unknown> | null> {
+  const r = (await db.execute(sql`SELECT screening FROM transfers WHERE id = ${id}`)) as unknown as {
+    rows: Array<{ screening: Record<string, unknown> | null }>;
+  };
+  return r.rows[0]?.screening ?? null;
+}
+
+describe('createTransfer — transfers.screening carries the mint evidence (Program-Fix 14 PR C)', () => {
+  it('cleared, flagged and blocked mints each store the SAME evidence as their sanctions.screen row', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await t1(db, '15550170011');
+    const cleared = await createTransfer(store, partnerStore, mvs, { ...base, senderName: 'Clean Person' });
+    const flagged = await createTransfer(store, partnerStore, mvs, { ...base, phone: '15550170011', amountSource: 1500 });
+    const blocked = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'Doe, John' });
+    expect([cleared.complianceStatus, flagged.complianceStatus, blocked.status]).toEqual(['cleared', 'flagged', 'blocked']);
+    const rows = await screenRows(db);
+    for (const t of [cleared, flagged, blocked]) {
+      const s = await screeningOf(db, t.id);
+      expect(s, t.id).not.toBeNull();
+      expect(s).toEqual(rows.find((r) => r.subject_id === t.id)!.meta);
+    }
+    expect((await screeningOf(db, blocked.id))!).toMatchObject({ decision: 'match' });
+    const all = JSON.stringify(await Promise.all([cleared, flagged, blocked].map((t) => screeningOf(db, t.id)))).toLowerCase();
+    for (const name of ['clean person', 'john', 'doe', 'mom']) expect(all).not.toContain(name);
+  });
+
+  it('is never mapped onto the domain Transfer (it cannot leak into an API response)', async () => {
+    const { store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base });
+    expect('screening' in t).toBe(false);
+    const read = await store.getTransfer(t.id);
+    expect(read && 'screening' in read).toBe(false);
+  });
+
+  it('is insert-only: a read-modify-write saveTransfer keeps it', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base });
+    const before = await screeningOf(db, t.id);
+    const read = (await store.getTransfer(t.id))!;
+    await store.saveTransfer({ ...read, adminNote: 'touched' });
+    expect(await screeningOf(db, t.id)).toEqual(before);
+  });
+
+  it('a SendCapError rollback leaves no transfer (and so no screening)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: '15550170012', amountSource: 600 }))
+      .rejects.toBeInstanceOf(SendCapError);
+    expect(await transferCount(db)).toBe(0);
+  });
+});
+
+describe('recordBlockedAttempt — transfers.screening (Program-Fix 14 PR C)', () => {
+  const blocked = {
+    phone: '15551234567', recipientName: 'John Doe', recipientPhone: '919133001840',
+    payoutMethod: 'bank' as const, payoutDestination: '', fundingMethod: 'bank_transfer' as const,
+    amountUsd: 100, amountSource: 100, sourceCurrency: 'USD' as const, feeUsd: 1.99, feeSource: 1.99,
+    fxRate: 85, amountInr: 8500, totalChargeUsd: 101.99, totalChargeSource: 101.99,
+    destinationCountry: 'IN' as const, destinationCurrency: 'INR' as const, partnerId: 'default',
+    reasons: ['Recipient is on the compliance watchlist.'],
+  };
+  const evidence = {
+    listSource: 'mock-watchlist', listVersion: 'static', listHash: 'a'.repeat(64),
+    screenedAt: new Date().toISOString(), decision: 'match' as const,
+    parties: [{ role: 'recipient' as const, inputHash: 'b'.repeat(64), matched: true, matchScore: 1, matchedEntryId: 'mock:0' }],
+  };
+
+  it('with evidence: the blocked row stores it', async () => {
+    const { db, store } = await makeStores();
+    const t = await recordBlockedAttempt(store, { ...blocked, evidence });
+    expect(await screeningOf(db, t.id)).toEqual(evidence);
+  });
+
+  it('without evidence: NULL (today\'s behaviour)', async () => {
+    const { db, store } = await makeStores();
+    const t = await recordBlockedAttempt(store, blocked);
+    expect(await screeningOf(db, t.id)).toBeNull();
+  });
+});
+
+describe('createTransfer with SANCTIONS_LIST=ofac-sdn (Program-Fix 14 PR C)', () => {
+  const original = process.env.SANCTIONS_LIST;
+  afterEach(() => {
+    if (original === undefined) delete process.env.SANCTIONS_LIST;
+    else process.env.SANCTIONS_LIST = original;
+    setOfacListSourceForTests(null);
+  });
+
+  it('no loaded list version FAILS CLOSED: the mint is flagged list_unavailable (never cleared)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    setOfacListSourceForTests(new PostgresSanctionsListSource(() => createSanctionsListRepo(db)));
+    const t = await createTransfer(store, partnerStore, mvs, { ...base });
+    expect(t.complianceStatus).toBe('flagged');
+    expect(await screeningOf(db, t.id)).toMatchObject({ decision: 'list_unavailable', listSource: 'ofac-sdn' });
+  });
+
+  it('refreshes the list BEFORE the sender lock; inside the lock nothing reads the list tables', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    await createSanctionsListRepo(db).storeList(
+      parseOfacSdnXml(readFileSync(join(__dirname, 'fixtures', 'ofac-sdn-sample.xml'), 'utf8')),
+    );
+    setOfacListSourceForTests(new PostgresSanctionsListSource(() => createSanctionsListRepo(db)));
+    const stop = captureQueries();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'FIXTURELLI, Testa' });
+    const q = stop().map((x) => x.sql);
+    expect(t.status).toBe('blocked');
+    const lockAt = q.findIndex((s) => s.includes('pg_advisory_xact_lock'));
+    expect(lockAt).toBeGreaterThan(-1);
+    const listReads = q.map((s, i) => (s.includes('sanctions_list_') ? i : -1)).filter((i) => i >= 0);
+    expect(listReads.length).toBeGreaterThan(0);
+    expect(Math.max(...listReads)).toBeLessThan(lockAt);
   });
 });

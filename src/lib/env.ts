@@ -187,9 +187,19 @@ export const env = {
   get sanctionsList(): string {
     // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER
     // screening runs (it always runs). '' / 'mock' ⇒ the mock watchlist;
-    // 'ofac-sdn' ⇒ the OFAC SDN snapshot (fails closed to review if it cannot
-    // load); anything else ⇒ the mock plus a warning. Optional; unset in prod.
+    // 'ofac-sdn' ⇒ the OFAC SDN list loaded into Postgres by the daily loader
+    // (PR C; fails closed to review while no version is loaded); anything else
+    // ⇒ the mock plus a warning. Optional; unset in prod.
     return (process.env.SANCTIONS_LIST ?? '').trim().toLowerCase();
+  },
+  get sanctionsLoaderEnabled(): boolean {
+    // Program-Fix 14 PR C: '1' / 'true' ⇒ /api/cron downloads the OFAC SDN list
+    // from Treasury's Sanctions List Service and stores a new version when it
+    // changed. OFF by default (unset in prod until the owner flips it). It
+    // loads the list only; it never turns screening on or off. Optional, NOT in
+    // boot-assert.
+    const v = (process.env.SANCTIONS_LOADER_ENABLED ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true';
   },
   get passwordPepper(): string {
     // HMAC pepper applied before Argon2id. '' ⇒ no pepper (keeps existing staff

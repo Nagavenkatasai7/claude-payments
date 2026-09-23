@@ -21,7 +21,10 @@ describe('parseOfacSdnXml (fixture: 5 SDN entries)', () => {
   it('collects primary names and AKAs (individuals as "first last")', () => {
     const byId = new Map(list.entries.map((e) => [e.id, e]));
     expect(byId.get('sdn:1001')!.names).toEqual(['EXAMPLE AIRWAYS LTD', 'EXAMPLE-AIR']);
-    expect(byId.get('sdn:1002')!.names).toEqual(['BANCO EJEMPLO NACIONAL', 'BEN', 'NATIONAL EXAMPLE BANK']);
+    // PR C: a WEAK a.k.a. is kept apart (weakNames) — it is screened for review, never a block.
+    expect(byId.get('sdn:1002')!.names).toEqual(['BANCO EJEMPLO NACIONAL', 'NATIONAL EXAMPLE BANK']);
+    expect(byId.get('sdn:1002')!.weakNames).toEqual(['BEN']);
+    expect(byId.get('sdn:1001')!.weakNames ?? []).toEqual([]);
     expect(byId.get('sdn:1003')!.names).toEqual(['Testa FIXTURELLI', 'Sample PLACEHOLDER']);
     expect(byId.get('sdn:1004')!.names).toEqual(['SEA FIXTURE']);
   });
@@ -43,6 +46,8 @@ describe('parseOfacSdnXml (fixture: 5 SDN entries)', () => {
     expect(parseOfacSdnXml(FIXTURE).hash).toBe(list.hash);
     expect(parseOfacSdnXml(FIXTURE.replace(/\n\s*/g, '\n')).hash).toBe(list.hash);
     expect(parseOfacSdnXml(FIXTURE.replace('SEA FIXTURE', 'SEA FIXTURES')).hash).not.toBe(list.hash);
+    // A weak a.k.a. that turns strong is a content change too.
+    expect(parseOfacSdnXml(FIXTURE.replace('<category>weak</category>', '<category>strong</category>')).hash).not.toBe(list.hash);
   });
 
   it('refuses a document with no publish date or no entries (never an empty "clean" list)', () => {
@@ -61,6 +66,22 @@ describe('fetchOfacSdn (never called in prod unless SANCTIONS_LIST is set; here 
     expect(url).toBe(OFAC_SDN_XML_URL);
     expect(new Headers(init.headers).get('user-agent')).toMatch(/\S/);
     expect(list.entries).toHaveLength(5);
+  });
+
+  it('passes an abort signal (a hung download cannot eat the cron budget)', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => FIXTURE }));
+    await fetchOfacSdn(fetchImpl as unknown as typeof fetch);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('refuses an oversized body (declared or actual) before parsing it', async () => {
+    const declared = vi.fn(async () => ({
+      ok: true, status: 200, headers: new Headers({ 'content-length': String(500 * 1024 * 1024) }), text: async () => FIXTURE,
+    }));
+    await expect(fetchOfacSdn(declared as unknown as typeof fetch)).rejects.toThrow(/too large/);
+    const actual = vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), text: async () => FIXTURE }));
+    await expect(fetchOfacSdn(actual as unknown as typeof fetch, { maxBytes: 100 })).rejects.toThrow(/too large/);
   });
 
   it('throws on a non-2xx response', async () => {
