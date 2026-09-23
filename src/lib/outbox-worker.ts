@@ -28,6 +28,7 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn, scrub } from '@/lib/log';
+import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
@@ -337,6 +338,18 @@ async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<W
 }
 
 /**
+ * Program-Fix 44 P2: a customer-facing row produced for a SANDBOX transfer
+ * (payload `sandbox: true`, set only by the settlement / refund producers)
+ * completes WITHOUT sending — the sandbox never messages a real phone. Live
+ * payloads never carry the key, so their path is unchanged.
+ */
+function sandboxSkip(row: OutboxRow, p: Payload): boolean {
+  if (p.sandbox !== true) return false;
+  logWarn('worker.sandbox', 'sandbox message completed without sending', { id: row.id, kind: row.kind });
+  return true;
+}
+
+/**
  * Program-Fix 49A (whatsapp-10d): the consent gate for a plain customer-facing
  * row. The tenant is the payload's partnerId (the ledger tenant the producer
  * wrote), else the default tenant — the shared number IS the default tenant.
@@ -391,11 +404,13 @@ async function handle(
     // WITHOUT sending (no retry, no dead letter). No category ⇒ essential, so
     // rows from the previous build deliver exactly as before.
     case 'whatsapp.text': {
+      if (sandboxSkip(row, p)) return;
       if (await optedOutSkip(deps, row, p)) return;
       await deps.sendText(str(p.to), str(p.body), await resolveSendCreds(p, partner));
       return;
     }
     case 'whatsapp.template': {
+      if (sandboxSkip(row, p)) return;
       if (await optedOutSkip(deps, row, p)) return;
       await deps.sendTemplate(
         str(p.to),
@@ -412,6 +427,15 @@ async function handle(
       const transferId = str(p.transferId);
       const { brand, waCreds } = await partner(str(p.partnerId) || 'default');
       const stage2 = await completePaymentStage2(deps.store, transferId, { brand });
+      // Program-Fix 44 P2: a sandbox transfer settles (delivered) but its
+      // customer and recipient are NEVER messaged. stage2.transfer is the
+      // ledger row (the guarded UPDATE's RETURNING, or a re-read).
+      if (isSandbox(stage2.transfer)) {
+        if (stage2.senderMessages.length > 0) {
+          logWarn('worker.sandbox', 'sandbox transfer settled on the mock rail; delivery messages suppressed', { id: row.id, transferId });
+        }
+        return;
+      }
       for (const msg of stage2.senderMessages) {
         await deps.sendText(stage2.transfer.phone, msg, waCreds);
       }
@@ -445,6 +469,23 @@ async function handle(
       const transferRepo = createTransferRepo(deps.db);
       const transfer = await transferRepo.getTransfer(transferId, { decrypt: true });
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
+      // Program-Fix 44 P2 — DEFENCE IN DEPTH behind the settlement chokepoint:
+      // a sandbox (test-key) transfer is NEVER instructed to a real rail, however
+      // this row came to exist (a hand-inserted row, a dead-letter Retry, an old
+      // build). Done with a log and ONE deduped ops alert; nothing is POSTed.
+      if (isSandbox(transfer)) {
+        logWarn('outbox.instruct-sandbox', 'sandbox transfer; settlement instruction refused', { transferId });
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          {
+            message:
+              `⚠️ SmartRemit ops: a settlement instruction was queued for SANDBOX transfer ${transferId} ` +
+              `(partner ${transfer.partnerId}). It was refused and nothing was sent to a rail. Investigate how it was queued.`,
+          },
+          { dedupeKey: `sandboxinstruct:${transferId}` },
+        );
+        return;
+      }
       // DEFENCE IN DEPTH: instruct only money the LEDGER still says is payable.
       //  • definitively NOT going out (cancelled / delivered, or a refund that
       //    is pending / completed) ⇒ skip: mark DONE with a log — retrying
@@ -570,7 +611,12 @@ async function handle(
       // ops dead-letter Retry (re-runs this handler) or the funding webhook's
       // refund_failed (pending → failed, surfacing the ops Refunds queue).
       let refundRef: string;
-      if (isPartnerPulled(transfer.fundingMethod)) {
+      if (isSandbox(transfer)) {
+        // Program-Fix 44 P2: a sandbox transfer moved no money — no signed
+        // reverse to the partner's rail, no funds-provider call. It completes
+        // with a deterministic sandbox ref so the refund lifecycle still ends.
+        refundRef = `sandbox-reverse-${transferId}`;
+      } else if (isPartnerPulled(transfer.fundingMethod)) {
         // NON-CUSTODIAL reverse: SmartRemit captured nothing on a partner-pulled
         // transfer (ach_pull / bank_pull), so there is no funds-provider charge to
         // refund. Instead we POST a SIGNED REVERSE instruction to the partner's
@@ -620,7 +666,7 @@ async function handle(
         await createOutboxRepo(tx).enqueue(
           'whatsapp.text',
           // Program-Fix 49A: essential (a refund notice survives STOP).
-          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential' },
+          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential', ...(isSandbox(transfer) ? { sandbox: true } : {}) },
           { dedupeKey: `refundmsg:${transferId}` },
         );
       });

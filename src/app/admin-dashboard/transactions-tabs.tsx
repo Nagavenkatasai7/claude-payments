@@ -242,7 +242,15 @@ export function TransactionsTabs({
               fallback={t.status === 'paid' ? 'in transit' : '—'}
             />,
             <ComplianceBadge key="compliance" status={t.complianceStatus} />,
-            <StatusPill key="status" status={t.status} />,
+            <span key="status" className="inline-flex flex-wrap items-center gap-1">
+              <StatusPill status={t.status} />
+              {/* Program-Fix 44 P2: a sandbox (test-key) transfer — mock rail, no customer messages. */}
+              {t.environment === 'test' && (
+                <span className="rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-muted-foreground" title="Minted by a sandbox (test) API key: mock rail only, no customer messages.">
+                  Sandbox
+                </span>
+              )}
+            </span>,
             t.assignedTo
               ? staffByUsername[t.assignedTo] ?? t.assignedTo
               : <span key="assignee" className={SUB_TEXT}>—</span>,
@@ -250,7 +258,8 @@ export function TransactionsTabs({
               <Link href={`/admin-dashboard/transactions/${t.id}`} className={MINI_BTN}>
                 Details
               </Link>
-              {t.status === 'awaiting_payment' && canResend && (
+              {/* Program-Fix 44 P2: a sandbox transfer has no payment link (the action refuses it too). */}
+              {t.status === 'awaiting_payment' && t.environment !== 'test' && canResend && (
                 <form action={resendAction}>
                   <input type="hidden" name="id" value={t.id} />
                   <button type="submit" className={MINI_BTN}>Resend link</button>

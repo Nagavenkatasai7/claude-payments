@@ -31,6 +31,7 @@ async function harness() {
     monthlyVolumeStore: createMonthlyVolumeStore(store),
     integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
     db,
+    keyMode: 'live', // Program-Fix 44 P2
     now: () => NOW,
     genId: () => `r${n++}`,
   };

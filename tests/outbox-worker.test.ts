@@ -2337,3 +2337,111 @@ describe('drainOnce — ops.alert template path (Program-Fix 25)', { retry: 0 },
     expect(le.rows[0].last_error).toContain('WhatsApp send failed (400)');
   });
 });
+
+// Program-Fix 44 P2 — sandbox (test-key) transfers: the worker is the second
+// line of defence behind the settlement chokepoint. A hand-inserted instruct
+// row is refused; a sandbox refund never reaches a rail or a funds provider;
+// the mock settle delivers with zero customer sends; a sandbox-marked plain
+// send completes unsent.
+describe('drainOnce — sandbox transfers never reach a rail or a real phone (Program-Fix 44 P2)', { retry: 0 }, () => {
+  type Row = { kind: string; dedupe_key: string | null; status: string; payload: Record<string, unknown> };
+  async function rowsOf(kind: string): Promise<Row[]> {
+    const r = (await db.execute(
+      sql`SELECT kind, dedupe_key, status, payload FROM outbox WHERE kind = ${kind} ORDER BY id`,
+    )) as unknown as { rows: Row[] };
+    return r.rows;
+  }
+
+  beforeEach(async () => {
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'http',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+
+  it('settlement.instruct for a test transfer: done WITHOUT a POST, providerRef untouched, ONE deduped ops alert', async () => {
+    await store.saveTransfer({ ...transferFixture(), environment: 'test' } as Transfer);
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((await rowsOf('settlement.instruct')).map((x) => x.status)).toEqual(['done', 'done']);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBeUndefined();
+    expect((await rowsOf('ops.alert')).map((x) => x.dedupe_key)).toEqual(['sandboxinstruct:wk_t1']);
+  });
+
+  it('a LIVE transfer on the same rail is still instructed (unchanged)', async () => {
+    await store.saveTransfer(transferFixture());
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-9' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-9');
+  });
+
+  it('funding.refund for a test partner-pulled transfer: no fetch, completes as sandbox-reverse-<id>, sandbox-marked notice', async () => {
+    await store.saveTransfer({
+      ...transferFixture(),
+      environment: 'test',
+      fundingMethod: 'ach_pull',
+      transferType: 'b2b',
+      achTokenRef: 'ach_deadbeef',
+      refundStatus: 'pending',
+    } as Transfer);
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const t = (await store.getTransfer('wk_t1'))!;
+    expect(t.refundStatus).toBe('completed');
+    expect(t.refundRef).toBe('sandbox-reverse-wk_t1');
+    const notice = (await rowsOf('whatsapp.text')).find((x) => x.dedupe_key === 'refundmsg:wk_t1')!;
+    expect(notice.payload.sandbox).toBe(true);
+  });
+
+  it('funding.refund for a test consumer transfer never asks the funds provider', async () => {
+    await store.saveTransfer({
+      ...transferFixture(), environment: 'test', status: 'cancelled', fundingRef: 'mockfund-wk_t1', refundStatus: 'pending',
+    } as Transfer);
+    const refund = vi.fn(async () => ({ refundRef: 'psp-1' }));
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    await drainOnce({ ...deps(), fundingProvider: { refund } as unknown as WorkerDeps['fundingProvider'] }, 'w1');
+    expect(refund).not.toHaveBeenCalled();
+    expect((await store.getTransfer('wk_t1'))!.refundRef).toBe('sandbox-reverse-wk_t1');
+  });
+
+  it('mock.settle for a test transfer: delivered, ZERO sendText / sendTemplate calls', async () => {
+    await store.saveTransfer({ ...transferFixture(), environment: 'test' } as Transfer);
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' }, { dedupeKey: 'mocksettle:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(0);
+    expect((await store.getTransfer('wk_t1'))!.status).toBe('delivered');
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('mock.settle for a LIVE transfer still messages sender and recipient (unchanged)', async () => {
+    await store.saveTransfer(transferFixture());
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' }, { dedupeKey: 'mocksettle:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalled();
+    expect(sendTemplate).toHaveBeenCalled();
+  });
+
+  it('a sandbox-marked whatsapp.text / whatsapp.template completes WITHOUT sending', async () => {
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'hi', partnerId: 'acme', category: 'essential', sandbox: true }, { dedupeKey: 'stage1:wk_t1' });
+    await outbox.enqueue('whatsapp.template', { to: '15551230000', template: 't', lang: 'en', params: [], partnerId: 'acme', sandbox: true });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(2);
+    expect(r.dead).toBe(0);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect((await rowsOf('whatsapp.text'))[0].status).toBe('done');
+  });
+});

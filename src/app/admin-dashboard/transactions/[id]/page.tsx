@@ -88,6 +88,8 @@ export default async function TransactionDetailPage({
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="secondary">{t.status}</Badge>
+            {/* Program-Fix 44 P2 */}
+            {t.environment === 'test' && <Badge variant="outline">Sandbox</Badge>}
             {refundBadge && <Badge variant={refundBadge.variant}>{refundBadge.label}</Badge>}
           </div>
         </div>

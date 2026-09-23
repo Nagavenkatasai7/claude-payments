@@ -16,6 +16,13 @@ vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks }));
 const scrubOldOutboxPayloads = vi.hoisted(() => vi.fn(async () => 3));
 vi.mock('@/lib/outbox-retention', () => ({ scrubOldOutboxPayloads }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// Program-Fix 27: every authorized run writes one cron.run audit row
+// (tests/cron-route-audit.test.ts covers the row on a real ledger).
+const auditRecord = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('@/db/repos/aux-repos', async (orig) => ({
+  ...(await orig<typeof import('@/db/repos/aux-repos')>()),
+  createAuditRepo: () => ({ record: auditRecord }),
+}));
 
 import { GET } from '@/app/api/cron/route';
 
@@ -31,6 +38,7 @@ describe('/api/cron Bearer gate', () => {
     }
     expect(runDueSchedules).not.toHaveBeenCalled();
     expect(expireUnpaidLinks).not.toHaveBeenCalled();
+    expect(auditRecord).not.toHaveBeenCalled(); // an unauthenticated caller cannot grow audit_events
   });
 
   it('the right Bearer passes the gate and runs the schedules', async () => {
@@ -40,6 +48,13 @@ describe('/api/cron Bearer gate', () => {
     expect(runDueSchedules).toHaveBeenCalledTimes(1);
     expect(expireUnpaidLinks).toHaveBeenCalledTimes(1);
     expect(scrubOldOutboxPayloads).toHaveBeenCalledTimes(1);
+    expect(auditRecord).toHaveBeenCalledTimes(1);
+    expect(auditRecord).toHaveBeenCalledWith({
+      actor: 'system',
+      actorType: 'system',
+      action: 'cron.run',
+      meta: { fired: 0, failed: 0, expired: 2, scrubbed: 3 },
+    });
   });
 
   it('Program-Fix 32: a failing expiry sweep never fails the cron — `expired` is null and the schedule result still returns', async () => {

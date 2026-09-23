@@ -11,6 +11,7 @@ import { expireUnpaidLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { logError } from '@/lib/log';
 import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
 import { sendTemplateWithButton, sendTemplateOrText, sendVerificationStatus, type WaCreds } from '@/lib/whatsapp';
 import {
@@ -127,6 +128,21 @@ export async function GET(req: NextRequest) {
     scrubbed = await scrubOldOutboxPayloads(getDb());
   } catch (err) {
     logError('cron.outbox-scrub', err);
+  }
+
+  // Program-Fix 27 (vercel-09): ONE append-only audit row per authorized run
+  // (13:00 UTC, the 17:00 UTC catch-up, or a manual re-run). Counts only: no
+  // phone, name, schedule or transfer id. INSERT only (migration 0019 makes
+  // audit_events append-only). Fail-soft: a throw never costs the results.
+  try {
+    await createAuditRepo(getDb()).record({
+      actor: 'system',
+      actorType: 'system',
+      action: 'cron.run',
+      meta: { fired: result.fired, failed: result.failed, expired, scrubbed },
+    });
+  } catch (err) {
+    logError('cron.audit', err);
   }
 
   return NextResponse.json({ ok: true, fired: result.fired, failed: result.failed, expired, scrubbed });

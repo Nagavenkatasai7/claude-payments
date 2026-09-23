@@ -660,3 +660,17 @@ describe('POST /api/payment-webhook — delivered-notice honesty (Program-Fix 25
     expect(notifyAlerts()).toEqual([]);
   });
 });
+
+// Program-Fix 44 P2: a sandbox transfer never messages a real phone.
+describe('POST /api/payment-webhook/[provider] — sandbox (Program-Fix 44 P2)', { retry: 0 }, () => {
+  it('Program-Fix 44 P2: a delivered SANDBOX transfer is updated but messages NO ONE', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue({ ...deliveredTransfer, environment: 'test' });
+    const res = await post('uniteller', body, sig(body));
+    expect(res.status).toBe(200);
+    await flushAfter();
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+});

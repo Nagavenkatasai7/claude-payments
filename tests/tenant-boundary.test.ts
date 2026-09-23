@@ -111,7 +111,7 @@ describe('F45/F47: the partner API cannot plant a payout destination in another 
     const deps: PartnerApiDeps = {
       store, partnerStore: createPartnerStore(db), monthlyVolumeStore: createMonthlyVolumeStore(store),
       integrationsStore: createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))),
-      customerStore, db, now: () => NOW,
+      customerStore, db, keyMode: 'live', now: () => NOW,
     };
     return { deps, store, customerStore };
   }

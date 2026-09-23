@@ -112,6 +112,14 @@ export const transfers = pgTable(
     kybReviewNotes: text('kyb_review_notes'),
     assignedTo: text('assigned_to'),
     adminNote: text('admin_note'),
+    // Program-Fix 44 P2: 'live' | 'test'. A 'test' row was minted by a sandbox
+    // (sr_test_) Partner API key: it never reaches a real rail, never messages a
+    // customer, and never counts toward a live customer's caps, velocity or AML
+    // aggregates. Write-once (saveTransfer's conflict-update never touches it).
+    // A constant DEFAULT is catalog-only on PG11+ (no table rewrite). The union
+    // is enforced in code (types.ts TransferEnvironment); no CHECK, so the
+    // migration never scans the table.
+    environment: text('environment').notNull().default('live'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -374,6 +382,10 @@ export const apiKeys = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    // Program-Fix 44 P2: an explicit scope set (JSON array of ApiScope). NULL ⇒
+    // the key mode's default set, so every existing key keeps its full live
+    // scope. Never widens a mode: authenticate() intersects it with the mode's set.
+    scopes: jsonb('scopes'),
   },
   (t) => [
     uniqueIndex('api_keys_hash').on(t.keyHash), // O(1) auth lookup

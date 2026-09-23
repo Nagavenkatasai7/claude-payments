@@ -8,10 +8,12 @@ import { issueApiKeyAction } from './actions';
 // shown ONCE in component state — never persisted, never re-fetchable. Closing
 // the banner discards it.
 //
-// Fix 44: the mode select shows Test DISABLED — test keys are issuable only
-// after sandbox isolation ships (the server action is live-only regardless).
+// Fix 44 P2: the mode select issues a Live key (default) or a Test (sandbox)
+// key. A test key's transfers settle only on the mock rail and never message a
+// customer; the server action re-validates the mode (strict allowlist).
 export function IssueKeyButton({ partnerId }: { partnerId: string }) {
   const [issued, setIssued] = useState<string | null>(null);
+  const [mode, setMode] = useState<'live' | 'test'>('live');
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -19,7 +21,7 @@ export function IssueKeyButton({ partnerId }: { partnerId: string }) {
     setError(null);
     startTransition(async () => {
       try {
-        const r = await issueApiKeyAction(partnerId);
+        const r = await issueApiKeyAction(partnerId, mode);
         setIssued(r.plaintext);
       } catch {
         setError('Could not issue a key. You may not have permission.');
@@ -55,13 +57,12 @@ export function IssueKeyButton({ partnerId }: { partnerId: string }) {
         <label className="sr-only" htmlFor={`key-mode-${partnerId}`}>Key mode</label>
         <select
           id={`key-mode-${partnerId}`}
-          defaultValue="live"
+          value={mode}
+          onChange={(e) => setMode(e.target.value === 'test' ? 'test' : 'live')}
           className="h-9 rounded-md border border-border bg-card px-2 text-sm"
         >
           <option value="live">Live</option>
-          <option value="test" disabled>
-            Test (available after sandbox isolation ships)
-          </option>
+          <option value="test">Test (sandbox: mock rail, no customer messages)</option>
         </select>
         <Button
           type="button"
