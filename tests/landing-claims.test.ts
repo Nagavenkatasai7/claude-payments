@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), 'utf-8');
 const LANDING = read('src/app/page.tsx');
 const DOCS = read('src/app/docs/page.tsx');
+const SHOWCASE = read('src/app/landing/showcase.tsx');
 
 const squash = (s: string) => s.replace(/\s+/g, ' ');
 const QUALIFIER = /reference (list|rule set)/i;
@@ -43,5 +44,19 @@ describe('landing sanctions claims are qualified (Program-Fix 14, docs-01)', () 
     const para = text.slice(at, at + 420);
     expect(para).toContain('watchlist hit returns 422');
     expect(para).toMatch(/built-in reference rule set, not yet a live commercial AML feed/);
+  });
+
+  it('the AI-layer mock on / (showcase.tsx) qualifies its sanctions claims, visible text and aria-label', () => {
+    expect(SHOWCASE).toContain('Sanctions screening — always on (demo: reference list)');
+    const aria = SHOWCASE.match(/aria-label="SmartRemit's AI layer:[^"]*"/);
+    expect(aria, 'AiMock aria-label not found').not.toBeNull();
+    expect(aria![0]).toMatch(/sanctions screening always on \(demo: reference list\)/);
+    const text = squash(SHOWCASE);
+    const hits = [...text.matchAll(/sanctions[\s-]+screen/gi)];
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+    for (const m of hits) {
+      const window = text.slice(m.index!, m.index! + 260);
+      expect(window, `unqualified claim: "${window.slice(0, 120)}"`).toMatch(QUALIFIER);
+    }
   });
 });
