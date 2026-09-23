@@ -6,9 +6,11 @@ import { openOptional, sealOptional } from './mappers';
 import { ctx } from '@/lib/crypto-context';
 import {
   EMPTY_PARTNER_INTEGRATIONS,
+  type PartnerFundingConfig,
   type PartnerIntegrations,
 } from '@/lib/partner-integrations';
 import type { PartnerId } from '@/lib/types';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 // integrations-repo — mirrors partner-integrations-store (getIntegrations /
 // saveIntegrations / deleteIntegrations). Secrets are envelope-encrypted into
@@ -75,6 +77,63 @@ export function createIntegrationsRepo(
         .insert(partnerIntegrations)
         .values(row)
         .onConflictDoUpdate({ target: partnerIntegrations.partnerId, set: row });
+    },
+
+    /**
+     * Program-Fix 7: the partner's OWN funds-capture PSP config (Stripe).
+     * Separate from getIntegrations/saveIntegrations on purpose — a dashboard
+     * save of the rail/KYC/WhatsApp config rebuilds that row and must never
+     * null these columns. Null ⇒ not configured (the mock, today's path).
+     * Decrypt failures THROW (a tampered or cross-tenant ciphertext never
+     * degrades to "unconfigured").
+     */
+    async getFundingConfig(id: PartnerId): Promise<PartnerFundingConfig | null> {
+      const rows = await db
+        .select({
+          partnerId: partnerIntegrations.partnerId,
+          type: partnerIntegrations.fundingProviderType,
+          enc: partnerIntegrations.fundingCredentialsEnc,
+        })
+        .from(partnerIntegrations)
+        .where(eq(partnerIntegrations.partnerId, id))
+        .limit(1);
+      const row = rows[0];
+      if (!row || row.type !== 'stripe') return null;
+      const json = openOptional(row.enc, provider, ctx.integration(row.partnerId, 'funding_credentials_enc'));
+      const creds = json ? (JSON.parse(json) as { secretKey?: unknown; webhookSecrets?: unknown }) : {};
+      return {
+        providerType: 'stripe',
+        secretKey: typeof creds.secretKey === 'string' ? creds.secretKey : '',
+        webhookSecrets: Array.isArray(creds.webhookSecrets)
+          ? creds.webhookSecrets.filter((s): s is string => typeof s === 'string' && s !== '')
+          : [],
+      };
+    },
+
+    /** Program-Fix 7: set (or, with null, clear) the funding config — touches ONLY the funding columns. */
+    async setFundingConfig(id: PartnerId, config: PartnerFundingConfig | null): Promise<void> {
+      const partnerId = id;
+      // Non-custodial (review nice-to-have): SmartRemit's own tenant must never
+      // hold a PSP account — SmartRemit would become merchant of record. The
+      // selector refuses it too (selectFundingProvider); this stops it at write.
+      if (config?.providerType === 'stripe' && partnerId === DEFAULT_PARTNER_ID) {
+        throw new Error('funding config refused: the default tenant can never hold a PSP account');
+      }
+      const set = config?.providerType === 'stripe'
+        ? {
+            fundingProviderType: 'stripe',
+            fundingCredentialsEnc: sealOptional(
+              JSON.stringify({ secretKey: config.secretKey ?? '', webhookSecrets: config.webhookSecrets ?? [] }),
+              provider,
+              ctx.integration(partnerId, 'funding_credentials_enc'),
+            ) ?? null,
+            updatedAt: new Date(),
+          }
+        : { fundingProviderType: null, fundingCredentialsEnc: null, updatedAt: new Date() };
+      await db
+        .insert(partnerIntegrations)
+        .values({ partnerId, ...set })
+        .onConflictDoUpdate({ target: partnerIntegrations.partnerId, set });
     },
 
     /** Crypto-shred: dropping the row destroys the only copy of the wrapped DEKs. */

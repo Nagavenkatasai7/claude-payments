@@ -39,6 +39,10 @@ const SECRET_NAME = /(cred|token|secret|passw|pepper|authori[sz]ation|bearer|api
 const SECRET_TYPE_DECLS: Record<string, 'all' | ReadonlySet<string>> = {
   [join('src', 'lib', 'partner-integrations.ts')]: 'all',
   [join('src', 'lib', 'whatsapp.ts')]: new Set(['WaCreds']),
+  // Program-Fix 7: the Stripe client secret (returned only to the paying
+  // browser) and the partner's Stripe key never belong in an outbox payload.
+  [join('src', 'lib', 'providers', 'funding-provider.ts')]: new Set(['PendingCaptureResult']),
+  [join('src', 'lib', 'providers', 'stripe-funding-provider.ts')]: new Set(['StripeFundingCredentials']),
 };
 const SEALERS: ReadonlySet<string> = new Set(['encryptField']);
 const PROBE = join(ROOT, 'src', '__outbox_probe__.ts');

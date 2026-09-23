@@ -43,7 +43,8 @@ export type IntegrationEncColumn =
   | 'payment_webhook_secret_enc'
   | 'wa_token_enc'
   | 'wa_verify_token_enc'
-  | 'wa_app_secret_enc';
+  | 'wa_app_secret_enc'
+  | 'funding_credentials_enc'; // Program-Fix 7
 
 export type WaitlistEncColumn = 'full_name_enc' | 'email_enc' | 'phone_enc' | 'location_enc';
 
