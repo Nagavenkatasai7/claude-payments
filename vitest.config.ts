@@ -13,7 +13,16 @@ export default defineConfig({
     // (they pass in isolation — see CLAUDE.md gotchas). One retry keeps known
     // flakes from evicting good PRs from the merge queue; locally retries stay
     // off so real failures (and flakes) remain loud.
+    // Program-Fix 40 (build-06): the money and tenant suites (pay-finalize,
+    // settlement, scoped-store) opt out with `describe(name, { retry: 0 }, fn)`,
+    // because a test's own retry wins (`options.retry ?? runner.config.retry`,
+    // @vitest/runner/dist/chunk-hooks.js:617). A flake there gets ONE isolated
+    // rerun, then a root-cause fix; never re-add retry.
     retry: process.env.CI ? 1 : 0,
+    // Explicit timeouts (Vitest defaults 5 s / 10 s): hooks boot a PGlite
+    // (`freshDb()`) and can take longer than a test body on a busy runner.
+    testTimeout: 15_000,
+    hookTimeout: 30_000,
     // Local memory cap: an uncapped full run forks one worker per core (11 on a 12-core Mac),
     // and 88 of the suites boot a PGlite (WASM Postgres) each, so one run peaked at 10.2 GB.
     // Parallel agents running it at once exhausted a 24 GB machine (2026-09-21). 4 workers

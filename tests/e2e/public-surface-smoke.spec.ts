@@ -2,11 +2,15 @@ import { test, expect } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
 
 // Program-Fix 41 — public-surface smoke. UNAUTHENTICATED and READ-ONLY: it
-// needs no E2E_* secret (so it must never throw at module load), only GETs
-// public pages, and never opens a /pay or /admin-dashboard link. It proves, on
-// the deployed build: robots.txt and sitemap.xml are served, an unknown URL is
-// a real 404 on the neutral page, x-powered-by is gone, /docs does not scroll
-// sideways on a phone, and the two sign-in pages have one h1 and a skip link.
+// needs no E2E_* secret (so it must never throw at module load), only sends
+// anonymous GETs, and never opens a /pay link or follows a redirect into a
+// gated page. It proves, on the deployed build: robots.txt and sitemap.xml are
+// served, an unknown URL is a real 404 on the neutral page, x-powered-by is
+// gone, /docs does not scroll sideways on a phone, and the two sign-in pages
+// have one h1 and a skip link. Program-Fix 40 adds: the auth gate
+// (src/middleware.ts) redirects an anonymous /admin-dashboard and /account to
+// their sign-in pages and leaves /account/login public — the guard for the
+// middleware → proxy rename.
 
 test('robots.txt is served and keeps crawlers off the pay links', async ({ request }) => {
   const res = await request.get('/robots.txt');
@@ -60,3 +64,25 @@ for (const path of ['/account/login', '/login']) {
     await expect(page.locator('#main')).toHaveCount(1);
   });
 }
+
+// Program-Fix 40 — the auth gate, anonymously. maxRedirects: 0 returns the
+// redirect itself (APIRequestContext.get options, node_modules/playwright-core/
+// types/types.d.ts:19305, "Pass `0` to not follow redirects"). The pathname is
+// compared exactly: endsWith('/login') would also accept /account/login.
+for (const [path, signIn] of [
+  ['/admin-dashboard', '/login'],
+  ['/account', '/account/login'],
+] as const) {
+  test(`anonymous ${path} is redirected (307) to ${signIn}`, async ({ request, baseURL }) => {
+    const res = await request.get(path, { maxRedirects: 0 });
+    expect(res.status()).toBe(307);
+    const location = res.headers()['location'];
+    expect(location).toBeTruthy();
+    expect(new URL(location, baseURL).pathname).toBe(signIn);
+  });
+}
+
+test('anonymous /account/login stays public (200, no redirect)', async ({ request }) => {
+  const res = await request.get('/account/login', { maxRedirects: 0 });
+  expect(res.status()).toBe(200);
+});
