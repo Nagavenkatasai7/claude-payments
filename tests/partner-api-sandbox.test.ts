@@ -123,11 +123,22 @@ describe('idempotency — the claim is namespaced by environment', { retry: 0 },
     expect(keys).toEqual([{ key: 'k1', transfer_id: 'sbx0' }, { key: 'test:k1', transfer_id: 'sbx1' }]);
   });
 
-  it("a live key that literally uses 'test:k1' can never be replayed by a test key 'k1' (409, nothing minted)", async () => {
-    expect(await createTransaction(deps('live'), ACME, 'pk_1', 'test:k1', txBody())).toMatchObject({ ok: true, status: 201 });
+  it("a client Idempotency-Key starting 'test:' is reserved (400 for any key, nothing claimed or minted)", async () => {
+    for (const m of ['live', 'test'] as const) {
+      const r = await createTransaction(deps(m), ACME, 'pk_1', 'test:k1', txBody());
+      expect(r).toMatchObject({ ok: false, status: 400 });
+    }
+    expect(await q(sql`SELECT count(*)::int AS n FROM idempotency_keys`)).toEqual([{ n: 0 }]);
+    expect(await q(sql`SELECT count(*)::int AS n FROM transfers`)).toEqual([{ n: 0 }]);
+  });
+
+  it('defence in depth: a pre-existing live claim on test:k1 is never replayed to a test key (409)', async () => {
+    // Only reachable for a claim written before the reservation shipped.
+    await createTransaction(deps('live'), ACME, 'pk_1', 'kx', txBody()); // mints sbx0 live
+    await db.execute(sql`INSERT INTO idempotency_keys (partner_id, key, transfer_id) VALUES ('acme', 'test:k1', 'sbx0')`);
     const r = await createTransaction(deps('test'), ACME, 'pk_test_1', 'k1', txBody());
     expect(r).toMatchObject({ ok: false, status: 409 });
-    expect(await q(sql`SELECT environment FROM transfers`)).toEqual([{ environment: 'live' }]);
+    expect(await q(sql`SELECT count(*)::int AS n FROM transfers`)).toEqual([{ n: 1 }]);
   });
 
   it('a test-key replay returns its own sandbox transfer (200)', async () => {

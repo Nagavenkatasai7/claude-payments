@@ -337,6 +337,16 @@ describe('resendPaymentLink', () => {
     await expect(resendPaymentLink(store, sendText, 'missing')).rejects.toThrow('Transfer not found');
   });
 
+  // Program-Fix 44 P2 (review r1 HIGH): a sandbox (test-key) transfer has no
+  // payment link and must never message a real phone.
+  it('REFUSES a sandbox transfer before any send (zero sendText calls)', { retry: 0 }, async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'r_sbx', phone: '15559876543', environment: 'test' }));
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    await expect(resendPaymentLink(store, sendText, 'r_sbx')).rejects.toThrow('Sandbox transfers have no payment link.');
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
   // Program-Fix 49A: a pay-link resend is nonessential — refused after STOP.
   it('refuses (no send) when the customer has opted out, checking the transfer\'s OWN tenant', async () => {
     const store = createStore(fakeRedis(), db);

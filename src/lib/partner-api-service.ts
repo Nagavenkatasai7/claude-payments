@@ -327,8 +327,11 @@ export async function createTransaction(
   // would unlock the payout of a transfer the partner supplied. Refused before
   // any read or write. Program-Fix 32: 'sched:' is the recurring-schedule
   // cron's claim (cron-run.ts) and payoutEditable exempts it the same way.
-  if (/^(draft|b2binvoice|sched):/.test(idempotencyKey)) {
-    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:' or 'sched:' (reserved).");
+  // Program-Fix 44 P2: 'test:' is the sandbox claim namespace (a test key's
+  // key K is claimed as 'test:K'), so no client key may start with it — the
+  // live and sandbox namespaces can then never collide.
+  if (/^(draft|b2binvoice|sched|test):/.test(idempotencyKey)) {
+    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:', 'sched:' or 'test:' (reserved).");
   }
 
   // Body validation + TENANT BINDING run BEFORE the idempotency claim (fix 1):

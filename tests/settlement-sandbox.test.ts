@@ -201,6 +201,14 @@ describe('ledger aggregates — sandbox rows never count toward a live customer'
     expect(pg.items.map((t) => t.id)).toEqual(['sb_live']);
   });
 
+  it('dashboard KPIs (summary) and the analytics feed (listAll) count live rows only', async () => {
+    const repo = createTransferRepo(db);
+    const s = await repo.summary('acme');
+    expect(s.total).toBe(1);
+    expect(s.volumeAllTime).toBe(100);
+    expect((await repo.listAll()).map((t) => t.id)).toEqual(['sb_live']);
+  });
+
   it("the partner's settlements statement is live-only", async () => {
     await db.execute(sql`UPDATE transfers SET status = 'delivered', paid_at = now()`);
     const page = await createTransferRepo(db).listSettledPage('acme', new Date(now.getTime() - 86_400_000), new Date(now.getTime() + 86_400_000), { limit: 10, cursor: null });

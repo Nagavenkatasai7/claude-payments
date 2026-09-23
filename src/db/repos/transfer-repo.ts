@@ -1035,7 +1035,10 @@ export function createTransferRepo(
       latest: string | null;
       total: number;
     }> {
-      const where = partnerId ? sql`WHERE partner_id = ${partnerId}` : sql``;
+      // Program-Fix 44 P2: KPIs count LIVE rows only (sandbox volume is not business).
+      const where = partnerId
+        ? sql`WHERE partner_id = ${partnerId} AND environment = 'live'`
+        : sql`WHERE environment = 'live'`;
       const res = await db.execute(sql`
         WITH t AS (
           SELECT *, (created_at AT TIME ZONE 'America/New_York')::date
@@ -1086,11 +1089,16 @@ export function createTransferRepo(
       };
     },
 
-    /** Full newest-first list (dashboard compat until Stage-4 pagination). */
+    /**
+     * Full newest-first list (dashboard compat until Stage-4 pagination).
+     * Program-Fix 44 P2: LIVE rows only — its consumers are KPI / analytics /
+     * customer-roll-up views, which must not count sandbox volume.
+     */
     async listAll(): Promise<Transfer[]> {
       const rows = await db
         .select()
         .from(transfers)
+        .where(LIVE_ONLY)
         .orderBy(desc(transfers.createdAt), desc(transfers.id));
       return rows.map((r) => toDomain(r));
     },
