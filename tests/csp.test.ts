@@ -16,14 +16,19 @@ function directives(policy: string): Map<string, string> {
 }
 
 describe('buildCsp', () => {
-  it('no nonce (the enforced policy): script-src is unchanged, unsafe-eval included in every env', async () => {
+  it('no nonce, production (the enforced policy): no unsafe-eval (Program-Fix 47 PR2)', async () => {
     const { buildCsp } = await import('@/lib/csp');
-    for (const isDev of [false, true]) {
-      expect(directives(buildCsp({ isDev })).get('script-src')).toBe(
-        "'self' 'unsafe-inline' 'unsafe-eval'",
-      );
-      expect(buildCsp({ isDev })).not.toContain('nonce-');
-    }
+    const policy = buildCsp({ isDev: false });
+    expect(directives(policy).get('script-src')).toBe("'self' 'unsafe-inline'");
+    expect(policy).not.toContain('unsafe-eval');
+    expect(policy).not.toContain('nonce-');
+  });
+
+  it('no nonce, development: keeps unsafe-eval (next dev HMR / React refresh use eval)', async () => {
+    const { buildCsp } = await import('@/lib/csp');
+    const policy = buildCsp({ isDev: true });
+    expect(directives(policy).get('script-src')).toBe("'self' 'unsafe-inline' 'unsafe-eval'");
+    expect(policy).not.toContain('nonce-');
   });
 
   it('with a nonce, development adds unsafe-eval (React uses eval for dev stacks)', async () => {
