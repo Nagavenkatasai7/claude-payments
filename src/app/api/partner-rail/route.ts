@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyWebhookSignature } from '@/lib/providers/payment-webhook-verify';
+import { verifyRailSignature } from '@/lib/providers/rail-signature';
+import { railSecrets } from '@/lib/partner-integrations';
+import { railNonceSeen, markRailNonce } from '@/lib/rail-replay';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
@@ -42,6 +44,7 @@ export async function POST(req: NextRequest) {
     action?: unknown;
     funding?: { method?: unknown };
     payout?: { rail?: unknown; destination?: unknown };
+    amount?: { destination?: unknown; destination_currency?: unknown };
   } = {};
   try {
     body = JSON.parse(raw) as typeof body;
@@ -74,12 +77,49 @@ export async function POST(req: NextRequest) {
   if (integrations.payment.providerType !== 'simulator') {
     return NextResponse.json({ ok: false }, { status: 404 });
   }
-  const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
-  const signature = req.headers.get('x-signature') ?? '';
-  if (!verifyWebhookSignature(raw, signature, signingSecret)) {
+  // fix 29: the timestamped header decides alone when present; the legacy
+  // x-signature is still accepted without it (deprecation log). Current +
+  // unexpired previous signing secret (rotation grace).
+  const nowMs = Date.now();
+  const verified = verifyRailSignature(
+    raw,
+    req.headers,
+    railSecrets(integrations.payment, 'signing', new Date(nowMs)),
+    nowMs,
+    { partnerId, route: 'partner-rail' },
+  );
+  if (!verified.ok) {
     return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
+  // Replay guard (check-then-mark, fail-open) — same rule as the status webhook.
+  if (verified.scheme === 'v2' && (await railNonceSeen(verified.nonce)) === 'seen') {
+    return NextResponse.json({ ok: true, duplicate: true, providerRef: `simrail-${reference}` });
+  }
+  const response = await handleVerifiedInstruction(body, reference, partnerId, action, isDualLeg);
+  if (verified.scheme === 'v2') await markRailNonce(verified.nonce);
+  return response;
+}
 
+/** fix 29: the verified instruction's destination amount, echoed on the callback. */
+function echoAmount(a: unknown): { destination: number | string; destination_currency: string } | null {
+  if (!a || typeof a !== 'object') return null;
+  const { destination, destination_currency } = a as Record<string, unknown>;
+  if ((typeof destination !== 'number' && typeof destination !== 'string') || typeof destination_currency !== 'string') {
+    return null;
+  }
+  return { destination, destination_currency };
+}
+
+async function handleVerifiedInstruction(
+  body: {
+    payout?: { rail?: unknown; destination?: unknown };
+    amount?: { destination?: unknown; destination_currency?: unknown };
+  },
+  reference: string,
+  partnerId: string,
+  action: string,
+  isDualLeg: boolean,
+): Promise<NextResponse> {
   // A REVERSE (B2B ach_pull return) has NO payout to settle — the rail simply
   // acknowledges it returned the debit it owns. So we DON'T schedule a payout
   // callback (which would POST a bogus `paid_out` for a non-existent transfer id);
@@ -104,12 +144,16 @@ export async function POST(req: NextRequest) {
   // account settles as before.
   const unreachable =
     isUnreachableAccount(body.payout?.destination) && (body.payout?.rail ?? 'bank') === 'bank';
+  const amount = echoAmount(body.amount);
   await createOutboxRepo(getDb()).enqueue(
     'rail.callback',
     {
       reference,
       partner_id: partnerId,
       ...(unreachable ? { status: 'failed', reason: UNREACHABLE_REASON } : {}),
+      // fix 29: the rail reports back the amount it was instructed to pay; the
+      // webhook checks it against the locked amount before delivering.
+      ...(amount ? { amount } : {}),
     },
     { delayMs: SETTLE_DELAY_MS, dedupeKey: `railcb:${reference}` },
   );

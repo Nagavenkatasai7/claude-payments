@@ -49,3 +49,78 @@ export const EMPTY_PARTNER_INTEGRATIONS: PartnerIntegrations = {
   payment: {},
   whatsapp: {},
 };
+
+// ── Program-Fix 29: rail secret rotation (no migration) ──────────────────────
+// The CURRENT webhook secret has its own encrypted column (payment.webhookSecret);
+// the current signing secret and BOTH previous secrets live in the encrypted
+// credentials blob, each previous with its own ISO expiry, so rotating one
+// never resets the other's grace period.
+
+export type RailSecretKind = 'webhook' | 'signing';
+
+/** Grace period a rotated-out secret keeps verifying/signing. */
+export const RAIL_SECRET_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export const PREVIOUS_SECRET_KEYS: Record<RailSecretKind, { secret: string; until: string }> = {
+  webhook: { secret: 'previousWebhookSecret', until: 'previousWebhookSecretUntil' },
+  signing: { secret: 'previousSigningSecret', until: 'previousSigningSecretUntil' },
+};
+
+/**
+ * The active secrets for one rail direction: `[current, previous-if-unexpired]`,
+ * current FIRST (it still signs the legacy header). No current secret ⇒ []
+ * (a previous alone never signs or verifies).
+ */
+export function railSecrets(
+  payment: PartnerPaymentConfig | undefined,
+  kind: RailSecretKind,
+  now: Date,
+): string[] {
+  const creds = payment?.credentials ?? {};
+  const current = (kind === 'webhook' ? payment?.webhookSecret : creds.signingSecret) ?? '';
+  if (current === '') return [];
+  const keys = PREVIOUS_SECRET_KEYS[kind];
+  const previous = creds[keys.secret] ?? '';
+  const until = Date.parse(creds[keys.until] ?? '');
+  if (previous !== '' && previous !== current && Number.isFinite(until) && until > now.getTime()) {
+    return [current, previous];
+  }
+  return [current];
+}
+
+/**
+ * Record a rotation in the credentials blob (a COPY is returned): when a stored
+ * non-empty secret is replaced by a DIFFERENT non-empty one, the old value
+ * becomes `previous<Kind>Secret` with its own `…Until` = now + grace. A first
+ * mint (no old value) or an unchanged value is not a rotation. Expired
+ * previous pairs of either kind are dropped.
+ */
+export function withRotatedSecret(
+  credentials: Record<string, string>,
+  kind: RailSecretKind,
+  oldSecret: string | undefined,
+  newSecret: string | undefined,
+  now: Date,
+): Record<string, string> {
+  const out = pruneExpiredPrevious(credentials, now);
+  const keys = PREVIOUS_SECRET_KEYS[kind];
+  if (oldSecret && newSecret && oldSecret !== newSecret) {
+    out[keys.secret] = oldSecret;
+    out[keys.until] = new Date(now.getTime() + RAIL_SECRET_GRACE_MS).toISOString();
+  }
+  return out;
+}
+
+/** A copy with every expired / unparseable previous-secret pair removed. */
+export function pruneExpiredPrevious(credentials: Record<string, string>, now: Date): Record<string, string> {
+  const out = { ...credentials };
+  for (const keys of Object.values(PREVIOUS_SECRET_KEYS)) {
+    if (!(keys.secret in out) && !(keys.until in out)) continue;
+    const until = Date.parse(out[keys.until] ?? '');
+    if (!Number.isFinite(until) || until <= now.getTime() || !out[keys.secret]) {
+      delete out[keys.secret];
+      delete out[keys.until];
+    }
+  }
+  return out;
+}

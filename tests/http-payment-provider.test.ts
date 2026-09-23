@@ -22,6 +22,7 @@ import {
   buildSettlementInstruction,
   signBody,
   RAIL_TIMEOUT_MS,
+  checkCallbackAmount,
 } from '@/lib/providers/http-payment-provider';
 
 function fixture(): Transfer {
@@ -356,5 +357,58 @@ describe('buildSettlementInstruction — an empty destination only on a B2B part
       } as Transfer) as { payout: { destination: string } };
       expect(built.payout.destination, fundingMethod).toBe('');
     }
+  });
+});
+
+// Program-Fix 29: a `paid_out` callback's amount is checked against the locked
+// instruction amount before a row may be delivered.
+describe('checkCallbackAmount (pure)', () => {
+  const t = fixture(); // amountInr 16600, INR
+  const cb = (amount: unknown) => ({ reference: 'rail_t1', status: 'paid_out', ...(amount === undefined ? {} : { amount }) });
+
+  it('no amount block → absent', () => {
+    expect(checkCallbackAmount(t, cb(undefined))).toBe('absent');
+    expect(checkCallbackAmount(t, null)).toBe('absent');
+  });
+
+  it('exact destination + currency → match (number or numeric string)', () => {
+    expect(checkCallbackAmount(t, cb({ destination: 16600, destination_currency: 'INR' }))).toBe('match');
+    expect(checkCallbackAmount(t, cb({ destination: '16600.00', destination_currency: 'INR' }))).toBe('match');
+    expect(checkCallbackAmount(t, cb({ destination: ' 16600 ', destination_currency: 'INR' }))).toBe('match');
+  });
+
+  it('the currency defaults to INR exactly as the instruction does', () => {
+    const { destinationCurrency: _drop, ...rest } = t;
+    const noCur = rest as Transfer;
+    expect(checkCallbackAmount(noCur, cb({ destination: 16600, destination_currency: 'INR' }))).toBe('match');
+    expect(checkCallbackAmount(noCur, cb({ destination: 16600, destination_currency: 'USD' }))).toBe('mismatch');
+  });
+
+  it('compares in minor units (rounding): 745.004 == 745.00, 745.01 != 745.00', () => {
+    const gbp = { ...t, amountInr: 745, destinationCurrency: 'GBP' } as Transfer;
+    expect(checkCallbackAmount(gbp, cb({ destination: 745.004, destination_currency: 'GBP' }))).toBe('match');
+    expect(checkCallbackAmount(gbp, cb({ destination: 745.01, destination_currency: 'GBP' }))).toBe('mismatch');
+  });
+
+  it('a different amount or currency → mismatch', () => {
+    expect(checkCallbackAmount(t, cb({ destination: 16601, destination_currency: 'INR' }))).toBe('mismatch');
+    expect(checkCallbackAmount(t, cb({ destination: 16600, destination_currency: 'GBP' }))).toBe('mismatch');
+  });
+
+  it('a partial or unparseable block → mismatch (never settles on half an answer)', () => {
+    for (const a of [
+      {}, { destination: 16600 }, { destination_currency: 'INR' },
+      { destination: '', destination_currency: 'INR' }, { destination: ' ', destination_currency: 'INR' },
+      { destination: null, destination_currency: 'INR' }, { destination: [], destination_currency: 'INR' },
+      { destination: 'abc', destination_currency: 'INR' }, { destination: 'Infinity', destination_currency: 'INR' },
+      { destination: '0x40D8', destination_currency: 'INR' }, { destination: '1e4', destination_currency: 'INR' },
+      { destination: 16600, destination_currency: 7 }, 'string', 42,
+    ]) {
+      expect(checkCallbackAmount(t, cb(a))).toBe('mismatch');
+    }
+  });
+
+  it('the currency compare is case-insensitive', () => {
+    expect(checkCallbackAmount(t, cb({ destination: 16600, destination_currency: 'inr' }))).toBe('match');
   });
 });

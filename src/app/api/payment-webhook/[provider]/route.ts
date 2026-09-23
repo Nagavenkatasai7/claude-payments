@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { getStore } from '@/lib/store';
 import { getPaymentProvider } from '@/lib/providers/payment-provider';
-import { verifyWebhookSignature } from '@/lib/providers/payment-webhook-verify';
-import { railCallbackTransferId } from '@/lib/providers/http-payment-provider';
+import { verifyRailSignature } from '@/lib/providers/rail-signature';
+import { railCallbackTransferId, checkCallbackAmount } from '@/lib/providers/http-payment-provider';
+import { railSecrets, type PartnerIntegrations } from '@/lib/partner-integrations';
+import type { Transfer } from '@/lib/types';
+import { railNonceSeen, markRailNonce } from '@/lib/rail-replay';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
-import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { createOutboxRepo, type OutboxRepo } from '@/db/repos/outbox-repo';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { logWarn } from '@/lib/log';
 import { handleRailFailure, alertRefusedDelivery } from '@/lib/rail-failure';
@@ -67,24 +70,48 @@ export async function POST(
     ? await getPartnerIntegrationsStore().getIntegrations(railPartnerId)
     : null;
 
-  // Mock skips verification (it never posts callbacks) — but ONLY when the
-  // resolved rail is actually mock. The URL segment is caller-chosen: if the
-  // transfer's rail partner is webhook-driven (http/simulator), an unsigned
-  // POST to /mock must NOT bypass the HMAC gate (it would resolve the http
-  // adapter below and flip real money state unauthenticated). Every other
-  // provider MUST verify: the rail partner's webhookSecret first, else the
-  // env per-provider secret. '' ⇒ unconfigured ⇒ reject (fail-closed).
-  const railProviderType = railIntegrations?.payment.providerType;
-  const railWebhookDriven = railProviderType === 'http' || railProviderType === 'simulator';
-  if (provider !== 'mock' || railWebhookDriven) {
-    const secret = railIntegrations?.payment.webhookSecret || env.paymentWebhookSecret(provider);
-    const signature = req.headers.get('x-signature') ?? '';
-    if (!verifyWebhookSignature(raw, signature, secret)) {
-      return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
-    }
+  // EVERY provider segment verifies (fix 29, authz-08: /mock no longer skips —
+  // nothing legitimate posts there, and the mock provider parses nothing).
+  // Secrets: the rail partner's webhookSecret (+ its unexpired previous one
+  // during a rotation) first, else the env per-provider secret (+ the optional
+  // env _PREVIOUS). No secret ⇒ unconfigured ⇒ reject (fail-closed).
+  const nowMs = Date.now();
+  const envSecret = env.paymentWebhookSecret(provider);
+  const secrets = railIntegrations?.payment.webhookSecret
+    ? railSecrets(railIntegrations.payment, 'webhook', new Date(nowMs))
+    : envSecret
+      ? [envSecret, env.paymentWebhookSecretPrevious(provider)].filter((s) => s !== '')
+      : []; // a previous secret alone never verifies
+  const verified = verifyRailSignature(raw, req.headers, secrets, nowMs, {
+    partnerId: railPartnerId,
+    route: 'payment-webhook',
+  });
+  if (!verified.ok) {
+    return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
 
-  const result = await getPaymentProvider(store, createOutboxRepo(getDb()), railIntegrations?.payment).handleWebhook(body);
+  // fix 29: replay guard for the timestamped scheme — CHECK here, MARK only
+  // after the handling below returned. A throw propagates (the rail retries)
+  // and leaves no mark. Redis down ⇒ 'unavailable' ⇒ proceed (fail-open; the
+  // ±5 min window still holds and every downstream effect is idempotent).
+  if (verified.scheme === 'v2' && (await railNonceSeen(verified.nonce)) === 'seen') {
+    return NextResponse.json({ ok: true, duplicate: true });
+  }
+  const response = await handleVerified(provider, body, railPartnerId, railIntegrations, refTransfer);
+  if (verified.scheme === 'v2') await markRailNonce(verified.nonce);
+  return response;
+}
+
+async function handleVerified(
+  provider: string,
+  body: unknown,
+  railPartnerId: string | null,
+  railIntegrations: PartnerIntegrations | null,
+  refTransfer: Transfer | null,
+): Promise<NextResponse> {
+  const store = getStore();
+  const outbox = createOutboxRepo(getDb());
+  const result = await getPaymentProvider(store, outbox, railIntegrations?.payment).handleWebhook(body);
   if (!result) {
     return NextResponse.json({ ok: true, ignored: true });  // unparseable/irrelevant → 200, no mutation
   }
@@ -98,6 +125,40 @@ export async function POST(
   if ('failure' in result) {
     await handleRailFailure(getDb(), result.transferId, result.failure);
     return NextResponse.json({ ok: true });
+  }
+
+  // fix 29 (money-09): a delivery is checked before it may land.
+  //  • a row already HELD for an amount mismatch (`railamount:<id>`) is never
+  //    delivered by a later callback — staff resolve it by cancel/refund;
+  //  • the callback's `amount` must equal the locked instruction amount. A
+  //    mismatch (or a partial/unparseable block) never settles: one deduped
+  //    ops alert (transfer id only) and 200 held, so the rail stops retrying.
+  //    No amount at all is accepted for now, with a deprecation log.
+  if (result.status === 'delivered') {
+    if (await outbox.hasDedupeKey(`railamount:${result.transferId}`)) {
+      logWarn('payment-webhook.held', 'delivery refused: transfer is held for an amount mismatch', {
+        transferId: result.transferId,
+      });
+      return NextResponse.json({ ok: true, held: true });
+    }
+    if (refTransfer && refTransfer.id === result.transferId) {
+      const amountCheck = checkCallbackAmount(refTransfer, body);
+      if (amountCheck === 'mismatch') {
+        await holdForAmountMismatch(outbox, result.transferId);
+        logWarn('payment-webhook.amount_mismatch', 'delivery held: callback amount differs from the instruction', {
+          transferId: result.transferId,
+          partnerId: railPartnerId,
+        });
+        return NextResponse.json({ ok: true, held: true });
+      }
+      if (amountCheck === 'absent') {
+        logWarn('payment-webhook.amount_absent', 'paid_out callback without an amount block (deprecated)', {
+          transferId: result.transferId,
+          partnerId: railPartnerId,
+          provider,
+        });
+      }
+    }
   }
 
   const updated = await store.updateTransferFromWebhook(result.transferId, result.status);
@@ -159,4 +220,23 @@ export async function POST(
     });
   }
   return NextResponse.json({ ok: true });
+}
+
+/**
+ * fix 29: the ONE durable hold marker + ops alert for an amount mismatch. The
+ * `railamount:<id>` dedupe key is what the instruct handler, reconcileSweep and
+ * this route read (outboxRepo.hasDedupeKey) to never deliver or re-instruct the
+ * row. Transfer id only — no amounts, no PII.
+ */
+async function holdForAmountMismatch(outbox: OutboxRepo, transferId: string): Promise<void> {
+  await outbox.enqueue(
+    'ops.alert',
+    {
+      message:
+        `⚠️ SmartRemit ops: transfer ${transferId} — the rail's paid_out reported a different ` +
+        `amount than the settlement instruction. NOT delivered; held (stays paid, never re-instructed). ` +
+        `Investigate with the rail, then cancel/refund it.`,
+    },
+    { dedupeKey: `railamount:${transferId}` },
+  );
 }

@@ -408,6 +408,20 @@ export function createOutboxRepo(db: DbOrTx) {
       return (res as unknown as { rows: unknown[] }).rows.length;
     },
 
+    /**
+     * Program-Fix 29: does ANY row carry this dedupe key (any status)? The
+     * `railamount:<id>` hold marker is read through this. Durable: rows are
+     * never deleted and scrubDonePayloads keeps dedupe_key.
+     */
+    async hasDedupeKey(key: string): Promise<boolean> {
+      const rows = await db
+        .select({ id: outbox.id })
+        .from(outbox)
+        .where(eq(outbox.dedupeKey, key))
+        .limit(1);
+      return rows.length > 0;
+    },
+
     /** Dead letters for the ops page (+ manual retry). */
     async listDead(limit = 100): Promise<OutboxRow[]> {
       return db.select().from(outbox).where(eq(outbox.status, 'dead')).limit(limit);

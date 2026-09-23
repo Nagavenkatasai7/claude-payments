@@ -11,9 +11,10 @@ import { eligibleAgents, pickLeastLoaded } from '@/lib/ticket-balancer';
 import {
   buildSettlementInstruction,
   buildReverseInstruction,
-  signBody,
   RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
+import { signRailHeaders } from '@/lib/providers/rail-signature';
+import { railSecrets } from '@/lib/partner-integrations';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
@@ -217,6 +218,20 @@ type Payload = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 /**
+ * fix 29: the amount a `rail.callback` row carries (echoed by the reference
+ * rail from the verified instruction). Only a {destination, destination_currency}
+ * pair of number|string / string passes through; anything else is dropped.
+ */
+function railCallbackAmount(v: unknown): { destination: number | string; destination_currency: string } | null {
+  if (!v || typeof v !== 'object') return null;
+  const a = v as Record<string, unknown>;
+  const d = a.destination;
+  const c = a.destination_currency;
+  if ((typeof d !== 'number' && typeof d !== 'string') || typeof c !== 'string') return null;
+  return { destination: d, destination_currency: c };
+}
+
+/**
  * Fix 22: the SYNC settlement-URL rule, run in the handler BEFORE any fetch.
  * A refusal is a thrown, RETRYABLE handler error (backoff → dead at
  * MAX_ATTEMPTS → the deduped ops alert): never skipped, never followed. The
@@ -418,6 +433,14 @@ async function handle(
           `Settlement instruction held: transfer is ${transfer.status} with refund ${refund} — retrying`,
         );
       }
+      // fix 29 (money-09): the rail reported a DIFFERENT amount for this row
+      // (`railamount:<id>` marker). It is held for staff — never instructed
+      // again, whether this is a reconcile `reinstruct:` row or a dead-letter
+      // Retry. Done with a log; resolution is cancel/refund by staff.
+      if (await createOutboxRepo(deps.db).hasDedupeKey(`railamount:${transferId}`)) {
+        logWarn('outbox.instruct-held', 'rail reported a different amount; instruction not sent', { transferId });
+        return;
+      }
       // Best-rate routing: the RAIL is the settlement partner's when routed
       // (settlementPartnerId set) — their endpoint, their signing secret, and
       // their id in the instruction (the rail verifies with the partner_id it
@@ -425,7 +448,7 @@ async function handle(
       const railPartnerId = transfer.settlementPartnerId ?? transfer.partnerId;
       const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
       const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
-      const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
+      const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
       if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
       assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
       const rawBody = JSON.stringify({
@@ -436,7 +459,8 @@ async function handle(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
+          // fix 29: legacy x-signature (byte-identical) + x-smartremit-signature.
+          ...signRailHeaders(rawBody, signingSecrets, Date.now()),
         },
         body: rawBody,
         signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
@@ -460,17 +484,25 @@ async function handle(
       const reference = str(p.reference);
       const partnerId = str(p.partner_id) || str(p.partnerId);
       const { integrations } = await partner(partnerId);
-      const webhookSecret = integrations.payment.webhookSecret ?? '';
+      const webhookSecrets = railSecrets(integrations.payment, 'webhook', new Date());
       // fix 8: the reference rail's one failure mode rides the same row —
       // `status` (default paid_out) and an optional `reason` pass through.
       const cbStatus = str(p.status) || 'paid_out';
       const cbReason = str(p.reason);
-      const callbackBody = JSON.stringify({ reference, status: cbStatus, ...(cbReason ? { reason: cbReason } : {}) });
+      // fix 29: the rail echoes the instruction's amount (checked by the
+      // webhook before delivery). A row queued by an older build has none.
+      const cbAmount = railCallbackAmount(p.amount);
+      const callbackBody = JSON.stringify({
+        reference,
+        status: cbStatus,
+        ...(cbReason ? { reason: cbReason } : {}),
+        ...(cbAmount ? { amount: cbAmount } : {}),
+      });
       const res = await deps.fetchFn(`${env.appBaseUrl}/api/payment-webhook/simulator`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(webhookSecret ? { 'x-signature': signBody(callbackBody, webhookSecret) } : {}),
+          ...signRailHeaders(callbackBody, webhookSecrets, Date.now()),
         },
         body: callbackBody,
         signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
@@ -505,7 +537,7 @@ async function handle(
         const railPartnerId = full.settlementPartnerId ?? full.partnerId;
         const integrations = await createIntegrationsRepo(deps.db).getIntegrations(railPartnerId);
         const settlementUrl = integrations.payment.credentials?.settlementUrl ?? '';
-        const signingSecret = integrations.payment.credentials?.signingSecret ?? '';
+        const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
         if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
         assertSettlementUrl(settlementUrl); // fix 22: same fail-closed rule as settlement.instruct
         const rawBody = JSON.stringify({ ...buildReverseInstruction(full), partner_id: railPartnerId });
@@ -513,7 +545,7 @@ async function handle(
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(signingSecret ? { 'x-signature': signBody(rawBody, signingSecret) } : {}),
+            ...signRailHeaders(rawBody, signingSecrets, Date.now()), // fix 29: both headers
           },
           body: rawBody,
           signal: AbortSignal.timeout(RAIL_TIMEOUT_MS), // rail-09: a hung rail is a RETRYABLE failure, never a stuck row
