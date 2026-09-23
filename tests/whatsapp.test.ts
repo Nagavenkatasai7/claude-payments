@@ -6,6 +6,7 @@ import {
   sendTemplate,
   sendInteractive,
   sendCtaUrl,
+  sendVerificationStatus,
   sendTemplateWithButton,
   sendTemplateOrText,
   RECIPIENT_TEMPLATE_NAME,
@@ -735,5 +736,76 @@ describe('outbound deadlines (META_TIMEOUT_MS — whatsapp-06)', () => {
     expect(b.signal).toBeInstanceOf(AbortSignal);
     expect(a.signal).not.toBe(b.signal);
     vi.useRealTimers();
+  });
+});
+
+// Program-Fix 37 (obs-13, this fix's part): the WhatsApp fail-soft paths log
+// only through the scrubbing logger with a masked phone. A Graph error body
+// can echo the recipient back, so neither the phone we pass nor one inside an
+// error may reach a log line.
+describe('WhatsApp error-path logging masks phones (Program-Fix 37)', () => {
+  function logArgs(spies: Array<{ mock: { calls: unknown[][] } }>): string {
+    return spies.flatMap((s) => s.mock.calls.flat()).map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : typeof a === 'string' ? a : JSON.stringify(a))).join('\n');
+  }
+
+  it('sendTemplateOrText with both sends failing logs no 7+ digit run, and the masked last 4', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 400, text: async () => '{"error":{"message":"bad recipient 919876543210"}}' })),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await sendTemplateOrText(
+      '919876543210',
+      async () => {
+        throw new Error('template send failed for 919876543210 (131047)');
+      },
+      'fallback body',
+    );
+
+    expect(warn).toHaveBeenCalled();
+    expect(error).toHaveBeenCalled();
+    const text = logArgs([warn, error]);
+    expect(text).not.toMatch(/\d{7,}/);
+    expect(text).toContain('3210');
+    expect(text).toContain('131047'); // 6-digit Meta error codes stay readable
+  });
+
+  it('sendCtaUrl logs a rejected Graph body only scrubbed', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        n++ === 0
+          ? { ok: false, status: 400, text: async (): Promise<string> => '{"error":{"message":"no such user 15551234567"}}' }
+          : { ok: true, text: async (): Promise<string> => '' },
+      ),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await sendCtaUrl('15551234567', 'Body', { displayText: 'Go', url: 'https://example.com/x' });
+    expect(warn).toHaveBeenCalled();
+    const text = logArgs([warn]);
+    expect(text).not.toMatch(/\d{7,}/);
+    expect(text).toContain('4567');
+  });
+});
+
+describe('sendVerificationStatus free-form failure log is scrubbed (Program-Fix 37)', () => {
+  it('logs through the scrubbing logger: no 7+ digit run, the masked last 4', async () => {
+    const saved = process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE;
+    delete process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE; // free-form path
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 400, text: async (): Promise<string> => 'outside window for 15551234567' })),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(sendVerificationStatus('15551234567', 'verified', 'Asha')).resolves.toBeUndefined();
+    if (saved !== undefined) process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE = saved;
+    expect(warn).toHaveBeenCalled();
+    const text = warn.mock.calls.flat().map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join('\n');
+    expect(text).not.toMatch(/\d{7,}/);
+    expect(text).toContain('4567');
+    expect(text).toContain('whatsapp.verification-status');
   });
 });

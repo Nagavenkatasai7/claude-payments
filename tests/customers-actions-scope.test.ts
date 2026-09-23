@@ -17,7 +17,11 @@ let cs: ReturnType<typeof createCustomerStore>;
 
 vi.mock('@/lib/auth', () => ({
   requireAdmin: async () => currentStaff,
-  requireScope: async () => ({ staff: currentStaff }),
+  // The REAL rule (src/lib/auth.ts requireScope): support is redirected away.
+  requireScope: async () => {
+    if (currentStaff.role === 'support') throw new Error('NEXT_REDIRECT /admin-dashboard/tickets');
+    return { staff: currentStaff };
+  },
   requireStaff: async () => currentStaff,
   requirePlatformAdmin: vi.fn(),
 }));
@@ -32,10 +36,13 @@ vi.mock('@/lib/customer-store', async () => {
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
 
+import { redirect } from 'next/navigation';
 import {
   markCustomerVerifiedAction,
   markCustomerRejectedAction,
+  openCustomerAction,
 } from '@/app/admin-dashboard/customers/actions';
+import { openCustomerRef } from '@/lib/customer-ref';
 
 function staff(overrides: Partial<Staff>): Staff {
   return {
@@ -131,5 +138,54 @@ describe('markCustomerRejectedAction (H3 + L3)', () => {
     currentStaff = staff({ username: 'plat' });
     await markCustomerRejectedAction(form({ phone: '15559990000', partnerId: 'A', reason: 'y'.repeat(900) }));
     expect((await cs.getCustomer('A', '15559990000'))?.kycRejectedReason?.length).toBe(500);
+  });
+});
+
+// Program-Fix 37 (dash-04): customer links POST (phone, partnerId) to
+// openCustomerAction, which checks scope and redirects to the sealed-ref URL.
+// The phone travels only in the POST body, never in a URL.
+describe('openCustomerAction (Program-Fix 37)', () => {
+  beforeEach(() => vi.mocked(redirect).mockClear());
+
+  it('in scope: redirects to /admin-dashboard/customers/v1.<ref> with no phone, and the ref opens to the row', async () => {
+    await cs.saveCustomer(makeCustomer('15551230000', 'A'));
+    currentStaff = staff({ username: 'pa', partnerId: 'A' });
+    await openCustomerAction(form({ phone: '15551230000', partnerId: 'A' }));
+    expect(redirect).toHaveBeenCalledTimes(1);
+    const target = vi.mocked(redirect).mock.calls[0][0] as string;
+    expect(target.startsWith('/admin-dashboard/customers/v1.')).toBe(true);
+    expect(target).not.toContain('15551230000');
+    expect(target).not.toContain('?');
+    expect(openCustomerRef(target.slice('/admin-dashboard/customers/'.length))).toEqual({ partnerId: 'A', phone: '15551230000' });
+  });
+
+  it('partner-A staff opening a partner-B customer gets "Customer not found" and no redirect (pinned, even with a hostile partnerId)', async () => {
+    await cs.saveCustomer(makeCustomer('15554445555', 'B'));
+    currentStaff = staff({ username: 'pa', partnerId: 'A' });
+    await expect(openCustomerAction(form({ phone: '15554445555', partnerId: 'B' }))).rejects.toThrow('Customer not found.');
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('platform staff: the posted tenant picks the row, and the ref seals THAT row\'s tenant', async () => {
+    await cs.saveCustomer(makeCustomer('15556667777', 'A'));
+    await cs.saveCustomer(makeCustomer('15556667777', 'B'));
+    currentStaff = staff({ username: 'plat' });
+    await openCustomerAction(form({ phone: '15556667777', partnerId: 'B' }));
+    const target = vi.mocked(redirect).mock.calls[0][0] as string;
+    expect(openCustomerRef(target.slice('/admin-dashboard/customers/'.length))).toEqual({ partnerId: 'B', phone: '15556667777' });
+  });
+
+  it('a support user is bounced by requireScope before any read or redirect', async () => {
+    await cs.saveCustomer(makeCustomer('15551230000', 'A'));
+    currentStaff = staff({ username: 'sup', role: 'support' });
+    await expect(openCustomerAction(form({ phone: '15551230000', partnerId: 'A' }))).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it('a missing phone or an unknown customer is "Customer not found"', async () => {
+    currentStaff = staff({ username: 'plat' });
+    await expect(openCustomerAction(form({ partnerId: 'A' }))).rejects.toThrow('Customer not found.');
+    await expect(openCustomerAction(form({ phone: '19990001111', partnerId: 'A' }))).rejects.toThrow('Customer not found.');
+    expect(redirect).not.toHaveBeenCalled();
   });
 });

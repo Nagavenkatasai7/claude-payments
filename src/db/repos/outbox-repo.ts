@@ -381,6 +381,33 @@ export function createOutboxRepo(db: DbOrTx) {
         .orderBy(outbox.kind, outbox.status);
     },
 
+    /**
+     * Program-Fix 37 (ctx-03): payload retention. Empties the payload of up to
+     * `limit` 'done' rows created more than `olderThanDays` days ago (their
+     * payloads are plaintext copies of what was sent: bodies, phones, names).
+     * ONLY the payload changes: id, kind, status, attempts, dedupe_key and the
+     * timestamps stay, so a redelivered key still dedupes and every ladder
+     * keyed on dedupe_key still sees its row. Never deletes a row, and never
+     * touches pending/failed/processing/dead (ops Retry needs a dead payload).
+     * Returns how many rows were emptied (RETURNING, not rowCount: the drivers
+     * disagree on that field).
+     */
+    async scrubDonePayloads(olderThanDays: number, limit = 1000): Promise<number> {
+      const res = await db.execute(sql`
+        UPDATE outbox SET payload = '{}'::jsonb
+        WHERE id IN (
+          SELECT id FROM outbox
+          WHERE status = 'done'
+            AND created_at < now() - make_interval(days => ${olderThanDays})
+            AND payload <> '{}'::jsonb
+          ORDER BY id
+          LIMIT ${limit}
+        )
+        RETURNING id
+      `);
+      return (res as unknown as { rows: unknown[] }).rows.length;
+    },
+
     /** Dead letters for the ops page (+ manual retry). */
     async listDead(limit = 100): Promise<OutboxRow[]> {
       return db.select().from(outbox).where(eq(outbox.status, 'dead')).limit(limit);

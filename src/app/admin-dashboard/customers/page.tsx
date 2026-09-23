@@ -8,6 +8,7 @@ import { sendGateActive } from '@/lib/kyc-gate';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { KycBadge } from '../kyc-badge';
+import { CustomerLink } from '../customer-link';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -133,13 +134,14 @@ export default async function CustomersPage({
                   key: `${c.partnerId}:${c.senderPhone}`,
                   label: `+${c.senderPhone}`,
                   cells: [
-                    <Link
-                      href={`/admin-dashboard/customers/${c.senderPhone}?partner=${encodeURIComponent(c.partnerId)}`}
-                      className="text-primary underline-offset-2 hover:underline"
+                    <CustomerLink
                       key="phone"
+                      phone={c.senderPhone}
+                      partnerId={c.partnerId}
+                      className="cursor-pointer border-0 bg-transparent p-0 text-left text-primary underline-offset-2 hover:underline"
                     >
                       +{c.senderPhone}
-                    </Link>,
+                    </CustomerLink>,
                     ...(isPlatform
                       ? [<span key="partner">{partnerById[c.partnerId]?.name ?? c.partnerId}</span>]
                       : []),

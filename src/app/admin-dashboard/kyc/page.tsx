@@ -8,9 +8,10 @@ import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { Sidebar } from '../sidebar';
 import { ExpandableTable } from '../expandable-table';
 import { KycBadge } from '../kyc-badge';
+import { CustomerLink } from '../customer-link';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { buttonVariants } from '@/components/ui/button';
 
 /**
  * Dedicated KYC surface (own sidebar entry). Two cards: a scoped status overview
@@ -89,9 +90,14 @@ export default async function KycPage() {
                 cells: [
                   <span key="phone">+{c.senderPhone}</span>,
                   <KycBadge key="kyc" kyc={c} />,
-                  <Button key="open" asChild size="sm" variant="outline">
-                    <a href={`/admin-dashboard/customers/${c.senderPhone}?partner=${encodeURIComponent(c.partnerId)}`}>Review</a>
-                  </Button>,
+                  <CustomerLink
+                    key="open"
+                    phone={c.senderPhone}
+                    partnerId={c.partnerId}
+                    className={buttonVariants({ size: 'sm', variant: 'outline' })}
+                  >
+                    Review
+                  </CustomerLink>,
                 ],
               }))}
             />
