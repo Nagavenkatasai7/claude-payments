@@ -69,11 +69,17 @@ for (const path of ['/account/login', '/login']) {
 // redirect itself (APIRequestContext.get options, node_modules/playwright-core/
 // types/types.d.ts:19305, "Pass `0` to not follow redirects"). The pathname is
 // compared exactly: endsWith('/login') would also accept /account/login.
+// Skipped when VERCEL_AUTOMATION_BYPASS_SECRET is set (Preview only): the
+// config then sends x-vercel-set-bypass-cookie, and Vercel's docs do not say
+// whether that answers with its own cookie-setting redirect, which maxRedirects: 0
+// would see instead of the app's. The production smoke (no secret) is the guard.
+const bypassActive = !!process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 for (const [path, signIn] of [
   ['/admin-dashboard', '/login'],
   ['/account', '/account/login'],
 ] as const) {
   test(`anonymous ${path} is redirected (307) to ${signIn}`, async ({ request, baseURL }) => {
+    test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
     const res = await request.get(path, { maxRedirects: 0 });
     expect(res.status()).toBe(307);
     const location = res.headers()['location'];
@@ -83,6 +89,7 @@ for (const [path, signIn] of [
 }
 
 test('anonymous /account/login stays public (200, no redirect)', async ({ request }) => {
+  test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
   const res = await request.get('/account/login', { maxRedirects: 0 });
   expect(res.status()).toBe(200);
 });
