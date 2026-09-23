@@ -234,4 +234,11 @@ describe('requestSellerOtpAction — issue cap (fix 45)', { retry: 0 }, () => {
     expect(await requestSellerOtpAction(id)).toEqual({ ok: false });
     expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
   });
+
+  it('draws from the seller budget of the seller partner', async () => {
+    const id = await seedPendingSeller();
+    const issue = vi.spyOn(txOtp, 'issue');
+    await requestSellerOtpAction(id);
+    expect(issue).toHaveBeenCalledWith(id, PHONE, { kind: 'seller', partnerId: 'default' });
+  });
 });

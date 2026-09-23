@@ -109,9 +109,17 @@ export async function enforceIpRateLimit(
   // Program-Fix 48: normalise once so the bucket AND the Retry-After math use the
   // same window (a raw 0 used to send `retry-after: NaN`).
   windowSec = normalizeWindowSec(windowSec);
+  // A header-parse error is not a limiter outage: fail open WITHOUT the
+  // limiter-down alert (Program-Fix 45).
+  let ip: string;
+  try {
+    ip = clientIpFrom(req.headers);
+  } catch {
+    return null;
+  }
   try {
     const now = Date.now();
-    const result = await checkIpRateLimit(limiterRedis(), scope, clientIpFrom(req.headers), {
+    const result = await checkIpRateLimit(limiterRedis(), scope, ip, {
       limit,
       windowSec,
       now,
@@ -205,8 +213,15 @@ export async function isIpRateLimited(
   deps: IpGuardDeps = {},
 ): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // A header-parse error is not a limiter outage: fail open WITHOUT the
+  // limiter-down alert (Program-Fix 45).
+  let ip: string;
   try {
-    const ip = clientIpFrom(headers);
+    ip = clientIpFrom(headers);
+  } catch {
+    return false;
+  }
+  try {
     if (ip === 'unknown') return false;
     const timeoutMs = deps.timeoutMs ?? PAY_PAGE_GUARD_TIMEOUT_MS;
     // The deadline resolves "allowed": a stalled limiter must never hide a

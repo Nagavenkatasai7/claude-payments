@@ -117,6 +117,8 @@ describe('POST /api/pay/b2b/[invoiceId] — request_otp at an issue cap (fix 45)
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, sent: true });
     expect(sendTransactionOtp).toHaveBeenCalledOnce();
+    // Its own per-phone budget: kind 'b2b', scoped to the invoice's partner.
+    expect(issue).toHaveBeenCalledWith('inv_1', '15551112222', { kind: 'b2b', partnerId: 'default' });
   });
 
   it('locked → the same 200 {ok:true,sent:true}, and no code is sent', async () => {

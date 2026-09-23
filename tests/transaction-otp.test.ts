@@ -228,6 +228,38 @@ describe('transaction-otp — issue caps (fix 45)', () => {
     }
   });
 
+  it('the per-phone budget is scoped by caller kind: B2B at its cap never blocks the pay-page code', async () => {
+    for (let i = 0; i < 20; i++) {
+      expect((await store.issue(`inv_${i}`, PHONE, { kind: 'b2b', partnerId: 'default' })).ok).toBe(true);
+    }
+    expect(await store.issue('inv_20', PHONE, { kind: 'b2b', partnerId: 'default' })).toEqual({ ok: false, reason: 'locked' });
+    expect((await store.issue('transfer_1', PHONE, { kind: 'pay', partnerId: 'default' })).ok).toBe(true);
+    expect((await store.issue('seller_1', PHONE, { kind: 'seller', partnerId: 'default' })).ok).toBe(true);
+  });
+
+  it('the per-phone budget is scoped by partner: one partner at its cap never blocks another', async () => {
+    for (let i = 0; i < 20; i++) await store.issue(`inv_${i}`, PHONE, { kind: 'b2b', partnerId: 'p_a' });
+    expect((await store.issue('inv_20', PHONE, { kind: 'b2b', partnerId: 'p_a' })).ok).toBe(false);
+    expect((await store.issue('inv_21', PHONE, { kind: 'b2b', partnerId: 'p_b' })).ok).toBe(true);
+  });
+
+  it('no budget argument means the pay budget of the default partner', async () => {
+    for (let i = 0; i < 20; i++) await store.issue(`d_${i}`, PHONE);
+    expect(await store.issue('d_20', PHONE, { kind: 'pay', partnerId: 'default' })).toEqual({ ok: false, reason: 'locked' });
+    expect(phoneKeys().every((k) => k.startsWith('txotp:phone:pay:default:'))).toBe(true);
+  });
+
+  it('a refusal at the phone cap does not burn the transaction budget', async () => {
+    for (let i = 0; i < 20; i++) await store.issue(`d_${i}`, PHONE);
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'locked' });
+    expect(redis.dump.has(issuedKey(TX))).toBe(false);
+  });
+
+  it('a partner id is never written raw into a key beyond a safe charset', async () => {
+    await store.issue(TX, PHONE, { kind: 'pay', partnerId: 'p a|b:c' });
+    expect(phoneKeys()[0]).toMatch(/^txotp:phone:pay:p_a_b_c:[0-9a-f]{64}:\d+$/);
+  });
+
   it('fails closed on a Redis error: issue rejects, calls onStoreError once, and rethrows the original error', async () => {
     const boom = new Error('redis down');
     const onStoreError = vi.fn().mockResolvedValue(undefined);

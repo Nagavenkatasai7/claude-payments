@@ -201,7 +201,10 @@ describe('isIpRateLimited — page guard (fail-open, never throws)', () => {
 
   it('a headers object whose get() throws fails open and never throws', async () => {
     const hostile = { get: () => { throw new Error('boom'); } } as unknown as Headers;
-    await expect(isIpRateLimited(hostile, PAY_PAGE_SCOPE, 1, 60, { redis: fakeRedis(), alert: vi.fn() })).resolves.toBe(false);
+    const alert = vi.fn();
+    await expect(isIpRateLimited(hostile, PAY_PAGE_SCOPE, 1, 60, { redis: fakeRedis(), alert })).resolves.toBe(false);
+    // A header-parse error is not a Redis outage: no limiter-down alert (fix 45 review).
+    expect(alert).not.toHaveBeenCalled();
   });
 });
 
@@ -447,6 +450,19 @@ describe('limiter errors raise an ops alert and still fail open (Program-Fix 45)
       const { res, raise } = await enforceWith(async () => { throw new Error('upstash down'); });
       expect(res).toBeNull();
       expect(raise).toHaveBeenCalledWith('pay', 'fail-open');
+    });
+
+    it('a header-parse error fails open without a limiter-down alert', async () => {
+      vi.resetModules();
+      vi.stubEnv('KV_REST_API_URL', 'https://kv.example.test');
+      vi.stubEnv('KV_REST_API_TOKEN', 'test-token');
+      const raise = vi.fn().mockResolvedValue(undefined);
+      vi.doMock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert: raise }));
+      vi.doMock('@upstash/redis', () => ({ Redis: class { incr = async () => 1; expire = async () => 1; } }));
+      const mod = await import('@/lib/ip-rate-limit');
+      const hostile = { headers: { get: () => { throw new Error('bad header'); } } } as unknown as NextRequest;
+      expect(await mod.enforceIpRateLimit(hostile, 'pay', 3, 60)).toBeNull();
+      expect(raise).not.toHaveBeenCalled();
     });
 
     it('a healthy limiter never alerts', async () => {

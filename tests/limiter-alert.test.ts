@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { raiseLimiterDownAlert, __resetLimiterAlertMemo } from '@/lib/limiter-alert';
+import { raiseLimiterDownAlert, __resetLimiterAlertMemo, __limiterAlertMemoSize } from '@/lib/limiter-alert';
 
 // Program-Fix 45 (P2): a limiter that cannot reach Redis raises ONE deduped
 // ops.alert per scope per clock hour. The payload is {message} only, with no
@@ -58,5 +58,29 @@ describe('raiseLimiterDownAlert', () => {
     const enqueue = vi.fn().mockResolvedValue(true);
     await raiseLimiterDownAlert('a b|c', 'fail-open', { enqueue, now: () => T0 });
     expect(enqueue.mock.calls[0][2].dedupeKey).toBe(`limiter-down:a_b_c:${Math.floor(T0 / HOUR_MS)}`);
+  });
+});
+
+describe('raiseLimiterDownAlert — memo hygiene (fix 45 review)', () => {
+  it('an enqueue that rejects AFTER the deadline still clears its memo entry, so the next call retries', async () => {
+    let rejectLate: (e: Error) => void = () => {};
+    const enqueue = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<boolean>((_, rej) => { rejectLate = rej; }))
+      .mockResolvedValue(true);
+    await raiseLimiterDownAlert('pay', 'fail-open', { enqueue, now: () => T0, timeoutMs: 5 });
+    rejectLate(new Error('db down'));
+    await new Promise((r) => setTimeout(r, 0));
+    await raiseLimiterDownAlert('pay', 'fail-open', { enqueue, now: () => T0 });
+    expect(enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('prunes entries from past hours: the memo never grows beyond the current hour', async () => {
+    const enqueue = vi.fn().mockResolvedValue(true);
+    for (let h = 0; h < 50; h++) {
+      await raiseLimiterDownAlert('pay', 'fail-open', { enqueue, now: () => T0 + h * HOUR_MS });
+      await raiseLimiterDownAlert('rail', 'fail-open', { enqueue, now: () => T0 + h * HOUR_MS });
+    }
+    expect(__limiterAlertMemoSize()).toBe(2);
   });
 });

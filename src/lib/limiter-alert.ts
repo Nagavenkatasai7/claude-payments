@@ -11,9 +11,10 @@
 //    per-IP key embeds the client IP. Never a phone or a transfer id.
 //  - Dedupe key `limiter-down:<scope>:<hourBucket>`: outbox dedupe keys are
 //    permanent, so the hour bucket is what lets a lasting outage alert again.
-//  - An in-process memo per scope+hour stops an outage turning every request
-//    into a database insert. A failed enqueue clears its memo entry so the next
-//    call retries.
+//  - An in-process memo (one entry per scope, holding its last alerted hour)
+//    stops an outage turning every request into a database insert. A failed
+//    enqueue, even one that fails after the deadline, clears its entry so the
+//    next call retries.
 //  - Never throws, and is bounded by a deadline (a stalled database must not
 //    stall the request that noticed the Redis failure).
 //  - The database is imported lazily: ip-rate-limit.ts has ~20 importers and
@@ -37,11 +38,18 @@ export interface LimiterAlertDeps {
 const HOUR_MS = 60 * 60 * 1000;
 export const LIMITER_ALERT_TIMEOUT_MS = 1000;
 
-const memo = new Set<string>();
+// scope → the hour bucket already alerted. One entry per scope: a new hour
+// overwrites the old one, so the memo never grows past the number of scopes.
+const memo = new Map<string, number>();
 
 /** Test-only: forget which scope+hour alerts this process already raised. */
 export function __resetLimiterAlertMemo(): void {
   memo.clear();
+}
+
+/** Test-only: how many entries the memo holds. */
+export function __limiterAlertMemoSize(): number {
+  return memo.size;
 }
 
 const defaultEnqueue: Enqueue = async (kind, payload, opts) => {
@@ -70,28 +78,35 @@ export async function raiseLimiterDownAlert(
   deps: LimiterAlertDeps = {},
 ): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let memoKey: string | undefined;
+  let safeScope: string | undefined;
+  let hour: number | undefined;
+  // Clear only OUR entry: a later hour may already have replaced it.
+  const forget = () => {
+    if (safeScope !== undefined && memo.get(safeScope) === hour) memo.delete(safeScope);
+  };
   try {
-    const safeScope = scope.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
-    const hour = Math.floor((deps.now ? deps.now() : Date.now()) / HOUR_MS);
-    memoKey = `${safeScope}:${hour}`;
-    if (memo.has(memoKey)) return;
-    memo.add(memoKey);
+    safeScope = scope.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+    hour = Math.floor((deps.now ? deps.now() : Date.now()) / HOUR_MS);
+    if (memo.get(safeScope) === hour) return;
+    memo.set(safeScope, hour);
     const enqueue = deps.enqueue ?? defaultEnqueue;
     const deadline = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, deps.timeoutMs ?? LIMITER_ALERT_TIMEOUT_MS);
     });
-    // Promise.race subscribes to both, so a late rejection is absorbed.
-    await Promise.race([
-      enqueue(
-        'ops.alert',
-        { message: messageFor(safeScope, mode) },
-        { dedupeKey: `limiter-down:${memoKey}` },
-      ),
-      deadline,
-    ]);
+    // A rejection that lands after the deadline won the race still clears the
+    // memo, so the next request retries instead of the hour going silent.
+    const sent = enqueue(
+      'ops.alert',
+      { message: messageFor(safeScope, mode) },
+      { dedupeKey: `limiter-down:${safeScope}:${hour}` },
+    ).catch((err: unknown) => {
+      forget();
+      throw err;
+    });
+    await Promise.race([sent, deadline]);
+    sent.catch(() => {}); // absorbed if the deadline won
   } catch {
-    if (memoKey) memo.delete(memoKey); // let the next call retry
+    forget(); // let the next call retry
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }

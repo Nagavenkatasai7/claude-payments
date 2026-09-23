@@ -2,6 +2,7 @@ import { getRedis } from './redis';
 import { createHash, randomInt as cryptoRandomInt, timingSafeEqual } from 'node:crypto';
 import type { RedisLike } from './store';
 import { raiseLimiterDownAlert } from './limiter-alert';
+import { DEFAULT_PARTNER_ID } from './defaults';
 
 /**
  * transaction-otp — a per-transaction step-up code (Phase 3, Part B).
@@ -27,12 +28,12 @@ import { raiseLimiterDownAlert } from './limiter-alert';
  * Issue caps (Program-Fix 45): two more ceilings bound how many codes are SENT.
  *  - `txotp:issued:<sha(txId)>` — codes per transaction over its lifetime
  *    (≤ TXOTP_MAX_ISSUES_PER_TX; TTL 8 days, past the 7-day unpaid-link expiry).
- *  - `txotp:phone:<sha(digits(phone))>:<day>` — codes per phone per UTC-day
- *    bucket (≤ TXOTP_MAX_ISSUES_PER_PHONE_PER_DAY), across all transactions.
+ *  - `txotp:phone:<kind>:<partnerId>:<sha(digits(phone))>:<day>` — codes per
+ *    phone per UTC-day bucket (≤ TXOTP_MAX_ISSUES_PER_PHONE_PER_DAY), across
+ *    transactions, scoped by caller kind and partner (see TxOtpBudget).
  *  Both are reserved with an atomic INCR AFTER the cooldown and fail-cap
  *  refusals (a refused request never burns quota) and BEFORE a code is minted;
- *  the transaction counter goes first, so a refusal there leaves the phone's
- *  budget untouched. At a cap `issue()` returns `locked`. A Redis error
+ *  neither cap's refusal burns the other's budget (see issueInner). At a cap `issue()` returns `locked`. A Redis error
  *  propagates (fails closed) after `onStoreError` raises the ops signal.
  */
 const TTL_S = 10 * 60;
@@ -43,7 +44,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const FAIL_BUCKET_TTL_S = 2 * 24 * 60 * 60; // outlives its day bucket
 export const TXOTP_MAX_ISSUES_PER_TX = 10;
 export const TXOTP_MAX_ISSUES_PER_PHONE_PER_DAY = 20;
-const ISSUED_TTL_S = 8 * 24 * 60 * 60; // outlives the 7-day unpaid-link expiry
+// Outlives the 7-day unpaid pay-link expiry. B2B invoice and seller ids do NOT
+// expire, so for those the lifetime counter lapses after 8 days and the budget
+// renews; the per-phone daily cap still bounds them in the meantime.
+const ISSUED_TTL_S = 8 * 24 * 60 * 60;
 /** The scope name the ops signal carries when an issue hits a Redis error. */
 export const TXOTP_ISSUE_SCOPE = 'txotp-issue';
 
@@ -53,10 +57,23 @@ const cdKey = (txId: string) => `txotp:cd:${sha(txId)}`;
 const attKey = (txId: string) => `txotp:att:${sha(txId)}`;
 const failKey = (txId: string, t: number) => `txotp:fail:${sha(txId)}:${Math.floor(t / DAY_MS)}`;
 const issuedKey = (txId: string) => `txotp:issued:${sha(txId)}`;
+/**
+ * Which per-phone daily budget an issue draws from. Budgets are separate per
+ * caller kind AND per partner, so one flow (or one tenant) reaching its cap can
+ * never block a phone's codes in another. The default is the remittance pay
+ * page of the default partner, so no caller is ever left unscoped.
+ */
+export type TxOtpBudgetKind = 'pay' | 'b2b' | 'seller';
+export interface TxOtpBudget {
+  kind: TxOtpBudgetKind;
+  partnerId: string;
+}
+const DEFAULT_BUDGET: TxOtpBudget = { kind: 'pay', partnerId: DEFAULT_PARTNER_ID };
+const keySafe = (s: string) => s.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
 // Digits only, so '+1555…' and '1555…' share one budget. Only this cap key is
 // normalised: the record's phoneHash stays sha(phone), which old builds verify.
-const phoneDayKey = (phone: string, t: number) =>
-  `txotp:phone:${sha(phone.replace(/\D/g, ''))}:${Math.floor(t / DAY_MS)}`;
+const phoneDayKey = (phone: string, t: number, b: TxOtpBudget) =>
+  `txotp:phone:${b.kind}:${keySafe(b.partnerId)}:${sha(phone.replace(/\D/g, ''))}:${Math.floor(t / DAY_MS)}`;
 
 interface Rec {
   codeHash: string;
@@ -97,7 +114,7 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
     return n;
   }
 
-  async function issueInner(txId: string, phone: string): Promise<IssueResult> {
+  async function issueInner(txId: string, phone: string, budget: TxOtpBudget): Promise<IssueResult> {
     const t = now();
     // Cooldown is judged in code off the injectable clock (the Redis TTL is a
     // backstop). A pre-fix-19 build wrote the marker '1' (TTL 30 s): still in cooldown.
@@ -112,11 +129,18 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       return { ok: false, reason: 'locked' };
     }
     // Program-Fix 45: reserve the send budgets only now, past every refusal
-    // above. Transaction first, so a refusal there leaves the phone's budget alone.
-    if ((await bump(issuedKey(txId), ISSUED_TTL_S)) > TXOTP_MAX_ISSUES_PER_TX) {
+    // above. A transaction already at its lifetime cap is refused on a plain
+    // read first, so it never touches the phone's budget. Then the phone budget
+    // is reserved, and only once that passes is the transaction's (so a phone-cap
+    // refusal never burns the transaction's budget). Only a concurrent race at the
+    // transaction cap can cost the phone one unit; RedisLike has no DECR to refund.
+    if ((await readCounter(issuedKey(txId))) >= TXOTP_MAX_ISSUES_PER_TX) {
       return { ok: false, reason: 'locked' };
     }
-    if ((await bump(phoneDayKey(phone, t), FAIL_BUCKET_TTL_S)) > TXOTP_MAX_ISSUES_PER_PHONE_PER_DAY) {
+    if ((await bump(phoneDayKey(phone, t, budget), FAIL_BUCKET_TTL_S)) > TXOTP_MAX_ISSUES_PER_PHONE_PER_DAY) {
+      return { ok: false, reason: 'locked' };
+    }
+    if ((await bump(issuedKey(txId), ISSUED_TTL_S)) > TXOTP_MAX_ISSUES_PER_TX) {
       return { ok: false, reason: 'locked' };
     }
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
@@ -136,9 +160,9 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
   }
 
   return {
-    async issue(txId: string, phone: string): Promise<IssueResult> {
+    async issue(txId: string, phone: string, budget: TxOtpBudget = DEFAULT_BUDGET): Promise<IssueResult> {
       try {
-        return await issueInner(txId, phone);
+        return await issueInner(txId, phone, budget);
       } catch (err) {
         try {
           await opts.onStoreError?.(TXOTP_ISSUE_SCOPE);
