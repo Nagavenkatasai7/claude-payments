@@ -740,6 +740,9 @@ async function handle(
   }
 }
 
+/** How many due reply rows drainOnce claims right after an agent.turn finishes (review S2). */
+const INLINE_REPLY_CLAIM = 5;
+
 export interface DrainResult {
   processed: number;
   failed: number;
@@ -787,7 +790,9 @@ export async function drainOnce(
   opts: DrainOptions = {},
 ): Promise<DrainResult> {
   const outbox: OutboxRepo = createOutboxRepo(deps.db);
-  const rows = await outbox.claimBatch(batchSize, workerId);
+  // Review S1: run in id order — UPDATE … RETURNING order is not guaranteed,
+  // and agent.turn ordering (plus the FIFO gate) assumes oldest first.
+  const rows = (await outbox.claimBatch(batchSize, workerId)).sort((a, b) => a.id - b.id);
   const partner = memoizedPartnerContext(deps); // one drain-time creds resolver per BATCH (fix 11)
   const rowDeadlineMs = opts.rowDeadlineMs ?? ROW_DEADLINE_MS;
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
@@ -841,6 +846,13 @@ export async function drainOnce(
       await withRowDeadline(handle(deps, row, signal, partner), rowDeadlineMs, signal);
       if (await outbox.markDone(row.id, workerId)) {
         result.processed++;
+        // Review S2: a finished turn's reply row is sent NEXT, not after every
+        // other customer's turn in this batch. It is claimed like any row (lease,
+        // attempt, CAS markDone) and runs through this same loop, so the budget,
+        // hard-stop and failure paths all apply to it.
+        if (row.kind === 'agent.turn') {
+          rows.splice(i + 1, 0, ...(await outbox.claimReplies(INLINE_REPLY_CLAIM, workerId)));
+        }
       } else {
         // Our lease was reclaimed while we ran (we outlived LEASE_MS): the new
         // owner's outcome wins. Ids/kinds only — never the payload.
