@@ -702,7 +702,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'update_recipient_phone',
       description:
-        "Add or correct the recipient's WhatsApp number on an existing transfer. Use this if a transfer was created without a valid recipient number.",
+        "Add or correct the recipient's WhatsApp number on an existing transfer that has not been paid yet. Use this if a transfer was created without a valid recipient number. After payment the number can't be changed here.",
       parameters: {
         type: 'object',
         properties: {
@@ -3193,11 +3193,24 @@ async function updateRecipientPhoneTool(
 
   // A column-targeted UPDATE (never a full-row save of the read above), scoped
   // to tenant + owner in the WHERE; the reply reflects the row as written.
+  // The WHERE also limits the edit to an unpaid transfer (no payment, capture
+  // or settlement instruction yet), atomically.
   const updated = await ctx.store.updateRecipientPhone(transfer.id, ctx.partnerId, ctx.phone, recipientPhone);
-  if (!updated) return { error: 'That transfer can no longer be edited.' };
+  if (!updated) {
+    const now = await ctx.store.getTransfer(transfer.id);
+    if (now && now.phone === ctx.phone && now.partnerId === ctx.partnerId) {
+      return {
+        error: "The recipient's number can't be changed after payment.",
+        error_code: 'recipient_phone_locked',
+        reply_hint:
+          "explain that the recipient's number can't be changed once a transfer is paid, and offer to connect them with a person; if they agree, call request_human_help (reason 'payment_problem') and quote its case_id",
+      };
+    }
+    return { error: 'That transfer can no longer be edited.' };
+  }
   return {
     transfer_id: updated.id,
-    recipient_phone: recipientPhone,
+    recipient_phone: updated.recipientPhone,
     recipient_name: boundUntrustedText(updated.recipientName, NAME_MAX), // fix 5: may be API-written
     status: updated.status,
   };
