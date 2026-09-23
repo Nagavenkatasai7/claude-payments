@@ -70,6 +70,7 @@ const ALL_TABLES = [
   'waitlist_signups',
   'sanctions_list_entries',
   'sanctions_list_versions',
+  'staff',
   'funding_events',
 ].join(', ');
 

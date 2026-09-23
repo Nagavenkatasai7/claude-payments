@@ -717,6 +717,33 @@ export const sanctionsListEntries = pgTable(
   (t) => [primaryKey({ columns: [t.versionId, t.entryId] })],
 );
 
+// Program-Fix 45 P5 (crypto-03, migration 0022): the staff ledger. Staff
+// records lived only in Redis (auth-store `staff:<username>`, no TTL). During
+// the dual-write release auth-store writes BOTH stores and a record exists only
+// while its Redis record exists; this row can only RESTRICT it (status, role,
+// permissions, partner scope). password_hash is a mirror that is NOT read yet
+// (the PG-first flip is a later PR). partner_id NULL = platform staff.
+export const staff = pgTable(
+  'staff',
+  {
+    username: text('username').primaryKey(),
+    partnerId: text('partner_id').references(() => partners.id),
+    name: text('name').notNull(),
+    role: text('role').notNull(),
+    permissions: jsonb('permissions').notNull(),
+    passwordHash: text('password_hash').notNull(),
+    status: text('status').notNull().default('active'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('staff_role_check', sql`${t.role} IN ('admin','agent','support')`),
+    check('staff_status_check', sql`${t.status} IN ('active','suspended')`),
+    index('staff_partner').on(t.partnerId),
+  ],
+);
+
 // ── Program-Fix 7 (0024): processed PSP webhook events ────────────────────────
 // Idempotency BACKSTOP for the Stripe funding webhook (the guarded ledger
 // transitions are the primary guard): one row per (partner, provider, event

@@ -28,9 +28,16 @@ vi.mock('@/lib/env', () => ({
     },
   }),
 }));
+// Program-Fix 45 P5: the store the app uses carries the Postgres staff ledger
+// (the fresh PGlite db). `ledgerOverride` swaps in a failing ledger per test.
+let ledgerOverride: import('@/lib/auth-store').StaffLedger | null = null;
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
-  return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
+  const { createStaffRepo } = await vi.importActual<typeof import('@/db/repos/staff-repo')>('@/db/repos/staff-repo');
+  return {
+    ...actual,
+    getAuthStore: () => actual.createAuthStore(redis, { ledger: () => ledgerOverride ?? createStaffRepo(db) }),
+  };
 });
 // Program-Fix 17b: login() asks whether the account enrolled in TOTP.
 vi.mock('@/lib/staff-mfa-store', async () => {
@@ -77,6 +84,8 @@ import { SESSION_COOKIE, LEGACY_SESSION_COOKIE } from '@/lib/session-cookie';
 import { createAuthStore } from '@/lib/auth-store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { verifyPassword } from '@/lib/password';
+import { createStaffRepo } from '@/db/repos/staff-repo';
+import { getAuthStore } from '@/lib/auth-store';
 
 beforeEach(async () => {
   redis.dump.clear();
@@ -84,6 +93,7 @@ beforeEach(async () => {
   db = await freshDb();
   ps = createPartnerStore(db);
   for (const k of Object.keys(envOverrides)) delete envOverrides[k];
+  ledgerOverride = null;
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -174,5 +184,63 @@ describe('login revokes the sessions behind the presented cookies (Program-Fix 4
     expect(fresh && fresh !== oldNew).toBe(true);
     expect(await store.getSessionUser(fresh!)).toBe('admin');
     expect(cookieJar.has(LEGACY_SESSION_COOKIE)).toBe(false);
+  });
+});
+
+// Program-Fix 45 P5 (crypto-03): the seed admin across the staff ledger. Owner
+// rule: nothing may lock out the seed admin.
+describe('seed admin and the staff ledger (Program-Fix 45 P5)', () => {
+  function signIn(username: string, password: string) {
+    const fd = new FormData();
+    fd.set('username', username);
+    fd.set('password', password);
+    return login(null, fd);
+  }
+
+  it('the seed lands in both stores', async () => {
+    await ensureSeedAdmin();
+    const row = await createStaffRepo(db).get('admin');
+    expect(row?.role).toBe('admin');
+    expect(row?.partnerId).toBeUndefined();
+    expect(redis.dump.has('staff:admin')).toBe(true);
+  });
+
+  it('a ledger outage never stops the seed: the Redis record lands and the seed admin signs in', async () => {
+    const failingLedger = new Proxy(createStaffRepo(db), {
+      get: () => async () => {
+        throw new Error('ledger down');
+      },
+    });
+    ledgerOverride = failingLedger;
+    await ensureSeedAdmin();
+    expect(redis.dump.has('staff:admin')).toBe(true);
+    await expect(signIn('admin', 'pw')).rejects.toThrow('REDIRECT:/admin-dashboard');
+  });
+
+  it('a stale suspended/demoted row never locks the seed admin out', async () => {
+    await ensureSeedAdmin();
+    const repo = createStaffRepo(db);
+    const row = (await repo.get('admin'))!;
+    await repo.upsert({ ...row, status: 'suspended', role: 'support' });
+    await expect(signIn('admin', 'pw')).rejects.toThrow('REDIRECT:/admin-dashboard');
+  });
+
+  it('a suspended row DOES stop any other member (most restrictive)', async () => {
+    await ensureSeedAdmin();
+    const store = getAuthStore();
+    const admin = (await store.getStaff('admin'))!;
+    await store.saveStaff({ ...admin, username: 'teammate', name: 'Teammate' });
+    const repo = createStaffRepo(db);
+    await repo.upsert({ ...(await repo.get('teammate'))!, status: 'suspended' });
+    await expect(signIn('teammate', 'pw')).resolves.toBe('Account unavailable. Contact SmartRemit support.');
+    expect(cookieJar.size).toBe(0);
+  });
+
+  it('a Redis flush with rows left behind re-seeds the seed admin, who signs in', async () => {
+    await ensureSeedAdmin();
+    redis.dump.clear();
+    await redis.srem('staff:index', 'admin');
+    await ensureSeedAdmin();
+    await expect(signIn('admin', 'pw')).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
 });

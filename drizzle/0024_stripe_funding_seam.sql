@@ -22,8 +22,8 @@
 -- lock_timeout makes them fail fast instead of queueing live traffic behind a
 -- long transaction.
 --
--- CHAIN NOTE: 0022 (#348) and 0023 (#350) are byte-copied here unmerged; this
--- file must be regenerated/renumbered after they merge.
+-- CHAIN NOTE: 0022 (#348) is on main; 0023 (#350) is byte-copied here unmerged
+-- from pull/350/head — regenerate this file's snapshot after #350 merges.
 --
 -- Rollback: revert the code FIRST (the new build selects these columns), then
 --   DROP INDEX "transfers_funding_intent";
