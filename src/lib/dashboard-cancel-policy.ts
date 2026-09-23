@@ -42,7 +42,7 @@ export type StaffCancelDecision =
   | { kind: 'noop' } // delivered / cancelled: idempotent second click
   | { kind: 'refuse'; reason: string };
 
-type CancelView = Pick<Transfer, 'status' | 'fundingMethod' | 'fundingRef'>;
+type CancelView = Pick<Transfer, 'status' | 'fundingMethod' | 'fundingRef'> & Partial<Pick<Transfer, 'fundingIntentRef'>>;
 
 export function decideStaffCancel(t: CancelView): StaffCancelDecision {
   switch (t.status) {
@@ -63,7 +63,11 @@ export function decideStaffCancel(t: CancelView): StaffCancelDecision {
       // Exactly `== null`, matching the claim's SQL `funding_ref IS NULL`: an
       // empty-string ref is NOT NULL there, so it must be refused here too,
       // never offered as a void the guarded UPDATE cannot land.
-      return t.fundingRef == null ? { kind: 'void' } : { kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting };
+      // Program-Fix 7: a bound PSP intent (an ACH debit may land days later)
+      // counts as charged — the claim's SQL refuses it too (funding_intent_ref IS NULL).
+      return t.fundingRef == null && t.fundingIntentRef == null
+        ? { kind: 'void' }
+        : { kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting };
     default: {
       // Exhaustive: a new TransferStatus (e.g. Task 4's rail-failure state)
       // fails tsc HERE until its Cancel semantics are decided. At runtime an

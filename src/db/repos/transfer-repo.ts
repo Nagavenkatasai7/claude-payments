@@ -6,7 +6,7 @@ import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers
 import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
-import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
+import type { CountryCode, FundingProviderId, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 import {
   encodeStatementCursor,
   type SettledTransfer,
@@ -66,6 +66,23 @@ function parseCursor(cursor: string | undefined): { createdAt: Date; id: string 
 const LIVE_ONLY = eq(transfers.environment, 'live');
 
 /**
+ * Program-Fix 7 — THE FUNDING GATE (a predicate, like the compliance gate):
+ * a row may flip to paid / in_review only when its async debit is absent
+ * (NULL — every mock / partner-settled row, i.e. everything while the flag is
+ * OFF) or has SUCCEEDED. A pending, failed or returned debit can never reach
+ * a rail or a "payment received" message, whichever caller asks.
+ */
+const fundingGate = () =>
+  sql`(${transfers.fundingState} IS NULL OR ${transfers.fundingState} = 'succeeded')`;
+
+/**
+ * Program-Fix 7 — "never charged AND no debit possibly in flight": the void /
+ * edit predicates' unfunded test. A bound PSP intent counts as possibly
+ * charged (the sender may have confirmed an ACH debit that lands days later).
+ */
+const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef));
+
+/**
  * Program-Fix 14 PR C: columns written only when a row is created. `screening`
  * is the mint's sanctions evidence (transfers.screening, migration 0023): list
  * identity, decision and keyed input hashes, never a name. It is deliberately
@@ -105,7 +122,7 @@ export function createTransferRepo(
       eq(transfers.id, id),
       eq(transfers.partnerId, partnerId),
       eq(transfers.status, 'awaiting_payment'),
-      isNull(transfers.fundingRef),
+      unfundedNoIntent(),
       eq(transfers.transferType, 'b2c'),
       sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%')`,
       sql`NOT EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key')`,
@@ -281,6 +298,13 @@ export function createTransferRepo(
             // caller's alertCallbackOnHold (rail-failure.ts) raises the signal.
             sql`(${transfers.status} <> 'awaiting_payment' OR ${transfers.complianceStatus} = 'cleared')`,
             ne(transfers.complianceStatus, 'blocked'),
+            // Program-Fix 7 (review M-1a): the FUNDING GATE on the rail
+            // callback's paid flip — an awaiting row whose async debit is
+            // pending / failed / returned never becomes paid or delivered here.
+            // A no-op on every row without an async debit (funding_state NULL).
+            // paid → delivered is NOT re-gated: the payout already went out; a
+            // later return is alerted (stripe-funding-webhook), never hidden.
+            sql`(${transfers.status} <> 'awaiting_payment' OR ${fundingGate()})`,
           ),
         )
         .returning();
@@ -348,7 +372,129 @@ export function createTransferRepo(
       await db
         .update(transfers)
         .set({ fundingRef: ref })
-        .where(and(eq(transfers.id, id), isNull(transfers.fundingRef)));
+        // Program-Fix 7: never on a row bound to a PSP intent — only a
+        // VERIFIED PSP event (markFundingSucceeded) may record that charge.
+        .where(and(eq(transfers.id, id), isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef)));
+    },
+
+    /**
+     * Program-Fix 7: bind the PSP intent (NOT a charge) to an awaiting,
+     * uncharged row of THIS tenant, write-once; state → pending. Re-binding
+     * the SAME intent is idempotent and re-arms a failed attempt (the sender
+     * retries on the same intent); a different intent is refused. Null ⇒ a
+     * guard failed (moved, charged, other tenant, other intent).
+     */
+    async bindFundingIntent(
+      id: string,
+      partnerId: PartnerId,
+      provider: FundingProviderId,
+      intentRef: string,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingProvider: provider, fundingIntentRef: intentRef, fundingState: 'pending' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.fundingRef),
+          or(
+            isNull(transfers.fundingIntentRef),
+            and(
+              eq(transfers.fundingIntentRef, intentRef),
+              sql`${transfers.fundingState} IN ('pending', 'failed')`,
+            ),
+          ),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Program-Fix 7: a VERIFIED `payment_intent.succeeded` for THIS tenant's
+     * bound intent — record the charge (funding_ref = the intent id,
+     * write-once) and state → succeeded, in one guarded UPDATE. No status
+     * change: settlement is still the one settleOrHold path. A replay (already
+     * succeeded) or a foreign intent/tenant is null.
+     */
+    async markFundingSucceeded(id: string, partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingRef: intentRef, fundingState: 'succeeded' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.fundingIntentRef, intentRef),
+          isNull(transfers.fundingRef),
+          sql`${transfers.fundingState} IN ('pending', 'failed')`,
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Program-Fix 7: pending → failed (a verified payment_failed / canceled). Never un-funds a success. */
+    async markFundingFailed(id: string, partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingState: 'failed' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.fundingIntentRef, intentRef),
+          eq(transfers.fundingState, 'pending'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Program-Fix 7: a verified dispute / late ACH return for (partner,
+     * intent) — state → returned. Status is left as-is (the funding gate now
+     * blocks every later paid / hold / release claim); the caller raises the
+     * ops alert. Null ⇒ unknown intent for this tenant, or already returned.
+     */
+    async markFundingReturned(partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingState: 'returned' })
+        .where(and(
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.fundingIntentRef, intentRef),
+          sql`${transfers.fundingState} IN ('pending', 'succeeded', 'failed')`,
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Program-Fix 7 (review M1): awaiting rows bound to a PSP intent that is
+     * still pending / failed and older than the cutoff — neither voidable (the
+     * intent may still be confirmed) nor settleable. Cross-tenant by design (a
+     * system sweep that only raises alerts). Bounded.
+     */
+    async listStaleFundingIntents(cutoff: Date, limit = 50): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          eq(transfers.status, 'awaiting_payment'),
+          isNotNull(transfers.fundingIntentRef),
+          sql`${transfers.fundingState} IN ('pending', 'failed')`,
+          lt(transfers.createdAt, cutoff),
+        ))
+        .orderBy(transfers.createdAt)
+        .limit(limit);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /** Program-Fix 7: (partner, intent) → transfer, tenant-scoped (masked read). */
+    async findByFundingIntent(partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(eq(transfers.partnerId, partnerId), eq(transfers.fundingIntentRef, intentRef)))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
     },
 
     /**
@@ -428,8 +574,17 @@ export function createTransferRepo(
         .where(and(
           eq(transfers.status, 'awaiting_payment'),
           sql`${transfers.fundingRef} IS NOT NULL`,
+          // Program-Fix 7: a charge later RETURNED is not a victim to resume
+          // (the claim gate would refuse it anyway); its dispute alert owns it.
+          fundingGate(),
+          // Review L-a: a Stripe-funded row the pre-settlement re-screen
+          // BLOCKED already raised its fundblocked alert and can never settle;
+          // re-listing it would re-screen it every minute and could starve
+          // real victims. Legacy blocked rows keep today's refused path.
+          sql`NOT (${transfers.fundingProvider} IS NOT DISTINCT FROM 'stripe' AND ${transfers.complianceStatus} = 'blocked')`,
           lt(transfers.createdAt, cutoff),
         ))
+        .orderBy(transfers.createdAt)
         .limit(50);
       return rows.map((r) => toDomain(r));
     },
@@ -449,7 +604,7 @@ export function createTransferRepo(
         .from(transfers)
         .where(and(
           eq(transfers.status, 'awaiting_payment'),
-          isNull(transfers.fundingRef),
+          unfundedNoIntent(),
           lt(transfers.createdAt, cutoff),
           // Review S1: consumer rows only. A B2B invoice row is owned by its
           // bill: b2b-pay-finalize replays a bound-and-minted row as ok, so an
@@ -479,6 +634,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.status, 'awaiting_payment'),
           eq(transfers.complianceStatus, 'cleared'),
+          fundingGate(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -508,6 +664,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.status, 'awaiting_payment'),
           ne(transfers.complianceStatus, 'blocked'),
+          fundingGate(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -542,7 +699,9 @@ export function createTransferRepo(
           ? {
               complianceStatus: 'blocked',
               complianceReasons: reasons,
-              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
+              // Program-Fix 7: a bound PSP intent may still land a debit —
+              // keep it awaiting (the Stripe webhook raises the alert).
+              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL AND ${transfers.fundingIntentRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
             }
           : { complianceStatus: 'flagged', complianceReasons: reasons })
         .where(and(
@@ -584,6 +743,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.status, 'in_review'),
           ne(transfers.complianceStatus, 'blocked'),
+          fundingGate(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -649,7 +809,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.partnerId, partnerId),
           eq(transfers.status, 'awaiting_payment'),
-          isNull(transfers.fundingRef),
+          unfundedNoIntent(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -682,7 +842,7 @@ export function createTransferRepo(
           eq(transfers.phone, ownerPhone),
           eq(transfers.status, 'awaiting_payment'),
           isNull(transfers.paidAt),
-          isNull(transfers.fundingRef),
+          unfundedNoIntent(),
           isNull(transfers.paymentProviderRef),
         ))
         .returning();
@@ -1176,6 +1336,10 @@ export function createTransferRepo(
             // Once a refund is in flight or done, the transfer is no longer "stuck",
             // it is being clawed back. refund_status defaults to 'none'.
             eq(transfers.refundStatus, 'none'),
+            // Program-Fix 7 (review M-1b): a paid row whose sender debit was
+            // RETURNED is not "stuck" — it must never be re-instructed (its
+            // dispute alert owns it). NULL (every non-async row) still listed.
+            sql`${transfers.fundingState} IS DISTINCT FROM 'returned'`,
           ),
         )
         .orderBy(transfers.paidAt);

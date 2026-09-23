@@ -36,6 +36,20 @@ export interface PartnerWhatsappConfig {
   appSecret?: string; // SECRET — Meta App secret for inbound x-hub-signature-256 verification
 }
 
+/**
+ * Program-Fix 7 — SENDER funds-capture config: the LICENSED PARTNER's own PSP
+ * account (Stripe). Deliberately NOT part of PartnerIntegrations: it has its
+ * own encrypted columns (funding_provider_type / funding_credentials_enc) and
+ * its own repo methods (getFundingConfig / setFundingConfig), so a dashboard
+ * save of the rail/KYC/WhatsApp config can never null it. absent ⇒ the mock
+ * (today's behaviour). Only honoured while STRIPE_FUNDING_ENABLED is 'true'.
+ */
+export interface PartnerFundingConfig {
+  providerType?: 'stripe';
+  secretKey?: string;          // SECRET — the partner's Stripe secret/restricted key
+  webhookSecrets?: string[];   // SECRET — the partner's endpoint signing secret(s) (≤2 while rolling)
+}
+
 /** The fully-resolved technical config (all sub-objects always present, possibly empty). */
 export interface PartnerIntegrations {
   kyc: PartnerKycConfig;

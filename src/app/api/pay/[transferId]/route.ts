@@ -13,7 +13,7 @@ import { getDb } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { DEFAULT_DESTINATION_COUNTRY } from '@/lib/defaults';
-import { getFundingProvider } from '@/lib/providers/funding-provider';
+import { getFundingProvider, isPendingCapture, selectFundingProvider } from '@/lib/providers/funding-provider';
 import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
@@ -56,8 +56,63 @@ export const maxDuration = 300;
  * returns a clean 402 and the customer retries the same link.
  */
 async function captureFunding(transfer: Transfer): Promise<void> {
-  const { fundingRef } = await getFundingProvider().capture(transfer);
-  await createTransferRepo(getDb()).setFundingRef(transfer.id, fundingRef);
+  const result = await getFundingProvider().capture(transfer);
+  // The legacy provider is synchronous; an async (pending) shape here would be
+  // a wiring error — never record it as a charge.
+  if (isPendingCapture(result)) throw new Error('unexpected async capture on the legacy funding path');
+  await createTransferRepo(getDb()).setFundingRef(transfer.id, result.fundingRef);
+}
+
+/**
+ * Program-Fix 7 — the funding decision for THIS transfer:
+ *  - 'settle'  : money is (or is treated as) captured — continue to
+ *                settleOrHold exactly as before (legacy mock / partner-settled
+ *                capture, or an async debit that already SUCCEEDED and whose
+ *                settlement a crash interrupted);
+ *  - Response  : stop here. A Stripe capture is PENDING: the intent is bound
+ *                (never as fundingRef), the browser gets the client secret to
+ *                confirm, and settlement waits for the SIGNED webhook
+ *                (/api/funding-webhook/stripe/<partnerId>). Refusals are 402s
+ *                with nothing mutated.
+ * Flag OFF (STRIPE_FUNDING_ENABLED unset) on a row never bound to a PSP intent
+ * is the byte-identical legacy path: getFundingProvider().capture →
+ * setFundingRef, with no config read.
+ */
+async function fundTransfer(transfer: Transfer): Promise<'settle' | NextResponse> {
+  const bound = transfer.fundingProvider === 'stripe' || !!transfer.fundingIntentRef;
+  if (!env.stripeFundingEnabled && !bound) {
+    await captureFunding(transfer);
+    return 'settle';
+  }
+  if (transfer.fundingState === 'succeeded') return 'settle'; // charged; resume settlement
+  if (transfer.fundingState === 'returned') {
+    return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
+  }
+  const config = env.stripeFundingEnabled
+    ? await getPartnerIntegrationsStore().getFundingConfig(transfer.partnerId)
+    : null;
+  const selection = selectFundingProvider(transfer, { enabled: env.stripeFundingEnabled, config });
+  if (selection.kind === 'refused') {
+    logError('pay.funding-refused', new Error(`funding refused: ${selection.reason}`), { transferId: transfer.id });
+    return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });
+  }
+  if (selection.kind === 'mock') {
+    await captureFunding(transfer);
+    return 'settle';
+  }
+  const pending = await selection.provider.capture(transfer);
+  const repo = createTransferRepo(getDb());
+  const boundRow = await repo.bindFundingIntent(transfer.id, transfer.partnerId, 'stripe', pending.intentRef);
+  if (!boundRow) {
+    // Moved, charged or bound to another intent since our read — never hand
+    // out a secret for an intent the ledger does not hold.
+    return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 409 });
+  }
+  // The client secret goes ONLY to this (OTP-verified) browser — never logged,
+  // stored or queued (https://docs.stripe.com/api/payment_intents/object.md,
+  // `client_secret`: "should not be stored, logged, or exposed to anyone
+  // other than the customer").
+  return NextResponse.json({ ok: true, status: 'awaiting_funds', clientSecret: pending.clientSecret });
 }
 
 /**
@@ -240,7 +295,8 @@ async function processTransferPayment(
   // entirely (derived from the transfer, so this holds for EVERY call site).
   if (!(transfer.transferType === 'b2b' && isPartnerPulled(transfer.fundingMethod))) {
     try {
-      await captureFunding(transfer);
+      const funded = await fundTransfer(transfer);
+      if (funded !== 'settle') return funded; // async capture pending, or refused
     } catch (err) {
       logError('pay.capture', err, { transferId: transfer.id });
       return NextResponse.json({ ok: false, error: 'payment_failed' }, { status: 402 });

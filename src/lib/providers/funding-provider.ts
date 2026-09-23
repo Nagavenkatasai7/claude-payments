@@ -1,4 +1,7 @@
 import type { Transfer } from '@/lib/types';
+import type { PartnerFundingConfig } from '@/lib/partner-integrations';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { StripeFundingProvider } from './stripe-funding-provider';
 
 // funding-provider — the FUNDS-CAPTURE seam (the sender-side charge), distinct
 // from payment-provider.ts (the recipient-side settlement rail). SmartRemit is
@@ -21,8 +24,36 @@ import type { Transfer } from '@/lib/types';
 //    real providers) — the /api/funding-webhook/[provider] route verifies the
 //    HMAC fail-closed BEFORE calling this.
 
-export interface CaptureResult {
+/**
+ * A SYNCHRONOUS capture: the charge exists now. `state` is optional so the
+ * pre-fix-7 shape `{ fundingRef }` (the mock) stays valid and byte-identical;
+ * absent ⇒ 'captured'.
+ */
+export interface CapturedResult {
   fundingRef: string;
+  state?: 'captured';
+}
+
+/**
+ * Program-Fix 7 — an ASYNC capture: the PSP created (or re-presented) an
+ * intent the SENDER must still confirm in the browser, and the money is only
+ * real once a SIGNED webhook says so (ACH can take up to 4 business days —
+ * https://docs.stripe.com/payments/ach-direct-debit). NOT a charge: the pay
+ * route persists `intentRef` (never as fundingRef) and never settles on it.
+ * `clientSecret` goes to the paying browser only — never logged, stored or
+ * put in an outbox payload.
+ */
+export interface PendingCaptureResult {
+  state: 'pending';
+  intentRef: string;
+  clientSecret: string;
+}
+
+export type CaptureResult = CapturedResult | PendingCaptureResult;
+
+/** Narrowing helper: true only for the async (not-yet-funded) shape. */
+export function isPendingCapture(r: CaptureResult): r is PendingCaptureResult {
+  return r.state === 'pending';
 }
 
 export interface RefundResult {
@@ -50,7 +81,7 @@ export interface FundingProvider {
  * simulator rail plays for settlement.
  */
 export class MockFundingProvider implements FundingProvider {
-  async capture(transfer: Transfer): Promise<CaptureResult> {
+  async capture(transfer: Transfer): Promise<CapturedResult> {
     return { fundingRef: `mockfund-${transfer.id}` };
   }
 
@@ -76,10 +107,64 @@ export class MockFundingProvider implements FundingProvider {
 }
 
 /**
- * Provider selection. Mock-only today (mirrors paymentProviderMode); a real
- * PSP lands here as an 'http'-style implementation without touching call
- * sites — same swap pattern as getPaymentProvider.
+ * The default provider: the mock. Unchanged for every caller that has no
+ * transfer-level decision to make (the generic HMAC webhook route). Transfer
+ * paths use selectFundingProvider / refundProviderFor below.
  */
 export function getFundingProvider(): FundingProvider {
   return new MockFundingProvider();
+}
+
+// ── Program-Fix 7: per-transfer selection (flag OFF ⇒ always the mock) ────────
+
+export type FundingSelection =
+  | { kind: 'mock'; provider: FundingProvider }
+  | { kind: 'stripe'; provider: StripeFundingProvider }
+  | { kind: 'refused'; reason: 'default_tenant' | 'routed' | 'unconfigured' | 'disabled_with_intent' };
+
+/**
+ * Decide how THIS transfer's sender is charged. Pure (the caller reads the
+ * flag and the partner's funding config). Rules, in order:
+ *  1. Flag OFF ⇒ mock — unless the row is ALREADY bound to a Stripe intent,
+ *     which is refused (a real debit may be in flight; never paper over it
+ *     with a mock charge).
+ *  2. Sandbox ('test') and B2B rows ⇒ mock (the fix-44 chokepoint; B2B keeps
+ *     its partner-pulled / mock path).
+ *  3. No Stripe config ⇒ mock (today's behaviour).
+ *  4. NON-CUSTODIAL refusals: SmartRemit's own DEFAULT tenant (SmartRemit
+ *     would be merchant of record) and ROUTED transfers (funds at one
+ *     licensee, payout at another) never charge through Stripe.
+ *  5. Stripe config without a secret key ⇒ refused (fail closed).
+ */
+export function selectFundingProvider(
+  transfer: Transfer,
+  opts: { enabled: boolean; config: PartnerFundingConfig | null; fetchImpl?: typeof fetch },
+): FundingSelection {
+  const bound = transfer.fundingProvider === 'stripe' || !!transfer.fundingIntentRef;
+  if (!opts.enabled) {
+    return bound ? { kind: 'refused', reason: 'disabled_with_intent' } : { kind: 'mock', provider: new MockFundingProvider() };
+  }
+  if (!bound && (transfer.environment === 'test' || transfer.transferType === 'b2b')) {
+    return { kind: 'mock', provider: new MockFundingProvider() };
+  }
+  if (!bound && opts.config?.providerType !== 'stripe') {
+    return { kind: 'mock', provider: new MockFundingProvider() };
+  }
+  if (transfer.partnerId === DEFAULT_PARTNER_ID) return { kind: 'refused', reason: 'default_tenant' };
+  if (transfer.settlementPartnerId) return { kind: 'refused', reason: 'routed' };
+  const secretKey = opts.config?.providerType === 'stripe' ? opts.config.secretKey ?? '' : '';
+  if (!secretKey) return { kind: 'refused', reason: 'unconfigured' };
+  return { kind: 'stripe', provider: new StripeFundingProvider({ secretKey }, opts.fetchImpl) };
+}
+
+/**
+ * The refund provider for a CHARGED transfer, chosen by what the LEDGER says
+ * charged it — never by the current flag. A Stripe-funded row gets the Stripe
+ * provider, whose refund() throws until the async refund lands (follow-up):
+ * the durable refund row dead-letters and alerts instead of recording a fake
+ * 'mockrefund-' completion with no money returned.
+ */
+export function refundProviderFor(transfer: Transfer): FundingProvider {
+  if (transfer.fundingProvider === 'stripe') return new StripeFundingProvider({ secretKey: '' });
+  return getFundingProvider();
 }

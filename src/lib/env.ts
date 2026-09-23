@@ -172,6 +172,22 @@ export const env = {
     // code step at sign-in and before those actions, whatever this says.
     return process.env.CUSTOMER_MFA_REQUIRED === 'true';
   },
+  // ── Program-Fix 7: real sender funds capture (both OPTIONAL; never in boot-assert) ──
+  get stripeFundingEnabled(): boolean {
+    // 'true' ⇒ a partner with a Stripe funding config (partner_integrations
+    // funding_*; the partner's OWN account) charges senders through Stripe and
+    // new transfers bind a PaymentIntent. Default false: every transfer keeps
+    // today's mock / partner-settled funding. (The webhook keeps applying
+    // verified events for ALREADY-bound debits either way — review M5.)
+    return process.env.STRIPE_FUNDING_ENABLED === 'true';
+  },
+  get stripeFundingAllowTestMode(): boolean {
+    // 'true' ⇒ a verified livemode:false (Stripe test-mode) success may settle
+    // a transfer. Default false: test-mode money never pays out on a rail.
+    // IGNORED in any production build (review M4): a stray variable must never
+    // let a test-card success settle a real payout.
+    return process.env.STRIPE_FUNDING_ALLOW_TEST_MODE === 'true' && process.env.NODE_ENV !== 'production';
+  },
   get paymentProviderMode(): PaymentProviderMode {
     // Default + only supported value in v1 — a forward hook, not a live switch.
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';

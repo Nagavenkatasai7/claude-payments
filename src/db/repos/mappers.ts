@@ -13,6 +13,7 @@ import type {
   CurrencyCode,
   EntityType,
   FundingMethod,
+  FundingState,
   PayoutMethod,
   RefundStatus,
   SenderRecipientRelationship,
@@ -190,6 +191,11 @@ export function rowToTransfer(row: TransferRow, opts: RowToTransferOpts = {}): T
   if (row.paymentProviderRef) t.paymentProviderRef = row.paymentProviderRef;
   if (row.settlementPartnerId) t.settlementPartnerId = row.settlementPartnerId;
   if (row.fundingRef) t.fundingRef = row.fundingRef;
+  // Program-Fix 7: read-only here (transferToRow never writes them — only the
+  // guarded transfer-repo funding transitions do). Absent on every legacy row.
+  if (row.fundingProvider === 'stripe') t.fundingProvider = 'stripe';
+  if (row.fundingIntentRef) t.fundingIntentRef = row.fundingIntentRef;
+  if (row.fundingState) t.fundingState = row.fundingState as FundingState;
   if (row.refundRef) t.refundRef = row.refundRef;
   t.refundStatus = (row.refundStatus as RefundStatus) ?? 'none';
   const refundedAt = isoOpt(row.refundedAt);
