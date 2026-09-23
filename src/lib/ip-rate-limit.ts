@@ -19,13 +19,28 @@ export interface IpRateLimitResult {
   limit: number;
 }
 
+/**
+ * Program-Fix 48: the one place a window length is made safe. Undefined or
+ * non-finite (NaN, ±Infinity) → the 60 s default; below 1 → 1; otherwise floored
+ * to whole seconds. Finiteness is tested FIRST: `NaN < 1` is false and
+ * `Math.max(1, NaN)` is NaN, so a bare clamp would let NaN through. A window of
+ * 0 used to key the bucket `Infinity` and call `expire(key, 0)`. Every call site
+ * passes a literal >= 60 (or the default), which this returns unchanged, so old
+ * and new builds share the same Redis buckets.
+ */
+export function normalizeWindowSec(windowSec?: number): number {
+  if (windowSec === undefined || !Number.isFinite(windowSec)) return 60;
+  if (windowSec < 1) return 1;
+  return Math.floor(windowSec);
+}
+
 export async function checkIpRateLimit(
   redis: RedisLike,
   scope: string,
   ip: string,
   opts: { limit: number; windowSec?: number; now?: number },
 ): Promise<IpRateLimitResult> {
-  const windowSec = opts.windowSec ?? 60;
+  const windowSec = normalizeWindowSec(opts.windowSec);
   const window = Math.floor((opts.now ?? Date.now()) / (windowSec * 1000));
   // Delimit with '|', not ':' — ':' is valid in both scope names and IPv6
   // addresses, so a ':'-joined key could collide (scope='a:b',ip='c' would key
@@ -73,6 +88,9 @@ export async function enforceIpRateLimit(
   limit: number,
   windowSec = 60,
 ): Promise<NextResponse | null> {
+  // Program-Fix 48: normalise once so the bucket AND the Retry-After math use the
+  // same window (a raw 0 used to send `retry-after: NaN`).
+  windowSec = normalizeWindowSec(windowSec);
   try {
     const now = Date.now();
     const result = await checkIpRateLimit(limiterRedis(), scope, clientIpFrom(req.headers), {

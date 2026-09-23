@@ -313,3 +313,24 @@ describe('Task 9 / money-07: the provenance gate — never price off the display
     expect(() => assertRatesUsable({ ...fresh(), fetchedAt: now - FX_MAX_AGE_MS }, now)).not.toThrow();
   });
 });
+
+describe('quote() — amountInr finiteness guard (Program-Fix 48)', () => {
+  const fresh = (): FxRates => ({ toInr: 95.82, toUsd: 1, fetchedAt: Date.now(), source: 'live' });
+
+  it('the fixture passes the provenance gate', () => {
+    expect(() => assertRatesUsable(fresh())).not.toThrow();
+  });
+
+  it('throws QuoteError when a finite-but-huge cross-rate overflows the recipient amount', () => {
+    // crossRate = toUsd 1 / destToUsd 1e-306 = 1e306 (finite, > 0); 1000 * 1e306 = Infinity.
+    expect(() => quote(1000, 'USD', fresh(), 'bank_transfer', 1, 'AED', 1e-306)).toThrow(QuoteError);
+  });
+
+  it('valid inputs are unchanged (USD→INR and USD→AED)', () => {
+    const inr = quote(1000, 'USD', fresh(), 'bank_transfer', 1);
+    expect(inr.amountInr).toBe(95820);
+    expect(inr.fxRate).toBe(95.82);
+    const aed = quote(1000, 'USD', fresh(), 'bank_transfer', 1, 'AED', 0.27);
+    expect(aed.amountInr).toBe(Math.round(1000 * (1 / 0.27)));
+  });
+});
