@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { CustomerLink } from './customer-link';
 import type { FundingMethod } from '@/lib/types';
 
 // sender-cell — the ONE place "who is sending" renders across every staff transfer
@@ -13,19 +13,23 @@ import type { FundingMethod } from '@/lib/types';
 /** Sender identity for a transfer row: name (if KYC-captured) + phone, linked to the profile. */
 export function SenderCell({ name, phone, partnerId }: { name?: string; phone: string; partnerId?: string }) {
   // The detail page is per (tenant, phone) since fix 1 — carry the row's tenant.
-  const href = `/admin-dashboard/customers/${phone}${partnerId ? `?partner=${encodeURIComponent(partnerId)}` : ''}`;
+  // Program-Fix 37: a POST link (CustomerLink), so the phone never enters a URL.
   if (!name) {
     return (
-      <Link href={href} className="font-medium text-foreground hover:underline">
+      <CustomerLink phone={phone} partnerId={partnerId}>
         +{phone}
-      </Link>
+      </CustomerLink>
     );
   }
   return (
     <div className="leading-tight">
-      <Link href={href} className="font-semibold text-foreground hover:underline">
+      <CustomerLink
+        phone={phone}
+        partnerId={partnerId}
+        className="cursor-pointer border-0 bg-transparent p-0 text-left font-semibold text-foreground hover:underline"
+      >
         {name}
-      </Link>
+      </CustomerLink>
       <div className="mt-0.5 text-xs text-muted-foreground tabular-nums">+{phone}</div>
     </div>
   );

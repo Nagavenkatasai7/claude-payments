@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { argon2id, argon2Verify } from 'hash-wasm';
 import { env } from './env';
+import { logWarn } from './log';
 
 // Argon2id parameters — OWASP ASVS v5 / NIST 800-63B AAL2 floor.
 // Store the full PHC string; verify back-compat with the legacy scrypt path.
@@ -59,6 +60,49 @@ export async function verifyPassword(
   const expected = Buffer.from(hash, 'hex');
   const actual = scryptSync(plain, salt, 64);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+// Fix 21 (F62 / CWE-208): one Argon2id hash per instance, of a random secret
+// nobody knows, so a login for a MISSING account can pay the same verify as a
+// login for a real one. Memoized as a promise so concurrent first callers on a
+// cold instance share the single computation. The value is never stored,
+// logged or compared against anything real; it only burns the same work.
+let dummyHashPromise: Promise<string> | null = null;
+function dummyHash(): Promise<string> {
+  if (!dummyHashPromise) {
+    dummyHashPromise = hashPassword(randomBytes(32).toString('hex')).catch((err) => {
+      dummyHashPromise = null; // don't cache a failure
+      throw err;
+    });
+  }
+  return dummyHashPromise;
+}
+
+/**
+ * Verify a password against a stored hash that MAY be absent (unknown
+ * username / phone, or a record without a password). When `stored` is empty
+ * the same Argon2id verify runs against the per-instance dummy hash and the
+ * result is ALWAYS false, so a caller that returns one generic error cannot be
+ * told apart by response time. With a real hash this is exactly verifyPassword.
+ */
+export async function verifyPasswordOrDummy(
+  plain: string,
+  stored: string | null | undefined,
+): Promise<boolean> {
+  if (!stored) {
+    try {
+      await verifyPassword(plain, await dummyHash());
+    } catch (err) {
+      // Fail CLOSED. A broken WASM build (hashPassword rejecting) must not turn
+      // a missing account into a 500 while a real account gets the generic
+      // failure — that difference is itself an enumeration signal. The memo is
+      // already cleared by dummyHash()'s catch, so the next call retries.
+      // Fields never carry the plaintext or the stored hash.
+      logWarn('password.dummy_hash_failed', err, { path: 'dummy' });
+    }
+    return false;
+  }
+  return verifyPassword(plain, stored);
 }
 
 /**

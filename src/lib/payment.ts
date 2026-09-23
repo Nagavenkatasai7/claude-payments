@@ -1,6 +1,7 @@
 import { isPartnerPulled } from './funding-method';
 import type { Store } from './store';
 import type { CurrencyCode, Transfer } from './types';
+import { NAME_MAX, safeDisplayText } from './untrusted-text';
 
 export interface StageResult {
   transfer: Transfer;
@@ -61,9 +62,22 @@ function isBusinessFunded(transfer: Transfer): boolean {
 function recipientLabel(transfer: Transfer): string {
   const biz = transfer.recipientBusinessName;
   if (transfer.recipientEntityType === 'business' && biz && !biz.startsWith('****')) {
-    return biz;
+    const shown = safeDisplayText(biz, NAME_MAX);
+    if (shown) return shown;
   }
-  return transfer.recipientName;
+  return recipientDisplayName(transfer);
+}
+
+/**
+ * Program-Fix 38: the recipient name as it may appear in a SYSTEM-SENT message.
+ * A partner-API mint supplies this name, and WhatsApp turns a web address into
+ * a tappable link — so it is clamped (fix 5's bound) and stripped of web
+ * addresses at render, which covers rows stored before the write-side checks.
+ * A name that strips to nothing becomes 'your recipient' (never empty: Meta
+ * rejects an empty template param).
+ */
+export function recipientDisplayName(transfer: Transfer): string {
+  return safeDisplayText(transfer.recipientName, NAME_MAX) || 'your recipient';
 }
 
 /**
@@ -92,7 +106,7 @@ export function buildStage1Message(transfer: Transfer, opts?: { held?: boolean }
 
   return opts?.held
     ? `✅ Payment received — ${sourceCharge} captured. This transfer is under a quick review; we'll confirm as soon as it's released. Transfer ID: ${transfer.id}`
-    : `✅ Payment received — ${sourceCharge} charged. ${transfer.recipientName} will get ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
+    : `✅ Payment received — ${sourceCharge} charged. ${recipientDisplayName(transfer)} will get ${destAmount} within ~10 minutes. Transfer ID: ${transfer.id}`;
 }
 
 /**
@@ -143,7 +157,7 @@ export function buildRailFailureMessage(transfer: Transfer, variant: RailFailure
     transfer.totalChargeSource ?? transfer.totalChargeUsd,
     transfer.sourceCurrency ?? 'USD',
   );
-  const head = `We couldn't deliver your transfer ${transfer.id} to ${transfer.recipientName}.`;
+  const head = `We couldn't deliver your transfer ${transfer.id} to ${recipientDisplayName(transfer)}.`;
   switch (variant) {
     case 'refund':
       return (
@@ -228,7 +242,7 @@ export async function completePaymentStage2(
 
   const brand = opts?.brand?.trim() || 'SmartRemit';
   const senderMessages = [
-    `🎉 ${destAmount} delivered to ${updated.recipientName} via bank transfer. Transfer ID: ${updated.id}. Thanks for using ${brand}!`,
+    `🎉 ${destAmount} delivered to ${recipientDisplayName(updated)} via bank transfer. Transfer ID: ${updated.id}. Thanks for using ${brand}!`,
   ];
 
   return { transfer: updated, senderMessages };
@@ -243,7 +257,7 @@ export function recipientTemplateParams(transfer: Transfer): string[] {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
   const sender = `+${transfer.phone}`;
-  return [transfer.recipientName, destAmount, sender, 'bank account'];
+  return [recipientDisplayName(transfer), destAmount, sender, 'bank account'];
 }
 
 // Free-form fallback for the recipient's "money delivered" notification. The
@@ -257,7 +271,7 @@ export function recipientDeliveredFallbackText(transfer: Transfer, brand = 'Smar
   const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
   const sender = `+${transfer.phone}`;
   return (
-    `💰 ${transfer.recipientName}, you've received ${destAmount} from ${sender} via ${brand}. ` +
+    `💰 ${recipientDisplayName(transfer)}, you've received ${destAmount} from ${sender} via ${brand}. ` +
     `It's on the way to your bank account.`
   );
 }

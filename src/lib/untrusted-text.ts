@@ -114,3 +114,105 @@ export function isBoundedPrintable(v: unknown, max: number): boolean {
     !FORMAT.test(v)
   );
 }
+
+// ── Program-Fix 38: web addresses and rule-override phrases ─────────────────
+// WhatsApp turns a web address in a system-sent message into a tappable link,
+// and the bot is barred from typing links — so outsider-written text (a seller's
+// business name, an API-supplied recipient name, a business's bot persona) must
+// not carry one. The detector is a heuristic: a scheme ("://"), "www.", a
+// dotted IPv4 address, or a host label followed by a common TLD. Every check
+// runs on the boundUntrustedText form, so fullwidth dots, bracketed dots
+// ("evil[.]com") and zero-width splits collapse into detectable text first.
+
+/**
+ * The brief's common TLDs, plus the reserved `example` (the audit's fixtures)
+ * and a few more that are not ordinary English words — a word TLD (pay, shop,
+ * live, to, ...) would refuse "Design work.Pay within 7 days", a common typo.
+ */
+const WEB_TLDS = [
+  'com', 'net', 'org', 'io', 'ai', 'app', 'co', 'me', 'ly', 'link', 'xyz', 'info', 'in', 'uk', 'us',
+  'example', 'dev', 'biz', 'gg', 'ru', 'cn', 'tk', 'ca', 'au', 'nz', 'sg', 'ae', 'hk', 'mx', 'de',
+  'fr', 'eu', 'tv', 'cc', 'gov', 'edu',
+  // cheap TLDs common in abuse, none of them an English word
+  'icu', 'pw', 'cfd', 'sbs', 'cyou',
+];
+/**
+ * Short words that often come before a dot and a slash in ordinary bill text
+ * ("Hrs.approx/week", "Mon.Fri/Sat"). The host+path rule never treats them as
+ * a host. Host labels under 3 characters ("sq.ft/month", "Mr.Rahul/Priya")
+ * are skipped too.
+ */
+const PATH_RULE_ABBREVIATIONS = [
+  'hrs', 'min', 'mins', 'sec', 'secs', 'day', 'days', 'wk', 'wks', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs',
+  'fri', 'sat', 'sun', 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+  'approx', 'qty', 'pcs', 'nos', 'max', 'est', 'ref', 'inv', 'per', 'mrs', 'kgs', 'lbs', 'sqft', 'unit', 'units',
+];
+/** The detector reads at most this many characters (a cap on the regex work). */
+const DETECT_MAX = 4096;
+const LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]*[\\p{L}\\p{N}])?';
+const WEB_ADDRESS = new RegExp(
+  [
+    '://',
+    '(?<![\\p{L}\\p{N}])www\\.',
+    '(?<![\\p{L}\\p{N}.])\\d{1,3}(?:\\.\\d{1,3}){3}(?![\\p{L}\\p{N}])',
+    // host with a path: "evil.whatever/x". The match starts at the start of
+    // the dotted chain. Its first label has 3+ characters and is not a common
+    // abbreviation, and its last label is letters (or an IDN "xn--" label),
+    // so "3.5/hr", "no.12/2026", "sq.ft/month" and "Mon.Fri/Sat" are not hosts.
+    `(?<![\\p{L}\\p{N}.-])(?!(?:${PATH_RULE_ABBREVIATIONS.join('|')})\\.)[\\p{L}\\p{N}][\\p{L}\\p{N}-]*[\\p{L}\\p{N}](?<=[\\p{L}\\p{N}-]{3})(?:\\.${LABEL})*\\.(?:\\p{L}{2,}|xn--[\\p{L}\\p{N}-]+)/`,
+    // host ending in a known TLD: "acme.com", "pay.evil.example"
+    `(?<![\\p{L}\\p{N}-])${LABEL}\\.(?:${WEB_TLDS.join('|')})(?![\\p{L}\\p{N}-])`,
+    // host ending in an IDN (punycode) label: "pay.xn--p1ai"
+    `(?<![\\p{L}\\p{N}-])${LABEL}\\.xn--[\\p{L}\\p{N}-]+`,
+  ].join('|'),
+  'iu',
+);
+// The ideographic / halfwidth full stops are not folded by NFKC; treat them as dots.
+const IDEOGRAPHIC_DOTS = /[。｡]/gu;
+
+function detectForm(v: unknown): string {
+  return boundUntrustedText(v, DETECT_MAX).replace(IDEOGRAPHIC_DOTS, '.').toLowerCase();
+}
+
+/** Whether a value carries a web address (heuristic; see the note above). Pure. */
+export function hasWebAddress(v: unknown): boolean {
+  const s = detectForm(v);
+  return s !== '' && WEB_ADDRESS.test(s);
+}
+
+// "ignore / disregard / override / forget" followed, within three words, by
+// "previous / prior / above / earlier / rules / instructions / limits /
+// guidelines". Bounded quantifiers only (no backtracking blow-up).
+const OVERRIDE_PHRASE =
+  /\b(?:ignore|disregard|override|forget)\b(?:\s+\S+){0,3}?\s+(?:previous|prior|above|earlier|rules?|instructions?|limits?|guidelines?)\b/iu;
+
+/**
+ * Whether a value contains a rule-override phrase — the closed set above.
+ * Used to refuse a bot persona at save. Pure.
+ */
+export function hasOverridePhrase(v: unknown): boolean {
+  const s = detectForm(v);
+  return s !== '' && OVERRIDE_PHRASE.test(s);
+}
+
+function stripWebAddressTokens(s: string): string {
+  return s
+    .split(' ')
+    .filter((token) => token !== '' && !hasWebAddress(token))
+    .join(' ')
+    .trim();
+}
+
+/**
+ * The render-time clamp for outsider text inside a SYSTEM-SENT message (a
+ * buyer push, a recipient template param, a sender confirmation):
+ * boundUntrustedText, with every whitespace-separated token that carries a web
+ * address removed, capped at `max`. Runs the strip again after the cap, so a
+ * truncation can never leave a linkifiable tail. A value that strips to
+ * nothing returns '' — the caller falls back to its own default text.
+ */
+export function safeDisplayText(v: unknown, max: number): string {
+  const wide = boundUntrustedText(v, Math.max(max, 1) * 4);
+  const capped = boundUntrustedText(stripWebAddressTokens(wide), max);
+  return stripWebAddressTokens(capped);
+}

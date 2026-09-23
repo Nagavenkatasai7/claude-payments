@@ -9,6 +9,7 @@ import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapErro
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
+import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
@@ -35,8 +36,9 @@ import {
 import { screenTransfer } from './compliance';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
-import { isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
-import { BILL_TEXT_MAX, boundUntrustedText, ID_MAX, isCleanName, NAME_MAX } from './untrusted-text';
+import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
+import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
+import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -65,6 +67,8 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'repeat_transfer',
   'request_refund',
   'open_recall_dispute',
+  // Program-Fix 34B: a signed-in web customer can ask for a person too.
+  'request_human_help',
   'generate_payment_link',
   // fix 5: the round-0 synthetic call names this tool on BOTH channels, so it
   // must be a real, dispatchable tool on each.
@@ -73,15 +77,16 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 
 /**
  * Tools that exist ONLY on the web channel — the mirror image of the allowlist.
- * The web account is an authenticated, single-customer surface, so a richer
- * self-service history read (list_recent_transfers) is safe there but is kept
- * off WhatsApp (where a turn isn't always identity-bound the same way). Stripped
- * from the WhatsApp schemas AND blocked at dispatch (defense-in-depth), exactly
- * mirroring the web-channel gate.
+ * Stripped from the WhatsApp schemas AND blocked at dispatch (defense-in-depth),
+ * exactly mirroring the web-channel gate.
+ *
+ * Empty since Program-Fix 34B: list_recent_transfers moved onto WhatsApp so a
+ * history answer always comes from the ledger, never from conversation memory
+ * (live-10). It is own-tenant, own-phone, masked and read-only, and the same rows
+ * already reach the model through get_customer_context. The gate stays for any
+ * future web-only tool.
  */
-export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  'list_recent_transfers',
-]);
+export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
 
 /** The tool schemas the model is shown for a given channel. */
 export function toolSchemasForChannel(channel: AgentChannel): ChatTool[] {
@@ -213,6 +218,25 @@ async function resolveStoredPayout(
  * destinationCurrency defaults to 'INR' for full back-compat — INR quotes render
  * identically to before (Intl en-US INR → "₹83", "₹41,500").
  */
+/**
+ * The ONE send-amount formatter (Intl en-US currency style): "$50.00", "₹900.00",
+ * "£20.00". buildApproveSummary's card line and the tools' amount_source_display
+ * share it, so the card and the model's restatement can never disagree.
+ */
+export function formatSourceAmount(amount: number, currency: CurrencyCode): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+}
+
+/**
+ * Program-Fix 33 (live-16): the server states the unit the sender pays in, as
+ * one string the prompt makes the model restate verbatim — "$50.00 USD". The
+ * symbol alone is ambiguous across languages ("$50" became "₹50" after a Hindi
+ * turn); the trailing ISO code pins it.
+ */
+function sourceAmountDisplay(amount: number, currency: CurrencyCode): string {
+  return `${formatSourceAmount(amount, currency)} ${currency}`;
+}
+
 export function buildApproveSummary(
   q: import('./types').Quote,
   recipientName: string,
@@ -221,8 +245,7 @@ export function buildApproveSummary(
   fundingMethod: FundingMethod,
   destinationCurrency: CurrencyCode = 'INR',
 ): string {
-  const fmt = (n: number) =>
-    new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
+  const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
   // For INR with en-US locale: Intl renders "₹83" / "₹41,500" — identical to the
   // previous `₹${n.toLocaleString('en-IN')}` for the integers we use here.
@@ -352,6 +375,11 @@ async function refuseUnlessOwnOpenBill(
   return null;
 }
 
+// Program-Fix 33: the destination schema copy derives from the ONE authority —
+// the model reads all ten codes, never "Defaults to India".
+const DESTINATION_COUNTRY_DESCRIPTION =
+  `Required. ISO country code of where the money is going. One of: ${destinationListText()}. Use the country the recipient's number belongs to unless the sender named another; never guess India.`;
+
 export const toolSchemas: ChatTool[] = [
   {
     type: 'function',
@@ -393,11 +421,11 @@ export const toolSchemas: ChatTool[] = [
           },
           destination_country: {
             type: 'string',
-            description:
-              "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+            enum: [...SUPPORTED_DESTINATIONS],
+            description: DESTINATION_COUNTRY_DESCRIPTION,
           },
         },
-        required: ['funding_method'],
+        required: ['funding_method', 'destination_country'],
       },
     },
   },
@@ -529,7 +557,8 @@ export const toolSchemas: ChatTool[] = [
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
           destination_country: {
             type: 'string',
-            description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+            enum: [...SUPPORTED_DESTINATIONS],
+            description: DESTINATION_COUNTRY_DESCRIPTION,
           },
           // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
           entity_type: { type: 'string', enum: ['business'], description: "Set to 'business' for a business-to-business bill payment (both parties are businesses). Omit for a normal consumer send." },
@@ -542,6 +571,7 @@ export const toolSchemas: ChatTool[] = [
           'recipient_name',
           'funding_method',
           'recipient_phone',
+          'destination_country',
         ],
       },
     },
@@ -590,6 +620,29 @@ export const toolSchemas: ChatTool[] = [
             description: 'Optional. Max number of transfers to return (default 10, max 20).',
           },
         },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'request_human_help',
+      description:
+        "Open a support case so a person on our team picks up this conversation. Call it whenever the customer asks for a person, a human, an agent or a manager, or has a complaint or problem you cannot resolve. It returns case_id — quote it to the customer. Never tell a customer that a person will help or contact them without calling this first. Calling it again while their case is still open returns the same case_id.",
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            enum: ['question', 'complaint', 'payment_problem', 'account_access', 'other'],
+            description: "Why they want a person: 'question', 'complaint', 'payment_problem', 'account_access', or 'other'.",
+          },
+          summary: {
+            type: 'string',
+            description: 'One or two sentences, in your own words, on what the customer needs help with. No card or bank numbers.',
+          },
+        },
+        required: ['reason'],
       },
     },
   },
@@ -669,6 +722,10 @@ export const toolSchemas: ChatTool[] = [
           amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string', description: "Recipient's WhatsApp number with country code." },
+          destination_country: {
+            type: 'string',
+            description: "ISO country code of where the money is going. Recurring transfers go to India only for now, so this must be 'IN' — for any other country offer a one-time send instead.",
+          },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
           frequency: { type: 'string', enum: ['monthly', 'weekly'] },
           day_of_month: { type: 'number', description: 'Day 1-28, required when frequency is monthly.' },
@@ -768,7 +825,8 @@ export const toolSchemas: ChatTool[] = [
           },
           destination_country: {
             type: 'string',
-            description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+            enum: [...SUPPORTED_DESTINATIONS],
+            description: DESTINATION_COUNTRY_DESCRIPTION,
           },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
@@ -786,6 +844,7 @@ export const toolSchemas: ChatTool[] = [
           'funding_method',
           'recipient_name',
           'recipient_phone',
+          'destination_country',
         ],
       },
     },
@@ -864,12 +923,14 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210)." },
+          transfer_id: { type: 'string', description: 'The transfer_id of the past transfer to repeat (from list_recent_transfers or get_customer_context). Preferred over recipient_phone.' },
+          recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210). Use when you have no transfer_id." },
           amount_source: { type: 'number', description: "Optional. New send amount in the sender's own currency; if omitted, reuse the last amount sent to this recipient." },
           amount_usd: { type: 'number', description: 'Back-compat alias of amount_source.' },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'], description: "Optional. Defaults to the sender's remembered method, then the last transfer's method." },
         },
-        required: ['recipient_phone'],
+        // Program-Fix 34B: one of transfer_id / recipient_phone; the tool says so when both are missing.
+        required: [],
       },
     },
   },
@@ -944,7 +1005,7 @@ export interface ToolContext {
   // Recall-dispute seam: the support-ticket repo (createTicket + listByCustomer)
   // open_recall_dispute writes to. Absent ⇒ a repo over the shared Pool (getDb())
   // is created lazily; tests inject one bound to PGlite.
-  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer'>;
+  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer' | 'findOpenHumanHelpCase'>;
   // Triage-enqueue seam: the outbox repo the recall-dispute path enqueues the
   // out-of-band 'ticket.triage' effect on. Absent ⇒ a repo over the shared Pool
   // (getDb()) is created lazily; tests inject one bound to PGlite so the enqueue
@@ -967,15 +1028,31 @@ function fxRefusal(err: unknown, scope: string): ToolResult | null {
   return { error: err.message };
 }
 
-// Valid CountryCode set for runtime validation (must match the union in types.ts).
-const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
-  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
-]);
+// Program-Fix 33: the destination-country authority is src/lib/destination-country.ts
+// (derived from DEFAULT_CURRENCY_FOR_COUNTRY — the hand-typed 8-country set that
+// turned a Mexico or Hong Kong send into India is gone). An UNKNOWN code is an
+// error; an ABSENT one keeps the IN default on get_quote only.
+const UNKNOWN_DESTINATION_MESSAGE = `We deliver to: ${destinationListText()}. Which of these is the money going to?`;
+
+/**
+ * Program-Fix 33: the card and mint paths never assume India. When the model
+ * passed NO destination and the recipient's number maps to a supported country
+ * other than IN, refuse before any draft, card, KYC inquiry or mint. An unknown
+ * (non-blank) code is left to resolveCurrencyAndRates, which refuses it by name.
+ */
+function missingDestinationRefusal(destinationCountryArg: unknown, recipientPhone: string): ToolResult | null {
+  if (parseDestinationCountry(destinationCountryArg) !== undefined) return null;
+  const detected = countryForPhone(recipientPhone);
+  if (!detected || detected === DEFAULT_DESTINATION_COUNTRY) return null;
+  return {
+    error: `destination_country is missing — the recipient number looks like ${detected}. Ask where the money is going, then pass destination_country (one of: ${destinationListText()}).`,
+  };
+}
 
 // Resolves the customer (upsert on first contact), their partner, the send
 // currency for that partner, fresh FX rates, AND the destination country/currency.
-// destinationCountryArg is validated against the CountryCode union; unknown values
-// fall back to 'IN' (India) so the default US→India path is unchanged.
+// destinationCountryArg is parsed by the ONE authority: an unknown value throws
+// a QuoteError naming the list (before any I/O); an absent one keeps 'IN'.
 /**
  * Mint a KYC inquiry for the turn's customer AND record it on the
  * (ctx.partnerId, phone) row (fix 1 review). Once a phone has rows under several
@@ -1054,16 +1131,16 @@ async function resolveCurrencyAndRates(
   destToUsd: number | undefined;
   fxFetchedAt: number | undefined;
 }> {
+  // Destination resolution FIRST (Program-Fix 33): an unknown code is refused
+  // before the customer upsert and before any rate fetch — never coerced to 'IN'.
+  const parsedDestination = parseDestinationCountry(destinationCountryArg);
+  if (parsedDestination === null) throw new QuoteError(UNKNOWN_DESTINATION_MESSAGE);
+  const destinationCountry: CountryCode = parsedDestination ?? DEFAULT_DESTINATION_COUNTRY;
+  const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
+
   const { customer, partner, sourceCurrency } = await resolveSender(ctx, requested);
   const rates = await getFxRates(sourceCurrency);
 
-  // Destination resolution — validated; unknown country code → 'IN' (back-compat).
-  const destinationCountry: CountryCode =
-    typeof destinationCountryArg === 'string' &&
-    VALID_COUNTRY_CODES.has(destinationCountryArg.toUpperCase())
-      ? (destinationCountryArg.toUpperCase() as CountryCode)
-      : 'IN';
-  const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
   // undefined for INR: quote() prices an INR destination off rates.toInr.
   const destRates = await getDestinationRates(destinationCurrency);
   // The OLDEST leg's fetch time — a stored draft quote's age is measured from it.
@@ -1140,8 +1217,8 @@ export async function executeTool(
     });
     return { error: 'not available here' };
   }
-  // Symmetric gate: a web-only tool named OFF the web channel (e.g. a WhatsApp
-  // model reaching for list_recent_transfers) gets a flat error and runs nothing.
+  // Symmetric gate: a web-only tool named OFF the web channel gets a flat error
+  // and runs nothing (the set is empty today — see WEB_ONLY_TOOLS).
   if (!isWebChannel(ctx) && WEB_ONLY_TOOLS.has(name)) {
     logWarn('web-only.tool-blocked', `blocked web-only tool off web channel: ${name}`, {
       phone: ctx.phone,
@@ -1175,6 +1252,8 @@ export async function executeTool(
       return requestRefundTool(args, ctx);
     case 'open_recall_dispute':
       return openRecallDisputeTool(args, ctx);
+    case 'request_human_help':
+      return requestHumanHelpTool(args, ctx);
     case 'update_recipient_phone':
       return updateRecipientPhoneTool(args, ctx);
     case 'create_schedule':
@@ -1340,6 +1419,9 @@ async function getQuoteTool(
       destination_currency: q.destinationCurrency,
       destination_country: destinationCountry,
       delivery_estimate: q.deliveryEstimate,
+      // Program-Fix 33: the unit the sender pays in, server-formatted; the
+      // prompt makes the model restate it verbatim ("$50.00 USD").
+      amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
@@ -1520,6 +1602,10 @@ async function createTransferTool(
   const legacyFundingArg = parseFundingArg(CHAT_FUNDING_METHODS, args.funding_method);
   if (legacyFundingArg === null) return { error: fundingMethodError(CHAT_FUNDING_METHODS) };
   const legacyFunding: FundingMethod = legacyFundingArg ?? 'bank_transfer';
+  // Program-Fix 33: no silent mint to India — an absent destination with a
+  // recipient number in another supported country is refused before any mint.
+  const legacyMissingDestination = missingDestinationRefusal(args.destination_country, recipientPhone);
+  if (legacyMissingDestination) return legacyMissingDestination;
   // Resolve currency + rates and reuse customer for cap check + partnerId.
   let legacyResolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
   try {
@@ -1527,6 +1613,7 @@ async function createTransferTool(
   } catch (err) {
     const refusal = fxRefusal(err, 'create_transfer');
     if (refusal) return refusal;
+    if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
   const { customer: legacyCustomer, partner: legacyPartner, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = legacyResolved;
@@ -1652,9 +1739,11 @@ async function presentBillTool(
     has_bill: true,
     invoice: {
       invoice_id: invoice.id,
-      seller_business_name: boundUntrustedText(invoice.businessName, NAME_MAX),
+      // Program-Fix 38: and stripped of web addresses — a pre-fix row can never
+      // hand the model a domain to repeat (WhatsApp would linkify it).
+      seller_business_name: safeDisplayText(invoice.businessName, NAME_MAX) || 'your supplier',
       line_items: invoice.lineItems.map((li) => ({
-        description: boundUntrustedText(li.description, BILL_TEXT_MAX),
+        description: safeDisplayText(li.description, BILL_TEXT_MAX) || 'Item',
         qty: li.qty,
         unit_amount_usd: li.unitAmountUsd,
       })),
@@ -1700,6 +1789,15 @@ async function registerSellerTool(
     return {
       registered: false,
       reply_to_customer: `Please send your business name in ${NAME_MAX} characters or fewer, without brackets.`,
+    };
+  }
+  // Program-Fix 38: the business name is shown to buyers in system-sent
+  // messages, where WhatsApp turns a web address into a link — refuse one here,
+  // before any write or screen.
+  if (hasWebAddress(businessName)) {
+    return {
+      registered: false,
+      reply_to_customer: 'Please leave web addresses out of the business name.',
     };
   }
 
@@ -1885,6 +1983,19 @@ async function createInvoiceTool(
         "I couldn't read that customer number — please give it with the country code (e.g. +1 555 123 4567).",
     };
   }
+  // Program-Fix 33 (b2b-02): no bill is created that cannot be paid. The pay
+  // page (/pay/b2b) hard-stops forever unless the buyer's number resolves to a
+  // supported country WITH bank fields — the exact same check, applied BEFORE
+  // any claim, insert or push. A national-format number (no calling code) or an
+  // unmapped calling code is refused here instead of minting a dead link.
+  const buyerCountry = countryForPhone(buyerPhone);
+  if (!buyerCountry || !BANK_FIELDS_BY_COUNTRY[buyerCountry]) {
+    return {
+      created: false,
+      reply_to_customer:
+        "I can't bill that number yet — please give your customer's number with its country code (for example +91 …).",
+    };
+  }
 
   // Validate the amount — finite and strictly positive (it is in the bill's
   // stated denomination; we never convert it here).
@@ -1929,7 +2040,17 @@ async function createInvoiceTool(
       reply_to_customer: `Please keep the bill description under ${BILL_TEXT_MAX} characters, without brackets.`,
     };
   }
-  const description = rawDescription || `Invoice from ${seller.businessName}`;
+  // Program-Fix 38: nor a web address — refused before the claim and the insert.
+  if (rawDescription !== '' && hasWebAddress(rawDescription)) {
+    return {
+      created: false,
+      reply_to_customer: 'Please leave web addresses out of the bill description.',
+    };
+  }
+  // Program-Fix 38: a pre-fix seller name is display-clamped before it becomes
+  // the default line item or the buyer push (a clean name is unchanged).
+  const sellerDisplayName = safeDisplayText(seller.businessName, NAME_MAX) || 'your supplier';
+  const description = rawDescription || `Invoice from ${sellerDisplayName}`;
 
   // Replay-safe minting (claim-first, the minting spine): the agent.turn outbox row
   // is at-least-once — a transient reply-send 5xx re-runs the WHOLE turn, and the
@@ -2012,7 +2133,7 @@ async function createInvoiceTool(
       'whatsapp.text',
       {
         to: buyerPhone,
-        body: `You have a new bill from ${seller.businessName} — pay securely: ${payUrl}`,
+        body: `You have a new bill from ${sellerDisplayName} — pay securely: ${payUrl}`,
         partnerId: routedSenderPartnerId(ctx),
       },
       { dedupeKey: `billpush:${invoiceId}` },
@@ -2152,7 +2273,7 @@ function clampLimit(raw: unknown, def: number, max: number): number {
 
 /**
  * Lists the customer's OWN recent transfers (newest first), optionally filtered
- * to a recipient they name (web-only — see WEB_ONLY_TOOLS). Ownership is implicit
+ * to a recipient they name (both channels since Program-Fix 34B). Ownership is implicit
  * and unforgeable: listTransfersByPhone(ctx.partnerId, ctx.phone) is an INDEXED own-customer query
  * and the tool takes no transfer_id, so it can never surface another customer's
  * data — there is nothing to 404 on. Each row is shaped by the shared
@@ -2353,7 +2474,7 @@ async function requestRefundTool(
       return {
         error_code: 'under_review',
         message:
-          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+          "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
     case 'already_requested':
       return {
@@ -2389,7 +2510,7 @@ async function requestRefundTool(
       return {
         error_code: 'cancelled',
         message:
-          "This transfer was already cancelled. If you believe you were charged for it, reply 'help' and our team will take a look.",
+          "This transfer was already cancelled. If you believe you were charged for it, say you'd like to talk to a person and I'll open a case for our team.",
       };
     case 'refundable':
       break; // the one eligible state — handled below
@@ -2400,7 +2521,7 @@ async function requestRefundTool(
       return {
         error_code: 'under_review',
         message:
-          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+          "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
   }
 
@@ -2505,7 +2626,7 @@ async function openRecallDisputeTool(
         return {
           error_code: 'not_recall_eligible',
           reply_hint:
-            'this transfer is not within the recall window — explain its current state and offer to check in with our team',
+            "this transfer is not within the recall window — explain its current state; if they want more help, offer to open a case with a person (request_human_help)",
         };
     }
   }
@@ -2554,6 +2675,75 @@ async function openRecallDisputeTool(
     reply_hint:
       'a recall case is open and our team will look into it — recovery is not guaranteed once funds are delivered; we will follow up',
   };
+}
+
+// ── Program-Fix 34B: "a person will help" only with a real case ─────────────
+
+const HELP_REASONS = ['question', 'complaint', 'payment_problem', 'account_access', 'other'] as const;
+type HelpReason = (typeof HELP_REASONS)[number];
+const HELP_SUMMARY_MAX = 300;
+
+/**
+ * The case-opened line the model relays. No response-time promise (owner
+ * decision, fix 34). A staff reply reaches WhatsApp only as a link notice
+ * (admin-dashboard/tickets/actions.ts), so the copy never promises an in-chat
+ * reply (review M1; copy decided by the main session, owner to confirm).
+ */
+function helpReplyHint(ctx: ToolContext, caseId: string): string {
+  return isWebChannel(ctx)
+    ? `A teammate will reply on the Support page of your account. Your case number is ${caseId}.`
+    : `When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number). Your case number is ${caseId}.`;
+}
+
+/**
+ * Opens (or reuses) the customer's help case in the staff Tickets queue.
+ *
+ * - One open case per (turn tenant, phone): ticketRepo.findOpenHumanHelpCase,
+ *   tenant-scoped in SQL — this tenant's customer ticket, still open/pending/
+ *   waiting, carrying category human_help OR the fixed help subject (staff may
+ *   re-categorise a case; its subject never changes). A sibling tenant's case
+ *   for the same phone is never reused. Find-then-create is not locked: on
+ *   WhatsApp the per-phone turn lock (34A) serialises it.
+ * - Triage and the ops alert are enqueued on BOTH paths with dedupe keys, so a
+ *   crash between the ticket insert and the enqueues is healed by the model's
+ *   next call, and a repeat call adds nothing (the outbox dedupe index is not
+ *   partial on status).
+ * - The alert carries the tenant and case id only — no phone, no summary.
+ * - The summary is outsider text: bounded (fix 5) before it is stored.
+ */
+async function requestHumanHelpTool(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const reason = asEnum(HELP_REASONS, args.reason) as HelpReason | undefined;
+  if (!reason) {
+    return { error: `reason must be one of: ${HELP_REASONS.join(', ')}.` };
+  }
+  const summary = boundUntrustedText(args.summary, HELP_SUMMARY_MAX);
+
+  const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
+  const open = await repo.findOpenHumanHelpCase(ctx.partnerId, ctx.phone); // tenant-scoped in SQL
+  const ticket =
+    open ??
+    (await repo.createTicket({
+      id: `tk_${newTransferId()}`,
+      partnerId: ctx.partnerId,
+      kind: 'customer',
+      customerPhone: ctx.phone,
+      subject: HUMAN_HELP_SUBJECT,
+      body: summary ? `Reason: ${reason}. ${summary}` : `Reason: ${reason}.`,
+      category: HUMAN_HELP_CATEGORY,
+    }));
+
+  const outbox = ctx.outboxRepo ?? createOutboxRepo(getDb());
+  await outbox.enqueue('ticket.triage', { ticketId: ticket.id }, { dedupeKey: `triage:${ticket.id}` });
+  await outbox.enqueue(
+    'ops.alert',
+    {
+      message: `🙋 SmartRemit ops: a customer asked for a person — case ${ticket.id} (${ticket.partnerId}) is in the Tickets queue.`,
+    },
+    { dedupeKey: `help:${ticket.id}` },
+  );
+  pokeWorker();
+
+  return { case_id: ticket.id, reply_hint: helpReplyHint(ctx, ticket.id) };
 }
 
 // Source-currency amount for the recall case body (mirrors recent-transfers'
@@ -2659,7 +2849,7 @@ async function checkBillStatusTool(
       const partnerId = await resolveBuyerPartnerId(ctx);
       const invoice = await ctx.store.getB2bInvoiceScoped(transfer.invoiceId, partnerId);
       if (invoice) {
-        result.seller_business_name = boundUntrustedText(invoice.businessName, NAME_MAX); // fix 5: clamped at read
+        result.seller_business_name = safeDisplayText(invoice.businessName, NAME_MAX) || 'your supplier'; // fix 5 + 38: clamped at read, no web address
         result.invoice_status = invoice.status;
         result.invoice_paid = invoice.status === 'paid';
       }
@@ -2775,7 +2965,7 @@ async function cancelBillTool(
             return {
               cancelled: false,
               reply_hint:
-                "The payment already settled and it's past the recall window — our team can look into it.",
+                "The payment already settled and it's past the recall window, so it can't be pulled back from here. If you'd like a person to look into it, just say so and I'll open a case.",
             };
           }
           return recall;
@@ -2867,7 +3057,7 @@ async function disputeBillTool(
   return {
     disputed: true,
     case_id: ticket.id,
-    reply_hint: "Thanks — we've flagged this bill as disputed and our team will follow up.",
+    reply_hint: `Thanks — we've flagged this bill as disputed and our team will follow up. Your case number is ${ticket.id}.`,
   };
 }
 
@@ -2923,6 +3113,16 @@ async function createScheduleTool(
       return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
     }
   }
+  // Program-Fix 33 (owner decision 1): schedules are India-only until they carry
+  // a destination (cron-run mints every run as DEFAULT_DESTINATION_COUNTRY). A
+  // destination that is not IN, an unknown one, or an absent one whose recipient
+  // number maps to another supported country is refused — and NOTHING is saved.
+  const scheduleDestination = parseDestinationCountry(args.destination_country);
+  if (scheduleDestination === null) return { error: UNKNOWN_DESTINATION_MESSAGE };
+  const impliedDestination = scheduleDestination ?? countryForPhone(recipientPhone);
+  if (impliedDestination !== undefined && impliedDestination !== DEFAULT_DESTINATION_COUNTRY) {
+    return { error: 'Recurring transfers can go to India only for now — offer a one-time send instead.' };
+  }
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
   // No FX here (Task 9): a schedule prices at RUN time, so a provider outage must
   // not stop the customer from setting one up.
@@ -2967,6 +3167,12 @@ async function createScheduleTool(
     day_of_month: schedule.dayOfMonth ?? null,
     day_of_week: schedule.dayOfWeek ?? null,
     end_date: schedule.endDate ?? null,
+    // Program-Fix 33 (live-16): the server states the unit — "$50.00 USD" —
+    // so a later language switch can never turn it into ₹50.
+    amount_source: schedule.amountSource,
+    source_currency: schedule.sourceCurrency,
+    amount_source_display: sourceAmountDisplay(schedule.amountSource, schedule.sourceCurrency),
+    destination_country: DEFAULT_DESTINATION_COUNTRY,
   };
 }
 
@@ -2979,7 +3185,11 @@ async function listSchedulesTool(
   return {
     schedules: mine.map((s) => ({
       schedule_id: s.id,
-      amount_usd: s.amountUsd,
+      amount_usd: s.amountUsd, // back-compat: the SOURCE amount despite the name
+      // Program-Fix 33: the unit, stated by the server.
+      amount_source: s.amountSource,
+      source_currency: s.sourceCurrency,
+      amount_source_display: sourceAmountDisplay(s.amountSource, s.sourceCurrency),
       recipient_name: boundUntrustedText(s.recipientName, NAME_MAX), // fix 5: clamped at read
       frequency: s.frequency,
       day_of_month: s.dayOfMonth ?? null,
@@ -3123,6 +3333,10 @@ async function sendApprovePickerTool(
   // is byte-for-byte unchanged). For B2B the recipient_name the card/screen use
   // is the PAYEE business legal name (the model passes it as recipient_name too).
   const b2b = parseB2bArgs(args);
+  // Program-Fix 33: no silent card to India — an absent destination with a
+  // recipient number in another supported country is refused before any draft.
+  const missingDestination = missingDestinationRefusal(args.destination_country, recipientPhone);
+  if (missingDestination) return missingDestination;
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
   let resolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
   try {
@@ -3130,6 +3344,9 @@ async function sendApprovePickerTool(
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
     if (refusal) return refusal;
+    // An unknown destination (or an ambiguous send currency) is the model's
+    // error to correct — a returned { error }, never a thrown agent turn.
+    if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
   const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt } =
@@ -3239,7 +3456,7 @@ async function sendApprovePickerTool(
       return {
         blocked: true,
         reply_to_customer:
-          "This transfer can't be completed, and our team has been notified. If you have any questions, reply 'help' and we'll follow up.",
+          "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team.",
       };
     }
 
@@ -3317,29 +3534,39 @@ async function sendApprovePickerTool(
     // (e.g. the reply send to Meta threw a transient 5xx) re-runs this whole turn
     // and would emit a SECOND card + a NEW pay link; the model can also call this
     // tool twice in one turn. Dedupe the card SEND by sender+content within a
-    // short TTL — a duplicate is a silent no-op, a genuinely new send still goes
+    // short TTL — a duplicate is not re-sent (and says so, below), a genuinely new send still goes
     // through. The draft above is single-use/30-min TTL, so an unsent one is harmless.
     // Content-keyed (NOT by draftId, which changes every call): two byte-identical
     // sends inside the TTL intentionally collide — a true "same amount, same
     // recipient, right now" duplicate is rare and worth suppressing.
     const cardKey = `${ctx.phone}|${recipientPhone}|${amountSource}|${sourceCurrency}|${destinationCountry}`;
-    if (await ctx.store.markApproveCardSent(cardKey)) {
-      try {
-        await sendCtaUrl(
-          ctx.phone,
-          `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
-          { displayText: 'Approve & Pay', url: payUrl },
-          undefined,
-          undefined,
-          ctx.waCreds, // WL2 — approve card leaves from the partner's number
-        );
-      } catch (sendErr) {
-        // The send itself failed AFTER we claimed the key — release it so the
-        // at-least-once retry can actually deliver the card. (A failure in a
-        // LATER step keeps the key, so that retry stays deduped.)
-        await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
-        throw sendErr;
-      }
+    if (!(await ctx.store.markApproveCardSent(cardKey))) {
+      // Program-Fix 34A: a DEDUPED card was not sent — never report sent:true
+      // (the agent would treat the card as the reply and the customer would see
+      // nothing). The model answers in text, pointing at the card above.
+      return {
+        sent: false,
+        duplicate: true,
+        draft_id: draftId,
+        reply_hint:
+          'The payment card for this exact send is already above — ask the customer to tap it, or say what to change.',
+      };
+    }
+    try {
+      await sendCtaUrl(
+        ctx.phone,
+        `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+        { displayText: 'Approve & Pay', url: payUrl },
+        undefined,
+        undefined,
+        ctx.waCreds, // WL2 — approve card leaves from the partner's number
+      );
+    } catch (sendErr) {
+      // The send itself failed AFTER we claimed the key — release it so the
+      // at-least-once retry can actually deliver the card. (A failure in a
+      // LATER step keeps the key, so that retry stays deduped.)
+      await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
+      throw sendErr;
     }
     return { sent: true, draft_id: draftId };
   } catch (err) {
@@ -3354,23 +3581,37 @@ async function repeatTransferTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const recipientPhone = normalizePhone(args.recipient_phone);
-  if (!isValidPhone(recipientPhone)) {
-    return { error: "I need the recipient's WhatsApp number to repeat a transfer." };
+  // Program-Fix 34B (prompt-09): a transfer_id names the exact past send, so
+  // "same person" never has to be guessed from a name. recipient_phone stays the
+  // fallback; with neither, the error names both options.
+  const transferIdArg = typeof args.transfer_id === 'string' ? args.transfer_id.trim().replace(/^#/, '') : '';
+  const phoneArg = normalizePhone(args.recipient_phone ?? '');
+  if (!transferIdArg && !isValidPhone(phoneArg)) {
+    return {
+      error:
+        'To repeat a transfer I need either its transfer_id (from list_recent_transfers) or the recipient_phone of a past recipient.',
+    };
   }
   // fix 6: funding_method is a closed set (the schema's consumer enum).
   const repeatFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
   if (repeatFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
 
-  // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
-  // Stage 4: indexed per-phone page, then a small in-JS recipient filter.
-  const mine = (await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, 100)).filter(
-    (t) => t.recipientPhone === recipientPhone,
-  );
-  const last = mine[0];
+  // Hydrate from the customer's OWN transfers (own tenant + phone, newest-first).
+  // Stage 4: indexed per-phone page, then a small in-JS filter. By id: an id that
+  // is not in this page (another customer's, or made up) reads exactly like "no
+  // past transfer" — 404, never 403.
+  const page = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, 100);
+  const last = transferIdArg
+    ? page.find((t) => t.id === transferIdArg)
+    : page.find((t) => t.recipientPhone === phoneArg);
   if (!last) {
-    return { error: "I don't see a past transfer to that number — who would you like to send to?" };
+    return {
+      error: transferIdArg
+        ? "I don't see a past transfer with that id — who would you like to send to?"
+        : "I don't see a past transfer to that number — who would you like to send to?",
+    };
   }
+  const recipientPhone = last.recipientPhone;
   // fix 5: the past row's name may be pre-fix outsider-written text. It seeds
   // the new draft (and the web summary returned to the model), so it is clamped
   // once here; a name that clamps to nothing is not reused.
@@ -3448,6 +3689,14 @@ async function repeatTransferTool(
   );
 }
 
+/**
+ * Program-Fix 34B (live-08): with no open card, the model told a customer
+ * mid-conversation that "nothing was set up". The hint makes it acknowledge the
+ * plan they are dropping instead.
+ */
+const NOTHING_TO_CANCEL_HINT =
+  "No payment was set up yet, so nothing will be charged — confirm you have dropped the send you were discussing.";
+
 async function cancelDraftTool(
   _args: Record<string, unknown>,
   ctx: ToolContext,
@@ -3460,18 +3709,18 @@ async function cancelDraftTool(
       ? ctx.turn.buttonTap.draftId
       : await ctx.draftStore.getActiveDraftId(ctx.partnerId, ctx.phone);
   if (!draftId) {
-    return { cancelled: false, reason: 'no_active_draft' };
+    return { cancelled: false, reason: 'no_active_draft', reply_hint: NOTHING_TO_CANCEL_HINT };
   }
   const draft = await ctx.draftStore.consumeDraft(draftId);
   if (!draft) {
-    return { cancelled: false, reason: 'draft_not_found_or_expired' };
+    return { cancelled: false, reason: 'draft_not_found_or_expired', reply_hint: NOTHING_TO_CANCEL_HINT };
   }
   // D12 (fix 1): same hard tenant guard as the approve tap — put another
   // tenant's draft back untouched and answer exactly like "no pointer".
   if ((draft.partnerId ?? DEFAULT_PARTNER_ID) !== ctx.partnerId) {
     await ctx.draftStore.restoreDraft(draft, draftId);
     logWarn('draft.tenant_mismatch', 'draft resolved under another tenant', { draftId });
-    return { cancelled: false, reason: 'no_active_draft' };
+    return { cancelled: false, reason: 'no_active_draft', reply_hint: NOTHING_TO_CANCEL_HINT };
   }
   return { cancelled: true };
 }

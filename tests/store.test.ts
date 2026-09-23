@@ -374,3 +374,27 @@ describe('saveCorridorRequest + listCorridorRequests', () => {
     expect(list[0].destinationCountry).toBe('UAE'); // original row untouched
   });
 });
+
+describe('per-(tenant, phone) agent-turn lock (Program-Fix 34A)', () => {
+  it('tryTurnLock is SET NX EX 90 on turnlock:<tenant>:<phone>: the first holder wins, a second token is refused', async () => {
+    const redis = fakeRedis();
+    const setSpy = vi.spyOn(redis, 'set');
+    const store = createStore(redis, db);
+    expect(await store.tryTurnLock('acme', '15551230000', '101')).toBe(true);
+    expect(setSpy).toHaveBeenCalledWith('turnlock:acme:15551230000', '101', { ex: 90, nx: true });
+    expect(await store.tryTurnLock('acme', '15551230000', '102')).toBe(false);
+    // Another phone, and the same phone under another tenant, are independent.
+    expect(await store.tryTurnLock('acme', '15551239999', '103')).toBe(true);
+    expect(await store.tryTurnLock('default', '15551230000', '104')).toBe(true);
+  });
+
+  it('releaseTurnLock deletes ONLY when the caller still holds it (a stranger token is a no-op)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await store.tryTurnLock('acme', '15551230000', '101');
+    await store.releaseTurnLock('acme', '15551230000', '999'); // not ours
+    expect(await store.tryTurnLock('acme', '15551230000', '102')).toBe(false);
+    await store.releaseTurnLock('acme', '15551230000', '101'); // ours
+    expect(await store.tryTurnLock('acme', '15551230000', '102')).toBe(true);
+  });
+});

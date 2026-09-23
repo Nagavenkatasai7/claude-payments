@@ -1,5 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { scryptSync, randomBytes } from 'node:crypto';
+
+// Pass-through spy on hash-wasm's verify so the fix-21 test can COUNT the
+// Argon2 work on the no-account path; everything else runs the real function.
+const hw = vi.hoisted(() => ({ argon2Verify: vi.fn() }));
+vi.mock('hash-wasm', async (orig) => {
+  const real = await orig<typeof import('hash-wasm')>();
+  hw.argon2Verify.mockImplementation(real.argon2Verify);
+  return { ...real, argon2Verify: hw.argon2Verify };
+});
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
@@ -179,6 +188,13 @@ describe('verifyCustomerPassword', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
     });
     expect(await s.verifyCustomerPassword(PHONE, 'whatever1234')).toBeNull();
+  });
+
+  it('runs exactly one Argon2 verify for an UNKNOWN phone (fix 21: no timing oracle)', async () => {
+    const { s } = await mkAuth();
+    hw.argon2Verify.mockClear();
+    expect(await s.verifyCustomerPassword('+1 (555) 010-9999', 'x')).toBeNull();
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
   });
 
   it('lazily re-hashes a legacy scrypt hash to argon2 on a successful verify', async () => {

@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
+import { payOkStatus } from '@/lib/pay-outcome';
 import {
   BANK_FIELDS_BY_COUNTRY,
   composePayoutDestination,
@@ -10,7 +11,7 @@ import {
   type Field,
 } from '@/lib/payout-format';
 
-type Status = 'idle' | 'paying' | 'done' | 'error';
+type Status = 'idle' | 'paying' | 'done' | 'inactive' | 'error';
 type Step = 'details' | 'review';
 
 export interface PaySummary {
@@ -208,7 +209,8 @@ function SimplePayForm({
         body: JSON.stringify({ otp: code }),
       });
       if (res.ok) {
-        setStatus('done');
+        // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
+        setStatus(payOkStatus(await res.json().catch(() => null)));
         return;
       }
       try {
@@ -221,6 +223,10 @@ function SimplePayForm({
     } catch {
       setStatus('error');
     }
+  }
+
+  if (status === 'inactive') {
+    return <p className={formErrorClasses}>This link is no longer active.</p>;
   }
 
   if (status === 'done') {
@@ -331,7 +337,8 @@ function BankDetailsPayForm({
         body: JSON.stringify({ country: destinationCountry, fields: values, otp: code }),
       });
       if (res.ok) {
-        setStatus('done');
+        // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
+        setStatus(payOkStatus(await res.json().catch(() => null)));
         return;
       }
       // Surface server-side errors: a wrong/expired OTP stays on the review step;
@@ -351,6 +358,10 @@ function BankDetailsPayForm({
     } catch {
       setStatus('error');
     }
+  }
+
+  if (status === 'inactive') {
+    return <p className={formErrorClasses}>This link is no longer active.</p>;
   }
 
   if (status === 'done') {
@@ -505,7 +516,8 @@ function AchDebitPayForm({
         body: JSON.stringify({ ach: { routingNumber, accountNumber, accountType }, otp: code }),
       });
       if (res.ok) {
-        setStatus('done');
+        // Review S2 (Program-Fix 32): a 200 { status: 'cancelled' } is a dead link, not a payment.
+        setStatus(payOkStatus(await res.json().catch(() => null)));
         return;
       }
       try {
@@ -522,6 +534,10 @@ function AchDebitPayForm({
     } catch {
       setStatus('error');
     }
+  }
+
+  if (status === 'inactive') {
+    return <p className={formErrorClasses}>This link is no longer active.</p>;
   }
 
   if (status === 'done') {

@@ -83,7 +83,7 @@ describe('issueVerifyLink', () => {
       customerStore,
     });
 
-    expect(url).toBe(`https://example.com/admin-dashboard/customers/${PHONE}`);
+    expect(url).toBe('https://example.com/admin-dashboard/customers'); // Program-Fix 37: no phone in the link
     const after = await customerStore.getCustomer('default', PHONE);
     expect(after?.kycInquiryId).toBe(`mock-${PHONE}`); // persisted for the next resend
   });

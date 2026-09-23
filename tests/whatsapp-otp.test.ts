@@ -193,3 +193,28 @@ describe('sendOtpCode — templates are OPT-IN (testing-business mode)', () => {
     expect(body.text.body).toContain('246802'); // the inbuilt free-form message carries the code
   });
 });
+
+// Program-Fix 37 review: the OTP template-fallback warn goes through the
+// scrubbing logger. A Graph error body can echo the recipient back.
+describe('sendOtpCode — fallback log is scrubbed (Program-Fix 37)', () => {
+  it('logs no 7+ digit run and no code when the template send fails with a body echoing the phone', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'verification_code';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        const body = JSON.parse(init.body as string);
+        if (body.type === 'template') return { ok: false, status: 400, text: async () => 'bad recipient 15551234567' };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await sendOtpCode('15551234567', '135790');
+    expect(warn).toHaveBeenCalled();
+    const text = warn.mock.calls.flat().map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join('\n');
+    expect(text).not.toMatch(/\d{7,}/);
+    expect(text).not.toContain('135790');
+    expect(text).toContain('4567');
+    expect(text).toContain('whatsapp.otp-fallback');
+  });
+});

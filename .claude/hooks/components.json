@@ -20,6 +20,7 @@
     ]},
     "corridors-fx": { "branch": "component/corridors-fx", "paths": [
       "src/lib/rate.ts", "src/lib/fx.ts", "src/lib/partner-rates.ts", "src/lib/partner-currency.ts", "src/lib/payout-format.ts",
+      "src/lib/destination-country.ts", "tests/destination-country*",
       "src/lib/sender-defaults.ts", "src/lib/rate-staleness.ts", "src/lib/corridor-*", "src/db/repos/partner-rate-repo.ts",
       "src/app/admin-dashboard/corridors/", "src/app/admin-dashboard/rates/", "scripts/refresh-demo-rates.ts", "scripts/routing-status.ts",
       "tests/*corridor*", "tests/rate*", "tests/fx*", "tests/partner-rates*", "tests/partner-currency*", "tests/payout-format*"
@@ -27,6 +28,7 @@
     "whatsapp-agent": { "branch": "component/whatsapp-agent", "paths": [
       "src/lib/agent.ts", "src/lib/prompt.ts", "src/lib/tools.ts", "src/lib/ollama.ts", "src/lib/whatsapp*", "src/lib/web-chat.ts",
       "src/lib/draft-store.ts", "src/lib/sender-names.ts", "src/lib/providers/meta-signature-verify.ts",
+      "src/lib/agent-fallback.ts", "src/lib/inbound-throttle.ts", "tests/inbound-throttle*",
       "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
     ]},
     "outbox-worker": { "branch": "component/outbox-worker", "paths": [

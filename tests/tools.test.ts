@@ -34,6 +34,7 @@ import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store'
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
 import { finalizeDraftPayment } from '@/lib/pay-finalize';
+import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
@@ -116,7 +117,7 @@ async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'def
 }
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-seven tools', () => {
+  it('exposes all twenty-eight tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -140,6 +141,7 @@ describe('toolSchemas', () => {
       'present_bill',
       'register_seller',
       'repeat_transfer',
+      'request_human_help',
       'request_refund',
       'resolve_recipient',
       'send_approve_picker',
@@ -1183,7 +1185,12 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     const first = await executeTool('send_approve_picker', args, ctx);
     const second = await executeTool('send_approve_picker', args, ctx); // the retry re-runs the turn
     expect(first.sent).toBe(true);
-    expect(second.sent).toBe(true);   // still reports sent so the agent suppresses trailing text (no dup text either)
+    // Program-Fix 34A: a deduped card is NOT a sent card — reporting sent:true made the
+    // agent return '' and the customer saw nothing. The model gets a hint to answer in text.
+    expect(second.sent).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect(second.draft_id).toEqual(expect.any(String));
+    expect(String(second.reply_hint)).toMatch(/already above/);
     expect(ctaSends).toBe(1);         // the "Approve & Pay" card was sent EXACTLY once
   });
 
@@ -2594,7 +2601,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the thirteen read-only/refund/recall/pay-link tools', () => {
+  it('the allowlist is exactly the fourteen read-only/refund/recall/help/pay-link tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
@@ -2606,6 +2613,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
       'list_schedules',
       'open_recall_dispute',
       'repeat_transfer',
+      'request_human_help',
       'request_refund',
       'resolve_recipient',
       'validate_phone',
@@ -2624,8 +2632,11 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
 
   it("toolSchemasForChannel('whatsapp') is the full set MINUS web-only tools", () => {
     const names = toolSchemasForChannel('whatsapp').map((t) => t.function.name);
-    // Every roster tool except the web-only ones (list_recent_transfers).
-    expect(names).not.toContain('list_recent_transfers');
+    // Program-Fix 34B: history answers come from the tool on WhatsApp too, so no
+    // tool is web-only any more (the gate stays for a future one).
+    expect(WEB_ONLY_TOOLS.size).toBe(0);
+    expect(names).toContain('list_recent_transfers');
+    expect(names).toContain('request_human_help');
     expect(names).toContain('create_transfer'); // a WhatsApp-only tool is still present
     expect(toolSchemasForChannel('whatsapp')).toHaveLength(toolSchemas.length - WEB_ONLY_TOOLS.size);
   });
@@ -2830,15 +2841,29 @@ describe('list_recent_transfers (web-only history lookup)', () => {
     expect((theirs.transfers as Array<Record<string, unknown>>).map((t) => t.recipient_name)).toEqual(['Dad']);
   });
 
-  it('is BLOCKED off the web channel (web-only) — returns not available here', async () => {
-    const base = await buildCtx(fakeRedis());
+  it('Program-Fix 34B: runs on WhatsApp too — own tenant + phone only, masked, names clamped', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const base = await buildCtx(redis);
     await send(base, 'Mom', '919876543210', 30);
-    // default channel (absent ⇒ whatsapp)
-    expect(await executeTool('list_recent_transfers', {}, base)).toEqual({ error: 'not available here' });
-    // explicit whatsapp
-    expect(
+    // A long, outsider-written recipient name (pre-fix row) is clamped at read.
+    const long = 'N'.repeat(300);
+    const t = (await base.store.listTransfersByPhone('default', base.phone, 5))[0];
+    await base.store.saveTransfer({ ...t, recipientName: long });
+    // The same phone under a sibling tenant never leaks in.
+    const sibling = await buildCtx(redis, PHONE, 'acme');
+    await send(sibling, 'Dad', '919811112222', 40);
+
+    for (const r of [
+      await executeTool('list_recent_transfers', {}, base), // default channel (absent ⇒ whatsapp)
       await executeTool('list_recent_transfers', {}, { ...base, channel: 'whatsapp' as const }),
-    ).toEqual({ error: 'not available here' });
+    ]) {
+      const rows = r.transfers as Array<Record<string, unknown>>;
+      expect(rows).toHaveLength(1);
+      expect(Object.keys(rows[0]).sort()).toEqual(['amount', 'date', 'recipient_name', 'status', 'transfer_id']);
+      expect(String(rows[0].recipient_name).length).toBeLessThanOrEqual(80);
+      expect(JSON.stringify(r)).not.toContain('okhdfc'); // no payout field, masked or not
+    }
   });
 });
 
@@ -3374,17 +3399,19 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
   });
 
-  it('an UNMAPPED buyer calling code leaves only the seller currency (Case B unavailable)', async () => {
+  it('an UNMAPPED buyer calling code is refused outright — /pay/b2b could never serve that bill (Program-Fix 33)', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedActiveSeller(ctx);
-    // +49 (Germany) is not a supported corridor — currencyForPhone is undefined.
+    // +49 (Germany) is not a supported corridor — the pay page hard-stops on an
+    // unmapped buyer country, so the bill is refused BEFORE any claim or insert
+    // (pre-fix: a USD bill was minted that could never be paid).
     const r = await executeTool(
       'create_invoice',
       { buyer_phone: '4915123456789', amount: 500, currency: 'EUR' },
       ctx,
     );
     expect(r.created).toBe(false);
-    expect(String(r.reply_to_customer)).toContain('USD');
+    expect(String(r.reply_to_customer)).toMatch(/can't bill that number/i);
     expect(String(r.reply_to_customer)).not.toContain('EUR');
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
   });
@@ -3870,6 +3897,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(r.disputed).toBe(true);
       expect(String(r.case_id)).toMatch(/^tk_/);
       expect(String(r.reply_hint).toLowerCase()).toContain('disputed');
+      expect(String(r.reply_hint)).toContain(String(r.case_id)); // fix 34B review: the follow-up promise quotes its case
 
       const repo = createTicketRepo(db);
       const ticket = (await repo.listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
@@ -4029,7 +4057,9 @@ describe('tools are tenant-scoped (fix 1)', () => {
     expect(await acme.store.listTransfers()).toHaveLength(0);            // nothing minted under acme
     expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();      // and default's draft was not consumed
     // Cancel is guarded the same way: acme's "cancel" cannot see default's pointer.
-    expect(await executeTool('cancel_draft', {}, acme)).toEqual({ cancelled: false, reason: 'no_active_draft' });
+    // (answers exactly like "no pointer" — the same reason and the same fix 34B hint)
+    expect(await executeTool('cancel_draft', {}, acme)).toEqual(await executeTool('cancel_draft', {}, await buildCtx(fakeRedis(), '15550008888')));
+    expect(await executeTool('cancel_draft', {}, acme)).toMatchObject({ cancelled: false, reason: 'no_active_draft' });
     expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();
   });
 });
@@ -4275,13 +4305,13 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
 
   it("a saved recipient is used only when the number's country IS the send's destination country", async () => {
     const { ctx } = await returningCtx();
-    const UNCLE = '15557654321'; // a US number; the send defaults to IN
+    const UNCLE = '15557654321'; // a US number; the sender names India explicitly (Program-Fix 33: it is never assumed)
     await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Uncle', recipientPhone: UNCLE, payoutMethod: 'bank', payoutDestination: 'HDFC0001234 555566667777',
       lastUsedAt: new Date().toISOString(),
     });
     expect(await draftDest(ctx, await executeTool('send_approve_picker', {
-      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Uncle', recipient_phone: UNCLE,
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Uncle', recipient_phone: UNCLE, destination_country: 'IN',
     }, ctx))).toBe('');
   });
 
@@ -4852,5 +4882,537 @@ describe('create_transfer — in-lock send cap (Program fix 16)', () => {
     expect(r.error).toBe('Cap exceeded for this transfer.');
     expect(r.cap_eval).toMatchObject({ reason: 'over_daily_cap', tier: 'T0' });
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
+  });
+});
+
+describe('fix 38: seller text with a web address is refused at write; the buyer push is clamped at render', () => {
+  beforeEach(async () => {
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  async function seedActiveSeller(ctx: Awaited<ReturnType<typeof buildCtx>>, businessName: string) {
+    await ctx.store.createSeller({
+      id: 's_f38', partnerId: 'default', phone: PHONE, businessName, country: 'US', currency: 'USD',
+    });
+    expect((await ctx.store.completeSellerOnboarding(PHONE, 'default', '021000021|12345678'))?.status).toBe('active');
+  }
+  async function billpushBodies(): Promise<string[]> {
+    const r = (await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key LIKE 'billpush:%' ORDER BY id`)) as unknown as { rows: { payload: { body: string } }[] };
+    return r.rows.map((x) => x.payload.body);
+  }
+
+  it('register_seller with business_name "Acme acme.com" gives registered: false and no seller row (test 6)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    for (const business_name of ['Acme acme.com', 'Acme https://evil.example', 'www.acme.io']) {
+      const r = await executeTool('register_seller', { business_name }, ctx);
+      expect(r).toEqual({
+        registered: false,
+        reply_to_customer: 'Please leave web addresses out of the business name.',
+      });
+    }
+    expect(await ctx.store.getSeller(PHONE, 'default')).toBeNull();
+  });
+
+  it('create_invoice with description "see pay.evil.example" gives created: false, no claim and no outbox row (test 6)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'Acme Exports Inc');
+    const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250, description: 'see pay.evil.example' }, ctx);
+    expect(r).toEqual({
+      created: false,
+      reply_to_customer: 'Please leave web addresses out of the bill description.',
+    });
+    expect(claim).not.toHaveBeenCalled();
+    const invoices = (await db.execute(sql`SELECT count(*)::int AS n FROM b2b_invoices`)) as unknown as { rows: { n: number }[] };
+    expect(invoices.rows[0].n).toBe(0);
+    const any = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as { rows: { n: number }[] };
+    expect(any.rows[0].n).toBe(0);
+  });
+
+  it('a pre-fix seller name with a web address: the buyer push drops it and still carries the pay link (test 5)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'Acme — refunds at evil.example');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250, description: 'Design work' }, ctx);
+    expect(r.created).toBe(true);
+    const [body] = await billpushBodies();
+    expect(body).not.toContain('evil.example');
+    expect(body).toContain('You have a new bill from Acme — refunds at — pay securely: ');
+    expect(body).toContain(`/pay/b2b/${String(r.invoice_id)}`);
+  });
+
+  it('an all-address seller name falls back to "your supplier" in the buyer push', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'www.evil.io');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 99, description: 'Design work' }, ctx);
+    expect(r.created).toBe(true);
+    const [body] = await billpushBodies();
+    expect(body).toMatch(/^You have a new bill from your supplier — pay securely: /);
+  });
+
+  it('a clean seller name is unchanged in the buyer push (control)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'Acme Exports Inc');
+    await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 99, description: 'Design work' }, ctx);
+    const [body] = await billpushBodies();
+    expect(body).toMatch(/^You have a new bill from Acme Exports Inc — pay securely: /);
+  });
+});
+
+describe('fix 38: the seller name and bill lines reach the model without a web address (pre-fix rows)', () => {
+  beforeEach(async () => {
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  it('present_bill strips the address from the seller name and every line item', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_url', partnerId: 'default', businessName: 'Acme — refunds at evil.example',
+      buyerPhone: PHONE,
+      lineItems: [
+        { description: 'Widgets, details at www.x.io', qty: 1, unitAmountUsd: 10 },
+        { description: 'https://evil.example/pay', qty: 1, unitAmountUsd: 5 },
+      ],
+      amountUsd: 15, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
+    const r = await executeTool('present_bill', {}, ctx);
+    const inv = r.invoice as { seller_business_name: string; line_items: { description: string }[] };
+    expect(inv.seller_business_name).toBe('Acme — refunds at');
+    expect(inv.line_items.map((li) => li.description)).toEqual(['Widgets, details at', 'Item']);
+    const j = JSON.stringify(r);
+    expect(j).not.toContain('evil.example');
+    expect(j).not.toContain('x.io');
+  });
+});
+
+// ── Program-Fix 33: one country authority — no silent India, the server owns
+// the send currency, no unpayable bills. ──────────────────────────────────────
+describe('Program-Fix 33 — destination-country authority', () => {
+  // Frankfurter stub for the two corridors the audit probed. MXN and HKD are
+  // fetched as `from=MXN` / `from=HKD` (rate.ts fetchFromProvider: to=USD,INR);
+  // the WhatsApp card send is a text response.
+  function stubCorridorFetch() {
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=MXN')) return { ok: true, json: async () => ({ rates: { INR: 5.574, USD: 0.05817 } }) };
+      if (u.includes('from=HKD')) return { ok: true, json: async () => ({ rates: { INR: 12.21, USD: 0.1275 } }) };
+      if (u.includes('graph.facebook.com') || u.includes('whatsapp')) return { ok: true, text: async () => '' };
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+  }
+  const fetchedUrls = () => vi.mocked(global.fetch).mock.calls.map(([u]) => String(u));
+  const MX_RECIPIENT = '525512345678';
+
+  describe('get_quote', () => {
+    it('with destination_country MX quotes MXN (was IN/INR on main)', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('get_quote', { amount_usd: 500, funding_method: 'bank_transfer', destination_country: 'MX' }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.destination_country).toBe('MX');
+      expect(r.destination_currency).toBe('MXN');
+      expect(r.amount_dest as number).toBeGreaterThan(0);
+      expect(fetchedUrls().some((u) => u.includes('from=MXN'))).toBe(true);
+      // The server states the send currency and a formatted send amount.
+      expect(r.source_currency).toBe('USD');
+      expect(r.amount_source_display).toBe('$500.00 USD');
+    });
+
+    it('with destination_country HK quotes HKD (lower-case accepted)', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer', destination_country: 'hk' }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.destination_country).toBe('HK');
+      expect(r.destination_currency).toBe('HKD');
+    });
+
+    it('with an unknown destination is an error naming the list — no rate is fetched, nothing is India', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      for (const bad of ['ZZ', 'Mexico', 'INR']) {
+        const r = await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer', destination_country: bad }, ctx);
+        expect(r.error).toBeDefined();
+        for (const code of SUPPORTED_DESTINATIONS) expect(String(r.error)).toContain(code);
+        expect(r.destination_currency).toBeUndefined();
+      }
+      expect(fetchedUrls()).toHaveLength(0);
+    });
+  });
+
+  describe('send_approve_picker', () => {
+    it('with a +52 recipient and NO destination is refused before any draft or card', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT,
+      }, ctx);
+      expect(r.sent).toBeUndefined();
+      expect(String(r.error)).toContain('destination_country');
+      expect(String(r.error)).toContain('MX');
+      expect(createDraft).not.toHaveBeenCalled();
+      expect(fetchedUrls().some((u) => u.includes('graph.facebook.com') || u.includes('whatsapp'))).toBe(false);
+    });
+
+    it('with an unknown destination is a returned { error }, never a thrown turn', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'ZZ',
+      }, ctx);
+      expect(r.sent).toBeUndefined();
+      expect(String(r.error)).toContain('MX');
+      expect(createDraft).not.toHaveBeenCalled();
+    });
+
+    it('with MX builds an MX draft carrying an MXN quote', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'MX',
+      }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.sent).toBe(true);
+      const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+      expect(draft?.destinationCountry).toBe('MX');
+      expect(draft?.destinationCurrency).toBe('MXN');
+      expect(draft?.quote.destinationCurrency).toBe('MXN');
+    });
+
+    it('a +91 recipient with no destination still cards to India (back-compat)', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210',
+      }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.sent).toBe(true);
+    });
+  });
+
+  describe('create_transfer (explicit-args path)', () => {
+    it('with a +52 recipient and NO destination is refused; nothing is minted', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_transfer', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT,
+      }, ctx);
+      expect(r.transfer_id).toBeUndefined();
+      expect(String(r.error)).toContain('destination_country');
+      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+    });
+
+    it('with an unknown destination is a returned { error }; nothing is minted', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_transfer', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'ZZ',
+      }, ctx);
+      expect(r.transfer_id).toBeUndefined();
+      expect(String(r.error)).toContain('MX');
+      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+    });
+  });
+
+  describe('schedules are India-only (owner decision 1)', () => {
+    const base = { amount_usd: 50, recipient_name: 'Rahul', funding_method: 'bank_transfer', frequency: 'monthly', day_of_month: 5 };
+
+    it('create_schedule to MX is refused and nothing is saved', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const save = vi.spyOn(ctx.scheduleStore, 'saveSchedule');
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210', destination_country: 'MX' }, ctx);
+      expect(r.schedule_id).toBeUndefined();
+      expect(String(r.error)).toMatch(/India only/i);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('create_schedule with no destination and a +52 recipient is refused and nothing is saved', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const save = vi.spyOn(ctx.scheduleStore, 'saveSchedule');
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: MX_RECIPIENT }, ctx);
+      expect(r.schedule_id).toBeUndefined();
+      expect(String(r.error)).toMatch(/India only/i);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('create_schedule with an unknown destination is refused', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const save = vi.spyOn(ctx.scheduleStore, 'saveSchedule');
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210', destination_country: 'ZZ' }, ctx);
+      expect(r.schedule_id).toBeUndefined();
+      expect(r.error).toBeDefined();
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('a +91 recipient with no destination saves, and the result states the send currency', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210' }, ctx);
+      expect(r.schedule_id).toBeTruthy();
+      expect(r.source_currency).toBe('USD');
+      expect(r.amount_source).toBe(50);
+      expect(String(r.amount_source_display)).toContain('$50');
+      expect(r.amount_source_display).toBe('$50.00 USD');
+      expect(r.destination_country).toBe('IN');
+    });
+
+    it('an explicit IN destination saves', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210', destination_country: 'in' }, ctx);
+      expect(r.schedule_id).toBeTruthy();
+    });
+
+    it('list_schedules rows state the unit (and keep amount_usd for back-compat)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await executeTool('create_schedule', { ...base, recipient_phone: '919876543210' }, ctx);
+      const r = await executeTool('list_schedules', {}, ctx);
+      const rows = r.schedules as Array<Record<string, unknown>>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].amount_usd).toBe(50);
+      expect(rows[0].amount_source).toBe(50);
+      expect(rows[0].source_currency).toBe('USD');
+      expect(rows[0].amount_source_display).toBe('$50.00 USD');
+    });
+  });
+
+  describe('create_invoice — no unpayable bill', () => {
+    beforeEach(async () => {
+      await db.execute(sql`TRUNCATE sellers CASCADE`);
+    });
+    async function seedActiveSeller(ctx: Awaited<ReturnType<typeof buildCtx>>) {
+      await ctx.store.createSeller({
+        id: 's_f33', partnerId: 'default', phone: PHONE, businessName: 'Acme Exports Inc', country: 'US', currency: 'USD',
+      });
+      expect((await ctx.store.completeSellerOnboarding(PHONE, 'default', '021000021|12345678'))?.status).toBe('active');
+    }
+
+    it("a national-format buyer number ('5555550100') is refused: no claim, no insert, no push", async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await seedActiveSeller(ctx);
+      const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
+      const save = vi.spyOn(ctx.store, 'saveB2bInvoice');
+      const enqueue = vi.spyOn(ctx.outboxRepo, 'enqueue');
+      const r = await executeTool('create_invoice', { buyer_phone: '5555550100', amount: 100 }, ctx);
+      expect(r.created).toBe(false);
+      expect(r.invoice_id).toBeUndefined();
+      expect(String(r.reply_to_customer)).toMatch(/country code/i);
+      expect(claim).not.toHaveBeenCalled();
+      expect(save).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
+    });
+
+    it('a +91 buyer still creates', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await seedActiveSeller(ctx);
+      const r = await executeTool('create_invoice', { buyer_phone: '+91 98765 43210', amount: 100 }, ctx);
+      expect(r.created).toBe(true);
+      expect(String(r.invoice_id)).toMatch(/^inv_/);
+    });
+  });
+
+  describe('schemas', () => {
+    it('destination_country is required on get_quote, create_transfer and send_approve_picker, and each lists all ten codes', () => {
+      for (const name of ['get_quote', 'create_transfer', 'send_approve_picker']) {
+        const tool = toolSchemas.find((t) => t.function.name === name)!;
+        expect(tool.function.parameters.required, name).toContain('destination_country');
+        const props = tool.function.parameters.properties as Record<string, { description?: string; enum?: string[] }>;
+        for (const code of SUPPORTED_DESTINATIONS) expect(props.destination_country.description, name).toContain(code);
+        expect(props.destination_country.enum, name).toEqual(SUPPORTED_DESTINATIONS);
+      }
+    });
+
+    it('create_schedule has a destination_country property', () => {
+      const tool = toolSchemas.find((t) => t.function.name === 'create_schedule')!;
+      const props = tool.function.parameters.properties as Record<string, { description?: string }>;
+      expect(props.destination_country).toBeDefined();
+      expect(String(props.destination_country.description)).toMatch(/India/);
+    });
+
+    it('no schema string says "Defaults to India"', () => {
+      expect(JSON.stringify(toolSchemas)).not.toContain('Defaults to India');
+    });
+  });
+});
+
+// ── Program-Fix 34B: human help, cancel wording, repeat by id ────────────────
+
+describe('request_human_help — a real case behind every "a person will help" (fix 34B)', () => {
+  async function outboxRows(kind: string) {
+    const r = await db.execute(sql`SELECT payload, dedupe_key FROM outbox WHERE kind = ${kind} ORDER BY id`);
+    return r.rows as Array<{ payload: Record<string, unknown>; dedupe_key: string | null }>;
+  }
+
+  it('opens ONE customer/human_help case under the turn tenant, enqueues triage + one alert, and returns case_id', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('request_human_help', { reason: 'complaint', summary: 'My money has not arrived and I want to talk to someone.' }, ctx);
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    // Review M1 (copy decided by the main session): a staff reply reaches WhatsApp
+    // only as a link notice, so the hint must not promise an in-chat reply.
+    expect(r.reply_hint).toBe(
+      `When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number). Your case number is ${r.case_id}.`,
+    );
+
+    const mine = await createTicketRepo(db).listByCustomer(ctx.phone);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: r.case_id, partnerId: 'default', kind: 'customer', category: 'human_help', status: 'open' });
+    expect(mine[0].subject).toBe('Customer asked for a person');
+
+    const triage = await outboxRows('ticket.triage');
+    expect(triage.map((x) => x.dedupe_key)).toEqual([`triage:${r.case_id}`]);
+    const alerts = await outboxRows('ops.alert');
+    expect(alerts.map((x) => x.dedupe_key)).toEqual([`help:${r.case_id}`]);
+    // The alert carries no customer content: no phone, no summary.
+    expect(JSON.stringify(alerts[0].payload)).not.toContain(ctx.phone);
+    expect(JSON.stringify(alerts[0].payload)).not.toContain('arrived');
+  });
+
+  it('a second request while the case is open returns the SAME case_id and creates nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    const second = await executeTool('request_human_help', { reason: 'other', summary: 'still need help' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+    expect(await createTicketRepo(db).listByCustomer(ctx.phone)).toHaveLength(1);
+    expect(await outboxRows('ticket.triage')).toHaveLength(1);
+    expect(await outboxRows('ops.alert')).toHaveLength(1);
+  });
+
+  it('reuses the open case even after staff re-categorise it (matched by its fixed subject)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    await createTicketRepo(db).setTriage(String(first.case_id), { category: 'kyc' });
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'help again' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+  });
+
+  it('a resolved case is not reused — a new request opens a new case', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    await createTicketRepo(db).updateStatus(String(first.case_id), 'resolved');
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'help again' }, ctx);
+    expect(second.case_id).not.toBe(first.case_id);
+  });
+
+  it('finds the open case with a tenant-scoped query even past 50 other tickets for the phone (review S1)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    const repo = createTicketRepo(db);
+    // 60 newer tickets for the SAME phone under a sibling tenant would push the
+    // case out of a phone-only `limit 50` read.
+    for (let i = 0; i < 60; i++) {
+      await repo.createTicket({ id: `tk_noise${i}`, partnerId: 'acme', kind: 'customer', customerPhone: ctx.phone, subject: `noise ${i}`, body: 'x' });
+    }
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'again' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+  });
+
+  it('ticket repo findOpenHumanHelpCase is tenant-scoped and open-only', async () => {
+    await seedPartner(db, 'acme');
+    const repo = createTicketRepo(db);
+    await repo.createTicket({ id: 'tk_h1', partnerId: 'acme', kind: 'customer', customerPhone: PHONE, subject: 'Customer asked for a person', body: 'x', category: 'human_help' });
+    expect(await repo.findOpenHumanHelpCase('default', PHONE)).toBeNull();
+    expect((await repo.findOpenHumanHelpCase('acme', PHONE))?.id).toBe('tk_h1');
+    await repo.updateStatus('tk_h1', 'resolved');
+    expect(await repo.findOpenHumanHelpCase('acme', PHONE)).toBeNull();
+  });
+
+  it("a sibling tenant's open case for the same phone is never reused", async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    const theirs = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, acme);
+    const ctx = await buildCtx(redis);
+    const mine = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    expect(mine.case_id).not.toBe(theirs.case_id);
+    const tickets = await createTicketRepo(db).listByCustomer(PHONE);
+    expect(tickets.find((t) => t.id === mine.case_id)!.partnerId).toBe('default');
+  });
+
+  it('bounds the summary (fix 5) and rejects an unknown reason', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const bad = await executeTool('request_human_help', { reason: 'lawsuit', summary: 'x' }, ctx);
+    expect(bad.error).toBeDefined();
+    expect(bad.case_id).toBeUndefined();
+    const r = await executeTool('request_human_help', { reason: 'other', summary: 'A'.repeat(2000) }, ctx);
+    const msgs = await createTicketRepo(db).listMessages(String(r.case_id), { includeInternal: true });
+    expect(msgs[0].body.length).toBeLessThanOrEqual(400);
+  });
+
+  it('on the web channel the hint points at the Support page, not "this chat"', async () => {
+    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
+    const r = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    expect(String(r.reply_hint)).not.toContain('in this chat');
+    expect(String(r.reply_hint)).toContain(String(r.case_id));
+  });
+});
+
+describe('cancel_draft — "nothing to cancel" never reads as "nothing was set up" (fix 34B)', () => {
+  it('no active draft ⇒ the reply_hint says nothing will be charged', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550006666');
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.cancelled).toBe(false);
+    expect(r.reason).toBe('no_active_draft');
+    expect(String(r.reply_hint)).toContain('nothing will be charged');
+  });
+
+  it('an expired draft ⇒ the same hint', async () => {
+    const redis = fakeRedis();
+    const ctx = await buildCtx(redis, '15550007777');
+    await redis.set(`active_draft:default:${ctx.phone}`, 'gone-draft'); // pointer outlived its draft
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.reason).toBe('draft_not_found_or_expired');
+    expect(String(r.reply_hint)).toContain('nothing will be charged');
+  });
+});
+
+describe('repeat_transfer — by transfer_id (fix 34B, prompt-09)', () => {
+  async function mint(ctx: Awaited<ReturnType<typeof buildCtx>>, name: string, phone: string, amount: number) {
+    await ctx.store.upsertRecipient(ctx.partnerId, ctx.phone, {
+      name, recipientPhone: phone, payoutMethod: 'upi', payoutDestination: `${name.toLowerCase()}@okhdfc`,
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('create_transfer', {
+      amount_usd: amount, recipient_name: name, recipient_phone: phone, funding_method: 'bank_transfer',
+    }, ctx);
+    return r.transfer_id as string;
+  }
+
+  it('schema: transfer_id is optional and nothing is required', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'repeat_transfer')!;
+    expect(tool.function.parameters.required ?? []).toEqual([]);
+    expect(Object.keys(tool.function.parameters.properties as object)).toContain('transfer_id');
+  });
+
+  it('hydrates THAT transfer’s recipient, not the latest one', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const momId = await mint(ctx, 'Mom', '919876543210', 60);
+    await mint(ctx, 'Dad', '919811112222', 70); // newer, different recipient
+    const r = await executeTool('repeat_transfer', { transfer_id: momId }, ctx);
+    expect(r.sent).toBe(true);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.recipient.recipientPhone).toBe('919876543210');
+    expect(draft?.amountSource).toBe(60);
+  });
+
+  it("another customer's id gives the same not-found error as a random id (404-never-403)", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mint(owner, 'Mom', '919876543210', 60);
+    const stranger = await buildCtx(redis, '15559990000');
+    const theirs = await executeTool('repeat_transfer', { transfer_id: id }, stranger);
+    const random = await executeTool('repeat_transfer', { transfer_id: 'zzzzzzzz' }, stranger);
+    expect(theirs.error).toBeDefined();
+    expect(theirs).toEqual(random);
+  });
+
+  it('neither argument ⇒ an error naming both options', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('repeat_transfer', {}, ctx);
+    expect(String(r.error)).toContain('transfer_id');
+    expect(String(r.error)).toContain('recipient_phone');
   });
 });
