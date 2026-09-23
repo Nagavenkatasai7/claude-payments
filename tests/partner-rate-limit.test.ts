@@ -31,4 +31,34 @@ describe('checkPartnerRateLimit', () => {
     expect(sameWindow.allowed).toBe(false);
     expect(nextWindow.allowed).toBe(true);
   });
+
+  // Program-Fix 44 P1: a per-KEY window alongside the per-partner one; both must pass.
+  it('is also PER-KEY: key A is blocked at keyLimit while the partner has budget, and key B still passes', async () => {
+    const redis = fakeRedis();
+    const opts = { limit: 100, keyLimit: 2, now: T };
+    const a = [];
+    for (let i = 0; i < 3; i++) a.push(await checkPartnerRateLimit(redis, 'acme', { ...opts, keyId: 'pk_live_A' }));
+    expect(a.map((h) => h.allowed)).toEqual([true, true, false]);
+    expect(a[2].remaining).toBe(0);
+    const b = await checkPartnerRateLimit(redis, 'acme', { ...opts, keyId: 'pk_live_B' });
+    expect(b.allowed).toBe(true);
+    expect(await redis.get(`ratelimit:key:pk_live_A:${Math.floor(T / 60_000)}`)).toBe('3');
+  });
+
+  it('the partner window still binds across keys (both must pass)', async () => {
+    const redis = fakeRedis();
+    const opts = { limit: 2, keyLimit: 100, now: T };
+    await checkPartnerRateLimit(redis, 'acme', { ...opts, keyId: 'pk_live_A' });
+    await checkPartnerRateLimit(redis, 'acme', { ...opts, keyId: 'pk_live_B' });
+    const third = await checkPartnerRateLimit(redis, 'acme', { ...opts, keyId: 'pk_live_C' });
+    expect(third.allowed).toBe(false);
+  });
+
+  it('the per-key default equals the partner default (120/min)', async () => {
+    const redis = fakeRedis();
+    const r = await checkPartnerRateLimit(redis, 'acme', { keyId: 'pk_live_A', now: T });
+    expect(r.limit).toBe(120);
+    expect(r.remaining).toBe(119);
+  });
 });
+

@@ -1,4 +1,5 @@
 import { getPartnerApiKeyStore, type PartnerApiKeyStore } from './partner-api-key';
+import type { ApiKeyMode, ApiScope } from './partner-api-scopes';
 
 // partner-api-auth — the guard every /api/partner/* route runs first. It derives
 // the tenant (partnerId) from the AUTHENTICATED KEY, never from the request body
@@ -9,6 +10,8 @@ export interface PartnerAuthOk {
   ok: true;
   partnerId: string;
   keyId: string;
+  mode: ApiKeyMode; // fix 44 — from the hash-covered plaintext prefix
+  scopes: ApiScope[];
 }
 export interface PartnerAuthErr {
   ok: false;
@@ -36,5 +39,5 @@ export async function authenticatePartner(
     // Same message for unknown/revoked — don't disclose which.
     return { ok: false, status: 401, error: 'Invalid or revoked API key.' };
   }
-  return { ok: true, partnerId: auth.partnerId, keyId: auth.keyId };
+  return { ok: true, partnerId: auth.partnerId, keyId: auth.keyId, mode: auth.mode, scopes: auth.scopes };
 }

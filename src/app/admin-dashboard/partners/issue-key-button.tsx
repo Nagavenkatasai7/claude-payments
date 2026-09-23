@@ -7,6 +7,9 @@ import { issueApiKeyAction } from './actions';
 // One-time API-key reveal. The plaintext is returned by the server action and
 // shown ONCE in component state — never persisted, never re-fetchable. Closing
 // the banner discards it.
+//
+// Fix 44: the mode select shows Test DISABLED — test keys are issuable only
+// after sandbox isolation ships (the server action is live-only regardless).
 export function IssueKeyButton({ partnerId }: { partnerId: string }) {
   const [issued, setIssued] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,13 +51,26 @@ export function IssueKeyButton({ partnerId }: { partnerId: string }) {
       {error && (
         <p className="mb-2 text-sm text-destructive">{error}</p>
       )}
-      <Button
-        type="button"
-        onClick={onIssue}
-        disabled={pending}
-      >
-        {pending ? 'Issuing…' : 'Issue new API key'}
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="sr-only" htmlFor={`key-mode-${partnerId}`}>Key mode</label>
+        <select
+          id={`key-mode-${partnerId}`}
+          defaultValue="live"
+          className="h-9 rounded-md border border-border bg-card px-2 text-sm"
+        >
+          <option value="live">Live</option>
+          <option value="test" disabled>
+            Test (available after sandbox isolation ships)
+          </option>
+        </select>
+        <Button
+          type="button"
+          onClick={onIssue}
+          disabled={pending}
+        >
+          {pending ? 'Issuing…' : 'Issue new API key'}
+        </Button>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedLedgerSpend, seedPartner } from './helpers-db';
+import { fakeRedis } from './helpers';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { sql } from 'drizzle-orm';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
@@ -96,7 +97,7 @@ describe('api-key-repo', () => {
     expect(issued.plaintext.startsWith('sr_live_')).toBe(true);
     const raw = await db.execute(`SELECT * FROM api_keys`);
     expect(JSON.stringify((raw as unknown as { rows: unknown[] }).rows)).not.toContain(issued.plaintext);
-    expect(await r.authenticate(issued.plaintext)).toEqual({ partnerId: 'acme', keyId: issued.keyId });
+    expect(await r.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', keyId: issued.keyId, mode: 'live' });
     expect(await r.authenticate('sr_live_nope')).toBeNull();
     expect(await r.revoke(issued.keyId)).toBe(true);
     expect(await r.authenticate(issued.plaintext)).toBeNull();
@@ -105,6 +106,76 @@ describe('api-key-repo', () => {
     const list = await r.list('acme');
     expect(list).toHaveLength(1);
     expect(list[0].revokedAt).toBeTruthy();
+  });
+
+  // Program-Fix 44 P1: last_used_at is written by authenticate — AWAITED (an
+  // un-awaited write can be dropped once a Vercel response is sent), throttled
+  // by a Redis SET NX EX 300 marker, and never able to fail the auth.
+  function lastUsed(): Promise<string | null> {
+    return db.execute(`SELECT last_used_at FROM api_keys`).then((raw) => {
+      const v = (raw as unknown as { rows: Array<{ last_used_at: unknown }> }).rows[0]?.last_used_at;
+      return v == null ? null : new Date(v as string).toISOString();
+    });
+  }
+
+  it('last_used_at: written on auth, then at most once per 5-minute marker window', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    let clock = new Date('2026-06-09T12:00:00.000Z');
+    const n = { v: 0 };
+    const r = createApiKeyRepo(db, {
+      pepper: 'test-pepper',
+      genSecret: () => `SECRET${n.v++}`,
+      genKeyId: () => `pk_${n.v}`,
+      now: () => clock,
+      redis,
+    });
+    const issued = await r.issue('acme');
+    expect(await lastUsed()).toBeNull();
+    expect(await r.authenticate(issued.plaintext)).not.toBeNull();
+    expect(await lastUsed()).toBe('2026-06-09T12:00:00.000Z');
+    expect(await redis.get(`apikey_seen:${issued.keyId}`)).not.toBeNull();
+
+    clock = new Date('2026-06-09T12:02:00.000Z'); // inside the marker window
+    expect(await r.authenticate(issued.plaintext)).not.toBeNull();
+    expect(await lastUsed()).toBe('2026-06-09T12:00:00.000Z'); // not rewritten
+
+    await redis.del(`apikey_seen:${issued.keyId}`); // marker expired (EX 300)
+    clock = new Date('2026-06-09T12:06:00.000Z');
+    expect(await r.authenticate(issued.plaintext)).not.toBeNull();
+    expect((await r.list('acme'))[0].lastUsedAt).toBe('2026-06-09T12:06:00.000Z');
+  });
+
+  it('last_used_at: a revoked key is never touched', async () => {
+    await seedPartner(db, 'acme');
+    const n = { v: 0 };
+    const r = createApiKeyRepo(db, { pepper: 'p', genSecret: () => `S${n.v++}`, genKeyId: () => `pk_${n.v}`, redis: fakeRedis() });
+    const issued = await r.issue('acme');
+    await r.revoke(issued.keyId);
+    expect(await r.authenticate(issued.plaintext)).toBeNull();
+    expect(await lastUsed()).toBeNull();
+  });
+
+  it('last_used_at: a failing UPDATE or a failing Redis still returns the auth', async () => {
+    await seedPartner(db, 'acme');
+    const n = { v: 0 };
+    const base = createApiKeyRepo(db, { pepper: 'p', genSecret: () => `S${n.v++}`, genKeyId: () => `pk_${n.v}` });
+    const issued = await base.issue('acme');
+
+    // Redis down: the marker SET throws — auth unaffected.
+    const redisDown = { ...fakeRedis(), set: async () => { throw new Error('redis down'); } };
+    const r1 = createApiKeyRepo(db, { pepper: 'p', redis: redisDown });
+    expect(await r1.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', mode: 'live' });
+
+    // DB UPDATE throws: auth unaffected. Proxy the db so only update() fails.
+    const failingDb = new Proxy(db, {
+      get(target, prop, recv) {
+        if (prop === 'update') return () => { throw new Error('update failed'); };
+        return Reflect.get(target, prop, recv);
+      },
+    });
+    const r2 = createApiKeyRepo(failingDb, { pepper: 'p', redis: fakeRedis() });
+    expect(await r2.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', mode: 'live' });
   });
 });
 

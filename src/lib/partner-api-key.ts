@@ -1,5 +1,6 @@
 import { getDb, type DbOrTx } from '@/db/client';
 import { createApiKeyRepo, type ApiKeyRepoDeps } from '@/db/repos/api-key-repo';
+import { getRedis } from './redis';
 import type { PartnerId } from './types';
 
 // partner-api-key — CUT OVER to Postgres (Stage 2a). Same surface (issue /
@@ -21,6 +22,8 @@ export interface ApiKeyPublic {
   createdAt: string;
   revokedAt?: string;
   last4: string;
+  /** Last authenticated use (throttled to ~5 min granularity). Absent ⇒ never used since fix 44. */
+  lastUsedAt?: string;
 }
 
 export interface IssuedApiKey {
@@ -40,6 +43,8 @@ export type PartnerApiKeyStore = ReturnType<typeof createPartnerApiKeyStore>;
 let cached: PartnerApiKeyStore | null = null;
 
 export function getPartnerApiKeyStore(): PartnerApiKeyStore {
-  if (!cached) cached = createPartnerApiKeyStore(getDb());
+  // Redis carries the last_used_at throttle marker (fix 44); wired only here so
+  // test-built stores never construct a real Upstash client.
+  if (!cached) cached = createPartnerApiKeyStore(getDb(), { redis: getRedis() });
   return cached;
 }
