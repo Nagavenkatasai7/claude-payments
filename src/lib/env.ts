@@ -204,6 +204,12 @@ export const env = {
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).
     return process.env[`PAYMENT_WEBHOOK_SECRET_${provider.toUpperCase()}`] ?? '';
   },
+  paymentWebhookSecretPrevious(provider: string): string {
+    // Program-Fix 29: OPTIONAL rotation grace secret, e.g.
+    // PAYMENT_WEBHOOK_SECRET_UNITELLER_PREVIOUS. '' when unset (no-op). Never
+    // boot-required: the current secret alone is the fail-closed gate.
+    return process.env[`PAYMENT_WEBHOOK_SECRET_${provider.toUpperCase()}_PREVIOUS`] ?? '';
+  },
   fundingWebhookSecret(provider: string): string {
     // Per-provider HMAC secret for the FUNDING (sender-charge) callback, e.g.
     // FUNDING_WEBHOOK_SECRET_STRIPE. Same posture as paymentWebhookSecret:

@@ -223,6 +223,42 @@ export function buildReverseInstruction(transfer: Transfer) {
   };
 }
 
+export type CallbackAmountCheck = 'match' | 'absent' | 'mismatch';
+
+const DECIMAL = /^\d+(\.\d+)?$/;
+
+/** A finite number, or a plain decimal string; anything else ⇒ null. */
+function parseAmount(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    return DECIMAL.test(s) ? Number(s) : null;
+  }
+  return null;
+}
+
+/**
+ * Program-Fix 29 (money-09): compare a `paid_out` callback's `amount` block to
+ * the LOCKED instruction amount (buildSettlementInstruction's
+ * amount.destination / destination_currency, the currency defaulting to INR
+ * exactly as there), in minor units. No `amount` key at all ⇒ 'absent' (older
+ * integrations); a partial, unparseable or different block ⇒ 'mismatch'.
+ */
+export function checkCallbackAmount(transfer: Transfer, body: unknown): CallbackAmountCheck {
+  if (!body || typeof body !== 'object' || !('amount' in body)) return 'absent';
+  const a = (body as Record<string, unknown>).amount;
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return 'mismatch';
+  const block = a as Record<string, unknown>;
+  const got = parseAmount(block.destination);
+  const cur = block.destination_currency;
+  if (got === null || typeof cur !== 'string') return 'mismatch';
+  const expected = parseAmount(transfer.amountInr);
+  if (expected === null) return 'mismatch';
+  const expectedCur = transfer.destinationCurrency ?? 'INR';
+  if (cur.trim().toUpperCase() !== expectedCur.toUpperCase()) return 'mismatch';
+  return Math.round(got * 100) === Math.round(expected * 100) ? 'match' : 'mismatch';
+}
+
 export function signBody(rawBody: string, secret: string): string {
   return createHmac('sha256', secret).update(rawBody).digest('hex');
 }

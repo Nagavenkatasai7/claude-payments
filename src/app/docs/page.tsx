@@ -225,11 +225,13 @@ curl -X PUT https://smartremit.ai/api/partner/v1/rates \\
             When a transfer is paid (pay page or <code>/confirm</code>), SmartRemit POSTs a{' '}
             <strong className="text-foreground">signed instruction</strong> to your configured
             settlement endpoint — with automatic retries and exponential backoff until your rail
-            acks 2xx. The signature is <code>HMAC-SHA256(rawBody, signingSecret)</code> hex in the{' '}
-            <code>x-signature</code> header.
+            acks 2xx. Every instruction carries a timestamped signature in the{' '}
+            <code>x-smartremit-signature</code> header — verify it (see{' '}
+            <a href="#signatures" className="underline">Signatures</a> below).
           </p>
           <Code>{`POST <your settlementUrl>
-x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
+x-smartremit-signature: t=1790000000,v1=5d2e…   # recommended — verify this
+x-signature: 3f1a…                              # deprecated — HMAC-SHA256 of the raw body
 
 {
   "reference": "tr_abc123",          // OUR transfer id — echo it in callbacks
@@ -269,6 +271,41 @@ x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
             instruction is retried with backoff and then raises an ops alert, so fix the endpoint in
             Admin → Partners → Payment and the retries pick it up.
           </p>
+          {/* keep in sync with src/lib/providers/rail-signature.ts (Program-Fix 29) */}
+          <div id="signatures" className="space-y-3">
+            <h3 className="text-base font-semibold">Signatures (both directions)</h3>
+            <p className="text-sm text-muted-foreground">
+              <code>x-smartremit-signature: t=&lt;unix seconds&gt;,v1=&lt;hex&gt;</code> where{' '}
+              <code>v1 = HMAC-SHA256(secret, t + &quot;.&quot; + rawBody)</code>, hex. Use the{' '}
+              <code>signingSecret</code> on instructions (us → you) and the <code>webhookSecret</code>{' '}
+              on status callbacks (you → us).
+            </p>
+            <Code>{`signed = t + "." + rawBody            // the exact bytes received
+expected = hex(HMAC_SHA256(secret, signed))
+valid = |now - t| <= 300 seconds
+        AND some v1 in the header equals expected (constant-time compare)`}</Code>
+            <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
+              <li>
+                Reject anything outside the <strong>±5 minute</strong> window, and keep the messages you
+                have already processed (e.g. a hash of <code>t.rawBody</code>) for at least 15 minutes:
+                answer a repeat with <code>2xx</code> and do nothing. We do the same — a repeated
+                callback gets <code>{`{ "ok": true, "duplicate": true }`}</code>.
+              </li>
+              <li>
+                <strong>Key rotation:</strong> when a secret is changed in Admin → Partners → Payment,
+                the old one stays valid for <strong>7 days</strong>. During that time our instructions
+                carry one <code>v1</code> per active secret; accept the message if any of them matches.
+                Your callbacks may be signed with either secret.
+              </li>
+              <li>
+                <strong>Deprecated:</strong> <code>x-signature</code> (hex <code>HMAC-SHA256(rawBody,
+                secret)</code>, no timestamp) is still sent and still accepted when{' '}
+                <code>x-smartremit-signature</code> is absent. It will be retired — move to the
+                timestamped header now. When <code>x-smartremit-signature</code> is present it alone
+                decides.
+              </li>
+            </ul>
+          </div>
         </section>
 
         <Separator />
@@ -277,14 +314,25 @@ x-signature: 3f1a…   # HMAC-SHA256 of the exact raw body
           <h2 className="text-xl font-semibold">4 · Status webhooks (you → us)</h2>
           <p className="text-sm text-muted-foreground">
             Report lifecycle status to{' '}
-            <code>POST /api/payment-webhook/&lt;provider&gt;</code>, signed the same way with your{' '}
-            <code>webhookSecret</code> (fail-closed: unsigned or mis-signed callbacks are rejected
-            with 401).
+            <code>POST /api/payment-webhook/&lt;provider&gt;</code>, signed with your{' '}
+            <code>webhookSecret</code> using the{' '}
+            <a href="#signatures" className="underline">timestamped signature</a> (fail-closed:
+            unsigned, mis-signed or out-of-window callbacks are rejected with 401).
           </p>
           <Code>{`POST /api/payment-webhook/acme-rail
-x-signature: 9c44…   # HMAC-SHA256(rawBody, webhookSecret)
+x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t + "." + rawBody)
 
-{ "reference": "tr_abc123", "status": "paid_out" }`}</Code>
+{ "reference": "tr_abc123", "status": "paid_out",
+  "amount": { "destination": 16600, "destination_currency": "INR" } }`}</Code>
+          <p className="text-sm text-muted-foreground">
+            <strong>Amount on <code>paid_out</code>:</strong> echo the <code>amount.destination</code>{' '}
+            and <code>destination_currency</code> from our instruction. If they differ from what we
+            instructed (to the minor unit), the transfer is <strong>not</strong> delivered: it is held
+            for our ops team, who resolve it with you, and we answer{' '}
+            <code>{`{ "ok": true, "held": true }`}</code> so you stop retrying. A{' '}
+            <code>paid_out</code> without an <code>amount</code> is accepted for now but is
+            deprecated.
+          </p>
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Status mapping</CardTitle>

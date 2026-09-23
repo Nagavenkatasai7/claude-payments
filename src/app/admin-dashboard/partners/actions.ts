@@ -30,6 +30,7 @@ import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { verifyPhoneNumberOwnership } from '@/lib/partner-integrations-verify';
+import { withRotatedSecret } from '@/lib/partner-integrations';
 import { logWarn } from '@/lib/log';
 import type {
   Partner,
@@ -350,13 +351,18 @@ export async function savePaymentConfigAction(formData: FormData): Promise<void>
   const existing = await store.getIntegrations(id);
   const providerType = String(formData.get('providerType') ?? '').trim() || undefined;
   // Spread-merge so fields this form doesn't manage are never silently wiped.
-  const credentials: Record<string, string> = { ...existing.payment.credentials };
+  let credentials: Record<string, string> = { ...existing.payment.credentials };
   const submittedSettlementUrl = String(formData.get('settlementUrl') ?? '').trim();
   const settlementUrl = keepOrUpdate(submittedSettlementUrl, credentials.settlementUrl);
   const signingSecret = keepOrUpdate(String(formData.get('signingSecret') ?? ''), credentials.signingSecret);
+  let webhookSecret = keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret);
+  // Program-Fix 29: a changed secret keeps the old one active for a 7-day grace
+  // period (previous* keys in this encrypted blob, one expiry per secret).
+  const now = new Date();
+  credentials = withRotatedSecret(credentials, 'signing', existing.payment.credentials?.signingSecret, signingSecret, now);
+  credentials = withRotatedSecret(credentials, 'webhook', existing.payment.webhookSecret, webhookSecret, now);
   if (settlementUrl) credentials.settlementUrl = settlementUrl;
   if (signingSecret) credentials.signingSecret = signingSecret;
-  let webhookSecret = keepOrUpdate(String(formData.get('webhookSecret') ?? ''), existing.payment.webhookSecret);
 
   // Zero-hassle simulator: selecting the hosted reference rail auto-provisions the
   // endpoint URL and both HMAC secrets so the partner pastes NOTHING. The reference
