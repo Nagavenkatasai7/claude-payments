@@ -37,6 +37,14 @@ export interface LegalDraft {
   sections: readonly LegalSection[];
 }
 
+/**
+ * The demonstration runs on the default tenant, whose brand is SmartRemit: it
+ * must never read as SmartRemit being the licensed transmitter. Shown in the
+ * LICENSING provider section and the /about footer.
+ */
+export const DEMO_NO_PARTNER_NOTE =
+  '(Demonstration: no licensed partner is attached and no real money moves.)';
+
 const PROVIDER_OF_RECORD =
   'Your money transmitter is the licensed partner named on your receipt. SmartRemit is the technology provider: it runs the chat, the quote and the pay page for that partner, and it never holds, receives or disburses your money.';
 
@@ -52,7 +60,7 @@ export const TERMS_DRAFT: LegalDraft = {
       heading: 'Who provides your transfer',
       paragraphs: [
         PROVIDER_OF_RECORD,
-        'The partner is responsible for receiving your payment, delivering the funds to your recipient, and handling refunds. Its name and contact details appear on your receipt.',
+        'The partner is responsible for receiving your payment, delivering the funds to your recipient, and handling refunds. Its name and contact details will appear on your receipt once partner disclosures are enabled.',
       ],
     },
     {
@@ -66,7 +74,7 @@ export const TERMS_DRAFT: LegalDraft = {
       id: 'quotes-and-fees',
       heading: 'Quotes, exchange rates and fees',
       paragraphs: [
-        'Before you pay, you are shown the amount you send, the fees, the total you pay, the exchange rate and the amount your recipient will receive. Exchange rates shown during a conversation are indicative; the rate is fixed when you confirm the transfer on the pay page.',
+        'Before you pay, you are shown the amount you send, the fees, the total you pay, the exchange rate and the amount your recipient will receive. When you confirm a quote in the chat, the exchange rate is locked for about 10 minutes. If the quote has expired by the time you pay, the pay page will not take payment and you are asked for a fresh quote.',
         'Your recipient’s bank or wallet provider may charge its own fees, which are not included in the amount shown.',
       ],
     },
@@ -150,7 +158,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       paragraphs: ['Depending on what you do, this can include:'],
       bullets: [
         'Contact details: your phone number, and your email address if you create an account.',
-        'Identity details the partner needs to verify you, such as your legal name, date of birth, address and identity document details.',
+        'Identity details the partner needs to verify you, such as your legal name, date of birth, address, nationality, occupation, source of funds, whether you hold a public position (politically exposed person), and identity document details.',
         'Transfer details: amounts, the recipient’s name and payout details, and the transfer history.',
         'Messages you send in the chat.',
         'Technical details from the pay page and account pages, such as IP address and browser type, used for security and fraud prevention.',
@@ -177,7 +185,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       ],
       bullets: [
         'For everyday business purposes, such as processing your transfers, responding to court orders and legal investigations, and reporting as the law requires: yes; you cannot limit this sharing.',
-        'With service providers acting for the partner, such as SmartRemit, messaging and identity-verification providers: yes; you cannot limit this sharing.',
+        'With service providers acting for the partner, such as SmartRemit, messaging (WhatsApp), identity-verification, AI model, hosting and database providers: yes; you cannot limit this sharing.',
         'For the partner’s or SmartRemit’s own marketing: no such sharing takes place.',
         'For joint marketing with other financial companies: no such sharing takes place.',
         'With affiliates or non-affiliates so they can market to you: no such sharing takes place.',
@@ -188,7 +196,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       heading: 'WhatsApp and the chat assistant',
       paragraphs: [
         'If you use the service on WhatsApp, your messages pass through WhatsApp, which is operated by Meta under its own terms and privacy policy. WhatsApp shows the service your phone number, your WhatsApp profile name and the messages you send.',
-        'Your messages are processed by an AI model provider to generate replies. Conversation history used to continue a conversation is kept for about 30 days; operational records of message processing are kept for a limited time; transfer records are kept separately, as described below.',
+        'Your messages are processed by an AI model provider to generate replies. Conversation history used to continue a conversation is kept until 30 days after your last message. Some records of message processing are kept longer: internal delivery records hold message content for about 7 days, records of failed deliveries and messages you send to support are kept until they are reviewed or deleted, and transfer records are kept separately, as described below.',
         'Never send card numbers, bank passwords or one-time codes in the chat. Payment details are entered only on the pay page.',
       ],
     },
@@ -203,7 +211,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       id: 'retention',
       heading: 'How long it is kept',
       paragraphs: [
-        'Transfer and identity records are kept for as long as financial-services law requires the partner to keep them. Chat history is kept for a shorter period, as described above.',
+        'Transfer and identity records are kept for as long as financial-services law requires the partner to keep them. Conversation history is kept for a shorter period, as described above; support messages are kept with the records of your account.',
       ],
     },
     {
@@ -233,6 +241,13 @@ export const REMITTANCE_RIGHTS_DRAFT: LegalDraft = {
     'Your rights under federal law (Regulation E, 12 CFR 1005 Subpart B) when you send money abroad for personal, family or household purposes: error resolution and cancellation.',
   version: LEGAL_DRAFT_VERSION,
   sections: [
+    {
+      id: 'status',
+      heading: 'Status of this section',
+      paragraphs: [
+        'The mechanics that honour these rights, including the 30-minute cancellation with a refund within three business days and the error-resolution timelines, are still being built; this wording may change.',
+      ],
+    },
     {
       id: 'error-resolution',
       heading: 'What to do if you think there has been an error or problem',
@@ -268,7 +283,7 @@ export const REMITTANCE_RIGHTS_DRAFT: LegalDraft = {
       id: 'complaints',
       heading: 'Complaints',
       paragraphs: [
-        'If you have a complaint, contact the licensed partner named on your receipt first. Your receipt also names the state regulator that licenses the partner, when the partner has supplied it.',
+        'If you have a complaint, contact the licensed partner named on your receipt first. Once partner disclosures are enabled, your receipt will also name the state regulator that licenses the partner, where the partner has supplied it.',
         'You can also contact the Consumer Financial Protection Bureau at consumerfinance.gov/complaint or 855-411-2372.',
       ],
     },
@@ -286,7 +301,8 @@ export const LICENSING_DRAFT: LegalDraft = {
       heading: 'Who provides your transfer',
       paragraphs: [
         'Transfers are provided by the licensed partner named on your receipt. That partner is the money transmitter for your transfer and holds the licences required to provide it.',
-        'The partner’s name and contact details, and its licence and state-regulator details where the partner has supplied them, are shown with your transfer receipt. Where a detail has not been supplied, nothing is shown in its place.',
+        'Once partner disclosures are enabled, your receipt will show the partner’s name and contact details, and its licence and state-regulator details where the partner has supplied them. Where a detail has not been supplied, nothing will be shown in its place.',
+        DEMO_NO_PARTNER_NOTE,
       ],
     },
     {
@@ -316,7 +332,8 @@ export const SCHEDULED_TRANSFERS_DRAFT: LegalDraft = {
       id: 'scheduled-note',
       heading: 'Scheduled and recurring transfers',
       paragraphs: [
-        'For a transfer scheduled at least three business days in advance, including a recurring transfer, the disclosures are given when you schedule it, and you may cancel it by contacting the licensed partner named on your receipt at least three business days before the scheduled date.',
+        'Today, when you set up a recurring transfer in the chat, you are sent a pay link on each scheduled date, and you review and pay each transfer on the pay page. Disclosures at the time you set up the schedule are not yet shown. You can cancel a schedule at any time by asking in the chat.',
+        'For a transfer scheduled at least three business days in advance, federal rules call for the disclosures to be given when you schedule it, and for you to be able to cancel it at least three business days before the scheduled date. How the service will meet those rules is still being worked out.',
         'This part of the service is still being reviewed, and the wording here may change.',
       ],
     },

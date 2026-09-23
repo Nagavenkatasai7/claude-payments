@@ -100,6 +100,57 @@ describe('src/lib/legal/drafts.ts', () => {
   });
 });
 
+// PR #314 review: no draft may state as present fact something the product
+// does not do today (receipt partner details arrive with PR B, the cancel
+// mechanics with PR C, scheduling disclosures later).
+describe('drafts claim only what the product does today', () => {
+  it('receipt partner details are conditional, not present fact', async () => {
+    const text = allDraftText(await drafts());
+    expect(text).not.toMatch(/(?<!will )appear on your receipt/i);
+    expect(text).not.toMatch(/are shown with your transfer receipt/i);
+    expect(text).not.toMatch(/receipt also names the state regulator/i);
+  });
+
+  it('the rate is described as locked for about 10 minutes in the chat, not fixed on the pay page', async () => {
+    const d = await drafts();
+    const quotes = d.TERMS_DRAFT.sections.find((s) => s.id === 'quotes-and-fees')!;
+    const text = quotes.paragraphs.join(' ');
+    expect(text).not.toMatch(/fixed when you confirm/i);
+    expect(text).toMatch(/about 10 minutes/);
+    expect(text).toMatch(/expired/i);
+  });
+
+  it('the scheduled-transfer note says scheduling disclosures are not yet shown and cancelling is in the chat', async () => {
+    const d = await drafts();
+    const text = d.SCHEDULED_TRANSFERS_DRAFT.sections.flatMap((s) => s.paragraphs).join(' ');
+    expect(text).toMatch(/not yet shown/i);
+    expect(text).toMatch(/chat/i);
+    expect(text).not.toMatch(/disclosures are given when you schedule/i);
+  });
+
+  it('the remittance rights carry a still-being-built status line', async () => {
+    const d = await drafts();
+    const first = d.REMITTANCE_RIGHTS_DRAFT.sections[0];
+    expect(first.id).toBe('status');
+    expect(first.paragraphs.join(' ')).toMatch(/still being built/i);
+  });
+
+  it('the licensing provider section and the /about footer say the demonstration has no licensed partner', async () => {
+    const d = await drafts();
+    const provider = d.LICENSING_DRAFT.sections.find((s) => s.id === 'provider')!;
+    expect(provider.paragraphs.join(' ')).toContain(d.DEMO_NO_PARTNER_NOTE);
+    expect(d.DEMO_NO_PARTNER_NOTE).toMatch(/no licensed partner is attached and no real money moves/);
+    const about = readFileSync(resolve(process.cwd(), 'src/app/about/page.tsx'), 'utf-8');
+    expect(about).toContain('DEMO_NO_PARTNER_NOTE');
+  });
+
+  it('chat retention matches the 30-days-after-last-message conversation TTL', async () => {
+    const d = await drafts();
+    const wa = d.PRIVACY_DRAFT.sections.find((s) => s.id === 'whatsapp')!;
+    expect(wa.paragraphs.join(' ')).toMatch(/30 days after your last message/);
+  });
+});
+
 describe.each(['terms', 'privacy', 'legal'] as const)('/%s page', (route) => {
   it('renders the draft banner, the version id, one h1 and a #main target', async () => {
     const d = await drafts();

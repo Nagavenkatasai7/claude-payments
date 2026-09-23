@@ -63,11 +63,15 @@ test.describe('at a 390px phone viewport', () => {
       const res = await page.goto(path);
       expect(res?.status()).toBe(200);
       await expect(page.getByText('Draft — for counsel review; not legal advice and not yet approved')).toBeVisible();
-      const { scrollWidth, innerWidth } = await page.evaluate(() => ({
-        scrollWidth: document.documentElement.scrollWidth,
+      // Measured on <main>, not the document: the page wrapper clips x-overflow,
+      // which would hide content that is wider than the phone.
+      const { scrollWidth, clientWidth, innerWidth } = await page.locator('main').evaluate((el) => ({
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
         innerWidth: window.innerWidth,
       }));
-      expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+      expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+      expect(clientWidth).toBeLessThanOrEqual(innerWidth);
     });
   }
 });
