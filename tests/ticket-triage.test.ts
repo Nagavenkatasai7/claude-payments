@@ -461,3 +461,44 @@ describe('enqueue sites — every customer ticket creation queues a triage', () 
     expect(await outboxKinds()).toEqual([]);
   });
 });
+
+// ── Program-Fix 34B: a human-help case keeps its category through triage ─────
+
+describe('ticket.triage — a human_help case keeps its category (fix 34B)', () => {
+  async function createHelpCase(id: string) {
+    return repo.createTicket({
+      id,
+      partnerId: 'p1',
+      kind: 'customer',
+      customerPhone: PHONE,
+      subject: 'Customer asked for a person',
+      body: 'I want to talk to someone about my account.',
+      category: 'human_help',
+    });
+  }
+
+  it('sets the priority but NOT the category, and audits category human_help', async () => {
+    const t = await createHelpCase('tk_help1');
+    chatMock.mockResolvedValue(chatReply('{"category":"kyc","priority":"urgent"}'));
+    await createOutboxRepo(db).enqueue('ticket.triage', { ticketId: t.id }, { dedupeKey: `triage:${t.id}` });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+
+    const after = await repo.getTicket(t.id);
+    expect(after!.category).toBe('human_help');
+    expect(after!.priority).toBe('urgent');
+    const a = (await createAuditRepo(db).listByPartner('p1')).find((x) => x.action === 'ticket.triage');
+    expect(a!.meta).toMatchObject({ source: 'copilot', category: 'human_help', priority: 'urgent' });
+  });
+
+  it('still auto-assigns a human_help case', async () => {
+    staffList = [agent({ username: 'venkat' })];
+    const t = await createHelpCase('tk_help2');
+    chatMock.mockResolvedValue(chatReply('{"category":"other","priority":"normal"}'));
+    await createOutboxRepo(db).enqueue('ticket.triage', { ticketId: t.id }, { dedupeKey: `triage:${t.id}` });
+    await drainOnce(deps(), 'w1');
+    const after = await repo.getTicket(t.id);
+    expect(after!.assignedTo).toBe('venkat');
+    expect(after!.category).toBe('human_help');
+  });
+});

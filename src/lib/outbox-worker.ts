@@ -6,6 +6,7 @@ import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { triageSuggest } from '@/lib/ticket-ai';
+import { HUMAN_HELP_CATEGORY } from '@/lib/ticket-category';
 import { eligibleAgents, pickLeastLoaded } from '@/lib/ticket-balancer';
 import {
   buildSettlementInstruction,
@@ -565,8 +566,14 @@ async function handle(
       if (!ticket || ticket.kind !== 'customer') return; // gone / not a customer ticket ⇒ no-op
       const messages = await repo.listMessages(ticketId, { includeInternal: false });
       const firstMessage = messages.find((m) => !m.internal)?.body ?? '';
-      const { category, priority } = await triageSuggest(ticket.subject, firstMessage);
-      await repo.setTriage(ticketId, { category, priority });
+      const suggested = await triageSuggest(ticket.subject, firstMessage);
+      // Program-Fix 34B: a help case the bot opened keeps 'human_help' (the bot
+      // finds the open case by it, and staff see it in the queue); triage sets
+      // only its priority. Every other ticket takes the suggested category.
+      const keepsCategory = ticket.category === HUMAN_HELP_CATEGORY;
+      const category = keepsCategory ? HUMAN_HELP_CATEGORY : suggested.category;
+      const priority = suggested.priority;
+      await repo.setTriage(ticketId, keepsCategory ? { priority } : { category, priority });
       await createAuditRepo(deps.db).record({
         partnerId: ticket.partnerId,
         actor: 'system',
