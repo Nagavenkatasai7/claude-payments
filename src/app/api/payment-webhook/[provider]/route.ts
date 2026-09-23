@@ -12,7 +12,7 @@ import { getDb } from '@/db/client';
 import { createOutboxRepo, type OutboxRepo } from '@/db/repos/outbox-repo';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { logWarn } from '@/lib/log';
-import { handleRailFailure, alertRefusedDelivery } from '@/lib/rail-failure';
+import { handleRailFailure, alertRefusedDelivery, alertCallbackOnHold } from '@/lib/rail-failure';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
 import { recipientTemplateParams, recipientDeliveredFallbackText, formatDestAmount, recipientDisplayName } from '@/lib/payment';
@@ -167,6 +167,13 @@ async function handleVerified(
   // in progress, is never silent — money may have moved twice (railconflict:<id>).
   if (!updated && result.status === 'delivered') {
     await alertRefusedDelivery(getDb(), result.transferId);
+  }
+  // Program-Fix 14: status updates respect compliance holds. The guarded
+  // UPDATE never advances a row under review; when a funded / paid_out was
+  // not applied, a held row raises ONE deduped ops signal (railhold:<id>) and
+  // the rail gets the same 200 { ok: true } as any no-op, so it stops retrying.
+  if (!updated && (result.status === 'paid' || result.status === 'delivered')) {
+    await alertCallbackOnHold(getDb(), result.transferId);
   }
   // Fire stage-2 notifications ONLY on a real terminal transition (non-null + delivered).
   if (updated && updated.status === 'delivered') {

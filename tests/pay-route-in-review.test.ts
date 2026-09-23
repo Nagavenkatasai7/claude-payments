@@ -24,7 +24,7 @@ vi.mock('@/lib/whatsapp', () => ({
   RECIPIENT_TEMPLATE_LANG: 'en',
 }));
 
-import { completePaymentStage1 } from '@/lib/payment';
+import { buildStage1Message, completePaymentStage1 } from '@/lib/payment';
 import { sql } from 'drizzle-orm';
 import { beginHold } from '@/lib/settlement';
 import { sendText } from '@/lib/whatsapp';
@@ -88,9 +88,15 @@ describe('pay route logic: flagged transfer → in_review', () => {
     const t = makeTransfer({ id: 'f2', complianceStatus: 'flagged' });
     await store.saveTransfer(t);
 
-    const { senderMessages } = await completePaymentStage1(store, 'f2', { held: true });
-    expect(senderMessages[0]).not.toContain('will get');
-    expect(senderMessages[0]).toContain('Transfer ID: f2');
+    // Program-Fix 14: the legacy stage-1 helper no longer marks a flagged
+    // (not cleared) transfer paid, so it sends nothing; the held wording is the
+    // one beginHold enqueues (pinned above) — built by buildStage1Message.
+    const legacy = await completePaymentStage1(store, 'f2', { held: true });
+    expect(legacy.senderMessages).toEqual([]);
+    expect(legacy.transfer.status).toBe('awaiting_payment');
+    const held = buildStage1Message(t, { held: true });
+    expect(held).not.toContain('will get');
+    expect(held).toContain('Transfer ID: f2');
   });
 
   it('cleared: completePaymentStage1 (normal) sends delivery-time message', async () => {
