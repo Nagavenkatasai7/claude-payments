@@ -64,6 +64,12 @@ describe('.env.example matches the code that reads it', () => {
     expect(missing).toEqual([]);
   });
 
+  it('lists every name drizzle.config.ts reads (the migrate connection)', () => {
+    const names = namesReadByEnvTs(read('drizzle.config.ts'));
+    expect(names).toContain('DATABASE_URL_UNPOOLED');
+    expect(names.filter((n) => !example.has(n))).toEqual([]);
+  });
+
   it('does not list the dead PAYMENT_PROVIDER_MODE', () => {
     expect(example.has('PAYMENT_PROVIDER_MODE')).toBe(false);
   });
