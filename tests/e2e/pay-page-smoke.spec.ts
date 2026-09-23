@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { randomBytes } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 
 // Program-Fix 23 — hosted pay-page smoke. UNAUTHENTICATED: needs no E2E_*
 // secret, so it must never throw at module load. It proves, on the deployed
@@ -39,6 +40,19 @@ test.afterEach(async ({}, testInfo) => {
       body: `${reportOnly.length} report-only CSP line(s)\n${reportOnly.join('\n')}`,
       contentType: 'text/plain',
     });
+  }
+  // A GREEN CI run shows neither attachments nor test stdout (the github
+  // reporter prints failures only; smoke.yml uploads test-results/ on failure
+  // only), so the count goes to the job summary too: that is where the PR2
+  // observation gate reads it. Written for every pay-page test, zero included,
+  // so "no lines" is distinguishable from "not checked".
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (summary) {
+    const body = reportOnly.map((l) => `    ${l.slice(0, 300)}`).join('\n');
+    appendFileSync(
+      summary,
+      `- CSP report-only lines: ${reportOnly.length} (${testInfo.title})\n${body ? `${body}\n` : ''}`,
+    );
   }
   expect(enforced, 'enforced CSP violations in the console').toEqual([]);
 });
