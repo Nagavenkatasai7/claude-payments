@@ -198,7 +198,7 @@ export default async function PartnerApplicationPage({
             </CardContent>
           </Card>
 
-          {(decisionOpen || status === 'approved' || decisionFlash) && (
+          {staff.role === 'admin' && (decisionOpen || status === 'approved' || decisionFlash) && (
             <Card>
               <CardHeader>
                 <CardTitle>Decision</CardTitle>
@@ -226,7 +226,7 @@ export default async function PartnerApplicationPage({
                     </div>
                   </form>
                 )}
-                {status === 'approved' && staff.role === 'admin' && (
+                {status === 'approved' && (
                   <Button asChild size="sm">
                     <Link href={`/admin-dashboard/partners/new?fromRequest=${encodeURIComponent(request.id)}`}>
                       Set up this partner →
