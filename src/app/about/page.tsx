@@ -251,7 +251,19 @@ export default function AboutPage() {
             <BrandLogo height={40} />
             <span>Non-custodial remittance infrastructure.</span>
           </span>
-          <span>[Placeholder: licensing &amp; regulatory disclosures]</span>
+          {/* Program-Fix 15 PR A: the licensing line + the legal drafts. */}
+          <nav aria-label="Legal" className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span>Transfers are provided by the licensed partner named on your receipt.</span>
+            <a className="underline-offset-4 hover:text-[#0b1b3f] hover:underline" href="/legal">
+              Licensing
+            </a>
+            <a className="underline-offset-4 hover:text-[#0b1b3f] hover:underline" href="/terms">
+              Terms
+            </a>
+            <a className="underline-offset-4 hover:text-[#0b1b3f] hover:underline" href="/privacy">
+              Privacy
+            </a>
+          </nav>
         </div>
       </footer>
     </div>
