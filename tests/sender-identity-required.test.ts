@@ -241,6 +241,7 @@ describe('sender identity is required before screening — web chat parity', { r
       expect(p).toContain('needs_sender_name');
       expect(p).toContain('set_sender_name');
       expect(p).toContain(NAME_QUESTION);
+      expect(p).toContain('retry_by_tapping_card');
     }
   });
 
@@ -278,6 +279,7 @@ describe('sender identity is required before screening — mint paths', { retry:
     const r = await executeTool('create_transfer', {}, tap);
     expect(r.needs_sender_name).toBe(true);
     expect(r.reply_to_customer).toBe(NAME_QUESTION);
+    expect(r.retry_by_tapping_card).toBe(true);
     expect(r.transfer_id).toBeUndefined();
     expect(await ctx.store.listTransfers()).toHaveLength(0);
     expect(await ctx.draftStore.getDraft(draftId)).not.toBeNull();

@@ -1519,7 +1519,7 @@ async function createTransferTool(
     // same card works once the name is on file.
     if (draft.transferType !== 'b2b' && !hasSenderName(customer)) {
       await ctx.draftStore.restoreDraft(draft, ctxDraftId);
-      return senderNameRequired();
+      return { ...senderNameRequired(), retry_by_tapping_card: true };
     }
     {
       const todayUsedCents = await ctx.dailyVolumeStore.getTodayCents(ctx.partnerId, ctx.phone);
