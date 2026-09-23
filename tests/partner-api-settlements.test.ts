@@ -137,6 +137,18 @@ describe('listSettlements', () => {
     expect(s).not.toContain('919876543210');
   });
 
+  it('totals include every listed row — an instructed cancelled row too (documented on /docs)', async () => {
+    await put('p1', 'paid', '2026-09-22 10:00:00+00');
+    await put('c1', 'cancelled', '2026-09-22 11:00:00+00', { refundStatus: 'pending', amountSource: 10, amountInr: 852 });
+    const body = await json({});
+    expect(body.settlements.map((s) => [s.reference, s.status])).toEqual([['p1', 'paid'], ['c1', 'cancelled']]);
+    expect(body.totals).toEqual({
+      count: 2,
+      amount_source_minor_by_currency: { USD: 21000 },
+      amount_destination_minor_by_currency: { INR: 1789200 },
+    });
+  });
+
   it('pages with next_cursor; totals are for the page only', async () => {
     await put('a', 'paid', '2026-09-22 10:00:00+00');
     await put('b', 'paid', '2026-09-22 11:00:00+00');

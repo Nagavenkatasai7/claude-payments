@@ -715,9 +715,11 @@ export function createTransferRepo(
      * the caller (settlement-statement.decodeStatementCursor) before this cast.
      * Selects ONLY the statement columns: no settlement_partner_id, payout
      * destination, recipient or sender identity is ever read here.
-     * Drizzle 0.45.2: select({...}) partial selection —
-     * node_modules/drizzle-orm/pg-core/db.d.ts (select<TSelection>);
-     * sql`` + .as — node_modules/drizzle-orm/sql/sql.d.ts.
+     * Drizzle 0.45.2: select(fields) partial selection —
+     * node_modules/drizzle-orm/pg-core/db.d.ts:146; sql`…`.as(alias) —
+     * node_modules/drizzle-orm/sql/sql.d.ts:84; gte/lt —
+     * node_modules/drizzle-orm/sql/expressions/conditions.d.ts:124,139; asc —
+     * node_modules/drizzle-orm/sql/expressions/select.d.ts:21.
      */
     async listSettledPage(
       partnerId: PartnerId,
@@ -759,7 +761,9 @@ export function createTransferRepo(
           paidAt: transfers.paidAt,
           deliveredAt: transfers.deliveredAt,
           refundedAt: transfers.refundedAt,
-          paidAtText: sql<string>`${transfers.paidAt}::text`.as('paid_at_text'),
+          // Fixed-format UTC text (6 µs digits, '+00') — independent of the
+          // session TimeZone and DateStyle, so the cursor always validates.
+          paidAtText: sql<string>`to_char(${transfers.paidAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'`.as('paid_at_text'),
         })
         .from(transfers)
         .where(and(...conds))

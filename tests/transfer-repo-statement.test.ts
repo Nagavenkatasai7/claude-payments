@@ -163,11 +163,8 @@ describe('transfer-repo.listSettledPage', () => {
     const page = await repo.listSettledPage('acme', FROM, TO, { limit: 1, cursor: null });
     const cur = decodeStatementCursor(page.nextCursor!);
     expect(cur?.id).toBe('r1');
-    // Postgres prints in the SESSION time zone (with its offset); the µs survive.
-    expect(cur?.paidAtText).toMatch(/:00\.123456[+-]\d{2}/);
-    expect(new Date(cur!.paidAtText.replace(' ', 'T').replace(/\.(\d{3})\d+/, '.$1').replace(/([+-]\d{2})$/, '$1:00')).toISOString()).toBe(
-      '2026-09-22T12:00:00.123Z',
-    );
+    // Fixed UTC text with all 6 µs digits — never a JS ms date, never the session zone.
+    expect(cur?.paidAtText).toBe('2026-09-22 12:00:00.123456+00');
   });
 
   it('never selects the settlement partner or the payout destination', async () => {
