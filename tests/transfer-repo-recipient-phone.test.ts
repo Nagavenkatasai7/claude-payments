@@ -20,8 +20,7 @@ function fixture(over: Partial<Transfer> = {}): Transfer {
     recipientLegalName: 'Anita Test',
     fundingMethod: 'bank_transfer',
     complianceStatus: 'cleared', complianceReasons: [],
-    status: 'paid',
-    paidAt: new Date(Date.now() - 60_000).toISOString(),
+    status: 'awaiting_payment',
     createdAt: new Date(Date.now() - 300_000).toISOString(),
     sourceCountry: 'US', sourceCurrency: 'USD',
     destinationCountry: 'IN', destinationCurrency: 'INR',
@@ -43,7 +42,7 @@ describe('transfer-repo updateRecipientPhone', { retry: 0 }, () => {
     await repo.saveTransfer(fixture());
     const updated = await repo.updateRecipientPhone('tr_rp1', 'default', OWNER, '919811112222');
     expect(updated?.recipientPhone).toBe('919811112222');
-    expect(updated?.status).toBe('paid');
+    expect(updated?.status).toBe('awaiting_payment');
     expect((await repo.getTransfer('tr_rp1'))?.recipientPhone).toBe('919811112222');
   });
 
@@ -72,5 +71,37 @@ describe('transfer-repo updateRecipientPhone', { retry: 0 }, () => {
   it('returns null for a missing row and never creates one', async () => {
     expect(await repo.updateRecipientPhone('tr_missing', 'default', OWNER, '919811112222')).toBeNull();
     expect(await repo.getTransfer('tr_missing')).toBeNull();
+  });
+});
+
+// The recipient number is fixed once money is involved: only an unpaid,
+// uncharged, not-yet-instructed transfer takes the edit. Each case below
+// changes exactly ONE gating column on an otherwise editable row.
+describe('transfer-repo updateRecipientPhone — unpaid transfers only', { retry: 0 }, () => {
+  const lockedCases: Array<[string, ReturnType<typeof sql>]> = [
+    ['paid', sql`UPDATE transfers SET status = 'paid', paid_at = now() WHERE id = 'tr_rp1'`],
+    ['delivered', sql`UPDATE transfers SET status = 'delivered', paid_at = now(), delivered_at = now() WHERE id = 'tr_rp1'`],
+    ['in_review', sql`UPDATE transfers SET status = 'in_review' WHERE id = 'tr_rp1'`],
+    ['cancelled', sql`UPDATE transfers SET status = 'cancelled' WHERE id = 'tr_rp1'`],
+    ['blocked', sql`UPDATE transfers SET status = 'blocked' WHERE id = 'tr_rp1'`],
+    ['awaiting_payment + funding captured', sql`UPDATE transfers SET funding_ref = 'fund_x' WHERE id = 'tr_rp1'`],
+    ['awaiting_payment + settlement instructed', sql`UPDATE transfers SET payment_provider_ref = 'prov_x' WHERE id = 'tr_rp1'`],
+    ['awaiting_payment + paid_at set', sql`UPDATE transfers SET paid_at = now() WHERE id = 'tr_rp1'`],
+  ];
+
+  for (const [label, lock] of lockedCases) {
+    it(`${label}: returns null and changes nothing`, async () => {
+      await repo.saveTransfer(fixture());
+      await db.execute(lock);
+      const before = (await db.execute(sql`SELECT * FROM transfers WHERE id = 'tr_rp1'`)).rows[0];
+      expect(await repo.updateRecipientPhone('tr_rp1', 'default', OWNER, '919811112222')).toBeNull();
+      const after = (await db.execute(sql`SELECT * FROM transfers WHERE id = 'tr_rp1'`)).rows[0];
+      expect(after).toEqual(before);
+    });
+  }
+
+  it('an unpaid, uncharged, not-yet-instructed transfer still takes the edit', async () => {
+    await repo.saveTransfer(fixture());
+    expect((await repo.updateRecipientPhone('tr_rp1', 'default', OWNER, '919811112222'))?.recipientPhone).toBe('919811112222');
   });
 });
