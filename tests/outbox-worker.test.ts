@@ -542,14 +542,14 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     );
 
     const r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
+    // Program-Fix 34A: the reply is its own whatsapp.text row (review S2: claimed
+    // and sent right after the turn, in the same drain) — 2 rows processed.
+    expect(r.processed).toBe(2);
     expect(runAgentTurn).toHaveBeenCalledWith(
       '15551230000', 'send $200 to mom', { isNewConversation: true }, undefined,
       expect.objectContaining({ routedPartnerId: null, signal: expect.any(AbortSignal) }),
     );
-    // Program-Fix 34A: the reply is its own whatsapp.text row — sent on the next drain.
-    expect(sendText).not.toHaveBeenCalled();
-    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith('15551230000', 'Here is your quote!', undefined);
   });
 
@@ -565,11 +565,10 @@ describe('drainOnce — agent.turn (the durable inbound turn)', () => {
     });
 
     const r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
+    expect(r.processed).toBe(2); // the turn + its reply row (review S2: same drain)
     const creds = (runAgentTurn.mock.calls[0] as unknown[])[3];
     expect(creds).toMatchObject({ phoneNumberId: 'pn_acme' });
     // Program-Fix 34A: the reply row carries partnerId 'acme'; its creds resolve at drain.
-    await drainOnce(deps(), 'w1');
     expect(sendText).toHaveBeenCalledWith('15551230000', 'hola', expect.objectContaining({ phoneNumberId: 'pn_acme' }));
     expect(((runAgentTurn.mock.calls[0] as unknown[])[4] as { routedPartnerId: string }).routedPartnerId).toBe('acme'); // the routed tenant reaches the agent
   });
@@ -1095,9 +1094,9 @@ describe('drainOnce — lease reclaim (a worker killed mid-row)', () => {
     // is a normal completion even though `signal.aborted` is true — the worker
     // discriminates on the row's `abandoned` flag (set only by the race timer).
     const r = await drainOnce(deps(), 'w1', 10, { rowDeadlineMs: 200 });
-    expect(r).toMatchObject({ processed: 1, failed: 0, dead: 0 });
-    // Program-Fix 34A: the reply (and the botfallback alert) drain as their own rows.
-    await drainOnce(deps(), 'w1');
+    // Program-Fix 34A: the reply drains as its own row — review S2: in the same drain.
+    expect(r).toMatchObject({ processed: 2, failed: 0, dead: 0 });
+    await drainOnce(deps(), 'w1'); // the botfallback alert
     const toCustomer = sendText.mock.calls.filter((c) => (c as unknown[])[0] === '15551230000');
     expect(toCustomer).toHaveLength(1);
     expect(String((toCustomer[0] as unknown[])[1])).toMatch(/send that again/);
@@ -1340,6 +1339,27 @@ describe('outbox repo — agent.turn gate + uncharged defer (Program-Fix 34A)', 
     await db.execute(sql`UPDATE outbox SET created_at = now() - interval '11 minutes' WHERE id = ${ids[1]}`);
     expect((await outbox.agentTurnGate(ids[1], '', P, 600)).pastBound).toBe(true);
   });
+
+  it('agentTurnGate (review M1): an in-flight reply row for the same phone + tenant blocks; its OWN reply, other phones/tenants and done/dead replies do not', async () => {
+    await outbox.enqueue('agent.turn', { phone: P, messageText: '1', turn: {}, routedPartnerId: null });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: '2', turn: {}, routedPartnerId: 'acme' });
+    const [t1, t2] = (await rowsOf()).map((r) => Number(r.id));
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE kind = 'agent.turn'`);
+    // An older turn's reply (shared number ⇒ no partnerId) is still queued.
+    await outbox.enqueue('whatsapp.text', { to: P, body: 'older reply' }, { dedupeKey: 'reply:1' });
+    expect((await outbox.agentTurnGate(t1 + 100, '', P, 600)).olderWaiting).toBe(true);
+    expect((await outbox.agentTurnGate(t2 + 100, 'acme', P, 600)).olderWaiting).toBe(false); // another tenant
+    expect((await outbox.agentTurnGate(t1 + 100, '', '15559990000', 600)).olderWaiting).toBe(false); // another phone
+    // A plain (non-reply) text to the phone never blocks a turn.
+    await db.execute(sql`UPDATE outbox SET status = 'done' WHERE dedupe_key = 'reply:1'`);
+    await outbox.enqueue('whatsapp.text', { to: P, body: 'staff note' }, { dedupeKey: 'ticketmsg:x:1' });
+    expect((await outbox.agentTurnGate(t1 + 100, '', P, 600)).olderWaiting).toBe(false);
+    // A routed reply blocks only its own tenant.
+    await outbox.enqueue('whatsapp.text', { to: P, body: 'acme reply', partnerId: 'acme' }, { dedupeKey: `reply:${t2}` });
+    expect((await outbox.agentTurnGate(t2 + 100, 'acme', P, 600)).olderWaiting).toBe(true);
+    // A re-run turn whose OWN reply is already queued is never blocked by it.
+    expect((await outbox.agentTurnGate(t2, 'acme', P, 600)).olderWaiting).toBe(false);
+  });
 });
 
 describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
@@ -1356,14 +1376,15 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     runAgentTurn.mockResolvedValue('hi');
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'hello', turn: {}, routedPartnerId: 'acme' });
     const [turn] = await outboxRows('agent.turn');
-    let r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
-    expect(customerSends()).toEqual([]); // not sent inside the turn
+    // The turn itself never sends: its handler only enqueues (spy on the handler's view).
+    runAgentTurn.mockImplementationOnce(async () => { expect(customerSends()).toEqual([]); return 'hi'; });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(2); // the turn, then its reply row claimed inline (review S2)
     const texts = await outboxRows('whatsapp.text');
     expect(texts).toHaveLength(1);
     expect(texts[0].dedupe_key).toBe(`reply:${turn.id}`);
+    expect(texts[0].status).toBe('done');
     expect(texts[0].payload).toEqual({ to: P, body: 'hi', partnerId: 'acme' });
-    r = await drainOnce(deps(), 'w1');
     expect(customerSends()).toEqual(['hi']);
   });
 
@@ -1383,9 +1404,8 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     runAgentTurn.mockResolvedValue('answer');
     sendText.mockRejectedValueOnce(new Error('graph 503'));
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'q', turn: {} });
-    await drainOnce(deps(), 'w1'); // the turn
-    let r = await drainOnce(deps(), 'w1'); // the reply send fails
-    expect(r.failed).toBe(1);
+    let r = await drainOnce(deps(), 'w1'); // the turn, then its reply send fails (claimed inline)
+    expect(r).toMatchObject({ processed: 1, failed: 1 });
     await makeDue();
     r = await drainOnce(deps(), 'w1');
     expect(r.processed).toBe(1);
@@ -1399,7 +1419,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'blocked', turn: {}, routedPartnerId: 'acme' });
     await outbox.enqueue('agent.turn', { phone: '15559990000', messageText: 'free', turn: {}, routedPartnerId: 'acme' });
     const r = await drainOnce(deps(), 'w1');
-    expect(r).toMatchObject({ processed: 1, released: 1, failed: 0, dead: 0 });
+    expect(r).toMatchObject({ processed: 2, released: 1, failed: 0, dead: 0 }); // 'free' + its reply
     expect(runAgentTurn).toHaveBeenCalledTimes(1);
     expect((runAgentTurn.mock.calls[0] as unknown[])[1]).toBe('free');
     const [blocked] = (await outboxRows('agent.turn')).filter((x) => (x.payload as { messageText: string }).messageText === 'blocked');
@@ -1429,7 +1449,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     runAgentTurn.mockResolvedValue('still here');
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'x', turn: {} });
     const r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
+    expect(r.processed).toBe(2); // the turn + its reply
     expect(runAgentTurn).toHaveBeenCalledTimes(1);
   });
 
@@ -1478,7 +1498,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     await db.execute(sql`UPDATE outbox SET created_at = now() - interval '11 minutes' WHERE kind = 'agent.turn'`);
     const [turn] = await outboxRows('agent.turn');
     const r = await drainOnce(deps(), 'w1');
-    expect(r.processed).toBe(1);
+    expect(r.processed).toBe(2); // the turn (answered with the fallback) + that reply row
     expect(runAgentTurn).not.toHaveBeenCalled();
     expect((await outboxRows('agent.turn'))[0].status).toBe('done');
     const texts = await outboxRows('whatsapp.text');
@@ -1521,5 +1541,55 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     expect(alerts[0].dedupe_key).toMatch(/^botfallback:\d+$/);
     expect(String(alerts[0].payload.message)).not.toContain(P);
     expect((await outboxRows('whatsapp.text'))).toHaveLength(2); // both customers still get the line
+  });
+});
+
+describe('drainOnce — agent.turn ordering with inline cards (Program-Fix 34A review M1/S1)', () => {
+  const P = '15551230000';
+  const makeDue = () => db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE status IN ('pending','failed')`);
+
+  it('a card sent inline by turn 2 never overtakes turn 1 text reply', async () => {
+    const order: string[] = [];
+    sendText.mockImplementation(async (_to: unknown, body: unknown) => { order.push(`text:${String(body)}`); });
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => {
+      if (String(a[1]) === 'two') { order.push('card:two'); return ''; }
+      return `re:${String(a[1])}`;
+    });
+    for (const m of ['one', 'two']) await outbox.enqueue('agent.turn', { phone: P, messageText: m, turn: {} });
+    for (let pass = 0; pass < 4; pass++) { await drainOnce(deps(), 'w1', 10); await makeDue(); }
+    expect(order).toEqual(['text:re:one', 'card:two']);
+  });
+
+  it("S2: a turn's reply goes out before the NEXT customer's turn in the same batch runs", async () => {
+    const order: string[] = [];
+    sendText.mockImplementation(async (to: unknown, body: unknown) => { order.push(`text:${String(to)}:${String(body)}`); });
+    runAgentTurn.mockImplementation(async (...a: unknown[]) => { order.push(`turn:${String(a[0])}`); return `re:${String(a[1])}`; });
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    await outbox.enqueue('agent.turn', { phone: '15559990000', messageText: 'b', turn: {} });
+    const r = await drainOnce(deps(), 'w1', 10);
+    expect(order).toEqual([
+      `turn:${P}`, `text:${P}:re:a`,
+      'turn:15559990000', 'text:15559990000:re:b',
+    ]);
+    expect(r).toMatchObject({ processed: 4, failed: 0, dead: 0 });
+  });
+
+  it('S2: a reply claimed inline still honours the budget — past stopAfter it is released, not sent', async () => {
+    runAgentTurn.mockResolvedValue('late');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {} });
+    const now = Date.now();
+    runAgentTurn.mockImplementation(async () => { vi.setSystemTime(now + 60_000); return 'late'; });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(now);
+    try {
+      const r = await drainOnce(deps(), 'w1', 10, { stopAfter: now + 30_000 });
+      expect(r.processed).toBe(1);
+      expect(sendText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+    await makeDue();
+    await drainOnce(deps(), 'w1', 10);
+    expect(sendText.mock.calls.map((c) => String((c as unknown[])[1]))).toEqual(['late']);
   });
 });
