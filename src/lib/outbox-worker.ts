@@ -302,6 +302,31 @@ async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<W
   return undefined;
 }
 
+/**
+ * Run one agent turn and return ONLY its reply text (Program-Fix 34A). The
+ * routing partner's outbound creds are re-resolved at RUN time (the payload
+ * never carries tokens; rotation is picked up automatically) and live only in
+ * this scope: they ride the turn for its interactive sends (cards, pickers),
+ * while the reply text — model output — is what the caller enqueues. Kept a
+ * separate function so the creds never share a scope with an enqueue payload.
+ */
+async function runTurnForReply(
+  deps: WorkerDeps,
+  p: Payload,
+  signal: RowSignal,
+  routedPartnerId: PartnerId | null,
+  partner: PartnerResolver,
+): Promise<string> {
+  const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
+  return deps.runAgentTurn(
+    str(p.phone),
+    str(p.messageText),
+    (p.turn ?? {}) as TurnContext,
+    waCreds,
+    { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
+  );
+}
+
 async function handle(
   deps: WorkerDeps,
   row: OutboxRow,
@@ -664,17 +689,7 @@ async function handle(
         return;
       }
       try {
-        // Re-resolve the routing partner's outbound creds at RUN time (the
-        // payload never carries tokens; rotation is picked up automatically).
-        // They still ride the turn for its interactive sends (cards, pickers).
-        const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
-        const reply = await deps.runAgentTurn(
-          phone,
-          str(p.messageText),
-          (p.turn ?? {}) as TurnContext,
-          waCreds,
-          { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
-        );
+        const reply = await runTurnForReply(deps, p, signal, routedPartnerId, partner);
         // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
         // and the row is already dead — never send its late reply (a second
         // customer message for the same inbound). The COOPERATIVE path is not
