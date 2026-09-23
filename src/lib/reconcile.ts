@@ -3,7 +3,7 @@ import type { Db } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { settleOrHold } from '@/lib/settlement';
+import { isSandbox, settleOrHold } from '@/lib/settlement';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
@@ -72,7 +72,9 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       t.settlementPartnerId ?? t.partnerId,
     );
     const providerType = integrations.payment.providerType;
-    const webhookDriven = providerType === 'http' || providerType === 'simulator';
+    // Program-Fix 44 P2: a sandbox transfer settles on the mock rail only, so
+    // it is never re-instructed, whatever the rail config says.
+    const webhookDriven = !isSandbox(t) && (providerType === 'http' || providerType === 'simulator');
     // fix 29 (money-09): the rail reported a DIFFERENT amount for this row — it
     // is held for staff (cancel/refund), never re-instructed. It keeps showing
     // here every sweep; the recon: alert below is still deduped (fires once).

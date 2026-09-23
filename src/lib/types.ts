@@ -41,6 +41,14 @@ export interface Quote {
 
 export type RefundStatus = 'none' | 'requested' | 'pending' | 'completed' | 'failed';
 
+/**
+ * Program-Fix 44 P2: which world a transfer lives in. 'test' ⇔ minted by a
+ * sandbox (sr_test_) Partner API key — it settles ONLY through the platform
+ * mock rail, never messages a customer, and never counts toward a live
+ * customer's caps, velocity, fee tier or AML aggregates. Write-once.
+ */
+export type TransferEnvironment = 'live' | 'test';
+
 export interface Transfer {
   id: string;
   phone: string;
@@ -102,6 +110,8 @@ export interface Transfer {
   achTokenRef?: string;                   // partner's opaque ACH-pull mandate token (B2B ach_pull)
   invoiceId?: string;                     // the B2bInvoice this transfer pays
   kybReviewNotes?: string;
+  // Program-Fix 44 P2 — absent ⇒ 'live'. Always set on a ledger read.
+  environment?: TransferEnvironment;
 }
 
 // ── B2B mock invoices (the "ERP" stand-in) ──

@@ -148,6 +148,13 @@
       "when": 1790177680775,
       "tag": "0020_customer_mfa_corridor_status",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1790183361073,
+      "tag": "0021_partner_api_sandbox",
+      "breakpoints": true
     }
   ]
 }

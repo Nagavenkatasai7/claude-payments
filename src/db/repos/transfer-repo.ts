@@ -5,7 +5,7 @@ import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
-import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
+import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 import {
   encodeStatementCursor,
   type SettledTransfer,
@@ -52,6 +52,17 @@ function parseCursor(cursor: string | undefined): { createdAt: Date; id: string 
   if (isNaN(at.getTime())) return null;
   return { createdAt: at, id: cursor.slice(sep + 1) };
 }
+
+/**
+ * Program-Fix 44 P2: every aggregate that feeds a live decision — send caps,
+ * velocity, the EDD month, the fee tier, the T0 clock, AML history, the AML
+ * sweep feed, the velocity leaderboard and the partner's settlements
+ * statement — reads LIVE rows only, so a sandbox (test-key) transfer never
+ * spends, ages or flags a live customer. Test mints are checked against the
+ * same live totals (conservative: the sandbox cannot exceed what the real
+ * sender could do) and add nothing to them.
+ */
+const LIVE_ONLY = eq(transfers.environment, 'live');
 
 export function createTransferRepo(
   db: DbOrTx,
@@ -149,7 +160,12 @@ export function createTransferRepo(
       const isMasked = (v: string | undefined) => /^\*{4}/.test(v ?? '');
       const masked =
         isMasked(t.payoutDestination) || isMasked(t.senderBusinessName) || isMasked(t.recipientBusinessName);
-      let set: Partial<typeof row> = row;
+      // Program-Fix 44 P2: environment is WRITE-ONCE — the insert sets it, the
+      // conflict-update never does, so a read-modify-write can never flip a
+      // sandbox row to live (or back).
+      const { environment: _env, ...updatable } = row;
+      void _env;
+      let set: Partial<typeof row> = updatable;
       if (masked) {
         const {
           payoutDestinationEnc: _enc,
@@ -160,7 +176,7 @@ export function createTransferRepo(
           recipientBusinessNameEnc: _rbEnc,
           recipientBusinessNameLast4: _rbL4,
           ...rest
-        } = row;
+        } = updatable;
         void _enc; void _l4; void _legal;
         void _sbEnc; void _sbL4; void _rbEnc; void _rbL4;
         set = rest;
@@ -757,8 +773,8 @@ export function createTransferRepo(
       partnerId?: PartnerId,
     ): Promise<{ phone: string; count: number }[]> {
       const where = partnerId
-        ? sql`WHERE (created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date AND partner_id = ${partnerId}`
-        : sql`WHERE (created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date`;
+        ? sql`WHERE (created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date AND partner_id = ${partnerId} AND environment = 'live'`
+        : sql`WHERE (created_at AT TIME ZONE 'America/New_York')::date = (now() AT TIME ZONE 'America/New_York')::date AND environment = 'live'`;
       const res = await db.execute(sql`
         SELECT phone, count(*)::int AS n FROM transfers ${where}
         GROUP BY phone ORDER BY n DESC, phone ASC LIMIT ${limit};
@@ -823,6 +839,7 @@ export function createTransferRepo(
         gte(transfers.paidAt, from),
         lt(transfers.paidAt, to),
         sql`(${transfers.status} IN ('paid','delivered') OR (${transfers.status} = 'cancelled' AND ${transfers.paymentProviderRef} IS NOT NULL))`,
+        LIVE_ONLY, // Program-Fix 44 P2: a sandbox row was never instructed — not a settlement
       ];
       if (req.cursor) {
         conds.push(
@@ -895,10 +912,14 @@ export function createTransferRepo(
     },
 
     /** Staff-only unscoped list (server actions behind requireStaff). */
-    adminList(req: PageReq & { partnerId?: PartnerId; status?: TransferStatus }): Promise<Page<Transfer>> {
+    adminList(
+      req: PageReq & { partnerId?: PartnerId; status?: TransferStatus; environment?: TransferEnvironment },
+    ): Promise<Page<Transfer>> {
       const conds = [
         req.partnerId ? eq(transfers.partnerId, req.partnerId) : undefined,
         req.status ? eq(transfers.status, req.status) : undefined,
+        // Program-Fix 44 P2: the Partner API lists one environment; staff lists pass none.
+        req.environment ? eq(transfers.environment, req.environment) : undefined,
       ].filter((c): c is NonNullable<typeof c> => Boolean(c));
       return page(conds.length ? and(...conds) : and(sql`true`), req);
     },
@@ -908,7 +929,9 @@ export function createTransferRepo(
       const rows = await db
         .select({ min: sql<string | null>`min(${transfers.createdAt})` })
         .from(transfers)
-        .where(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone)));
+        // Program-Fix 44 P2: live rows only — a sandbox mint never starts (or
+        // ages) a live customer's T0 window.
+        .where(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone), LIVE_ONLY));
       const v = rows[0]?.min;
       return v ? new Date(v).toISOString() : null;
     },
@@ -947,6 +970,7 @@ export function createTransferRepo(
             eq(transfers.partnerId, partnerId),
             eq(transfers.phone, phone),
             sql`${transfers.createdAt} >= ${monthStart}`,
+            LIVE_ONLY, // Program-Fix 44 P2: a sandbox row never spends live headroom
           ),
         );
       const r = rows[0];
@@ -974,6 +998,7 @@ export function createTransferRepo(
             eq(transfers.partnerId, partnerId),
             eq(transfers.phone, phone),
             sql`${transfers.status} != 'blocked'`,
+            LIVE_ONLY, // Program-Fix 44 P2: a sandbox mint never burns the free first transfer
           ),
         );
       return rows[0]?.n ?? 0;
@@ -1115,6 +1140,7 @@ export function createTransferRepo(
             and(sql`${transfers.createdAt} = ${after.at}`, sql`${transfers.id} > ${after.id}`),
           ),
           lt(transfers.createdAt, before),
+          LIVE_ONLY, // Program-Fix 44 P2: the AML sweep never scans sandbox rows
         ))
         .orderBy(asc(transfers.createdAt), asc(transfers.id))
         .limit(limit);
@@ -1154,6 +1180,7 @@ export function createTransferRepo(
           eq(transfers.partnerId, partnerId),
           eq(transfers.phone, phone),
           sql`${transfers.status} not in ('blocked', 'cancelled')`,
+          LIVE_ONLY, // Program-Fix 44 P2: sandbox rows are never AML history
           or(
             sql`${transfers.createdAt} < ${anchor.at}`,
             and(sql`${transfers.createdAt} = ${anchor.at}`, sql`${transfers.id} < ${anchor.id}`),
