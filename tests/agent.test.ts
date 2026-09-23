@@ -516,6 +516,31 @@ describe('createAgent — web history link (list_recent_transfers)', () => {
     expect(reply).toContain('https://smartremit.test/account/history'); // code link appended
   });
 
+  it('fix 34B: on WhatsApp the tool RUNS (not blocked) and the web history link is not appended', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    await seedVerified(deps);
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_recent_transfers', arguments: '{}' } }],
+      },
+      { role: 'assistant', content: "You haven't sent anything yet." },
+    ];
+    let i = 0;
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis),
+      ...deps, chat: async () => responses[i++], // default channel ⇒ whatsapp
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'what did I send recently?');
+    expect(reply).not.toContain('/account/history');
+    const toolMsg = (await store.getConversation('default', PHONE)).find((m) => m.role === 'tool');
+    const result = JSON.parse(toolMsg!.content!) as Record<string, unknown>;
+    expect(result.error).toBeUndefined();
+    expect(result.transfers).toEqual([]);
+  });
+
   it('a pay link ALWAYS wins the single append slot over the history link', async () => {
     // Regression: history_url must never displace a pay link, even when
     // list_recent_transfers is the LATER tool call in the same turn (the order
@@ -1302,7 +1327,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).toContain('open_recall_dispute');
     expect(names).toContain('list_recent_transfers'); // web-only history lookup
     expect(names).toContain('get_customer_context'); // fix 5: the round-0 context tool
-    expect(names).toHaveLength(13);
+    expect(names).toContain('request_human_help'); // fix 34B: a signed-in customer can ask for a person
+    expect(names).toHaveLength(14);
   });
 
   it('default channel: the model still sees the full WhatsApp tool set (call sites unchanged)', async () => {
@@ -1317,7 +1343,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(26);
+    expect(seenTools).toHaveLength(28); // fix 34B: + request_human_help, + list_recent_transfers
     const dn = seenTools.map((t) => t.function.name);
     expect(dn).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(dn).toContain('send_approve_picker');
@@ -1327,7 +1353,8 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(dn).toContain('cancel_bill'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).toContain('check_bill_status'); // B2B lifecycle (L1) — WhatsApp channel
     expect(dn).toContain('dispute_bill'); // B2B lifecycle (L1) — WhatsApp channel
-    expect(dn).not.toContain('list_recent_transfers'); // web-only — never on WhatsApp
+    expect(dn).toContain('list_recent_transfers'); // fix 34B: history comes from the tool on WhatsApp too
+    expect(dn).toContain('request_human_help'); // fix 34B
   });
 
   it("channel 'web': injects the [WEB CHAT] note; default channel does not", async () => {

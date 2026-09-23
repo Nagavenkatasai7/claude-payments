@@ -29,6 +29,7 @@ import {
   copilotRejectAction,
 } from '../actions';
 import type { TicketMessage, Transfer } from '@/lib/types';
+import { ticketCategoryLabel } from '@/lib/ticket-category';
 
 // Ticket detail (B3). Scope is enforced at the READ: partner staff resolve the
 // ticket via getOwnedTicket (404-never-403), platform staff via getTicket.
@@ -190,7 +191,7 @@ export default async function TicketDetailPage({
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-muted-foreground">Category</span>
-                  <span>{ticket.category ?? '—'}</span>
+                  <span>{ticketCategoryLabel(ticket.category)}</span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-muted-foreground">Assignee</span>
