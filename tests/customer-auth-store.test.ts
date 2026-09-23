@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { scryptSync, randomBytes } from 'node:crypto';
+import { scryptSync, randomBytes, createHash } from 'node:crypto';
 
 // Pass-through spy on hash-wasm's verify so the fix-21 test can COUNT the
 // Argon2 work on the no-account path; everything else runs the real function.
@@ -447,5 +447,102 @@ describe('tenant binding (fix 1, D6)', () => {
     await expect(
       s.registerCustomer({ phone: '15550102031', email: 'b@example.com', password: 'correct horse battery' }, { pwnedCheck: neverPwned(), cryptoProvider: crypto }),
     ).rejects.toBeInstanceOf(CustomerInputError);
+  });
+});
+
+// Program-Fix 20 (F65): the per-phone revoke index holds sha256(token), never the
+// raw token, and carries a TTL. Revoke-all still sweeps the pre-fix raw-token
+// index (`sr_sess_idx:`), whose sessions survive the deploy (same record key).
+describe('customer session index holds hashes (fix 20)', () => {
+  const sha = (t: string) => createHash('sha256').update(t).digest('hex');
+
+  /** A pre-fix session: a live sr_sess:<sha> record indexed by its RAW token. */
+  async function seedLegacySession(redis: ReturnType<typeof fakeRedis>, ts: number): Promise<string> {
+    const t = randomBytes(32).toString('hex');
+    await redis.set(
+      `sr_sess:${sha(t)}`,
+      JSON.stringify({ phone: NORM, partnerId: 'default', createdAtMs: ts, lastSeenMs: ts }),
+    );
+    await redis.sadd(`sr_sess_idx:${NORM}`, t);
+    return t;
+  }
+
+  it('indexes sha256(token) under sr_sess_ix:<phone> with a TTL, and stores the raw token nowhere', async () => {
+    const redis = fakeRedis();
+    const expire = vi.spyOn(redis, 'expire');
+    const { s } = await mkAuth(redis);
+    const token = await s.createSession(NORM, 'default');
+    expect(await s.getSession(token)).toBe(NORM);
+    expect(redis.sets.get(`sr_sess_ix:${NORM}`)?.has(sha(token))).toBe(true);
+    expect(redis.sets.has(`sr_sess_idx:${NORM}`)).toBe(false);
+    for (const [k, v] of redis.dump) {
+      expect(k).not.toContain(token);
+      expect(v).not.toContain(token);
+    }
+    for (const [k, members] of redis.sets) {
+      expect(k).not.toContain(token);
+      for (const m of members) expect(m).not.toContain(token);
+    }
+    expect(expire).toHaveBeenCalledWith(`sr_sess_ix:${NORM}`, 12 * 60 * 60);
+  });
+
+  it('deleteSession removes the hash from the new index', async () => {
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis);
+    const token = await s.createSession(NORM, 'default');
+    expect(redis.sets.get(`sr_sess_ix:${NORM}`)?.size).toBe(1);
+    await s.deleteSession(token);
+    expect(redis.sets.get(`sr_sess_ix:${NORM}`)?.size).toBe(0);
+  });
+
+  it('deleteSession on a pre-fix session removes its raw token from the legacy index', async () => {
+    const now = 1_000_000;
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis, () => now);
+    const legacy = await seedLegacySession(redis, now);
+    expect(await s.getSession(legacy)).toBe(NORM);
+    await s.deleteSession(legacy);
+    expect(await s.getSession(legacy)).toBeNull();
+    expect(redis.sets.get(`sr_sess_idx:${NORM}`)?.size ?? 0).toBe(0);
+  });
+
+  it('deleteAllSessions revokes new AND pre-fix sessions, and drops both index sets', async () => {
+    const now = 1_000_000;
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis, () => now);
+    const legacy = await seedLegacySession(redis, now);
+    const fresh = await s.createSession(NORM, 'default');
+    const other = await s.createSession('19998887777', 'default');
+    expect(await s.getSession(legacy)).toBe(NORM); // precondition: live before revoke
+    expect(await s.getSession(fresh)).toBe(NORM);
+
+    await s.deleteAllSessions(NORM);
+
+    expect(await s.getSession(legacy)).toBeNull();
+    expect(await s.getSession(fresh)).toBeNull();
+    expect(redis.sets.has(`sr_sess_idx:${NORM}`)).toBe(false);
+    expect(redis.sets.has(`sr_sess_ix:${NORM}`)).toBe(false);
+    expect(await s.getSession(other)).toBe('19998887777');
+  });
+
+  it('setPassword revokes new AND pre-fix sessions', async () => {
+    const now = Date.now();
+    const redis = fakeRedis();
+    const { s } = await mkAuth(redis, () => now);
+    await s.registerCustomer(
+      { phone: PHONE, email: 'a@example.com', password: 'correct horse battery' },
+      { pwnedCheck: neverPwned(), cryptoProvider: crypto },
+    );
+    const legacy = await seedLegacySession(redis, now);
+    const fresh = await s.createSession(NORM, 'default');
+    expect(await s.getSession(legacy)).toBe(NORM);
+    expect(await s.getSession(fresh)).toBe(NORM);
+
+    expect(await s.setPassword(PHONE, 'another good one!!', { pwnedCheck: neverPwned() })).not.toBeNull();
+
+    expect(await s.getSession(legacy)).toBeNull();
+    expect(await s.getSession(fresh)).toBeNull();
+    expect(redis.sets.has(`sr_sess_idx:${NORM}`)).toBe(false);
+    expect(redis.sets.has(`sr_sess_ix:${NORM}`)).toBe(false);
   });
 });
