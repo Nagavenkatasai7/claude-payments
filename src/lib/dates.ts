@@ -72,9 +72,13 @@ export function easternMonth(epochMs: number): string {
 }
 
 export function easternDayOfMonth(epochMs: number): number {
-  return Number(
-    new Date(epochMs).toLocaleString('en-US', { timeZone: ET, day: 'numeric' }),
-  );
+  const d = new Date(epochMs);
+  // Program-Fix 48: an invalid epoch used to return NaN (Number('Invalid Date'));
+  // throw like easternDayOfWeek so a caller never silently compares against NaN.
+  if (isNaN(d.getTime())) {
+    throw new RangeError(`easternDayOfMonth: invalid epochMs ${epochMs}`);
+  }
+  return Number(d.toLocaleString('en-US', { timeZone: ET, day: 'numeric' }));
 }
 
 export function easternDayOfWeek(epochMs: number): number {

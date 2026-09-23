@@ -440,6 +440,8 @@ export default async function PartnerDetailPage({
                     <Input name="token" type="password" autoComplete="off" placeholder="Access token (leave blank to keep)" />
                     <Input name="verifyToken" type="password" autoComplete="off" placeholder="Webhook verify token (leave blank to keep)" />
                     <Input name="appSecret" type="password" autoComplete="off" placeholder="App secret (leave blank to keep)" />
+                    <Input name="wabaId" inputMode="numeric" autoComplete="off" placeholder="WhatsApp Business Account ID (optional — used only for the check, not saved)" />
+                    <p className="text-xs text-muted-foreground">We check this number with Meta using the access token you enter.</p>
                     <Button type="submit">Save WhatsApp config</Button>
                   </form>
                   <div className="mt-4">
