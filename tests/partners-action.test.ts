@@ -7,6 +7,7 @@ import { createStore } from '@/lib/store';
 import { decryptField } from '@/lib/field-crypto';
 import { hashApplicationToken } from '@/lib/partner-application-token';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
+import { buildInviteEmail } from '@/lib/partner-invite-email';
 
 /**
  * U1 — the public "Partner with us" lead form server action.
@@ -156,6 +157,8 @@ describe('submitPartnerRequestAction', () => {
     // The link is a placeholder rendered from a field-crypto blob at send time (fix 11 / F66).
     expect(invite!.payload.text).toContain('{{apply_link}}');
     expect(invite!.payload.text).not.toContain('/partners/apply/');
+    // Program-Fix 39: the body comes from the SHARED builder (the staff resend uses it too).
+    expect(invite!.payload.text).toBe(buildInviteEmail().text);
 
     expect(pokeWorkerMock).toHaveBeenCalledTimes(1);
   });
