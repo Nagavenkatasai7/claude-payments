@@ -152,6 +152,27 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { ret
   const rowStatus = async (key: string) =>
     ((await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = ${key}`)) as unknown as { rows: Array<{ status: string }> }).rows[0].status;
 
+  it('Program-Fix 7 (review M-1b): a paid row whose debit was RETURNED is never instructed — done + ONE ops alert', async () => {
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_wk', funding_state = 'returned', funding_ref = 'pi_wk' WHERE id = 'wk_t1'`);
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await rowStatus('instruct:wk_t1')).toBe('done');
+    expect(await rowStatus('reinstruct:wk_t1')).toBe('done');
+    const alerts = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert'`)) as unknown as { rows: Array<{ dedupe_key: string }> };
+    expect(alerts.rows.map((a) => a.dedupe_key)).toEqual(['instructreturned:wk_t1']);
+  });
+
+  it.each(['pending', 'failed'])('Program-Fix 7 (review M-1b): a paid row whose debit is %s is HELD (throws → retries), never instructed', async (state) => {
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_wk', funding_state = ${state} WHERE id = 'wk_t1'`);
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it('an instruct row for a PAID transfer with a refund in flight (pending) sends NOTHING and is done (never pay out AND refund)', async () => {
     await store.saveTransfer({ ...transferFixture(), refundStatus: 'pending' });
     await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
@@ -969,6 +990,21 @@ describe('drainOnce — funding.refund (the money-back leg)', () => {
     expect(body).toContain('wk_t1');
     expect(body.toLowerCase()).not.toContain('compliance');
     expect(creds).toEqual({ phoneNumberId: 'pn_acme', token: 'tok_acme' });
+  });
+
+  it('Program-Fix 7: a STRIPE-funded refund is never faked — the row fails (retry → dead-letter + alert), refund stays pending, no "refunded" message', async () => {
+    await store.saveTransfer(refundFixture({ fundingRef: 'pi_wk' }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_wk', funding_state = 'succeeded' WHERE id = 'wk_t1'`);
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    const t = await store.getTransfer('wk_t1');
+    expect(t?.refundStatus).toBe('pending');
+    expect(t?.refundRef).toBeUndefined();
+    const msgs = (await db.execute(
+      sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ n: number }> };
+    expect(msgs.rows[0].n).toBe(0);
   });
 
   it('a replay after completion is a clean no-op: provider untouched, no second message', async () => {

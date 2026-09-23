@@ -4,6 +4,7 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { isSandbox, settleOrHold } from '@/lib/settlement';
+import { settleFundedTransfer } from '@/lib/stripe-funded-settle';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
@@ -31,6 +32,8 @@ export const STUCK_PAID_MINUTES = 15;
 export const STALE_REVIEW_HOURS = 24;
 export const FUNDING_RESUME_MINUTES = 10;
 export const STUCK_REFUND_MINUTES = 60;
+/** Program-Fix 7 (review M1): a bound Stripe debit still pending/failed after this many days is alerted once. */
+export const STALE_FUNDING_INTENT_DAYS = 7;
 /**
  * A 'processing' row whose lease expired this long ago and is STILL unreclaimed.
  * claimBatch reclaims expired leases on every drain, so a survivor means the
@@ -163,9 +166,26 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
     const railIntegrations = await integrationsRepo.getIntegrations(
       t.settlementPartnerId ?? t.partnerId,
     );
-    const result = await settleOrHold(db, t, railIntegrations);
+    // Program-Fix 7 (review M2): a Stripe-funded row is RE-SCREENED before it
+    // settles (its debit may have confirmed days after the pay-time screen).
+    // blocked / moved / a re-screen error ⇒ nothing settles here (a blocked
+    // row's fundblocked alert is raised inside); the next sweep retries.
+    let kind: 'started' | 'held' | 'refused' | 'already';
+    if (t.fundingProvider === 'stripe') {
+      let funded: Awaited<ReturnType<typeof settleFundedTransfer>>;
+      try {
+        funded = await settleFundedTransfer(db, t);
+      } catch (err) {
+        logWarn('reconcile.stripe-resume', err, { transferId: t.id });
+        continue;
+      }
+      if (funded === 'blocked' || funded === 'moved') continue;
+      kind = funded;
+    } else {
+      kind = (await settleOrHold(db, t, railIntegrations)).kind;
+    }
     const prefix = `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) was charged (${t.fundingRef}) but never settled — `;
-    switch (result.kind) {
+    switch (kind) {
       case 'started':
         fundingResumed++;
         await outbox.enqueue(
@@ -210,6 +230,22 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
         );
         break;
     }
+  }
+
+  // Program-Fix 7 (review M1): STALE STRIPE INTENTS — bound, still pending /
+  // failed after STALE_FUNDING_INTENT_DAYS. Such a row cannot be voided (the
+  // sender may still confirm the intent) or settled; ops cancels the
+  // PaymentIntent in the partner's Stripe dashboard. One alert per row, ever.
+  for (const t of await transfers.listStaleFundingIntents(new Date(now.getTime() - STALE_FUNDING_INTENT_DAYS * 86_400_000))) {
+    await outbox.enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: transfer ${t.id} (partner ${t.partnerId}) has a Stripe debit (${t.fundingIntentRef}) still '${t.fundingState}' after ` +
+          `${STALE_FUNDING_INTENT_DAYS} days. Cancel the PaymentIntent in the partner's Stripe dashboard, then close the transfer with a ledger edit under a change ticket (in-app cancel refuses intent-bound rows until the server-side cancel follow-up lands).`,
+      },
+      { dedupeKey: `fundstale:${t.id}` },
+    );
   }
 
   // CHARGED-BUT-CANCELLED (the capture↔cancel race): captureFunding is

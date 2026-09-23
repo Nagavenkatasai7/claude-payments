@@ -92,6 +92,19 @@ export interface Transfer {
   // none → requested (customer asked via bot) → pending (ops approved /
   // auto on reject-in-review) → completed | failed (failed → pending on retry).
   fundingRef?: string;
+  // Program-Fix 7 — ASYNC funds capture (a real PSP behind the seam; flag OFF
+  // by default). All three are absent on every mock / partner-settled row, so
+  // those rows behave exactly as before. Written ONLY by guarded,
+  // column-targeted repo updates (never by saveTransfer's whole-row upsert).
+  //  fundingProvider  — which PSP holds the intent ('stripe'); routes refunds.
+  //  fundingIntentRef — the PSP's intent id (Stripe `pi_…`), bound write-once
+  //                     BEFORE the sender confirms; NOT a charge.
+  //  fundingState     — pending → succeeded | failed; succeeded → returned.
+  //                     The ledger's paid/hold claims require it absent or
+  //                     'succeeded' (transfer-repo fundingGate).
+  fundingProvider?: FundingProviderId;
+  fundingIntentRef?: string;
+  fundingState?: FundingState;
   refundRef?: string;            // funding provider's refund transaction id
   refundStatus?: RefundStatus;   // optional (lazy-fill convention): absent ⇒ 'none'
   refundedAt?: string;
@@ -113,6 +126,11 @@ export interface Transfer {
   // Program-Fix 44 P2 — absent ⇒ 'live'. Always set on a ledger read.
   environment?: TransferEnvironment;
 }
+
+/** Program-Fix 7: the PSP that holds an async funding intent. */
+export type FundingProviderId = 'stripe';
+/** Program-Fix 7: async funds-capture lifecycle (absent ⇒ legacy synchronous capture). */
+export type FundingState = 'pending' | 'succeeded' | 'failed' | 'returned';
 
 // ── B2B mock invoices (the "ERP" stand-in) ──
 export interface InvoiceLineItem {

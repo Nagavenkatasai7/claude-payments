@@ -16,7 +16,7 @@ import {
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { railSecrets } from '@/lib/partner-integrations';
-import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
+import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
 import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
@@ -90,7 +90,7 @@ export interface WorkerDeps {
   ) => Promise<string>;
   /**
    * The funds-capture seam for refunds (DI'd like the other effects; absent ⇒
-   * getFundingProvider(), so routes need no wiring while tests can inject a
+   * refundProviderFor(transfer) (Program-Fix 7: by the ledger's funding_provider), so routes need no wiring while tests can inject a
    * failing provider to exercise the retry/dead-letter machinery).
    */
   fundingProvider?: FundingProvider;
@@ -518,6 +518,27 @@ async function handle(
           `Settlement instruction held: transfer is ${transfer.status} with refund ${refund} — retrying`,
         );
       }
+      // Program-Fix 7 (review M-1b): the sender's ASYNC debit must still be
+      // good. RETURNED ⇒ never payable: done + ONE deduped ops alert (retrying
+      // can never help). pending / failed on a paid row (should not exist — the
+      // ledger claims carry the funding gate) ⇒ THROW: held, retried, and the
+      // dead-row alert fires if it never clears. NULL / succeeded ⇒ unchanged.
+      if (transfer.fundingState === 'returned') {
+        logWarn('outbox.instruct-skipped', 'sender debit returned; instruction not sent', { transferId });
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          {
+            message:
+              `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}) is 'paid' but the sender's debit was RETURNED — ` +
+              'the settlement instruction was NOT sent. Cancel it; do not refund (the dispute already credits the sender).',
+          },
+          { dedupeKey: `instructreturned:${transferId}` },
+        );
+        return;
+      }
+      if (transfer.fundingState === 'pending' || transfer.fundingState === 'failed') {
+        throw new Error(`Settlement instruction held: sender debit is ${transfer.fundingState} — retrying`);
+      }
       // fix 29 (money-09): the rail reported a DIFFERENT amount for this row
       // (`railamount:<id>` marker). It is held for staff — never instructed
       // again, whether this is a reconcile `reinstruct:` row or a dead-letter
@@ -654,7 +675,10 @@ async function handle(
           /* non-JSON 2xx ack — keep the deterministic ref */
         }
       } else {
-        ({ refundRef } = await (deps.fundingProvider ?? getFundingProvider()).refund(transfer));
+        // Program-Fix 7: the provider that CHARGED this row (ledger
+        // funding_provider), never the current flag — a Stripe-funded row must
+        // never get a fake 'mockrefund-' completion.
+        ({ refundRef } = await (deps.fundingProvider ?? refundProviderFor(transfer)).refund(transfer));
       }
       await deps.db.transaction(async (tx) => {
         const updated = await createTransferRepo(tx).updateRefund(transferId, {

@@ -104,3 +104,11 @@ describe('showsStaffCancel: the transactions list offers Cancel only where the s
     }
   });
 });
+
+describe('Program-Fix 7: a bound PSP intent counts as possibly charged', () => {
+  it('an awaiting row with a Stripe intent (debit may be in flight) is refused, never voided', () => {
+    expect(decideStaffCancel({ status: 'awaiting_payment', fundingMethod: 'bank_transfer', fundingIntentRef: 'pi_1' }))
+      .toEqual({ kind: 'refuse', reason: CANCEL_REFUSAL.chargedAwaiting });
+    expect(showsStaffCancel({ status: 'awaiting_payment', fundingMethod: 'bank_transfer', fundingIntentRef: 'pi_1' })).toBe(false);
+  });
+});
