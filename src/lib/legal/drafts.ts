@@ -16,7 +16,13 @@
 //    versioned separately: DISCLOSURE_DRAFT_VERSION in ./disclosure-drafts.ts,
 //    which the pay page records with the customer's acknowledgement.)
 
-export const LEGAL_DRAFT_VERSION = 'draft-2026-09-23b' as const;
+import { DRAFT_TTL_SECONDS } from '../draft-ttl';
+
+export const LEGAL_DRAFT_VERSION = 'draft-2026-09-23c' as const;
+
+/** Program-Fix 49B: the chat quote's lock, derived from the draft lifetime (the
+ *  same source as the approve card's "Rate locked for N min."), never a literal. */
+const RATE_LOCK_MINUTES_TEXT = String(Math.floor(DRAFT_TTL_SECONDS / 60));
 
 /** Shown verbatim at the top of every legal page. */
 export const LEGAL_DRAFT_BANNER = 'Draft — for counsel review; not legal advice and not yet approved';
@@ -75,7 +81,7 @@ export const TERMS_DRAFT: LegalDraft = {
       id: 'quotes-and-fees',
       heading: 'Quotes, exchange rates and fees',
       paragraphs: [
-        'Before you pay, you are shown the amount you send, the fees, the total you pay, the exchange rate and the amount your recipient will receive. When you confirm a quote in the chat, the exchange rate is locked for about 10 minutes. If the quote has expired by the time you pay, the pay page will not take payment and you are asked for a fresh quote.',
+        `Before you pay, you are shown the amount you send, the fees, the total you pay, the exchange rate and the amount your recipient will receive. When you confirm a quote in the chat, the exchange rate is locked for up to ${RATE_LOCK_MINUTES_TEXT} minutes. If the quote has expired by the time you pay, the pay page will not take payment and you are asked for a fresh quote.`,
         'Your recipient’s bank or wallet provider may charge its own fees, which are not included in the amount shown.',
       ],
     },
