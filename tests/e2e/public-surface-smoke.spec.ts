@@ -10,7 +10,8 @@ import { randomBytes } from 'node:crypto';
 // have one h1 and a skip link. Program-Fix 40 adds: the auth gate
 // (src/middleware.ts) redirects an anonymous /admin-dashboard and /account to
 // their sign-in pages and leaves /account/login public — the guard for the
-// middleware → proxy rename.
+// middleware → proxy rename. Program-Fix 47 adds: exactly one enforced CSP per
+// page, with https: images and object-src 'none'.
 
 test('robots.txt is served and keeps crawlers off the pay links', async ({ request }) => {
   const res = await request.get('/robots.txt');
@@ -93,3 +94,25 @@ test('anonymous /account/login stays public (200, no redirect)', async ({ reques
   const res = await request.get('/account/login', { maxRedirects: 0 });
   expect(res.status()).toBe(200);
 });
+
+// Program-Fix 47 — the enforced Content-Security-Policy, anonymously. Every
+// page carries exactly ONE enforced CSP (from next.config.ts) with the fix's
+// additions (https: images, object-src 'none'). headersArray() keeps duplicate
+// headers apart (headers() merges them: node_modules/playwright-core/types/
+// types.d.ts:19866-19870), and the single value must hold one default-src, so
+// a comma-merged pair of policies is caught too. The /pay check lives in
+// pay-page-smoke.spec.ts: this spec never opens a /pay link.
+for (const path of ['/', '/about', '/docs', '/login', '/account/login']) {
+  test(`${path} has exactly one enforced CSP, with the Program-Fix 47 additions`, async ({ request }) => {
+    const res = await request.get(path);
+    expect(res.status()).toBe(200);
+    const enforced = res
+      .headersArray()
+      .filter((h) => h.name.toLowerCase() === 'content-security-policy')
+      .map((h) => h.value);
+    expect(enforced).toHaveLength(1);
+    expect(enforced[0].match(/default-src/g)).toHaveLength(1);
+    expect(enforced[0]).toContain("img-src 'self' data: blob: https:");
+    expect(enforced[0]).toContain("object-src 'none'");
+  });
+}

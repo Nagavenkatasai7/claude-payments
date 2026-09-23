@@ -69,7 +69,11 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     );
     const providerType = integrations.payment.providerType;
     const webhookDriven = providerType === 'http' || providerType === 'simulator';
-    if (webhookDriven) {
+    // fix 29 (money-09): the rail reported a DIFFERENT amount for this row — it
+    // is held for staff (cancel/refund), never re-instructed. It keeps showing
+    // here every sweep; the recon: alert below is still deduped (fires once).
+    const held = await outbox.hasDedupeKey(`railamount:${t.id}`);
+    if (webhookDriven && !held) {
       // Exactly ONE recovery re-instruction per transfer (`reinstruct:` is a
       // different key from the original `instruct:` row, which is done/dead by
       // now). The instruct handler itself is idempotent on the partner side —
@@ -93,7 +97,9 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
           (t.settlementPartnerId ? `, settles via ${t.settlementPartnerId}` : '') +
           `) has been ` +
           `'paid' for >${STUCK_PAID_MINUTES}min with no delivery confirmation.` +
-          (webhookDriven ? ' Re-instructed the partner rail once.' : ''),
+          (held
+            ? ' The rail reported a different amount — held, not re-instructed. Investigate with the rail, then cancel/refund it.'
+            : webhookDriven ? ' Re-instructed the partner rail once.' : ''),
       },
       { dedupeKey: `recon:${t.id}` },
     );

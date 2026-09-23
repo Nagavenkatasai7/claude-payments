@@ -46,3 +46,79 @@ describe('logError / logWarn — one scrubbed JSON line', () => {
     expect(spy.mock.calls[0][0] as string).not.toContain('919876543210');
   });
 });
+
+// Program-Fix 47 — bound the scrubber's work on input the app does not control
+// (provider error bodies). Two layers: the email pattern is bounded with
+// non-overlapping labels and anchored to the start of a token, and scrub()
+// caps its input at 8 KB, cut back to a boundary that cannot split a phone
+// number or an email, with a visible marker.
+describe('scrub — bounded work on hostile input (Program-Fix 47)', () => {
+  const MAX = 8 * 1024;
+  const time = (s: string) => {
+    const t = performance.now();
+    const out = scrub(s);
+    return { out, ms: performance.now() - t };
+  };
+
+  it('pathological inputs of 8 KB or less aimed at the email pattern finish fast', () => {
+    // Generous bound for a loaded CI runner; the bounded pattern takes well
+    // under 1 ms on each of these locally.
+    for (const s of [
+      'a@' + 'a-'.repeat(2000) + '.',
+      'a'.repeat(4000) + '@',
+      'a@' + 'a.'.repeat(4000),
+      'a@' + '.'.repeat(8000),
+      'a@' + 'a'.repeat(8000),
+    ]) {
+      expect(s.length).toBeLessThanOrEqual(MAX);
+      expect(time(s).ms).toBeLessThan(1000);
+    }
+  });
+
+  it('a large hostile body is cut to 8 KB, finishes fast, and says it was cut', () => {
+    const { out, ms } = time('a@' + 'a.'.repeat(50_000));
+    expect(ms).toBeLessThan(1000);
+    expect(out.length).toBeLessThanOrEqual(MAX + '…[truncated]'.length);
+    expect(out.endsWith('…[truncated]')).toBe(true);
+  });
+
+  it('input at or under 8 KB is not cut and gets no marker', () => {
+    const s = 'x'.repeat(MAX);
+    expect(scrub(s)).toBe(s);
+  });
+
+  it('a 7+ digit number straddling the cut is dropped, never partly exposed', () => {
+    for (let pad = 1; pad <= 11; pad++) {
+      // The number starts `pad` characters before the 8 KB mark.
+      const s = 'y'.repeat(MAX - pad - 1) + ' ' + '15551234567' + ' tail';
+      const out = scrub(s);
+      expect(out.endsWith('…[truncated]')).toBe(true);
+      expect(out).not.toMatch(/\d/);
+    }
+  });
+
+  it('an email straddling the cut is dropped, never left half-unmasked', () => {
+    const email = 'maria.lopez@example.com';
+    for (let pad = 1; pad <= email.length; pad++) {
+      const s = 'y'.repeat(MAX - pad - 1) + ' ' + email + ' tail';
+      const out = scrub(s);
+      expect(out.endsWith('…[truncated]')).toBe(true);
+      expect(out).not.toContain('maria');
+      expect(out).not.toContain('@');
+    }
+  });
+
+  it('masks the whole address however long its parts are (no half-masking, no pass-through)', () => {
+    expect(scrub(`id ${'b'.repeat(64)}@example.com x`)).toBe('id <email> x');
+    // A local part longer than RFC 5321's 64 is still PII in a log line.
+    expect(scrub(`id ${'c'.repeat(10)}${'b'.repeat(64)}@example.com x`)).toBe('id <email> x');
+    // More than 8 domain labels.
+    expect(scrub(`id user@${'a.'.repeat(12)}example.com x`)).toBe('id <email> x');
+    // A domain label longer than 63 characters.
+    expect(scrub(`id user@${'d'.repeat(80)}.example.com x`)).toBe('id <email> x');
+  });
+
+  it('still masks ordinary and multi-label addresses', () => {
+    expect(scrub('to a.b+c@mail.example.co.uk, cc x_y@ex-ample.io')).toBe('to <email>, cc <email>');
+  });
+});

@@ -79,6 +79,32 @@ vi.mock('@/lib/rail-failure', () => ({
   alertRefusedDelivery: (...a: unknown[]) => alertRefusedDelivery(...a),
 }));
 
+// fix 29: the replay guard (check-then-mark) is unit-tested in
+// tests/rail-replay.test.ts; here an in-memory set pins the route's ORDER.
+const replay = vi.hoisted(() => ({ marked: new Set<string>(), state: null as null | 'unavailable', markCalls: 0 }));
+vi.mock('@/lib/rail-replay', () => ({
+  railNonceSeen: async (n: string) => replay.state ?? (replay.marked.has(n) ? 'seen' : 'fresh'),
+  markRailNonce: async (n: string) => { replay.markCalls++; replay.marked.add(n); },
+}));
+// fix 29: the held-row marker + the mismatch alert go through the outbox repo.
+const outboxFake = vi.hoisted(() => ({ keys: new Set<string>(), enqueued: [] as Array<{ kind: string; payload: unknown; dedupeKey?: string }> }));
+vi.mock('@/db/repos/outbox-repo', () => ({
+  createOutboxRepo: () => ({
+    hasDedupeKey: async (k: string) => outboxFake.keys.has(k),
+    enqueue: async (kind: string, payload: unknown, opts: { dedupeKey?: string } = {}) => {
+      if (opts.dedupeKey && outboxFake.keys.has(opts.dedupeKey)) return false;
+      if (opts.dedupeKey) outboxFake.keys.add(opts.dedupeKey);
+      outboxFake.enqueued.push({ kind, payload, dedupeKey: opts.dedupeKey });
+      return true;
+    },
+  }),
+}));
+const logWarnSpy = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/log', async (orig) => {
+  const real = await orig<typeof import('@/lib/log')>();
+  return { ...real, logWarn: (...a: unknown[]) => { logWarnSpy(...a); } };
+});
+
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
 
 const deliveredTransfer = {
@@ -94,13 +120,16 @@ const SECRET = 'uniteller-secret';
 const body = JSON.stringify({ reference: 'wh_1', status: 'paid_out' });
 const sig = (b: string, s = SECRET) => createHmac('sha256', s).update(b).digest('hex');
 
-function post(provider: string, raw: string, signature?: string) {
+function post(provider: string, raw: string, signature?: string, extra: Record<string, string> = {}) {
   const req = new NextRequest('https://x/api/payment-webhook/' + provider, {
     method: 'POST', body: raw,
-    headers: signature ? { 'x-signature': signature } : {},
+    headers: { ...(signature ? { 'x-signature': signature } : {}), ...extra },
   });
   return POST(req, { params: Promise.resolve({ provider }) });
 }
+/** fix 29: the v2 header, built straight from the documented recipe (not via signRailHeaders). */
+const v2 = (b: string, s = SECRET, t = Math.floor(Date.now() / 1000)) =>
+  ({ 'x-smartremit-signature': `t=${t},v1=${createHmac('sha256', s).update(`${t}.${b}`).digest('hex')}` });
 
 beforeEach(() => {
   sendText.mockClear(); sendTemplate.mockClear();
@@ -111,6 +140,10 @@ beforeEach(() => {
   fixtures.getPaymentProviderCalls.length = 0;
   afterPending.length = 0; // never leak an unflushed after() into the next test
   process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER = SECRET;
+  delete process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER_PREVIOUS;
+  replay.marked.clear(); replay.state = null; replay.markCalls = 0;
+  outboxFake.keys.clear(); outboxFake.enqueued.length = 0;
+  logWarnSpy.mockClear();
 });
 
 describe('POST /api/payment-webhook/[provider]', () => {
@@ -202,11 +235,11 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect(updateTransferFromWebhook).not.toHaveBeenCalled();
   });
 
-  it('mock provider path → verification skipped (no signature needed)', async () => {
-    handleWebhook.mockResolvedValue(null); // mock handleWebhook is a no-op
-    const res = await post('mock', body); // no x-signature header
-    expect(res.status).toBe(200);
-    expect(handleWebhook).toHaveBeenCalled();
+  it('fix 29 (authz-08): the /mock segment no longer skips verification — unsigned → 401, nothing parsed', async () => {
+    handleWebhook.mockResolvedValue(null);
+    const res = await post('mock', body); // no signature header
+    expect(res.status).toBe(401);
+    expect(handleWebhook).not.toHaveBeenCalled();
   });
 });
 
@@ -327,13 +360,13 @@ describe('POST /api/payment-webhook — rail failure (fix 8)', () => {
     expect(handleRailFailure).not.toHaveBeenCalled();
   });
 
-  it('an UNSIGNED failure to /mock for a MOCK-rail transfer → 200 ignored: the mock provider parses nothing, the row is untouched', async () => {
+  it('an UNSIGNED failure to /mock for a MOCK-rail transfer → 401 (fix 29, authz-08): nothing is parsed, the row is untouched', async () => {
     fixtures.transfersById['wh_1'] = paidTransfer;
     fixtures.integrationsByPartner['owner'] = mockInteg;
-    handleWebhook.mockResolvedValue(null); // MockPaymentProvider.handleWebhook (pinned in payment-provider.test.ts)
+    handleWebhook.mockResolvedValue(null);
     const res = await post('mock', failedBody);
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, ignored: true });
+    expect(res.status).toBe(401);
+    expect(handleWebhook).not.toHaveBeenCalled();
     expect(handleRailFailure).not.toHaveBeenCalled();
     expect(updateTransferFromWebhook).not.toHaveBeenCalled();
   });
@@ -360,5 +393,150 @@ describe('POST /api/payment-webhook — rail failure (fix 8)', () => {
     expect((await post('simulator', failedBody, sig(failedBody, 'owner_whk'))).status).toBe(200);
     expect((await post('simulator', failedBody, sig(failedBody, 'owner_whk'))).status).toBe(200);
     expect(handleRailFailure).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Program-Fix 29: timestamped signature, replay guard, rotation, amount check.
+describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
+  const paidOwner = { ...deliveredTransfer, status: 'paid', partnerId: 'owner', amountInr: 16600, destinationCurrency: 'INR' };
+  const ownerInteg = { kyc: {}, payment: { providerType: 'simulator', webhookSecret: 'owner_whk' }, whatsapp: {} };
+  const withAmount = (destination: unknown, cur = 'INR') =>
+    JSON.stringify({ reference: 'wh_1', status: 'paid_out', amount: { destination, destination_currency: cur } });
+
+  beforeEach(() => {
+    fixtures.transfersById['wh_1'] = paidOwner;
+    fixtures.integrationsByPartner['owner'] = ownerInteg;
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue({ ...deliveredTransfer, partnerId: 'owner' });
+  });
+
+  it('a valid v2 header → 200, delivered, and the nonce is marked after success', async () => {
+    const res = await post('simulator', body, undefined, v2(body, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
+    expect(replay.markCalls).toBe(1);
+  });
+
+  it('a stale v2 timestamp → 401, nothing parsed', async () => {
+    const stale = Math.floor(Date.now() / 1000) - 3600;
+    const res = await post('simulator', body, undefined, v2(body, 'owner_whk', stale));
+    expect(res.status).toBe(401);
+    expect(handleWebhook).not.toHaveBeenCalled();
+  });
+
+  it('a bad v2 header next to a VALID legacy header → 401 (the new header decides alone)', async () => {
+    const res = await post('simulator', body, sig(body, 'owner_whk'), { 'x-smartremit-signature': `t=${Math.floor(Date.now() / 1000)},v1=${'0'.repeat(64)}` });
+    expect(res.status).toBe(401);
+    expect(handleWebhook).not.toHaveBeenCalled();
+  });
+
+  it('legacy-only header → 200 with a deprecation log that names the rail partner', async () => {
+    const res = await post('simulator', body, sig(body, 'owner_whk'));
+    expect(res.status).toBe(200);
+    const call = logWarnSpy.mock.calls.find((c) => c[0] === 'rail-sig.legacy');
+    expect(call?.[2]).toMatchObject({ partnerId: 'owner' });
+    expect(replay.markCalls).toBe(0); // legacy carries no nonce
+  });
+
+  it('the same v2 message again → 200 duplicate, NO handling', async () => {
+    const h = v2(body, 'owner_whk');
+    expect((await post('simulator', body, undefined, h)).status).toBe(200);
+    handleWebhook.mockClear(); updateTransferFromWebhook.mockClear();
+    const res = await post('simulator', body, undefined, h);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, duplicate: true });
+    expect(handleWebhook).not.toHaveBeenCalled();
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+  });
+
+  it('Redis unavailable → fail-open: the signed request is handled', async () => {
+    replay.state = 'unavailable';
+    const res = await post('simulator', body, undefined, v2(body, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(updateTransferFromWebhook).toHaveBeenCalledTimes(1);
+  });
+
+  it('a handler throw rethrows and leaves NO mark, so the retry is handled', async () => {
+    const failedBody = JSON.stringify({ reference: 'wh_1', status: 'failed' });
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure: { code: 'failed', reason: 'unspecified' } });
+    handleRailFailure.mockRejectedValueOnce(new Error('db down'));
+    const h = v2(failedBody, 'owner_whk');
+    await expect(post('simulator', failedBody, undefined, h)).rejects.toThrow('db down');
+    expect(replay.markCalls).toBe(0);
+    expect((await post('simulator', failedBody, undefined, h)).status).toBe(200);
+    expect(handleRailFailure).toHaveBeenCalledTimes(2);
+    expect(replay.markCalls).toBe(1);
+  });
+
+  it('rotation: a v1 made with the unexpired PREVIOUS webhook secret verifies', async () => {
+    fixtures.integrationsByPartner['owner'] = {
+      ...ownerInteg,
+      payment: {
+        ...ownerInteg.payment,
+        credentials: { previousWebhookSecret: 'old_whk', previousWebhookSecretUntil: new Date(Date.now() + 86_400_000).toISOString() },
+      },
+    };
+    expect((await post('simulator', body, undefined, v2(body, 'old_whk'))).status).toBe(200);
+  });
+
+  it('rotation (env): PAYMENT_WEBHOOK_SECRET_<P>_PREVIOUS also verifies when no partner secret applies', async () => {
+    delete fixtures.transfersById['wh_1'];
+    process.env.PAYMENT_WEBHOOK_SECRET_UNITELLER_PREVIOUS = 'uni_old';
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+    expect((await post('uniteller', body, sig(body, 'uni_old'))).status).toBe(200);
+    expect((await post('uniteller', body, undefined, v2(body, 'uni_old'))).status).toBe(200);
+  });
+
+  it('matching amount (number or numeric string) → delivered', async () => {
+    const a = withAmount('16600.00');
+    expect((await post('simulator', a, undefined, v2(a, 'owner_whk'))).status).toBe(200);
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
+    expect(outboxFake.enqueued).toEqual([]);
+  });
+
+  it('absent amount → delivered with a deprecation log', async () => {
+    expect((await post('simulator', body, undefined, v2(body, 'owner_whk'))).status).toBe(200);
+    expect(updateTransferFromWebhook).toHaveBeenCalledTimes(1);
+    expect(logWarnSpy.mock.calls.some((c) => c[0] === 'payment-webhook.amount_absent')).toBe(true);
+  });
+
+  it('MISMATCH → never delivered: 200 held, ONE railamount:<id> ops alert (id only), nonce marked', async () => {
+    const a = withAmount(99999);
+    const res = await post('simulator', a, undefined, v2(a, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, held: true });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    expect(outboxFake.enqueued).toHaveLength(1);
+    expect(outboxFake.enqueued[0]).toMatchObject({ kind: 'ops.alert', dedupeKey: 'railamount:wh_1' });
+    const msg = String((outboxFake.enqueued[0].payload as { message: string }).message);
+    expect(msg).toContain('wh_1');
+    expect(msg).not.toContain('99999');
+    expect(msg).not.toContain('919876543210');
+    expect(replay.markCalls).toBe(1);
+    await flushAfter();
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it('a held row + a later MATCHING paid_out → stays paid (no update), no stage-2 message', async () => {
+    const bad = withAmount(99999);
+    await post('simulator', bad, undefined, v2(bad, 'owner_whk'));
+    const good = withAmount(16600);
+    const res = await post('simulator', good, undefined, v2(good, 'owner_whk'));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, held: true });
+    expect(updateTransferFromWebhook).not.toHaveBeenCalled();
+    await flushAfter();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(outboxFake.enqueued).toHaveLength(1); // the alert fired once
+  });
+
+  it('a held row still accepts a signed FAILURE (the resolution path is cancel/refund)', async () => {
+    outboxFake.keys.add('railamount:wh_1');
+    const failedBody = JSON.stringify({ reference: 'wh_1', status: 'failed' });
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure: { code: 'failed', reason: 'unspecified' } });
+    expect((await post('simulator', failedBody, undefined, v2(failedBody, 'owner_whk'))).status).toBe(200);
+    expect(handleRailFailure).toHaveBeenCalledTimes(1);
   });
 });

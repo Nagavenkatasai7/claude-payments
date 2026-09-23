@@ -21,9 +21,37 @@ export function scrub(value: unknown): string {
       : value instanceof Error
         ? `${value.name}: ${value.message}`
         : JSON.stringify(value) ?? String(value);
-  return s
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>')
+  const capped = capInput(s);
+  const out = capped.text
+    .replace(EMAIL, '<email>')
     .replace(/\d{7,}/g, (m) => `…${m.slice(-4)}`);
+  return capped.cut ? `${out}${TRUNCATED}` : out;
+}
+
+// Program-Fix 47 — bounded work on input we do not control. A domain label
+// cannot contain the dot that ends it, so the domain part never overlaps, and
+// the lookbehind lets a match start only at the start of a token (not at every
+// position inside a long run). With the 8 KB cap below, that bounds the work.
+// Parts are deliberately NOT length-bounded: an over-long local part or label
+// is still PII and must be masked whole.
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g;
+
+/** Longest input scrub() looks at; the rest is dropped with a visible marker. */
+export const SCRUB_MAX_CHARS = 8 * 1024;
+const TRUNCATED = '…[truncated]';
+
+/**
+ * Cut `s` to SCRUB_MAX_CHARS, then back to the last character that cannot be
+ * part of a phone number or an email. A cut through `15551234567` could leave
+ * up to 6 digits (below the 7-digit mask), and a cut through `name@example.com`
+ * leaves `name@exam`, which no longer looks like an email; both are dropped
+ * whole instead.
+ */
+function capInput(s: string): { text: string; cut: boolean } {
+  if (s.length <= SCRUB_MAX_CHARS) return { text: s, cut: false };
+  let end = SCRUB_MAX_CHARS;
+  while (end > 0 && /[A-Za-z0-9._%+@-]/.test(s[end - 1])) end--;
+  return { text: s.slice(0, end), cut: true };
 }
 
 function emit(level: 'error' | 'warn', scope: string, message: unknown, fields?: Record<string, unknown>): void {
