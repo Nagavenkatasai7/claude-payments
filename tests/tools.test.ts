@@ -34,6 +34,7 @@ import type { PartnerIntegrationsStore } from '@/lib/partner-integrations-store'
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import type { Db } from '@/db/client';
 import { finalizeDraftPayment } from '@/lib/pay-finalize';
+import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
@@ -3398,17 +3399,19 @@ describe('create_invoice — WhatsApp seller-initiated cross-border bill (Plan 5
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
   });
 
-  it('an UNMAPPED buyer calling code leaves only the seller currency (Case B unavailable)', async () => {
+  it('an UNMAPPED buyer calling code is refused outright — /pay/b2b could never serve that bill (Program-Fix 33)', async () => {
     const ctx = await buildCtx(fakeRedis());
     await seedActiveSeller(ctx);
-    // +49 (Germany) is not a supported corridor — currencyForPhone is undefined.
+    // +49 (Germany) is not a supported corridor — the pay page hard-stops on an
+    // unmapped buyer country, so the bill is refused BEFORE any claim or insert
+    // (pre-fix: a USD bill was minted that could never be paid).
     const r = await executeTool(
       'create_invoice',
       { buyer_phone: '4915123456789', amount: 500, currency: 'EUR' },
       ctx,
     );
     expect(r.created).toBe(false);
-    expect(String(r.reply_to_customer)).toContain('USD');
+    expect(String(r.reply_to_customer)).toMatch(/can't bill that number/i);
     expect(String(r.reply_to_customer)).not.toContain('EUR');
     expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
   });
@@ -4302,13 +4305,13 @@ describe('fix 6 (ctx-01): the model never chooses a payout destination, a partne
 
   it("a saved recipient is used only when the number's country IS the send's destination country", async () => {
     const { ctx } = await returningCtx();
-    const UNCLE = '15557654321'; // a US number; the send defaults to IN
+    const UNCLE = '15557654321'; // a US number; the sender names India explicitly (Program-Fix 33: it is never assumed)
     await ctx.store.upsertRecipient('default', ctx.phone, {
       name: 'Uncle', recipientPhone: UNCLE, payoutMethod: 'bank', payoutDestination: 'HDFC0001234 555566667777',
       lastUsedAt: new Date().toISOString(),
     });
     expect(await draftDest(ctx, await executeTool('send_approve_picker', {
-      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Uncle', recipient_phone: UNCLE,
+      amount_usd: 200, funding_method: 'bank_transfer', recipient_name: 'Uncle', recipient_phone: UNCLE, destination_country: 'IN',
     }, ctx))).toBe('');
   });
 
@@ -4879,6 +4882,258 @@ describe('create_transfer — in-lock send cap (Program fix 16)', () => {
     expect(r.error).toBe('Cap exceeded for this transfer.');
     expect(r.cap_eval).toMatchObject({ reason: 'over_daily_cap', tier: 'T0' });
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
+  });
+});
+
+// ── Program-Fix 33: one country authority — no silent India, the server owns
+// the send currency, no unpayable bills. ──────────────────────────────────────
+describe('Program-Fix 33 — destination-country authority', () => {
+  // Frankfurter stub for the two corridors the audit probed. MXN and HKD are
+  // fetched as `from=MXN` / `from=HKD` (rate.ts fetchFromProvider: to=USD,INR);
+  // the WhatsApp card send is a text response.
+  function stubCorridorFetch() {
+    resetRateCacheForTests();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes('from=MXN')) return { ok: true, json: async () => ({ rates: { INR: 5.574, USD: 0.05817 } }) };
+      if (u.includes('from=HKD')) return { ok: true, json: async () => ({ rates: { INR: 12.21, USD: 0.1275 } }) };
+      if (u.includes('graph.facebook.com') || u.includes('whatsapp')) return { ok: true, text: async () => '' };
+      return { ok: true, json: async () => ({ rates: { INR: 85 } }) };
+    }));
+  }
+  const fetchedUrls = () => vi.mocked(global.fetch).mock.calls.map(([u]) => String(u));
+  const MX_RECIPIENT = '525512345678';
+
+  describe('get_quote', () => {
+    it('with destination_country MX quotes MXN (was IN/INR on main)', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('get_quote', { amount_usd: 500, funding_method: 'bank_transfer', destination_country: 'MX' }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.destination_country).toBe('MX');
+      expect(r.destination_currency).toBe('MXN');
+      expect(r.amount_dest as number).toBeGreaterThan(0);
+      expect(fetchedUrls().some((u) => u.includes('from=MXN'))).toBe(true);
+      // The server states the send currency and a formatted send amount.
+      expect(r.source_currency).toBe('USD');
+      expect(r.amount_source_display).toBe('$500.00 USD');
+    });
+
+    it('with destination_country HK quotes HKD (lower-case accepted)', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer', destination_country: 'hk' }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.destination_country).toBe('HK');
+      expect(r.destination_currency).toBe('HKD');
+    });
+
+    it('with an unknown destination is an error naming the list — no rate is fetched, nothing is India', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      for (const bad of ['ZZ', 'Mexico', 'INR']) {
+        const r = await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer', destination_country: bad }, ctx);
+        expect(r.error).toBeDefined();
+        for (const code of SUPPORTED_DESTINATIONS) expect(String(r.error)).toContain(code);
+        expect(r.destination_currency).toBeUndefined();
+      }
+      expect(fetchedUrls()).toHaveLength(0);
+    });
+  });
+
+  describe('send_approve_picker', () => {
+    it('with a +52 recipient and NO destination is refused before any draft or card', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT,
+      }, ctx);
+      expect(r.sent).toBeUndefined();
+      expect(String(r.error)).toContain('destination_country');
+      expect(String(r.error)).toContain('MX');
+      expect(createDraft).not.toHaveBeenCalled();
+      expect(fetchedUrls().some((u) => u.includes('graph.facebook.com') || u.includes('whatsapp'))).toBe(false);
+    });
+
+    it('with an unknown destination is a returned { error }, never a thrown turn', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const createDraft = vi.spyOn(ctx.draftStore, 'createDraft');
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'ZZ',
+      }, ctx);
+      expect(r.sent).toBeUndefined();
+      expect(String(r.error)).toContain('MX');
+      expect(createDraft).not.toHaveBeenCalled();
+    });
+
+    it('with MX builds an MX draft carrying an MXN quote', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'MX',
+      }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.sent).toBe(true);
+      const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+      expect(draft?.destinationCountry).toBe('MX');
+      expect(draft?.destinationCurrency).toBe('MXN');
+      expect(draft?.quote.destinationCurrency).toBe('MXN');
+    });
+
+    it('a +91 recipient with no destination still cards to India (back-compat)', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: '919876543210',
+      }, ctx);
+      expect(r.error).toBeUndefined();
+      expect(r.sent).toBe(true);
+    });
+  });
+
+  describe('create_transfer (explicit-args path)', () => {
+    it('with a +52 recipient and NO destination is refused; nothing is minted', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_transfer', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT,
+      }, ctx);
+      expect(r.transfer_id).toBeUndefined();
+      expect(String(r.error)).toContain('destination_country');
+      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+    });
+
+    it('with an unknown destination is a returned { error }; nothing is minted', async () => {
+      stubCorridorFetch();
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_transfer', {
+        amount_usd: 100, funding_method: 'bank_transfer', recipient_name: 'Luis', recipient_phone: MX_RECIPIENT, destination_country: 'ZZ',
+      }, ctx);
+      expect(r.transfer_id).toBeUndefined();
+      expect(String(r.error)).toContain('MX');
+      expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(0);
+    });
+  });
+
+  describe('schedules are India-only (owner decision 1)', () => {
+    const base = { amount_usd: 50, recipient_name: 'Rahul', funding_method: 'bank_transfer', frequency: 'monthly', day_of_month: 5 };
+
+    it('create_schedule to MX is refused and nothing is saved', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const save = vi.spyOn(ctx.scheduleStore, 'saveSchedule');
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210', destination_country: 'MX' }, ctx);
+      expect(r.schedule_id).toBeUndefined();
+      expect(String(r.error)).toMatch(/India only/i);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('create_schedule with no destination and a +52 recipient is refused and nothing is saved', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const save = vi.spyOn(ctx.scheduleStore, 'saveSchedule');
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: MX_RECIPIENT }, ctx);
+      expect(r.schedule_id).toBeUndefined();
+      expect(String(r.error)).toMatch(/India only/i);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('create_schedule with an unknown destination is refused', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const save = vi.spyOn(ctx.scheduleStore, 'saveSchedule');
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210', destination_country: 'ZZ' }, ctx);
+      expect(r.schedule_id).toBeUndefined();
+      expect(r.error).toBeDefined();
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('a +91 recipient with no destination saves, and the result states the send currency', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210' }, ctx);
+      expect(r.schedule_id).toBeTruthy();
+      expect(r.source_currency).toBe('USD');
+      expect(r.amount_source).toBe(50);
+      expect(String(r.amount_source_display)).toContain('$50');
+      expect(r.amount_source_display).toBe('$50.00 USD');
+      expect(r.destination_country).toBe('IN');
+    });
+
+    it('an explicit IN destination saves', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const r = await executeTool('create_schedule', { ...base, recipient_phone: '919876543210', destination_country: 'in' }, ctx);
+      expect(r.schedule_id).toBeTruthy();
+    });
+
+    it('list_schedules rows state the unit (and keep amount_usd for back-compat)', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await executeTool('create_schedule', { ...base, recipient_phone: '919876543210' }, ctx);
+      const r = await executeTool('list_schedules', {}, ctx);
+      const rows = r.schedules as Array<Record<string, unknown>>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0].amount_usd).toBe(50);
+      expect(rows[0].amount_source).toBe(50);
+      expect(rows[0].source_currency).toBe('USD');
+      expect(rows[0].amount_source_display).toBe('$50.00 USD');
+    });
+  });
+
+  describe('create_invoice — no unpayable bill', () => {
+    beforeEach(async () => {
+      await db.execute(sql`TRUNCATE sellers CASCADE`);
+    });
+    async function seedActiveSeller(ctx: Awaited<ReturnType<typeof buildCtx>>) {
+      await ctx.store.createSeller({
+        id: 's_f33', partnerId: 'default', phone: PHONE, businessName: 'Acme Exports Inc', country: 'US', currency: 'USD',
+      });
+      expect((await ctx.store.completeSellerOnboarding(PHONE, 'default', '021000021|12345678'))?.status).toBe('active');
+    }
+
+    it("a national-format buyer number ('5555550100') is refused: no claim, no insert, no push", async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await seedActiveSeller(ctx);
+      const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
+      const save = vi.spyOn(ctx.store, 'saveB2bInvoice');
+      const enqueue = vi.spyOn(ctx.outboxRepo, 'enqueue');
+      const r = await executeTool('create_invoice', { buyer_phone: '5555550100', amount: 100 }, ctx);
+      expect(r.created).toBe(false);
+      expect(r.invoice_id).toBeUndefined();
+      expect(String(r.reply_to_customer)).toMatch(/country code/i);
+      expect(claim).not.toHaveBeenCalled();
+      expect(save).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      expect(await ctx.store.listB2bInvoices('default')).toHaveLength(0);
+    });
+
+    it('a +91 buyer still creates', async () => {
+      const ctx = await buildCtx(fakeRedis());
+      await seedActiveSeller(ctx);
+      const r = await executeTool('create_invoice', { buyer_phone: '+91 98765 43210', amount: 100 }, ctx);
+      expect(r.created).toBe(true);
+      expect(String(r.invoice_id)).toMatch(/^inv_/);
+    });
+  });
+
+  describe('schemas', () => {
+    it('destination_country is required on get_quote, create_transfer and send_approve_picker, and each lists all ten codes', () => {
+      for (const name of ['get_quote', 'create_transfer', 'send_approve_picker']) {
+        const tool = toolSchemas.find((t) => t.function.name === name)!;
+        expect(tool.function.parameters.required, name).toContain('destination_country');
+        const props = tool.function.parameters.properties as Record<string, { description?: string; enum?: string[] }>;
+        for (const code of SUPPORTED_DESTINATIONS) expect(props.destination_country.description, name).toContain(code);
+        expect(props.destination_country.enum, name).toEqual(SUPPORTED_DESTINATIONS);
+      }
+    });
+
+    it('create_schedule has a destination_country property', () => {
+      const tool = toolSchemas.find((t) => t.function.name === 'create_schedule')!;
+      const props = tool.function.parameters.properties as Record<string, { description?: string }>;
+      expect(props.destination_country).toBeDefined();
+      expect(String(props.destination_country.description)).toMatch(/India/);
+    });
+
+    it('no schema string says "Defaults to India"', () => {
+      expect(JSON.stringify(toolSchemas)).not.toContain('Defaults to India');
+    });
   });
 });
 

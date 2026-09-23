@@ -7,6 +7,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
 import { sweepFxHealth, sweepStaleRates } from '@/lib/rate-staleness';
+import { escalateStuckPaid } from '@/lib/stale-money';
 import {
   cadenceRedis,
   checkCronQuiet,
@@ -155,6 +156,17 @@ async function run(req: NextRequest): Promise<NextResponse> {
     logError('worker.rate-sweep', err);
   }
 
+  // Stuck-paid escalation ladder (Program-Fix 32, neon-10): one deduped ops
+  // alert + audit row per rung (1 h / 6 h / 24 h / daily) while a transfer
+  // stays 'paid' with no delivery. reconcileSweep's one-shot recon:<id> alert
+  // is unchanged. Failures never block the drain.
+  let escalated = 0;
+  try {
+    escalated = await escalateStuckPaid(deps.db, now);
+  } catch (err) {
+    logError('worker.stuck-escalation', err);
+  }
+
   // Drain-gap SLA (Program-Fix 12): one deduped ops alert per hour while the
   // oldest claimable row (due, or an expired lease) has waited past
   // DRAIN_SLA_MINUTES. Counts and ages only; a throw never blocks the drain.
@@ -213,7 +225,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
   // Nothing parses this body (the heartbeat curls to /dev/null; the poke ignores
   // it), so adding fields is safe across a rolling release.
   return NextResponse.json({
-    ok: true, source, processed, failed, dead, released, sweep, staleRates, fxHealth, drainGap, cronQuiet,
+    ok: true, source, processed, failed, dead, released, sweep, staleRates, escalated, fxHealth, drainGap, cronQuiet,
   });
 }
 

@@ -26,14 +26,16 @@ export default async function AccountRegisterPage({
   }
 
   return (
-    <main className="flex min-h-svh flex-col items-center justify-center bg-muted/30 px-4 py-10">
+    <main id="main" className="flex min-h-svh flex-col items-center justify-center bg-muted/30 px-4 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-6 text-center text-2xl font-bold tracking-tight">
           Smart<span className="text-primary">Remit</span>
         </div>
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Create your account</CardTitle>
+            <CardTitle className="text-lg">
+              <h1>Create your account</h1>
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <RegisterForm token={token} prefillPhone={prefillPhone} />

@@ -9,6 +9,7 @@ import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapErro
 import { isSendVerified, isB2bSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
 import { evaluateCap, evaluateEdd } from './tier-rules';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_PARTNER_ID } from './defaults';
+import { destinationListText, parseDestinationCountry, SUPPORTED_DESTINATIONS } from './destination-country';
 import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
@@ -36,7 +37,7 @@ import { screenTransfer } from './compliance';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
-import { isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
+import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 import { BILL_TEXT_MAX, boundUntrustedText, ID_MAX, isCleanName, NAME_MAX } from './untrusted-text';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
@@ -217,6 +218,25 @@ async function resolveStoredPayout(
  * destinationCurrency defaults to 'INR' for full back-compat — INR quotes render
  * identically to before (Intl en-US INR → "₹83", "₹41,500").
  */
+/**
+ * The ONE send-amount formatter (Intl en-US currency style): "$50.00", "₹900.00",
+ * "£20.00". buildApproveSummary's card line and the tools' amount_source_display
+ * share it, so the card and the model's restatement can never disagree.
+ */
+export function formatSourceAmount(amount: number, currency: CurrencyCode): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount);
+}
+
+/**
+ * Program-Fix 33 (live-16): the server states the unit the sender pays in, as
+ * one string the prompt makes the model restate verbatim — "$50.00 USD". The
+ * symbol alone is ambiguous across languages ("$50" became "₹50" after a Hindi
+ * turn); the trailing ISO code pins it.
+ */
+function sourceAmountDisplay(amount: number, currency: CurrencyCode): string {
+  return `${formatSourceAmount(amount, currency)} ${currency}`;
+}
+
 export function buildApproveSummary(
   q: import('./types').Quote,
   recipientName: string,
@@ -225,8 +245,7 @@ export function buildApproveSummary(
   fundingMethod: FundingMethod,
   destinationCurrency: CurrencyCode = 'INR',
 ): string {
-  const fmt = (n: number) =>
-    new Intl.NumberFormat('en-US', { style: 'currency', currency: q.sourceCurrency }).format(n);
+  const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
   // For INR with en-US locale: Intl renders "₹83" / "₹41,500" — identical to the
   // previous `₹${n.toLocaleString('en-IN')}` for the integers we use here.
@@ -356,6 +375,11 @@ async function refuseUnlessOwnOpenBill(
   return null;
 }
 
+// Program-Fix 33: the destination schema copy derives from the ONE authority —
+// the model reads all ten codes, never "Defaults to India".
+const DESTINATION_COUNTRY_DESCRIPTION =
+  `Required. ISO country code of where the money is going. One of: ${destinationListText()}. Use the country the recipient's number belongs to unless the sender named another; never guess India.`;
+
 export const toolSchemas: ChatTool[] = [
   {
     type: 'function',
@@ -397,11 +421,11 @@ export const toolSchemas: ChatTool[] = [
           },
           destination_country: {
             type: 'string',
-            description:
-              "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+            enum: [...SUPPORTED_DESTINATIONS],
+            description: DESTINATION_COUNTRY_DESCRIPTION,
           },
         },
-        required: ['funding_method'],
+        required: ['funding_method', 'destination_country'],
       },
     },
   },
@@ -533,7 +557,8 @@ export const toolSchemas: ChatTool[] = [
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
           destination_country: {
             type: 'string',
-            description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+            enum: [...SUPPORTED_DESTINATIONS],
+            description: DESTINATION_COUNTRY_DESCRIPTION,
           },
           // ── B2B (business-to-business) — all optional; absent ⇒ the consumer shape ──
           entity_type: { type: 'string', enum: ['business'], description: "Set to 'business' for a business-to-business bill payment (both parties are businesses). Omit for a normal consumer send." },
@@ -546,6 +571,7 @@ export const toolSchemas: ChatTool[] = [
           'recipient_name',
           'funding_method',
           'recipient_phone',
+          'destination_country',
         ],
       },
     },
@@ -696,6 +722,10 @@ export const toolSchemas: ChatTool[] = [
           amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string', description: "Recipient's WhatsApp number with country code." },
+          destination_country: {
+            type: 'string',
+            description: "ISO country code of where the money is going. Recurring transfers go to India only for now, so this must be 'IN' — for any other country offer a one-time send instead.",
+          },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
           frequency: { type: 'string', enum: ['monthly', 'weekly'] },
           day_of_month: { type: 'number', description: 'Day 1-28, required when frequency is monthly.' },
@@ -795,7 +825,8 @@ export const toolSchemas: ChatTool[] = [
           },
           destination_country: {
             type: 'string',
-            description: "ISO country code of where the money is going, e.g. 'IN','AE','GB','US'. Defaults to India.",
+            enum: [...SUPPORTED_DESTINATIONS],
+            description: DESTINATION_COUNTRY_DESCRIPTION,
           },
           recipient_legal_name: { type: 'string', description: 'Recipient legal name (only when enhanced verification is required).' },
           relationship: { type: 'string', enum: ['self','spouse','parent','child','sibling','other_family','friend','business','other'] },
@@ -813,6 +844,7 @@ export const toolSchemas: ChatTool[] = [
           'funding_method',
           'recipient_name',
           'recipient_phone',
+          'destination_country',
         ],
       },
     },
@@ -996,15 +1028,31 @@ function fxRefusal(err: unknown, scope: string): ToolResult | null {
   return { error: err.message };
 }
 
-// Valid CountryCode set for runtime validation (must match the union in types.ts).
-const VALID_COUNTRY_CODES: ReadonlySet<string> = new Set<CountryCode>([
-  'US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN',
-]);
+// Program-Fix 33: the destination-country authority is src/lib/destination-country.ts
+// (derived from DEFAULT_CURRENCY_FOR_COUNTRY — the hand-typed 8-country set that
+// turned a Mexico or Hong Kong send into India is gone). An UNKNOWN code is an
+// error; an ABSENT one keeps the IN default on get_quote only.
+const UNKNOWN_DESTINATION_MESSAGE = `We deliver to: ${destinationListText()}. Which of these is the money going to?`;
+
+/**
+ * Program-Fix 33: the card and mint paths never assume India. When the model
+ * passed NO destination and the recipient's number maps to a supported country
+ * other than IN, refuse before any draft, card, KYC inquiry or mint. An unknown
+ * (non-blank) code is left to resolveCurrencyAndRates, which refuses it by name.
+ */
+function missingDestinationRefusal(destinationCountryArg: unknown, recipientPhone: string): ToolResult | null {
+  if (parseDestinationCountry(destinationCountryArg) !== undefined) return null;
+  const detected = countryForPhone(recipientPhone);
+  if (!detected || detected === DEFAULT_DESTINATION_COUNTRY) return null;
+  return {
+    error: `destination_country is missing — the recipient number looks like ${detected}. Ask where the money is going, then pass destination_country (one of: ${destinationListText()}).`,
+  };
+}
 
 // Resolves the customer (upsert on first contact), their partner, the send
 // currency for that partner, fresh FX rates, AND the destination country/currency.
-// destinationCountryArg is validated against the CountryCode union; unknown values
-// fall back to 'IN' (India) so the default US→India path is unchanged.
+// destinationCountryArg is parsed by the ONE authority: an unknown value throws
+// a QuoteError naming the list (before any I/O); an absent one keeps 'IN'.
 /**
  * Mint a KYC inquiry for the turn's customer AND record it on the
  * (ctx.partnerId, phone) row (fix 1 review). Once a phone has rows under several
@@ -1083,16 +1131,16 @@ async function resolveCurrencyAndRates(
   destToUsd: number | undefined;
   fxFetchedAt: number | undefined;
 }> {
+  // Destination resolution FIRST (Program-Fix 33): an unknown code is refused
+  // before the customer upsert and before any rate fetch — never coerced to 'IN'.
+  const parsedDestination = parseDestinationCountry(destinationCountryArg);
+  if (parsedDestination === null) throw new QuoteError(UNKNOWN_DESTINATION_MESSAGE);
+  const destinationCountry: CountryCode = parsedDestination ?? DEFAULT_DESTINATION_COUNTRY;
+  const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
+
   const { customer, partner, sourceCurrency } = await resolveSender(ctx, requested);
   const rates = await getFxRates(sourceCurrency);
 
-  // Destination resolution — validated; unknown country code → 'IN' (back-compat).
-  const destinationCountry: CountryCode =
-    typeof destinationCountryArg === 'string' &&
-    VALID_COUNTRY_CODES.has(destinationCountryArg.toUpperCase())
-      ? (destinationCountryArg.toUpperCase() as CountryCode)
-      : 'IN';
-  const destinationCurrency = DEFAULT_CURRENCY_FOR_COUNTRY[destinationCountry];
   // undefined for INR: quote() prices an INR destination off rates.toInr.
   const destRates = await getDestinationRates(destinationCurrency);
   // The OLDEST leg's fetch time — a stored draft quote's age is measured from it.
@@ -1371,6 +1419,9 @@ async function getQuoteTool(
       destination_currency: q.destinationCurrency,
       destination_country: destinationCountry,
       delivery_estimate: q.deliveryEstimate,
+      // Program-Fix 33: the unit the sender pays in, server-formatted; the
+      // prompt makes the model restate it verbatim ("$50.00 USD").
+      amount_source_display: sourceAmountDisplay(q.amountSource, q.sourceCurrency),
     };
   } catch (err) {
     const refusal = fxRefusal(err, 'get_quote');
@@ -1551,6 +1602,10 @@ async function createTransferTool(
   const legacyFundingArg = parseFundingArg(CHAT_FUNDING_METHODS, args.funding_method);
   if (legacyFundingArg === null) return { error: fundingMethodError(CHAT_FUNDING_METHODS) };
   const legacyFunding: FundingMethod = legacyFundingArg ?? 'bank_transfer';
+  // Program-Fix 33: no silent mint to India — an absent destination with a
+  // recipient number in another supported country is refused before any mint.
+  const legacyMissingDestination = missingDestinationRefusal(args.destination_country, recipientPhone);
+  if (legacyMissingDestination) return legacyMissingDestination;
   // Resolve currency + rates and reuse customer for cap check + partnerId.
   let legacyResolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
   try {
@@ -1558,6 +1613,7 @@ async function createTransferTool(
   } catch (err) {
     const refusal = fxRefusal(err, 'create_transfer');
     if (refusal) return refusal;
+    if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
   const { customer: legacyCustomer, partner: legacyPartner, sourceCurrency, rates, destinationCountry: legacyDestCountry, destinationCurrency: legacyDestCurrency } = legacyResolved;
@@ -1914,6 +1970,19 @@ async function createInvoiceTool(
       created: false,
       reply_to_customer:
         "I couldn't read that customer number — please give it with the country code (e.g. +1 555 123 4567).",
+    };
+  }
+  // Program-Fix 33 (b2b-02): no bill is created that cannot be paid. The pay
+  // page (/pay/b2b) hard-stops forever unless the buyer's number resolves to a
+  // supported country WITH bank fields — the exact same check, applied BEFORE
+  // any claim, insert or push. A national-format number (no calling code) or an
+  // unmapped calling code is refused here instead of minting a dead link.
+  const buyerCountry = countryForPhone(buyerPhone);
+  if (!buyerCountry || !BANK_FIELDS_BY_COUNTRY[buyerCountry]) {
+    return {
+      created: false,
+      reply_to_customer:
+        "I can't bill that number yet — please give your customer's number with its country code (for example +91 …).",
     };
   }
 
@@ -3023,6 +3092,16 @@ async function createScheduleTool(
       return { error: 'For a weekly schedule, pick a day of the week from 0 (Sunday) to 6 (Saturday).' };
     }
   }
+  // Program-Fix 33 (owner decision 1): schedules are India-only until they carry
+  // a destination (cron-run mints every run as DEFAULT_DESTINATION_COUNTRY). A
+  // destination that is not IN, an unknown one, or an absent one whose recipient
+  // number maps to another supported country is refused — and NOTHING is saved.
+  const scheduleDestination = parseDestinationCountry(args.destination_country);
+  if (scheduleDestination === null) return { error: UNKNOWN_DESTINATION_MESSAGE };
+  const impliedDestination = scheduleDestination ?? countryForPhone(recipientPhone);
+  if (impliedDestination !== undefined && impliedDestination !== DEFAULT_DESTINATION_COUNTRY) {
+    return { error: 'Recurring transfers can go to India only for now — offer a one-time send instead.' };
+  }
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
   // No FX here (Task 9): a schedule prices at RUN time, so a provider outage must
   // not stop the customer from setting one up.
@@ -3067,6 +3146,12 @@ async function createScheduleTool(
     day_of_month: schedule.dayOfMonth ?? null,
     day_of_week: schedule.dayOfWeek ?? null,
     end_date: schedule.endDate ?? null,
+    // Program-Fix 33 (live-16): the server states the unit — "$50.00 USD" —
+    // so a later language switch can never turn it into ₹50.
+    amount_source: schedule.amountSource,
+    source_currency: schedule.sourceCurrency,
+    amount_source_display: sourceAmountDisplay(schedule.amountSource, schedule.sourceCurrency),
+    destination_country: DEFAULT_DESTINATION_COUNTRY,
   };
 }
 
@@ -3079,7 +3164,11 @@ async function listSchedulesTool(
   return {
     schedules: mine.map((s) => ({
       schedule_id: s.id,
-      amount_usd: s.amountUsd,
+      amount_usd: s.amountUsd, // back-compat: the SOURCE amount despite the name
+      // Program-Fix 33: the unit, stated by the server.
+      amount_source: s.amountSource,
+      source_currency: s.sourceCurrency,
+      amount_source_display: sourceAmountDisplay(s.amountSource, s.sourceCurrency),
       recipient_name: boundUntrustedText(s.recipientName, NAME_MAX), // fix 5: clamped at read
       frequency: s.frequency,
       day_of_month: s.dayOfMonth ?? null,
@@ -3223,6 +3312,10 @@ async function sendApprovePickerTool(
   // is byte-for-byte unchanged). For B2B the recipient_name the card/screen use
   // is the PAYEE business legal name (the model passes it as recipient_name too).
   const b2b = parseB2bArgs(args);
+  // Program-Fix 33: no silent card to India — an absent destination with a
+  // recipient number in another supported country is refused before any draft.
+  const missingDestination = missingDestinationRefusal(args.destination_country, recipientPhone);
+  if (missingDestination) return missingDestination;
   // Resolve currency+rates+destination ONCE; reuse `customer` for the cap check (no second getCustomer).
   let resolved: Awaited<ReturnType<typeof resolveCurrencyAndRates>>;
   try {
@@ -3230,6 +3323,9 @@ async function sendApprovePickerTool(
   } catch (err) {
     const refusal = fxRefusal(err, 'send_approve_picker');
     if (refusal) return refusal;
+    // An unknown destination (or an ambiguous send currency) is the model's
+    // error to correct — a returned { error }, never a thrown agent turn.
+    if (err instanceof QuoteError) return { error: err.message };
     throw err;
   }
   const { customer, partner, sourceCurrency, rates, destinationCountry, destinationCurrency, destToUsd, fxFetchedAt } =
