@@ -43,7 +43,7 @@ async function renderPage(route: 'terms' | 'privacy' | 'legal'): Promise<string>
 describe('src/lib/legal/drafts.ts', () => {
   it('exports the version id and the owner banner verbatim', async () => {
     const d = await drafts();
-    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-09-23b'); // PR B: the receipt-disclosure wording changed
+    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-09-23c'); // Program-Fix 49B: the rate-lock wording matches the system (30 min)
     expect(d.LEGAL_DRAFT_BANNER).toBe(BANNER);
   });
 
@@ -124,13 +124,29 @@ describe('drafts claim only what the product does today', () => {
     expect(allDraftText(d)).not.toMatch(/are shown with your transfer receipt/i);
   });
 
-  it('the rate is described as locked for about 10 minutes in the chat, not fixed on the pay page', async () => {
+  it('the rate is described as locked for up to the real lock in the chat, not fixed on the pay page', async () => {
     const d = await drafts();
     const quotes = d.TERMS_DRAFT.sections.find((s) => s.id === 'quotes-and-fees')!;
     const text = quotes.paragraphs.join(' ');
     expect(text).not.toMatch(/fixed when you confirm/i);
-    expect(text).toMatch(/about 10 minutes/);
+    expect(text).not.toMatch(/about 10 minutes/);
+    expect(text).toContain('locked for up to 30 minutes');
     expect(text).toMatch(/expired/i);
+  });
+
+  it('Program-Fix 49B: the draft states the same lock minutes the approve card shows for a fresh rate', async () => {
+    const d = await drafts();
+    const { RATE_LOCK_MINUTES, buildApproveSummary } = await import('@/lib/tools');
+    const text = d.TERMS_DRAFT.sections.find((s) => s.id === 'quotes-and-fees')!.paragraphs.join(' ');
+    const card = buildApproveSummary(
+      { amountUsd: 100, feeUsd: 1.99, totalChargeUsd: 101.99, fxRate: 83, amountInr: 8300, deliveryEstimate: 'within minutes',
+        sourceCurrency: 'USD', amountSource: 100, feeSource: 1.99, totalChargeSource: 101.99 },
+      'Test', 'bank', '', 'bank_transfer',
+    );
+    const cardMinutes = Number(/Rate locked for (\d+) min\./.exec(card)?.[1]);
+    const draftMinutes = Number(/locked for up to (\d+) minutes/.exec(text)?.[1]);
+    expect(cardMinutes).toBe(RATE_LOCK_MINUTES);
+    expect(draftMinutes).toBe(cardMinutes);
   });
 
   it('the scheduled-transfer note says scheduling disclosures are not yet shown and cancelling is in the chat', async () => {

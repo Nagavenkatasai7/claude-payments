@@ -1,5 +1,5 @@
 import { quote, QuoteError, sourceForDest, wouldBeFeeUsd } from './fx';
-import { getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
+import { FX_MAX_AGE_MS, getDestinationRates, getFxRates, RateUnavailableError, type FxRates } from './rate';
 import { resolveSendCurrency, destinationCountryForRecipientPhone, countryForPhone, currencyForPhone } from './partner-currency';
 import { newTransferId } from './id';
 import { env } from './env';
@@ -14,7 +14,7 @@ import type { ScheduleStore } from './schedule-store';
 import type { ChatTool, CountryCode, Customer, CurrencyCode, EntityType, FundingMethod, Occupation, Partner, PartnerId, PayoutMethod, Quote, Schedule, SettlementRoute, SourceOfFunds, TurnContext } from './types';
 import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
-import type { DraftStore } from './draft-store';
+import { DRAFT_TTL_SECONDS, type DraftStore } from './draft-store';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
@@ -95,9 +95,24 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
  */
 export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
 
+/**
+ * Program-Fix 49B (prompt-07): tools the WhatsApp model is NOT shown. The
+ * WhatsApp flow is send_approve_picker → the secure pay page (the mint happens
+ * there, pay-finalize.ts), so a model-called create_transfer only leaves a stray
+ * unconfirmed row and generate_payment_link a second link the prompt forbids.
+ * Schema filter ONLY: executeTool still dispatches both, so an in-flight
+ * conversation (or an old build during a rolling release) that names one still
+ * works, and the web channel keeps generate_payment_link (WEB_TOOL_ALLOWLIST).
+ */
+export const WHATSAPP_HIDDEN_TOOLS: ReadonlySet<string> = new Set(['create_transfer', 'generate_payment_link']);
+
 /** The tool schemas the model is shown for a given channel. */
 export function toolSchemasForChannel(channel: AgentChannel): ChatTool[] {
-  if (channel !== 'web') return toolSchemas.filter((t) => !WEB_ONLY_TOOLS.has(t.function.name));
+  if (channel !== 'web') {
+    return toolSchemas.filter(
+      (t) => !WEB_ONLY_TOOLS.has(t.function.name) && !WHATSAPP_HIDDEN_TOOLS.has(t.function.name),
+    );
+  }
   return toolSchemas.filter((t) => WEB_TOOL_ALLOWLIST.has(t.function.name));
 }
 
@@ -244,6 +259,37 @@ function sourceAmountDisplay(amount: number, currency: CurrencyCode): string {
   return `${formatSourceAmount(amount, currency)} ${currency}`;
 }
 
+/**
+ * Program-Fix 49B (prompt-05): how long the approve card's rate really holds.
+ * The quote is stored on the draft and honored VERBATIM at pay time
+ * (pay-finalize.ts quoteOverrideFromDraft), so the lock ends at the EARLIER of:
+ *   - the draft expiring (DRAFT_TTL_SECONDS, draft-store.ts): the pay link dies;
+ *   - the rate behind it passing FX_MAX_AGE_MS (rate.ts): the mint refuses it
+ *     (transfer-create.ts assertQuoteOverrideFresh → "quote has expired").
+ * A fresh rate gives the full draft lifetime (30 min). Never a literal: the old
+ * "~10 min" copy under-stated a 30-minute lock.
+ */
+export const RATE_LOCK_MINUTES = Math.floor(DRAFT_TTL_SECONDS / 60);
+
+/** Whole minutes the quote stays payable; `fxFetchedAt` undefined ⇒ the draft lifetime. */
+export function rateLockMinutes(fxFetchedAt: number | undefined, now: number = Date.now()): number {
+  const draftMs = DRAFT_TTL_SECONDS * 1000;
+  const fxLeftMs = fxFetchedAt === undefined ? draftMs : FX_MAX_AGE_MS - (now - fxFetchedAt);
+  return Math.max(0, Math.floor(Math.min(draftMs, fxLeftMs) / 60_000));
+}
+
+/**
+ * The card's rate-lock line. Under 2 minutes left (only when FX has been
+ * degraded for ~58+ minutes) no lock time is promised: "0 min" would read as
+ * already expired, and "1 min" can lapse before the page opens. If it lapses,
+ * the pay page refuses the mint with the expired-quote message and asks for a
+ * fresh quote, so this wording stays honest.
+ */
+export const RATE_LOCK_SHORT_LINE = 'Rate valid for a moment — tap soon.';
+export function rateLockLine(lockMinutes: number): string {
+  return lockMinutes < 2 ? RATE_LOCK_SHORT_LINE : `Rate locked for ${lockMinutes} min.`;
+}
+
 export function buildApproveSummary(
   q: import('./types').Quote,
   recipientName: string,
@@ -251,6 +297,7 @@ export function buildApproveSummary(
   payoutDestination: string,
   fundingMethod: FundingMethod,
   destinationCurrency: CurrencyCode = 'INR',
+  lockMinutes: number = RATE_LOCK_MINUTES,
 ): string {
   const fmt = (n: number) => formatSourceAmount(n, q.sourceCurrency);
   // Generic destination-currency formatter (works for AED, GBP, INR, …).
@@ -283,7 +330,7 @@ export function buildApproveSummary(
     `Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`,
     `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
-    `Rate locked ~10 min.`,
+    rateLockLine(lockMinutes),
   ].join('\n');
 }
 
@@ -418,9 +465,9 @@ export const toolSchemas: ChatTool[] = [
           },
           funding_method: {
             type: 'string',
-            enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'],
+            enum: ['bank_transfer', 'ach_pull'],
             description:
-              "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. The fee depends on this choice. For a BUSINESS bill payment use 'ach_pull' (flat $1.99 ACH bank debit).",
+              "Optional. Omit it for a normal send: it is always a bank transfer. For a BUSINESS bill payment pass 'ach_pull' (flat $1.99 ACH bank debit).",
           },
           source_currency: {
             type: 'string',
@@ -433,7 +480,7 @@ export const toolSchemas: ChatTool[] = [
             description: DESTINATION_COUNTRY_DESCRIPTION,
           },
         },
-        required: ['funding_method', 'destination_country'],
+        required: ['destination_country'],
       },
     },
   },
@@ -550,8 +597,8 @@ export const toolSchemas: ChatTool[] = [
           recipient_name: { type: 'string' },
           funding_method: {
             type: 'string',
-            enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'],
-            description: "How the sender pays: 'credit_card', 'debit_card', or 'bank_transfer'. For a BUSINESS bill payment use 'ach_pull'.",
+            enum: ['bank_transfer', 'ach_pull'],
+            description: "Optional. Omit it for a normal send: it is always a bank transfer. For a BUSINESS bill payment pass 'ach_pull'.",
           },
           recipient_phone: {
             type: 'string',
@@ -577,7 +624,6 @@ export const toolSchemas: ChatTool[] = [
         required: [
           'amount_source',
           'recipient_name',
-          'funding_method',
           'recipient_phone',
           'destination_country',
         ],
@@ -734,7 +780,7 @@ export const toolSchemas: ChatTool[] = [
             type: 'string',
             description: "ISO country code of where the money is going. Recurring transfers go to India only for now, so this must be 'IN' — for any other country offer a one-time send instead.",
           },
-          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'] },
+          funding_method: { type: 'string', enum: ['bank_transfer'], description: 'Optional. Omit it: a schedule is always paid by bank transfer.' },
           frequency: { type: 'string', enum: ['monthly', 'weekly'] },
           day_of_month: { type: 'number', description: 'Day 1-28, required when frequency is monthly.' },
           day_of_week: { type: 'number', description: 'Day 0 (Sunday) to 6 (Saturday), required when frequency is weekly.' },
@@ -753,7 +799,7 @@ export const toolSchemas: ChatTool[] = [
           source_of_funds: { type: 'string', enum: ['employment','business','investment','gift','savings','other'] },
           occupation: { type: 'string', enum: ['salaried','self_employed','business_owner','student','homemaker','retired','unemployed','other'] },
         },
-        required: ['amount_source', 'recipient_name', 'recipient_phone', 'funding_method', 'frequency'],
+        required: ['amount_source', 'recipient_name', 'recipient_phone', 'frequency'],
       },
     },
   },
@@ -782,7 +828,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'list_saved_recipients',
       description:
-        "List the sender's recently-used recipients (top 2 by most recent). Call this on the first message of a new conversation.",
+        "List the sender's recently-used recipients (top 2 by most recent). Call this only once the customer wants to send and has not named anyone, then offer them with send_recipient_picker. Never call it merely to greet.",
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -817,13 +863,17 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'send_approve_picker',
       description:
-        "Lock the quote and send the sender an [Approve & pay] button. Call this when you have the amount, funding method, recipient name, destination country, and recipient phone. Do NOT collect bank details — the sender enters the recipient's bank details on the secure pay page. For a saved/known recipient (repeat or scheduled), the system reuses the stored payout details automatically.",
+        "Lock the quote and send the sender an [Approve & pay] button. Call this when you have the amount, recipient name, destination country, and recipient phone. Do NOT collect bank details — the sender enters the recipient's bank details on the secure pay page. For a saved/known recipient (repeat or scheduled), the system reuses the stored payout details automatically.",
       parameters: {
         type: 'object',
         properties: {
           amount_source: { type: 'number', description: "Send amount in the sender's OWN currency (rupees for India, dollars for the US, etc.). Do NOT convert it yourself." },
           amount_usd: { type: 'number', description: "Back-compat alias of amount_source (the send amount in the sender's currency)." },
-          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer', 'ach_pull'] },
+          funding_method: {
+            type: 'string',
+            enum: ['bank_transfer', 'ach_pull'],
+            description: "Optional. Omit it for a normal send: it is always a bank transfer. For a BUSINESS bill payment pass 'ach_pull'.",
+          },
           recipient_name: { type: 'string' },
           recipient_phone: { type: 'string' },
           source_currency: {
@@ -849,7 +899,6 @@ export const toolSchemas: ChatTool[] = [
         },
         required: [
           'amount_source',
-          'funding_method',
           'recipient_name',
           'recipient_phone',
           'destination_country',
@@ -862,7 +911,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'cancel_draft',
       description:
-        'Cancel the pending approval draft. Call this when the user taps [Cancel] or otherwise asks to cancel before paying. No arguments needed; the system supplies the draft id from the button-tap context.',
+        'Cancel the pending approval draft. Call this when the customer replies "cancel" (or "no", or otherwise asks to stop) before paying. The Approve & Pay card has no Cancel button. No arguments needed: the system finds the pending draft.',
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -927,7 +976,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'repeat_transfer',
       description:
-        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount; funding_method overrides the remembered method. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with the amount, source_currency, funding_method, destination_country, recipient_name and recipient_phone it returned plus those two fields (never payout details — the stored ones are reused automatically).",
+        "Re-send to a recipient the sender has paid before, reusing that recipient's saved payout details and last amount. Use ONLY when the customer asks to repeat ('send the usual', 'send Mom again', 'same as last time'). amount_usd overrides the last amount. It re-checks the cap and routes to the [Approve & pay] card — it never moves money without that confirmation. If it returns needs_edd: true, ask the source-of-funds + occupation questions, then call send_approve_picker with the amount, source_currency, destination_country, recipient_name and recipient_phone it returned plus those two fields (never payout details — the stored ones are reused automatically).",
       parameters: {
         type: 'object',
         properties: {
@@ -935,7 +984,7 @@ export const toolSchemas: ChatTool[] = [
           recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210). Use when you have no transfer_id." },
           amount_source: { type: 'number', description: "Optional. New send amount in the sender's own currency; if omitted, reuse the last amount sent to this recipient." },
           amount_usd: { type: 'number', description: 'Back-compat alias of amount_source.' },
-          funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'], description: "Optional. Defaults to the sender's remembered method, then the last transfer's method." },
+          funding_method: { type: 'string', enum: ['bank_transfer'], description: 'Optional. Omit it.' },
         },
         // Program-Fix 34B: one of transfer_id / recipient_phone; the tool says so when both are missing.
         required: [],
@@ -3705,6 +3754,7 @@ async function sendApprovePickerTool(
       payoutDestination,
       fundingMethod,
       q.destinationCurrency ?? 'INR',
+      rateLockMinutes(fxFetchedAt),
     );
     const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
     // Web channel (B5): no WhatsApp interactive exists here — return the
@@ -3720,7 +3770,11 @@ async function sendApprovePickerTool(
         summary,
         pay_url: payUrl,
         reply_hint:
-          'show the summary and tell the customer to tap the secure payment link below your reply to review and pay — the rate is locked for about 10 minutes',
+          `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
+            rateLockMinutes(fxFetchedAt) < 2
+              ? 'the rate is valid only for a moment, so they should tap soon'
+              : `the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`
+          }`,
       };
     }
     // Idempotency guard: the agent.turn outbox row is at-least-once, so a retry
