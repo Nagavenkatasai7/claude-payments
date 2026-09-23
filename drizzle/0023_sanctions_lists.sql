@@ -12,7 +12,9 @@
 --
 -- Locks: ADD COLUMN (nullable, no default) is catalog-only but takes an ACCESS
 -- EXCLUSIVE lock on "transfers", held until COMMIT — so it is the LAST
--- statement (if 0022 is applied in the same run, its brief lock comes first). The two CREATE INDEX on
+-- statement. (If 0022 is applied in the same run, its FK's SHARE ROW EXCLUSIVE
+-- lock on "partners" is also held to COMMIT: partner WRITES wait for the whole
+-- run, reads do not.) The two CREATE INDEX on
 -- "audit_events" take a SHARE lock for the index build (blocks INSERTs into
 -- audit_events, not reads, for the build — the table is small today). The
 -- drizzle migrator runs every pending migration inside ONE transaction
