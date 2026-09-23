@@ -12,6 +12,7 @@ import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
@@ -337,12 +338,14 @@ export default async function OpsPage() {
                           <TableCell>{age(t.createdAt)} ago</TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-2">
-                              <form action={approveRefundAction}>
+                              <form action={approveRefundAction} className="flex items-center gap-1">
                                 <input type="hidden" name="id" value={t.id} />
+                                <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
                                 <Button type="submit" size="sm" variant="default">Approve</Button>
                               </form>
-                              <form action={dismissRefundAction}>
+                              <form action={dismissRefundAction} className="flex items-center gap-1">
                                 <input type="hidden" name="id" value={t.id} />
+                                <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
                                 <Button type="submit" size="sm" variant="outline">Dismiss</Button>
                               </form>
                             </div>
@@ -387,8 +390,9 @@ export default async function OpsPage() {
                           <TableCell className="tabular-nums">{refundAmount(t)}</TableCell>
                           <TableCell>{age(t.createdAt)} ago</TableCell>
                           <TableCell className="text-right">
-                            <form action={retryRefundAction}>
+                            <form action={retryRefundAction} className="flex items-center gap-1">
                               <input type="hidden" name="id" value={t.id} />
+                              <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
                               <Button type="submit" size="sm" variant="default">Retry</Button>
                             </form>
                           </TableCell>

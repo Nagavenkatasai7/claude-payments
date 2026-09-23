@@ -4,7 +4,7 @@ import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb, captureQueries } from './helpers-db';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
-import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
+import { createKycCaseStore, mergeKycTrail, type KycCaseStore } from '@/lib/kyc-case-store';
 import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
@@ -266,5 +266,31 @@ describe('kyc-case-store.review with a db (Program-Fix 28)', () => {
     expect(await store.review('acme', PHONE, 'approve', 'plat', 'docs look good', opts())).toBeNull();
     expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('pending');
     expect(await auditRows()).toEqual([]);
+  });
+});
+
+describe('mergeKycTrail — the page trail (Program-Fix 28)', () => {
+  it('durable rows + legacy Redis entries NOT tagged durable, oldest first; the display name wins over the username', () => {
+    const merged = mergeKycTrail(
+      [
+        { actor: 'plat', action: 'kyc.manual_override.approve', at: '2026-09-23T10:00:00.000Z', meta: { reason: 'docs checked offline', reviewerName: 'Platform Admin (plat)' } },
+        { actor: 'plat', action: 'kyc.review.reject', at: '2026-09-22T10:00:00.000Z', meta: { reason: 'blurry id' } },
+      ],
+      [
+        { actor: 'persona', action: 'inquiry.completed', at: '2026-09-21T10:00:00.000Z' },
+        { actor: 'Platform Admin (plat)', action: 'review.approve', at: '2026-09-23T10:00:00.001Z', reason: 'docs checked offline', durable: true },
+      ],
+    );
+    expect(merged).toEqual([
+      { actor: 'persona', action: 'inquiry.completed', at: '2026-09-21T10:00:00.000Z', reason: undefined },
+      { actor: 'plat', action: 'kyc.review.reject', at: '2026-09-22T10:00:00.000Z', reason: 'blurry id' },
+      { actor: 'Platform Admin (plat)', action: 'kyc.manual_override.approve', at: '2026-09-23T10:00:00.000Z', reason: 'docs checked offline' },
+    ]);
+  });
+
+  it('a non-string meta.reason / reviewerName is ignored, never rendered as [object Object]', () => {
+    expect(mergeKycTrail([{ actor: 'plat', action: 'kyc.review.approve', at: '2026-09-23T10:00:00.000Z', meta: { reason: { x: 1 }, reviewerName: 7 } }], [])).toEqual([
+      { actor: 'plat', action: 'kyc.review.approve', at: '2026-09-23T10:00:00.000Z', reason: undefined },
+    ]);
   });
 });

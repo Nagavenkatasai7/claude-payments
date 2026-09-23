@@ -56,6 +56,33 @@ export interface DurableReviewOpts {
   source: 'persona_review' | 'manual';
 }
 
+/** One line of the customer page's KYC audit trail. */
+export interface KycTrailLine {
+  at: string;
+  actor: string;
+  action: string;
+  reason: string | undefined;
+}
+
+/**
+ * Program-Fix 28: the page trail = the durable audit_events rows PLUS the
+ * legacy Redis entries NOT tagged `durable: true` (pre-fix history, Persona
+ * events, and anything the old build wrote during a rollout). No timestamp
+ * matching: a durable decision's Redis copy is skipped by its tag alone.
+ * Oldest first. Pure.
+ */
+export function mergeKycTrail(
+  durable: ReadonlyArray<{ actor: string; action: string; at: string; meta: Record<string, unknown> }>,
+  legacy: ReadonlyArray<AuditEntry>,
+): KycTrailLine[] {
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined);
+  const lines: KycTrailLine[] = [
+    ...durable.map((r) => ({ at: r.at, actor: str(r.meta.reviewerName) ?? r.actor, action: r.action, reason: str(r.meta.reason) })),
+    ...legacy.filter((e) => e.durable !== true).map((e) => ({ at: e.at, actor: e.actor, action: e.action, reason: e.reason })),
+  ];
+  return lines.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+}
+
 export function createKycCaseStore(
   redis: RedisLike,
   customers: CustomerStore,
