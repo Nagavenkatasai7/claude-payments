@@ -3,6 +3,7 @@ import { auditEvents, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import type { ScreeningEvidence } from '@/lib/sanctions/evidence';
 import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { CountryCode, FundingProviderId, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
@@ -80,6 +81,16 @@ const fundingGate = () =>
  * charged (the sender may have confirmed an ACH debit that lands days later).
  */
 const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef));
+
+/**
+ * Program-Fix 14 PR C: columns written only when a row is created. `screening`
+ * is the mint's sanctions evidence (transfers.screening, migration 0023): list
+ * identity, decision and keyed input hashes, never a name. It is deliberately
+ * NOT on the domain Transfer, so no read maps it into an API response.
+ */
+export interface InsertOnlyColumns {
+  screening?: ScreeningEvidence;
+}
 
 export function createTransferRepo(
   db: DbOrTx,
@@ -199,7 +210,7 @@ export function createTransferRepo(
      * conflict-update leaves payout_destination_enc/_last4 and
      * recipient_legal_name_enc untouched.
      */
-    async saveTransfer(t: Transfer): Promise<void> {
+    async saveTransfer(t: Transfer, opts: InsertOnlyColumns = {}): Promise<void> {
       const row = transferToRow(t, provider);
       // A read-back transfer masks payout + business names TOGETHER (one
       // opts.decrypt), so any ****-prefixed field means "saved from a masked
@@ -230,15 +241,19 @@ export function createTransferRepo(
         void _sbEnc; void _sbL4; void _rbEnc; void _rbL4;
         set = rest;
       }
+      // Program-Fix 14 PR C: `screening` is INSERT-ONLY — it goes into the
+      // VALUES of a new row and never into `set`, so a later read-modify-write
+      // (which has no screening: it is not on the domain Transfer) keeps it.
       await db
         .insert(transfers)
-        .values(row)
+        .values(opts.screening ? { ...row, screening: opts.screening } : row)
         .onConflictDoUpdate({ target: transfers.id, set });
     },
 
     /** Transaction-aware insert for the money paths (no upsert — must be new). */
-    async insertTransfer(t: Transfer): Promise<void> {
-      await db.insert(transfers).values(transferToRow(t, provider));
+    async insertTransfer(t: Transfer, opts: InsertOnlyColumns = {}): Promise<void> {
+      const row = transferToRow(t, provider);
+      await db.insert(transfers).values(opts.screening ? { ...row, screening: opts.screening } : row);
     },
 
     /**

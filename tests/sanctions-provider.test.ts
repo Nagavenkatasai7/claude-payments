@@ -45,7 +45,12 @@ describe('getSanctionsScreener', () => {
 import { afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setOfacListSourceForTests } from '@/lib/providers/sanctions-provider';
+import {
+  setOfacListSourceForTests,
+  ofacListSourceForTests,
+  warmSanctionsList,
+} from '@/lib/providers/sanctions-provider';
+import { PostgresSanctionsListSource } from '@/lib/sanctions/pg-list-source';
 import { ListSanctionsScreener, SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
 import { parseOfacSdnXml } from '@/lib/sanctions/ofac-sdn-loader';
 import { WATCHLIST } from '@/lib/compliance-config';
@@ -111,11 +116,30 @@ describe('getSanctionsScreener — SANCTIONS_LIST picks WHICH list, never WHETHE
     expect(await s.screen({ name: 'John Doe', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'extra:0' });
   });
 
-  it('"ofac-sdn" with no snapshot on disk fails CLOSED (rejects; never a pass, never the mock)', async () => {
+  it('"ofac-sdn" with no loaded list version fails CLOSED (rejects; never a pass, never the mock)', async () => {
     process.env.SANCTIONS_LIST = 'ofac-sdn';
-    setOfacListSourceForTests({ load: async () => { throw new Error('ENOENT'); } });
+    setOfacListSourceForTests({ load: async () => { throw new Error('no active ofac-sdn list version is loaded'); } });
     const s = getSanctionsScreener(WATCHLIST);
     await expect(s.screen({ name: 'Mom', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
+  });
+
+  // PR C: the OFAC list lives in Postgres (migration 0023), loaded by the daily loader.
+  it('"ofac-sdn" reads the Postgres-backed list by default (no checked-in snapshot)', () => {
+    setOfacListSourceForTests(null);
+    expect(ofacListSourceForTests()).toBeInstanceOf(PostgresSanctionsListSource);
+  });
+
+  it('warmSanctionsList refreshes the OFAC source only when SANCTIONS_LIST=ofac-sdn, and never throws', async () => {
+    const warm = vi.fn(async () => { throw new Error('db down'); });
+    setOfacListSourceForTests({ load: async () => { throw new Error('unused'); }, warm });
+    delete process.env.SANCTIONS_LIST;
+    await warmSanctionsList();
+    process.env.SANCTIONS_LIST = 'mock';
+    await warmSanctionsList();
+    expect(warm).not.toHaveBeenCalled();
+    process.env.SANCTIONS_LIST = 'ofac-sdn';
+    await expect(warmSanctionsList()).resolves.toBeUndefined();
+    expect(warm).toHaveBeenCalledTimes(1);
   });
 });
 

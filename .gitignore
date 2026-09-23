@@ -16,5 +16,5 @@ playwright-report
 test-results
 /playwright/.cache
 .gstack/
-# Program-Fix 14: OFAC snapshot output (scripts/sanctions/build-ofac-snapshot.ts) is never committed
+# Program-Fix 14: an OFAC list file is never committed (PR C loads the list into Postgres instead)
 src/lib/sanctions/data/

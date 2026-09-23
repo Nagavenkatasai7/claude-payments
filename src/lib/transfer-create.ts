@@ -2,6 +2,7 @@ import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
+import { warmSanctionsList } from './providers/sanctions-provider';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
@@ -299,6 +300,11 @@ export async function createTransferWithOutcome(
   // both spend the same headroom. A SendCapError / MaskedDestinationError
   // throws out of the transaction (nothing written); a lock wait past 5 s is
   // the retryable SendBusyError (store.mintUnderSenderLock).
+  // Program-Fix 14 PR C: refresh the OFAC list (a no-op unless
+  // SANCTIONS_LIST=ofac-sdn) BEFORE the lock, so the screen inside the mint
+  // transaction reads a cached list and never needs a second pool connection.
+  // Never throws; a missing list fails the screen closed (flagged).
+  await warmSanctionsList();
   const minted = await store.mintUnderSenderLock(input.partnerId, input.phone, (ops) =>
     mintLocked(ops, {
       input, q, sourceCountry, destinationCountry, destinationCurrency, rules,
@@ -363,7 +369,8 @@ interface PreparedMint {
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
  *   2a. the optional AML hold (Program-Fix 43 PR B: OFF by default, never
  *       demo, cleared → flagged only, never throws);
- *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction;
+ *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction
+ *       (PR C: the same evidence is stored on the inserted row, transfers.screening);
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
  *   5. evaluateCap on today's ledger spend → SendCapError (rolls back);
@@ -509,7 +516,7 @@ async function mintLocked(
     const blockedRow: Transfer = isMaskedDestination(transfer.payoutDestination)
       ? { ...transfer, payoutDestination: '' }
       : transfer;
-    await ops.insertTransfer(blockedRow);
+    await ops.insertTransfer(blockedRow, { screening: compliance.evidence });
     return { transfer: blockedRow, replayed: false };
   }
 
@@ -531,7 +538,7 @@ async function mintLocked(
   const ev = evaluateCap(p.subject, now, totals.todayUsdCents, requestedCents, p.kycGateActive, p.limits);
   if (!ev.withinCap) throw new SendCapError(ev);
 
-  await ops.insertTransfer(transfer);
+  await ops.insertTransfer(transfer, { screening: compliance.evidence });
   return { transfer, replayed: false };
 }
 

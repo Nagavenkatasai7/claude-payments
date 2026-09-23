@@ -24,6 +24,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
+import { NEWLY_LISTED_BUSINESS, NEWLY_LISTED_PERSON, primeStaleOfacSource, restoreOfacSource } from './helpers-sanctions';
 import { freshDb, seedLedgerSpend, seedPartner, seedSender } from './helpers-db';
 import { SendBusyError } from '@/lib/send-limits';
 import {
@@ -1423,6 +1424,27 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     const metaText = JSON.stringify(ev.rows[0].meta).toLowerCase();
     expect(metaText).not.toContain('john');
     expect(metaText).not.toContain('doe');
+  });
+
+  // Program-Fix 14 PR C (review r1): the quote-time screen warms the OFAC list first.
+  it('quote-time screen uses a newly activated OFAC version (warmed before the screen)', async () => {
+    const original = process.env.SANCTIONS_LIST;
+    try {
+      const ctx = await buildClearedCtx();
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+      await primeStaleOfacSource();
+      const r = await executeTool('send_approve_picker', {
+        amount_usd: 200,
+        funding_method: 'bank_transfer',
+        recipient_name: NEWLY_LISTED_PERSON,
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'newly@upi',
+      }, ctx);
+      expect(r.blocked).toBe(true);
+    } finally {
+      restoreOfacSource(original);
+    }
   });
 
   it('BLOCKED for a formatting variant of a listed name (prs-03)', async () => {
@@ -3444,6 +3466,20 @@ describe('register_seller — cross-border seller onboarding start (WhatsApp cha
     expect(rows[0].subject_id).toBe(sellerId);
     expect(rows[0].meta).toMatchObject({ decision: 'clear', listSource: 'mock-watchlist' });
     expect(JSON.stringify(rows[0].meta).toLowerCase()).not.toContain('acme');
+  });
+
+  // Program-Fix 14 PR C (review r1): register_seller warms the OFAC list first.
+  it('register_seller screens against a newly activated OFAC version (warmed before the screen)', async () => {
+    const original = process.env.SANCTIONS_LIST;
+    try {
+      const ctx = await buildCtx(fakeRedis());
+      await primeStaleOfacSource();
+      const r = await executeTool('register_seller', { business_name: NEWLY_LISTED_BUSINESS }, ctx);
+      expect(r.registered).toBe(false);
+      expect((await ctx.store.getSeller(PHONE, 'default'))?.kycReviewState).toBe('needs_review');
+    } finally {
+      restoreOfacSource(original);
+    }
   });
 
   it('evidence: a hit writes decision "match"', async () => {
