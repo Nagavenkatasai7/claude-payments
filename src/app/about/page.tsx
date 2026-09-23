@@ -7,6 +7,7 @@ import BrandLogo from '../landing/BrandLogo';
 import AboutDemoVideo from './AboutDemoVideo';
 import { SHARE_IMAGE } from '../landing/share-image';
 import { SMARTREMIT_ICONS } from '../brand-icons';
+import { SkipLink } from '@/components/skip-link';
 
 // Public /about page — the story, how a send works, and the partner platform.
 // Styled with the SAME inline-Tailwind light brand conventions as the landing
@@ -67,6 +68,7 @@ function Pillar({ title, children }: { title: string; children: React.ReactNode 
 export default function AboutPage() {
   return (
     <div className={ROOT}>
+      <SkipLink />
       {/* Top bar */}
       <header className="sticky top-0 z-30 border-b border-[#dbe4f0] bg-[#f5f9ff]/85 backdrop-blur">
         <div className="mx-auto flex w-full max-w-[1180px] items-center gap-4 px-5 py-3.5">
@@ -91,7 +93,7 @@ export default function AboutPage() {
         </div>
       </header>
 
-      <main>
+      <main id="main" className="scroll-mt-20">
         {/* Hero / mission */}
         <section className="px-5 pt-[clamp(48px,7vw,96px)] pb-[clamp(28px,4vw,48px)]">
           <div className="mx-auto w-full max-w-[1000px]">
