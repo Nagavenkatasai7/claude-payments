@@ -1042,6 +1042,29 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     expect(sys.join('\n')).not.toContain('999,999');
   });
 
+  it('Program-Fix 35: a delegated, gate-OFF tenant\'s system prompt says the partner runs identity checks', async () => {
+    const b = build();
+    const dflt = await b.partnerStore.ensureDefaultPartner();
+    await b.partnerStore.savePartner({ ...dflt, kycMode: 'delegated', requireKycBeforeSend: false, updatedAt: new Date().toISOString() });
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: freshScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
+      kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'do I need to verify my ID?');
+    const sys = String(seen[0].find((m) => m.role === 'system')?.content ?? '');
+    expect(sys).toContain('Identity checks for this service are handled by');
+    expect(sys).not.toContain('Verification is not required before sending on this service.');
+    expect(sys).not.toContain('no identity verification is required');
+  });
+
   it('[NEW CUSTOMER] and the system prompt state a tenant\'s tighter T0 cap ($200) — fix 16', async () => {
     const b = build();
     const dflt = await b.partnerStore.ensureDefaultPartner();

@@ -15,7 +15,7 @@ import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
-import { resolvePartnerBranding } from './partner-config';
+import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { selectSettlementRoute } from './partner-rates'; // best-rate routing
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
@@ -153,6 +153,8 @@ export function createAgent(deps: AgentDeps) {
     // (Sanctions are unaffected and still run inside createTransfer.)
     const branding = resolvePartnerBranding(notePartner);
     const gateActive = sendGateActive(notePartner);
+    // Program-Fix 35: who runs KYC — only the gate-off prompt copy reads it.
+    const kycMode = resolveKycMode(notePartner).mode;
     // Program fix 16/16b: the limits the bot STATES are this sender's EFFECTIVE
     // ladder (customer raise → partner default → platform) — the same figures
     // its tools refuse on. Never a literal.
@@ -217,7 +219,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, limits: sendLimits }) },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits }) },
       ];
       // Web channel: injected EVERY round (not just round 0) so the model still
       // knows the channel's limits after tool results arrive. Never persisted.
