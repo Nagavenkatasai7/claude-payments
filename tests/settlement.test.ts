@@ -399,7 +399,7 @@ describe('releaseHold — the staff release IS a settlement (in_review → paid 
   });
 });
 
-describe('releaseHold — staff audit context (Program-Fix 28)', () => {
+describe('releaseHold — staff audit context (Program-Fix 28)', { retry: 0 }, () => {
   it('with an audit context: ONE transfer.release row, keyed on the OWNER partner, inside the release transaction', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
