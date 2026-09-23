@@ -56,6 +56,11 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(sharedRedis) };
 });
+// Program-Fix 17b: creating/removing a member clears its MFA keys.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(sharedRedis) };
+});
 
 vi.mock('next/navigation', () => ({
   redirect: vi.fn(),

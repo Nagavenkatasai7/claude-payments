@@ -18,7 +18,9 @@ import {
   updateStaffAction,
   setStaffStatusAction,
   removeStaffAction,
+  resetStaffMfaAction,
 } from './actions';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { ResetPasswordForm } from './reset-password-form';
 
 const STAFF_COLUMNS: ExpandableColumn[] = [
@@ -52,7 +54,10 @@ function PartnerOptions({ partners }: { partners: Partner[] }) {
   );
 }
 
-function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: Partner[]; partnerName: (id?: string) => string }) {
+function staffRow(
+  s: Staff,
+  opts: { isSelf: boolean; isTest: boolean; mfaOn: boolean; partners: Partner[]; partnerName: (id?: string) => string },
+) {
   const status = s.status === 'suspended' ? 'suspended' : 'active';
   const initial = s.name.charAt(0).toUpperCase();
 
@@ -73,6 +78,7 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
             {s.name}
             {opts.isSelf ? <Badge variant="outline">You</Badge> : null}
             {opts.isTest ? <Badge variant="outline" className="text-muted-foreground">test fixture</Badge> : null}
+            {opts.mfaOn ? <Badge variant="outline">2FA</Badge> : null}
           </span>
           <span className="block text-xs text-muted-foreground">{s.username}</span>
         </span>
@@ -138,6 +144,15 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
             <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
           </form>
           <ResetPasswordForm username={s.username} name={s.name} />
+          {opts.mfaOn ? (
+            // Program-Fix 17b: lost authenticator → turn two-step off (audited, signs them out).
+            <form action={resetStaffMfaAction}>
+              <input type="hidden" name="username" value={s.username} />
+              <Button type="submit" size="sm" variant="outline" aria-label={`Reset two-step verification for ${s.name}`}>
+                Reset 2FA
+              </Button>
+            </form>
+          ) : null}
         </span>
       ),
     ],
@@ -164,6 +179,7 @@ export default async function TeamPage() {
   const realStaff = allStaff.filter((s) => !isTestStaff(s));
   const testStaff = allStaff.filter((s) => isTestStaff(s));
   const orderedStaff = [...realStaff, ...testStaff];
+  const mfaOn = await getStaffMfaStore().enrolledAmong(allStaff.map((s) => s.username));
 
   return (
     <>
@@ -207,7 +223,13 @@ export default async function TeamPage() {
             <ExpandableTable
               columns={STAFF_COLUMNS}
               rows={orderedStaff.map((s) =>
-                staffRow(s, { isSelf: s.username === me.username, isTest: isTestStaff(s), partners, partnerName }),
+                staffRow(s, {
+                  isSelf: s.username === me.username,
+                  isTest: isTestStaff(s),
+                  mfaOn: mfaOn.has(s.username),
+                  partners,
+                  partnerName,
+                }),
               )}
               empty={<>No teammates yet — add your first.</>}
             />

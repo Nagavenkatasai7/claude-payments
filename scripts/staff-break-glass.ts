@@ -6,6 +6,7 @@
  *   set -a; source .env.local; set +a
  *   node_modules/.bin/tsx scripts/staff-break-glass.ts <username> --clear-lockout [--ip <ip>] [--apply]
  *   node_modules/.bin/tsx scripts/staff-break-glass.ts <username> --restore-seed-password-from-env [--apply]
+ *   node_modules/.bin/tsx scripts/staff-break-glass.ts <username> --clear-mfa [--apply]
  *
  * --clear-lockout   DELs the username's all-IP day buckets (today + yesterday)
  *                   and its per-(username, IP) hour buckets: rebuilt for the
@@ -19,9 +20,13 @@
  *                   its hash from SEED_ADMIN_PASSWORD and revokes its
  *                   sessions. Needed because seed.ts seeds only when there are
  *                   zero staff, so rotating the env var alone changes nothing.
+ * --clear-mfa       Program-Fix 17b: turns the username's TOTP MFA off (its
+ *                   sealed secret, any pending enrolment and the replay
+ *                   marker), so the password alone signs in again. The
+ *                   owner's way back in when the seed admin's authenticator is
+ *                   lost and no other platform admin can reset it from the
+ *                   Team page. Key builders come from src/lib/staff-mfa-store.ts.
  * --apply           Actually write. Without it nothing is changed.
- *
- * (MFA reset arrives with 17b; this script has no MFA flag yet.)
  *
  * Upstash `scan(cursor, { match, count })` returns `[nextCursor, keys]` with a
  * STRING cursor; the loop ends at '0' (@upstash/redis 1.38.1
@@ -33,6 +38,7 @@ import { getRedis } from '@/lib/redis';
 import { createAuthStore } from '@/lib/auth-store';
 import { hashPassword } from '@/lib/password';
 import { isSeedAdminRecord, staffLoginKeys } from '@/lib/staff-login-guard';
+import { staffMfaKeys } from '@/lib/staff-mfa-store';
 import type { RedisLike } from '@/lib/store';
 
 /** A refusal written by this script (safe to print: no names, no secrets). */
@@ -52,6 +58,7 @@ export interface BreakGlassArgs {
   clearLockout: boolean;
   ip?: string;
   restoreSeedPassword: boolean;
+  clearMfa: boolean;
   apply: boolean;
 }
 
@@ -68,17 +75,25 @@ export interface BreakGlassReport {
   uKeys: number;
   sessionsRevoked: number;
   seedPasswordRestored: boolean;
+  mfaKeys: number;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
 export function parseBreakGlassArgs(argv: string[]): BreakGlassArgs {
-  const out: BreakGlassArgs = { username: '', clearLockout: false, restoreSeedPassword: false, apply: false };
+  const out: BreakGlassArgs = {
+    username: '',
+    clearLockout: false,
+    restoreSeedPassword: false,
+    clearMfa: false,
+    apply: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--clear-lockout') out.clearLockout = true;
     else if (a === '--restore-seed-password-from-env') out.restoreSeedPassword = true;
+    else if (a === '--clear-mfa') out.clearMfa = true;
     else if (a === '--apply') out.apply = true;
     else if (a === '--ip') out.ip = argv[++i];
     else if (a.startsWith('--')) throw new BreakGlassError(`Unknown flag: ${a}`);
@@ -86,8 +101,10 @@ export function parseBreakGlassArgs(argv: string[]): BreakGlassArgs {
     else throw new BreakGlassError('Pass exactly one username.');
   }
   if (!out.username) throw new BreakGlassError('Pass the staff username as the first argument.');
-  if (!out.clearLockout && !out.restoreSeedPassword) {
-    throw new BreakGlassError('Nothing to do: pass --clear-lockout and/or --restore-seed-password-from-env.');
+  if (!out.clearLockout && !out.restoreSeedPassword && !out.clearMfa) {
+    throw new BreakGlassError(
+      'Nothing to do: pass --clear-lockout, --restore-seed-password-from-env and/or --clear-mfa.',
+    );
   }
   if (out.ip !== undefined && !out.ip) throw new BreakGlassError('--ip needs a value.');
   return out;
@@ -117,7 +134,13 @@ export async function runStaffBreakGlass(
 ): Promise<BreakGlassReport> {
   const t = opts.now();
   const mode = opts.apply ? 'APPLY' : 'DRY RUN';
-  const report: BreakGlassReport = { uiKeys: 0, uKeys: 0, sessionsRevoked: 0, seedPasswordRestored: false };
+  const report: BreakGlassReport = {
+    uiKeys: 0,
+    uKeys: 0,
+    sessionsRevoked: 0,
+    seedPasswordRestored: false,
+    mfaKeys: 0,
+  };
 
   if (opts.restoreSeedPassword) {
     // Validate BEFORE any write, including the lockout clear below.
@@ -162,6 +185,13 @@ export async function runStaffBreakGlass(
     log(`  seed password: ${opts.apply ? 'restored from env' : 'would be restored from env'}; ${sessions} session(s) ${opts.apply ? 'revoked' : 'would be revoked'}`);
   }
 
+  if (opts.clearMfa) {
+    const mfaKeys = await existing(redis, staffMfaKeys.perUser(opts.username));
+    report.mfaKeys = mfaKeys.length;
+    if (opts.apply) for (const k of mfaKeys) await redis.del(k);
+    log(`  mfa: ${mfaKeys.length} key(s) ${opts.apply ? 'DELETED (MFA off; the password alone signs in)' : 'found (dry run)'}`);
+  }
+
   log(`  mode: ${mode}`);
   return report;
 }
@@ -172,7 +202,7 @@ async function main() {
     process.exit(1);
   }
   const args = parseBreakGlassArgs(process.argv.slice(2));
-  console.log(`\nStaff break-glass (fix 17a) — ${new Date().toISOString()} — ${args.apply ? 'APPLY' : 'DRY RUN'}`);
+  console.log(`\nStaff break-glass (fix 17) — ${new Date().toISOString()} — ${args.apply ? 'APPLY' : 'DRY RUN'}`);
   await runStaffBreakGlass(
     getRedis() as unknown as BreakGlassRedis,
     {

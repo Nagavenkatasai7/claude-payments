@@ -5,6 +5,8 @@ import { getPartnerStore } from './partner-store';
 import { staffSessionTokens } from './session-cookie';
 import { logWarn } from './log';
 import { scopeOf, type Scope } from './staff-scope';
+import { mfaEnrolmentRequired } from './staff-mfa-policy';
+import { getStaffMfaStore } from './staff-mfa-store';
 import type { Staff } from './types';
 
 /**
@@ -55,10 +57,19 @@ export async function requireAdmin(): Promise<Staff> {
 
 // P3: a platform admin = role:'admin' AND no partnerId. Used by /admin-dashboard/team
 // and partner-staff CRUD actions.
+//
+// Program-Fix 17b: with STAFF_MFA_REQUIRED=true (default off) an UNENROLLED
+// platform admin is sent to enrol first. The Account page uses requireStaff,
+// so there is no redirect loop. Never the seed admin or a STAFF_MFA_EXEMPT
+// name (staff-mfa-policy). The flag is read before any Redis call, so with
+// it off nothing changes.
 export async function requirePlatformAdmin(): Promise<Staff> {
   const staff = await requireStaff();
   if (staff.role !== 'admin' || staff.partnerId !== undefined) {
     redirect('/admin-dashboard');
+  }
+  if (mfaEnrolmentRequired(staff) && !(await getStaffMfaStore().isEnrolled(staff.username))) {
+    redirect('/admin-dashboard/account?enroll=1');
   }
   return staff;
 }

@@ -149,6 +149,21 @@ export const env = {
   get seedPartnerId() {
     return process.env.SEED_PARTNER_ID ?? '';
   },
+  // ── Program-Fix 17b: staff TOTP MFA (both OPTIONAL; never in boot-assert) ──
+  get staffMfaRequired(): boolean {
+    // 'true' ⇒ an unenrolled PLATFORM admin is sent to enrol on the
+    // platform-admin surfaces. Default false: MFA stays opt-in. The seed admin
+    // and STAFF_MFA_EXEMPT names are never required (staff-mfa-policy.ts).
+    return process.env.STAFF_MFA_REQUIRED === 'true';
+  },
+  get staffMfaExempt(): string[] {
+    // Comma-separated usernames exempt from ENFORCEMENT only (e.g. the e2e
+    // smoke account). Never skips the code step for someone who enrolled.
+    return (process.env.STAFF_MFA_EXEMPT ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  },
   get paymentProviderMode(): PaymentProviderMode {
     // Default + only supported value in v1 — a forward hook, not a live switch.
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';
