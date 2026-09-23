@@ -4854,3 +4854,103 @@ describe('create_transfer — in-lock send cap (Program fix 16)', () => {
     expect(await ctx.store.getTransferCount('default', ctx.phone)).toBe(1);
   });
 });
+
+describe('fix 38: seller text with a web address is refused at write; the buyer push is clamped at render', () => {
+  beforeEach(async () => {
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  async function seedActiveSeller(ctx: Awaited<ReturnType<typeof buildCtx>>, businessName: string) {
+    await ctx.store.createSeller({
+      id: 's_f38', partnerId: 'default', phone: PHONE, businessName, country: 'US', currency: 'USD',
+    });
+    expect((await ctx.store.completeSellerOnboarding(PHONE, 'default', '021000021|12345678'))?.status).toBe('active');
+  }
+  async function billpushBodies(): Promise<string[]> {
+    const r = (await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key LIKE 'billpush:%' ORDER BY id`)) as unknown as { rows: { payload: { body: string } }[] };
+    return r.rows.map((x) => x.payload.body);
+  }
+
+  it('register_seller with business_name "Acme acme.com" gives registered: false and no seller row (test 6)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    for (const business_name of ['Acme acme.com', 'Acme https://evil.example', 'www.acme.io']) {
+      const r = await executeTool('register_seller', { business_name }, ctx);
+      expect(r).toEqual({
+        registered: false,
+        reply_to_customer: 'Please leave web addresses out of the business name.',
+      });
+    }
+    expect(await ctx.store.getSeller(PHONE, 'default')).toBeNull();
+  });
+
+  it('create_invoice with description "see pay.evil.example" gives created: false, no claim and no outbox row (test 6)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'Acme Exports Inc');
+    const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250, description: 'see pay.evil.example' }, ctx);
+    expect(r).toEqual({
+      created: false,
+      reply_to_customer: 'Please leave web addresses out of the bill description.',
+    });
+    expect(claim).not.toHaveBeenCalled();
+    const invoices = (await db.execute(sql`SELECT count(*)::int AS n FROM b2b_invoices`)) as unknown as { rows: { n: number }[] };
+    expect(invoices.rows[0].n).toBe(0);
+    const any = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox`)) as unknown as { rows: { n: number }[] };
+    expect(any.rows[0].n).toBe(0);
+  });
+
+  it('a pre-fix seller name with a web address: the buyer push drops it and still carries the pay link (test 5)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'Acme — refunds at evil.example');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250, description: 'Design work' }, ctx);
+    expect(r.created).toBe(true);
+    const [body] = await billpushBodies();
+    expect(body).not.toContain('evil.example');
+    expect(body).toContain('You have a new bill from Acme — refunds at — pay securely: ');
+    expect(body).toContain(`/pay/b2b/${String(r.invoice_id)}`);
+  });
+
+  it('an all-address seller name falls back to "your supplier" in the buyer push', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'www.evil.io');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 99, description: 'Design work' }, ctx);
+    expect(r.created).toBe(true);
+    const [body] = await billpushBodies();
+    expect(body).toMatch(/^You have a new bill from your supplier — pay securely: /);
+  });
+
+  it('a clean seller name is unchanged in the buyer push (control)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedActiveSeller(ctx, 'Acme Exports Inc');
+    await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 99, description: 'Design work' }, ctx);
+    const [body] = await billpushBodies();
+    expect(body).toMatch(/^You have a new bill from Acme Exports Inc — pay securely: /);
+  });
+});
+
+describe('fix 38: the seller name and bill lines reach the model without a web address (pre-fix rows)', () => {
+  beforeEach(async () => {
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  it('present_bill strips the address from the seller name and every line item', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_url', partnerId: 'default', businessName: 'Acme — refunds at evil.example',
+      buyerPhone: PHONE,
+      lineItems: [
+        { description: 'Widgets, details at www.x.io', qty: 1, unitAmountUsd: 10 },
+        { description: 'https://evil.example/pay', qty: 1, unitAmountUsd: 5 },
+      ],
+      amountUsd: 15, currency: 'USD', status: 'unpaid', createdAt: new Date().toISOString(),
+    });
+    const r = await executeTool('present_bill', {}, ctx);
+    const inv = r.invoice as { seller_business_name: string; line_items: { description: string }[] };
+    expect(inv.seller_business_name).toBe('Acme — refunds at');
+    expect(inv.line_items.map((li) => li.description)).toEqual(['Widgets, details at', 'Item']);
+    const j = JSON.stringify(r);
+    expect(j).not.toContain('evil.example');
+    expect(j).not.toContain('x.io');
+  });
+});

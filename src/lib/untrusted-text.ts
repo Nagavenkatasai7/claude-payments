@@ -114,3 +114,82 @@ export function isBoundedPrintable(v: unknown, max: number): boolean {
     !FORMAT.test(v)
   );
 }
+
+// ── Program-Fix 38: web addresses and rule-override phrases ─────────────────
+// WhatsApp turns a web address in a system-sent message into a tappable link,
+// and the bot is barred from typing links — so outsider-written text (a seller's
+// business name, an API-supplied recipient name, a business's bot persona) must
+// not carry one. The detector is a heuristic: a scheme ("://"), "www.", a
+// dotted IPv4 address, or a host label followed by a common TLD. Every check
+// runs on the boundUntrustedText form, so fullwidth dots, bracketed dots
+// ("evil[.]com") and zero-width splits collapse into detectable text first.
+
+/** Common TLDs, plus the reserved `example` (used by the audit's fixtures). */
+const WEB_TLDS = [
+  'com', 'net', 'org', 'io', 'ai', 'app', 'co', 'me', 'ly', 'link', 'xyz', 'info', 'in', 'uk', 'us',
+  'example', 'dev', 'biz', 'site', 'online', 'store', 'shop', 'top', 'page', 'click', 'live', 'gg',
+  'to', 'ru', 'cn', 'tk', 'ca', 'au', 'nz', 'sg', 'ae', 'hk', 'mx', 'de', 'fr', 'eu', 'tv', 'cc',
+  'gov', 'edu', 'pay', 'money', 'bank', 'finance', 'tech', 'cloud', 'club',
+];
+const LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]*[\\p{L}\\p{N}])?';
+const WEB_ADDRESS = new RegExp(
+  [
+    '://',
+    '(?<![\\p{L}\\p{N}])www\\.',
+    '(?<![\\p{L}\\p{N}.])\\d{1,3}(?:\\.\\d{1,3}){3}(?![\\p{L}\\p{N}])',
+    // host with a path: "evil.whatever/x"
+    `${LABEL}(?:\\.${LABEL})+/`,
+    // host ending in a known TLD: "acme.com", "pay.evil.example"
+    `${LABEL}\\.(?:${WEB_TLDS.join('|')})(?![\\p{L}\\p{N}-])`,
+  ].join('|'),
+  'iu',
+);
+// The ideographic / halfwidth full stops are not folded by NFKC; treat them as dots.
+const IDEOGRAPHIC_DOTS = /[。｡]/gu;
+
+function detectForm(v: unknown): string {
+  return boundUntrustedText(v, Number.MAX_SAFE_INTEGER).replace(IDEOGRAPHIC_DOTS, '.').toLowerCase();
+}
+
+/** Whether a value carries a web address (heuristic; see the note above). Pure. */
+export function hasWebAddress(v: unknown): boolean {
+  const s = detectForm(v);
+  return s !== '' && WEB_ADDRESS.test(s);
+}
+
+// "ignore / disregard / override / forget" followed, within three words, by
+// "previous / prior / above / earlier / rules / instructions / limits /
+// guidelines". Bounded quantifiers only (no backtracking blow-up).
+const OVERRIDE_PHRASE =
+  /\b(?:ignore|disregard|override|forget)\b(?:\s+\S+){0,3}?\s+(?:previous|prior|above|earlier|rules?|instructions?|limits?|guidelines?)\b/iu;
+
+/**
+ * Whether a value contains a rule-override phrase — the closed set above.
+ * Used to refuse a bot persona at save. Pure.
+ */
+export function hasOverridePhrase(v: unknown): boolean {
+  const s = detectForm(v);
+  return s !== '' && OVERRIDE_PHRASE.test(s);
+}
+
+function stripWebAddressTokens(s: string): string {
+  return s
+    .split(' ')
+    .filter((token) => token !== '' && !hasWebAddress(token))
+    .join(' ')
+    .trim();
+}
+
+/**
+ * The render-time clamp for outsider text inside a SYSTEM-SENT message (a
+ * buyer push, a recipient template param, a sender confirmation):
+ * boundUntrustedText, with every whitespace-separated token that carries a web
+ * address removed, capped at `max`. Runs the strip again after the cap, so a
+ * truncation can never leave a linkifiable tail. A value that strips to
+ * nothing returns '' — the caller falls back to its own default text.
+ */
+export function safeDisplayText(v: unknown, max: number): string {
+  const wide = boundUntrustedText(v, Math.max(max, 1) * 4);
+  const capped = boundUntrustedText(stripWebAddressTokens(wide), max);
+  return stripWebAddressTokens(capped);
+}
