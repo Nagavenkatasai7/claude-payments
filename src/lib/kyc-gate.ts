@@ -52,15 +52,20 @@ export function requiresKyb(partner: Partner | null | undefined): boolean {
   return sendGateActive(partner);
 }
 
+/** Settlement providers that move no real money (Program-Fix 35 decision b). */
+const NON_LIVE_RAILS = ['mock', 'simulator'];
+
 /**
  * Program-Fix 35 (read-only partner-page warning): the verify-before-send gate
- * is OFF while the partner settles on a provider other than the mock rail
- * (absent or blank ⇒ mock). Display only — it never changes the gate.
+ * is OFF while the partner settles on a LIVE rail — any provider other than
+ * mock / simulator (absent or blank ⇒ mock). A 'delegated' partner runs KYC on
+ * its own side, so it is never warned. Display only — it never changes the gate.
  */
 export function gateOffOnLiveRail(
   partner: Partner | null | undefined,
   integrations: Pick<PartnerIntegrations, 'payment'>,
 ): boolean {
+  if (resolveKycMode(partner).mode === 'delegated') return false;
   const provider = (integrations.payment.providerType ?? '').trim() || 'mock';
-  return !sendGateActive(partner) && provider !== 'mock';
+  return !sendGateActive(partner) && !NON_LIVE_RAILS.includes(provider);
 }

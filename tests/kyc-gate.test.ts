@@ -65,10 +65,17 @@ describe('sendGateActive (WL1 per-partner gate)', () => {
 describe('gateOffOnLiveRail (Program-Fix 35: partner page warning, read-only)', () => {
   const rail = (providerType?: string) => ({ payment: providerType === undefined ? {} : { providerType } });
 
-  it('gate OFF + a non-mock settlement provider → true', () => {
+  it('gate OFF + a live settlement provider (not mock / simulator) → true', () => {
     expect(gateOffOnLiveRail(partner({}), rail('http'))).toBe(true);
-    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: false }), rail('simulator'))).toBe(true);
-    expect(gateOffOnLiveRail(partner({ kycMode: 'delegated' }), rail('http'))).toBe(true);
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: false, kycMode: 'ours' }), rail('http'))).toBe(true);
+  });
+
+  it('the simulator is a demo rail, not a live one → false (orchestrator decision b)', () => {
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: false }), rail('simulator'))).toBe(false);
+  });
+
+  it('a delegated partner runs KYC on its side → never warned', () => {
+    expect(gateOffOnLiveRail(partner({ kycMode: 'delegated' }), rail('http'))).toBe(false);
   });
 
   it('gate OFF on the mock (or unset / blank) provider → false', () => {

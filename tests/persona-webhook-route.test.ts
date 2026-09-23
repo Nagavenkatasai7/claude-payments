@@ -51,7 +51,27 @@ vi.mock('@/db/repos/outbox-repo', async (orig) => {
 });
 vi.mock('@/lib/log', async (orig) => ({ ...(await orig() as object), logWarn: warn }));
 vi.mock('@/lib/store', async (orig) => ({ ...(await orig() as object), getStore: () => ({}) }));
-vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig() as object), getCustomerStore: () => cs }));
+// failSave: the NEXT saveCustomer on a tx-bound store (the durable apply) throws.
+const failSave = vi.hoisted(() => ({ once: false }));
+vi.mock('@/lib/customer-store', async (orig) => {
+  const real = await orig<typeof import('@/lib/customer-store')>();
+  return {
+    ...real,
+    getCustomerStore: () => cs,
+    createCustomerStore: (...a: Parameters<typeof real.createCustomerStore>) => {
+      const store = real.createCustomerStore(...a);
+      const save = store.saveCustomer;
+      store.saveCustomer = async (c) => {
+        if (failSave.once) {
+          failSave.once = false;
+          throw new Error('db down');
+        }
+        return save(c);
+      };
+      return store;
+    },
+  };
+});
 vi.mock('@/lib/kyc-case-store', async (orig) => ({ ...(await orig() as object), getKycCaseStore: () => kcs }));
 vi.mock('@/lib/partner-store', () => ({
   getPartnerStore: () => ({ getPartner: async () => partner, ensureDefaultPartner: async () => partner }),
@@ -87,6 +107,7 @@ beforeEach(async () => {
   notify.mockClear();
   warn.mockClear();
   failEnqueue.once = false;
+  failSave.once = false;
 });
 
 describe('POST /api/persona-webhook', () => {
@@ -188,6 +209,9 @@ const reportBody = (name: string, eventId: string, inquiryId = 'inq_1', extraAtt
 const kycAlerts = async () =>
   (await db.select().from(outbox).where(eq(outbox.kind, 'ops.alert'))).filter((r) => (r.dedupeKey ?? '').startsWith('kycmatch:'));
 
+const unboundAlerts = async () =>
+  (await db.select().from(outbox).where(eq(outbox.kind, 'ops.alert'))).filter((r) => (r.dedupeKey ?? '').startsWith('kycunbound:'));
+
 const post = async (body: string) => POST(req(body, signed(body)));
 
 describe('POST /api/persona-webhook — report events + release on failure (Program-Fix 35)', () => {
@@ -230,10 +254,10 @@ describe('POST /api/persona-webhook — report events + release on failure (Prog
   it('apply throws → 500 and the seen-mark is released → Persona\'s retry processes the event', async () => {
     await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
     const body = reportBody('report/watchlist.matched', 'evt_throw_1');
-    const spy = vi.spyOn(cs, 'saveCustomer').mockRejectedValueOnce(new Error('db down'));
+    failSave.once = true;
     const first = await post(body);
     expect(first.status).toBe(500);
-    spy.mockRestore();
+    expect(failSave.once).toBe(false); // the save really ran and threw
     expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('pending_review');
     expect(await kycAlerts()).toHaveLength(0);
 
@@ -259,47 +283,43 @@ describe('POST /api/persona-webhook — report events + release on failure (Prog
     expect((await cs.getCustomer('default', PHONE))?.pepHit).toBe(true);
   });
 
-  it('save ok, audit throws → retry → same state, one alert (re-apply is idempotent)', async () => {
+  it('save + alert commit together; a Redis audit failure AFTER the commit is best-effort → 200, not retried, one alert', async () => {
     await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
     const body = reportBody('report/politically-exposed-person.matched', 'evt_audit_throw');
-    // appendAudit = hgetall + hset; the customer save already committed when hset throws.
-    const realHset = redis.hset.bind(redis);
-    let failOnce = true;
-    redis.hset = (async (...args: Parameters<typeof realHset>) => {
-      if (failOnce) {
-        failOnce = false;
-        throw new Error('redis down');
-      }
-      return realHset(...args);
+    // appendAudit = hgetall + hset, and runs only after the transaction committed.
+    redis.hset = (async () => {
+      throw new Error('redis down');
     }) as typeof redis.hset;
 
-    expect((await post(body)).status).toBe(500);
-    const afterFail = await cs.getCustomer('default', PHONE);
-    expect(afterFail?.kycReviewState).toBe('needs_review'); // the save landed
-    expect(afterFail?.pepHit).toBe(true);
-
-    const retry = await post(body);
-    expect(retry.status).toBe(200);
+    const res = await post(body);
+    expect(res.status).toBe(200);
     const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('needs_review');
     expect(c?.pepHit).toBe(true);
     expect(c?.kycInquiryId).toBe('inq_1');
     expect(await kycAlerts()).toHaveLength(1);
-    const trail = await kcs.getAudit('default', PHONE);
-    expect(trail.map((e) => e.action)).toEqual(['report/politically-exposed-person.matched']);
+    expect(warn).toHaveBeenCalledWith('kyc.persona.redis_audit', expect.anything(), { partnerId: 'default' });
+    // Processed: a re-delivery is deduped (the mark was kept, not released).
+    expect((await (await post(body)).json()).deduped).toBe(true);
+    expect(await kycAlerts()).toHaveLength(1);
   });
 
-  it('a failed alert enqueue releases the mark; the retry re-applies to the same state and enqueues one alert', async () => {
+  it('a thrown alert enqueue ROLLS BACK the customer save → 500, mark released → the retry commits state + one alert', async () => {
     await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
-    const body = reportBody('report/adverse-media.matched', 'evt_alert_throw');
+    const body = reportBody('report/politically-exposed-person.matched', 'evt_rollback');
     failEnqueue.once = true;
     expect((await post(body)).status).toBe(500);
     expect(failEnqueue.once).toBe(false); // the enqueue really ran and threw
+    const rolledBack = await cs.getCustomer('default', PHONE);
+    expect(rolledBack?.kycReviewState).toBe('pending_review'); // the hold did NOT commit without its alert
+    expect(rolledBack?.pepHit).toBeUndefined();
+    expect(await kycAlerts()).toHaveLength(0);
+    expect(await kcs.getAudit('default', PHONE)).toEqual([]);
+
     expect((await post(body)).status).toBe(200);
     const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('needs_review');
-    expect(c?.pepHit).toBeUndefined();
-    expect(c?.watchlistHit).toBeUndefined();
+    expect(c?.pepHit).toBe(true);
     expect(await kycAlerts()).toHaveLength(1);
   });
 
@@ -341,13 +361,30 @@ describe('POST /api/persona-webhook — report events + release on failure (Prog
     expect((await cs.getCustomer('acme', PHONE))?.kycReviewState).toBe('pending_review');
     expect(warn).toHaveBeenCalledWith('persona.webhook.unbound', expect.anything(), expect.objectContaining({ candidates: 2 }));
     expect(await kycAlerts()).toHaveLength(0);
+    // …but the unbound match raises ONE deduped alert: the event name and the count only.
+    const unbound = await unboundAlerts();
+    expect(unbound.map((r) => r.dedupeKey)).toEqual(['kycunbound:evt_amb']);
+    const msg = String((unbound[0].payload as { message: string }).message);
+    expect(msg).toContain('report/politically-exposed-person.matched');
+    expect(msg).toContain('2 candidates');
+    expect(msg).not.toContain(PHONE);
+    expect(msg).not.toContain('inq_1');
   });
 
-  it('an unknown inquiry id is ignored', async () => {
+  it('an unknown inquiry id is ignored; a match raises the unbound alert (0 candidates)', async () => {
     await seed({ kycInquiryId: 'inq_1' });
     const res = await post(reportBody('report/watchlist.matched', 'evt_unknown', 'inq_zzz'));
     expect((await res.json()).ignored).toBe(true);
     expect((await cs.getCustomer('default', PHONE))?.watchlistHit).toBeUndefined();
+    const unbound = await unboundAlerts();
+    expect(unbound).toHaveLength(1);
+    expect(String((unbound[0].payload as { message: string }).message)).toContain('0 candidates');
+  });
+
+  it('an unbound NON-match event raises no alert', async () => {
+    const res = await post(reportBody('report/watchlist.ready', 'evt_unknown_ready', 'inq_zzz'));
+    expect((await res.json()).ignored).toBe(true);
+    expect(await unboundAlerts()).toHaveLength(0);
   });
 
   it('approved + PEP match: the flag is set, the state stays approved, one alert', async () => {

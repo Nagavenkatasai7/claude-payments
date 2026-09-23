@@ -9,6 +9,9 @@ import { auditSubjectId } from './customer-ref';
 import { logWarn } from './log';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { KycDelta } from './kyc-state-machine';
+import { applyKycEvent } from './kyc-state-machine';
+import type { PersonaEvent } from './providers/persona-webhook-parse';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
 
 /**
  * kyc-case-store (Phase 2, Task 9) — the KYC review case layer.
@@ -27,6 +30,12 @@ import type { KycDelta } from './kyc-state-machine';
  */
 
 const EVT_TTL = 30 * 24 * 60 * 60; // 30d replay-dedup window
+/**
+ * Program-Fix 35: the FIRST mark is short-lived. A process killed mid-apply
+ * (no release, no confirm) leaves a mark that lapses in 5 min, so Persona's
+ * retry is processed; confirmEventSeen extends it to EVT_TTL on success.
+ */
+const EVT_PENDING_TTL = 5 * 60;
 const evtKey = (id: string) => `sr_kyc_evt:${id}`;
 const auditKey = (partnerId: PartnerId, phone: string) => `kyc_audit:${partnerId}:${phone}`;
 /** Pre-fix-1 phone-only trail — read-only fallback for the phone's pre-fix tenant (D10). */
@@ -83,6 +92,23 @@ export function mergeKycTrail(
   return lines.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
 
+/**
+ * Program-Fix 35: the options for the webhook's durable apply. `alert` builds
+ * the kycmatch ops-alert payload (ids only) from the committed row; it is
+ * enqueued only for a `*.matched` event.
+ */
+export interface PersonaApplyOpts {
+  db: Db;
+  store: Store;
+  alert?: (after: Customer) => Record<string, unknown>;
+}
+
+export interface PersonaApplyResult {
+  before: Customer;
+  after: Customer;
+  changed: boolean;
+}
+
 export function createKycCaseStore(
   redis: RedisLike,
   customers: CustomerStore,
@@ -103,8 +129,13 @@ export function createKycCaseStore(
   return {
     /** True the FIRST time an event id is seen; false on replay (Persona re-delivers + reorders). */
     async markEventSeen(eventId: string): Promise<boolean> {
-      const r = await redis.set(evtKey(eventId), '1', { nx: true, ex: EVT_TTL });
+      const r = await redis.set(evtKey(eventId), '1', { nx: true, ex: EVT_PENDING_TTL });
       return r !== null;
+    },
+
+    /** Program-Fix 35: the event was processed — keep its mark for the full replay window. */
+    async confirmEventSeen(eventId: string): Promise<void> {
+      await redis.expire(evtKey(eventId), EVT_TTL);
     },
 
     /**
@@ -123,6 +154,49 @@ export function createKycCaseStore(
       await customers.saveCustomer(updated);
       await appendAudit(partnerId, phone, { ...meta, at: nowIso });
       return updated;
+    },
+
+    /**
+     * Program-Fix 35 — the Persona webhook's DURABLE apply. ONE transaction:
+     * lock the tenant row (SELECT 1 … FOR UPDATE), re-read it through the
+     * tx-bound store, RECOMPUTE applyKycEvent on that locked row (so a stale
+     * pre-lock read racing a concurrent event can never undo a hold), save,
+     * and — for a `*.matched` event — enqueue the kycmatch ops alert
+     * (dedupe `kycmatch:<eventId>`). A throw anywhere rolls the save back.
+     * The Redis audit line follows the commit, best-effort (a Redis failure
+     * never fails the committed apply). Returns null when the row is gone.
+     */
+    async applyPersonaEvent(
+      partnerId: PartnerId,
+      phone: string,
+      event: PersonaEvent,
+      opts: PersonaApplyOpts,
+    ): Promise<PersonaApplyResult | null> {
+      const nowIso = new Date(now()).toISOString();
+      const result = await opts.db.transaction(async (tx) => {
+        const txCustomers = createCustomerStore(tx, opts.store);
+        if (!(await txCustomers.lockCustomer(partnerId, phone))) return null;
+        const before = await txCustomers.getCustomer(partnerId, phone);
+        if (!before) return null;
+        const delta = applyKycEvent(before, event, nowIso);
+        const changed = Object.keys(delta).length > 0;
+        const after: Customer = changed ? { ...before, ...delta, updatedAt: nowIso } : before;
+        if (changed) await txCustomers.saveCustomer(after);
+        if (event.matchKind !== undefined && opts.alert) {
+          await createOutboxRepo(tx).enqueue('ops.alert', opts.alert(after), {
+            dedupeKey: `kycmatch:${event.eventId}`,
+          });
+        }
+        return { before, after, changed };
+      });
+      if (result?.changed) {
+        try {
+          await appendAudit(partnerId, phone, { actor: 'persona', action: event.name, at: nowIso });
+        } catch (err) {
+          logWarn('kyc.persona.redis_audit', err, { partnerId });
+        }
+      }
+      return result;
     },
 
     async review(
