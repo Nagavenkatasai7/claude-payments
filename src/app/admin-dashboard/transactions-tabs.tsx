@@ -2,7 +2,8 @@
 
 import { useState, type ReactNode } from 'react';
 import Link from 'next/link';
-import type { Partner, Staff, Tier, Transfer } from '@/lib/types';
+import type { Partner, Tier, Transfer } from '@/lib/types';
+import type { StaffOption } from '@/lib/staff-options';
 import { showsStaffCancel } from '@/lib/dashboard-cancel-policy';
 import { money } from './format';
 import { MaskedDestination } from './masked-destination';
@@ -124,7 +125,8 @@ function Stage({ at, fallback }: { at?: string; fallback: string }) {
 
 export interface TransactionsTabsProps {
   transfers: Transfer[];
-  staff: Staff[];
+  /** Fix 20: the {username, name} projection only — never a full Staff (it carries passwordHash). */
+  staff: StaffOption[];
   staffByUsername: Record<string, string>;
   /** Keyed `${partnerId}:${phone}` (fix 1). */
   tierByPhone: Record<string, Tier>;

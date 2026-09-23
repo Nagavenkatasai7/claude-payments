@@ -27,7 +27,10 @@ import {
  * Redis KEY is the sha256 of the token so a DB dump leaks nothing usable;
  * **30-min idle / 12-h absolute** lifetimes enforced in code off an
  * injectable `now()` seam.
- * A per-phone reverse-index set enables revoke-all on password reset/change.
+ * A per-phone reverse-index set enables revoke-all on password reset/change;
+ * since Program-Fix 20 it holds sha256(token) too (`sr_sess_ix:`), with a TTL,
+ * so no Redis read yields a replayable token. The pre-fix raw-token index
+ * (`sr_sess_idx:`) is still swept on revoke until the owner purges it.
  */
 
 /**
@@ -71,7 +74,13 @@ const DAY_BUCKET_TTL_S = 2 * 24 * 60 * 60;
 
 // ── Key schema (sr_* namespace, fully separate from staff `session:` keys) ──
 const sessionKey = (tokenHash: string) => `sr_sess:${tokenHash}`;
-const sessionIndexKey = (phone: string) => `sr_sess_idx:${phone}`;
+// Program-Fix 20 (F65): the revoke index holds sha256(token), never the token.
+const sessionHashIndexKey = (phone: string) => `sr_sess_ix:${phone}`;
+// Pre-fix index of RAW tokens. Never written again; revoke paths still sweep it
+// (its sessions survive the deploy: the record key is unchanged) until
+// scripts/purge-legacy-session-keys.ts --customer removes what is left.
+const legacySessionIndexKey = (phone: string) => `sr_sess_idx:${phone}`;
+const SESSION_INDEX_TTL_SECONDS = ABSOLUTE_MS / 1000; // no session outlives 12 h
 const resetKey = (tokenHash: string) => `sr_reset:${tokenHash}`;
 
 function sha256hex(s: string): string {
@@ -141,6 +150,42 @@ export function createCustomerAuthStore(
     const n = await redis.incr(key);
     if (n === 1) await redis.expire(key, ttlS);
     return n;
+  }
+
+  /** Revoke every session for a phone: hashed-index members AND legacy raw-token members. */
+  async function revokeAll(phone: string): Promise<void> {
+    const hashes = await redis.smembers(sessionHashIndexKey(phone));
+    for (const h of hashes) await redis.del(sessionKey(h));
+    const legacyTokens = await redis.smembers(legacySessionIndexKey(phone));
+    for (const t of legacyTokens) await redis.del(sessionKey(sha256hex(t)));
+    await redis.del(sessionHashIndexKey(phone));
+    await redis.del(legacySessionIndexKey(phone));
+  }
+
+  /**
+   * Resolve a token to its live record, enforcing the AAL2 lifetimes in code
+   * (Redis TTL is only a backstop) and sliding the idle window. A record without
+   * a tenant (pre-fix-1) is treated as expired.
+   */
+  async function readLiveSession(
+    token: string,
+  ): Promise<(SessionRecord & { partnerId: PartnerId }) | null> {
+    const keyHash = sha256hex(token);
+    const raw = await redis.get(sessionKey(keyHash));
+    if (!raw) return null;
+    let record: SessionRecord;
+    try {
+      record = JSON.parse(raw) as SessionRecord;
+    } catch {
+      return null;
+    }
+    if (!record.partnerId) return null;
+    const ts = now();
+    if (ts - record.createdAtMs > ABSOLUTE_MS) return null; // 12-h absolute
+    if (ts - record.lastSeenMs > IDLE_MS) return null; //      30-min idle
+    record.lastSeenMs = ts;
+    await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
+    return { ...record, partnerId: record.partnerId };
   }
 
   return {
@@ -274,7 +319,8 @@ export function createCustomerAuthStore(
         const upgraded: Customer = {
           ...customer,
           passwordHash: await hashPassword(password),
-          passwordUpdatedAt: new Date(now()).toISOString(),
+          // passwordUpdatedAt is NOT bumped: the password is unchanged, and
+          // resolveSession (fix 20) kills every session older than that stamp.
           updatedAt: new Date(now()).toISOString(),
         };
         await saveCustomer(upgraded);
@@ -330,11 +376,7 @@ export function createCustomerAuthStore(
       await saveCustomer(updated);
 
       // Revoke every live session: a reset/change invalidates all devices.
-      const tokens = await redis.smembers(sessionIndexKey(phone));
-      for (const t of tokens) {
-        await redis.del(sessionKey(sha256hex(t)));
-      }
-      await redis.del(sessionIndexKey(phone));
+      await revokeAll(phone);
 
       return updated;
     },
@@ -367,8 +409,12 @@ export function createCustomerAuthStore(
       const token = randomBytes(32).toString('hex');
       const ts = now();
       const record: SessionRecord = { phone, partnerId, createdAtMs: ts, lastSeenMs: ts };
-      await redis.set(sessionKey(sha256hex(token)), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
-      await redis.sadd(sessionIndexKey(phone), token);
+      const keyHash = sha256hex(token);
+      // Index FIRST (a dangling index hash is harmless; an unindexed live record
+      // would escape revoke-all on password reset).
+      await redis.sadd(sessionHashIndexKey(phone), keyHash);
+      await redis.expire(sessionHashIndexKey(phone), SESSION_INDEX_TTL_SECONDS);
+      await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
       return token;
     },
 
@@ -379,22 +425,8 @@ export function createCustomerAuthStore(
      * A record without a tenant (pre-fix-1) is treated as expired.
      */
     async getSessionIdentity(token: string): Promise<SessionIdentity | null> {
-      const keyHash = sha256hex(token);
-      const raw = await redis.get(sessionKey(keyHash));
-      if (!raw) return null;
-      let record: SessionRecord;
-      try {
-        record = JSON.parse(raw) as SessionRecord;
-      } catch {
-        return null;
-      }
-      if (!record.partnerId) return null;
-      const ts = now();
-      if (ts - record.createdAtMs > ABSOLUTE_MS) return null; // 12-h absolute
-      if (ts - record.lastSeenMs > IDLE_MS) return null; //      30-min idle
-      record.lastSeenMs = ts;
-      await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
-      return { phone: record.phone, partnerId: record.partnerId };
+      const live = await readLiveSession(token);
+      return live ? { phone: live.phone, partnerId: live.partnerId } : null;
     },
 
     /** Phone-only view of getSessionIdentity (kept for existing callers/tests). */
@@ -402,11 +434,21 @@ export function createCustomerAuthStore(
       return (await this.getSessionIdentity(token))?.phone ?? null;
     },
 
-    /** The Customer a live session belongs to — the (tenant, phone) row, never a phone-only guess. */
+    /**
+     * The Customer a live session belongs to — the (tenant, phone) row, never a
+     * phone-only guess. Fix 20 review: a session minted BEFORE the row's last
+     * password change is dead whether or not any revoke index still lists it
+     * (an old build's reset during a rolling release / Skew Protection /
+     * rollback, or a lost index write). No `passwordUpdatedAt` ⇒ no rejection.
+     */
     async resolveSession(token: string): Promise<Customer | null> {
-      const identity = await this.getSessionIdentity(token);
-      if (!identity) return null;
-      return customers.getCustomer(identity.partnerId, identity.phone);
+      const live = await readLiveSession(token);
+      if (!live) return null;
+      const customer = await customers.getCustomer(live.partnerId, live.phone);
+      if (!customer) return null;
+      const changedAt = customer.passwordUpdatedAt ? Date.parse(customer.passwordUpdatedAt) : NaN;
+      if (Number.isFinite(changedAt) && changedAt > live.createdAtMs) return null;
+      return customer;
     },
 
     async deleteSession(token: string): Promise<void> {
@@ -416,7 +458,8 @@ export function createCustomerAuthStore(
       if (raw) {
         try {
           const { phone } = JSON.parse(raw) as SessionRecord;
-          await redis.srem(sessionIndexKey(phone), token);
+          await redis.srem(sessionHashIndexKey(phone), keyHash);
+          await redis.srem(legacySessionIndexKey(phone), token); // a pre-fix session signing out
         } catch {
           /* index entry will be skipped harmlessly on the next deleteAll */
         }
@@ -425,11 +468,7 @@ export function createCustomerAuthStore(
 
     /** Revoke every live session for a phone (on password reset/change). */
     async deleteAllSessions(phone: string): Promise<void> {
-      const tokens = await redis.smembers(sessionIndexKey(phone));
-      for (const t of tokens) {
-        await redis.del(sessionKey(sha256hex(t)));
-      }
-      await redis.del(sessionIndexKey(phone));
+      await revokeAll(phone);
     },
 
     // ── Password-reset tokens (256-bit, hashed at rest, single-use) ──
