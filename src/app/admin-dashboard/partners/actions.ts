@@ -16,6 +16,7 @@ import {
   partnerForPhoneNumberId,
 } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
+import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
 import { assertStaffPasswordPolicy } from '@/lib/staff-password';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
@@ -620,12 +621,21 @@ export async function saveDisclosureConfigAction(formData: FormData): Promise<vo
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
-/** Issue a new API key. Returns the plaintext ONCE — the client surfaces it then discards it. */
+/**
+ * Issue a new API key. Returns the plaintext ONCE — the client surfaces it then discards it.
+ * Program-Fix 44 P2: `mode` is 'live' (default — every existing caller) or
+ * 'test' (a sandbox key: its transfers settle only on the mock rail and never
+ * message a customer). This is a public POST endpoint, so the mode is a STRICT
+ * allowlist checked after the gate and before any write.
+ */
 export async function issueApiKeyAction(
   partnerId: PartnerId,
+  mode?: ApiKeyMode,
 ): Promise<{ plaintext: string; keyId: string; last4: string }> {
   await gatePartnerConfig(partnerId);
-  const issued = await getPartnerApiKeyStore().issue(partnerId);
+  const m: unknown = mode ?? 'live';
+  if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
+  const issued = await getPartnerApiKeyStore().issue(partnerId, m);
   revalidatePath(`/admin-dashboard/partners/${partnerId}`);
   return { plaintext: issued.plaintext, keyId: issued.keyId, last4: issued.last4 };
 }

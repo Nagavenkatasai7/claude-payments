@@ -65,6 +65,17 @@ export async function recordStaffTransferAudit(
   });
 }
 
+/**
+ * Program-Fix 44 P2: the one "is this a sandbox transfer?" rule (absent ⇒ live).
+ * A customer-facing outbox payload for a sandbox transfer carries
+ * `sandbox: true` (inlined at each enqueue so the payload-secrets static check
+ * can read it); the worker completes such a row WITHOUT sending. Live payloads
+ * never carry the key, so they are byte-identical to before.
+ */
+export function isSandbox(t: Pick<Transfer, 'environment'>): boolean {
+  return t.environment === 'test';
+}
+
 export type SettlementResult =
   | { kind: 'started'; webhookDriven: boolean }
   | { kind: 'already' } // not awaiting_payment anymore — idempotent no-op
@@ -98,6 +109,12 @@ export type ReleaseResult =
  * driven rail gets the signed instruction (`instruct:<id>`), the mock rail gets
  * the delayed simulated settlement (`mocksettle:<id>`) plus the deterministic
  * write-once providerRef. Both keys are forever; a replay enqueues nothing.
+ *
+ * Program-Fix 44 P2 — THE SANDBOX CHOKEPOINT: a 'test' transfer ALWAYS takes
+ * the mock branch, whatever the rail partner's providerType says. `paid` is
+ * the RETURNING row of the ledger claim (never the caller's object), so a
+ * stale or hand-built live-shaped Transfer cannot route a sandbox row to a
+ * real rail.
  */
 async function enqueueRailEffect(
   tx: Parameters<Parameters<Db['transaction']>[0]>[0],
@@ -105,7 +122,8 @@ async function enqueueRailEffect(
   integrations: PartnerIntegrations,
 ): Promise<{ webhookDriven: boolean }> {
   const providerType = integrations.payment.providerType;
-  const webhookDriven = providerType === 'http' || providerType === 'simulator';
+  const webhookDriven =
+    !isSandbox(paid) && (providerType === 'http' || providerType === 'simulator');
   const outbox = createOutboxRepo(tx);
   if (webhookDriven) {
     await outbox.enqueue('settlement.instruct', { transferId: paid.id }, { dedupeKey: `instruct:${paid.id}` });
@@ -157,7 +175,7 @@ export async function beginSettlement(
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
       // Program-Fix 49A: essential (a settlement stage message survives STOP).
-      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId, category: 'essential' },
+      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId, category: 'essential', ...(isSandbox(paid) ? { sandbox: true } : {}) },
       { dedupeKey: `stage1:${paid.id}` },
     );
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
@@ -194,7 +212,7 @@ export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult>
     // as the paid stage-1: the OWNING partnerId, never creds (fix 11 / F49).
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
-      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId, category: 'essential' },
+      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
       { dedupeKey: `stage1:${held.id}` },
     );
     return { kind: 'held' };

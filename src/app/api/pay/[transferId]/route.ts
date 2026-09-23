@@ -397,7 +397,13 @@ export async function POST(
     // Resolve the sender phone from the id (draft PEEK — never consumes — else
     // an existing transfer) so the code is bound to this exact transaction.
     const otpDraft = await getDraftStore().getDraft(transferId);
-    const otpPhone = otpDraft?.senderPhone ?? (await store.getTransfer(transferId))?.phone ?? null;
+    const otpTransfer = otpDraft ? null : await store.getTransfer(transferId);
+    // Program-Fix 44 P2: a SANDBOX (test-key) transfer is never payable here —
+    // no OTP to the partner-supplied phone, no capture. Same answer as a dead link.
+    if (otpTransfer && otpTransfer.environment === 'test') {
+      return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
+    }
+    const otpPhone = otpDraft?.senderPhone ?? otpTransfer?.phone ?? null;
 
     // (1) "request_otp": issue + deliver a code in-session (free-form). No charge.
     if (typeof body.action === 'string' && body.action === 'request_otp') {

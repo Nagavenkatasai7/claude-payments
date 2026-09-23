@@ -285,6 +285,8 @@ export function createStore(redis: RedisLike, db: Db) {
       cursor?: string;
       partnerId?: import('./types').PartnerId;
       status?: TransferStatus;
+      /** Program-Fix 44 P2: the Partner API lists one environment; staff pass none. */
+      environment?: import('./types').TransferEnvironment;
     }): Promise<import('@/db/repos/transfer-repo').Page<Transfer>> {
       return transfersRepo.adminList(req);
     },

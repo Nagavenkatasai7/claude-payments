@@ -7,7 +7,7 @@ import { listSettlements } from '@/lib/partner-api-service';
 // partner is resolved from the API key ONLY (guardPartner); a partner_id in the
 // query is never read — only the five documented params are passed on.
 // Scope (fix 44): `settlements:read` — live keys (and every legacy key) hold
-// it; test keys do not until sandbox isolation ships.
+// it; test (sandbox) keys never do, and the statement lists live rows only.
 // Route handlers are uncached by default and this one reads the request —
 // node_modules/next/dist/docs/01-app/01-getting-started/15-route-handlers.md:51.
 export async function GET(req: NextRequest) {

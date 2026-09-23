@@ -112,7 +112,8 @@ export async function handleRailFailure(
       await outbox.enqueue(
         'whatsapp.text',
         // Program-Fix 49A: essential (a rail-failure / refund notice survives STOP).
-        { to: updated.phone, body: buildRailFailureMessage(updated, variant), partnerId: updated.partnerId, category: 'essential' },
+        // Program-Fix 44 P2: a sandbox row's notice is marked; the worker completes it unsent.
+        { to: updated.phone, body: buildRailFailureMessage(updated, variant), partnerId: updated.partnerId, category: 'essential', ...(updated.environment === 'test' ? { sandbox: true } : {}) },
         { dedupeKey: `railfailmsg:${transferId}` },
       );
     }

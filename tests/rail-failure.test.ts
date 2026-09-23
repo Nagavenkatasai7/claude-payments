@@ -307,3 +307,19 @@ describe('staff paths on a rail-failed row', () => {
     expect((await createTransferRepo(db).getOwnedTransfer('acme', 'rf_t1'))?.status).toBe('cancelled');
   });
 });
+
+// Program-Fix 44 P2: a rail failure on a SANDBOX row still cancels it, but the
+// customer notice is sandbox-marked so the worker completes it unsent.
+describe('handleRailFailure — sandbox transfer (Program-Fix 44 P2)', { retry: 0 }, () => {
+  it('the railfailmsg payload carries sandbox: true; a live one never does', async () => {
+    await store.saveTransfer(fixture({ environment: 'test' }));
+    await handleRailFailure(db, 'rf_t1', FAILED);
+    expect((await rows()).find((r) => r.dedupe_key === 'railfailmsg:rf_t1')?.payload.sandbox).toBe(true);
+  });
+
+  it('live: no sandbox key on the notice', async () => {
+    await store.saveTransfer(fixture());
+    await handleRailFailure(db, 'rf_t1', FAILED);
+    expect('sandbox' in ((await rows()).find((r) => r.dedupe_key === 'railfailmsg:rf_t1')?.payload ?? {})).toBe(false);
+  });
+});

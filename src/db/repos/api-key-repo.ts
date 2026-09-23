@@ -10,8 +10,8 @@ import type { RedisLike } from '@/lib/store';
 import { logWarn } from '@/lib/log';
 import {
   displayKeyPrefix,
+  effectiveScopes,
   keyModeFromPlaintext,
-  scopesForMode,
   type ApiKeyMode,
   type ApiScope,
 } from '@/lib/partner-api-scopes';
@@ -26,7 +26,8 @@ import {
 // Program-Fix 44 P1: keys carry a MODE. The plaintext prefix (sr_live_ /
 // sr_test_) is authoritative and hash-covered, so it cannot be forged; the key
 // id mirrors it (pk_live_ / pk_test_) for display. Every pre-fix key (a bare
-// pk_<id> id with an sr_live_ plaintext) is live with full scope.
+// pk_<id> id with an sr_live_ plaintext) is live with full scope (its
+// api_keys.scopes is NULL — P2's column only ever narrows a key).
 
 /** last_used_at is rewritten at most once per this window (Redis SET NX EX marker). */
 const LAST_USED_THROTTLE_SEC = 300;
@@ -100,7 +101,8 @@ export function createApiKeyRepo(db: DbOrTx, deps: ApiKeyRepoDeps = {}) {
       const row = rows[0];
       if (!row || row.revokedAt) return null;
       await touchLastUsed(row.id);
-      return { partnerId: row.partnerId, keyId: row.id, mode, scopes: scopesForMode(mode) };
+      // Program-Fix 44 P2: the stored scopes column can only narrow the mode's set.
+      return { partnerId: row.partnerId, keyId: row.id, mode, scopes: effectiveScopes(mode, row.scopes) };
     },
 
     /** Idempotent revoke (first revocation timestamp wins). False only for unknown keyId. */
