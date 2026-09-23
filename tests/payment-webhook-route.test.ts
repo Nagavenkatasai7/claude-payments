@@ -77,9 +77,11 @@ vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }))
 // answers.
 const handleRailFailure = vi.fn(async (..._a: unknown[]) => ({ kind: 'failed', refundStarted: true }));
 const alertRefusedDelivery = vi.fn(async (..._a: unknown[]) => false);
+const alertCallbackOnHold = vi.fn(async (..._a: unknown[]) => false);
 vi.mock('@/lib/rail-failure', () => ({
   handleRailFailure: (...a: unknown[]) => handleRailFailure(...a),
   alertRefusedDelivery: (...a: unknown[]) => alertRefusedDelivery(...a),
+  alertCallbackOnHold: (...a: unknown[]) => alertCallbackOnHold(...a),
 }));
 
 // fix 29: the replay guard (check-then-mark) is unit-tested in
@@ -138,7 +140,7 @@ const v2 = (b: string, s = SECRET, t = Math.floor(Date.now() / 1000)) =>
 beforeEach(() => {
   sendText.mockClear(); sendTemplate.mockClear();
   updateTransferFromWebhook.mockReset(); handleWebhook.mockReset();
-  handleRailFailure.mockClear(); alertRefusedDelivery.mockClear();
+  handleRailFailure.mockClear(); alertRefusedDelivery.mockClear(); alertCallbackOnHold.mockClear();
   fixtures.transfersById = {};
   fixtures.integrationsByPartner = {};
   fixtures.getPaymentProviderCalls.length = 0;
@@ -223,6 +225,33 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect((await post('uniteller', body, sig(body))).status).toBe(200);
     expect(alertRefusedDelivery).not.toHaveBeenCalled();
     expect(handleRailFailure).not.toHaveBeenCalled();
+  });
+
+  it('compliance holds: a refused paid / delivered update checks the row for a hold and answers the usual 200 { ok: true }', async () => {
+    for (const status of ['paid', 'delivered'] as const) {
+      alertCallbackOnHold.mockClear();
+      handleWebhook.mockResolvedValue({ transferId: 'wh_1', status });
+      updateTransferFromWebhook.mockResolvedValue(null); // the guarded UPDATE did not advance the row
+      const res = await post('uniteller', body, sig(body));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      await flushAfter();
+      expect(alertCallbackOnHold).toHaveBeenCalledTimes(1);
+      expect(alertCallbackOnHold.mock.calls[0][1]).toBe('wh_1');
+    }
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('compliance holds: a REAL transition, or a refused non-advancing status, never checks for a hold', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+    expect((await post('uniteller', body, sig(body))).status).toBe(200);
+    await flushAfter();
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'awaiting_payment' });
+    updateTransferFromWebhook.mockResolvedValue(null); // a `created` callback
+    expect((await post('uniteller', body, sig(body))).status).toBe(200);
+    expect(alertCallbackOnHold).not.toHaveBeenCalled();
   });
 
   it('malformed JSON → 400, no mutation', async () => {
