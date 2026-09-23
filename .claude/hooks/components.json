@@ -28,6 +28,7 @@
     "whatsapp-agent": { "branch": "component/whatsapp-agent", "paths": [
       "src/lib/agent.ts", "src/lib/prompt.ts", "src/lib/tools.ts", "src/lib/ollama.ts", "src/lib/whatsapp*", "src/lib/web-chat.ts",
       "src/lib/draft-store.ts", "src/lib/sender-names.ts", "src/lib/providers/meta-signature-verify.ts",
+      "src/lib/agent-fallback.ts", "src/lib/inbound-throttle.ts", "tests/inbound-throttle*",
       "src/app/api/whatsapp/", "src/app/api/copilot/", "tests/agent*", "tests/prompt*", "tests/tools*", "tests/whatsapp*", "tests/bot-*", "tests/web-chat*"
     ]},
     "outbox-worker": { "branch": "component/outbox-worker", "paths": [

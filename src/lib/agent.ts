@@ -25,8 +25,10 @@ const MAX_TOOL_ROUNDS = 6;
 // fix 5: the id of the synthetic round-0 get_customer_context call. It lives in
 // the messages sent to the model only — never in the persisted history.
 const CONTEXT_CALL_ID = 'ctx_r0';
-const FALLBACK_REPLY =
-  "Sorry, I'm having trouble right now. Could you send that again?";
+// Program-Fix 34A: exported (via a leaf module) so the worker can raise the
+// hourly fallback alert without importing this file.
+import { FALLBACK_REPLY } from './agent-fallback';
+export { FALLBACK_REPLY };
 
 export interface AgentDeps {
   chat: (messages: ChatMessage[], tools: ChatTool[], opts?: { signal?: AbortSignal }) => Promise<ChatMessage>;
@@ -427,6 +429,9 @@ export function createAgent(deps: AgentDeps) {
     if (!reply) reply = FALLBACK_REPLY;
     // Sanitize: strip model-emitted URLs, append canonical link if present.
     reply = sanitizeReply(reply, paymentLinks);
+    // Program-Fix 34A: a reply that sanitizing EMPTIED (a URL-only answer) is
+    // still an answer the customer must see — never '' past this point.
+    if (!reply.trim()) reply = FALLBACK_REPLY;
     await deps.store.saveConversation(partnerId, phone, history);
     return reply;
   }
