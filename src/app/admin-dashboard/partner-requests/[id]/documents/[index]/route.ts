@@ -33,7 +33,7 @@ import { getStore } from '@/lib/store';
 //      `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and
 //      the store's recorded (sniffed) content type, allow-listed. No label or
 //      URL ever reaches a header; the CDN caches nothing.
-// The /admin-dashboard/:path* middleware matcher (src/middleware.ts) is the
+// The /admin-dashboard/:path* proxy matcher (src/proxy.ts) is the
 // outer ring; the security headers in next.config.ts apply to /:path*.
 
 export const runtime = 'nodejs';
