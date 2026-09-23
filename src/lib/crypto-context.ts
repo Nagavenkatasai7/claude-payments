@@ -31,7 +31,10 @@ export type CustomerEncColumn =
   | 'date_of_birth_enc'
   | 'residential_address_enc'
   | 'gov_id_number_enc'
-  | 'email_enc';
+  | 'email_enc'
+  // Program-Fix 49D: the portal TOTP secret. Sealed and opened ONLY by
+  // customer-repo's MFA methods, under customerRowCtx(row, 'mfa_totp_enc').
+  | 'mfa_totp_enc';
 
 export type IntegrationEncColumn =
   | 'kyc_api_key_enc'

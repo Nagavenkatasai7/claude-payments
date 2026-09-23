@@ -240,6 +240,13 @@ export const customers = pgTable(
     phoneVerifiedAt: timestamp('phone_verified_at', { withTimezone: true }),
     optInAt: timestamp('opt_in_at', { withTimezone: true }),
     optedOutAt: timestamp('opted_out_at', { withTimezone: true }),
+    // Program-Fix 49D (0020, portal-03): opt-in portal TOTP. The base32 secret
+    // is ENCRYPTED (field-crypto, customerRowCtx(row, 'mfa_totp_enc')). Present
+    // = enrolled. NEITHER column is in customerToRow: saveCustomer's whole-row
+    // upsert never names them, so only customer-repo's single-column MFA
+    // writers can set or clear an enrolment.
+    mfaTotpEnc: text('mfa_totp_enc'), // ENCRYPTED
+    mfaEnrolledAt: timestamp('mfa_enrolled_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -491,6 +498,10 @@ export const corridorRequests = pgTable('corridor_requests', {
   approxAmount: numeric('approx_amount', { precision: 12, scale: 2 }),
   approxCurrency: text('approx_currency'),
   capturedAt: timestamp('captured_at', { withTimezone: true }).notNull(),
+  // Program-Fix 49D (0020, partner-02): the lead's review state. NULLABLE with
+  // no default and no CHECK: NULL means 'open' (every row captured so far);
+  // the values are CorridorRequestStatus (src/lib/types.ts).
+  status: text('status'),
 });
 
 // Inbound "Partner with us" leads from the public landing form. A durable record

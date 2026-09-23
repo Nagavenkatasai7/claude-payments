@@ -1,5 +1,6 @@
 'use server';
 
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getDb } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
@@ -10,6 +11,9 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import { isRecallEligible } from '@/lib/refund-policy';
 import type { Customer, Partner } from '@/lib/types';
+import { getCustomerAuthStore } from '@/lib/customer-auth-store';
+import { getCustomerMfaStore, stepUp, STEP_UP_ERROR } from '@/lib/customer-mfa';
+import { clientIpFrom } from '@/lib/ip-rate-limit';
 
 /**
  * Customer-facing "Report a problem with this transfer" server action — opens a
@@ -100,6 +104,15 @@ export async function requestRecallAction(formData: FormData): Promise<void> {
   // Server-side eligibility re-check — NEVER trust the client. Only a delivered
   // transfer still inside the 24h recall window qualifies.
   if (!isRecallEligible(transfer!, Date.now())) back('ineligible');
+
+  // Program-Fix 49D (portal-03): step-up — a customer with two-step
+  // verification on proves a fresh authenticator code before the case opens
+  // (see refund-actions.ts). Refusals bounce back with a fixed code.
+  const gate = await stepUp(customer, String(formData.get('code') ?? ''), async () => clientIpFrom(await headers()), {
+    mfa: getCustomerMfaStore(),
+    auth: getCustomerAuthStore(),
+  });
+  if (gate !== 'ok') back(STEP_UP_ERROR[gate]);
 
   const repo = createTicketRepo(getDb());
 

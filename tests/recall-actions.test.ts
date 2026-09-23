@@ -66,6 +66,28 @@ vi.mock('next/navigation', () => ({
   notFound: () => { throw new Error('NOT_FOUND'); },
 }));
 
+
+// Program-Fix 49D: the step-up's collaborators. `mfaEnrolled` toggles the
+// customer's portal TOTP; '246810' is the one valid code; `reserveAllowed`
+// simulates the fix-19 attempt buckets.
+let mfaEnrolled = false;
+let reserveAllowed = true;
+const verifyCodeMock = vi.fn(async (_k: unknown, code: string) => code === '246810');
+const reserveMock = vi.fn(async () => reserveAllowed);
+const clearMock = vi.fn(async () => undefined);
+vi.mock('@/lib/customer-mfa', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/customer-mfa')>('@/lib/customer-mfa');
+  return {
+    ...actual,
+    getCustomerMfaStore: () => ({ isEnrolled: async () => mfaEnrolled, verifyCode: verifyCodeMock }),
+  };
+});
+vi.mock('@/lib/customer-auth-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/customer-auth-store')>('@/lib/customer-auth-store');
+  return { ...actual, getCustomerAuthStore: () => ({ reserveLoginAttempt: reserveMock, clearLoginFailures: clearMock }) };
+});
+vi.mock('next/headers', () => ({ headers: async () => ({ get: (n: string) => (n === 'x-forwarded-for' ? '198.51.100.7' : null) }) }));
+
 import { requestRecallAction } from '@/app/account/receipt/recall-actions';
 
 function fd(fields: Record<string, string>): FormData {
@@ -112,6 +134,11 @@ beforeEach(async () => {
   repo = createTicketRepo(db);
   sessionCustomer = customer();
   redirectMock.mockClear();
+  mfaEnrolled = false;
+  reserveAllowed = true;
+  verifyCodeMock.mockClear();
+  reserveMock.mockClear();
+  vi.unstubAllEnvs();
 });
 
 describe('requestRecallAction', () => {
@@ -210,3 +237,48 @@ describe('requestRecallAction', () => {
     expect(await repo.listByCustomer(PHONE)).toEqual([]);
   });
 });
+
+describe('requestRecallAction — step-up for portal MFA (Program-Fix 49D)', () => {
+  it('not enrolled (default): unchanged — the ticket opens with no code', async () => {
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa0' }));
+    await expect(requestRecallAction(fd({ transferId: 'T_mfa0', reason: 'not_received' }))).rejects.toThrow(/REDIRECT:\/account\/support\/tk_/);
+    expect(reserveMock).not.toHaveBeenCalled();
+  });
+
+  it('enrolled + no code: ?error=mfa_code and no ticket', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa1' }));
+    await expect(requestRecallAction(fd({ transferId: 'T_mfa1', reason: 'not_received' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/T_mfa1?error=mfa_code',
+    );
+    expect(await repo.listByCustomer(PHONE)).toHaveLength(0);
+  });
+
+  it('enrolled + wrong code: ?error=mfa_invalid and no ticket', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa2' }));
+    await expect(requestRecallAction(fd({ transferId: 'T_mfa2', reason: 'not_received', code: '000000' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/T_mfa2?error=mfa_invalid',
+    );
+    expect(await repo.listByCustomer(PHONE)).toHaveLength(0);
+  });
+
+  it('enrolled + right code: the ticket opens', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa3' }));
+    await expect(requestRecallAction(fd({ transferId: 'T_mfa3', reason: 'not_received', code: '246810' }))).rejects.toThrow(
+      /REDIRECT:\/account\/support\/tk_/,
+    );
+    expect(await repo.listByCustomer(PHONE)).toHaveLength(1);
+  });
+
+  it('CUSTOMER_MFA_REQUIRED on and not enrolled: ?error=mfa_required and no ticket', async () => {
+    vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
+    await store.saveTransfer(mkTransfer({ id: 'T_mfa4' }));
+    await expect(requestRecallAction(fd({ transferId: 'T_mfa4', reason: 'not_received' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/T_mfa4?error=mfa_required',
+    );
+    expect(await repo.listByCustomer(PHONE)).toHaveLength(0);
+  });
+});
+

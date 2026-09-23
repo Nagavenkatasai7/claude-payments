@@ -23,6 +23,8 @@ describe('crypto-context pins the exact AAD strings', () => {
     ['customer addr', ctx.customer('acme', '15550001111', 'residential_address_enc'), 'v2|k0|customers|residential_address_enc|acme|15550001111'],
     ['customer gov id', ctx.customer('acme', '15550001111', 'gov_id_number_enc'), 'v2|k0|customers|gov_id_number_enc|acme|15550001111'],
     ['customer email', ctx.customer('acme', '15550001111', 'email_enc'), 'v2|k0|customers|email_enc|acme|15550001111'],
+    // Program-Fix 49D: the customer portal TOTP secret (NOT v1-exempt, unlike staff_mfa).
+    ['customer mfa', ctx.customer('acme', '15550001111', 'mfa_totp_enc'), 'v2|k0|customers|mfa_totp_enc|acme|15550001111'],
     ['seller', ctx.seller('acme', '919800000000'), 'v2|k0|sellers|payout_destination_enc|acme|919800000000'],
     ['recipient', ctx.recipient('acme', '15550001111', '919800000000'), 'v2|k0|recipients|payout_destination_enc|acme|15550001111|919800000000'],
     ['beneficiary', ctx.beneficiary('ben_1'), 'v2|k0|beneficiaries|payout_destination_enc|ben_1'],
@@ -50,6 +52,7 @@ describe('crypto-context v1 exemptions (honoured by 46B)', () => {
     expect(ctx.purpose('outbox.apply_link').v1Exempt).toBeFalsy();
     expect(ctx.transfer('t', 'payout_destination_enc').v1Exempt).toBeFalsy();
     expect(ctx.customer('p', '1', 'full_name_enc').v1Exempt).toBeFalsy();
+    expect(customerRowCtx({ partnerId: 'p', phone: '1' }, 'mfa_totp_enc').v1Exempt).toBeFalsy();
   });
 });
 

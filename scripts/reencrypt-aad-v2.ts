@@ -54,7 +54,8 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
   {
     table: 'customers',
     key: ['partner_id', 'phone'],
-    columns: ['full_name_enc', 'date_of_birth_enc', 'residential_address_enc', 'gov_id_number_enc', 'email_enc'],
+    // mfa_totp_enc: Program-Fix 49D (portal TOTP secret, same row context).
+    columns: ['full_name_enc', 'date_of_birth_enc', 'residential_address_enc', 'gov_id_number_enc', 'email_enc', 'mfa_totp_enc'],
     ctxFor: ([partnerId, phone], column) => ctx.customer(partnerId, phone, column as CustomerEncColumn),
   },
   {

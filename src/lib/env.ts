@@ -164,6 +164,14 @@ export const env = {
       .map((s) => s.trim())
       .filter(Boolean);
   },
+  // ── Program-Fix 49D: customer portal TOTP (OPTIONAL; never in boot-assert) ──
+  get customerMfaRequired(): boolean {
+    // 'true' ⇒ refund and recall requests from the portal require the customer
+    // to have turned on two-step verification (customer-mfa.ts stepUp). Default
+    // false: portal MFA stays opt-in. Someone who HAS enrolled always gets the
+    // code step at sign-in and before those actions, whatever this says.
+    return process.env.CUSTOMER_MFA_REQUIRED === 'true';
+  },
   get paymentProviderMode(): PaymentProviderMode {
     // Default + only supported value in v1 — a forward hook, not a live switch.
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';

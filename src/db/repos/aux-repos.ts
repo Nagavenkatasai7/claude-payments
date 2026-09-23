@@ -21,6 +21,7 @@ import { ctx, recipientRowCtx, sellerRowCtx } from '@/lib/crypto-context';
 import type {
   B2bInvoice,
   CorridorRequest,
+  CorridorRequestStatus,
   CountryCode,
   CurrencyCode,
   InvoiceLineItem,
@@ -169,6 +170,8 @@ export function createCorridorRequestRepo(db: DbOrTx) {
         };
         if (row.approxAmount !== null) r.approxAmount = Number(row.approxAmount);
         if (row.approxCurrency) r.approxCurrency = row.approxCurrency;
+        // Program-Fix 49D (0020): only when set, so a NULL (= open) lead keeps its old shape.
+        if (row.status) r.status = row.status as CorridorRequestStatus;
         return r;
       });
     },

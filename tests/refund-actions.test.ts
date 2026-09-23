@@ -48,6 +48,28 @@ vi.mock('@/lib/customer-auth', () => ({
 
 const revalidateMock = vi.fn();
 vi.mock('next/cache', () => ({ revalidatePath: (p: string) => revalidateMock(p) }));
+vi.mock('next/navigation', () => ({ redirect: (p: string) => redirectMock(p) }));
+
+// Program-Fix 49D: the step-up's collaborators. `mfaEnrolled` toggles the
+// customer's portal TOTP; '246810' is the one valid code; `reserveAllowed`
+// simulates the fix-19 attempt buckets.
+let mfaEnrolled = false;
+let reserveAllowed = true;
+const verifyCodeMock = vi.fn(async (_k: unknown, code: string) => code === '246810');
+const reserveMock = vi.fn(async () => reserveAllowed);
+const clearMock = vi.fn(async () => undefined);
+vi.mock('@/lib/customer-mfa', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/customer-mfa')>('@/lib/customer-mfa');
+  return {
+    ...actual,
+    getCustomerMfaStore: () => ({ isEnrolled: async () => mfaEnrolled, verifyCode: verifyCodeMock }),
+  };
+});
+vi.mock('@/lib/customer-auth-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/customer-auth-store')>('@/lib/customer-auth-store');
+  return { ...actual, getCustomerAuthStore: () => ({ reserveLoginAttempt: reserveMock, clearLoginFailures: clearMock }) };
+});
+vi.mock('next/headers', () => ({ headers: async () => ({ get: (n: string) => (n === 'x-forwarded-for' ? '198.51.100.7' : null) }) }));
 
 import { requestRefundAction } from '@/app/account/receipt/refund-actions';
 
@@ -101,6 +123,12 @@ beforeEach(async () => {
   sessionCustomer = customer();
   redirectMock.mockClear();
   revalidateMock.mockClear();
+  mfaEnrolled = false;
+  reserveAllowed = true;
+  verifyCodeMock.mockClear();
+  reserveMock.mockClear();
+  clearMock.mockClear();
+  vi.unstubAllEnvs();
 });
 
 async function refundStatusOf(id: string): Promise<string> {
@@ -170,3 +198,66 @@ describe('requestRefundAction', () => {
     expect(await refundStatusOf('tr_refund_1')).toBe('none');
   });
 });
+
+describe('requestRefundAction — step-up for portal MFA (Program-Fix 49D)', () => {
+  it('not enrolled (default): unchanged — no code asked, no reservation spent', async () => {
+    await store.saveTransfer(transfer({ status: 'paid' }));
+    await requestRefundAction(form({ transferId: 'tr_refund_1' }));
+    expect(await refundStatusOf('tr_refund_1')).toBe('requested');
+    expect(reserveMock).not.toHaveBeenCalled();
+  });
+
+  it('enrolled + no code: bounced back to the receipt with ?error=mfa_code, nothing changes', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(transfer({ status: 'paid' }));
+    await expect(requestRefundAction(form({ transferId: 'tr_refund_1' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/tr_refund_1?error=mfa_code',
+    );
+    expect(await refundStatusOf('tr_refund_1')).toBe('none');
+  });
+
+  it('enrolled + wrong code: ?error=mfa_invalid after a reservation, nothing changes', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(transfer({ status: 'paid' }));
+    await expect(requestRefundAction(form({ transferId: 'tr_refund_1', code: '111111' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/tr_refund_1?error=mfa_invalid',
+    );
+    expect(reserveMock).toHaveBeenCalledWith(OWNER, '198.51.100.7');
+    expect(await refundStatusOf('tr_refund_1')).toBe('none');
+  });
+
+  it('enrolled + throttled: ?error=mfa_throttled and the code is never checked', async () => {
+    mfaEnrolled = true;
+    reserveAllowed = false;
+    await store.saveTransfer(transfer({ status: 'paid' }));
+    await expect(requestRefundAction(form({ transferId: 'tr_refund_1', code: '246810' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/tr_refund_1?error=mfa_throttled',
+    );
+    expect(verifyCodeMock).not.toHaveBeenCalled();
+    expect(await refundStatusOf('tr_refund_1')).toBe('none');
+  });
+
+  it('enrolled + right code: the refund request goes through', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(transfer({ status: 'paid' }));
+    await requestRefundAction(form({ transferId: 'tr_refund_1', code: '246 810' }));
+    expect(await refundStatusOf('tr_refund_1')).toBe('requested');
+  });
+
+  it('CUSTOMER_MFA_REQUIRED on and not enrolled: ?error=mfa_required, nothing changes', async () => {
+    vi.stubEnv('CUSTOMER_MFA_REQUIRED', 'true');
+    await store.saveTransfer(transfer({ status: 'paid' }));
+    await expect(requestRefundAction(form({ transferId: 'tr_refund_1' }))).rejects.toThrow(
+      'REDIRECT:/account/receipt/tr_refund_1?error=mfa_required',
+    );
+    expect(await refundStatusOf('tr_refund_1')).toBe('none');
+  });
+
+  it('an ineligible transfer is still refused with the generic error before any code is asked', async () => {
+    mfaEnrolled = true;
+    await store.saveTransfer(transfer({ status: 'delivered', deliveredAt: new Date().toISOString() }));
+    await expect(requestRefundAction(form({ transferId: 'tr_refund_1' }))).rejects.toThrow(/not eligible/i);
+    expect(reserveMock).not.toHaveBeenCalled();
+  });
+});
+
