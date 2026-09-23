@@ -72,6 +72,7 @@ SmartRemit is white-label, non-custodial remittance **infrastructure**: a multi-
 | Multi-channel WhatsApp | ✅ built | Per-partner BYO numbers; credentials encrypted at rest and resolved at send time. |
 | Postgres ledger | ✅ built | Neon Postgres via Drizzle (`src/db/schema.ts`); Redis is hot/ephemeral only. |
 | Durable effects | ✅ built | Transactional outbox drained by `/api/worker` with retries, dead-lettering and ops alerts (`src/lib/outbox-worker.ts`). |
+| Observability | ⚠️ integrated, not live | Program-Fix 26: server errors → Sentry by plain fetch when `SENTRY_DSN` is set (`src/lib/error-report.ts`, `onRequestError`); ops alerts mirrored to `OPS_ALERT_EMAIL` / `OPS_ALERT_WEBHOOK_URL`; failed WhatsApp deliveries land in `audit_events`. **Log retention** is the Vercel runtime buffer only until the owner attaches a Log Drain (Pro; `src/lib/log.ts` already emits one JSON line per event) with retention set to the partner's record-keeping rule. |
 | Partner REST API + signed webhooks | ✅ built | `/api/partner/v1/*`, documented at `/docs`. |
 | B2B invoicing | ✅ built (mock data) | Sellers issue bills the buyer pays in chat (`create_invoice`, `present_bill`, `b2b_invoices`, `sellers`). No real accounting integration. |
 | Customer account portal | ✅ built | `/account`: history, receipts, repeat sends, support tickets, web chat (restricted toolset). |
