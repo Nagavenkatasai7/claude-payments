@@ -173,6 +173,17 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect((sendTemplate.mock.calls[0] as unknown[])[1]).toBe('transfer_delivered');
   });
 
+  it('Program-Fix 44 P2: a delivered SANDBOX transfer is updated but messages NO ONE', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue({ ...deliveredTransfer, environment: 'test' });
+    const res = await post('uniteller', body, sig(body));
+    expect(res.status).toBe(200);
+    await flushAfter();
+    expect(updateTransferFromWebhook).toHaveBeenCalledWith('wh_1', 'delivered');
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
   it('recipient TEMPLATE rejected by Meta → falls back to a free-form text so the recipient is still notified', async () => {
     handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
     updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);

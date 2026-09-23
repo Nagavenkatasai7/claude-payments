@@ -740,6 +740,9 @@ export function createTransferRepo(
           eq(transfers.transferType, 'b2c'),
           inArray(transfers.status, ['paid', 'delivered']),
           eq(transfers.destinationCountry, destinationCountry),
+          // Program-Fix 44 P2: a sandbox row can NEVER become a live customer's
+          // rehydrated payout (a test key must not plant a destination).
+          LIVE_ONLY,
         ))
         .orderBy(desc(transfers.createdAt))
         .limit(1);
@@ -906,9 +909,14 @@ export function createTransferRepo(
       };
     },
 
-    /** Indexed per-(tenant, customer) page — a phone alone is not an identity (fix 1). */
+    /**
+     * Indexed per-(tenant, customer) page — a phone alone is not an identity (fix 1).
+     * Program-Fix 44 P2: LIVE rows only — this is the customer's own history (chat
+     * tools, /account portal, support, staff customer page); a partner's sandbox
+     * mint on the same number never appears in it.
+     */
     listByPhone(partnerId: PartnerId, phone: string, req: PageReq): Promise<Page<Transfer>> {
-      return page(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone)), req);
+      return page(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone), LIVE_ONLY), req);
     },
 
     /** Staff-only unscoped list (server actions behind requireStaff). */

@@ -188,6 +188,19 @@ describe('ledger aggregates — sandbox rows never count toward a live customer'
     expect((await repo.adminList({ limit: 10, partnerId: 'acme', environment: 'live' })).items.map((t) => t.id)).toEqual(['sb_live']);
   });
 
+  it('payout rehydration (latestSettledConsumerTo) never returns a sandbox row', async () => {
+    await db.execute(sql`UPDATE transfers SET status = 'delivered'`);
+    const t = await createTransferRepo(db).latestSettledConsumerTo('acme', '15551230000', '919876543210', 'IN');
+    expect(t?.id).toBe('sb_live');
+    await db.execute(sql`UPDATE transfers SET status = 'awaiting_payment' WHERE id = 'sb_live'`);
+    expect(await createTransferRepo(db).latestSettledConsumerTo('acme', '15551230000', '919876543210', 'IN')).toBeNull();
+  });
+
+  it("the customer's own history (listByPhone: chat, portal, refund tools) is live-only", async () => {
+    const pg = await createTransferRepo(db).listByPhone('acme', '15551230000', { limit: 10 });
+    expect(pg.items.map((t) => t.id)).toEqual(['sb_live']);
+  });
+
   it("the partner's settlements statement is live-only", async () => {
     await db.execute(sql`UPDATE transfers SET status = 'delivered', paid_at = now()`);
     const page = await createTransferRepo(db).listSettledPage('acme', new Date(now.getTime() - 86_400_000), new Date(now.getTime() + 86_400_000), { limit: 10, cursor: null });
