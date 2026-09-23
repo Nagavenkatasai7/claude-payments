@@ -14,13 +14,17 @@ import { encryptField } from '@/lib/field-crypto';
 import { pokeWorker } from '@/lib/outbox';
 import { issueApplicationToken } from '@/lib/partner-application-token';
 import { buildInviteEmail, inviteResendDedupeKey } from '@/lib/partner-invite-email';
+import {
+  canDecideApplication,
+  isPartnerRequestId,
+  parseDecisionReason,
+  type ApplicationDecision,
+} from '@/lib/partner-application-decision';
 
 // Partner-request staff actions (Program-Fix 39). A server action is a public
 // POST endpoint, so every action self-gates: PLATFORM ADMINS only (these are
 // cross-tenant business-development records), and it validates the target
 // before mutating. Every mutation writes an audit_events row.
-
-const PREQ_ID = /^preq_[A-Za-z0-9_-]{1,64}$/;
 
 /**
  * Resend the partner-application invite. The raw token is not retained
@@ -41,7 +45,7 @@ export async function resendApplicationInviteAction(formData: FormData): Promise
   const staff = await requirePlatformAdmin();
 
   const id = String(formData.get('id') ?? '').trim();
-  if (!PREQ_ID.test(id)) throw new Error('Invalid partner request id.');
+  if (!isPartnerRequestId(id)) throw new Error('Invalid partner request id.');
   const page = `/admin-dashboard/partner-requests/${encodeURIComponent(id)}`;
 
   const existing = await createPartnerRequestRepo(getDb()).getPartnerRequest(id);
@@ -92,4 +96,52 @@ export async function resendApplicationInviteAction(formData: FormData): Promise
   if (outcome === 'resent') pokeWorker();
   revalidatePath(page);
   redirect(`${page}?invite=${outcome}`);
+}
+
+/**
+ * Program-Fix 49C (partner-02): the staff decision on a SUBMITTED application.
+ * Platform admins only; a reason is required (kept in the audit row only).
+ * completed → approved | rejected, nothing else: an 'invited' row has nothing
+ * to decide and a decided row is final. In ONE transaction the conditional
+ * UPDATE (the atomic double-decide guard) also clears the application link's
+ * token hash, and the audit row is written only when the row actually moved.
+ * No email is sent to anyone: approval hands staff to the partner wizard.
+ */
+async function decideApplication(formData: FormData, decision: ApplicationDecision): Promise<void> {
+  const staff = await requirePlatformAdmin();
+
+  const id = String(formData.get('id') ?? '').trim();
+  if (!isPartnerRequestId(id)) throw new Error('Invalid partner request id.');
+  const page = `/admin-dashboard/partner-requests/${encodeURIComponent(id)}`;
+
+  const existing = await createPartnerRequestRepo(getDb()).getPartnerRequest(id);
+  if (!existing) notFound();
+  const reason = parseDecisionReason(formData.get('reason'));
+  if (!reason) redirect(`${page}?decision=reason_required`);
+  if (!canDecideApplication(existing.applicationStatus)) redirect(`${page}?decision=not_decidable`);
+
+  const decided = await getDb().transaction(async (tx) => {
+    const moved = await createPartnerRequestRepo(tx).decideApplication(id, decision);
+    if (!moved) return false;
+    await createAuditRepo(tx).record({
+      actor: staff.username,
+      actorType: 'staff',
+      action: decision === 'approved' ? 'partner_application.approve' : 'partner_application.reject',
+      subjectId: id,
+      meta: { reason, from: 'completed', to: decision, linkRevoked: true },
+    });
+    return true;
+  });
+
+  revalidatePath(page);
+  revalidatePath('/admin-dashboard/partner-requests');
+  redirect(`${page}?decision=${decided ? decision : 'not_decidable'}`);
+}
+
+export async function approveApplicationAction(formData: FormData): Promise<void> {
+  await decideApplication(formData, 'approved');
+}
+
+export async function rejectApplicationAction(formData: FormData): Promise<void> {
+  await decideApplication(formData, 'rejected');
 }

@@ -4,17 +4,19 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import type { Scope } from '@/lib/staff-scope';
 import { ticketCategoryLabel } from '@/lib/ticket-category';
+import { slaState } from '@/lib/ticket-sla';
 import type { Staff, Ticket, TicketPriority, TicketStatus } from '@/lib/types';
 import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { Card } from '@/components/ui/card';
-import { TicketStatusPill, TicketPriorityPill, TICKET_STATUS_LABEL } from './pills';
+import { TicketStatusPill, TicketPriorityPill, TicketSlaPill, TICKET_STATUS_LABEL } from './pills';
 
 // Shared queue view for /tickets (all customer tickets in scope) and
 // /tickets/my-queue (pinned to assignedTo = the viewer). Scope is decided by
 // the CALLER's requireSupportOrAdmin result: partner staff are pinned to their
 // tenant at the repo WHERE; platform staff see every partner + a Partner
 // column. Only kind:'customer' tickets appear — internal (employee-question)
-// tickets live on the admin employee-questions surface.
+// tickets live on the admin employee-questions surface. The Age / SLA column is
+// the INTERNAL first-response target (fix 49C) — staff-only, never a customer promise.
 
 export interface QueueParams {
   status?: string;
@@ -98,6 +100,11 @@ export async function TicketQueueView({
       (!assignedToMe || t.assignedTo === assignee),
   );
 
+  // Program-Fix 49C: first public staff reply per listed ticket (one grouped
+  // read over ids already tenant-scoped above) → the staff-only SLA pill.
+  const firstReplies = await repo.firstStaffResponses(tickets.map((t) => t.id));
+  const now = new Date();
+
   const partnerName: Record<string, string> = {};
   for (const p of partners) partnerName[p.id] = p.name;
 
@@ -105,6 +112,7 @@ export async function TicketQueueView({
     { label: 'Subject', primary: true },
     { label: 'Status', primary: true },
     { label: 'Priority' },
+    { label: 'Age / SLA' },
     { label: 'Category' },
     { label: 'Customer' },
     ...(isPlatform ? [{ label: 'Partner' }] : []),
@@ -123,6 +131,7 @@ export async function TicketQueueView({
       </Link>,
       <TicketStatusPill key="status" status={t.status} />,
       <TicketPriorityPill key="priority" priority={t.priority} />,
+      <TicketSlaPill key="sla" sla={slaState(t, firstReplies.get(t.id) ?? null, now)} now={now} />,
       <span key="category" className="text-muted-foreground">{ticketCategoryLabel(t.category)}</span>,
       <span key="customer" className="text-xs text-muted-foreground">{t.customerPhone || '—'}</span>,
       ...(isPlatform

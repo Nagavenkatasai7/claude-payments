@@ -8,12 +8,14 @@ import { Sidebar } from '../../sidebar';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import type { PartnerApplicationDetails } from '@/lib/types';
 import { getDb } from '@/db/client';
 import { getInviteEmailStatus } from '@/db/repos/aux-repos';
 import { emailConfigured } from '@/lib/email';
 import type { InviteEmailStatus } from '@/lib/partner-invite-email';
-import { resendApplicationInviteAction } from '../actions';
+import { approveApplicationAction, rejectApplicationAction, resendApplicationInviteAction } from '../actions';
+import { canDecideApplication, DECISION_REASON_MAX } from '@/lib/partner-application-decision';
 
 // /admin-dashboard/partner-requests/[id] — the staff view of ONE submitted
 // stage-2 partner application. Same PLATFORM-ONLY guard as the list: these are
@@ -92,12 +94,27 @@ const INVITE_FLASH: Record<string, string> = {
   not_invited: 'This application is no longer open, so no invite was sent.',
 };
 
+/** Program-Fix 49C: the flash line after a decision attempt (?decision=…). */
+const DECISION_FLASH: Record<string, string> = {
+  approved: 'Application approved. The application link is closed. Set the partner up with the wizard below.',
+  rejected: 'Application rejected. The application link is closed. No email was sent.',
+  not_decidable: 'This application cannot be decided: it has not been submitted, or a decision was already recorded.',
+  reason_required: 'Add a reason before approving or rejecting.',
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  invited: 'Invited',
+  completed: 'Submitted, awaiting decision',
+  approved: 'Approved',
+  rejected: 'Rejected',
+};
+
 export default async function PartnerApplicationPage({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ invite?: string }>;
+  searchParams?: Promise<{ invite?: string; decision?: string }>;
 }) {
   const { staff, scope } = await requireScope();
   if (scope.kind !== 'platform') redirect('/admin-dashboard');
@@ -112,8 +129,14 @@ export default async function PartnerApplicationPage({
   // Resend is platform-ADMIN only (the action re-checks via requirePlatformAdmin).
   const inviteOpen = (request.applicationStatus ?? 'invited') === 'invited' && staff.role === 'admin';
   const mailConfigured = emailConfigured();
-  const inviteParam = (await searchParams)?.invite ?? '';
+  const sp = await searchParams;
+  const inviteParam = sp?.invite ?? '';
   const flash = Object.hasOwn(INVITE_FLASH, inviteParam) ? INVITE_FLASH[inviteParam] : undefined;
+  const decisionParam = sp?.decision ?? '';
+  const decisionFlash = Object.hasOwn(DECISION_FLASH, decisionParam) ? DECISION_FLASH[decisionParam] : undefined;
+  const status = request.applicationStatus ?? 'invited';
+  // Decide is platform-ADMIN only (the actions re-check via requirePlatformAdmin).
+  const decisionOpen = canDecideApplication(request.applicationStatus) && staff.role === 'admin';
 
   return (
     <>
@@ -156,6 +179,7 @@ export default async function PartnerApplicationPage({
                   <FieldRow label="Submitted" value={new Date(application.submittedAt).toLocaleString()} />
                 )}
                 <FieldRow label="Invite email" value={INVITE_STATUS_TEXT[inviteStatus]} />
+                <FieldRow label="Application status" value={STATUS_LABEL[status] ?? status} />
               </div>
               {flash && <p className="mt-3 text-[13px] text-muted-foreground">{flash}</p>}
               {inviteOpen && (
@@ -174,10 +198,49 @@ export default async function PartnerApplicationPage({
             </CardContent>
           </Card>
 
+          {(decisionOpen || status === 'approved' || decisionFlash) && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Decision</CardTitle>
+                <CardDescription>
+                  Approve or reject this submitted application. The reason is kept in the audit log only; no email is sent.
+                  Either decision closes the application link for good.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {decisionFlash && <p className="mb-3 text-[13px] text-muted-foreground">{decisionFlash}</p>}
+                {decisionOpen && (
+                  <form className="flex flex-col gap-3">
+                    <input type="hidden" name="id" value={request.id} />
+                    <label className="flex flex-col gap-1.5 text-sm font-medium">
+                      Reason (required)
+                      <Input name="reason" required maxLength={DECISION_REASON_MAX} placeholder="e.g. Licence and AML documents reviewed" />
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="submit" size="sm" formAction={approveApplicationAction}>
+                        Approve
+                      </Button>
+                      <Button type="submit" size="sm" variant="outline" formAction={rejectApplicationAction}>
+                        Reject
+                      </Button>
+                    </div>
+                  </form>
+                )}
+                {status === 'approved' && staff.role === 'admin' && (
+                  <Button asChild size="sm">
+                    <Link href={`/admin-dashboard/partners/new?fromRequest=${encodeURIComponent(request.id)}`}>
+                      Set up this partner →
+                    </Link>
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {!application ? (
             <Card>
               <CardContent className="px-6 py-10 text-center text-[13px] text-muted-foreground">
-                No application submitted yet (status: {request.applicationStatus ?? 'invited'}).
+                No application submitted yet (status: {STATUS_LABEL[status] ?? status}).
               </CardContent>
             </Card>
           ) : (

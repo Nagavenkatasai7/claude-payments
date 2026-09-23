@@ -27,6 +27,7 @@ import type {
   PartnerApplicationDetails,
   PartnerApplicationDocument,
   PartnerId,
+  PartnerApplicationStatus,
   PartnerRequest,
   PayoutMethod,
   Recipient,
@@ -180,7 +181,8 @@ function rowToPartnerRequest(row: PartnerRequestRow): PartnerRequest {
     phone: row.phone,
     corridors: (row.corridors as string[]) ?? [],
     capturedAt: row.capturedAt.toISOString(),
-    applicationStatus: row.applicationStatus,
+    // The raw stored value, never coerced: an unknown value must not read as 'invited' (open).
+    applicationStatus: row.applicationStatus as PartnerApplicationStatus,
   };
   if (row.comments) r.comments = row.comments;
   if (row.tokenExpiresAt) r.tokenExpiresAt = row.tokenExpiresAt.toISOString();
@@ -231,12 +233,33 @@ export function createPartnerRequestRepo(db: DbOrTx) {
       return rows[0] ? rowToPartnerRequest(rows[0]) : null;
     },
 
-    /** Single-use: flip to 'completed' so the link is dead. Idempotent. */
-    async markApplicationCompleted(id: string): Promise<void> {
-      await db
+    /**
+     * Single-use: flip invited → 'completed' so the link is dead. Conditional on
+     * 'invited' (Program-Fix 49C): a submit that raced a staff decision can never
+     * turn 'approved'/'rejected' back into 'completed'. Returns whether it flipped.
+     */
+    async markApplicationCompleted(id: string): Promise<boolean> {
+      const rows = await db
         .update(partnerRequests)
         .set({ applicationStatus: 'completed' })
-        .where(eq(partnerRequests.id, id));
+        .where(and(eq(partnerRequests.id, id), eq(partnerRequests.applicationStatus, 'invited')))
+        .returning({ id: partnerRequests.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Program-Fix 49C: the staff decision, atomically. completed → approved|rejected
+     * AND the link's token hash is cleared (a decided application's link can never
+     * resolve again). The WHERE is the guard: a second decision, or a decision on
+     * an application that was never submitted, updates nothing and returns false.
+     */
+    async decideApplication(id: string, decision: 'approved' | 'rejected'): Promise<boolean> {
+      const rows = await db
+        .update(partnerRequests)
+        .set({ applicationStatus: decision, applicationTokenHash: null })
+        .where(and(eq(partnerRequests.id, id), eq(partnerRequests.applicationStatus, 'completed')))
+        .returning({ id: partnerRequests.id });
+      return rows.length > 0;
     },
   };
 }

@@ -64,6 +64,19 @@ describe('partner-request application extensions (PGlite)', () => {
     await repo.markApplicationCompleted('preq_x');
     expect((await repo.getByTokenHash(hash))?.applicationStatus).toBe('completed');
   });
+
+  it('markApplicationCompleted is conditional on invited: it never turns a decision back into completed (fix 49C)', async () => {
+    const repo = await seed();
+    const { hash, expiresAt } = issueApplicationToken();
+    await repo.setApplicationToken('preq_x', hash, expiresAt);
+    expect(await repo.markApplicationCompleted('preq_x')).toBe(true);
+    expect(await repo.markApplicationCompleted('preq_x')).toBe(false); // idempotent no-op
+    expect(await repo.decideApplication('preq_x', 'rejected')).toBe(true);
+    expect(await repo.markApplicationCompleted('preq_x')).toBe(false);
+    expect((await repo.getPartnerRequest('preq_x'))?.applicationStatus).toBe('rejected');
+    expect(await repo.getByTokenHash(hash)).toBeNull(); // the decision cleared the link
+    expect(await repo.decideApplication('preq_x', 'approved')).toBe(false); // final
+  });
 });
 
 describe('partner-application repo (PGlite)', () => {

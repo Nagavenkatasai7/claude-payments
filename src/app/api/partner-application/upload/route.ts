@@ -8,7 +8,7 @@ import { getStore } from '@/lib/store';
 // POST /api/partner-application/upload?token=<token>
 // One-document-at-a-time upload for the detailed partner application. PUBLIC but
 // token-gated: the URL token is the capability — re-hash it, resolve the
-// partner_request, and refuse a missing/expired/completed link (404). The token
+// partner_request, and refuse a missing/expired link or any row not 'invited' (404). The token
 // is validated identically by the page and the submit action; nothing here is
 // trusted beyond it. Size, declared type AND the leading bytes (magic-number
 // sniff, fix 24) are checked SERVER-SIDE before the file ever reaches Blob; the
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
   if (
     !request ||
     isApplicationTokenExpired(request.tokenExpiresAt) ||
-    request.applicationStatus === 'completed'
+    request.applicationStatus !== 'invited' // refuse unless invited (fix 49C: decided links stay dead)
   ) {
     return NextResponse.json({ error: 'Invalid or expired application link.' }, { status: 404 });
   }
