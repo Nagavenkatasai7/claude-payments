@@ -154,10 +154,10 @@ describe('customer-mfa store (Program-Fix 49D)', () => {
   });
 
   it('passwordTag is a short, stable, non-reversible tag that changes with the hash', () => {
-    const a = store().passwordTag('$argon2id$v=19$aaa');
+    const a = store().passwordTag('hash-1');
     expect(a).toMatch(/^[0-9a-f]{32}$/);
-    expect(store().passwordTag('$argon2id$v=19$aaa')).toBe(a);
-    expect(store().passwordTag('$argon2id$v=19$bbb')).not.toBe(a);
+    expect(store().passwordTag('hash-1')).toBe(a);
+    expect(store().passwordTag('hash-2')).not.toBe(a);
   });
 });
 
