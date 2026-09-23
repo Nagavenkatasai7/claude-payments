@@ -7,6 +7,7 @@ import type { Db } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { auditSubjectId } from './customer-ref';
 import { logWarn } from './log';
+import { isScreeningCustomerHold } from './compliance-config';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { KycDelta } from './kyc-state-machine';
 import { applyKycEvent } from './kyc-state-machine';
@@ -63,6 +64,13 @@ export interface DurableReviewOpts {
   actor: string;
   slug: string;
   source: 'persona_review' | 'manual';
+  /**
+   * Program-Fix 43 follow-up: true only when the deciding staffer is PLATFORM
+   * staff. A watchlist / PEP hold (isScreeningCustomerHold) is re-checked on
+   * the LOCKED row and refused unless this is true (absent ⇒ refused), so a
+   * match that lands between the action's read and the lock is still caught.
+   */
+  allowScreeningHold?: boolean;
 }
 
 /** One line of the customer page's KYC audit trail. */
@@ -257,6 +265,9 @@ export function createKycCaseStore(
         if (!(await txCustomers.lockCustomer(partnerId, phone))) return null;
         const c = await txCustomers.getCustomer(partnerId, phone);
         if (!c) return null;
+        if (durable.allowScreeningHold !== true && isScreeningCustomerHold(c)) {
+          throw new Error('You do not have permission to perform this action.');
+        }
         const next = decide(c);
         await txCustomers.saveCustomer(next);
         await createAuditRepo(tx).record({
