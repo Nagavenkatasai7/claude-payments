@@ -21,6 +21,11 @@
  *                   its hash from SEED_ADMIN_PASSWORD and revokes its
  *                   sessions. Needed because seed.ts seeds only when there are
  *                   zero staff, so rotating the env var alone changes nothing.
+ *                   ⚠ Since Program-Fix 45 P4 the new hash is written by
+ *                   hashPassword as `$pv=p0$<argon2id>`, which only builds
+ *                   at or after fix 45 P3 can verify. It is NOT a recovery
+ *                   path on a production build older than fix 45 P3 (and
+ *                   production must never be rolled back below P3).
  * --clear-mfa       Program-Fix 17b: turns the username's TOTP MFA off (its
  *                   sealed secret, any pending enrolment and the replay
  *                   marker), so the password alone signs in again. The

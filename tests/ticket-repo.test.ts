@@ -9,7 +9,7 @@ vi.mock('@/lib/log', async (orig) => {
 });
 import { freshDb, seedPartner } from './helpers-db';
 import { createTicketRepo, type TicketRepo } from '@/db/repos/ticket-repo';
-import type { Db } from '@/db/client';
+import type { Db, DbOrTx } from '@/db/client';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
@@ -266,6 +266,69 @@ describe('ticket-repo — body reader (fix 45 P3)', () => {
     const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'hello' });
     await r.listMessages(t.id, { includeInternal: true });
     expect(logSpy.logWarn.mock.calls.filter((c) => c[0] === 'ticket.body_unreadable')).toHaveLength(0);
+  });
+
+  // Pins insert-THEN-seal: the INSERT carries an empty body and only the
+  // UPDATE carries the sealed blob, so the plaintext never reaches the table
+  // even transiently (inserting the plaintext and re-sealing would still end
+  // in a sealed row, so only the insert values can catch it).
+  it('the INSERT writes an empty body; only the seal UPDATE writes the (sealed) body', async () => {
+    const inserted: Record<string, unknown>[] = [];
+    const updated: Record<string, unknown>[] = [];
+    const spy = (target: DbOrTx): DbOrTx =>
+      new Proxy(target, {
+        get(t, prop, recv) {
+          if (prop === 'insert') {
+            return (table: unknown) => {
+              const b = (t as unknown as { insert: (x: unknown) => { values: (v: unknown) => unknown } }).insert(table);
+              return new Proxy(b, {
+                get(bt, bp) {
+                  if (bp === 'values') {
+                    return (v: Record<string, unknown>) => {
+                      if (table === ticketMessages) inserted.push(v);
+                      return bt.values(v);
+                    };
+                  }
+                  const val = Reflect.get(bt, bp);
+                  return typeof val === 'function' ? val.bind(bt) : val;
+                },
+              });
+            };
+          }
+          if (prop === 'update') {
+            return (table: unknown) => {
+              const b = (t as unknown as { update: (x: unknown) => { set: (v: unknown) => unknown } }).update(table);
+              return new Proxy(b, {
+                get(bt, bp) {
+                  if (bp === 'set') {
+                    return (v: Record<string, unknown>) => {
+                      if (table === ticketMessages) updated.push(v);
+                      return bt.set(v);
+                    };
+                  }
+                  const val = Reflect.get(bt, bp);
+                  return typeof val === 'function' ? val.bind(bt) : val;
+                },
+              });
+            };
+          }
+          if (prop === 'transaction') {
+            const tx = (t as unknown as { transaction?: (fn: (x: DbOrTx) => Promise<unknown>) => Promise<unknown> }).transaction;
+            return tx ? (fn: (x: DbOrTx) => Promise<unknown>) => tx.call(t, (inner) => fn(spy(inner))) : undefined;
+          }
+          const val = Reflect.get(t, prop, recv);
+          return typeof val === 'function' ? val.bind(t) : val;
+        },
+      });
+    const r = createTicketRepo(spy(db), { cryptoProvider: provider });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'first body' });
+    await r.appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'second body' });
+    expect(inserted).toHaveLength(2);
+    expect(inserted.map((v) => v.body)).toEqual(['', '']);
+    expect(updated).toHaveLength(2);
+    for (const u of updated) expect(String(u.body)).toMatch(/^v2\.k0\./);
+    expect(JSON.stringify([inserted, updated])).not.toContain('first body');
+    expect(JSON.stringify([inserted, updated])).not.toContain('second body');
   });
 
   it('inside a caller\'s transaction, a seal failure rolls back the caller\'s other writes too', async () => {

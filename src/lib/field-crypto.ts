@@ -4,6 +4,7 @@ import {
   createDecipheriv,
 } from 'node:crypto';
 import { env } from '@/lib/env';
+import { isKid } from '@/lib/key-id';
 
 /**
  * field-crypto — AES-256-GCM **envelope** encryption for C2 PII fields.
@@ -47,13 +48,9 @@ const VERSION_V2 = 'v2';
  * (key ring) adds kids without a v3.
  */
 export const FIELD_KID = 'k0';
-/**
- * Program-Fix 45 P3: the grammar of a key id — `k0`, `k1` … `k999`, no leading
- * zeros, so one kid has exactly one spelling (the AAD binds its bytes). Checked
- * before any key use or AAD build; anything else is an unknown key id.
- */
-const KID_PATTERN = /^k(?:0|[1-9][0-9]{0,2})$/;
-const isKid = (kid: unknown): kid is string => typeof kid === 'string' && KID_PATTERN.test(kid);
+// Program-Fix 45: the kid grammar (k0 … k999) lives in key-id.ts, shared with
+// boot-assert so the two can never disagree. Checked before any key use or AAD
+// build; anything else is an unknown key id.
 const GCM_IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 const DEK_BYTES = 32; // AES-256

@@ -269,3 +269,15 @@ describe('staff-break-glass and the staff ledger (Program-Fix 45 P5)', () => {
     expect((err as Error & { cause?: unknown }).cause).toBeUndefined();
   });
 });
+
+// Program-Fix 45 P4: --restore-seed-password-from-env writes via hashPassword,
+// i.e. a `$pv=p0$` hash, which a pre-P3 build cannot verify. The header must
+// say so, so nobody relies on it as a recovery path on an older build.
+describe('staff-break-glass header (fix 45 P4)', () => {
+  it('warns that the restored seed hash is $pv=p0$ and needs a build at or after fix 45 P3', async () => {
+    const { readFileSync } = await import('node:fs');
+    const header = readFileSync('scripts/staff-break-glass.ts', 'utf8').split('*/')[0];
+    expect(header).toContain('$pv=p0$');
+    expect(header).toMatch(/fix 45 P3/i);
+  });
+});

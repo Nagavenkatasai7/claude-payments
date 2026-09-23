@@ -7,6 +7,8 @@
 // Pure + DI'd (takes the env record) so the matrix is unit-tested without
 // touching process.env.
 
+import { K0, isKid } from './key-id';
+
 /** Vars that must be present AND non-empty for a production boot. */
 export const REQUIRED_PRODUCTION_VARS = [
   'DATABASE_URL', // the ledger
@@ -77,5 +79,42 @@ export function productionBootProblems(env: EnvRecord): string[] {
   if (key !== '' && !isValidMasterKey(key)) {
     problems.push('FIELD_ENCRYPTION_KEY must be 64 hex chars or base64 for exactly 32 bytes');
   }
+  const kidProblem = currentKidProblem(env);
+  if (kidProblem) problems.push(kidProblem);
   return problems;
+}
+
+/**
+ * Program-Fix 45 P4: FIELD_ENCRYPTION_CURRENT_KID, checked ONLY when set
+ * (production leaves it unset ⇒ no check, boot unchanged). It MUST accept
+ * exactly what field-crypto's currentWriteKid accepts — pinned by the
+ * agreement matrix in tests/boot-assert.test.ts:
+ *  - blank / unset / `k0` → fine (k0 is always FIELD_ENCRYPTION_KEY; the ring
+ *    env is not read for it);
+ *  - otherwise the kid must match the shared grammar (key-id.ts) AND
+ *    FIELD_ENCRYPTION_PREVIOUS_KEYS must parse exactly as parseKeyRingEntries
+ *    does (`kid:key` comma list, valid non-k0 kids, no duplicates, each key a
+ *    valid master key) and hold that kid.
+ * Returns a message naming only the env var — never a kid, an entry or a key.
+ */
+export function currentKidProblem(env: EnvRecord): string | null {
+  const kid = (env.FIELD_ENCRYPTION_CURRENT_KID ?? '').trim() || K0;
+  if (kid === K0) return null;
+  if (!isKid(kid)) return 'FIELD_ENCRYPTION_CURRENT_KID is not a valid key id';
+  const held = new Set<string>();
+  for (const entry of (env.FIELD_ENCRYPTION_PREVIOUS_KEYS ?? '').split(',')) {
+    const trimmed = entry.trim();
+    if (trimmed === '') continue;
+    const colon = trimmed.indexOf(':');
+    const entryKid = colon > 0 ? trimmed.slice(0, colon).trim() : '';
+    const key = colon > 0 ? trimmed.slice(colon + 1).trim() : '';
+    if (!isKid(entryKid) || entryKid === K0 || held.has(entryKid) || !isValidMasterKey(key)) {
+      return 'FIELD_ENCRYPTION_CURRENT_KID names a key id the key ring (FIELD_ENCRYPTION_PREVIOUS_KEYS) does not hold';
+    }
+    held.add(entryKid);
+  }
+  if (!held.has(kid)) {
+    return 'FIELD_ENCRYPTION_CURRENT_KID names a key id the key ring (FIELD_ENCRYPTION_PREVIOUS_KEYS) does not hold';
+  }
+  return null;
 }
