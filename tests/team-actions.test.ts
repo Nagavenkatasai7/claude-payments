@@ -48,9 +48,15 @@ vi.mock('@/lib/pwned', async () => {
   const actual = await vi.importActual<typeof import('@/lib/pwned')>('@/lib/pwned');
   return { ...actual, pwnedPasswordStatus: pwnedStatus };
 });
+// Program-Fix 45 P5: `ledgerOn` gives the actions the real Postgres staff ledger.
+let ledgerOn = false;
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
-  return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
+  const { createStaffRepo } = await vi.importActual<typeof import('@/db/repos/staff-repo')>('@/db/repos/staff-repo');
+  return {
+    ...actual,
+    getAuthStore: () => actual.createAuthStore(redis, ledgerOn ? { ledger: () => createStaffRepo(db) } : {}),
+  };
 });
 // Program-Fix 17b: creating/removing a member clears its MFA keys.
 vi.mock('@/lib/staff-mfa-store', async () => {
@@ -111,6 +117,7 @@ beforeEach(async () => {
   authAudited.length = 0;
   pwnedStatus.mockReset();
   pwnedStatus.mockImplementation(async () => 'clean');
+  ledgerOn = false;
   db = await freshDb();
   partnerStore = createPartnerStore(db);
   auditStore = createAuditLogStore(db);
@@ -526,5 +533,32 @@ describe('the seed admin record is guarded like reset (Program-Fix 17a follow-up
     await authStore.saveStaff(staff({ username: 'a3', role: 'agent' }));
     await setStaffStatusAction(form({ username: 'a3', status: 'suspended' }));
     expect((await authStore.getStaff('a3'))?.status).toBe('suspended');
+  });
+});
+
+// Program-Fix 45 P5 (review): agent and support are incomparable, so a row
+// that disagrees suspends the member. The Team actions save the MERGED record
+// back; that must never turn the disagreement into a role change or a grant.
+describe('Team actions over a role disagreement with the staff ledger (Program-Fix 45 P5)', () => {
+  async function disagree() {
+    ledgerOn = true;
+    const { createStaffRepo } = await import('@/db/repos/staff-repo');
+    await authStore.saveStaff(staff({ username: 'a', role: 'agent', permissions: { canCancel: false, canResend: true, canAssign: false } }));
+    await createStaffRepo(db).upsert(staff({ username: 'a', role: 'support' }));
+    return createStaffRepo(db);
+  }
+
+  it('suspend saves the Redis role (agent) as suspended to both stores; no role change', async () => {
+    const repo = await disagree();
+    await setStaffStatusAction(form({ username: 'a', status: 'suspended' }));
+    expect(JSON.parse(redis.dump.get('staff:a')!)).toMatchObject({ role: 'agent', status: 'suspended' });
+    expect(await repo.get('a')).toMatchObject({ role: 'agent', status: 'suspended' });
+  });
+
+  it('an edit keeps the member suspended (the merged status is saved): fail closed until an explicit reactivate', async () => {
+    const repo = await disagree();
+    await updateStaffAction(form({ username: 'a', role: 'agent', canResend: 'on' }));
+    expect(JSON.parse(redis.dump.get('staff:a')!)).toMatchObject({ role: 'agent', status: 'suspended' });
+    expect(await repo.get('a')).toMatchObject({ role: 'agent', status: 'suspended' });
   });
 });

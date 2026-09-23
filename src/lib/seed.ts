@@ -29,7 +29,9 @@ export async function ensureSeedAdmin(
         passwordHash: await hashPassword(creds.password),
         createdAt: new Date().toISOString(),
       };
-      await store.saveStaff(admin);
+      // Program-Fix 45 P5: the seed must always land (owner rule: nothing locks
+      // out the seed admin), so a staff-ledger failure is logged, not thrown.
+      await store.saveStaff(admin, { ledgerBestEffort: true });
     } else {
       // Program-Fix 45 P1 (crypto-14): no staff at all AND no seed variables.
       // Log it for ops and carry on: the login then answers with its ordinary
@@ -67,7 +69,7 @@ export async function ensureSeedAdmin(
         createdAt: new Date().toISOString(),
         partnerId: env.seedPartnerId,
       };
-      await store.saveStaff(seeded);
+      await store.saveStaff(seeded, { ledgerBestEffort: true });
     }
   }
 }
