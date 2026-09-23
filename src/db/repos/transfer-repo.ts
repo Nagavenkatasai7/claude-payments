@@ -131,6 +131,23 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0], opts?.decrypt ?? false) : null;
     },
 
+    /**
+     * Program-Fix 15 PR C: the row-locking read (`SELECT … FOR UPDATE`). Call
+     * inside a transaction. With `partnerId` the read is tenant-scoped (null for
+     * missing OR out-of-scope, 404-never-403). The settlement.instruct handler
+     * and reconcile's re-instruction take it before deciding a transfer is
+     * still payable, so a concurrent sender cancel is either fully committed
+     * (seen) or not started.
+     */
+    async getTransferForUpdate(
+      id: string,
+      opts: { decrypt?: boolean; partnerId?: PartnerId } = {},
+    ): Promise<Transfer | null> {
+      const where = opts.partnerId ? and(eq(transfers.id, id), eq(transfers.partnerId, opts.partnerId)) : eq(transfers.id, id);
+      const rows = await db.select().from(transfers).where(where).limit(1).for('update');
+      return rows[0] ? toDomain(rows[0], opts.decrypt ?? false) : null;
+    },
+
     /** Partner-scoped read: null for missing OR out-of-scope (404-never-403). */
     async getOwnedTransfer(partnerId: PartnerId, id: string): Promise<Transfer | null> {
       const rows = await db

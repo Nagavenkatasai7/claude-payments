@@ -7,7 +7,7 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { formatDestAmount } from '@/lib/payment';
 import { payoutMethodLabel } from '@/lib/payout-format';
-import { isRecallEligible } from '@/lib/refund-policy';
+import { isRecallEligible, refundDisposition } from '@/lib/refund-policy';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { AccountShell, PageHeader } from '../../shell';
 import { money, transferAmount, transferStatusLabel, transferStatusTone } from '../../format';
@@ -16,7 +16,8 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
-import { requestRefundAction } from '../refund-actions';
+import { cancelTransferAction, requestRefundAction } from '../refund-actions';
+import { CANCEL_CARD_BODY, CANCEL_CARD_TITLE, CANCEL_NOTICE, cancelButtonLabel } from '@/lib/legal/cancel-drafts';
 import { requestRecallAction } from '../recall-actions';
 import { getPartnerStore } from '@/lib/partner-store';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
@@ -88,6 +89,9 @@ const STATUS_SUMMARY: Record<string, string> = {
   blocked: 'This transfer could not be completed and you were not charged.',
 };
 
+// The cancel deadline, in the same zone the disclosure card uses (UTC).
+const CANCEL_TIME_FMT = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC', timeZoneName: 'short' });
+
 function fmtWhen(iso?: string): string {
   return iso
     ? new Date(iso).toLocaleString('en-US', {
@@ -124,11 +128,11 @@ export default async function ReceiptPage({
   searchParams,
 }: {
   params: Promise<{ transferId: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; cancel?: string }>;
 }) {
   const customer = await requireCustomer();
   const { transferId } = await params;
-  const { error } = await searchParams;
+  const { error, cancel } = await searchParams;
   const store = getStore();
   const t = await store.getTransfer(transferId);
   if (!t || t.phone !== customer.senderPhone || t.partnerId !== customer.partnerId) notFound();
@@ -172,6 +176,17 @@ export default async function ReceiptPage({
   const mfaOn = Boolean(customer.mfaEnrolledAt);
 
   const statusSummary = STATUS_SUMMARY[t.status] ?? 'In progress.';
+
+  // Program-Fix 15 PR C: the 30-minute sender cancel. paid_at is only the
+  // HINT here (the action's locked service re-checks the charge time by the
+  // database clock); the notice maps a FIXED code to fixed copy.
+  const cancelDisp = refundDisposition(t, Date.now());
+  const cancelUntil =
+    cancelDisp.kind === 'cancellable' ? CANCEL_TIME_FMT.format(new Date(Date.now() + cancelDisp.msLeft)) : null;
+  const cancelNotice =
+    cancel && Object.prototype.hasOwnProperty.call(CANCEL_NOTICE, cancel)
+      ? CANCEL_NOTICE[cancel as keyof typeof CANCEL_NOTICE]
+      : undefined;
 
   // Program-Fix 15 PR B: the Reg E receipt disclosure (null for B2B). The
   // provider of record is the OWNING partner (t.partnerId, ownership-checked
@@ -313,6 +328,38 @@ export default async function ReceiptPage({
         )}
 
         {disclosure && <ReceiptDisclosureCard disclosure={disclosure} />}
+
+        {cancelNotice && (
+          <Alert className="sm:col-span-2">
+            <AlertTitle>{CANCEL_CARD_TITLE}</AlertTitle>
+            <AlertDescription>{cancelNotice}</AlertDescription>
+          </Alert>
+        )}
+
+        {/* Program-Fix 15 PR C: cancel within 30 minutes of payment (consumer). */}
+        {cancelUntil && (
+          <Card className="sm:col-span-2">
+            <CardHeader>
+              <CardTitle>{CANCEL_CARD_TITLE}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {stepUpErrorMsg ? (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertTitle>We couldn&rsquo;t send that request</AlertTitle>
+                  <AlertDescription>{stepUpErrorMsg}</AlertDescription>
+                </Alert>
+              ) : null}
+              <form action={cancelTransferAction} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="max-w-prose text-sm text-muted-foreground">{CANCEL_CARD_BODY}</p>
+                <input type="hidden" name="transferId" value={t.id} />
+                {mfaOn ? <StepUpCodeField id="cancel-code" /> : null}
+                <Button type="submit" variant="destructive" className="shrink-0">
+                  {cancelButtonLabel(cancelUntil)}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Request a refund — only on a paid transfer with no refund in flight. */}
         {canRequestRefund && (

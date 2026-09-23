@@ -49,6 +49,22 @@ export interface SweepResult {
   staleLocks?: number;
 }
 
+/**
+ * Program-Fix 15 PR C: the ONE recovery re-instruction, serialized with a
+ * sender cancel (sender-cancel.ts). A short transaction takes the transfer
+ * `FOR UPDATE` (transfer → outbox, the lock order every writer uses) and
+ * re-checks paid + refund none on the LOCKED row before enqueueing
+ * `reinstruct:<id>`: findStuckPaid's read may predate a cancel or a refund
+ * request that has since committed. True when a new row was created.
+ */
+export async function enqueueReinstructLocked(db: Db, transferId: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const cur = await createTransferRepo(tx).getTransferForUpdate(transferId);
+    if (!cur || cur.status !== 'paid' || (cur.refundStatus ?? 'none') !== 'none') return false;
+    return createOutboxRepo(tx).enqueue('settlement.instruct', { transferId }, { dedupeKey: `reinstruct:${transferId}` });
+  });
+}
+
 export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<SweepResult> {
   const transfers = createTransferRepo(db);
   const outbox = createOutboxRepo(db);
@@ -84,12 +100,7 @@ export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<Sw
       // different key from the original `instruct:` row, which is done/dead by
       // now). The instruct handler itself is idempotent on the partner side —
       // the reference is the transfer id, so their rail dedupes a replay.
-      const fresh = await outbox.enqueue(
-        'settlement.instruct',
-        { transferId: t.id },
-        { dedupeKey: `reinstruct:${t.id}` },
-      );
-      if (fresh) reinstructed++;
+      if (await enqueueReinstructLocked(db, t.id)) reinstructed++;
     }
     // Mock-rail transfers land here too if their delayed settle died — the
     // dead-letter alert already fired for that row; this is the money-state view.

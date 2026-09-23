@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { sql } from 'drizzle-orm';
 import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
@@ -187,6 +187,38 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
     expect(retry.processed).toBe(1);
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(await rowStatus('instruct:wk_t1')).toBe('done');
+  });
+
+  // Program-Fix 15 PR C: the pre-POST payability check is a LOCKING read in a
+  // short transaction (committed before the POST), so a concurrent sender
+  // cancel is either fully committed (seen: no POST) or not started.
+  it('Program-Fix 15 PR C: the payability read takes the transfer FOR UPDATE before the POST', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-lk' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const stop = captureQueries();
+    await drainOnce(deps(), 'w1');
+    const q = stop().map((x) => x.sql.toLowerCase());
+    expect(q.some((x) => x.includes('from "transfers"') && x.includes('for update'))).toBe(true);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    // The instruction still carries the DECRYPTED account.
+    expect(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body)).toContain('123456789012');
+  });
+
+  it('Program-Fix 15 PR C: a reinstruct row an OLD build queued after a sender cancel sends nothing and is done', async () => {
+    await store.saveTransfer({ ...transferFixture(), status: 'cancelled', refundStatus: 'pending' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(await rowStatus('reinstruct:wk_t1')).toBe('done');
+  });
+
+  it('Program-Fix 15 PR C: rail rows a sender cancel marked done are never claimed', async () => {
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    const [rail] = await outbox.lockRailRowsForTransfer('wk_t1');
+    expect(await outbox.markDoneLocked([rail.id], 'sender_cancel')).toBe(1);
+    expect(await outbox.claimBatch(10, 'w1')).toEqual([]);
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it('rail failure → retry with backoff; at MAX_ATTEMPTS → dead + EXACTLY ONE ops alert', async () => {

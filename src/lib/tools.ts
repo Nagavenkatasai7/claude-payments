@@ -27,6 +27,8 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { getDb } from '@/db/client';
 import { refundDisposition } from './refund-policy';
+import { cancelWithinWindow, type SenderCancelResult } from './sender-cancel';
+import { CANCEL_REPLY_HINT } from './legal/cancel-drafts';
 import {
   recipientButtonId,
   someoneNewButtonId,
@@ -1110,6 +1112,10 @@ export interface ToolContext {
   // (getDb()) is created lazily; tests inject one bound to PGlite so the enqueue
   // is asserted against the same engine as the ticket write.
   outboxRepo?: Pick<ReturnType<typeof createOutboxRepo>, 'enqueue'>;
+  // Program-Fix 15 PR C seam: the locked 30-minute sender cancel
+  // (sender-cancel.ts cancelWithinWindow, via 'bot'). Absent ⇒ it runs over the
+  // shared Pool (getDb()); tests inject one bound to PGlite.
+  senderCancel?: (partnerId: PartnerId, transferId: string) => Promise<SenderCancelResult>;
 }
 
 type ToolResult = Record<string, unknown>;
@@ -2603,8 +2609,18 @@ async function resolveRefundTarget(
   // its current state.
   const recent = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, REFUND_LOOKBACK);
   if (recent.length === 0) return { transfer: null };
-  const match = recent.find((t) => refundDisposition(t, now).kind === prefer);
+  // Program-Fix 15 PR C: a transfer inside the 30-minute cancel window is the
+  // best refund target too (cancellable is refundable-or-better).
+  const kinds: string[] = prefer === 'refundable' ? ['refundable', 'cancellable'] : [prefer];
+  const match = recent.find((t) => kinds.includes(refundDisposition(t, now).kind));
   return { transfer: match ?? recent[0] };
+}
+
+/** The locked sender cancel (Program-Fix 15 PR C), through the ctx seam. */
+function runSenderCancel(ctx: ToolContext, transferId: string): Promise<SenderCancelResult> {
+  return ctx.senderCancel
+    ? ctx.senderCancel(ctx.partnerId, transferId)
+    : cancelWithinWindow(getDb(), ctx.partnerId, transferId, { via: 'bot' });
 }
 
 /**
@@ -2618,9 +2634,16 @@ async function resolveRefundTarget(
  * Disposition (refund-policy.ts) is the single source of truth for which state
  * the transfer is in; delivered-within-24h is routed to open_recall_dispute.
  *
+ * Program-Fix 15 PR C: inside 30 minutes of payment (`cancellable`) the
+ * request is a Reg E cancel through the locked sender-cancel service, which
+ * cancels (full refund queued) only while no rail instruction can have gone
+ * out, and otherwise escalates to staff. A held (in_review) transfer inside the
+ * window escalates, never auto-cancels (C4).
+ *
  * Every return shape is customer-safe by construction: only
- * error / error_code+message / requested+transfer_id+reply_hint ever leave this
- * function. No refundStatus tokens, no settlementPartnerId, no compliance detail.
+ * error / error_code+message / requested|cancelled+transfer_id+reply_hint ever
+ * leave this function. No refundStatus tokens, no settlementPartnerId, no
+ * compliance detail.
  */
 async function requestRefundTool(
   args: Record<string, unknown>,
@@ -2659,12 +2682,53 @@ async function requestRefundTool(
         message:
           "No money has been taken for this transfer yet, so there's nothing to refund — simply don't complete the payment, or reply cancel to cancel it.",
       };
-    case 'under_review':
+    case 'under_review': {
+      // Program-Fix 15 PR C (C4): a HELD transfer inside 30 minutes of the
+      // charge is never auto-cancelled — the request escalates to staff (ops
+      // alert + refund requested for the reviewer). The reply is neutral and
+      // promises no refund. Outside the window: the established wording.
+      if (transfer.status === 'in_review') {
+        const stepUp = await webStepUpRefusal(ctx, transfer.id);
+        if (stepUp) return stepUp;
+        const res = await runSenderCancel(ctx, transfer.id);
+        if (res.kind === 'escalated') {
+          return { requested: true, transfer_id: transfer.id, reply_hint: CANCEL_REPLY_HINT.heldRequested };
+        }
+      }
       return {
         error_code: 'under_review',
         message:
           "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
+    }
+    case 'cancellable': {
+      // Program-Fix 15 PR C: inside 30 minutes of payment (12 CFR 1005.34).
+      // The LOCKED service decides (the disposition's paid_at is only a hint):
+      // cancelled when no rail instruction can have gone out, else escalated.
+      // window_passed (e.g. a released hold charged earlier) falls through to
+      // the ordinary refund request below.
+      const stepUp = await webStepUpRefusal(ctx, transfer.id);
+      if (stepUp) return stepUp;
+      const res = await runSenderCancel(ctx, transfer.id);
+      if (res.kind === 'cancelled') {
+        return {
+          cancelled: true,
+          transfer_id: transfer.id,
+          reply_hint: res.refundQueued ? CANCEL_REPLY_HINT.cancelled : CANCEL_REPLY_HINT.cancelledNoRefund,
+        };
+      }
+      if (res.kind === 'escalated') {
+        return { requested: true, transfer_id: transfer.id, reply_hint: CANCEL_REPLY_HINT.requested };
+      }
+      if (res.kind !== 'window_passed') {
+        return {
+          error_code: 'not_cancellable',
+          message:
+            "This transfer can't be changed right now. If you'd like to talk to a person about it, just say so and I'll open a case.",
+        };
+      }
+      break; // window_passed → the ordinary ops-reviewed refund request
+    }
     case 'already_requested':
       return {
         error_code: 'already_requested',
@@ -2793,6 +2857,7 @@ async function openRecallDisputeTool(
     // explain the state, never opening a case we can't justify.
     switch (disp.kind) {
       case 'refundable':
+      case 'cancellable':
         return {
           error_code: 'use_request_refund',
           transfer_id: transfer.id,
