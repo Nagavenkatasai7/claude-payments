@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderSealedText } from '@/lib/sealed-text';
-import { encryptField, decryptField, EnvKeyProvider } from '@/lib/field-crypto';
+import { encryptField, decryptField, EnvKeyProvider, sealFieldV2, defaultProvider } from '@/lib/field-crypto';
+import { ctx, outboxSealedCtx } from '@/lib/crypto-context';
 
 // sealed-text — the ONE way an outbox payload may carry a capability (fix 11 /
 // F66): the value is sealed with field-crypto at enqueue and opened at SEND time.
@@ -38,5 +39,27 @@ describe('renderSealedText', () => {
   it('defaults to the env key provider (the worker calls it without an opener)', () => {
     const sealed = { apply_link: encryptField('https://smartremit.test/partners/apply/def') };
     expect(renderSealedText('{{apply_link}}', sealed)).toBe('https://smartremit.test/partners/apply/def');
+  });
+
+  // Program-Fix 46A: the default opener binds each placeholder to its purpose
+  // context (outboxSealedCtx — the same mapping the sealer uses).
+  it('a v2 apply_link sealed under its purpose opens by default', () => {
+    const blob = sealFieldV2('https://smartremit.test/partners/apply/v2', defaultProvider(), outboxSealedCtx('apply_link'));
+    expect(renderSealedText('{{apply_link}}', { apply_link: blob })).toBe('https://smartremit.test/partners/apply/v2');
+  });
+
+  it('a v2 blob under a different context throws', () => {
+    const blob = sealFieldV2('secret-from-a-column', defaultProvider(), ctx.integration('acme', 'wa_app_secret_enc'));
+    expect(() => renderSealedText('{{apply_link}}', { apply_link: blob })).toThrow();
+  });
+
+  it('the injected opener receives the placeholder key (old 1-arg openers still work)', () => {
+    const seen: string[] = [];
+    const text = renderSealedText('{{apply_link}}', { apply_link: 'blob' }, (b, key) => {
+      seen.push(`${key}:${b}`);
+      return 'x';
+    });
+    expect(text).toBe('x');
+    expect(seen).toEqual(['apply_link:blob']);
   });
 });

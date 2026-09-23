@@ -3,6 +3,7 @@ import { waitlistSignups } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { blindIndex, deriveBlindIndexKey } from '@/lib/blind-index';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import { initialOf, maskEmail, type WaitlistCsvRow, type WaitlistSignupInput } from '@/lib/waitlist';
 import { last4 } from './mappers';
 
@@ -72,10 +73,10 @@ export function createWaitlistRepo(
         .insert(waitlistSignups)
         .values({
           id: s.id,
-          fullNameEnc: encryptField(s.fullName, provider),
-          emailEnc: encryptField(s.email, provider),
-          phoneEnc: encryptField(s.phone, provider),
-          locationEnc: encryptField(s.location, provider),
+          fullNameEnc: encryptField(s.fullName, provider, ctx.waitlist(s.id, 'full_name_enc')),
+          emailEnc: encryptField(s.email, provider, ctx.waitlist(s.id, 'email_enc')),
+          phoneEnc: encryptField(s.phone, provider, ctx.waitlist(s.id, 'phone_enc')),
+          locationEnc: encryptField(s.location, provider, ctx.waitlist(s.id, 'location_enc')),
           emailBidx: blindIndex('email', s.email, key),
           phoneBidx: blindIndex('phone', s.phone, key),
           nameInitial: initialOf(s.fullName),
@@ -124,10 +125,10 @@ export function createWaitlistRepo(
       const rows = await db.select().from(waitlistSignups).orderBy(desc(waitlistSignups.createdAt), desc(waitlistSignups.id));
       return rows.map((row) => ({
         ...common(row),
-        fullName: decryptField(row.fullNameEnc, provider),
-        email: decryptField(row.emailEnc, provider),
-        phone: decryptField(row.phoneEnc, provider),
-        location: decryptField(row.locationEnc, provider),
+        fullName: decryptField(row.fullNameEnc, provider, ctx.waitlist(row.id, 'full_name_enc')),
+        email: decryptField(row.emailEnc, provider, ctx.waitlist(row.id, 'email_enc')),
+        phone: decryptField(row.phoneEnc, provider, ctx.waitlist(row.id, 'phone_enc')),
+        location: decryptField(row.locationEnc, provider, ctx.waitlist(row.id, 'location_enc')),
       }));
     },
   };

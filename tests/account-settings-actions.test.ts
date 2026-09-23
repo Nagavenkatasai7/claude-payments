@@ -4,7 +4,8 @@ import { freshDb } from './helpers-db';
 import { createCustomerAuthStore } from '@/lib/customer-auth-store';
 import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
-import { EnvKeyProvider, decryptField } from '@/lib/field-crypto';
+import { EnvKeyProvider, decryptField, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { customerEmailCtx } from '@/lib/crypto-context';
 
 /**
  * Settings server-action tests (customer dashboard B1). Focus:
@@ -120,6 +121,20 @@ describe('updateEmailAction', () => {
     expect(decryptField(customer!.email!, crypto)).toBe('new@example.com');
     // The password is untouched.
     expect(await authStore.verifyCustomerPassword(NORM, PASSWORD)).toBeTruthy();
+  });
+
+  it('seals the new email for the row it is saved into (fix 46A, v2 forced in-test)', async () => {
+    __setFieldCryptoWriteV2ForTests(true);
+    try {
+      await expect(updateEmailAction(form({ email: 'v2@example.com' }))).rejects.toThrow(
+        'REDIRECT:/account/settings?ok=email',
+      );
+    } finally {
+      __setFieldCryptoWriteV2ForTests(false);
+    }
+    const customer = (await customerStore.getCustomer('default', NORM))!;
+    expect(customer.email!.startsWith('v2.k0.')).toBe(true);
+    expect(decryptField(customer.email!, crypto, customerEmailCtx(customer))).toBe('v2@example.com');
   });
 });
 

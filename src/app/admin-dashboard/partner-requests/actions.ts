@@ -11,6 +11,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { emailConfigured } from '@/lib/email';
 import { env } from '@/lib/env';
 import { encryptField } from '@/lib/field-crypto';
+import { outboxSealedCtx } from '@/lib/crypto-context';
 import { pokeWorker } from '@/lib/outbox';
 import { issueApplicationToken } from '@/lib/partner-application-token';
 import { buildInviteEmail, inviteResendDedupeKey } from '@/lib/partner-invite-email';
@@ -67,7 +68,11 @@ export async function resendApplicationInviteAction(formData: FormData): Promise
     const { token, hash, expiresAt } = issueApplicationToken();
     await createPartnerRequestRepo(tx).setApplicationToken(id, hash, expiresAt);
     // The link's one durable copy is sealed (fix 11); the worker opens it at send time.
-    const sealedApplyLink = encryptField(`${env.appBaseUrl}/partners/apply/${token}`);
+    const sealedApplyLink = encryptField(
+      `${env.appBaseUrl}/partners/apply/${token}`,
+      undefined,
+      outboxSealedCtx('apply_link'), // the same mapping sealed-text opens with (fix 46A)
+    );
     const invite = buildInviteEmail();
     const created = await createOutboxRepo(tx).enqueue(
       'email.send',

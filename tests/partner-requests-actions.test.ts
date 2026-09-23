@@ -4,7 +4,9 @@ import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { decryptField } from '@/lib/field-crypto';
+import { decryptField, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { outboxSealedCtx } from '@/lib/crypto-context';
+import { renderSealedText } from '@/lib/sealed-text';
 import { hashApplicationToken } from '@/lib/partner-application-token';
 import { inviteResendDedupeKey, buildInviteEmail } from '@/lib/partner-invite-email';
 import type { Staff } from '@/lib/types';
@@ -106,7 +108,7 @@ async function auditCount(): Promise<number> {
 
 /** The raw token inside a row's sealed link (decrypted the way the worker does). */
 function tokenInRow(row: OutRow): string {
-  const link = decryptField(row.payload.sealed!.apply_link);
+  const link = decryptField(row.payload.sealed!.apply_link, undefined, outboxSealedCtx('apply_link'));
   return link.slice(link.lastIndexOf('/') + 1);
 }
 
@@ -211,6 +213,22 @@ describe('resendApplicationInviteAction', { retry: 0 }, () => {
     const newest = rows[rows.length - 1];
     expect(await storedHash()).toBe(hashApplicationToken(tokenInRow(newest)));
     expect(await auditCount()).toBe(2);
+  });
+
+  it('fix 46A: the resent link is sealed under the apply_link purpose (v2 forced in-test) and opens through the default opener', async () => {
+    configureSmtp();
+    __setFieldCryptoWriteV2ForTests(true);
+    try {
+      expect(await resend()).toBe(`/admin-dashboard/partner-requests/${REQ}?invite=resent`);
+    } finally {
+      __setFieldCryptoWriteV2ForTests(false);
+    }
+    const [row] = await resendRows();
+    const blob = row.payload.sealed!.apply_link;
+    expect(blob.startsWith('v2.k0.')).toBe(true);
+    const rendered = renderSealedText('{{apply_link}}', row.payload.sealed);
+    expect(rendered).toMatch(/\/partners\/apply\/[0-9a-f]{64}$/);
+    expect(await storedHash()).toBe(hashApplicationToken(tokenInRow(row)));
   });
 
   it('a dedupe collision throws and ROLLS BACK: hash unchanged, no audit row', async () => {

@@ -14,6 +14,7 @@ import {
   RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
 import { signRailHeaders } from '@/lib/providers/rail-signature';
+import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { railSecrets } from '@/lib/partner-integrations';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
@@ -476,9 +477,14 @@ async function handle(
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
       if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
       assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
+      // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
+      // key, so the signature below covers it. Built after the fail-closed URL
+      // check; loadComplianceBlock never throws (fail open, originator null).
+      const compliance = await loadComplianceBlock(deps.db, transfer);
       const rawBody = JSON.stringify({
         ...buildSettlementInstruction(transfer),
         partner_id: railPartnerId,
+        ...(compliance ? { compliance } : {}),
       });
       const res = await deps.fetchFn(settlementUrl, {
         method: 'POST',
