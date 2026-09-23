@@ -126,7 +126,7 @@ describe('POST /api/pay/[transferId] — per-transaction OTP', () => {
 // generic {ok:true,sent:true} (the page cannot tell a cap from a send), and no
 // code is delivered. A normal single request still sends (pinned above).
 describe('POST /api/pay/[transferId] — request_otp at the lifetime issue cap', { retry: 0 }, () => {
-  it('the 11th request (past the cooldown) answers exactly like a send and delivers nothing', async () => {
+  it('the 11th request (past the cooldown) answers 429 locked and delivers nothing', async () => {
     let nowMs = Date.now();
     txOtp = createTransactionOtpStore(fakeRedis(), { now: () => nowMs, randomInt: () => 654321 });
     for (let i = 0; i < 10; i++) {
@@ -138,8 +138,9 @@ describe('POST /api/pay/[transferId] — request_otp at the lifetime issue cap',
     expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
     nowMs += 31_000;
     const capped = await POST(req({ action: 'request_otp' }), ctx);
-    expect(capped.status).toBe(200);
-    expect(await capped.json()).toEqual({ ok: true, sent: true });
+    // Program-Fix 25 PR B (amendment 6): locked is the ONE refusal that answers 429.
+    expect(capped.status).toBe(429);
+    expect(await capped.json()).toEqual({ ok: false, reason: 'locked' });
     expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
     expect(await status()).toBe('awaiting_payment');
   });
@@ -164,5 +165,43 @@ describe('POST /api/pay/[transferId] — request_otp uses the pay budget of the 
     const issue = vi.spyOn(txOtp, 'issue');
     await POST(req({ action: 'request_otp' }), ctx);
     expect(issue).toHaveBeenCalledWith(TID, PHONE, { kind: 'pay', partnerId: 'default' });
+  });
+});
+
+// Program-Fix 25 PR B (§3.6): honest sends on the money-gate OTP. A failed send
+// answers 502 otp_send_failed and releases the cooldown so Resend really sends;
+// a cooldown still answers 200 sent:true (an earlier code was genuinely sent).
+describe('POST /api/pay/[transferId] — request_otp send honesty (Program-Fix 25 PR B)', { retry: 0 }, () => {
+  it('a send that throws → 502 {ok:false, reason:"otp_send_failed"}, never charges', async () => {
+    sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(await status()).toBe('awaiting_payment');
+  });
+
+  it('after a failed send, an immediate second request_otp really sends (cooldown released)', async () => {
+    sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
+    await POST(req({ action: 'request_otp' }), ctx);
+    const again = await POST(req({ action: 'request_otp' }), ctx);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(2);
+  });
+
+  it('a cooldown (code sent < 30 s ago) still answers 200 {ok:true, sent:true} without a second send', async () => {
+    await POST(req({ action: 'request_otp' }), ctx);
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(1);
+  });
+
+  it('a releaseCooldown error still answers the 502 (never a 500)', async () => {
+    sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
+    vi.spyOn(txOtp, 'releaseCooldown').mockRejectedValueOnce(new Error('redis down'));
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
   });
 });

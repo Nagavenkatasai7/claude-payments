@@ -302,3 +302,23 @@ describe('getTransactionOtpStore — wires the fail-closed ops signal (fix 45)',
     expect(raise).toHaveBeenCalledWith('txotp-issue', 'fail-closed');
   });
 });
+
+// Program-Fix 25 PR B (§3.6 cooldown trap): a code whose SEND failed never
+// reached the customer, so a Resend must really send instead of landing in the
+// 30-s cooldown. releaseCooldown deletes ONLY the cooldown marker.
+describe('transaction-otp releaseCooldown (Program-Fix 25 PR B)', () => {
+  it('after a release, an immediate re-issue sends a fresh code', async () => {
+    expect((await store.issue(TX, PHONE)).ok).toBe(true);
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'cooldown' });
+    await store.releaseCooldown(TX);
+    expect(redis.dump.has(cdKeyFor(TX))).toBe(false);
+    expect((await store.issue(TX, PHONE)).ok).toBe(true);
+  });
+
+  it('keeps every issue/verify budget (only the cooldown marker goes)', async () => {
+    await store.issue(TX, PHONE);
+    const before = [...redis.dump.keys()].filter((k) => k !== cdKeyFor(TX)).sort();
+    await store.releaseCooldown(TX);
+    expect([...redis.dump.keys()].sort()).toEqual(before);
+  });
+});

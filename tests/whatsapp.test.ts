@@ -497,8 +497,57 @@ describe('sendTemplateOrText', () => {
         },
         'fallback body',
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ ok: false, reason: 'send_failed' });
     expect(error).toHaveBeenCalled();
+  });
+
+  // Program-Fix 25 PR B (§3.4 part 2): same send order, but the outcome is RETURNED.
+  it('returns {ok:true, via:"template"} when the template thunk resolves', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    await expect(sendTemplateOrText('919876543210', async () => {}, 'fb')).resolves.toEqual({ ok: true, via: 'template' });
+  });
+
+  it('returns {ok:true, via:"text"} when the template fails and the fallback text lands', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      sendTemplateOrText('919876543210', async () => { throw new Error('no template'); }, 'fb'),
+    ).resolves.toEqual({ ok: true, via: 'text' });
+  });
+
+  it('returns ok:false carrying the FALLBACK Graph code when both fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 400, text: async () => '{"error":{"message":"(#131030) x","code":131030}}' })),
+    );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const out = await sendTemplateOrText('919876543210', async () => { throw new Error('no template'); }, 'fb');
+    expect(out).toMatchObject({ ok: false, code: 131030, reason: 'send_failed' });
+  });
+
+  it('forwards a SendOutcome returned by the thunk (opaque-thunk rule: sendVerificationStatus)', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const forwarded = { ok: false as const, code: 131047, reason: 'send_failed' as const };
+    await expect(sendTemplateOrText('919876543210', async () => forwarded, 'fb')).resolves.toBe(forwarded);
+    expect(fetchMock).not.toHaveBeenCalled(); // no extra fallback: the thunk already handled its own
+  });
+});
+
+describe('sendVerificationStatus returns a SendOutcome (Program-Fix 25 PR B)', () => {
+  it('free-form path: ok → {ok:true, via:"text"}; failure → ok:false with the code (never throws)', async () => {
+    const saved = process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE;
+    delete process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE;
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, text: async () => '' })));
+    await expect(sendVerificationStatus('15551234567', 'verified', 'Asha')).resolves.toEqual({ ok: true, via: 'text' });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 400, text: async () => '{"error":{"message":"(#131047) x","code":131047}}' })),
+    );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(sendVerificationStatus('15551234567', 'verified', 'Asha')).resolves.toMatchObject({ ok: false, code: 131047 });
+    if (saved !== undefined) process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE = saved;
   });
 });
 
@@ -848,7 +897,7 @@ describe('sendVerificationStatus free-form failure log is scrubbed (Program-Fix 
       vi.fn(async () => ({ ok: false, status: 400, text: async (): Promise<string> => 'outside window for 15551234567' })),
     );
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    await expect(sendVerificationStatus('15551234567', 'verified', 'Asha')).resolves.toBeUndefined();
+    await expect(sendVerificationStatus('15551234567', 'verified', 'Asha')).resolves.toMatchObject({ ok: false });
     if (saved !== undefined) process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE = saved;
     expect(warn).toHaveBeenCalled();
     const text = warn.mock.calls.flat().map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join('\n');

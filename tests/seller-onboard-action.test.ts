@@ -242,3 +242,23 @@ describe('requestSellerOtpAction — issue cap (fix 45)', { retry: 0 }, () => {
     expect(issue).toHaveBeenCalledWith(id, PHONE, { kind: 'seller', partnerId: 'default' });
   });
 });
+
+// Program-Fix 25 PR B (§3.6): a failed send is reported (reason otp_send_failed)
+// and releases the cooldown so the seller's Resend really sends. A cooldown is
+// unchanged: the bare { ok: false }.
+describe('requestSellerOtpAction — send honesty (Program-Fix 25 PR B)', { retry: 0 }, () => {
+  it('a send that throws → { ok: false, reason: "otp_send_failed" }; a retry sends again at once', async () => {
+    const id = await seedPendingSeller();
+    sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(2);
+  });
+
+  it('a cooldown stays the bare { ok: false }', async () => {
+    const id = await seedPendingSeller();
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(1);
+  });
+});

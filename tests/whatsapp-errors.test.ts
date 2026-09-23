@@ -4,6 +4,9 @@ import {
   classifyGraphCode,
   WhatsAppSendError,
   isInServiceWindow,
+  permanentCodeInError,
+  sendOutcomeFromError,
+  PERMANENT_GRAPH_CODES,
 } from '@/lib/whatsapp-errors';
 
 // Program-Fix 25 PR A: the pure Graph error classifier. Meta: "Build your app's
@@ -98,5 +101,46 @@ describe('isInServiceWindow (reads the existing lastmsg:{partner}:{phone} key)',
     };
     await isInServiceWindow(store, 'acme', '15550002222');
     expect(seen).toEqual(['acme:15550002222']);
+  });
+});
+
+// Program-Fix 25 PR B (b): ONE permanent-code list. ops-diagnosis derives its
+// Retry-disable from this classifier instead of keeping its own copy.
+describe('131031 (account restricted / locked) is permanent — PR B', () => {
+  it('classifies 131031 as permanent (Meta: resolved through Policy Enforcement, not a retry)', () => {
+    expect(classifyGraphCode(131031)).toBe('permanent');
+    expect(PERMANENT_GRAPH_CODES).toEqual(expect.arrayContaining([131030, 131031, 131026, 132000, 132001, 133010]));
+    expect(PERMANENT_GRAPH_CODES).not.toContain(131047); // window: a retry after the customer writes back can work
+  });
+});
+
+describe('permanentCodeInError — reads a stored last_error / message string', () => {
+  it('finds the (#code) marker, even in a truncated Graph body', () => {
+    expect(
+      permanentCodeInError('WhatsApp send failed (400): {"error":{"message":"(#131030) Recipient phone number not in allowed list"'),
+    ).toBe(131030);
+    expect(permanentCodeInError('Graph error (#131031) account restricted')).toBe(131031);
+  });
+  it('finds a JSON "code": field when there is no (#code) marker', () => {
+    expect(permanentCodeInError('WhatsApp template send failed (404): {"error":{"code":132001}}')).toBe(132001);
+  });
+  it('a retryable / window / absent code → undefined', () => {
+    expect(permanentCodeInError('WhatsApp send failed (400): (#131056) rate limited')).toBeUndefined();
+    expect(permanentCodeInError('WhatsApp send failed (400): {"error":{"code":131047}}')).toBeUndefined();
+    expect(permanentCodeInError('Settlement instruction rejected (503)')).toBeUndefined();
+    expect(permanentCodeInError('')).toBeUndefined();
+    expect(permanentCodeInError(null)).toBeUndefined();
+    expect(permanentCodeInError(undefined)).toBeUndefined();
+  });
+});
+
+describe('sendOutcomeFromError — PR B', () => {
+  it('a WhatsAppSendError → ok:false carrying its Graph code', () => {
+    const err = WhatsAppSendError.fromResponse('WhatsApp send failed', 400, graphBody(131030));
+    expect(sendOutcomeFromError(err)).toEqual({ ok: false, code: 131030, reason: 'send_failed', error: err });
+  });
+  it('a plain Error → ok:false with no code', () => {
+    const err = new Error('boom');
+    expect(sendOutcomeFromError(err)).toEqual({ ok: false, reason: 'send_failed', error: err });
   });
 });
