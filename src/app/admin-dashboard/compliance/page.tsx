@@ -6,6 +6,9 @@ import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { reviewAmlAlertAction } from './actions';
 import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
@@ -20,6 +23,7 @@ import { ReviewCopilot } from './review-copilot';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
+import Link from 'next/link';
 import { Input } from '@/components/ui/input';
 import { CustomerLink } from '../customer-link';
 import type { Transfer } from '@/lib/types';
@@ -48,6 +52,23 @@ const CORRIDOR_COLUMNS: ExpandableColumn[] = [
   { label: 'Velocity / day' },
   { label: 'Watchlist' },
 ];
+
+const AML_COLUMNS: ExpandableColumn[] = [
+  { label: 'Rule', primary: true },
+  { label: 'Transfer', primary: true },
+  { label: 'Sender' },
+  { label: 'Raised' },
+  { label: 'Review' },
+];
+
+// Program-Fix 43: staff-facing names for the behavioural rules (aml-rules.ts).
+// Staff only — rule names never reach the customer, the bot or the partner API.
+const AML_RULE_LABEL: Record<string, string> = {
+  structuring: 'Possible structuring',
+  first_transfer: 'Large first transfer',
+  new_beneficiary: 'Large send to a new beneficiary',
+  cluster: 'Many senders → one beneficiary',
+};
 
 const VELOCITY_COLUMNS: ExpandableColumn[] = [
   { label: 'Phone', primary: true },
@@ -99,13 +120,25 @@ export default async function CompliancePage() {
   // whole ledger and filtering in JS per render.
   const { inReview, flagged, blocked, topVelocity: topVel } = await scoped.complianceViews();
 
+  // Program-Fix 43: open behavioural AML alerts (an aml.alert with no
+  // aml.reviewed), pinned to the staff member's tenant at the WHERE; the
+  // transfers they name are loaded masked and tenant-pinned too.
+  const tenant = scoped.scope.kind === 'partner' ? scoped.scope.partnerId : undefined;
+  const amlAlerts = await createAuditRepo(getDb()).listOpenAmlAlerts(tenant ?? null, 100);
+  const amlTransfers = new Map(
+    (await createTransferRepo(getDb()).listByIdsScoped(
+      [...new Set(amlAlerts.map((a) => a.subjectId).filter((id): id is string => Boolean(id)))],
+      tenant,
+    )).map((t) => [t.id, t]),
+  );
+
   // Resolve decrypted sender names for every transfer shown on the page in ONE
   // batched query, so each Sender cell can show the KYC name (linked to the
   // profile) instead of a bare phone — phones with no captured name fall back to
   // the phone inside SenderCell.
   const senderNames = await resolveSenderNames(
     getDb(),
-    [...inReview, ...flagged, ...blocked],
+    [...inReview, ...flagged, ...blocked, ...amlTransfers.values()],
   );
 
   const partners = await scoped.listPartners();
@@ -241,6 +274,48 @@ export default async function CompliancePage() {
                 label: t.recipientName,
                 cells: transferCells(t, senderNames),
               }))}
+            />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Behavioural alerts</CardTitle>
+            <CardDescription>
+              {amlAlerts.length} open {amlAlerts.length === 1 ? 'alert' : 'alerts'} — review items only.
+              These never hold a transfer and are never shown to the customer.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={AML_COLUMNS}
+              empty={<>No open behavioural alerts.</>}
+              rows={amlAlerts.map((a) => {
+                const t = a.subjectId ? amlTransfers.get(a.subjectId) : undefined;
+                const label = AML_RULE_LABEL[String(a.meta.rule)] ?? 'Behavioural alert';
+                return {
+                  key: String(a.id),
+                  label,
+                  cells: [
+                    <span key="rule" className="font-semibold">{label}</span>,
+                    a.subjectId ? (
+                      <Link key="transfer" href={`/admin-dashboard/transactions/${a.subjectId}`} className="font-mono text-xs hover:underline">
+                        {a.subjectId}
+                      </Link>
+                    ) : '—',
+                    t ? (
+                      <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />
+                    ) : '—',
+                    new Date(a.at).toLocaleString(),
+                    <form key="review" action={reviewAmlAlertAction} className="flex flex-wrap items-center gap-1">
+                      <input type="hidden" name="alertId" value={a.id} />
+                      <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
+                      <Button type="submit" size="sm" variant="outline" name="disposition" value="no_action">No action</Button>
+                      <Button type="submit" size="sm" name="disposition" value="escalated">Escalate</Button>
+                    </form>,
+                  ],
+                };
+              })}
             />
           </CardContent>
         </Card>

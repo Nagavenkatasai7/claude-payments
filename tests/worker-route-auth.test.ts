@@ -24,6 +24,23 @@ vi.mock('@/lib/worker-cadence', async (orig) => {
   return { ...real, cadenceRedis: () => box.redis };
 });
 
+// Program-Fix 43: the AML sweep's own Upstash client → an in-memory stand-in.
+const amlBox = vi.hoisted(() => ({ throwOnce: false }));
+vi.mock('@/lib/aml-sweep', async (orig) => {
+  const real = await orig<typeof import('@/lib/aml-sweep')>();
+  const { fakeAmlRedis } = await import('./helpers-aml-redis');
+  return {
+    ...real,
+    amlRedis: () => {
+      if (amlBox.throwOnce) {
+        amlBox.throwOnce = false;
+        throw new Error('aml redis construction failed');
+      }
+      return fakeAmlRedis();
+    },
+  };
+});
+
 import { GET, POST } from '@/app/api/worker/route';
 
 function req(method: 'GET' | 'POST', headers: Record<string, string> = {}): NextRequest {
@@ -96,5 +113,31 @@ describe('/api/worker — stuck-paid escalation (Program-Fix 32)', () => {
     expect(await res.json()).toMatchObject({ ok: true, escalated: 1 });
     const r = await db.execute(sql`SELECT dedupe_key FROM outbox WHERE dedupe_key = ${`recon:${id}:1h`}`);
     expect((r as unknown as { rows: unknown[] }).rows).toHaveLength(1);
+  });
+});
+
+// Program-Fix 43: the worker runs the behavioural AML sweep beside the other
+// sweeps (alerts only) and a sweep failure never blocks the drain.
+describe('/api/worker — AML sweep wiring (Program-Fix 43)', () => {
+  it('a poke runs the sweep: a first-ever $600 send older than 2 minutes raises its alert', async () => {
+    const { sql } = await import('drizzle-orm');
+    const { seedLedgerSpend } = await import('./helpers-db');
+    const id = await seedLedgerSpend(db, {
+      partnerId: 'default', phone: '15550003333', amountUsd: 600, createdAt: new Date(Date.now() - 10 * 60_000),
+    });
+    const res = await POST(req('POST', { authorization: `Bearer ${SECRET}` }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; aml: { scanned: number; alerts: number } };
+    expect(body.ok).toBe(true);
+    expect(body.aml).toMatchObject({ scanned: 1, alerts: 1 });
+    const r = await db.execute(sql`SELECT kind FROM outbox WHERE dedupe_key = ${`aml:first_transfer:${id}`}`);
+    expect((r as unknown as { rows: unknown[] }).rows).toHaveLength(1);
+  });
+
+  it('a throwing sweep is swallowed: the drain still answers 200 with aml null', async () => {
+    amlBox.throwOnce = true;
+    const res = await POST(req('POST', { authorization: `Bearer ${SECRET}` }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, aml: null });
   });
 });
