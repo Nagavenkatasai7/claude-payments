@@ -4,7 +4,7 @@ import { createQuote } from '@/lib/partner-api-service';
 
 // POST /api/partner/v1/quote — FX + fee quote (no persistence).
 export async function POST(req: NextRequest) {
-  const g = await guardPartner(req);
+  const g = await guardPartner(req, 'quote');
   if (!g.ok) return g.response;
   return svcResponse(await createQuote(g.ctx.deps, g.ctx.partner, await readJson(req)));
 }

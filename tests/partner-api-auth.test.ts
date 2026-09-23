@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { authenticatePartner } from '@/lib/partner-api-auth';
 import { createPartnerApiKeyStore } from '@/lib/partner-api-key';
+import { ALL_SCOPES } from '@/lib/partner-api-scopes';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 
@@ -42,7 +43,7 @@ describe('authenticatePartner', () => {
     const store = keyStore(db);
     const issued = await store.issue('acme');
     const r = await authenticatePartner(reqWith({ authorization: `Bearer ${issued.plaintext}` }), store);
-    expect(r).toEqual({ ok: true, partnerId: 'acme', keyId: issued.keyId });
+    expect(r).toEqual({ ok: true, partnerId: 'acme', keyId: issued.keyId, mode: 'live', scopes: [...ALL_SCOPES] });
   });
 
   it('401 after the key is revoked', async () => {
