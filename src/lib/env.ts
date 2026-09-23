@@ -192,6 +192,21 @@ export const env = {
     // leaves zero v1 rows (owner checklist, fix 46 §7). Read on every call.
     return process.env.FIELD_CRYPTO_REJECT_V1 === 'true';
   },
+  get fieldEncryptionPreviousKeys(): string {
+    // Program-Fix 45 P3 (key-ring READER): optional `<kid>:<key>` comma list of
+    // extra field-crypto keys (k1 …; k0 is always FIELD_ENCRYPTION_KEY). Read
+    // only when a v2 blob carries a non-k0 kid, so a malformed value never
+    // breaks a k0/v1 read or any write. Unset in production (no rotation).
+    // NEVER boot-required (the assert must mirror the accepting code).
+    return process.env.FIELD_ENCRYPTION_PREVIOUS_KEYS ?? '';
+  },
+  get fieldEncryptionCurrentKid(): string {
+    // Program-Fix 45: the kid NEW field-crypto writes will use, default 'k0'.
+    // INERT in P3 (the reader): no code path reads it yet and every write stays
+    // k0 (pinned by tests/key-ring-reader.test.ts). The P4 writer consumes it.
+    // Optional, unset in production, never boot-required.
+    return process.env.FIELD_ENCRYPTION_CURRENT_KID || 'k0';
+  },
   get sanctionsList(): string {
     // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER
     // screening runs (it always runs). '' / 'mock' ⇒ the mock watchlist;
@@ -213,6 +228,13 @@ export const env = {
     // HMAC pepper applied before Argon2id. '' ⇒ no pepper (keeps existing staff
     // scrypt hashes verifying). Kept out of Redis; lives only in this secret.
     return process.env.PASSWORD_PEPPER ?? '';
+  },
+  get passwordPepperPrevious(): string {
+    // Program-Fix 45 P3 (pepper-id READER): optional `<id>:<pepper>` comma list
+    // for `$pv=<id>$` hashes whose id is not p0 (p0 is always PASSWORD_PEPPER,
+    // which is set-once and never rotated). Unset in production. NEVER
+    // boot-required. Not used for API-key hashes (api-key-repo.ts).
+    return process.env.PASSWORD_PEPPER_PREVIOUS ?? '';
   },
   get otpDevMode(): boolean {
     // 'true' ⇒ sendOtpCode logs the code + no-ops the live send, so dev/staging

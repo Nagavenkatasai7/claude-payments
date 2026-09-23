@@ -19,12 +19,65 @@ const ARGON2_PARAMS = { memorySize: 19456, iterations: 2, parallelism: 1 } as co
  * to verify (the legacy-scrypt fallthrough does NOT cover Argon2id), locking out
  * those accounts. (Safe today: no customer accounts exist yet.) A future
  * versioned-pepper scheme — store the pepper id alongside the hash — is the
- * planned upgrade if rotation is ever required.
+ * planned upgrade if rotation is ever required. Program-Fix 45 P3 ships its
+ * READER (`$pv=<id>$`, below); hashPassword still writes the bare form.
  */
-function applyPepper(plain: string): string {
-  const pepper = env.passwordPepper;
+function applyPepper(plain: string, pepper: string = env.passwordPepper): string {
   if (!pepper) return plain;
   return createHmac('sha256', pepper).update(plain).digest('hex');
+}
+
+// ── Program-Fix 45 P3: the pepper-id READER ─────────────────────────────────
+// A stored hash may carry the id of the pepper it was made under:
+//   `$pv=<id>$<argon2 PHC>`   e.g. `$pv=p0$$argon2id$v=19$m=…`
+// p0 is always PASSWORD_PEPPER (set-once, never rotated); other ids come only
+// from the optional PASSWORD_PEPPER_PREVIOUS (`<id>:<pepper>` comma list,
+// unset in production). P3 only READS this form: hashPassword still writes the
+// bare `$argon2id$…` string (an implicit p0). The P4 writer emits `$pv=p0$`.
+// API-key hashes (api-key-repo.ts) are deliberately NOT versioned.
+
+/** The id of PASSWORD_PEPPER. Pinned by tests/password-pepper-id.test.ts. */
+export const PEPPER_ID_CURRENT = 'p0';
+const PEPPER_ID_PATTERN = /^p(?:0|[1-9][0-9]{0,2})$/;
+const PV_PREFIX = /^\$pv=([^$]*)\$/;
+
+/**
+ * Split `$pv=<id>$<phc>`. Returns null for a stored value with no `$pv=`
+ * prefix; `{ id: null }` for a prefix that is malformed or wraps anything but
+ * an Argon2 PHC string — never the unpeppered legacy scrypt form, which would
+ * be a downgrade.
+ */
+function splitPepperId(stored: string): { id: string | null; phc: string } | null {
+  if (!stored.startsWith('$pv=')) return null;
+  const m = PV_PREFIX.exec(stored);
+  if (!m || !PEPPER_ID_PATTERN.test(m[1])) return { id: null, phc: '' };
+  const phc = stored.slice(m[0].length);
+  if (!phc.startsWith('$argon2')) return { id: null, phc: '' };
+  return { id: m[1], phc };
+}
+
+/**
+ * The pepper for an id: p0 → PASSWORD_PEPPER; any other id → its entry in
+ * PASSWORD_PEPPER_PREVIOUS (parsed per call into a Map; a `p0` entry is
+ * ignored so it can never shadow PASSWORD_PEPPER). Undefined when unknown or
+ * when the optional env is malformed (logged without any value).
+ */
+function pepperForId(id: string): string | undefined {
+  if (id === PEPPER_ID_CURRENT) return env.passwordPepper;
+  const peppers = new Map<string, string>();
+  for (const entry of env.passwordPepperPrevious.split(',')) {
+    const trimmed = entry.trim();
+    if (trimmed === '') continue;
+    const colon = trimmed.indexOf(':');
+    const entryId = colon > 0 ? trimmed.slice(0, colon).trim() : '';
+    const pepper = colon > 0 ? trimmed.slice(colon + 1).trim() : '';
+    if (!PEPPER_ID_PATTERN.test(entryId) || pepper === '' || peppers.has(entryId)) {
+      logWarn('password.pepper_previous_malformed', 'PASSWORD_PEPPER_PREVIOUS is malformed');
+      return undefined;
+    }
+    if (entryId !== PEPPER_ID_CURRENT) peppers.set(entryId, pepper);
+  }
+  return peppers.get(id);
 }
 
 export async function hashPassword(plain: string): Promise<string> {
@@ -44,6 +97,22 @@ export async function verifyPassword(
   plain: string,
   stored: string,
 ): Promise<boolean> {
+  const versioned = splitPepperId(stored);
+  if (versioned) {
+    const pepper = versioned.id === null ? undefined : pepperForId(versioned.id);
+    if (pepper === undefined) {
+      // A malformed prefix or an unknown pepper id: false, never a throw and
+      // never another pepper. Burn the same Argon2 work as a real verify so
+      // this account is not told apart by response time (fix 21).
+      await burnDummyVerify(plain);
+      return false;
+    }
+    try {
+      return await argon2Verify({ password: applyPepper(plain, pepper), hash: versioned.phc });
+    } catch {
+      return false;
+    }
+  }
   if (stored.startsWith('$argon2')) {
     const pre = applyPepper(plain);
     try {
@@ -76,6 +145,15 @@ function dummyHash(): Promise<string> {
     });
   }
   return dummyHashPromise;
+}
+
+/** One Argon2 verify against the dummy hash; the result is discarded. */
+async function burnDummyVerify(plain: string): Promise<void> {
+  try {
+    await argon2Verify({ password: applyPepper(plain), hash: await dummyHash() });
+  } catch (err) {
+    logWarn('password.dummy_hash_failed', err, { path: 'dummy' });
+  }
 }
 
 /**
@@ -111,8 +189,13 @@ export async function verifyPasswordOrDummy(
  * are below our target floor. Lets callers lazy-rehash transparently.
  */
 export function needsRehash(stored: string): boolean {
-  if (!stored.startsWith('$argon2id$')) return true;
-  const match = stored.match(/\$m=(\d+),t=(\d+),p=(\d+)\$/);
+  // Program-Fix 45 P3: strip `$pv=<id>$` first. A malformed prefix or a
+  // non-current pepper id → rehash (moves the hash onto PASSWORD_PEPPER).
+  const versioned = splitPepperId(stored);
+  if (versioned && versioned.id !== PEPPER_ID_CURRENT) return true;
+  const phc = versioned ? versioned.phc : stored;
+  if (!phc.startsWith('$argon2id$')) return true;
+  const match = phc.match(/\$m=(\d+),t=(\d+),p=(\d+)\$/);
   if (!match) return true;
   const [, m, t, p] = match.map(Number);
   return (

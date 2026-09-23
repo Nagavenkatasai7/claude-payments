@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { freshDb, seedPartner } from './helpers-db';
 import { createTicketRepo, type TicketRepo } from '@/db/repos/ticket-repo';
 import type { Db } from '@/db/client';
+import { createCipheriv, randomBytes } from 'node:crypto';
+import { eq } from 'drizzle-orm';
+import { ticketMessages } from '@/db/schema';
+import { EnvKeyProvider, EnvKeyRing, aadFor, encryptField } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 
 let db: Db;
 let repo: TicketRepo;
@@ -138,3 +143,103 @@ describe('ticket-repo — aggregates', () => {
     expect(await repo.ticketStamp('p2')).toBe('0|');
   });
 });
+
+// Program-Fix 45 P3 — the ticket_messages.body READER. P3 writes plaintext
+// bodies exactly as before; the reader also opens a v2 blob sealed for THIS
+// message row (what P4 will write). Bodies are customer-authored, so the reader
+// opens ONLY v2 under `ticket_messages|body|<id>`: a pasted v1 blob (which opens
+// under any context) or a blob sealed for another row passes through as text.
+describe('ticket-repo — body reader (fix 45 P3)', () => {
+  const KEY = Buffer.alloc(32, 7);
+  const OTHER = Buffer.alloc(32, 9);
+  const provider = new EnvKeyProvider(KEY);
+
+  async function firstMessageRow(ticketId: string) {
+    const rows = await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, ticketId));
+    return rows[0];
+  }
+
+  async function setBody(id: number, body: string) {
+    await db.update(ticketMessages).set({ body }).where(eq(ticketMessages.id, id));
+  }
+
+  it('pins the ticket body AAD string', () => {
+    expect(aadFor(ctx.ticketMessage(42))).toBe('v2|k0|ticket_messages|body|42');
+    expect(aadFor(ctx.ticketMessage('42'))).toBe('v2|k0|ticket_messages|body|42');
+  });
+
+  it('GOLDEN: createTicket and appendMessage store the body as plaintext, byte-for-byte', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    const body = 'My transfer — नमस्ते 🌍 — has not arrived.';
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body });
+    const appended = await r.appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'reply v2.k0.a.b.c.d' });
+    const raw = await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id));
+    expect(raw.map((m) => m.body).sort()).toEqual([body, 'reply v2.k0.a.b.c.d'].sort());
+    expect(appended.body).toBe('reply v2.k0.a.b.c.d');
+    const listed = await r.listMessages(t.id, { includeInternal: true });
+    expect(listed.map((m) => m.body).sort()).toEqual([body, 'reply v2.k0.a.b.c.d'].sort());
+  });
+
+  it('opens a v2 body sealed for its own row', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'x' });
+    const row = await firstMessageRow(t.id);
+    await setBody(row.id, encryptField('sealed body', provider, ctx.ticketMessage(row.id)));
+    const msgs = await r.listMessages(t.id, { includeInternal: true });
+    expect(msgs[0].body).toBe('sealed body');
+  });
+
+  it('opens a k1 body when the ring holds k1', async () => {
+    const ring = new EnvKeyRing(KEY, `k1:${OTHER.toString('hex')}`);
+    const r = createTicketRepo(db, { cryptoProvider: ring });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'x' });
+    const row = await firstMessageRow(t.id);
+    // Seal a k1 blob by hand (the P3 writer refuses any kid but k0).
+    const k1Blob = sealK1(OTHER, 'ring body', aadFor(ctx.ticketMessage(row.id), 'k1'));
+    await setBody(row.id, k1Blob);
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe('ring body');
+  });
+
+  it('a v2 body sealed for ANOTHER row falls back to the raw text (never throws)', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'x' });
+    const row = await firstMessageRow(t.id);
+    const moved = encryptField('someone else', provider, ctx.ticketMessage(row.id + 1000));
+    await setBody(row.id, moved);
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe(moved);
+  });
+
+  it('a pasted v1 blob is NEVER decrypted (v1 opens under any context)', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    const v1 = encryptField('a leaked value', provider);
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: v1 });
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe(v1);
+  });
+
+  it('envelope-shaped garbage and a wrong key fall back to the raw text', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: new EnvKeyProvider(OTHER) });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'v2.k0.aa.bb.cc.dd' });
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe('v2.k0.aa.bb.cc.dd');
+    const row = await firstMessageRow(t.id);
+    const sealed = encryptField('under KEY', provider, ctx.ticketMessage(row.id));
+    await setBody(row.id, sealed);
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe(sealed);
+  });
+
+  it('plaintext rows never touch the key (no FIELD_ENCRYPTION_KEY needed)', async () => {
+    const r = createTicketRepo(db); // default provider; no key in the test env
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'plain' });
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe('plain');
+  });
+});
+
+function sealK1(masterKey: Buffer, plain: string, aad: string): string {
+  const dek = randomBytes(32);
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', dek, iv);
+  c.setAAD(Buffer.from(aad, 'utf8'));
+  const ct = Buffer.concat([c.update(Buffer.from(plain, 'utf8')), c.final()]);
+  const tag = c.getAuthTag();
+  const wrapped = new EnvKeyProvider(masterKey).wrapDataKey(dek);
+  return ['v2', 'k1', iv, tag, wrapped, ct].map((p) => (typeof p === 'string' ? p : p.toString('base64url'))).join('.');
+}
