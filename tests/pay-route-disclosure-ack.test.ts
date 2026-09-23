@@ -46,9 +46,11 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async (i
 // WL1: existing-transfer branch resolves the owning partner for the gate toggle
 // (default ⇒ gate ON). Plain-object stub — no partner row ⇒ ensureDefaultPartner's
 // default (kycMode 'ours' ⇒ gate ON).
+// Review r1: per-id partners so the ack meta's provider kind can be asserted.
+const partners = vi.hoisted(() => new Map<string, unknown>());
 vi.mock('@/lib/partner-store', () => ({
   getPartnerStore: () => ({
-    getPartner: async () => null,
+    getPartner: async (id: string) => partners.get(id) ?? null,
     ensureDefaultPartner: async () => ({
       id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active',
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
@@ -66,6 +68,25 @@ vi.mock('@/lib/partner-integrations-store', () => ({
 
 // Stage 3: the per-IP limiter would dial Upstash — always allow in unit tests.
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
+
+// Review r1: an audit write that throws must not change the pay response.
+const ackAudit = vi.hoisted(() => ({ throwOnAck: false }));
+vi.mock('@/db/repos/aux-repos', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/aux-repos')>();
+  return {
+    ...real,
+    createAuditRepo: (db: Parameters<typeof real.createAuditRepo>[0]) => {
+      const repo = real.createAuditRepo(db);
+      return {
+        ...repo,
+        record: async (e: Parameters<typeof repo.record>[0]) => {
+          if (ackAudit.throwOnAck && e.action === 'remittance.disclosure_ack') throw new Error('audit store down');
+          return repo.record(e);
+        },
+      };
+    },
+  };
+});
 
 import { POST } from '@/app/api/pay/[transferId]/route';
 
@@ -95,6 +116,8 @@ beforeEach(async () => {
   await customerStore.saveCustomer(customer);
   sendTransactionOtp.mockClear();
   drafts.clear();
+  partners.clear();
+  ackAudit.throwOnAck = false;
 });
 
 const status = async () => (await store.getTransfer(TID))?.status;
@@ -106,7 +129,7 @@ async function ackRows() {
 describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', { retry: 0 }, () => {
   it('a well-formed version + a valid code ⇒ pays AND records one ack row (version only)', async () => {
     await txOtp.issue(TID, PHONE);
-    const res = await POST(req({ otp: '654321', disclosureVersion: 'disclosure-draft-2026-09-23' }), ctx);
+    const res = await POST(req({ otp: '654321', disclosureVersion: 'disclosure-draft-2026-09-23b' }), ctx);
     expect(res.status).toBe(200);
     expect(await status()).toBe('paid');
     expect(await ackRows()).toEqual([
@@ -116,7 +139,7 @@ describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', {
         actor_type: 'system',
         action: 'remittance.disclosure_ack',
         subject_id: TID,
-        meta: { version: 'disclosure-draft-2026-09-23' },
+        meta: { version: 'disclosure-draft-2026-09-23b', providerKind: 'demo' },
       },
     ]);
   });
@@ -126,6 +149,24 @@ describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', {
     const res = await POST(req({ otp: '654321' }), ctx);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, status: 'paid' });
+    expect(await ackRows()).toEqual([]);
+  });
+
+  it('a well-formed but UNKNOWN version ⇒ pays, no ack row (review r1: known versions only)', async () => {
+    await txOtp.issue(TID, PHONE);
+    const res = await POST(req({ otp: '654321', disclosureVersion: 'disclosure-draft-2099-01-01' }), ctx);
+    expect(res.status).toBe(200);
+    expect(await status()).toBe('paid');
+    expect(await ackRows()).toEqual([]);
+  });
+
+  it('an audit write that throws does not change the pay response (review r1)', async () => {
+    await txOtp.issue(TID, PHONE);
+    ackAudit.throwOnAck = true;
+    const res = await POST(req({ otp: '654321', disclosureVersion: 'disclosure-draft-2026-09-23b' }), ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, status: 'paid' }); // byte-for-byte the no-field response
+    expect(await status()).toBe('paid');
     expect(await ackRows()).toEqual([]);
   });
 
@@ -139,19 +180,24 @@ describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', {
 
   it('a wrong code ⇒ 403 and no ack row (recorded only after the OTP passes)', async () => {
     await txOtp.issue(TID, PHONE);
-    const res = await POST(req({ otp: '000000', disclosureVersion: 'disclosure-draft-2026-09-23' }), ctx);
+    const res = await POST(req({ otp: '000000', disclosureVersion: 'disclosure-draft-2026-09-23b' }), ctx);
     expect(res.status).toBe(403);
     expect(await ackRows()).toEqual([]);
   });
 
   it('request_otp never records an ack', async () => {
-    const res = await POST(req({ action: 'request_otp', disclosureVersion: 'disclosure-draft-2026-09-23' }), ctx);
+    const res = await POST(req({ action: 'request_otp', disclosureVersion: 'disclosure-draft-2026-09-23b' }), ctx);
     expect(res.status).toBe(200);
     expect(await ackRows()).toEqual([]);
   });
 
   it('a DRAFT link: the ack is recorded under the draft id and the draft tenant, before finalize', async () => {
     const DRAFT_ID = 'draft_ack_1';
+    partners.set('p_draft_tenant', {
+      id: 'p_draft_tenant', name: 'Draft Tenant', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+      supportConfig: { disclosure: { licensedEntity: 'Draft Tenant Money LLC' } },
+    });
     drafts.set(DRAFT_ID, {
       senderPhone: PHONE,
       partnerId: 'p_draft_tenant',
@@ -174,7 +220,7 @@ describe('POST /api/pay/[transferId] — optional disclosure acknowledgement', {
     expect(rows[0]).toMatchObject({
       partner_id: 'p_draft_tenant',
       subject_id: DRAFT_ID,
-      meta: { version: 'disclosure-draft-2026-09-23b' },
+      meta: { version: 'disclosure-draft-2026-09-23b', providerKind: 'configured' },
     });
   });
 });

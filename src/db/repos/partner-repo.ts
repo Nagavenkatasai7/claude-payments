@@ -71,7 +71,14 @@ export function createPartnerRepo(db: DbOrTx) {
 
     async savePartner(partner: Partner): Promise<void> {
       const row = partnerToRow(partner);
-      await db.insert(partners).values(row).onConflictDoUpdate({ target: partners.id, set: row });
+      // Program-Fix 15 PR B (review r1): support_config is written on INSERT
+      // only. On an existing row its ONE writer is updateSupportConfig (locked,
+      // audited); a full-row upsert from an unlocked read (updatePartnerAction,
+      // setPartnerStatusAction) must never roll back a disclosure or support
+      // save that committed in between.
+      const { supportConfig: _insertOnly, ...update } = row;
+      void _insertOnly;
+      await db.insert(partners).values(row).onConflictDoUpdate({ target: partners.id, set: update });
     },
 
     /**

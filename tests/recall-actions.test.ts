@@ -194,12 +194,9 @@ describe('requestRecallAction', () => {
 
   it('admin kill switch off refuses outright (bounce to support landing)', async () => {
     await store.saveTransfer(mkTransfer({ id: 'T_off' }));
-    const p1 = await ps.getPartner('p1');
-    await ps.savePartner({
-      ...p1!,
-      supportConfig: { enableSupportPortal: false },
-      updatedAt: new Date().toISOString(),
-    });
+    // support_config's one writer on an existing row (Program-Fix 15 PR B).
+    const { found } = await ps.updateSupportConfig('p1', (prev) => ({ ...prev, enableSupportPortal: false }));
+    expect(found).toBe(true);
     await expect(requestRecallAction(fd({ transferId: 'T_off', reason: 'not_received' })))
       .rejects.toThrow('REDIRECT:/account/support');
     expect(await repo.listByCustomer(PHONE)).toEqual([]);

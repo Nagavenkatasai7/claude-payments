@@ -199,3 +199,35 @@ describe('saveDisclosureConfigAction (Reg E provider identity, draft)', () => {
     expect(await auditRows()).toEqual([]);
   });
 });
+
+// Review r1 (MUST-FIX): a full-row savePartner from a stale read
+// (updatePartnerAction / setPartnerStatusAction read without a lock, then
+// upsert the whole row) must never roll back a disclosure or support save that
+// committed in between. updateSupportConfig is the ONLY writer of the column on
+// an existing row; savePartner still sets it on INSERT.
+describe('support_config has one writer on existing rows', { retry: 0 }, () => {
+  it('a stale full-row savePartner does not undo a disclosure save made after its read', async () => {
+    await ps.savePartner(basePartner({ supportConfig: { enableSupportPortal: true } }));
+    const stale = await ps.getPartner('p1'); // e.g. updatePartnerAction's unlocked read
+    await saveDisclosureConfigAction(disclosureForm()); // commits in between
+    await ps.savePartner({ ...stale!, brandName: 'Acme Brand', updatedAt: new Date().toISOString() });
+    const got = await ps.getPartner('p1');
+    expect(got?.brandName).toBe('Acme Brand'); // the full-row write itself still lands
+    expect(got?.supportConfig).toEqual({ enableSupportPortal: true, disclosure: DISCLOSURE });
+  });
+
+  it('a stale full-row savePartner does not undo a support save made after its read', async () => {
+    await ps.savePartner(basePartner({ supportConfig: { enableSupportPortal: true, disclosure: DISCLOSURE } }));
+    const stale = await ps.getPartner('p1');
+    await saveSupportConfigAction(form({ autoAssign: 'round_robin' }));
+    await ps.savePartner({ ...stale!, status: 'suspended', updatedAt: new Date().toISOString() });
+    const got = await ps.getPartner('p1');
+    expect(got?.status).toBe('suspended');
+    expect(got?.supportConfig).toEqual({ enableSupportPortal: false, autoAssign: 'round_robin', disclosure: DISCLOSURE });
+  });
+
+  it('savePartner still writes support_config when it INSERTS a new row', async () => {
+    await ps.savePartner(basePartner({ id: 'fresh', supportConfig: { enableSupportPortal: false } }));
+    expect((await ps.getPartner('fresh'))?.supportConfig).toEqual({ enableSupportPortal: false });
+  });
+});

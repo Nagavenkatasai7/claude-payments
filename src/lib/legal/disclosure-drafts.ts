@@ -14,6 +14,16 @@
 
 export const DISCLOSURE_DRAFT_VERSION = 'disclosure-draft-2026-09-23b' as const;
 
+/**
+ * Versions whose wording a still-open page may have shown. On a bump, move the
+ * outgoing id here, so an acknowledgement posted by a page rendered before the
+ * deploy (the Rolling Release overlap) is still recorded. Only ids in this list
+ * or the current one are ever written to the audit log. Empty today: the only
+ * earlier id ('disclosure-draft-2026-09-23') never reached production.
+ * tests/disclosure-drafts-version-pin.test.ts pins the wording to the version.
+ */
+export const PREVIOUS_DISCLOSURE_VERSIONS: readonly string[] = [];
+
 /** Shown above every disclosure block. */
 export const DISCLOSURE_DRAFT_BADGE = 'Draft disclosure — for counsel review';
 

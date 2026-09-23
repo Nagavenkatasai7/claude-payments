@@ -16,6 +16,7 @@ import {
   DISCLOSURE_LABELS as L,
   DISCLOSURE_LINKS,
   PARTNER_DETAILS_PENDING,
+  PREVIOUS_DISCLOSURE_VERSIONS,
   RIGHTS_SUMMARY,
   THIRD_PARTY_FEE_STATEMENT,
   dateAvailableEstimate,
@@ -205,10 +206,16 @@ export function buildReceiptDisclosure(t: ReceiptTransfer, d: ResolvedDisclosure
 }
 
 /**
- * The optional `disclosureVersion` on the pay POST: a bounded, version-shaped
- * id. Deliberately NOT equality with the current version — during a Rolling
- * Release an older page may post the previous id, and it must still be recorded.
+ * The optional `disclosureVersion` on the pay POST: ONLY a version whose wording
+ * exists — the current one, or one retained in PREVIOUS_DISCLOSURE_VERSIONS for
+ * the Rolling Release overlap. Anything else records no acknowledgement, so the
+ * audit log never claims a customer acknowledged wording that was never shown.
  */
 export function isDisclosureAckVersion(v: unknown): v is string {
-  return typeof v === 'string' && /^[a-z0-9][a-z0-9.-]{0,63}$/.test(v);
+  return typeof v === 'string' && (v === DISCLOSURE_DRAFT_VERSION || PREVIOUS_DISCLOSURE_VERSIONS.includes(v));
+}
+
+/** The provider block's kind for a resolved partner (recorded in the ack meta). */
+export function disclosureProviderKind(d: ResolvedDisclosure): DisclosureProvider['kind'] {
+  return providerBlock(d).kind;
 }

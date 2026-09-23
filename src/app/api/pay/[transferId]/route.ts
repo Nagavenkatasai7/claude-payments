@@ -18,7 +18,8 @@ import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError, logWarn } from '@/lib/log';
-import { isDisclosureAckVersion } from '@/lib/remittance-disclosure';
+import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { settleOrHold } from '@/lib/settlement';
@@ -321,7 +322,7 @@ function validateAndTokenizeAch(
 
 /**
  * Program-Fix 15 PR B: one `remittance.disclosure_ack` audit row — subject the
- * route id (the transfer, or the draft before it is minted), meta the version
+ * route id (the transfer, or the draft before it is minted), meta the version + provider kind
  * only (no PII). Tenant: the transfer's partner, else the draft's (the same
  * resolution the request_otp branch uses). Never throws.
  */
@@ -335,13 +336,16 @@ async function recordDisclosureAck(
     const partnerId = draft
       ? await draftTenant(draft, store.legacyTenantOf)
       : (await store.getTransfer(routeId))?.partnerId ?? DEFAULT_PARTNER_ID;
+    // Which provider block the page showed (demo | pending | configured),
+    // resolved server-side from the tenant's current config — never client input.
+    const providerKind = disclosureProviderKind(resolvePartnerDisclosure(await getPartnerStore().getPartner(partnerId)));
     await createAuditRepo(getDb()).record({
       partnerId,
       actor: 'pay-page',
       actorType: 'system',
       action: 'remittance.disclosure_ack',
       subjectId: routeId,
-      meta: { version },
+      meta: { version, providerKind },
     });
   } catch (err) {
     logWarn('pay.disclosure_ack', err, { transferId: routeId });

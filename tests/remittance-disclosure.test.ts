@@ -282,11 +282,14 @@ describe('buildReceiptDisclosure (§1005.31(b)(2))', () => {
 });
 
 describe('isDisclosureAckVersion (the optional pay POST field)', () => {
-  it('accepts the current version and any bounded version-shaped id', async () => {
+  it('accepts ONLY known versions: the current one plus the retained previous ones (review r1)', async () => {
     const { isDisclosureAckVersion } = await mod();
-    const { DISCLOSURE_DRAFT_VERSION } = await dd();
+    const { DISCLOSURE_DRAFT_VERSION, PREVIOUS_DISCLOSURE_VERSIONS } = await dd();
     expect(isDisclosureAckVersion(DISCLOSURE_DRAFT_VERSION)).toBe(true);
-    expect(isDisclosureAckVersion('disclosure-draft-2026-10-01')).toBe(true);
+    for (const v of PREVIOUS_DISCLOSURE_VERSIONS) expect(isDisclosureAckVersion(v)).toBe(true);
+    // Well-formed but never shipped ⇒ no ack (an ack must name wording that exists).
+    expect(isDisclosureAckVersion('disclosure-draft-2026-10-01')).toBe(false);
+    expect(isDisclosureAckVersion('draft-2026-09-23b')).toBe(false); // the legal-pages id, not a disclosure id
   });
 
   it('refuses junk, non-strings and oversize values', async () => {
@@ -294,6 +297,17 @@ describe('isDisclosureAckVersion (the optional pay POST field)', () => {
     for (const v of [undefined, null, 1, '', ' ', 'x'.repeat(65), 'has space', '<script>', 'ÜBER', { v: 1 }]) {
       expect(isDisclosureAckVersion(v)).toBe(false);
     }
+  });
+});
+
+describe('disclosureProviderKind (the ack meta)', () => {
+  it('maps the resolver to demo | pending | configured', async () => {
+    const { disclosureProviderKind } = await mod();
+    const { resolvePartnerDisclosure } = await cfg();
+    expect(disclosureProviderKind(resolvePartnerDisclosure(null))).toBe('demo');
+    expect(disclosureProviderKind(resolvePartnerDisclosure(partner({ id: 'default' })))).toBe('demo');
+    expect(disclosureProviderKind(resolvePartnerDisclosure(partner({ displayName: 'Acme Send' })))).toBe('pending');
+    expect(disclosureProviderKind(resolvePartnerDisclosure(partner({ supportConfig: { disclosure: FULL } })))).toBe('configured');
   });
 });
 
