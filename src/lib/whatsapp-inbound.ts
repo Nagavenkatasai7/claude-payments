@@ -15,6 +15,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn, scrub } from '@/lib/log';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { waMessageRef } from '@/lib/wa-message-ref';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { getRedis } from '@/lib/redis';
 import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
@@ -59,14 +60,18 @@ export async function processInboundWebhook(
   const statusEvents = parseStatusEvent(body);
   if (statusEvents) {
     for (const ev of statusEvents) {
+      // Program-Fix 26: the message id is never logged or stored raw — only its
+      // keyed reference (src/lib/wa-message-ref.ts).
+      const msgRef = waMessageRef(ev.wamid);
       if (ev.status === 'failed') {
         // Stage 3: structured + PII-scrubbed (recipientId is a phone number).
         logWarn('whatsapp.delivery_failed', `code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`, {
           recipient: ev.recipientId,
-          wamid: ev.wamid,
+          msgRef: msgRef.slice(0, 16),
         });
         // Program-Fix 26: persist the failure (no wamid→transfer map yet). Meta's
-        // code + title only — NEVER the recipient number, not even masked. A DB
+        // code + title only — NEVER the recipient number, not even masked; the
+        // subject is the keyed message reference, never the raw id. A DB
         // error must not turn this webhook into a non-200 (Meta would redeliver).
         try {
           await createAuditRepo(getDb()).record({
@@ -74,7 +79,7 @@ export async function processInboundWebhook(
             actor: 'whatsapp',
             actorType: 'system',
             action: 'whatsapp.delivery_failed',
-            subjectId: ev.wamid,
+            subjectId: msgRef,
             meta: {
               code: ev.errorCode ?? null,
               title: ev.errorTitle ? scrub(ev.errorTitle).slice(0, 200) : null,
@@ -84,7 +89,7 @@ export async function processInboundWebhook(
           logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
         }
       } else {
-        console.debug(`WhatsApp status ${ev.status} — wamid=${ev.wamid}`);
+        console.debug(`WhatsApp status ${ev.status} — msgRef=${msgRef.slice(0, 16)}`);
       }
     }
     return { ok: true };

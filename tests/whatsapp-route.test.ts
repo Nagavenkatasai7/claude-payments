@@ -98,6 +98,7 @@ import { GET, POST } from '@/app/api/whatsapp/route';
 import { OPT_OUT_REPLY, OPT_IN_REPLY, OPT_OUT_REMINDER } from '@/lib/consent';
 import { SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import { fakeRedis } from './helpers';
+import { waMessageRef } from '@/lib/wa-message-ref';
 
 const SECRET = 'meta-app-secret';
 const inboundBody = JSON.stringify({
@@ -273,10 +274,35 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
       actor: 'whatsapp',
       actorType: 'system',
       action: 'whatsapp.delivery_failed',
-      subjectId: 'wamid.STATUS1',
+      subjectId: waMessageRef('wamid.STATUS1'),
       meta: { code: 131047, title: 'Re-engagement message' },
     });
     expect(JSON.stringify(row)).not.toMatch(/\d{7,}/);
+  });
+
+  it('a Meta-style message id is NEVER stored or logged raw: audit subjectId and log fields carry only the keyed ref', async () => {
+    const id = 'wamid.HBgLMTU1NTk4NzEyMzQVAgARGBI5QzZBOEQ3RjA0QjE2NjJCMzcA';
+    const b64 = id.slice('wamid.'.length);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const body = (status: string) => JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { statuses: [{
+        id, recipient_id: '15559871234', status,
+        ...(status === 'failed' ? { errors: [{ code: 131026, title: 'Message undeliverable' }] } : {}),
+      }] } }] }],
+    });
+    expect((await post(body('failed'))).status).toBe(200);
+    expect((await post(body('delivered'))).status).toBe(200);
+    const row = auditRecord.mock.calls[0][0];
+    expect(row.subjectId).toBe(waMessageRef(id));
+    const logged = [...warn.mock.calls, ...debug.mock.calls].flat().map(String).join(' ');
+    expect(logged).toContain(waMessageRef(id).slice(0, 16));
+    for (const out of [JSON.stringify(row), logged]) {
+      expect(out).not.toContain(id);
+      expect(out).not.toContain(b64.slice(0, 12));
+      expect(out).not.toMatch(/\d{7,}/);
+    }
   });
 
   it('the audit insert throws → still 200 {ok:true} (Meta never sees a non-200)', async () => {
@@ -462,7 +488,7 @@ describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret
     const res = await post(body, sign(body, 'acme_secret'));
     expect(res.status).toBe(200);
     expect(auditRecord).toHaveBeenCalledTimes(1);
-    expect(auditRecord.mock.calls[0][0]).toMatchObject({ partnerId: 'acme', subjectId: 'wamid.RS1', meta: { code: 131026, title: 'Message undeliverable' } });
+    expect(auditRecord.mock.calls[0][0]).toMatchObject({ partnerId: 'acme', subjectId: waMessageRef('wamid.RS1'), meta: { code: 131026, title: 'Message undeliverable' } });
   });
 
   it('routed + partner has NO appSecret ⇒ 401 fail closed even when signed with the platform secret — no fallback for a routed event', async () => {
