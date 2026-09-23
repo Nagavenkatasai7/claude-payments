@@ -1,7 +1,11 @@
 import { getRedis } from './redis';
 import { createHash, randomBytes } from 'node:crypto';
 import type { RedisLike } from './store';
-import type { Staff } from './types';
+import { SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffPermissions, type StaffRole } from './types';
+import { isSeedAdminRecord, seedAdminUsername } from './staff-login-guard';
+import { logWarn } from './log';
+import { createStaffRepo, type StaffRepo } from '@/db/repos/staff-repo';
+import { getDb } from '@/db/client';
 
 // Program-Fix 45 P1 (sec-11 / crypto-10): a staff session lives at most 12 h
 // (absolute) and ends after 30 min without a request (idle), the same windows
@@ -59,26 +63,177 @@ function seenTtlSeconds(createdAtMs: number, now: number): number {
   return Math.max(1, Math.ceil((createdAtMs + ABSOLUTE_MS - now) / 1000)) + SEEN_GRACE_SECONDS;
 }
 
-export function createAuthStore(redis: RedisLike) {
+// ── Program-Fix 45 P5 (crypto-03): the staff ledger (Postgres `staff`, 0022) ──
+//
+// DUAL-WRITE RELEASE. The previous build reads and writes only Redis, so for
+// this release:
+//   • a record EXISTS only while its Redis record exists (a row alone is never
+//     a login: an old-build delete must not resurrect anyone, and a Redis flush
+//     still re-seeds the seed admin because listStaff walks the Redis index);
+//   • the row can only RESTRICT the Redis record (mergeStaffRecords), because an
+//     old-build suspend lands only in Redis and a row must never grant;
+//   • the seed admin's platform-admin Redis record is never restricted by its
+//     row (owner rule: nothing locks out the seed admin; a Redis writer already
+//     controls that account's hash, so the exemption adds no reach);
+//   • any ledger READ failure falls back to the Redis record, the pre-P5
+//     behaviour, so a Neon blip never signs staff out;
+//   • restriction-carrying writes (saveStaff, deleteStaff) go to the row FIRST
+//     and throw on failure, so a change is never reported done while one store
+//     still holds the old state; login-path writes (lastLoginAt, the password
+//     mirror) are best-effort.
+// The row's password_hash is a MIRROR that nothing reads yet. The PG-first flip
+// (and the atomic password compare-and-set it enables) is a later PR.
+
+/** The ledger surface auth-store uses (the staff-repo). */
+export type StaffLedger = Pick<
+  StaffRepo,
+  'getMany' | 'upsert' | 'insertIfMissing' | 'remove' | 'setLastLogin' | 'setPasswordHash'
+>;
+
+export interface AuthStoreOptions {
+  /** Resolved on first use, so a store built without a database never touches one. */
+  ledger?: () => StaffLedger;
+  /** SEED_ADMIN_USERNAME ('' when unset); injectable for tests. */
+  seedName?: () => string;
+}
+
+export interface SaveStaffOptions {
+  /** Seed path only: a ledger failure is logged and the Redis record still lands. */
+  ledgerBestEffort?: boolean;
+}
+
+const ROLE_RANK: Record<StaffRole, number> = { support: 0, agent: 1, admin: 2 };
+
+function andPermissions(a: StaffPermissions, b: StaffPermissions): StaffPermissions {
+  return {
+    canCancel: a.canCancel === true && b.canCancel === true,
+    canResend: a.canResend === true && b.canResend === true,
+    canAssign: a.canAssign === true && b.canAssign === true,
+    canRevealPii: a.canRevealPii === true && b.canRevealPii === true,
+  };
+}
+
+/**
+ * The most restrictive view of one staff member across the two stores.
+ * Identity, name, password hash and timestamps come from Redis (the store both
+ * builds write). Status: suspended if either says so. Role: the lower rank
+ * (support < agent < admin); a support result carries no permissions.
+ * Permissions: per-key AND. Partner scope: a set value wins over unset, and
+ * two DIFFERENT partners fail closed (suspended). The seed admin's
+ * platform-admin record is returned unchanged.
+ */
+export function mergeStaffRecords(fromRedis: Staff, fromLedger: Staff | null, seedName: string): Staff {
+  if (!fromLedger || isSeedAdminRecord(fromRedis, seedName)) return fromRedis;
+  const merged: Staff = { ...fromRedis };
+  const role = ROLE_RANK[fromLedger.role] < ROLE_RANK[fromRedis.role] ? fromLedger.role : fromRedis.role;
+  merged.role = role;
+  merged.permissions =
+    role === 'support' ? { ...SUPPORT_DEFAULT_PERMISSIONS } : andPermissions(fromRedis.permissions, fromLedger.permissions);
+  if (fromRedis.status === 'suspended' || fromLedger.status === 'suspended') merged.status = 'suspended';
+  const partnerId = fromRedis.partnerId ?? fromLedger.partnerId;
+  if (partnerId !== undefined) merged.partnerId = partnerId;
+  if (fromRedis.partnerId && fromLedger.partnerId && fromRedis.partnerId !== fromLedger.partnerId) {
+    merged.status = 'suspended';
+  }
+  return merged;
+}
+
+function sameAccess(a: Staff, b: Staff): boolean {
+  return (
+    a.role === b.role &&
+    (a.status ?? 'active') === (b.status ?? 'active') &&
+    a.partnerId === b.partnerId &&
+    // andPermissions(p, p) normalises absent keys to false before comparing.
+    JSON.stringify(andPermissions(a.permissions, a.permissions)) ===
+      JSON.stringify(andPermissions(b.permissions, b.permissions))
+  );
+}
+
+function errName(e: unknown): string {
+  return e instanceof Error ? e.name : 'unknown';
+}
+
+export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
+  const seedName = opts.seedName ?? seedAdminUsername;
+  let ledgerCache: StaffLedger | null = null;
+  const ledger = (): StaffLedger | null => {
+    if (!opts.ledger) return null;
+    if (!ledgerCache) ledgerCache = opts.ledger();
+    return ledgerCache;
+  };
+
+  async function readRedisStaff(username: string): Promise<Staff | null> {
+    const raw = await redis.get(`staff:${username}`);
+    return raw ? (JSON.parse(raw) as Staff) : null;
+  }
+
+  /** Merge Redis records with their rows; copy the missing rows in. Never throws on the ledger. */
+  async function withLedger(records: Staff[]): Promise<Staff[]> {
+    if (records.length === 0 || !opts.ledger) return records;
+    let rows: Map<string, Staff>;
+    try {
+      rows = await ledger()!.getMany(records.map((r) => r.username));
+    } catch (e) {
+      logWarn('staff_ledger.read_failed', 'staff ledger read failed; using the Redis record', { error: errName(e) });
+      return records;
+    }
+    const missing = records.filter((r) => !rows.has(r.username));
+    if (missing.length > 0) {
+      try {
+        await ledger()!.insertIfMissing(missing);
+      } catch (e) {
+        logWarn('staff_ledger.copy_failed', 'staff ledger copy-on-read failed', { error: errName(e), count: missing.length });
+      }
+    }
+    const seed = seedName();
+    return records.map((r) => {
+      const merged = mergeStaffRecords(r, rows.get(r.username) ?? null, seed);
+      const row = rows.get(r.username);
+      if (row && !sameAccess(merged, r)) {
+        logWarn('staff_ledger.restricted', 'staff record restricted by the ledger row');
+      } else if (row && isSeedAdminRecord(r, seed) && !sameAccess(r, row)) {
+        logWarn('staff_ledger.seed_divergence', 'seed admin ledger row differs from Redis; Redis record used');
+      }
+      return merged;
+    });
+  }
+
+  /** A best-effort ledger mirror: logged, never thrown. */
+  async function mirror(what: string, fn: (l: StaffLedger) => Promise<void>): Promise<void> {
+    if (!opts.ledger) return;
+    try {
+      await fn(ledger()!);
+    } catch (e) {
+      logWarn('staff_ledger.mirror_failed', `staff ledger ${what} mirror failed`, { error: errName(e) });
+    }
+  }
+
   return {
     async getStaff(username: string): Promise<Staff | null> {
-      const raw = await redis.get(`staff:${username}`);
-      return raw ? (JSON.parse(raw) as Staff) : null;
+      const fromRedis = await readRedisStaff(username);
+      if (!fromRedis) return null;
+      return (await withLedger([fromRedis]))[0];
     },
-    async saveStaff(staff: Staff): Promise<void> {
+    async saveStaff(staff: Staff, saveOpts: SaveStaffOptions = {}): Promise<void> {
+      // Row FIRST (see the header): a failure throws before Redis changes,
+      // unless the caller is the seed path, which must always land.
+      if (opts.ledger) {
+        if (saveOpts.ledgerBestEffort) await mirror('seed upsert', (l) => l.upsert(staff));
+        else await ledger()!.upsert(staff);
+      }
       await redis.set(`staff:${staff.username}`, JSON.stringify(staff));
       await redis.sadd('staff:index', staff.username);
     },
     async listStaff(): Promise<Staff[]> {
+      // The Redis index decides who exists (a row alone is never a member).
       const usernames = await redis.smembers('staff:index');
-      const all = await Promise.all(
-        usernames.map((u) => this.getStaff(u)),
+      const all = (await Promise.all(usernames.map((u) => readRedisStaff(u)))).filter(
+        (s): s is Staff => s !== null,
       );
-      return all
-        .filter((s): s is Staff => s !== null)
-        .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
+      return (await withLedger(all)).sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
     },
     async deleteStaff(username: string): Promise<void> {
+      if (opts.ledger) await ledger()!.remove(username);
       await redis.del(`staff:${username}`);
       await redis.srem('staff:index', username);
     },
@@ -94,6 +249,8 @@ export function createAuthStore(redis: RedisLike) {
       if (staff.status === 'suspended') return;
       staff.lastLoginAt = new Date().toISOString();
       await redis.set(`staff:${username}`, JSON.stringify(staff));
+      const at = staff.lastLoginAt;
+      await mirror('lastLoginAt', (l) => l.setLastLogin(username, at));
     },
     /**
      * Fix 21 lazy scrypt → Argon2id upgrade after a successful login, as a
@@ -117,6 +274,7 @@ export function createAuthStore(redis: RedisLike) {
       if (staff.passwordHash !== expectedOldHash) return false;
       staff.passwordHash = newHash;
       await redis.set(`staff:${username}`, JSON.stringify(staff));
+      await mirror('password', (l) => l.setPasswordHash(username, newHash));
       return true;
     },
     /**
@@ -134,6 +292,7 @@ export function createAuthStore(redis: RedisLike) {
       if (staff.passwordHash !== expectedOldHash) return false;
       staff.passwordHash = newHash;
       await redis.set(`staff:${username}`, JSON.stringify(staff));
+      await mirror('password', (l) => l.setPasswordHash(username, newHash));
       return true;
     },
     async createSession(username: string): Promise<string> {
@@ -216,7 +375,9 @@ let cached: AuthStore | null = null;
 
 export function getAuthStore(): AuthStore {
   if (!cached) {
-    cached = createAuthStore(getRedis());
+    // Program-Fix 45 P5: the Postgres staff ledger rides along, resolved on
+    // first use (a failure to reach it degrades to the Redis-only behaviour).
+    cached = createAuthStore(getRedis(), { ledger: () => createStaffRepo(getDb()) });
   }
   return cached;
 }

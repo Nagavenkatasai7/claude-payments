@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { freshDb } from './helpers-db';
+import { createStaffRepo } from '@/db/repos/staff-repo';
+import type { Db } from '@/db/client';
 import { fakeRedis } from './helpers';
 import { runStaffBreakGlass, parseBreakGlassArgs, type BreakGlassRedis } from '../scripts/staff-break-glass';
 import { createAuthStore } from '@/lib/auth-store';
@@ -185,5 +188,69 @@ describe('staff-break-glass', () => {
     expect(await mfa.isEnrolled(SEED)).toBe(false);
     expect(lines.join('\n')).not.toContain(SEED);
     expect(lines.join('\n')).not.toContain(b.secretBase32);
+  });
+});
+
+// Program-Fix 45 P5: the staff ledger (Postgres `staff`, migration 0022). The
+// break-glass keeps the seed admin reachable when the row and Redis disagree.
+describe('staff-break-glass and the staff ledger (Program-Fix 45 P5)', () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await freshDb();
+  });
+
+  it('parses --sync-ledger-from-redis on its own', () => {
+    expect(parseBreakGlassArgs([SEED, '--sync-ledger-from-redis'])).toMatchObject({ username: SEED, syncLedger: true, apply: false });
+  });
+
+  it('--restore-seed-password-from-env --apply also mirrors the new hash into the row', async () => {
+    const { r, redis } = withScan();
+    const repo = createStaffRepo(db);
+    await createAuthStore(r, { ledger: () => repo, seedName: () => SEED }).saveStaff(seedRecord());
+    await runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: SEED, restoreSeedPassword: true, apply: true }, () => {});
+    const row = (await repo.get(SEED))!;
+    expect(await verifyPassword(SEED_PW, row.passwordHash)).toBe(true);
+  });
+
+  it('--sync-ledger-from-redis: dry run reports and writes nothing; --apply rewrites the row from the Redis record', async () => {
+    const { r, redis } = withScan();
+    const repo = createStaffRepo(db);
+    await createAuthStore(r).saveStaff(seedRecord());
+    await repo.upsert(seedRecord({ status: 'suspended', role: 'support', passwordHash: 'stale' }));
+    const lines: string[] = [];
+
+    const dry = await runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: SEED, syncLedger: true }, (l) => lines.push(l));
+    expect(dry.ledgerRow).toBe('differs');
+    expect(dry.ledgerSynced).toBe(false);
+    expect((await repo.get(SEED))!.status).toBe('suspended');
+
+    const applied = await runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: SEED, syncLedger: true, apply: true }, (l) => lines.push(l));
+    expect(applied.ledgerSynced).toBe(true);
+    const row = (await repo.get(SEED))!;
+    expect(row.status).toBe('active');
+    expect(row.role).toBe('admin');
+    expect(row.passwordHash).toBe('H-leaked');
+
+    const again = await runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: SEED, syncLedger: true }, () => {});
+    expect(again.ledgerRow).toBe('match');
+
+    const out = lines.join('\n');
+    for (const secret of [SEED, 'H-leaked', 'stale']) expect(out).not.toContain(secret);
+  });
+
+  it('--sync-ledger-from-redis creates a missing row, and refuses without a Redis record or without a database', async () => {
+    const { r, redis } = withScan();
+    const repo = createStaffRepo(db);
+    await createAuthStore(r).saveStaff(seedRecord());
+    const rep = await runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: SEED, syncLedger: true, apply: true }, () => {});
+    expect(rep.ledgerRow).toBe('missing');
+    expect((await repo.get(SEED))?.role).toBe('admin');
+
+    await expect(
+      runStaffBreakGlass(redis, { ...baseOpts, ledger: repo, username: 'nobody', syncLedger: true, apply: true }, () => {}),
+    ).rejects.toThrow(/no Redis record/i);
+    await expect(
+      runStaffBreakGlass(redis, { ...baseOpts, username: SEED, syncLedger: true, apply: true }, () => {}),
+    ).rejects.toThrow(/DATABASE_URL/);
   });
 });

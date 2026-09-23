@@ -68,6 +68,7 @@ const ALL_TABLES = [
   'customers',
   'partners',
   'waitlist_signups',
+  'staff',
 ].join(', ');
 
 export async function freshDb(): Promise<Db> {
