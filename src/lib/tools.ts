@@ -3191,13 +3191,15 @@ async function updateRecipientPhoneTool(
     };
   }
 
-  transfer.recipientPhone = recipientPhone;
-  await ctx.store.saveTransfer(transfer);
+  // A column-targeted UPDATE (never a full-row save of the read above), scoped
+  // to tenant + owner in the WHERE; the reply reflects the row as written.
+  const updated = await ctx.store.updateRecipientPhone(transfer.id, ctx.partnerId, ctx.phone, recipientPhone);
+  if (!updated) return { error: 'That transfer can no longer be edited.' };
   return {
-    transfer_id: transfer.id,
+    transfer_id: updated.id,
     recipient_phone: recipientPhone,
-    recipient_name: boundUntrustedText(transfer.recipientName, NAME_MAX), // fix 5: may be API-written
-    status: transfer.status,
+    recipient_name: boundUntrustedText(updated.recipientName, NAME_MAX), // fix 5: may be API-written
+    status: updated.status,
   };
 }
 

@@ -592,6 +592,31 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /**
+     * The customer's update_recipient_phone edit: ONE UPDATE that sets only
+     * recipient_phone (a plain, unencrypted column), scoped to the tenant AND
+     * the owning sender in the WHERE. Every other column stays as the ledger
+     * has it at write time. Null ⇒ no such row for this owner/tenant now; the
+     * caller refuses and never falls back to saveTransfer.
+     */
+    async updateRecipientPhone(
+      id: string,
+      partnerId: PartnerId,
+      ownerPhone: string,
+      recipientPhone: string,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ recipientPhone })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, ownerPhone),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
     /** fix 6: may the pay page write this transfer's payout? (the same guard setPayoutIfEditable applies) */
     async isPayoutEditable(id: string, partnerId: PartnerId): Promise<boolean> {
       const rows = await db.select({ id: transfers.id }).from(transfers).where(payoutEditable(id, partnerId)).limit(1);

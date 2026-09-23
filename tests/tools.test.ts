@@ -648,6 +648,88 @@ describe('executeTool', () => {
   });
 });
 
+describe('update_recipient_phone — writes only the recipient phone', { retry: 0 }, () => {
+  async function createOne(ctx: Awaited<ReturnType<typeof buildCtx>>): Promise<string> {
+    const created = await executeTool('create_transfer', {
+      amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    return created.transfer_id as string;
+  }
+
+  /** Runs `between` after the tool's read and before its write. */
+  function interleave(ctx: Awaited<ReturnType<typeof buildCtx>>, between: (id: string) => Promise<void>) {
+    const read = ctx.store.getTransfer;
+    ctx.store = {
+      ...ctx.store,
+      async getTransfer(id: string) {
+        const t = await read(id);
+        await between(id);
+        return t;
+      },
+    };
+  }
+
+  it('preserves concurrent changes to other fields made after the read', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    interleave(ctx, async (tid) => {
+      await db.execute(sql`UPDATE transfers
+        SET status = 'delivered', paid_at = now(), delivered_at = now(), refund_status = 'requested'
+        WHERE id = ${tid}`);
+    });
+
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '+91 98765 11111' },
+      ctx,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.recipient_phone).toBe('919876511111');
+    expect(result.status).toBe('delivered'); // the row as written, not the earlier read
+    const row = await createTransferRepo(db).getTransfer(id);
+    expect(row?.recipientPhone).toBe('919876511111');
+    expect(row?.status).toBe('delivered');
+    expect(row?.paidAt).toBeTruthy();
+    expect(row?.deliveredAt).toBeTruthy();
+    expect(row?.refundStatus).toBe('requested');
+  });
+
+  it('returns an honest error and writes nothing when the row is no longer editable', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    interleave(ctx, async (tid) => {
+      await db.execute(sql`DELETE FROM transfers WHERE id = ${tid}`);
+    });
+
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '919876511111' },
+      ctx,
+    );
+
+    expect(result.error).toBe('That transfer can no longer be edited.');
+    expect(await createTransferRepo(db).getTransfer(id)).toBeNull();
+  });
+
+  it('normal case: the reply shape is unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '919876511111' },
+      ctx,
+    );
+    expect(result).toEqual({
+      transfer_id: id,
+      recipient_phone: '919876511111',
+      recipient_name: 'Dad',
+      status: 'awaiting_payment',
+    });
+  });
+});
+
 describe('create_schedule — end_date guardrail (QA #7)', () => {
   it('stores a valid end_date on the schedule', async () => {
     const c = await buildCtx(fakeRedis());
