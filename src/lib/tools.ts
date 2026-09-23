@@ -3239,7 +3239,11 @@ async function createScheduleTool(
   // Resolve currency (P4 wiring); the schedule is owned by the turn's tenant (fix 1).
   // No FX here (Task 9): a schedule prices at RUN time, so a provider outage must
   // not stop the customer from setting one up.
-  const { sourceCurrency } = await resolveSender(ctx, args.source_currency);
+  const { customer, sourceCurrency } = await resolveSender(ctx, args.source_currency);
+  // Program-Fix 14: every scheduled run is screened with the sender's legal
+  // name, so a schedule is set up only once one is on file — nothing is saved
+  // until then (the same needs_sender_name flow as send_approve_picker).
+  if (!hasSenderName(customer)) return senderNameRequired();
   const partnerId = ctx.partnerId;
   const amountSource = Number(args.amount_source ?? args.amount_usd);
   // Validate optional end_date: must be a parseable ISO date string; ignore if not.

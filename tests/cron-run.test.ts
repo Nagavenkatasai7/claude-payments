@@ -21,12 +21,16 @@ const kycProvider: KycProvider = {
   handleWebhook: async () => null,
 };
 
+// Program-Fix 14: every scheduled mint screens the owner's legal name, so the
+// owners that exercise the fire path carry one.
+const OWNER_FULL_NAME = 'Alex Rivera';
+
 // Seed a verified owner for the schedule's phone so the verify-before-send gate
 // passes for the existing-behavior tests (they exercise the fire path).
 async function seedVerified(cs: CustomerStore, phone = '15551234567'): Promise<void> {
   await cs.saveCustomer({
     senderPhone: phone, firstSeenAt: '2026-01-01T00:00:00Z',
-    kycStatus: 'verified', senderCountry: 'US', partnerId: 'default',
+    kycStatus: 'verified', senderCountry: 'US', partnerId: 'default', fullName: OWNER_FULL_NAME,
     createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
   });
 }
@@ -211,6 +215,7 @@ describe('runDueSchedules', () => {
       senderCountry: 'US',
       partnerId: 'default',
       optInAt: '2026-01-01T00:00:00Z',
+      fullName: OWNER_FULL_NAME,
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
     });

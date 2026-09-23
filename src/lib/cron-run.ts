@@ -2,6 +2,7 @@ import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
 import { isSendVerified, sendGateActive } from './kyc-gate';
+import { hasSenderName } from './sender-identity';
 import { env } from './env';
 import { logError } from './log';
 import { RateUnavailableError } from './rate';
@@ -102,6 +103,18 @@ export async function runDueSchedules(
     // pay link the customer was told would not come.
     const current = await deps.scheduleStore.getSchedule(schedule.id);
     if (!current || current.status !== 'active') continue;
+    // Program-Fix 14: every scheduled mint screens the owner's legal name with
+    // the recipient's. With no name on file this run mints NOTHING and binds no
+    // claim key: counted as failed, lastRunAt NOT advanced, the schedule stays
+    // active (it resumes once a name is on file — a same-day re-run of
+    // /api/cron then mints), and ops gets ONE deduped alert per schedule per
+    // Eastern day, the same shape as a refused mint.
+    const senderName = hasSenderName(owner) ? owner?.fullName : undefined;
+    if (senderName === undefined) {
+      failed++;
+      await alertScheduleNotCreated(deps, schedule.id, 'sender_name_missing', 'schedule-sender-name');
+      continue;
+    }
     try {
       // Program-Fix 32 (neon-08): CLAIM-FIRST, the pay-finalize.ts pattern.
       // Bind sched:<scheduleId>:<YYYY-MM-DD Eastern day — the day
@@ -144,6 +157,7 @@ export async function runDueSchedules(
         payoutMethod: schedule.payoutMethod,
         payoutDestination: schedule.payoutDestination,
         fundingMethod: schedule.fundingMethod,
+        senderName, // Program-Fix 14: screened with the recipient's name
         senderKycStatus: owner?.kycStatus ?? 'not_started',
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
       });
@@ -180,24 +194,38 @@ export async function runDueSchedules(
         : err instanceof SendBusyError ? 'busy'      // the per-sender mint lock timed out twice (once retried above)
         : 'error';
       logError('cron.schedule-run', err, { scheduleId: schedule.id, reason });
-      const day = easternDay(deps.now);
-      try {
-        await createOutboxRepo(deps.db).enqueue(
-          'ops.alert',
-          {
-            message:
-              `⚠️ SmartRemit ops: scheduled send ${schedule.id} was NOT created on ${day} (${reason}) — ` +
-              `the customer got no pay link. Re-run /api/cron today once the cause clears; ` +
-              `the daily cron does not retry it tomorrow.`,
-          },
-          { dedupeKey: `schedule-refused:${schedule.id}:${day}` },
-        );
-      } catch (alertErr) {
-        logError('cron.schedule-alert', alertErr, { scheduleId: schedule.id });
-      }
+      await alertScheduleNotCreated(deps, schedule.id, reason, 'schedule-refused');
     }
   }
   return { fired, failed };
+}
+
+/**
+ * ONE deduped ops alert per schedule per Eastern day when a due run created
+ * nothing (`<dedupePrefix>:<scheduleId>:<day>`). The message names the
+ * schedule id and a fixed reason code only — never the owner's phone or name.
+ */
+async function alertScheduleNotCreated(
+  deps: Pick<CronDeps, 'db' | 'now'>,
+  scheduleId: string,
+  reason: string,
+  dedupePrefix: 'schedule-refused' | 'schedule-sender-name',
+): Promise<void> {
+  const day = easternDay(deps.now);
+  try {
+    await createOutboxRepo(deps.db).enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: scheduled send ${scheduleId} was NOT created on ${day} (${reason}) — ` +
+          `the customer got no pay link. Re-run /api/cron today once the cause clears; ` +
+          `the daily cron does not retry it tomorrow.`,
+      },
+      { dedupeKey: `${dedupePrefix}:${scheduleId}:${day}` },
+    );
+  } catch (alertErr) {
+    logError('cron.schedule-alert', alertErr, { scheduleId });
+  }
 }
 
 /** YYYY-MM-DD for the same Eastern day isScheduleDueToday matches. */
