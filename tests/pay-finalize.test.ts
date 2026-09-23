@@ -68,7 +68,7 @@ beforeEach(() => {
   );
 });
 
-describe('finalizeDraftPayment', () => {
+describe('finalizeDraftPayment', { retry: 0 }, () => {
   it('happy path ($200): returns ok:true with a transferId, persists the transfer, consumes the draft, increments transfer count', async () => {
     const stores = await buildStores();
     const draftId = await makeDraft(stores, 200);
@@ -468,7 +468,7 @@ describe('finalizeDraftPayment', () => {
 
 // U1: the pay page is the PRIMARY B2B mint path (the Approve & Pay card opens
 // /pay/<draftId>), so finalizeDraftPayment MUST thread the draft's B2B fields.
-describe('finalizeDraftPayment — B2B (business-to-business) mint threads business fields', () => {
+describe('finalizeDraftPayment — B2B (business-to-business) mint threads business fields', { retry: 0 }, () => {
   it('a B2B draft mints a b2b transfer with discriminators, business names, invoice link (never b2c)', async () => {
     const stores = await buildStores();
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
@@ -562,7 +562,7 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
   });
 });
 
-describe('finalizeDraftPayment — FX gate (Task 9): refuses BEFORE the claim, never burns the draft', () => {
+describe('finalizeDraftPayment — FX gate (Task 9): refuses BEFORE the claim, never burns the draft', { retry: 0 }, () => {
   // Ruling 7 pre-claim order: kyc → masked destination (fix 6) → FX (this) → cap (fix 10) → idem.claim.
   async function verifiedSender(stores: Awaited<ReturnType<typeof buildStores>>) {
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
@@ -655,7 +655,7 @@ describe('finalizeDraftPayment — FX gate (Task 9): refuses BEFORE the claim, n
   });
 });
 
-describe('finalizeDraftPayment — FX refused AFTER the claim (Task 9 review): mapped, never a thrown 400', () => {
+describe('finalizeDraftPayment — FX refused AFTER the claim (Task 9 review): mapped, never a thrown 400', { retry: 0 }, () => {
   it('a legacy re-quote whose live rate becomes unavailable between the gate and the mint → fx_unavailable; the claimed id stays unminted and a retry mints THAT id', async () => {
     const stores = await buildStores();
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
@@ -694,7 +694,7 @@ describe('finalizeDraftPayment — FX refused AFTER the claim (Task 9 review): m
   });
 });
 
-describe('fix 6 (ctx-01): the payout destination is settled BEFORE idem.claim — a refusal burns nothing', () => {
+describe('fix 6 (ctx-01): the payout destination is settled BEFORE idem.claim — a refusal burns nothing', { retry: 0 }, () => {
   const claimFor = (stores: Awaited<ReturnType<typeof buildStores>>, draftId: string) =>
     createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
 
@@ -804,7 +804,7 @@ describe('fix 6 (ctx-01): the payout destination is settled BEFORE idem.claim �
 });
 
 // ── Program fix 16 (Task 10, tests 15 + 16): ruling-7 guard order and the replay skip ──
-describe('finalizeDraftPayment — cap from the ledger (Program fix 16)', () => {
+describe('finalizeDraftPayment — cap from the ledger (Program fix 16)', { retry: 0 }, () => {
   async function untouched(stores: Awaited<ReturnType<typeof buildStores>>, draftId: string) {
     expect(await stores.draftStore.getDraft(draftId)).not.toBeNull();
     expect(await createIdempotencyRepo(stores.db).find(DEFAULT_PARTNER_ID, `draft:${draftId}`)).toBeNull();
