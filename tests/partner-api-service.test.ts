@@ -14,8 +14,10 @@ import { FX_UNAVAILABLE_MESSAGE, resetRateCacheForTests } from '@/lib/rate';
 import {
   listCorridors, createQuote, validateBeneficiary, createBeneficiary,
   createTransaction, getTransaction, confirmTransaction, listTransactions,
+  resetSenderNameDeprecationLogForTests,
   type PartnerApiDeps,
 } from '@/lib/partner-api-service';
+import { SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import type { Partner } from '@/lib/types';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
@@ -950,5 +952,113 @@ describe('createTransaction — sender.phone normalization (review MUST 1) + typ
     expect(JSON.stringify(r)).not.toContain('15550000999');
     const row = await store.getTransfer('b0');
     expect([row?.partnerId, row?.amountUsd]).toEqual(['globex', 10]); // untouched
+  });
+});
+
+// ── Program-Fix 14 follow-up: partner API transfers without sender identity ──
+// sender.name stays OPTIONAL (backward-compatible), but a mint without it can
+// not be name-screened on the sender side, so it is minted straight into the
+// existing compliance hold (flagged ⇒ confirm holds in_review), never rejected.
+describe('partner-api-service: a transfer without sender identity is held for review', () => {
+  type View = { id: string; status: string; compliance_status: string };
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    resetSenderNameDeprecationLogForTests();
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  const deprecationLines = () =>
+    warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('partner_api.sender_name_missing'));
+
+  it.each([
+    ['absent', { phone: '15557772001', kyc_status: 'not_started' }],
+    ['blank', { phone: '15557772001', name: '   ', kyc_status: 'not_started' }],
+    ['non-string', { phone: '15557772001', name: 42, kyc_status: 'not_started' }],
+  ])('%s sender.name ⇒ 201, flagged with the stable reason, still awaiting_payment', async (_label, sender) => {
+    const { deps, store } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-noname', txBody({ sender }));
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (!r.ok) throw new Error('unexpected');
+    expect(r.data as View).toMatchObject({ status: 'awaiting_payment', compliance_status: 'flagged' });
+    const row = await store.getTransfer((r.data as View).id);
+    expect(row?.complianceStatus).toBe('flagged');
+    expect(row?.complianceReasons).toContain(SENDER_IDENTITY_MISSING_REASON);
+  });
+
+  it('confirm on such a transfer holds it in_review and never reaches the payment seam', async () => {
+    const { deps, store } = await harness();
+    const initiatePayment = vi.fn(deps.initiatePayment!);
+    deps.initiatePayment = initiatePayment;
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-noname-c', txBody({ sender: { phone: '15557772002' } }));
+    if (!r.ok) throw new Error('unexpected');
+    const id = (r.data as View).id;
+    const c = await confirmTransaction(deps, DELEGATED, 'pk_1', id);
+    expect(c).toMatchObject({ ok: true, status: 200 });
+    if (c.ok) expect(c.data as View).toMatchObject({ status: 'in_review', compliance_status: 'flagged' });
+    expect(initiatePayment).not.toHaveBeenCalled();
+    expect((await store.getTransfer(id))?.status).toBe('in_review');
+  });
+
+  it("holds under an 'ours' key exactly like a delegated key", async () => {
+    const { deps } = await harness();
+    await deps.partnerStore.savePartner(OURS);
+    const r = await createTransaction(deps, OURS, 'pk_2', 'idem-noname-ours', txBody({ sender: { phone: '15557772003' } }));
+    expect(r).toMatchObject({ ok: true, status: 201 });
+    if (r.ok) expect((r.data as View).compliance_status).toBe('flagged');
+  });
+
+  it('a present sender.name is screened exactly as before: cleared, no reason, no warning', async () => {
+    const { deps, store } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-named', txBody());
+    if (!r.ok) throw new Error('unexpected');
+    expect((r.data as View).compliance_status).toBe('cleared');
+    expect((await store.getTransfer((r.data as View).id))?.complianceReasons ?? []).not.toContain(SENDER_IDENTITY_MISSING_REASON);
+    expect(deprecationLines()).toHaveLength(0);
+  });
+
+  it('a watchlisted sender.name is still blocked (422)', async () => {
+    const { deps, store } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-named-blocked', txBody({
+      sender: { phone: '15557772004', name: 'Test Blocked' },
+    }));
+    expect(r).toMatchObject({ ok: false, status: 422 });
+    expect((await store.listTransfers())[0]?.status).toBe('blocked');
+  });
+
+  it('no sender.name AND a watchlisted beneficiary is still blocked — the block wins over the hold', async () => {
+    const { deps, store } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-noname-blocked', txBody({
+      sender: { phone: '15557772005' },
+      beneficiary: { name: 'John Doe', phone: '919876543210', payout_method: 'bank', payout_destination: '1234567890' },
+    }));
+    expect(r).toMatchObject({ ok: false, status: 422 });
+    const [t] = await store.listTransfers();
+    expect(t.status).toBe('blocked');
+    expect(t.complianceReasons).not.toContain(SENDER_IDENTITY_MISSING_REASON);
+    expect(deprecationLines()).toHaveLength(0);
+  });
+
+  it('a dirty sender.name is still a 400 before the claim (unchanged)', async () => {
+    const { deps, db } = await harness();
+    const r = await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dirty', txBody({ sender: { phone: '15557772006', name: 'a<b>' } }));
+    expect(r).toMatchObject({ ok: false, status: 400 });
+    expect(await createIdempotencyRepo(db).find('acme', 'idem-dirty')).toBeNull();
+  });
+
+  it('logs ONE structured deprecation warning per key per hour — partner id + key id only, no phone, no name, no idempotency key', async () => {
+    const { deps } = await harness();
+    await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dep-1', txBody({ sender: { phone: '15557772007' } }));
+    await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dep-2', txBody({ sender: { phone: '15557772008' } }));
+    // a replay of an already-minted key never re-logs
+    await createTransaction(deps, DELEGATED, 'pk_1', 'idem-dep-1', txBody({ sender: { phone: '15557772007' } }));
+    const lines = deprecationLines();
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(lines[0]) as Record<string, unknown>;
+    expect(line).toMatchObject({ level: 'warn', scope: 'partner_api.sender_name_missing', partnerId: 'acme', keyId: 'pk_1' });
+    expect(String(line.msg)).toMatch(/sender\.name/);
+    expect(lines[0]).not.toContain('1555777200');
+    expect(lines[0]).not.toContain('idem-dep');
+    // a different key logs its own line
+    await createTransaction(deps, DELEGATED, 'pk_other', 'idem-dep-3', txBody({ sender: { phone: '15557772009' } }));
+    expect(deprecationLines()).toHaveLength(2);
   });
 });

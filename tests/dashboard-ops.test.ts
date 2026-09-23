@@ -5,7 +5,7 @@ import {
   cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
 } from '@/lib/dashboard-ops';
-import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON } from '@/lib/compliance';
+import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
 import { AML_HOLD_REASON } from '@/lib/aml-hold';
 
 // Program-Fix 43 follow-up: releaseTransfer requires the staff audit context
@@ -735,6 +735,13 @@ describe('canReleaseHeld — who may release a compliance hold (owner decision 2
   it("a partner-scoped admin may release a kycMode 'delegated' partner's non-screening hold", () => {
     expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
     expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [AML_HOLD_REASON] })).toBe(true);
+  });
+
+  it("a hold for a missing sender identity is PLATFORM-only, even for a 'delegated' partner", () => {
+    const MISSING = { complianceReasons: [SENDER_IDENTITY_MISSING_REASON] };
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, MISSING)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: ['Large transfer amount.', SENDER_IDENTITY_MISSING_REASON] })).toBe(false);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, MISSING)).toBe(true);
   });
 
   // Program-Fix 43 follow-up: sanctions / name-screening holds are PLATFORM-only,
