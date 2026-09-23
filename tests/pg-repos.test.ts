@@ -450,6 +450,10 @@ describe('transfer-repo listStaleUnfunded (Program-Fix 32)', () => {
     for (const status of ['in_review', 'paid', 'delivered', 'cancelled', 'blocked'] as const) {
       await seedLedgerSpend(db, { partnerId: 'default', phone: '15550000005', amountUsd: 10, createdAt: ago(20), status });
     }
+    // Review S1: a B2B invoice row is never expired (a crashed invoice mint
+    // would otherwise be cancelled while b2b-pay-finalize replays it as ok).
+    const b2b = await seedLedgerSpend(db, { partnerId: 'default', phone: '15550000006', amountUsd: 10, createdAt: ago(20) });
+    await db.execute(sql`UPDATE transfers SET transfer_type = 'b2b', invoice_id = 'inv_1' WHERE id = ${b2b}`);
     const repo = createTransferRepo(db);
     expect((await repo.listStaleUnfunded(ago(7))).map((t) => t.id)).toEqual([old1, old2]);
     expect((await repo.listStaleUnfunded(ago(7), 1)).map((t) => t.id)).toEqual([old1]);

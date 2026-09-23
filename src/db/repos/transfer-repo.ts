@@ -359,7 +359,7 @@ export function createTransferRepo(
      * (funding_ref IS NULL) awaiting_payment rows created before `cutoff`,
      * oldest first, bounded. The same shape as listAwaitingWithFunding with the
      * funding predicate inverted: a charged row belongs to the funding-resume
-     * sweep and is never listed here. Served by transfers_status_paid (leading
+     * sweep and is never listed here, and neither is a B2B invoice row. Served by transfers_status_paid (leading
      * `status`, schema.ts). Cross-tenant by design (a system sweep); every
      * write the caller makes is tenant-scoped (cancelIfCancellable).
      */
@@ -371,6 +371,11 @@ export function createTransferRepo(
           eq(transfers.status, 'awaiting_payment'),
           isNull(transfers.fundingRef),
           lt(transfers.createdAt, cutoff),
+          // Review S1: consumer rows only. A B2B invoice row is owned by its
+          // bill: b2b-pay-finalize replays a bound-and-minted row as ok, so an
+          // expired invoice transfer would leave a bill that reads "done" but
+          // can never be paid.
+          eq(transfers.transferType, 'b2c'),
         ))
         .orderBy(transfers.createdAt)
         .limit(limit);

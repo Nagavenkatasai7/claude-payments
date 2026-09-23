@@ -121,6 +121,10 @@ describe('expireUnpaidLinks (Program-Fix 32, neon-09)', () => {
     await store.saveTransfer(fixture({ id: 'x_review', createdAt: ago(30), status: 'in_review' }));
     await store.saveTransfer(fixture({ id: 'x_paid', createdAt: ago(30), status: 'paid', paidAt: ago(30) }));
     await store.saveTransfer(fixture({ id: 'x_delivered', createdAt: ago(30), status: 'delivered' }));
+    await store.saveTransfer(fixture({
+      id: 'x_b2b', createdAt: ago(30), transferType: 'b2b', invoiceId: 'inv_1',
+      senderEntityType: 'business', recipientEntityType: 'business',
+    }));
 
     expect(await expireUnpaidLinks(db)).toBe(1);
     expect(await statusOf('x_old')).toBe('cancelled');
@@ -129,6 +133,7 @@ describe('expireUnpaidLinks (Program-Fix 32, neon-09)', () => {
     expect(await statusOf('x_review')).toBe('in_review');
     expect(await statusOf('x_paid')).toBe('paid');
     expect(await statusOf('x_delivered')).toBe('delivered');
+    expect(await statusOf('x_b2b')).toBe('awaiting_payment'); // review S1: B2B invoice rows never expire
     expect(await audits('transfer.expired')).toEqual([
       { partner_id: 'acme', actor: 'system', actor_type: 'system', subject_id: 'x_old', meta: { ageDays: 8 } },
     ]);
