@@ -34,16 +34,19 @@ export function applyKycEvent(
     return {};
   }
 
-  const isWatchlistEvent =
-    event.watchlistMatched === true || event.name === 'report/watchlist.matched';
+  // Watchlist or PEP match is a hard hold: once in needs_review from a compliance signal,
+  // only another hard-hold event (not a routine inquiry event) can touch the delta.
+  // HOLD LOCK: no later NON-watchlist/PEP Persona event may touch it — only a human via
+  // kyc-case-store.review() can clear it. Return an empty delta so a clean
+  // inquiry.approved/completed delivered out of order cannot silently downgrade the hold.
+  const isHardHoldEvent =
+    event.watchlistMatched === true ||
+    event.name === 'report/watchlist.matched' ||
+    event.pepMatched === true ||
+    event.name === 'report/pep.matched';
 
-  // HOLD LOCK: once a customer is in needs_review (a watchlist/PEP hold, or a
-  // failed inquiry awaiting a human), no later NON-watchlist Persona event may
-  // touch it — only a human via kyc-case-store.review() can clear it. Return an
-  // empty delta so a clean inquiry.approved/completed delivered out of order
-  // cannot silently downgrade (or even partially overwrite) the hold.
-  if (customer.kycReviewState === 'needs_review' && !isWatchlistEvent) {
-    return {};
+  if (customer.kycReviewState === 'needs_review' && !isHardHoldEvent) {
+    return {}; // hold lock: routine events cannot downgrade a compliance hold
   }
 
   const delta: KycDelta = {};
@@ -53,9 +56,13 @@ export function applyKycEvent(
   }
   if (event.idLast4) delta.idLast4 = event.idLast4;
 
-  // Watchlist/PEP match is a hard hold regardless of inquiry status.
-  if (isWatchlistEvent) {
-    delta.watchlistHit = true;
+  if (isHardHoldEvent) {
+    if (event.watchlistMatched === true || event.name === 'report/watchlist.matched') {
+      delta.watchlistHit = true;
+    }
+    if (event.pepMatched === true || event.name === 'report/pep.matched') {
+      delta.pepHit = true;
+    }
     delta.kycReviewState = 'needs_review';
     return delta;
   }

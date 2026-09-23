@@ -61,6 +61,48 @@ describe('checkIpRateLimit — colon-in-scope/ip collision regression', () => {
   });
 });
 
+describe('checkIpRateLimit — windowSec=0 bypass (regression)', () => {
+  // With real Redis, expire(key, 0) immediately deletes the key, so the counter
+  // resets to 1 on every call and the rate limit never triggers.
+  // fakeRedis treats expire as a no-op, so we simulate the real behaviour with an
+  // inline wrapper that deletes the key when TTL ≤ 0.
+  function realExpireFakeRedis() {
+    const base = fakeRedis();
+    return {
+      ...base,
+      async expire(key: string, seconds: number): Promise<unknown> {
+        if (seconds <= 0) {
+          base.dump.delete(key);
+          return 1;
+        }
+        return base.expire(key, seconds);
+      },
+    };
+  }
+
+  it('windowSec=0 is clamped to 1 — counter accumulates and blocks after limit', async () => {
+    const redis = realExpireFakeRedis();
+    for (let i = 0; i < 3; i++) {
+      const r = await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec: 0, now: T0 });
+      expect(r.allowed).toBe(true);
+    }
+    // Without the clamp: expire(key, 0) deletes key → counter stays at 1 → fourth call allowed.
+    // With the clamp (windowSec=1): expire(key, 2) keeps key → counter reaches 4 → blocked.
+    const fourth = await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec: 0, now: T0 });
+    expect(fourth.allowed).toBe(false);
+    expect(fourth.remaining).toBe(0);
+  });
+
+  it('negative windowSec is also clamped to 1', async () => {
+    const redis = realExpireFakeRedis();
+    for (let i = 0; i < 3; i++) {
+      await checkIpRateLimit(redis, 'pay', '9.9.9.9', { limit: 3, windowSec: -10, now: T0 });
+    }
+    const fourth = await checkIpRateLimit(redis, 'pay', '9.9.9.9', { limit: 3, windowSec: -10, now: T0 });
+    expect(fourth.allowed).toBe(false);
+  });
+});
+
 describe('clientIpFrom', () => {
   it('takes the FIRST x-forwarded-for entry (the platform-set client ip)', () => {
     expect(clientIpFrom(new Headers({ 'x-forwarded-for': '9.9.9.9, 10.0.0.1' }))).toBe('9.9.9.9');
