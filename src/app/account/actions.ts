@@ -66,7 +66,10 @@ export interface AccountState {
 }
 
 const GENERIC_LOGIN_ERROR = 'Invalid phone or password.';
-const GENERIC_OTP_NOTE = 'We sent a 6-digit code to your WhatsApp.';
+// Program-Fix 25 PR B (portal-01): the SAME text on every branch (enumeration
+// safety), now with what to do when the code never arrives.
+const GENERIC_OTP_NOTE =
+  "We sent a 6-digit code to your WhatsApp. Didn't get it? Message us on WhatsApp first, then Resend.";
 const SESSION_EXPIRED = 'Your session expired — please start again.';
 const COOKIE_MAX_AGE = 12 * 60 * 60; // 12h absolute (matches the session ceiling)
 // Program-Fix 46A (F70): registrations per client IP per hour (own scope).

@@ -173,6 +173,16 @@ export function createTransactionOtpStore(redis: RedisLike, opts: TxOtpOptions =
       }
     },
 
+    /**
+     * Program-Fix 25 PR B (cooldown trap): the code issued last never reached the
+     * customer (the WhatsApp send threw), so drop ONLY the 30-s cooldown marker
+     * and a Resend really sends. Every issue/verify budget is kept, so the issue
+     * caps still bound a send that keeps failing.
+     */
+    async releaseCooldown(txId: string): Promise<void> {
+      await redis.del(cdKey(txId));
+    },
+
     async verify(txId: string, phone: string, code: string): Promise<VerifyResult> {
       const t = now();
       // 1. Per-transaction daily ceiling: at the cap, nothing is compared.

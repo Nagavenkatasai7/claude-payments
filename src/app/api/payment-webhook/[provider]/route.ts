@@ -21,6 +21,7 @@ import { logError } from '@/lib/log';
 import {
   sendText, sendTemplate, sendTemplateOrText, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
 } from '@/lib/whatsapp';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 
 // WL3: the settlement status callback. A partner's rail (or our hosted reference
 // rail) POSTs lifecycle events here; we verify the HMAC with THAT partner's
@@ -203,7 +204,7 @@ async function handleVerified(
           // degrade to a free-form text if Meta rejects the template — otherwise
           // the recipient silently gets nothing while the sender is notified.
           const recipientPhone = updated.recipientPhone;
-          await sendTemplateOrText(
+          const outcome = await sendTemplateOrText(
             recipientPhone,
             () => sendTemplate(
               recipientPhone, RECIPIENT_TEMPLATE_NAME, RECIPIENT_TEMPLATE_LANG,
@@ -213,13 +214,43 @@ async function handleVerified(
             recipientDeliveredFallbackText(updated, brand),
             waCreds,
           );
+          // Program-Fix 25 PR B (§3.7): the recipient notice failing is no longer silent.
+          if (!outcome.ok) await alertNotifyFailed(updated.id, outcome.code);
         }
       } catch (err) {
         logError('payment-webhook.notify', err, { transferId: updated.id });
+        await alertNotifyFailed(updated.id, err instanceof WhatsAppSendError ? err.code : undefined);
       }
     });
   }
   return NextResponse.json({ ok: true });
+}
+
+/**
+ * Program-Fix 25 PR B (§3.7): a delivered notice that did not reach the sender or
+ * the recipient raises ONE deduped ops alert per transfer (`notifyfail:<id>`).
+ * EXCEPT 131030 (recipient not on the sandbox allow-list): it fires on every demo
+ * delivery through the simulator callback, so it stays log-only. The message
+ * carries the transfer id and the numeric Graph code only — no phone, no name.
+ * Best-effort: an enqueue error is logged, never thrown (this runs in after()).
+ */
+const NOTIFY_ALERT_EXEMPT_CODE = 131030;
+async function alertNotifyFailed(transferId: string, code: number | undefined): Promise<void> {
+  if (code === NOTIFY_ALERT_EXEMPT_CODE) return;
+  try {
+    await createOutboxRepo(getDb()).enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: transfer ${transferId} was delivered, but the WhatsApp "delivered" notice ` +
+          `did not reach the customer${code !== undefined ? ` (WhatsApp #${code})` : ''}. ` +
+          `Check the template / number in WhatsApp Manager.`,
+      },
+      { dedupeKey: `notifyfail:${transferId}` },
+    );
+  } catch (err) {
+    logError('payment-webhook.notify-alert', err, { transferId });
+  }
 }
 
 /**

@@ -100,6 +100,10 @@ export async function POST(
     if (typeof body.action === 'string' && body.action === 'request_otp') {
       // Program-Fix 45: the buyer code draws from its own per-phone budget (kind 'b2b', this invoice's partner).
       const issued = await otpStore.issue(invoiceId, buyerPhone, { kind: 'b2b', partnerId: invoice.partnerId });
+      // Program-Fix 25 PR B: locked answers 429; a cooldown stays 200 sent:true.
+      if (!issued.ok && issued.reason === 'locked') {
+        return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
+      }
       if (issued.ok) {
         let otpCreds: WaCreds | undefined;
         try {
@@ -110,7 +114,14 @@ export async function POST(
         try {
           await sendTransactionOtp(buyerPhone, issued.code, otpCreds);
         } catch {
-          /* generic surface; never log the code */
+          // Program-Fix 25 PR B: honest — release the cooldown so Resend really
+          // sends, and say so. Never log the code.
+          try {
+            await otpStore.releaseCooldown(invoiceId);
+          } catch {
+            /* the 30-s TTL expires it anyway */
+          }
+          return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
         }
       }
       return NextResponse.json({ ok: true, sent: true });

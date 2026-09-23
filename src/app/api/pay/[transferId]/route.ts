@@ -408,10 +408,16 @@ export async function POST(
           ? await draftTenant(otpDraft, store.legacyTenantOf)
           : (await store.getTransfer(transferId))?.partnerId;
       } catch { /* budget falls back to the default partner; send to the shared env number */ }
-      const issued = await getTransactionOtpStore().issue(transferId, otpPhone, {
+      const otpStore = getTransactionOtpStore();
+      const issued = await otpStore.issue(transferId, otpPhone, {
         kind: 'pay',
         partnerId: otpPartnerId ?? DEFAULT_PARTNER_ID,
       });
+      // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
+      // 429; a cooldown stays 200 sent:true because an earlier code WAS sent.
+      if (!issued.ok && issued.reason === 'locked') {
+        return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
+      }
       if (issued.ok) {
         // WL2: the code arrives from the number the customer is mid-payment with.
         let otpCreds: WaCreds | undefined;
@@ -420,7 +426,14 @@ export async function POST(
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
           }
         } catch { /* fall back to the shared env number */ }
-        try { await sendTransactionOtp(otpPhone, issued.code, otpCreds); } catch { /* generic surface; never log the code */ }
+        try {
+          await sendTransactionOtp(otpPhone, issued.code, otpCreds);
+        } catch {
+          // Program-Fix 25 PR B: honest — the code never arrived. Release the
+          // cooldown so Resend really sends. Never log the code.
+          try { await otpStore.releaseCooldown(transferId); } catch { /* the 30-s TTL expires it anyway */ }
+          return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
+        }
       }
       return NextResponse.json({ ok: true, sent: true });
     }
