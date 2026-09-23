@@ -1,10 +1,15 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { auditEvents, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
+import {
+  encodeStatementCursor,
+  type SettledTransfer,
+  type StatementCursor,
+} from '@/lib/settlement-statement';
 
 // transfer-repo — the Postgres ledger for transfers. Mirrors the function
 // surface call sites already use (getTransfer/saveTransfer/
@@ -691,6 +696,103 @@ export function createTransferRepo(
 
     listByPartner(partnerId: PartnerId, req: PageReq): Promise<Page<Transfer>> {
       return page(and(eq(transfers.partnerId, partnerId)), req);
+    },
+
+    /**
+     * Program-Fix 31 PR A (rail-11): the partner settlements statement page.
+     * partnerId is REQUIRED and first (like getOwnedTransfer) — there is no
+     * unscoped variant. Rows:
+     *   partner_id = $p AND paid_at IS NOT NULL AND from <= paid_at < to
+     *   AND (status IN ('paid','delivered')
+     *        OR (status = 'cancelled' AND payment_provider_ref IS NOT NULL))
+     * never in_review (markInReviewIfAwaiting stamps paid_at at the HOLD, not
+     * at an instruction), and a cancelled row only when a rail was instructed
+     * (a staff-rejected hold keeps its hold-time paid_at but has no ref). A
+     * released hold appears at its release time (markPaidIfInReview resets
+     * paid_at). Keyset ascending on (paid_at, id). The cursor compares the
+     * Postgres TEXT of paid_at IN SQL — never a JS Date (ms), which would
+     * repeat/skip rows sharing a millisecond — and the cursor is validated by
+     * the caller (settlement-statement.decodeStatementCursor) before this cast.
+     * Selects ONLY the statement columns: no settlement_partner_id, payout
+     * destination, recipient or sender identity is ever read here.
+     * Drizzle 0.45.2: select({...}) partial selection —
+     * node_modules/drizzle-orm/pg-core/db.d.ts (select<TSelection>);
+     * sql`` + .as — node_modules/drizzle-orm/sql/sql.d.ts.
+     */
+    async listSettledPage(
+      partnerId: PartnerId,
+      from: Date,
+      to: Date,
+      req: { limit: number; cursor: StatementCursor | null },
+    ): Promise<{ items: SettledTransfer[]; nextCursor: string | null }> {
+      const conds = [
+        eq(transfers.partnerId, partnerId),
+        isNotNull(transfers.paidAt),
+        gte(transfers.paidAt, from),
+        lt(transfers.paidAt, to),
+        sql`(${transfers.status} IN ('paid','delivered') OR (${transfers.status} = 'cancelled' AND ${transfers.paymentProviderRef} IS NOT NULL))`,
+      ];
+      if (req.cursor) {
+        conds.push(
+          sql`(${transfers.paidAt}, ${transfers.id}) > (${req.cursor.paidAtText}::timestamptz, ${req.cursor.id})`,
+        );
+      }
+      const rows = await db
+        .select({
+          id: transfers.id,
+          status: transfers.status,
+          complianceStatus: transfers.complianceStatus,
+          refundStatus: transfers.refundStatus,
+          amountSource: transfers.amountSource,
+          sourceCurrency: transfers.sourceCurrency,
+          feeSource: transfers.feeSource,
+          totalChargeSource: transfers.totalChargeSource,
+          fxRate: transfers.fxRate,
+          amountDest: transfers.amountDest,
+          destinationCurrency: transfers.destinationCurrency,
+          destinationCountry: transfers.destinationCountry,
+          payoutMethod: transfers.payoutMethod,
+          paymentProviderRef: transfers.paymentProviderRef,
+          fundingRef: transfers.fundingRef,
+          refundRef: transfers.refundRef,
+          createdAt: transfers.createdAt,
+          paidAt: transfers.paidAt,
+          deliveredAt: transfers.deliveredAt,
+          refundedAt: transfers.refundedAt,
+          paidAtText: sql<string>`${transfers.paidAt}::text`.as('paid_at_text'),
+        })
+        .from(transfers)
+        .where(and(...conds))
+        .orderBy(asc(transfers.paidAt), asc(transfers.id))
+        .limit(req.limit + 1);
+      const pageRows = rows.slice(0, req.limit);
+      const items: SettledTransfer[] = pageRows.map((r) => ({
+        id: r.id,
+        status: r.status as TransferStatus,
+        complianceStatus: r.complianceStatus as SettledTransfer['complianceStatus'],
+        refundStatus: (r.refundStatus ?? 'none') as RefundStatus,
+        amountSource: Number(r.amountSource),
+        sourceCurrency: r.sourceCurrency as SettledTransfer['sourceCurrency'],
+        feeSource: Number(r.feeSource),
+        totalChargeSource: Number(r.totalChargeSource),
+        fxRate: Number(r.fxRate),
+        amountInr: Number(r.amountDest),
+        destinationCurrency: (r.destinationCurrency ?? undefined) as SettledTransfer['destinationCurrency'],
+        destinationCountry: r.destinationCountry as CountryCode,
+        payoutMethod: r.payoutMethod as PayoutMethod,
+        paymentProviderRef: r.paymentProviderRef ?? undefined,
+        fundingRef: r.fundingRef ?? undefined,
+        refundRef: r.refundRef ?? undefined,
+        createdAt: r.createdAt.toISOString(),
+        paidAt: r.paidAt ? r.paidAt.toISOString() : undefined,
+        deliveredAt: r.deliveredAt ? r.deliveredAt.toISOString() : undefined,
+        refundedAt: r.refundedAt ? r.refundedAt.toISOString() : undefined,
+      }));
+      const last = pageRows[pageRows.length - 1];
+      return {
+        items,
+        nextCursor: rows.length > req.limit && last ? encodeStatementCursor(last.paidAtText, last.id) : null,
+      };
     },
 
     /** Indexed per-(tenant, customer) page — a phone alone is not an identity (fix 1). */
