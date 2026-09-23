@@ -263,11 +263,44 @@ describe('runDueSchedules', () => {
     // so the Persona completion can bind to it once the phone has sibling rows.
     expect((await customerStore.getCustomer('default', '15551234567'))?.kycInquiryId).toBe('ref_1');
   });
+
+  it('Program-Fix 27: the 17:00 UTC catch-up run on the same Eastern day does NOT nudge an unverified owner again (one inquiry, one message)', async () => {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    const dflt = await partnerStore.ensureDefaultPartner();
+    await partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: new Date().toISOString() });
+    await scheduleStore.saveSchedule(sched('unverified', 21));
+    await customerStore.saveCustomer({
+      senderPhone: '15551234567', firstSeenAt: '2026-01-01T00:00:00Z',
+      kycStatus: 'grandfathered', senderCountry: 'US', partnerId: 'default',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    const startVerification = vi.fn(kycProvider.startVerification);
+    const provider: KycProvider = { ...kycProvider, startVerification };
+    const skipped: string[] = [];
+    const run = (now: number) => runDueSchedules({
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider: provider, now,
+      sendScheduledLink: async () => {},
+      sendScheduledSkipped: async (s) => { skipped.push(s.id); },
+    });
+
+    // 13:00 UTC and 17:00 UTC on 2026-05-21 are the same Eastern day.
+    await run(Date.parse('2026-05-21T13:00:00.000Z'));
+    await run(Date.parse('2026-05-21T17:00:00.000Z'));
+    expect(startVerification).toHaveBeenCalledTimes(1);
+    expect(skipped).toEqual(['unverified']);
+
+    // The schedule's NEXT due day nudges again (monthly: 2026-06-21).
+    await run(Date.parse('2026-06-21T13:00:00.000Z'));
+    expect(startVerification).toHaveBeenCalledTimes(2);
+    expect(skipped).toEqual(['unverified', 'unverified']);
+    expect((await scheduleStore.getSchedule('unverified'))?.lastRunAt).toBeUndefined();
+  });
 });
 
 describe('runDueSchedules — a refused scheduled send is loud (Task 9)', () => {
-  // The daily cron (vercel.json "0 13 * * *") has no catch-up — isScheduleDueToday
-  // matches the day exactly — so a refused run must page ops, not just log.
+  // The cron (vercel.json "0 13 * * *" + the Program-Fix 27 "0 17 * * *" same-day
+  // catch-up) has no NEXT-day catch-up — isScheduleDueToday matches the day
+  // exactly — so a refused run must page ops, not just log.
   async function opsAlerts(db: Awaited<ReturnType<typeof makeDeps>>['db']) {
     const r = await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`);
     return (r as unknown as { rows: Array<{ dedupe_key: string; payload: { message: string } }> }).rows;
