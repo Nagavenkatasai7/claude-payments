@@ -92,6 +92,8 @@ function pepperForId(id: string): string | undefined {
  * change can tell hashes apart. The PHC inside is byte-for-byte what was
  * written before. ⚠ Never roll production back below fix 45 P3: an older
  * verifyPassword rejects the `$pv=` form and would lock these accounts out.
+ * For the same reason P4 ships only after P3 is at 100% AND the Skew
+ * Protection max age has elapsed (a skew-pinned pre-P3 tab cannot verify it).
  */
 export async function hashPassword(plain: string): Promise<string> {
   const pre = applyPepper(plain);

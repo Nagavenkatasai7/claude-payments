@@ -12,7 +12,7 @@ import { createTicketRepo, type TicketRepo } from '@/db/repos/ticket-repo';
 import type { Db } from '@/db/client';
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { ticketMessages } from '@/db/schema';
+import { tickets, ticketMessages } from '@/db/schema';
 import { EnvKeyProvider, EnvKeyRing, aadFor, encryptField } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
 
@@ -266,6 +266,29 @@ describe('ticket-repo — body reader (fix 45 P3)', () => {
     const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'hello' });
     await r.listMessages(t.id, { includeInternal: true });
     expect(logSpy.logWarn.mock.calls.filter((c) => c[0] === 'ticket.body_unreadable')).toHaveLength(0);
+  });
+
+  it('inside a caller\'s transaction, a seal failure rolls back the caller\'s other writes too', async () => {
+    const ok = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await ok.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'first' });
+    const broken = { wrapDataKey: () => { throw new Error('kms down'); }, unwrapDataKey: () => { throw new Error('kms down'); } };
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.update(tickets).set({ subject: 'changed in the same tx' }).where(eq(tickets.id, t.id));
+        await createTicketRepo(tx, { cryptoProvider: broken }).appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'never' });
+      }),
+    ).rejects.toThrow();
+    expect((await ok.getTicket(t.id))?.subject).toBe('s');
+    expect(await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).toHaveLength(1);
+
+    // …and the happy path inside a caller's tx commits a sealed row.
+    await db.transaction(async (tx) => {
+      await createTicketRepo(tx, { cryptoProvider: provider }).appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'in tx' });
+    });
+    const rows = await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.body.startsWith('v2.k0.'))).toBe(true);
+    expect((await ok.listMessages(t.id, { includeInternal: true })).map((m) => m.body)).toEqual(['first', 'in tx']);
   });
 
   it('legacy plaintext rows (written before P4) read back unchanged', async () => {

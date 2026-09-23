@@ -206,6 +206,11 @@ export const env = {
     // AT USE and fails closed (a malformed kid or one the key ring lacks refuses
     // the write). Optional, UNSET in production (no rotation), never
     // boot-required: the accepting code tolerates its absence.
+    // ROTATION ORDER (owner, reviewed plan only): env is a per-deployment
+    // snapshot, so first ship the new key in FIELD_ENCRYPTION_PREVIOUS_KEYS to
+    // EVERY serving deployment (incl. skew-pinned ones, up to the Skew
+    // Protection max age), and only then set this — otherwise a build without
+    // the key cannot open what the new one writes.
     return (process.env.FIELD_ENCRYPTION_CURRENT_KID ?? '').trim() || 'k0';
   },
   get sanctionsList(): string {

@@ -124,6 +124,22 @@ describe('scripts/reencrypt-key-ring (fix 45 P4)', { retry: 0 }, () => {
     expect(again.reduce((n, r) => n + r.stale, 0)).toBe(0);
   });
 
+  it('pages numerically through bigint ids with batch=1 (ids past 10)', async () => {
+    const ticketId = await seedK0();
+    const repo = createTicketRepo(db, { cryptoProvider: new EnvKeyRing(KEY_0) });
+    for (let i = 0; i < 11; i += 1) {
+      await repo.appendMessage({ ticketId, actorType: 'staff', actorId: 'sup1', body: `reply ${i}` });
+    }
+    rotateEnv();
+    const report = await reencryptKeyRing(db, { apply: true, table: 'ticket_messages', batch: 1 });
+    expect(report[0]).toMatchObject({ stale: 12, resealed: 12, skipped: 0, failed: 0 });
+    const bodies = await raw(`SELECT id, body FROM ticket_messages ORDER BY id`);
+    expect(Number(bodies[bodies.length - 1].id)).toBeGreaterThanOrEqual(12);
+    expect(bodies.every((r) => r.body?.startsWith('v2.k1.'))).toBe(true);
+    const msgs = await createTicketRepo(db).listMessages(ticketId, { includeInternal: true });
+    expect(msgs.map((m) => m.body)).toEqual(['where is it', ...Array.from({ length: 11 }, (_, i) => `reply ${i}`)]);
+  });
+
   it('leaves legacy plaintext ticket bodies and v1 blobs alone (not this script\'s job)', async () => {
     const ticketId = await seedK0();
     await db.execute(sql`INSERT INTO ticket_messages (ticket_id, actor_type, actor_id, body) VALUES (${ticketId}, 'customer', '1', 'legacy plain')`);

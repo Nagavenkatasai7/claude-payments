@@ -77,8 +77,13 @@ export interface KeyRingOptions {
 type Row = Record<string, unknown>;
 const rowsOf = (res: unknown): Row[] => (res as { rows: Row[] }).rows;
 const id = (name: string): SQL => sql`${sql.identifier(name)}`;
-const keyMatch = (key: readonly string[], vals: readonly string[]): SQL =>
-  sql.join(key.map((k, i) => sql`${id(k)}::text = ${vals[i]}`), sql` AND `);
+const castTo = (v: string, type: 'text' | 'bigint'): SQL => (type === 'bigint' ? sql`${v}::bigint` : sql`${v}::text`);
+const keyTypesOf = (t: KeyRingTable): ('text' | 'bigint')[] => t.key.map((_, i) => t.keyTypes?.[i] ?? 'text');
+/** `k = $v` with the value cast to the column type, so the PK index is used. */
+const keyMatch = (t: KeyRingTable, vals: readonly string[]): SQL => {
+  const types = keyTypesOf(t);
+  return sql.join(t.key.map((k, i) => sql`${id(k)} = ${castTo(vals[i], types[i])}`), sql` AND `);
+};
 
 /** v2 blobs NOT under the current kid. The kid is validated (KID_PATTERN), so it has no LIKE wildcards. */
 const staleWhere = (column: string, kid: string): SQL =>
@@ -97,9 +102,12 @@ async function resealColumn(
   report: KeyRingColumnReport,
   opts: Required<Pick<KeyRingOptions, 'batch' | 'provider'>> & Pick<KeyRingOptions, 'beforeWrite'>,
 ): Promise<void> {
-  const types = t.key.map((_, i) => t.keyTypes?.[i] ?? 'text');
-  const castVal = (v: string, i: number): SQL => (types[i] === 'bigint' ? sql`${v}::bigint` : sql`${v}::text`);
+  const types = keyTypesOf(t);
+  const castVal = (v: string, i: number): SQL => castTo(v, types[i]);
   // Keyset pagination on the row key, so skipped/failed rows are never revisited.
+  // ORDER BY names the TABLE column: the SELECT aliases each key `::text AS
+  // <key>`, and a bare ORDER BY <key> would sort by that text alias ('10' <
+  // '2'), out of step with the typed cursor, silently skipping rows.
   let after: string[] | null = null;
   for (;;) {
     const cursor = after
@@ -109,7 +117,7 @@ async function resealColumn(
       sql`SELECT ${sql.join(t.key.map((k) => sql`${id(k)}::text AS ${id(k)}`), sql`, `)}, ${id(column)} AS enc
             FROM ${id(t.table)}
            WHERE ${staleWhere(column, kid)}${cursor}
-           ORDER BY ${sql.join(t.key.map(id), sql`, `)}
+           ORDER BY ${sql.join(t.key.map((k) => sql`${id(t.table)}.${id(k)}`), sql`, `)}
            LIMIT ${opts.batch}`,
     );
     const rows = rowsOf(res);
@@ -130,7 +138,7 @@ async function resealColumn(
       if (opts.beforeWrite) await opts.beforeWrite({ table: t.table, column });
       const upd = await db.execute(
         sql`UPDATE ${id(t.table)} SET ${id(column)} = ${next}
-             WHERE ${keyMatch(t.key, keyVals)} AND ${id(column)} = ${oldBlob}
+             WHERE ${keyMatch(t, keyVals)} AND ${id(column)} = ${oldBlob}
              RETURNING 1 AS ok`,
       );
       if (rowsOf(upd).length === 1) report.resealed += 1;

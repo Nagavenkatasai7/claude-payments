@@ -32,7 +32,8 @@ import { env } from '@/lib/env';
  * What is NOT sealed (Program-Fix 37, crypto-06; an honest claim): sender and
  * recipient phone numbers (they are the lookup keys), `recipient_name`, ticket
  * bodies written BEFORE fix 45 P4 (new ones are sealed, see ticket-repo.ts),
- * and 30-day chat history in Redis stay plaintext. So a dump is NOT
+ * ticket subjects, staff escalation reasons (message text and audit meta), and
+ * 30-day chat history in Redis stay plaintext. So a dump is NOT
  * ciphertext-only. Phones and `recipient_name` are a follow-up fix (a blind
  * index); legacy ticket bodies have no backfill yet.
  */
