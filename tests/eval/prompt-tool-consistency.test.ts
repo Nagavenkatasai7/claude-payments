@@ -95,6 +95,6 @@ describe('the recorded eval set (scripts/eval-bot-cases.ts) stays true to the ap
   it('carries no real-looking phone number outside the fixture set', () => {
     const src = read('scripts/eval-bot-cases.ts');
     const numbers = [...src.matchAll(/\b\d{11,13}\b/g)].map((m) => m[0]);
-    for (const n of numbers) expect(['919876543210', '525555550101', '15555550199'], n).toContain(n);
+    for (const n of numbers) expect(['919876543210', '525512345678', '15555550199'], n).toContain(n);
   });
 });

@@ -8,6 +8,7 @@ import {
   WEB_ONLY_TOOLS,
   WHATSAPP_HIDDEN_TOOLS,
   rateLockMinutes,
+  rateLockLine,
   RATE_LOCK_MINUTES,
   buildApproveSummary,
   maskAccount,
@@ -5652,6 +5653,17 @@ describe('Program-Fix 49B: rate-lock copy is derived, never a literal (prompt-05
     expect(rateLockMinutes(NOW - 50 * 60_000, NOW)).toBe(10);
     // Never negative; a rate at the ceiling shows 0.
     expect(rateLockMinutes(NOW - 70 * 60_000, NOW)).toBe(0);
+  });
+  it('under 2 minutes left, the card never states a lock time (no "Rate locked for 0 min.")', () => {
+    for (const m of [0, 1]) {
+      const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', m);
+      expect(s).not.toMatch(/Rate locked for \d+ min/);
+      expect(s).toContain('Rate valid for a moment — tap soon.');
+    }
+    const two = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 2);
+    expect(two).toContain('Rate locked for 2 min.');
+    expect(rateLockLine(0)).toBe('Rate valid for a moment — tap soon.');
+    expect(rateLockLine(30)).toBe('Rate locked for 30 min.');
   });
   it('the approve card states the derived minutes for the quote it shows', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 12);

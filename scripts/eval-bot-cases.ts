@@ -85,7 +85,7 @@ const textMatches = (r: ChatMessage, re: RegExp, why: string) => (re.test(textOf
 const textAvoids = (r: ChatMessage, re: RegExp, why: string) => (re.test(textOf(r)) ? why : null);
 
 const IN_RECIPIENT = '919876543210';
-const MX_RECIPIENT = '525555550101';
+const MX_RECIPIENT = '525512345678';
 
 export const EVAL_CASES: EvalCase[] = [
   {
