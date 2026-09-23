@@ -969,3 +969,132 @@ describe('createTransfer — send caps from the ledger (Program fix 16)', () => 
     expect(t.status).toBe('awaiting_payment');
   });
 });
+
+// ── Program-Fix 14: sanctions screening evidence, written in the SAME transaction ──
+type AuditRow = { partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> };
+async function screenRows(db: Awaited<ReturnType<typeof freshDb>>): Promise<AuditRow[]> {
+  const r = (await db.execute(
+    sql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events WHERE action = 'sanctions.screen' ORDER BY id`,
+  )) as unknown as { rows: AuditRow[] };
+  return r.rows;
+}
+async function transferCount(db: Awaited<ReturnType<typeof freshDb>>): Promise<number> {
+  const r = (await db.execute(sql`SELECT count(*)::int AS n FROM transfers`)) as unknown as { rows: Array<{ n: number }> };
+  return r.rows[0].n;
+}
+
+describe('createTransfer — sanctions.screen evidence (Program-Fix 14)', () => {
+  it('a CLEARED mint writes exactly one sanctions.screen row bound to the transfer', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, senderName: 'Clean Person' });
+    expect(t.complianceStatus).toBe('cleared');
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      partner_id: 'default', actor: 'system:sanctions', actor_type: 'system', action: 'sanctions.screen', subject_id: t.id,
+    });
+    expect(rows[0].meta).toMatchObject({ listSource: 'mock-watchlist', decision: 'clear' });
+    expect((rows[0].meta.parties as Array<{ role: string }>).map((p) => p.role)).toEqual(['recipient', 'sender']);
+  });
+
+  it('a FLAGGED (large amount) mint writes one row too', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await t1(db, '15550170001');
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, phone: '15550170001', amountSource: 1500 });
+    expect(t.complianceStatus).toBe('flagged');
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBe(t.id);
+  });
+
+  it('a BLOCKED mint (a formatting variant of a listed name) writes the blocked row + one evidence row, with no name in meta', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    const t = await createTransfer(store, partnerStore, mvs, { ...base, recipientName: 'John  Doe' });
+    expect(t.status).toBe('blocked');
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBe(t.id);
+    expect(rows[0].meta).toMatchObject({ decision: 'match', listSource: 'mock-watchlist' });
+    const p0 = (rows[0].meta.parties as Array<Record<string, unknown>>)[0];
+    expect(p0).toMatchObject({ role: 'recipient', matched: true, matchScore: 1, matchedEntryId: 'mock:0' });
+    const persisted = JSON.stringify(rows[0].meta).toLowerCase();
+    expect(persisted).not.toContain('john');
+    expect(persisted).not.toContain('doe');
+  });
+
+  it('a SendCapError rollback leaves NEITHER the transfer nor the evidence row', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, phone: '15550170002', amountSource: 600 }))
+      .rejects.toBeInstanceOf(SendCapError);
+    expect(await transferCount(db)).toBe(0);
+    expect(await screenRows(db)).toHaveLength(0);
+  });
+
+  it('a masked-destination refusal leaves no evidence row', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await expect(createTransfer(store, partnerStore, mvs, { ...base, payoutMethod: 'bank', payoutDestination: '****9012' }))
+      .rejects.toThrow();
+    expect(await screenRows(db)).toHaveLength(0);
+  });
+
+  it('a same-id replay does not screen again (still exactly one row)', async () => {
+    const { db, store, partnerStore, mvs } = await makeStores();
+    await createTransfer(store, partnerStore, mvs, { ...base, id: 'ev_replay_1' });
+    await createTransfer(store, partnerStore, mvs, { ...base, id: 'ev_replay_1' });
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBe('ev_replay_1');
+  });
+});
+
+describe('recordBlockedAttempt — quote-time evidence in ONE transaction (Program-Fix 14 step 5)', () => {
+  const blocked = {
+    phone: '15551234567', recipientName: 'John Doe', recipientPhone: '919133001840',
+    payoutMethod: 'bank' as const, payoutDestination: '', fundingMethod: 'bank_transfer' as const,
+    amountUsd: 100, amountSource: 100, sourceCurrency: 'USD' as const, feeUsd: 1.99, feeSource: 1.99,
+    fxRate: 85, amountInr: 8500, totalChargeUsd: 101.99, totalChargeSource: 101.99,
+    destinationCountry: 'IN' as const, destinationCurrency: 'INR' as const, partnerId: 'default',
+    reasons: ['Recipient is on the compliance watchlist.'],
+  };
+  const evidence = {
+    listSource: 'mock-watchlist', listVersion: 'static', listHash: 'a'.repeat(64),
+    screenedAt: new Date().toISOString(), decision: 'match' as const,
+    parties: [{ role: 'recipient' as const, inputHash: 'b'.repeat(64), matched: true, matchScore: 1, matchedEntryId: 'mock:0' }],
+  };
+
+  it('with evidence: exactly one blocked transfer + one sanctions.screen row whose subject is the new id', async () => {
+    const { db, store } = await makeStores();
+    const t = await recordBlockedAttempt(store, { ...blocked, evidence });
+    expect(await transferCount(db)).toBe(1);
+    const rows = await screenRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ partner_id: 'default', actor: 'system:sanctions', actor_type: 'system', subject_id: t.id });
+    expect(rows[0].meta).toMatchObject({ decision: 'match', listSource: 'mock-watchlist' });
+  });
+
+  it('without evidence: today\'s behaviour (the row only, no evidence row)', async () => {
+    const { db, store } = await makeStores();
+    await recordBlockedAttempt(store, blocked);
+    expect(await transferCount(db)).toBe(1);
+    expect(await screenRows(db)).toHaveLength(0);
+  });
+
+  it('an audit insert failure leaves NEITHER row (recordBlockedWithEvidence is one transaction)', async () => {
+    const { db, store } = await makeStores();
+    const t = { ...(await recordBlockedAttempt(store, blocked)), id: 'blk_atomic_1' };
+    await db.execute(sql`DELETE FROM transfers`);
+    await expect(store.recordBlockedWithEvidence(t, {
+      partnerId: 'default', actor: null as never, actorType: 'system', action: 'sanctions.screen', subjectId: t.id, meta: {},
+    })).rejects.toThrow();
+    expect(await transferCount(db)).toBe(0);
+    expect(await screenRows(db)).toHaveLength(0);
+  });
+});
+
+describe('store.recordAudit (root handle; register_seller evidence)', () => {
+  it('writes one audit_events row', async () => {
+    const { db, store } = await makeStores();
+    await store.recordAudit({ partnerId: 'default', actor: 'system:sanctions', actorType: 'system', action: 'sanctions.screen', subjectId: 's_1', meta: { decision: 'clear' } });
+    expect(await screenRows(db)).toHaveLength(1);
+  });
+});
