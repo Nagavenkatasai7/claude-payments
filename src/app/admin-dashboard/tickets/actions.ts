@@ -112,6 +112,8 @@ export async function replyAction(formData: FormData): Promise<void> {
           to: ticket.customerPhone,
           body: `You have a new reply from support — view it in your SmartRemit dashboard: ${supportUrl(ticket.id)}`,
           partnerId: ticket.partnerId,
+          // Program-Fix 49A: nonessential — suppressed after STOP (B5).
+          category: 'nonessential',
         },
         { dedupeKey: `ticketmsg:${ticket.id}:${msg.id}` },
       );
@@ -220,6 +222,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
           to: ticket.customerPhone,
           body: `Your support request has been resolved — view it in your SmartRemit dashboard: ${supportUrl(ticket.id)}`,
           partnerId: ticket.partnerId,
+          category: 'nonessential', // Program-Fix 49A (B5)
         },
         { dedupeKey: `ticketresolved:${ticket.id}` },
       );

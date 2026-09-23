@@ -77,9 +77,26 @@ vi.mock('@/lib/partner-store', () => ({
   getPartnerStore: () => ({ getPartner: async () => partner, ensureDefaultPartner: async () => partner }),
 }));
 vi.mock('@/lib/whatsapp', () => ({ sendVerificationStatus: notify }));
-vi.mock('next/server', async (orig) => ({ ...(await orig() as object), after: (fn: () => void) => fn() }));
+// Program-Fix 49A: the nudge leaves from the owning partner's own number.
+const integrations = vi.hoisted(() => ({ current: { kyc: {}, payment: {}, whatsapp: {} } as Record<string, unknown> }));
+vi.mock('@/lib/partner-integrations-store', () => ({
+  getPartnerIntegrationsStore: () => ({ getIntegrations: async () => integrations.current }),
+}));
+// after() runs inline; its promise is collected so POST (below) can await the
+// post-response notify before the assertions (Program-Fix 49A: the nudge now
+// resolves the partner's creds first, so it is no longer synchronous).
+const afterTasks = vi.hoisted(() => [] as unknown[]);
+vi.mock('next/server', async (orig) => ({
+  ...(await orig() as object),
+  after: (fn: () => unknown) => { afterTasks.push(fn()); },
+}));
 
-import { POST } from '@/app/api/persona-webhook/route';
+import { POST as routePOST } from '@/app/api/persona-webhook/route';
+const POST = async (r: Parameters<typeof routePOST>[0]) => {
+  const res = await routePOST(r);
+  await Promise.all(afterTasks.splice(0));
+  return res;
+};
 
 const PHONE = '15551230000';
 const ISO = '2026-06-01T00:00:00.000Z';
@@ -105,6 +122,7 @@ beforeEach(async () => {
   kcs = createKycCaseStore(redis, cs);
   partner = { id: 'default', name: 'SmartRemit Default', countries: ['US'], status: 'active', requireKycBeforeSend: true, createdAt: ISO, updatedAt: ISO };
   notify.mockClear();
+  integrations.current = { kyc: {}, payment: {}, whatsapp: {} };
   warn.mockClear();
   failEnqueue.once = false;
   failSave.once = false;
@@ -127,7 +145,7 @@ describe('POST /api/persona-webhook', () => {
     const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycReviewState).toBe('pending_review');
     expect(c?.kycStatus).toBe('pending'); // gate field untouched
-    expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined);
+    expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined, undefined); // no BYO creds ⇒ shared number
   });
 
   it('gate OFF ⇒ KYC state still advances but the customer is NOT messaged', async () => {
@@ -178,6 +196,25 @@ describe('POST /api/persona-webhook', () => {
     const body = eventBody('inquiry.completed', 'evt_two_rows_none');
     const j = await (await POST(req(body, signed(body)))).json();
     expect(j.ignored).toBe(true);
+  });
+});
+
+describe('POST /api/persona-webhook — consent + BYO creds (Program-Fix 49A)', () => {
+  it('an opted-out customer gets NO KYC nudge (nonessential); the state still advances', async () => {
+    await seed({ optedOutAt: '2026-06-01T12:00:00.000Z' });
+    const body = eventBody('inquiry.completed', 'evt_optout');
+    const res = await POST(req(body, signed(body)));
+    expect(res.status).toBe(200);
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('pending_review');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('a BYO partner\'s nudge carries that partner\'s creds', async () => {
+    integrations.current = { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_byo', token: 'tok_byo' } };
+    await seed();
+    const body = eventBody('inquiry.completed', 'evt_byo');
+    await POST(req(body, signed(body)));
+    expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined, { phoneNumberId: 'pn_byo', token: 'tok_byo' });
   });
 });
 
@@ -348,7 +385,7 @@ describe('POST /api/persona-webhook — report events + release on failure (Prog
     const body = JSON.stringify({ data: { id: 'evt_noref', type: 'event', attributes: { name: 'inquiry.completed', 'created-at': '2026-06-02T20:00:00Z', payload: { data: { type: 'inquiry', id: 'inq_1', attributes: { status: 'completed' } } } } } });
     expect((await post(body)).status).toBe(200);
     expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('pending_review');
-    expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined);
+    expect(notify).toHaveBeenCalledWith(PHONE, 'received', undefined, undefined); // 49A: no BYO creds ⇒ shared number
   });
 
   it('ambiguous inquiry id (two rows recorded it) is ignored and warned; nothing changes', async () => {

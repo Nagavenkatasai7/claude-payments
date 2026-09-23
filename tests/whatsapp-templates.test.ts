@@ -201,6 +201,26 @@ describe('verificationReminderParams (§3.8 — body [name] + URL button token)'
   });
 });
 
+// Program-Fix 49A (whatsapp-11): a partner's own brand, never a hard-coded
+// "SmartRemit", on the OTP copy a BYO-number partner's customers receive.
+describe('OTP copy — brand interpolated (Program-Fix 49A)', () => {
+  it('otpMessage and transactionOtpMessage carry the partner brand', async () => {
+    const { otpMessage, transactionOtpMessage } = await import('@/lib/whatsapp-templates');
+    expect(otpMessage('482913', 'Acme Remit')).toContain('Your Acme Remit verification code is 482913');
+    expect(otpMessage('482913', 'Acme Remit')).not.toContain('SmartRemit');
+    expect(transactionOtpMessage('123456', 'Acme Remit')).toContain('Your Acme Remit confirmation code is 123456');
+  });
+
+  it('no brand (or a blank one) keeps the SmartRemit default byte-for-byte', async () => {
+    const { otpMessage, transactionOtpMessage } = await import('@/lib/whatsapp-templates');
+    expect(otpMessage('482913')).toBe(
+      "Your SmartRemit verification code is 482913. It expires in 10 minutes. Don't share it with anyone.",
+    );
+    expect(otpMessage('482913', '  ')).toBe(otpMessage('482913'));
+    expect(transactionOtpMessage('123456')).toContain('Your SmartRemit confirmation code is 123456');
+  });
+});
+
 // Program-Fix 45 (P2): the pay-page confirmation code is free-form in-session
 // text (no Meta template), so the "never share" line is added to the text itself.
 import { transactionOtpMessage } from '@/lib/whatsapp-templates';

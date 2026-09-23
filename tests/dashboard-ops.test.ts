@@ -330,6 +330,28 @@ describe('resendPaymentLink', () => {
     const sendText = vi.fn().mockResolvedValue(undefined);
     await expect(resendPaymentLink(store, sendText, 'missing')).rejects.toThrow('Transfer not found');
   });
+
+  // Program-Fix 49A: a pay-link resend is nonessential — refused after STOP.
+  it('refuses (no send) when the customer has opted out, checking the transfer\'s OWN tenant', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'r2', phone: '15559876543' }));
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const optedOut = vi.fn(async (_p: string, _ph: string) => ({ optedOutAt: '2026-09-01T00:00:00Z' }));
+    await expect(
+      resendPaymentLink(store, sendText, 'r2', { getCustomer: optedOut }),
+    ).rejects.toThrow(/opted out/i);
+    expect(sendText).not.toHaveBeenCalled();
+    const t = await store.getTransfer('r2');
+    expect(optedOut).toHaveBeenCalledWith(t!.partnerId, '15559876543');
+  });
+
+  it('sends when the customer is opted in', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'r3', phone: '15559876543' }));
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    await resendPaymentLink(store, sendText, 'r3', { getCustomer: async () => ({}) });
+    expect(sendText).toHaveBeenCalledOnce();
+  });
 });
 
 describe('releaseTransfer', () => {

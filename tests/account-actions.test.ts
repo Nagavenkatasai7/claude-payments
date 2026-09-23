@@ -89,12 +89,15 @@ vi.mock('@/lib/pending-auth-store', async () => {
   return { ...actual, getPendingAuthStore: () => pendingStore };
 });
 
-const sentCodes: { phone: string; code: string }[] = [];
+const sentCodes: { phone: string; code: string; creds?: unknown; brand?: string }[] = [];
 vi.mock('@/lib/whatsapp', () => ({
-  sendOtpCode: vi.fn(async (phone: string, code: string) => {
-    sentCodes.push({ phone, code });
+  sendOtpCode: vi.fn(async (phone: string, code: string, creds?: unknown, brand?: string) => {
+    sentCodes.push({ phone, code, creds, brand });
   }),
 }));
+// Program-Fix 49A (whatsapp-11): the OTP leaves from the OWNING partner's number.
+const waContext = vi.hoisted(() => vi.fn(async (_partnerId: string) => ({ brand: 'SmartRemit', waCreds: undefined as unknown })));
+vi.mock('@/lib/whatsapp-creds', () => ({ partnerWaContext: waContext }));
 vi.mock('@/lib/pwned', () => ({ isPwnedPassword: vi.fn(async () => false) }));
 vi.mock('@/lib/field-crypto', async () => {
   const actual = await vi.importActual<typeof import('@/lib/field-crypto')>('@/lib/field-crypto');
@@ -139,6 +142,16 @@ beforeEach(async () => {
   const db = await freshDb();
   customerStore = createCustomerStore(db, createStore(fakeRedis(), db));
   authStore = createCustomerAuthStore(redis, customerStore);
+});
+
+describe('OTP delivery uses the owning partner\'s WhatsApp identity (Program-Fix 49A)', () => {
+  it('register: the code is sent with the account partner\'s creds and brand', async () => {
+    waContext.mockResolvedValueOnce({ brand: 'Acme Remit', waCreds: { phoneNumberId: 'pn_byo', token: 'tok_byo' } });
+    await register();
+    expect(waContext).toHaveBeenCalledWith('default');
+    expect(sentCodes).toHaveLength(1);
+    expect(sentCodes[0]).toMatchObject({ creds: { phoneNumberId: 'pn_byo', token: 'tok_byo' }, brand: 'Acme Remit' });
+  });
 });
 
 describe('registerAction', () => {

@@ -8,6 +8,8 @@ import { verifyPersonaSignature } from '@/lib/providers/persona-signature';
 import { parsePersonaEvent } from '@/lib/providers/persona-webhook-parse';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
+import { optOutSuppresses } from '@/lib/consent-gate';
+import { partnerWaContext } from '@/lib/whatsapp-creds';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { auditSubjectId } from '@/lib/customer-ref';
@@ -109,11 +111,14 @@ export async function POST(req: NextRequest) {
     try {
       // Report events never message the customer: a match is a hold (staff
       // handle it) and any other report event moves nothing.
-      if (!isReportEvent(event) && sendGateActive(partner)) {
+      // Program-Fix 49A: a KYC nudge is nonessential (suppressed after STOP)
+      // and leaves from the owning partner's own number.
+      if (!isReportEvent(event) && sendGateActive(partner) && !optOutSuppresses(customer, 'nonessential')) {
+        const { waCreds } = await partnerWaContext(customer.partnerId);
         if (nextState === 'inquiry_started') {
-          await sendVerificationStatus(phone, 'in_progress', customer.fullName);
+          await sendVerificationStatus(phone, 'in_progress', customer.fullName, waCreds);
         } else if (nextState === 'pending_review') {
-          await sendVerificationStatus(phone, 'received', customer.fullName);
+          await sendVerificationStatus(phone, 'received', customer.fullName, waCreds);
         }
       }
     } catch (err) {

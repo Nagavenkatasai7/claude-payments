@@ -30,6 +30,8 @@ import { logWarn, scrub } from '@/lib/log';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
+import { suppressForOptOut } from '@/lib/consent-gate';
+import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
@@ -321,6 +323,22 @@ async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<W
 }
 
 /**
+ * Program-Fix 49A (whatsapp-10d): the consent gate for a plain customer-facing
+ * row. The tenant is the payload's partnerId (the ledger tenant the producer
+ * wrote), else the default tenant — the shared number IS the default tenant.
+ * Only a `nonessential` row reads the customer; a read error throws and rides
+ * the ordinary backoff (never a send to someone who may have opted out).
+ */
+async function optedOutSkip(deps: WorkerDeps, row: OutboxRow, p: Payload): Promise<boolean> {
+  const tenant = str(p.partnerId) || DEFAULT_PARTNER_ID;
+  const suppressed = await suppressForOptOut(createCustomerStore(deps.db, deps.store), tenant, str(p.to), p.category);
+  if (suppressed) {
+    logWarn('worker.optout', 'nonessential message suppressed: customer opted out', { id: row.id, kind: row.kind });
+  }
+  return suppressed;
+}
+
+/**
  * Run one agent turn and return ONLY its reply text (Program-Fix 34A). The
  * routing partner's outbound creds are re-resolved at RUN time (the payload
  * never carries tokens; rotation is picked up automatically) and live only in
@@ -355,11 +373,16 @@ async function handle(
   switch (row.kind) {
     // ── Plain customer-facing sends (the transactional message outbox) ──────
     // Payloads carry the OWNING partnerId, never creds (fix 11 / F49·F54·F58).
+    // Program-Fix 49A: a `nonessential` row to an opted-out customer completes
+    // WITHOUT sending (no retry, no dead letter). No category ⇒ essential, so
+    // rows from the previous build deliver exactly as before.
     case 'whatsapp.text': {
+      if (await optedOutSkip(deps, row, p)) return;
       await deps.sendText(str(p.to), str(p.body), await resolveSendCreds(p, partner));
       return;
     }
     case 'whatsapp.template': {
+      if (await optedOutSkip(deps, row, p)) return;
       await deps.sendTemplate(
         str(p.to),
         str(p.template),
@@ -577,7 +600,8 @@ async function handle(
         // id is persisted (fix 11 / F54); creds resolve when THIS row drains.
         await createOutboxRepo(tx).enqueue(
           'whatsapp.text',
-          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId },
+          // Program-Fix 49A: essential (a refund notice survives STOP).
+          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential' },
           { dedupeKey: `refundmsg:${transferId}` },
         );
       });
@@ -774,7 +798,8 @@ async function handle(
         // no message content — then finish the row. Never dead-lettered.
         await outbox.enqueue(
           'whatsapp.text',
-          { to: phone, body: FALLBACK_REPLY, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+          // Program-Fix 49A: essential — a reply to the customer's own message.
+          { to: phone, body: FALLBACK_REPLY, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
           { dedupeKey: `reply:${row.id}` },
         );
         await outbox.enqueue(
@@ -806,7 +831,7 @@ async function handle(
         if (reply.trim()) {
           await outbox.enqueue(
             'whatsapp.text',
-            { to: phone, body: reply, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+            { to: phone, body: reply, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
             { dedupeKey: `reply:${row.id}` },
           );
         }

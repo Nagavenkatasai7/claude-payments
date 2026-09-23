@@ -1,3 +1,4 @@
+import { suppressForOptOut, type OptOutLookup } from './consent-gate';
 import { env } from './env';
 import { isPartnerPulled } from './funding-method';
 import { CANCEL_REFUSAL, decideStaffCancel } from './dashboard-cancel-policy';
@@ -110,14 +111,24 @@ export async function assignTransfer(
   }
 }
 
+/**
+ * Program-Fix 49A: a pay-link resend is NONESSENTIAL — refused, with a
+ * staff-readable reason, when the customer opted out (STOP) under the
+ * transfer's own tenant. `consent` is injected (the action passes the
+ * customer store) so the check runs on the caller's database.
+ */
 export async function resendPaymentLink(
   store: Store,
   sendText: (to: string, text: string) => Promise<void>,
   id: string,
+  consent?: OptOutLookup,
 ): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
+  }
+  if (consent && (await suppressForOptOut(consent, transfer.partnerId, transfer.phone, 'nonessential'))) {
+    throw new Error('Cannot resend: this customer has opted out of WhatsApp messages (replied STOP).');
   }
   const url = `${env.appBaseUrl}/pay/${id}`;
   await sendText(transfer.phone, `Here is your secure payment link again: ${url}`);

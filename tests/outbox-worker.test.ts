@@ -15,6 +15,7 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
+import { createCustomerStore } from '@/lib/customer-store';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -1487,7 +1488,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     expect(texts).toHaveLength(1);
     expect(texts[0].dedupe_key).toBe(`reply:${turn.id}`);
     expect(texts[0].status).toBe('done');
-    expect(texts[0].payload).toEqual({ to: P, body: 'hi', partnerId: 'acme' });
+    expect(texts[0].payload).toEqual({ to: P, body: 'hi', partnerId: 'acme', category: 'essential' });
     expect(customerSends()).toEqual(['hi']);
   });
 
@@ -1495,7 +1496,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     runAgentTurn.mockResolvedValueOnce('yo').mockResolvedValueOnce('');
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {}, routedPartnerId: null });
     await drainOnce(deps(), 'w1');
-    expect((await outboxRows('whatsapp.text'))[0].payload).toEqual({ to: P, body: 'yo' });
+    expect((await outboxRows('whatsapp.text'))[0].payload).toEqual({ to: P, body: 'yo', category: 'essential' });
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'b', turn: {}, routedPartnerId: null });
     await drainOnce(deps(), 'w1');
     await drainOnce(deps(), 'w1');
@@ -1937,5 +1938,66 @@ describe('drainOnce — ops-alert mirror (Program-Fix 26)', () => {
     await outbox.enqueue('ops.webhook', { text: 'x' }, { dedupeKey: 'opshook:3' });
     expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+// ── Program-Fix 49A (whatsapp-10d): the worker honours STOP by category ──────
+describe('whatsapp.* rows honour opt-out by category (Program-Fix 49A)', { retry: 0 }, () => {
+  async function optOut(partnerId: string, phone: string) {
+    const customers = createCustomerStore(db, store);
+    await customers.ensureCustomer(partnerId, phone);
+    await customers.setOptedOut(partnerId, phone);
+  }
+  const doneCount = async () =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE status = 'done'`)).rows[0] as { n: number }).n;
+
+  it('nonessential text to an opted-out customer completes WITHOUT sending', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'ticket reply', partnerId: 'acme', category: 'nonessential' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(await doneCount()).toBe(1);
+    expect(warn.mock.calls.flat().join(' ')).toContain('opted out');
+  });
+
+  it('nonessential template to an opted-out customer is suppressed too', async () => {
+    await optOut('acme', '919876543210');
+    await outbox.enqueue('whatsapp.template', {
+      to: '919876543210', template: 't', lang: 'en', params: [], partnerId: 'acme', category: 'nonessential',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await drainOnce(deps(), 'w1');
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('essential text to an opted-out customer still sends', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'stage 1', partnerId: 'acme', category: 'essential' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'stage 1', undefined);
+  });
+
+  it('a row with NO category (old build) to an opted-out customer still sends', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'legacy', partnerId: 'acme' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'legacy', undefined);
+  });
+
+  it('opt-out is per tenant: opted out under acme, a nonessential row for the default tenant (no partnerId) still sends', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'default tenant', category: 'nonessential' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'default tenant', undefined);
+  });
+
+  it('a nonessential row with no partnerId checks the DEFAULT tenant', async () => {
+    await optOut('default', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'x', category: 'nonessential' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await drainOnce(deps(), 'w1');
+    expect(sendText).not.toHaveBeenCalled();
   });
 });

@@ -218,3 +218,89 @@ describe('sendOtpCode — fallback log is scrubbed (Program-Fix 37)', () => {
     expect(text).toContain('whatsapp.otp-fallback');
   });
 });
+
+// ── Program-Fix 49A (whatsapp-11): a BYO-number partner's OTPs and KYC notices
+// leave FROM the partner's own number, with the partner's token and brand, on
+// EVERY internal path (free-form, template, template → free-form fallback).
+describe('BYO creds used for the OTP and the verification notice (Program-Fix 49A)', () => {
+  const BYO = { phoneNumberId: 'pn_byo', token: 'tok_byo' };
+  const ORIGINAL_VNEEDED = process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE;
+  afterEach(() => {
+    if (ORIGINAL_VNEEDED === undefined) delete process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE;
+    else process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE = ORIGINAL_VNEEDED;
+  });
+
+  function expectAllOnByo(fetchMock: { mock: { calls: unknown[][] } }, calls: number) {
+    expect(fetchMock.mock.calls).toHaveLength(calls);
+    for (const [url, init] of fetchMock.mock.calls as [string, RequestInit][]) {
+      expect(url).toContain('/pn_byo/messages');
+      expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok_byo');
+    }
+  }
+
+  it('sendOtpCode, no template: the free-form code goes out on the BYO number with the partner brand', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    delete process.env.WHATSAPP_AUTH_TEMPLATE;
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendOtpCode('15551234567', '246802', BYO, 'Acme Remit');
+    expectAllOnByo(fetchMock, 1);
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.text.body).toContain('Your Acme Remit verification code is 246802');
+  });
+
+  it('sendOtpCode, template configured: the AUTH template goes out on the BYO number', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'otp_auth';
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendOtpCode('15551234567', '135790', BYO, 'Acme Remit');
+    expectAllOnByo(fetchMock, 1);
+  });
+
+  it('sendOtpCode, template rejected: the free-form fallback also uses the BYO number', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    process.env.WHATSAPP_AUTH_TEMPLATE = 'otp_auth';
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let n = 0;
+    const fetchMock = vi.fn(async () =>
+      n++ === 0 ? { ok: false, status: 400, text: async (): Promise<string> => '{"error":"no template"}' } : { ok: true, text: async (): Promise<string> => '' },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await sendOtpCode('15551234567', '135790', BYO, 'Acme Remit');
+    expectAllOnByo(fetchMock, 2);
+  });
+
+  it('no creds keeps the shared env number (unchanged callers)', async () => {
+    process.env.OTP_DEV_MODE = 'false';
+    delete process.env.WHATSAPP_AUTH_TEMPLATE;
+    const fetchMock = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await sendOtpCode('15551234567', '246802');
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toContain('/123456/messages');
+  });
+
+  it('sendVerificationStatus: free-form, template, and template → fallback all use the BYO number', async () => {
+    const { sendVerificationStatus } = await import('@/lib/whatsapp');
+    const ok = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', ok);
+    delete process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE;
+    await sendVerificationStatus('15551234567', 'needed', 'Asha', BYO);
+    expectAllOnByo(ok, 1);
+
+    process.env.WHATSAPP_VERIFICATION_NEEDED_TEMPLATE = 'verification_needed';
+    const ok2 = vi.fn(async () => ({ ok: true, text: async () => '' }));
+    vi.stubGlobal('fetch', ok2);
+    await sendVerificationStatus('15551234567', 'needed', 'Asha', BYO);
+    expectAllOnByo(ok2, 1);
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let n = 0;
+    const flaky = vi.fn(async () =>
+      n++ === 0 ? { ok: false, status: 400, text: async (): Promise<string> => '{"error":"no template"}' } : { ok: true, text: async (): Promise<string> => '' },
+    );
+    vi.stubGlobal('fetch', flaky);
+    await sendVerificationStatus('15551234567', 'needed', 'Asha', BYO);
+    expectAllOnByo(flaky, 2);
+  });
+});
