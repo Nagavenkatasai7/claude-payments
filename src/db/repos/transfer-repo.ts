@@ -283,6 +283,13 @@ export function createTransferRepo(
             // caller's alertCallbackOnHold (rail-failure.ts) raises the signal.
             sql`(${transfers.status} <> 'awaiting_payment' OR ${transfers.complianceStatus} = 'cleared')`,
             ne(transfers.complianceStatus, 'blocked'),
+            // Program-Fix 7 (review M-1a): the FUNDING GATE on the rail
+            // callback's paid flip — an awaiting row whose async debit is
+            // pending / failed / returned never becomes paid or delivered here.
+            // A no-op on every row without an async debit (funding_state NULL).
+            // paid → delivered is NOT re-gated: the payout already went out; a
+            // later return is alerted (stripe-funding-webhook), never hidden.
+            sql`(${transfers.status} <> 'awaiting_payment' OR ${fundingGate()})`,
           ),
         )
         .returning();
@@ -1314,6 +1321,10 @@ export function createTransferRepo(
             // Once a refund is in flight or done, the transfer is no longer "stuck",
             // it is being clawed back. refund_status defaults to 'none'.
             eq(transfers.refundStatus, 'none'),
+            // Program-Fix 7 (review M-1b): a paid row whose sender debit was
+            // RETURNED is not "stuck" — it must never be re-instructed (its
+            // dispute alert owns it). NULL (every non-async row) still listed.
+            sql`${transfers.fundingState} IS DISTINCT FROM 'returned'`,
           ),
         )
         .orderBy(transfers.paidAt);

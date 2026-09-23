@@ -166,3 +166,41 @@ describe('a bound intent counts as "possibly charged" on every void / edit path'
     expect(r).toMatchObject({ status: 'awaiting_payment', complianceStatus: 'blocked' });
   });
 });
+
+describe('review M-1(a): the rail-callback flip carries the funding gate', () => {
+  it.each([
+    [null, true], ['succeeded', true], ['pending', false], ['failed', false], ['returned', false],
+  ] as const)('awaiting_payment → paid via rail callback with funding_state %s ⇒ advances: %s', async (state, advances) => {
+    const id = `rc_p_${state ?? 'null'}`;
+    await repo.saveTransfer(makeTransfer({ id }));
+    if (state) await setFunding(id, state);
+    expect(!!(await repo.updateTransferFromWebhook(id, 'paid'))).toBe(advances);
+  });
+
+  it.each([
+    [null, true], ['succeeded', true], ['pending', false], ['failed', false], ['returned', false],
+  ] as const)('awaiting_payment → delivered via rail callback with funding_state %s ⇒ advances: %s', async (state, advances) => {
+    const id = `rc_d_${state ?? 'null'}`;
+    await repo.saveTransfer(makeTransfer({ id }));
+    if (state) await setFunding(id, state);
+    expect(!!(await repo.updateTransferFromWebhook(id, 'delivered'))).toBe(advances);
+  });
+
+  it('paid → delivered is NOT re-gated (the payout already went out; a return is alerted, not hidden)', async () => {
+    await repo.saveTransfer(makeTransfer({ id: 'rc_pd', status: 'paid' }));
+    await setFunding('rc_pd', 'returned');
+    expect((await repo.updateTransferFromWebhook('rc_pd', 'delivered'))?.status).toBe('delivered');
+  });
+});
+
+describe('review M-1(b): the stuck-paid sweep never re-instructs a RETURNED debit', () => {
+  it('findStuckPaid skips funding_state returned; NULL and succeeded are still listed', async () => {
+    const paidAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    for (const [id, state] of [['sp_null', null], ['sp_ok', 'succeeded'], ['sp_ret', 'returned']] as const) {
+      await repo.saveTransfer(makeTransfer({ id, status: 'paid', paidAt }));
+      if (state) await setFunding(id, state);
+    }
+    const ids = (await repo.findStuckPaid(15)).map((t) => t.id).sort();
+    expect(ids).toEqual(['sp_null', 'sp_ok']);
+  });
+});

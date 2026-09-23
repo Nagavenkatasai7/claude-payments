@@ -40,6 +40,13 @@ describe('integrations-repo funding config', () => {
     expect(row.funding_credentials_enc).not.toContain(WH);
   });
 
+  it('refuses a Stripe funding config on SmartRemit\'s own default tenant (never merchant of record); clearing is allowed', async () => {
+    const repo = createIntegrationsRepo(db);
+    await expect(repo.setFundingConfig('default', { providerType: 'stripe', secretKey: KEY, webhookSecrets: [WH] })).rejects.toThrow(/default/);
+    expect(await repo.getFundingConfig('default')).toBeNull();
+    await expect(repo.setFundingConfig('default', null)).resolves.toBeUndefined();
+  });
+
   it('saveIntegrations (a dashboard save) never wipes the funding config', async () => {
     const repo = createIntegrationsRepo(db);
     await repo.setFundingConfig('acme', { providerType: 'stripe', secretKey: KEY, webhookSecrets: [WH] });

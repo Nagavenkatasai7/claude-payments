@@ -10,6 +10,7 @@ import {
   type PartnerIntegrations,
 } from '@/lib/partner-integrations';
 import type { PartnerId } from '@/lib/types';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 
 // integrations-repo — mirrors partner-integrations-store (getIntegrations /
 // saveIntegrations / deleteIntegrations). Secrets are envelope-encrypted into
@@ -112,6 +113,12 @@ export function createIntegrationsRepo(
     /** Program-Fix 7: set (or, with null, clear) the funding config — touches ONLY the funding columns. */
     async setFundingConfig(id: PartnerId, config: PartnerFundingConfig | null): Promise<void> {
       const partnerId = id;
+      // Non-custodial (review nice-to-have): SmartRemit's own tenant must never
+      // hold a PSP account — SmartRemit would become merchant of record. The
+      // selector refuses it too (selectFundingProvider); this stops it at write.
+      if (config?.providerType === 'stripe' && partnerId === DEFAULT_PARTNER_ID) {
+        throw new Error('funding config refused: the default tenant can never hold a PSP account');
+      }
       const set = config?.providerType === 'stripe'
         ? {
             fundingProviderType: 'stripe',

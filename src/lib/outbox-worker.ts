@@ -518,6 +518,27 @@ async function handle(
           `Settlement instruction held: transfer is ${transfer.status} with refund ${refund} — retrying`,
         );
       }
+      // Program-Fix 7 (review M-1b): the sender's ASYNC debit must still be
+      // good. RETURNED ⇒ never payable: done + ONE deduped ops alert (retrying
+      // can never help). pending / failed on a paid row (should not exist — the
+      // ledger claims carry the funding gate) ⇒ THROW: held, retried, and the
+      // dead-row alert fires if it never clears. NULL / succeeded ⇒ unchanged.
+      if (transfer.fundingState === 'returned') {
+        logWarn('outbox.instruct-skipped', 'sender debit returned; instruction not sent', { transferId });
+        await createOutboxRepo(deps.db).enqueue(
+          'ops.alert',
+          {
+            message:
+              `⚠️ SmartRemit ops: transfer ${transferId} (partner ${transfer.partnerId}) is 'paid' but the sender's debit was RETURNED — ` +
+              'the settlement instruction was NOT sent. Cancel it; do not refund (the dispute already credits the sender).',
+          },
+          { dedupeKey: `instructreturned:${transferId}` },
+        );
+        return;
+      }
+      if (transfer.fundingState === 'pending' || transfer.fundingState === 'failed') {
+        throw new Error(`Settlement instruction held: sender debit is ${transfer.fundingState} — retrying`);
+      }
       // fix 29 (money-09): the rail reported a DIFFERENT amount for this row
       // (`railamount:<id>` marker). It is held for staff — never instructed
       // again, whether this is a reconcile `reinstruct:` row or a dead-letter
