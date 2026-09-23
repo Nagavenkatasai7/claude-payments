@@ -29,6 +29,7 @@ import { DELIVERY_DELAY_MS } from './providers/payment-provider';
 import type { Db } from '@/db/client';
 import { newTransferId } from './id';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
+import { destinationListText, parseDestinationCountry } from './destination-country';
 import { resolveSenderNames, senderNameKey } from './sender-names';
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
@@ -127,17 +128,21 @@ async function transferViewWithName(deps: PartnerApiDeps, t: Transfer) {
 }
 
 // The supported destination set + its home currency — derived from the single
-// DEFAULT_CURRENCY_FOR_COUNTRY authority (US/CA/GB/AE/SG/AU/NZ/IN).
+// DEFAULT_CURRENCY_FOR_COUNTRY authority (all ten codes; see destination-country.ts).
 const SUPPORTED_DESTINATIONS = (Object.entries(DEFAULT_CURRENCY_FOR_COUNTRY) as [CountryCode, CurrencyCode][])
   .map(([destination_country, destination_currency]) => ({ destination_country, destination_currency }));
 
-// Resolve a body-supplied destination_country → its home currency. Unknown or
-// absent ⇒ the legacy IN/INR default (back-compat; never 400s).
-function resolveDestination(requested: string): { country: CountryCode; currency: CurrencyCode } {
-  const country = requested.toUpperCase() as CountryCode;
-  const currency = DEFAULT_CURRENCY_FOR_COUNTRY[country];
-  if (currency) return { country, currency };
-  return { country: DEFAULT_DESTINATION_COUNTRY, currency: DEFAULT_DESTINATION_CURRENCY };
+// Program-Fix 33 (owner decision 2): the 400 for an unknown destination_country.
+const DESTINATION_COUNTRY_400 = `destination_country must be one of: ${destinationListText()}.`;
+
+// Resolve a body-supplied destination_country → its home currency. Absent ⇒ the
+// legacy IN/INR default (back-compat). Unknown or non-string ⇒ null — the
+// caller's 400 (Program-Fix 33: an unknown destination is an error, never India).
+function resolveDestination(requested: unknown): { country: CountryCode; currency: CurrencyCode } | null {
+  const parsed = parseDestinationCountry(requested);
+  if (parsed === null) return null;
+  const country = parsed ?? DEFAULT_DESTINATION_COUNTRY;
+  return { country, currency: DEFAULT_CURRENCY_FOR_COUNTRY[country] ?? DEFAULT_DESTINATION_CURRENCY };
 }
 
 // The partner API is PROGRAMMATIC — it must never throw a "which currency?" prompt
@@ -190,10 +195,13 @@ export async function createQuote(
   );
   // Callers may pass either destination_country (resolved to its home currency)
   // or destination_currency directly. destination_country takes precedence when
-  // it names a supported country; otherwise the legacy destination_currency path
-  // (default INR) is unchanged.
-  const destCountryReq = str(body.destination_country);
-  const destByCountry = destCountryReq ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryReq.toUpperCase() as CountryCode] : undefined;
+  // present; an unknown or non-string one is the caller's 400 (Program-Fix 33 —
+  // never a silent fall-through to INR; the RAW value is parsed, not str()-
+  // coerced); absent ⇒ the legacy destination_currency path (default INR) is
+  // unchanged.
+  const destCountryParsed = parseDestinationCountry(body.destination_country);
+  if (destCountryParsed === null) return err(400, DESTINATION_COUNTRY_400);
+  const destByCountry = destCountryParsed ? DEFAULT_CURRENCY_FOR_COUNTRY[destCountryParsed] : undefined;
   // str() trims; upper-cased like pushPartnerRate so "gbp" quotes exactly like "GBP".
   const destinationCurrency = (destByCountry || str(body.destination_currency).toUpperCase() || 'INR') as CurrencyCode;
   // Validated at the edge (Task 9 security review): an unsupported code is the
@@ -367,6 +375,15 @@ export async function createTransaction(
   if (payoutDestination.trim() === '') {
     return err(400, 'beneficiary payout_destination is required.');
   }
+  // Program-Fix 33: an absent destination_country defaults to IN/INR
+  // (back-compat); an unknown or non-string one is a 400 HERE — above the
+  // customer write and the Idempotency-Key claim, like every other body check,
+  // so a corrected retry under the same key mints normally. The RAW body value
+  // is parsed (not str()-coerced) so a numeric or array value is refused, never
+  // treated as absent. NOTE compliance is SOURCE-gated — the destination is
+  // never fed into screening.
+  const destination = resolveDestination(body.destination_country);
+  if (!destination) return err(400, DESTINATION_COUNTRY_400);
 
   // The LAST step before the claim, AFTER every body check (Task 2 Step 28
   // later inserts its beneficiary name / destination edge validation ABOVE this
@@ -391,10 +408,6 @@ export async function createTransaction(
   // senderPhone is required here (validated above), so an Indian sender with no
   // source_currency auto-detects INR; the helper never throws (→ no 500).
   const sourceCurrency = apiSourceCurrency(partner, str(body.source_currency) || undefined, senderPhone);
-  // Any-to-any destination: an absent/unsupported destination_country defaults
-  // to IN/INR (back-compat). NOTE compliance is SOURCE-gated — the destination
-  // is never fed into screening.
-  const destination = resolveDestination(str(body.destination_country));
   const requiresKyc = sendGateActive(partner); // 'delegated' ⇒ false; sanctions still run
   const senderKycStatus = (str(sender.kyc_status) || 'not_started') as KycStatus;
 

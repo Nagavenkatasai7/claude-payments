@@ -41,6 +41,20 @@ export function createAuthStore(redis: RedisLike) {
       staff.lastLoginAt = new Date().toISOString();
       await redis.set(`staff:${username}`, JSON.stringify(staff));
     },
+    /**
+     * Fix 21: lazy scrypt → Argon2id upgrade after a successful login. Same
+     * re-read-then-SET discipline as recordLogin: only `passwordHash` changes on
+     * the FRESH record, and a missing or suspended record is left untouched (a
+     * stale snapshot from earlier in the request can never resurrect it).
+     */
+    async updatePasswordHash(username: string, passwordHash: string): Promise<void> {
+      const raw = await redis.get(`staff:${username}`);
+      if (!raw) return;
+      const staff = JSON.parse(raw) as Staff;
+      if (staff.status === 'suspended') return;
+      staff.passwordHash = passwordHash;
+      await redis.set(`staff:${username}`, JSON.stringify(staff));
+    },
     async createSession(username: string): Promise<string> {
       const token = randomBytes(32).toString('hex');
       await redis.set(`session:${token}`, username, {

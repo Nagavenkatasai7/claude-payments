@@ -188,6 +188,26 @@
   --sidebar-ring: #533afd;
 }
 
+/* Customer-portal brand scope (Program-Fix 41, ui-06). The shadcn tokens
+ * resolve through `@theme inline` below, so re-pointing them on a wrapper
+ * repaints bg-primary / text-primary / ring / accent / muted inside
+ * /account/** only (app/account/layout.tsx). The values are the landing's
+ * literal light brand (app/page.tsx): blue #0c5bd2, navy #0b1b3f, ground
+ * #f5f9ff, tint #eef4fc. The staff /login and the dashboard keep the indigo
+ * above. WCAG contrast (all pass AA 4.5:1): #0c5bd2 on white 6.10:1 (white
+ * on #0c5bd2 the same), #0c5bd2 on the bg-primary/10 nav pill 5.27:1,
+ * #0b1b3f on #eef4fc 15.27:1, #60646c (muted-foreground) on #f5f9ff 5.62:1.
+ * `display: contents`: the wrapper adds no box, so no layout changes. */
+.account-brand {
+  display: contents;
+  --primary: #0c5bd2;
+  --primary-foreground: #ffffff;
+  --ring: #0c5bd2;
+  --accent: #eef4fc;
+  --accent-foreground: #0b1b3f;
+  --muted: #f5f9ff;
+}
+
 @theme inline {
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --color-background: var(--background);

@@ -1,6 +1,90 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { randomBytes, scryptSync } from 'node:crypto';
-import { hashPassword, verifyPassword } from '@/lib/password';
+
+// Pass-through spies on hash-wasm so the enumeration tests below can COUNT the
+// Argon2 work (fix 21): every existing test still runs the real functions.
+const hw = vi.hoisted(() => ({
+  argon2id: vi.fn(),
+  argon2Verify: vi.fn(),
+}));
+vi.mock('hash-wasm', async (orig) => {
+  const real = await orig<typeof import('hash-wasm')>();
+  hw.argon2id.mockImplementation(real.argon2id);
+  hw.argon2Verify.mockImplementation(real.argon2Verify);
+  return { ...real, argon2id: hw.argon2id, argon2Verify: hw.argon2Verify };
+});
+
+import { hashPassword, verifyPassword, verifyPasswordOrDummy } from '@/lib/password';
+
+// Fix 21 — the dummy path. This describe runs FIRST in the file on purpose: the
+// dummy hash is memoized per module instance, so the "computed once" assertion
+// needs these to be the first verifyPasswordOrDummy calls in the file.
+describe('verifyPasswordOrDummy (fix 21, no timing oracle)', () => {
+  it('runs exactly one Argon2 verify for a missing account, computes the dummy hash once, and is always false', async () => {
+    hw.argon2id.mockClear();
+    hw.argon2Verify.mockClear();
+
+    expect(await verifyPasswordOrDummy('pw-one', undefined)).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+    expect(hw.argon2id).toHaveBeenCalledTimes(1); // the one-off per-instance dummy hash
+
+    expect(await verifyPasswordOrDummy('pw-two', '')).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(2);
+
+    expect(await verifyPasswordOrDummy('pw-three', null)).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(3);
+    expect(hw.argon2id).toHaveBeenCalledTimes(1); // memoized: never re-hashed
+  });
+
+  it('behaves exactly like verifyPassword when a real hash is stored', async () => {
+    const stored = await hashPassword('s3cret!');
+    hw.argon2id.mockClear();
+    hw.argon2Verify.mockClear();
+    expect(await verifyPasswordOrDummy('s3cret!', stored)).toBe(true);
+    expect(await verifyPasswordOrDummy('wrong', stored)).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(2);
+    expect(hw.argon2id).not.toHaveBeenCalled(); // no dummy work on the real path
+    // Legacy scrypt values take the legacy path, same as verifyPassword.
+    const salt = randomBytes(16).toString('hex');
+    const legacy = `${salt}:${scryptSync('s3cret!', salt, 64).toString('hex')}`;
+    expect(await verifyPasswordOrDummy('s3cret!', legacy)).toBe(true);
+    expect(await verifyPasswordOrDummy('nope', legacy)).toBe(false);
+  });
+
+  // Reviewer should-fix: if the dummy hash itself cannot be computed (broken
+  // WASM), an unknown account must still get `false` — not a thrown 500 that a
+  // known account (generic failure string) would never produce. The failure
+  // must not poison the memo either. A fresh module instance is needed because
+  // the dummy hash above is already memoized for this file's instance.
+  it('fails closed when the dummy hash cannot be computed: false, a scrubbed warn line, and the failure is not cached', async () => {
+    vi.resetModules();
+    const fresh = await import('@/lib/password');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      hw.argon2id.mockClear();
+      hw.argon2Verify.mockClear();
+      hw.argon2id.mockRejectedValueOnce(new Error('wasm broken'));
+
+      await expect(fresh.verifyPasswordOrDummy('pw-fail-plain', undefined)).resolves.toBe(false);
+      expect(hw.argon2id).toHaveBeenCalledTimes(1);
+      expect(hw.argon2Verify).not.toHaveBeenCalled();
+
+      const lines = warn.mock.calls.map((c) => JSON.parse(String(c[0])) as Record<string, unknown>);
+      const line = lines.find((l) => l.scope === 'password.dummy_hash_failed');
+      expect(line).toBeDefined();
+      expect(line?.level).toBe('warn');
+      expect(String(line?.msg)).toContain('wasm broken');
+      expect(JSON.stringify(line)).not.toContain('pw-fail-plain');
+
+      // Not cached: the next missing-account check re-hashes and pays the verify.
+      await expect(fresh.verifyPasswordOrDummy('pw-after', null)).resolves.toBe(false);
+      expect(hw.argon2id).toHaveBeenCalledTimes(2);
+      expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
 
 describe('password', () => {
   it('verifies a correct password', async () => {

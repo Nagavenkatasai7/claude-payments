@@ -5,7 +5,7 @@ import { redirect } from 'next/navigation';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { ensureSeedAdmin } from '@/lib/seed';
-import { verifyPassword } from '@/lib/password';
+import { hashPassword, needsRehash, verifyPasswordOrDummy } from '@/lib/password';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 
 export async function login(
@@ -16,7 +16,11 @@ export async function login(
   const username = String(formData.get('username') ?? '').trim();
   const password = String(formData.get('password') ?? '');
   const staff = await getAuthStore().getStaff(username);
-  if (!staff || !(await verifyPassword(password, staff.passwordHash))) {
+  // Fix 21 (F62): ONE Argon2id verify on every attempt — an unknown username
+  // pays the same work against a per-instance dummy hash, so response time
+  // does not say whether the username exists. One generic message either way.
+  const ok = await verifyPasswordOrDummy(password, staff?.passwordHash);
+  if (!staff || !ok) {
     return 'Invalid username or password.';
   }
   // Team: a suspended staff member cannot log in. Generic message (no leak).
@@ -30,6 +34,13 @@ export async function login(
     if (!partner || partner.status !== 'active') {
       return 'Account unavailable. Contact SmartRemit support.';
     }
+  }
+  // Fix 21: lazy upgrade of a legacy scrypt hash to Argon2id. Only after every
+  // refusal gate above, and through a fresh re-read (auth-store.updatePasswordHash)
+  // so a concurrent suspend is never undone. After this the account verifies
+  // with the same cost as every other one.
+  if (needsRehash(staff.passwordHash)) {
+    await getAuthStore().updatePasswordHash(username, await hashPassword(password));
   }
   // Record an "active" signal for the Team page (re-reads fresh; won't clobber a
   // concurrent suspend/edit — see auth-store.recordLogin).
