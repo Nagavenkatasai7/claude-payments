@@ -702,6 +702,44 @@ describe('runDueSchedules — claim-first replay safety (Program-Fix 32)', () =>
     expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeTruthy();
   });
 
+  async function replayOnto(mutate: (db: Awaited<ReturnType<typeof makeDeps>>['db'], id: string) => Promise<void>) {
+    const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
+    await seedVerified(customerStore);
+    await scheduleStore.saveSchedule(sched('due', 21));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let failSend = true;
+    const notified: string[] = [];
+    const deps = {
+      db, store, partnerStore, customerStore, monthlyVolumeStore, scheduleStore, kycProvider, now: NOW,
+      sendScheduledLink: async (_s: Schedule, _t: unknown, url: string) => {
+        if (failSend) throw new Error('graph api down');
+        notified.push(url);
+      },
+    };
+    expect(await runDueSchedules(deps)).toEqual({ fired: 0, failed: 1 });
+    const [t] = await store.listTransfers();
+    await mutate(db, t.id);
+    failSend = false;
+    expect(await runDueSchedules(deps)).toEqual({ fired: 1, failed: 0 });
+    expect(await store.listTransfers()).toHaveLength(1);
+    expect((await scheduleStore.getSchedule('due'))?.lastRunAt).toBeTruthy();
+    return notified;
+  }
+
+  it('review S5: a replay onto a PAID row sends no link', async () => {
+    const notified = await replayOnto(async (db, id) => {
+      await db.execute(sql`UPDATE transfers SET status = 'paid', paid_at = now(), funding_ref = 'mockfund-x' WHERE id = ${id}`);
+    });
+    expect(notified).toHaveLength(0);
+  });
+
+  it('review S4: a replay onto an awaiting row that is already CHARGED (funding_ref set) sends no link', async () => {
+    const notified = await replayOnto(async (db, id) => {
+      await db.execute(sql`UPDATE transfers SET funding_ref = 'mockfund-x' WHERE id = ${id}`);
+    });
+    expect(notified).toHaveLength(0);
+  });
+
   it('test 5: a replay onto an existing BLOCKED row sends no link and still records lastRunAt', async () => {
     const { db, store, partnerStore, monthlyVolumeStore, customerStore, scheduleStore } = await makeDeps();
     await seedVerified(customerStore);

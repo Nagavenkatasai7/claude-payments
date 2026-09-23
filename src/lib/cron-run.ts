@@ -123,9 +123,9 @@ export async function runDueSchedules(
         const existing = await deps.store.getTransfer(reservedId);
         if (existing) {
           // Already minted today: re-send the SAME link only while it is
-          // still payable (never for a blocked, cancelled or already-paid
-          // row), record the run, and count it — no second mint.
-          if (existing.status === 'awaiting_payment') {
+          // still payable (never for a blocked, cancelled, paid or already-
+          // charged row), record the run, and count it — no second mint.
+          if (existing.status === 'awaiting_payment' && !existing.fundingRef) {
             await deps.sendScheduledLink(schedule, existing, `${env.appBaseUrl}/pay/${existing.id}`);
           }
           await deps.scheduleStore.markRun(schedule.id, new Date(deps.now));
@@ -157,7 +157,7 @@ export async function runDueSchedules(
         if (!(first instanceof SendBusyError)) throw first;
         transfer = await mint();
       }
-      if (transfer.status !== 'blocked') {
+      if (transfer.status === 'awaiting_payment') {
         const url = `${env.appBaseUrl}/pay/${transfer.id}`;
         await deps.sendScheduledLink(schedule, transfer, url);
       }
