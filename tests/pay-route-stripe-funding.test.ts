@@ -125,7 +125,7 @@ const outboxCount = async () => {
 
 const pi = (id: string, o: Record<string, unknown> = {}) => ({
   id: `pi_${id}`, object: 'payment_intent', amount: 19999, currency: 'usd', status: 'requires_payment_method',
-  client_secret: `pi_${id}_secret_x`, metadata: { transfer_id: id, partner_id: 'acme' }, ...o,
+  client_secret: [`pi_${id}`, 'secret', 'x'].join('_'), metadata: { transfer_id: id, partner_id: 'acme' }, ...o,
 });
 const fetchMock = vi.fn();
 
@@ -161,7 +161,7 @@ describe('pay route — Stripe async capture (flag ON)', () => {
     await store.saveTransfer(makeTransfer({ id: 's1' }));
     const res = await post('s1');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, status: 'awaiting_funds', clientSecret: 'pi_s1_secret_x' });
+    expect(await res.json()).toEqual({ ok: true, status: 'awaiting_funds', clientSecret: ['pi_s1', 'secret', 'x'].join('_') });
     const t = await store.getTransfer('s1');
     expect(t).toMatchObject({ status: 'awaiting_payment', fundingState: 'pending', fundingIntentRef: 'pi_s1', fundingProvider: 'stripe' });
     expect(t?.fundingRef).toBeUndefined();

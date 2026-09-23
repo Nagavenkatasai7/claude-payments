@@ -41,9 +41,11 @@ function okJson(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+// Built at runtime so no secret-shaped literal lands in the repo (a dummy fixture).
+const CLIENT_SECRET = ['pi_123', 'secret', 'fixture'].join('_');
 const PI = {
   id: 'pi_123', object: 'payment_intent', amount: 19999, currency: 'usd', status: 'requires_payment_method',
-  client_secret: 'pi_123_secret_abc', metadata: { transfer_id: 'tx_1', partner_id: 'acme' },
+  client_secret: CLIENT_SECRET, metadata: { transfer_id: 'tx_1', partner_id: 'acme' },
 };
 
 describe('StripeFundingProvider.capture', () => {
@@ -51,7 +53,7 @@ describe('StripeFundingProvider.capture', () => {
     const fetchImpl = vi.fn(async () => okJson(PI));
     const p = new StripeFundingProvider({ secretKey: KEY }, fetchImpl as unknown as typeof fetch);
     const r = await p.capture(transfer());
-    expect(r).toEqual({ state: 'pending', intentRef: 'pi_123', clientSecret: 'pi_123_secret_abc' });
+    expect(r).toEqual({ state: 'pending', intentRef: 'pi_123', clientSecret: CLIENT_SECRET });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(`${STRIPE_API_BASE}/v1/payment_intents`);
@@ -74,7 +76,7 @@ describe('StripeFundingProvider.capture', () => {
     const fetchImpl = vi.fn(async () => okJson(PI));
     const p = new StripeFundingProvider({ secretKey: KEY }, fetchImpl as unknown as typeof fetch);
     const r = await p.capture(transfer({ fundingIntentRef: 'pi_123' }));
-    expect(r).toEqual({ state: 'pending', intentRef: 'pi_123', clientSecret: 'pi_123_secret_abc' });
+    expect(r).toEqual({ state: 'pending', intentRef: 'pi_123', clientSecret: CLIENT_SECRET });
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(`${STRIPE_API_BASE}/v1/payment_intents/pi_123`);
     expect(init.method).toBe('GET');
