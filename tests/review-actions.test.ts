@@ -223,6 +223,21 @@ describe('releaseTransferAction — mandatory reason + screening holds are platf
     expect(await auditRows()).toEqual([]);
   });
 
+  it("a delegated partner's admin releases an EDD-only hold end to end: paid + rail effect + audit with actor and reason", async () => {
+    await delegatedPartner();
+    mockRequireAdmin.mockResolvedValue({ username: 'dadmin', role: 'admin', partnerId: 'delg' });
+    await store.saveTransfer(makeTransfer({ id: 'edd1', partnerId: 'delg', complianceReasons: ['edd_required'] }));
+
+    await releaseTransferAction(form({ id: 'edd1', note: 'EDD documents received' }));
+
+    expect((await store.getTransfer('edd1'))?.status).toBe('paid');
+    expect(await outboxRows()).toEqual([{ kind: 'mock.settle' }]);
+    const r = await db.execute(sql`SELECT actor, action, meta FROM audit_events ORDER BY id`);
+    expect((r as unknown as { rows: unknown[] }).rows).toEqual([
+      { actor: 'dadmin', action: 'transfer.release', meta: expect.objectContaining({ reason: 'EDD documents received' }) },
+    ]);
+  });
+
   it('a PLATFORM admin may still release a screening hold (with a reason)', async () => {
     await delegatedPartner();
     mockRequireAdmin.mockResolvedValue({ username: 'plat', role: 'admin' });

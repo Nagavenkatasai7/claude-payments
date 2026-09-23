@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   isScreeningHold,
+  isScreeningCustomerHold,
+  canDecideCustomerKyc,
   screenTransfer,
   SCREENING_REASONS,
   POSSIBLE_MATCH_REASON,
@@ -90,5 +92,24 @@ describe('screenTransfer writes the exported screening reason constants', () => 
     const r = await screenTransfer({ amountUsd: 5000, recipientName: 'x', transfersToday: 0, sourceCountry: 'US', screener });
     expect(r.status).toBe('flagged');
     expect(isScreeningHold({ complianceReasons: r.reasons })).toBe(false);
+  });
+});
+
+describe('isScreeningCustomerHold / canDecideCustomerKyc (Program-Fix 43 follow-up)', () => {
+  const PLATFORM = { kind: 'platform' } as const;
+  const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
+
+  it('true only when a watchlist or PEP hit is recorded', () => {
+    expect(isScreeningCustomerHold({ watchlistHit: true })).toBe(true);
+    expect(isScreeningCustomerHold({ pepHit: true })).toBe(true);
+    expect(isScreeningCustomerHold({})).toBe(false);
+    expect(isScreeningCustomerHold({ watchlistHit: false, pepHit: false })).toBe(false);
+  });
+
+  it('platform staff may always decide; partner staff only when there is no screening hit', () => {
+    expect(canDecideCustomerKyc(PLATFORM, { watchlistHit: true })).toBe(true);
+    expect(canDecideCustomerKyc(PARTNER, { watchlistHit: true })).toBe(false);
+    expect(canDecideCustomerKyc(PARTNER, { pepHit: true })).toBe(false);
+    expect(canDecideCustomerKyc(PARTNER, {})).toBe(true);
   });
 });
