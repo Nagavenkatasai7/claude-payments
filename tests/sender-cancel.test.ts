@@ -378,6 +378,18 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     expect((await store.getTransfer(ID))?.status).toBe('in_review');
   });
 
+  it('Program-Fix 44 parity: a SANDBOX transfer\'s cancel confirmation carries sandbox: true (the worker never sends it)', async () => {
+    await paidOnSimulator({ environment: 'test' });
+    expect((await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' })).kind).toBe('cancelled');
+    expect((await byKey(`sendercancel:${ID}`))!.payload).toMatchObject({ sandbox: true });
+  });
+
+  it('a LIVE transfer\'s cancel confirmation carries no sandbox key (payload unchanged)', async () => {
+    await paidOnSimulator();
+    await cancelWithinWindow(db, 'acme', ID, { via: 'receipt' });
+    expect((await byKey(`sendercancel:${ID}`))!.payload).not.toHaveProperty('sandbox');
+  });
+
   it('a partner-funded transfer (no captured charge) is cancelled with NO refund queued and no refund promise', async () => {
     await store.saveTransfer(fixture());
     await beginSettlement(db, fixture(), SIMULATOR); // no funding_ref

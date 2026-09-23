@@ -171,6 +171,18 @@ describe('reconcileSweep — re-instruction vs a sender cancel (Program-Fix 15 P
     const r = await reconcileSweep(db);
     expect(r.reinstructed).toBe(0);
     expect((await outboxRows()).map((x) => x.dedupe_key)).not.toContain('reinstruct:rc_t1');
+    // The recon alert must not claim a re-instruction that never happened.
+    const alert = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'recon:rc_t1'`);
+    const msg = String((alert as unknown as { rows: Array<{ payload: { message: string } }> }).rows[0]?.payload.message);
+    expect(msg).not.toContain('Re-instructed');
+    expect(msg).toContain('Not re-instructed');
+  });
+
+  it('a real re-instruction still says so in the recon alert', async () => {
+    await store.saveTransfer(fixture());
+    expect((await reconcileSweep(db)).reinstructed).toBe(1);
+    const alert = await db.execute(sql`SELECT payload FROM outbox WHERE dedupe_key = 'recon:rc_t1'`);
+    expect(String((alert as unknown as { rows: Array<{ payload: { message: string } }> }).rows[0].payload.message)).toContain('Re-instructed the partner rail once.');
   });
 
   it('a sweep that starts while the cancel holds its locks re-instructs nothing (it runs after the commit)', async () => {

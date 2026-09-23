@@ -4,6 +4,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { CANCEL_WINDOW_MS } from '@/lib/refund-policy';
 import { buildSenderCancelMessage } from '@/lib/legal/cancel-drafts';
+import { isSandbox } from '@/lib/settlement';
 import type { PartnerId, Transfer } from '@/lib/types';
 
 // sender-cancel — Program-Fix 15 PR C: the consumer sender's 30-minute
@@ -171,6 +172,9 @@ export async function cancelWithinWindow(
             body: buildSenderCancelMessage(updated, refundQueued),
             partnerId: updated.partnerId,
             category: 'essential',
+            // Program-Fix 44 parity: a sandbox transfer's message is completed
+            // by the worker WITHOUT sending (never a real phone).
+            ...(isSandbox(updated) ? { sandbox: true } : {}),
           },
           { dedupeKey: `sendercancel:${updated.id}` },
         );
