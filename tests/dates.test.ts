@@ -45,6 +45,31 @@ describe('easternDayOfWeek — invalid epochMs must throw (regression)', () => {
   });
 });
 
+describe('easternDayOfMonth — invalid epochMs must throw (Program-Fix 48)', () => {
+  // Bug: an invalid epoch returned NaN (Number('Invalid Date')), while its sibling
+  // easternDayOfWeek throws. schedule.ts compares the result to dayOfMonth, so a NaN
+  // silently never matches. Same contract as easternDayOfWeek: throw RangeError.
+  it('throws RangeError for NaN', () => {
+    expect(() => easternDayOfMonth(NaN)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for Infinity', () => {
+    expect(() => easternDayOfMonth(Infinity)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for -Infinity', () => {
+    expect(() => easternDayOfMonth(-Infinity)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for an out-of-range epochMs (> JS Date max)', () => {
+    expect(() => easternDayOfMonth(8.64e15 + 1)).toThrow(RangeError);
+  });
+
+  it('error message names the function', () => {
+    expect(() => easternDayOfMonth(NaN)).toThrow(/easternDayOfMonth/);
+  });
+});
+
 describe('easternMonth', () => {
   it('returns YYYY-MM in Eastern time', () => {
     // 2026-05-24 18:00Z = 2pm ET → May 2026

@@ -156,3 +156,40 @@ describe('applyKycEvent — monotone rank guard (regression: bug-hunt)', () => {
     expect(delta.watchlistHit).toBe(true);
   });
 });
+
+describe('applyKycEvent — kycSubmittedAt follows the rank guard (Program-Fix 48)', () => {
+  // Bug: a late inquiry.started/created after pending_review had its kycReviewState
+  // dropped by the rank guard, but still stamped kycSubmittedAt (a side effect leak).
+  for (const name of ['inquiry.started', 'inquiry.created'] as const) {
+    it(`a late ${name} on a pending_review customer stamps neither kycSubmittedAt nor kycReviewState`, () => {
+      const customer = { ...base, kycReviewState: 'pending_review', kycSubmittedAt: undefined } as Customer;
+      const delta = applyKycEvent(customer, ev({ name, status: 'started' }), '2026-06-03T00:00:00.000Z');
+      expect(delta.kycSubmittedAt).toBeUndefined();
+      expect(delta.kycReviewState).toBeUndefined();
+    });
+  }
+
+  it('still stamps kycSubmittedAt when the state is unset', () => {
+    const delta = applyKycEvent(base, ev({ name: 'inquiry.started', status: 'started' }), '2026-06-03T00:00:00.000Z');
+    expect(delta.kycSubmittedAt).toBe('2026-06-03T00:00:00.000Z');
+    expect(delta.kycReviewState).toBe('inquiry_started');
+  });
+
+  it("still stamps kycSubmittedAt when the state is 'none'", () => {
+    const customer = { ...base, kycReviewState: 'none' } as Customer;
+    const delta = applyKycEvent(customer, ev({ name: 'inquiry.created', status: 'created' }), '2026-06-03T00:00:00.000Z');
+    expect(delta.kycSubmittedAt).toBe('2026-06-03T00:00:00.000Z');
+  });
+
+  it("still stamps kycSubmittedAt when the state is 'inquiry_started' with no prior timestamp", () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    const delta = applyKycEvent(customer, ev({ name: 'inquiry.started', status: 'started' }), '2026-06-03T00:00:00.000Z');
+    expect(delta.kycSubmittedAt).toBe('2026-06-03T00:00:00.000Z');
+  });
+
+  it('never overwrites an existing kycSubmittedAt', () => {
+    const customer = { ...base, kycReviewState: 'inquiry_started', kycSubmittedAt: '2026-06-01T00:00:00.000Z' } as Customer;
+    const delta = applyKycEvent(customer, ev({ name: 'inquiry.started', status: 'started' }), '2026-06-03T00:00:00.000Z');
+    expect(delta.kycSubmittedAt).toBeUndefined();
+  });
+});

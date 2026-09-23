@@ -271,3 +271,109 @@ describe('isIpRateLimited — deadline (fail-open on a stalled limiter)', () => 
     expect(Date.now() - t0).toBeLessThan(2000);
   });
 });
+
+// ── Program-Fix 48: window normalisation ─────────────────────────────────────
+// windowSec 0 / negative / NaN used to yield a non-finite bucket key
+// (`Math.floor(now / 0)` = Infinity) and `expire(key, 0)`, and enforceIpRateLimit
+// recomputed Retry-After from the RAW value (`retry-after: NaN`). All 16 call
+// sites pass literals >= 60 or the default today, so this is defensive.
+import { normalizeWindowSec } from '@/lib/ip-rate-limit';
+import type { NextRequest } from 'next/server';
+
+describe('normalizeWindowSec (Program-Fix 48)', () => {
+  it('undefined and non-finite fall back to the 60 s default', () => {
+    expect(normalizeWindowSec(undefined)).toBe(60);
+    expect(normalizeWindowSec(NaN)).toBe(60);
+    expect(normalizeWindowSec(Infinity)).toBe(60);
+    expect(normalizeWindowSec(-Infinity)).toBe(60);
+  });
+
+  it('values below 1 clamp to 1', () => {
+    expect(normalizeWindowSec(0)).toBe(1);
+    expect(normalizeWindowSec(-5)).toBe(1);
+    expect(normalizeWindowSec(0.5)).toBe(1);
+  });
+
+  it('fractional values >= 1 are floored; integers pass through unchanged', () => {
+    expect(normalizeWindowSec(90.7)).toBe(90);
+    expect(normalizeWindowSec(60)).toBe(60);
+    expect(normalizeWindowSec(3600)).toBe(3600);
+    expect(normalizeWindowSec(86_400)).toBe(86_400);
+  });
+});
+
+describe('checkIpRateLimit — degenerate windows produce finite keys (Program-Fix 48)', () => {
+  for (const [label, windowSec, expectedWindowSec] of [
+    ['0', 0, 1],
+    ['-5', -5, 1],
+    ['NaN', NaN, 60],
+  ] as const) {
+    it(`windowSec ${label} → finite bucket key and expire >= 2`, async () => {
+      const redis = fakeRedis();
+      const expire = vi.spyOn(redis, 'expire');
+      const incr = vi.spyOn(redis, 'incr');
+      await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec, now: T0 });
+      const bucket = Math.floor(T0 / (expectedWindowSec * 1000));
+      expect(incr).toHaveBeenCalledWith(`iprl|pay|1.2.3.4|${bucket}`);
+      expect(expire).toHaveBeenCalledWith(`iprl|pay|1.2.3.4|${bucket}`, expectedWindowSec * 2);
+    });
+  }
+
+  it('real call-site literals keep their exact keys (old and new builds share buckets)', async () => {
+    for (const windowSec of [60, 3600, 86_400]) {
+      const redis = fakeRedis();
+      const incr = vi.spyOn(redis, 'incr');
+      await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, windowSec, now: T0 });
+      expect(incr).toHaveBeenCalledWith(`iprl|pay|1.2.3.4|${Math.floor(T0 / (windowSec * 1000))}`);
+    }
+    const redis = fakeRedis();
+    const incr = vi.spyOn(redis, 'incr');
+    await checkIpRateLimit(redis, 'pay', '1.2.3.4', { limit: 3, now: T0 });
+    expect(incr).toHaveBeenCalledWith(`iprl|pay|1.2.3.4|${Math.floor(T0 / 60_000)}`);
+  });
+});
+
+describe('enforceIpRateLimit — Retry-After uses the normalised window (Program-Fix 48)', () => {
+  // Scoped module mock (vi.doMock + dynamic import) so the rest of this file keeps
+  // the real module. Same '@upstash/redis' class-mock shape as tests/pay-page-guard.test.ts:34.
+  afterEach(() => {
+    vi.doUnmock('@upstash/redis');
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  async function enforceOverLimit(windowSec: number) {
+    vi.resetModules();
+    vi.stubEnv('KV_REST_API_URL', 'https://kv.example.test');
+    vi.stubEnv('KV_REST_API_TOKEN', 'test-token');
+    vi.doMock('@upstash/redis', () => ({
+      Redis: class {
+        incr = async () => 999; // always over the limit
+        expire = async () => 1;
+      },
+    }));
+    const mod = await import('@/lib/ip-rate-limit');
+    const req = { headers: new Headers({ 'x-forwarded-for': '1.2.3.4' }) } as unknown as NextRequest;
+    return mod.enforceIpRateLimit(req, 'pay', 3, windowSec);
+  }
+
+  for (const windowSec of [0, -5, NaN]) {
+    it(`windowSec ${windowSec} over limit → 429 with a positive integer retry-after`, async () => {
+      const res = await enforceOverLimit(windowSec);
+      expect(res).not.toBeNull();
+      expect(res!.status).toBe(429);
+      const ra = res!.headers.get('retry-after');
+      expect(ra).toMatch(/^[1-9]\d*$/);
+      expect(Number(ra)).toBeLessThanOrEqual(normalizeWindowSec(windowSec));
+    });
+  }
+
+  it('a normal 60 s window still answers 429 with retry-after in [1, 60]', async () => {
+    const res = await enforceOverLimit(60);
+    expect(res!.status).toBe(429);
+    const ra = Number(res!.headers.get('retry-after'));
+    expect(Number.isInteger(ra)).toBe(true);
+    expect(ra).toBeGreaterThanOrEqual(1);
+    expect(ra).toBeLessThanOrEqual(60);
+  });
+});

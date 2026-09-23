@@ -151,6 +151,11 @@ export function quote(
     throw new QuoteError('Invalid exchange rate; please try again.');
   }
   const amountInr = Math.round(amountSource * crossRate); // amount in the destination currency
+  // Program-Fix 48: a finite-but-huge cross-rate (e.g. destToUsd ≈ 1e-306) can
+  // overflow the recipient amount to Infinity. Never quote a non-finite payout.
+  if (!Number.isFinite(amountInr)) {
+    throw new QuoteError('Amount too large; please try again.');
+  }
 
   return {
     amountUsd,
