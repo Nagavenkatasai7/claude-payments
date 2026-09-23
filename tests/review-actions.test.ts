@@ -30,7 +30,14 @@ vi.mock('@/db/client', async (orig) => ({
   getDb: () => db,
 }));
 
-import { releaseTransferAction, rejectTransferAction } from '@/app/admin-dashboard/actions';
+import {
+  releaseTransferAction,
+  rejectTransferAction,
+  issueRefundAction,
+  approveRefundAction,
+  dismissRefundAction,
+  retryRefundAction,
+} from '@/app/admin-dashboard/actions';
 
 function makeTransfer(overrides: Partial<Transfer> & { id: string }): Transfer {
   return {
@@ -164,5 +171,83 @@ describe('rejectTransferAction', () => {
     await store.saveTransfer(makeTransfer({ id: 'rj2', status: 'awaiting_payment' }));
 
     await expect(rejectTransferAction(form({ id: 'rj2' }))).rejects.toThrow(/not in_review/i);
+  });
+});
+
+// ── Program-Fix 28 (compliance-03/-08): every admin money action writes ONE
+// audit_events row whose actor is the SESSION user (never a form field) and
+// whose reason is the optional, bounded `note` field.
+describe('admin money actions write the durable audit row (Program-Fix 28)', () => {
+  type Row = { partner_id: string | null; actor: string; actor_type: string; action: string; subject_id: string | null; meta: Record<string, unknown> };
+  async function auditRows(): Promise<Row[]> {
+    const r = await db.execute(sql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events ORDER BY id`);
+    return (r as unknown as { rows: Row[] }).rows;
+  }
+  beforeEach(() => mockRequireAdmin.mockResolvedValue({ username: 'plat', name: 'Platform Admin', role: 'admin' }));
+
+  it('release: transfer.release row, actor = session username (a posted actor field is ignored), reason = bounded note', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_rel' }));
+    await releaseTransferAction(form({ id: 'au_rel', note: '  source\u0000 of funds ok ', actor: 'mallory' }));
+    expect(await auditRows()).toEqual([{
+      partner_id: 'default', actor: 'plat', actor_type: 'staff', action: 'transfer.release', subject_id: 'au_rel',
+      meta: { previousStatus: 'in_review', newStatus: 'paid', reason: 'source of funds ok' },
+    }]);
+  });
+
+  it('reject: transfer.reject row; no note ⇒ reason null; a 900-char note is cut to 500', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_rej' }));
+    await store.saveTransfer(makeTransfer({ id: 'au_rej2' }));
+    await rejectTransferAction(form({ id: 'au_rej' }));
+    await rejectTransferAction(form({ id: 'au_rej2', note: 'n'.repeat(900) }));
+    const rows = await auditRows();
+    expect(rows.map((r) => [r.action, r.actor, r.subject_id])).toEqual([
+      ['transfer.reject', 'plat', 'au_rej'],
+      ['transfer.reject', 'plat', 'au_rej2'],
+    ]);
+    expect(rows[0].meta.reason).toBeNull();
+    expect((rows[1].meta.reason as string).length).toBe(500);
+  });
+
+  it('issueRefundAction: refund.issue row with reason null (the confirm button carries no note)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_iss', status: 'paid', fundingRef: 'mockfund-au_iss' }));
+    await issueRefundAction(form({ id: 'au_iss' }));
+    expect(await auditRows()).toEqual([expect.objectContaining({
+      actor: 'plat', actor_type: 'staff', action: 'refund.issue', subject_id: 'au_iss',
+      meta: expect.objectContaining({ refundStatus: 'pending', reason: null }),
+    })]);
+  });
+
+  it('approveRefundAction: refund.approve row with the note as reason', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_apr', status: 'cancelled', fundingRef: 'f', refundStatus: 'requested' }));
+    await approveRefundAction(form({ id: 'au_apr', note: 'customer called in' }));
+    expect(await auditRows()).toEqual([expect.objectContaining({
+      actor: 'plat', action: 'refund.approve', subject_id: 'au_apr',
+      meta: expect.objectContaining({ previousRefundStatus: 'requested', refundStatus: 'pending', reason: 'customer called in' }),
+    })]);
+  });
+
+  it('dismissRefundAction: refund.dismiss row', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_dis', status: 'cancelled', fundingRef: 'f', refundStatus: 'requested' }));
+    await dismissRefundAction(form({ id: 'au_dis', note: 'duplicate request' }));
+    expect(await auditRows()).toEqual([expect.objectContaining({
+      actor: 'plat', action: 'refund.dismiss', subject_id: 'au_dis',
+      meta: expect.objectContaining({ refundStatus: 'none', reason: 'duplicate request' }),
+    })]);
+  });
+
+  it('retryRefundAction: refund.retry row', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_rty', status: 'cancelled', fundingRef: 'f', refundStatus: 'failed' }));
+    await retryRefundAction(form({ id: 'au_rty' }));
+    expect(await auditRows()).toEqual([expect.objectContaining({
+      actor: 'plat', action: 'refund.retry', subject_id: 'au_rty',
+      meta: expect.objectContaining({ previousRefundStatus: 'failed', refundStatus: 'pending', reason: null }),
+    })]);
+  });
+
+  it('a refused action (wrong state) writes NO audit row', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'au_no', status: 'delivered' }));
+    await expect(releaseTransferAction(form({ id: 'au_no', note: 'x' }))).rejects.toThrow(/not in_review/i);
+    await expect(approveRefundAction(form({ id: 'au_no' }))).rejects.toThrow(/not awaiting approval/i);
+    expect(await auditRows()).toEqual([]);
   });
 });
