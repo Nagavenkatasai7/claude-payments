@@ -163,7 +163,11 @@ function bundleText(bundle: OpsDiagnosisBundle): string {
   if (bundle.subjectKind === 'dead_letter' && bundle.deadLetter) {
     const d = bundle.deadLetter;
     return (
-      `Subject: a DEAD outbox effect (exhausted all retries).\n` +
+      // Program-Fix 25: a permanent WhatsApp code (or a terminal row deadline)
+      // dead-letters at attempt 1 — never tell the model 8 retries happened.
+      (d.attempts <= 1
+        ? `Subject: a DEAD outbox effect (terminal at attempt 1: a permanent error or a terminal deadline, not retried).\n`
+        : `Subject: a DEAD outbox effect (exhausted all retries).\n`) +
       `Effect kind: ${d.kind}\n` +
       `Provider type: ${d.providerType}\n` +
       `Attempts: ${d.attempts}\n` +

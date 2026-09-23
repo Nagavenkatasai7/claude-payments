@@ -224,6 +224,18 @@ export const env = {
   get whatsappVerificationFailedTemplate(): string {
     return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? '';
   },
+  // Program-Fix 25 — both OPTIONAL, unset ⇒ today's behaviour byte-for-byte.
+  // The approved UTILITY template (one body variable) for ops alerts. '' ⇒ the
+  // ops.alert row sends free-form text exactly as before.
+  get whatsappOpsAlertTemplate(): string {
+    return process.env.WHATSAPP_OPS_ALERT_TEMPLATE ?? '';
+  },
+  // 'true' ⇒ sendBusinessInitiated checks the 24h customer-service window
+  // (lastmsg:) and skips a doomed free-form send outside it. Turn on only after
+  // the production number is live and the templates are approved.
+  get whatsappWindowAware(): boolean {
+    return process.env.WHATSAPP_WINDOW_AWARE === 'true';
+  },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).
