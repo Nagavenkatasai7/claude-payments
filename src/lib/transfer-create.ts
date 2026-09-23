@@ -5,7 +5,8 @@ import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidenc
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
-import { logWarn } from './log';
+import { logError, logWarn } from './log';
+import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold } from './aml-hold';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
@@ -332,6 +333,8 @@ interface PreparedMint {
  *   1. same-id replay (claim-first callers) → return the existing row, no
  *      second insert and no cap check;
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
+ *   2a. the optional AML hold (Program-Fix 43 PR B: OFF by default, never
+ *       demo, cleared → flagged only, never throws);
  *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction;
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
@@ -378,8 +381,37 @@ async function mintLocked(
     complianceStatus = 'flagged';
     complianceReasons = [...complianceReasons, eddCheck.flagReason];
   }
+  const id = input.id ?? newTransferId();
+  // ── Optional AML hold (Program-Fix 43 PR B) ──────────────────────────────
+  // OFF unless the partner's corridor switch is the literal `true`; never on
+  // the default (demo) tenant on either side; never on a non-http rail; only
+  // ever cleared → flagged. The gate is pure, so OFF / demo / an already
+  // flagged or blocked verdict costs ZERO statements. Past it, the two reads
+  // run in a savepoint that never throws (null ⇒ failed, alert queued ⇒ no
+  // hold), and this block is wrapped again: it can never fail the mint.
+  if (amlHoldGate({
+    amlHolds: p.rules.amlHolds,
+    partnerId: input.partnerId,
+    railPartnerId: p.settlementPartnerId ?? input.partnerId,
+    complianceStatus,
+  })) {
+    try {
+      const inputs = await ops.amlHoldInputs({
+        railPartnerId: p.settlementPartnerId ?? input.partnerId,
+        anchor: { at: now, id },
+        largeAmountUsd: p.rules.largeAmountUsd,
+        band: p.rules.aml.band,
+      });
+      if (inputs?.prior && amlHoldRailEligible(inputs.railProviderType)) {
+        const hit = amlHoldHit(inputs.prior, q.amountUsd, { ...p.rules.aml, largeAmountUsd: p.rules.largeAmountUsd });
+        ({ complianceStatus, complianceReasons } = applyAmlHold({ complianceStatus, complianceReasons }, hit));
+      }
+    } catch (err) {
+      logError('aml.hold_check', err, { partnerId: input.partnerId });
+    }
+  }
   const transfer: Transfer = {
-    id: input.id ?? newTransferId(),
+    id,
     phone: input.phone,
     amountUsd: q.amountUsd,
     feeUsd: q.feeUsd,
