@@ -187,6 +187,25 @@ describe('diagnoseOps — bundle facts reach the model (masked, deterministic)',
     expect(sent).toMatch(/3 \(this row excluded\)/);
   });
 
+  it('an 8-attempt dead row keeps the "exhausted all retries" wording', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps(deadBundle);
+    expect(JSON.stringify(chatMock.mock.calls[0][0])).toContain('Subject: a DEAD outbox effect (exhausted all retries).');
+  });
+
+  // Program-Fix 25: a permanent WhatsApp error (or a terminal row deadline) is
+  // dead at attempt 1 — the model must not assume 8 retries happened.
+  it('a row dead at attempt 1 is described as TERMINAL, not as exhausted retries', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps({
+      subjectKind: 'dead_letter',
+      deadLetter: { ...deadBundle.deadLetter!, kind: 'whatsapp.text', attempts: 1, lastError: 'WhatsApp send failed (400): (#131030) x' },
+    });
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    expect(sent).toContain('terminal at attempt 1');
+    expect(sent).not.toContain('exhausted all retries');
+  });
+
   it('the stuck-transfer prompt carries the masked amount, age, and provider type', async () => {
     chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
     await diagnoseOps(stuckBundle);
