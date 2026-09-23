@@ -179,7 +179,8 @@ export function createTransferRepo(
     /**
      * Atomic, forward-only webhook transition — ONE guarded UPDATE, immune to
      * the concurrent funded/paid_out race. Terminal states (cancelled, blocked,
-     * in_review) never move; equal-or-backward ranks no-op. Non-null return ⇒
+     * in_review) never move; equal-or-backward ranks no-op; an awaiting_payment
+     * row that is not compliance-cleared never moves (Program-Fix 14). Non-null return ⇒
      * a REAL transition (the caller's notify contract, unchanged).
      */
     async updateTransferFromWebhook(
@@ -207,6 +208,16 @@ export function createTransferRepo(
             // non-refunding transfers are unaffected. refund_status defaults to
             // 'none'.
             sql`(${status} <> 'delivered' OR COALESCE(${transfers.refundStatus}, 'none') = 'none')`,
+            // COMPLIANCE HOLDS (Program-Fix 14): a status update advances a row
+            // out of awaiting_payment ONLY when the ledger says 'cleared' — the
+            // same predicate as markPaidIfAwaiting, IN the UPDATE so a stale
+            // read can never decide. A paid row already passed a gate (the
+            // cleared claim, or the audited staff release — which keeps
+            // compliance_status 'flagged' as evidence), so paid → delivered is
+            // not re-gated on 'cleared'. Blocked never advances. Null ⇒ the
+            // caller's alertCallbackOnHold (rail-failure.ts) raises the signal.
+            sql`(${transfers.status} <> 'awaiting_payment' OR ${transfers.complianceStatus} = 'cleared')`,
+            ne(transfers.complianceStatus, 'blocked'),
           ),
         )
         .returning();
@@ -440,6 +451,48 @@ export function createTransferRepo(
     },
 
     /**
+     * Program-Fix 14 follow-up: record a pay-time RE-SCREEN verdict on a row
+     * that is still this tenant's awaiting_payment transfer. ONE guarded,
+     * column-targeted UPDATE (compliance_status, compliance_reasons and, for a
+     * block, status) — never a whole-row re-save.
+     *  • 'blocked' always wins. An UNCHARGED row becomes status 'blocked' (the
+     *    same shape a mint-time hit lands in). A CHARGED row (funding_ref set:
+     *    a crash between capture and settlement) keeps status awaiting_payment
+     *    so the funding-resume sweep still reaches settleOrHold → refused and
+     *    raises its fundblocked:<id> alert for a refund.
+     *  • 'flagged' never downgrades a blocked row.
+     * `reasons` is the caller's merged list (existing + new, de-duplicated).
+     * Null ⇒ a guard failed (moved, cancelled, blocked, another tenant); the
+     * caller re-reads and reports current truth.
+     * Drizzle 0.45.2: update().set().where().returning() —
+     * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:43,143,166.
+     */
+    async applyRescreenIfAwaiting(
+      id: string,
+      partnerId: PartnerId,
+      verdict: 'blocked' | 'flagged',
+      reasons: string[],
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set(verdict === 'blocked'
+          ? {
+              complianceStatus: 'blocked',
+              complianceReasons: reasons,
+              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
+            }
+          : { complianceStatus: 'flagged', complianceReasons: reasons })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'awaiting_payment'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Atomically claim the in_review → paid transition — the STAFF RELEASE.
      * Deliberately NO 'cleared' predicate: a released transfer keeps
      * compliance_status = 'flagged' forever (the evidence is never rewritten),
@@ -534,6 +587,40 @@ export function createTransferRepo(
           eq(transfers.partnerId, partnerId),
           eq(transfers.status, 'awaiting_payment'),
           isNull(transfers.fundingRef),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * The customer's update_recipient_phone edit: ONE UPDATE that sets only
+     * recipient_phone (a plain, unencrypted column), scoped to the tenant AND
+     * the owning sender in the WHERE. Every other column stays as the ledger
+     * has it at write time. Null ⇒ no such row for this owner/tenant now; the
+     * caller refuses and never falls back to saveTransfer.
+     * Unpaid only: the WHERE also requires status awaiting_payment with no
+     * paid_at, no captured funding (funding_ref) and no settlement instruction
+     * acknowledged (payment_provider_ref), so the check and the write are one
+     * atomic statement. Null also covers "money already involved"; the caller
+     * re-reads to tell that apart from a missing row.
+     */
+    async updateRecipientPhone(
+      id: string,
+      partnerId: PartnerId,
+      ownerPhone: string,
+      recipientPhone: string,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ recipientPhone })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, ownerPhone),
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.paidAt),
+          isNull(transfers.fundingRef),
+          isNull(transfers.paymentProviderRef),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;

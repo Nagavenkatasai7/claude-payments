@@ -42,6 +42,7 @@ import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 
 const PHONE = '15551234567';
 const MOCK_RATE = 85.0;
+const SENDER_FULL_NAME = 'Alex Rivera';
 
 // Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
 // PGlite and reseeds the 'default' partner, so it runs per-test in beforeEach.
@@ -59,9 +60,11 @@ async function buildCtx(redis: ReturnType<typeof fakeRedis>, phone: string = PHO
   // Customers live in Postgres now, so the seed is an awaited saveCustomer;
   // tests that want a different status saveCustomer() over it afterward.
   const nowIso = new Date().toISOString();
+  // Program-Fix 14: a consumer send needs the sender's legal name on file
+  // (sender identity is required before screening), so the seed carries one.
   await customerStore.saveCustomer({
     senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
-    senderCountry: 'US', partnerId, optInAt: nowIso,
+    senderCountry: 'US', partnerId, optInAt: nowIso, fullName: SENDER_FULL_NAME,
     createdAt: nowIso, updatedAt: nowIso,
   });
   return {
@@ -121,7 +124,7 @@ async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'def
 }
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-eight tools', () => {
+  it('exposes all twenty-nine tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -150,6 +153,7 @@ describe('toolSchemas', () => {
       'resolve_recipient',
       'send_approve_picker',
       'send_recipient_picker',
+      'set_sender_name',
       'update_recipient_phone',
       'validate_phone',
     ]);
@@ -648,6 +652,103 @@ describe('executeTool', () => {
   });
 });
 
+describe('update_recipient_phone — writes only the recipient phone', { retry: 0 }, () => {
+  async function createOne(ctx: Awaited<ReturnType<typeof buildCtx>>): Promise<string> {
+    const created = await executeTool('create_transfer', {
+      amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    return created.transfer_id as string;
+  }
+
+  /** Runs `between` after the tool's read and before its write. */
+  function interleave(ctx: Awaited<ReturnType<typeof buildCtx>>, between: (id: string) => Promise<void>) {
+    const read = ctx.store.getTransfer;
+    ctx.store = {
+      ...ctx.store,
+      async getTransfer(id: string) {
+        const t = await read(id);
+        await between(id);
+        return t;
+      },
+    };
+  }
+
+  it('preserves concurrent changes to other fields made after the read', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    interleave(ctx, async (tid) => {
+      await db.execute(sql`UPDATE transfers SET admin_note = 'note', assigned_to = 'staff_a' WHERE id = ${tid}`);
+    });
+
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '+91 98765 11111' },
+      ctx,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.recipient_phone).toBe('919876511111');
+    expect(result.status).toBe('awaiting_payment');
+    const row = (await db.execute(sql`SELECT recipient_phone, admin_note, assigned_to, status FROM transfers WHERE id = ${id}`)).rows[0];
+    expect(row).toEqual({ recipient_phone: '919876511111', admin_note: 'note', assigned_to: 'staff_a', status: 'awaiting_payment' });
+  });
+
+  it('a payment that lands between the read and the write wins: the number stays as it was', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    interleave(ctx, async (tid) => {
+      await db.execute(sql`UPDATE transfers
+        SET status = 'delivered', paid_at = now(), delivered_at = now()
+        WHERE id = ${tid}`);
+    });
+
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '+91 98765 11111' },
+      ctx,
+    );
+
+    expect(result.error_code).toBe('recipient_phone_locked');
+    const row = await createTransferRepo(db).getTransfer(id);
+    expect(row?.recipientPhone).toBe('919876543210');
+    expect(row?.status).toBe('delivered');
+  });
+
+  it('returns an honest error and writes nothing when the row is no longer editable', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    interleave(ctx, async (tid) => {
+      await db.execute(sql`DELETE FROM transfers WHERE id = ${tid}`);
+    });
+
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '919876511111' },
+      ctx,
+    );
+
+    expect(result.error).toBe('That transfer can no longer be edited.');
+    expect(await createTransferRepo(db).getTransfer(id)).toBeNull();
+  });
+
+  it('normal case: the reply shape is unchanged', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await createOne(ctx);
+    const result = await executeTool(
+      'update_recipient_phone',
+      { transfer_id: id, recipient_phone: '919876511111' },
+      ctx,
+    );
+    expect(result).toEqual({
+      transfer_id: id,
+      recipient_phone: '919876511111',
+      recipient_name: 'Dad',
+      status: 'awaiting_payment',
+    });
+  });
+});
+
 describe('create_schedule — end_date guardrail (QA #7)', () => {
   it('stores a valid end_date on the schedule', async () => {
     const c = await buildCtx(fakeRedis());
@@ -739,6 +840,7 @@ describe('schedule tools', () => {
       kycStatus: 'verified',
       senderCountry: 'US',
       partnerId: 'acme',
+      fullName: SENDER_FULL_NAME, // Program-Fix 14: a schedule needs the sender's legal name
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
     });
@@ -847,6 +949,7 @@ describe('create_transfer — daily volume increment', () => {
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
       partnerId: 'default',
+      fullName: SENDER_FULL_NAME,
     });
     await executeTool('create_transfer', {
       amount_usd: 100,
@@ -874,6 +977,7 @@ describe('create_transfer — KYC EDD / Travel-Rule plumbing', () => {
       createdAt: '2026-01-01T00:00:00Z',
       updatedAt: '2026-01-01T00:00:00Z',
       partnerId: 'default',
+      fullName: SENDER_FULL_NAME,
     });
   }
 
@@ -2137,7 +2241,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
     const nowIso = new Date().toISOString();
     await ctx.customerStore.saveCustomer({
       senderPhone: '15558887777', firstSeenAt: nowIso, kycStatus: 'verified',
-      senderCountry: 'US', partnerId: 'acme', optInAt: nowIso,
+      senderCountry: 'US', partnerId: 'acme', optInAt: nowIso, fullName: SENDER_FULL_NAME,
       createdAt: nowIso, updatedAt: nowIso,
     });
     const spy = vi.fn(async () => WIN);
@@ -2646,7 +2750,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the fourteen read-only/refund/recall/help/pay-link tools', () => {
+  it('the allowlist is exactly the fifteen read-only/refund/recall/help/pay-link/sender-name tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
@@ -2661,6 +2765,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
       'request_human_help',
       'request_refund',
       'resolve_recipient',
+      'set_sender_name',
       'validate_phone',
     ]);
   });
@@ -5698,5 +5803,93 @@ describe('Program-Fix 49B: WhatsApp hides create_transfer + generate_payment_lin
     const link = await executeTool('generate_payment_link', { transfer_id: r.transfer_id }, ctx);
     expect(link.error).toBeUndefined();
     expect(typeof link.url).toBe('string');
+  });
+});
+
+// The recipient number can change only while a transfer is unpaid. Once money
+// is involved the tool refuses and routes the customer to a person.
+describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () => {
+  const lockCases: Array<[string, (id: string) => ReturnType<typeof sql>]> = [
+    ['delivered', (id) => sql`UPDATE transfers SET status = 'delivered', paid_at = now(), delivered_at = now() WHERE id = ${id}`],
+    ['paid', (id) => sql`UPDATE transfers SET status = 'paid', paid_at = now() WHERE id = ${id}`],
+    ['charged but not yet paid', (id) => sql`UPDATE transfers SET funding_ref = 'fund_x' WHERE id = ${id}`],
+    ['instructed', (id) => sql`UPDATE transfers SET payment_provider_ref = 'prov_x' WHERE id = ${id}`],
+  ];
+
+  for (const [label, lock] of lockCases) {
+    it(`${label}: refuses, leaves the number unchanged and points to a person`, async () => {
+      const ctx = await buildCtx(fakeRedis());
+      const created = await executeTool('create_transfer', {
+        amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
+        payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
+      }, ctx);
+      const id = created.transfer_id as string;
+      await db.execute(lock(id));
+
+      const result = await executeTool('update_recipient_phone', { transfer_id: id, recipient_phone: '919811112222' }, ctx);
+
+      expect(result.error_code).toBe('recipient_phone_locked');
+      expect(String(result.error)).toMatch(/can.t be changed after payment/i);
+      expect(String(result.reply_hint)).toContain('request_human_help');
+      expect(result.recipient_phone).toBeUndefined();
+      expect((await ctx.store.getTransfer(id))?.recipientPhone).toBe('919876543210');
+    });
+  }
+
+  it('awaiting_payment: still updates, and the reply number comes from the written row', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const created = await executeTool('create_transfer', {
+      amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
+    }, ctx);
+    const id = created.transfer_id as string;
+    const written = { ...(await ctx.store.getTransfer(id))!, recipientPhone: '919811112222' };
+    ctx.store = { ...ctx.store, async updateRecipientPhone() { return written; } };
+    const result = await executeTool('update_recipient_phone', { transfer_id: id, recipient_phone: '919800000000' }, ctx);
+    expect(result.error).toBeUndefined();
+    expect(result.recipient_phone).toBe('919811112222');
+  });
+
+  it("another sender's transfer is still not found, locked or not", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const created = await executeTool('create_transfer', {
+      amount_usd: 200, recipient_name: 'Dad', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'dad@upi', funding_method: 'bank_transfer',
+    }, owner);
+    const id = created.transfer_id as string;
+    await db.execute(sql`UPDATE transfers SET status = 'delivered', paid_at = now(), delivered_at = now() WHERE id = ${id}`);
+    const other = await buildCtx(redis, '15559990001');
+    const result = await executeTool('update_recipient_phone', { transfer_id: id, recipient_phone: '919811112222' }, other);
+    expect(result.error).toMatch(/not found/i);
+    expect(result.error_code).toBeUndefined();
+  });
+
+  it('after a refused change on a delivered transfer, a later send to the other number starts fresh', async () => {
+    const phone = '15550006016';
+    const NEW = '919811112222';
+    const ctx = await buildCtx(fakeRedis(), phone);
+    await seedSender(db, { partnerId: 'default', phone, firstSeenDaysAgo: 10 });
+    await ctx.store.saveTransfer(fix6LedgerRow(phone, { id: 'rp_done', createdAt: new Date(Date.now() - 5000).toISOString() }));
+    await executeTool('get_quote', { amount_usd: 100, funding_method: 'bank_transfer' }, ctx); // prime FX
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, text: async () => '', json: async () => ({ rates: { INR: MOCK_RATE } }),
+    })));
+
+    const refused = await executeTool('update_recipient_phone', { transfer_id: 'rp_done', recipient_phone: NEW }, ctx);
+    expect(refused.error_code).toBe('recipient_phone_locked');
+
+    const fresh = await executeTool('send_approve_picker', {
+      amount_usd: 150, funding_method: 'bank_transfer', recipient_name: 'Ravi', recipient_phone: NEW,
+    }, ctx);
+    expect(fresh.draft_id).toBeDefined();
+    expect((await ctx.draftStore.consumeDraft(fresh.draft_id as string))?.recipient.payoutDestination).toBe('');
+
+    // Control: the original number still resolves its own settled details.
+    const same = await executeTool('send_approve_picker', {
+      amount_usd: 150, funding_method: 'bank_transfer', recipient_name: 'Mom', recipient_phone: FIX6_MOM,
+    }, ctx);
+    expect(same.draft_id).toBeDefined();
+    expect((await ctx.draftStore.consumeDraft(same.draft_id as string))?.recipient.payoutDestination).toBe(FIX6_REAL);
   });
 });

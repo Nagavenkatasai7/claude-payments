@@ -21,6 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
+import { canDecideCustomerKyc } from '@/lib/compliance-config';
 import { CustomerLink } from '../../customer-link';
 import { openCustomerRef, auditIdentityView, auditSubjectId } from '@/lib/customer-ref';
 import { SendLimitsCard } from '../../send-limits-card';
@@ -90,6 +91,9 @@ export default async function CustomerDetailPage({
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
   const canManualApprove = customer.kycStatus !== 'verified' && customer.kycStatus !== 'grandfathered';
   const canManualReject = customer.kycStatus !== 'rejected';
+  // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to decide.
+  // Mirrors the actions' gate (the server actions are the authority).
+  const canDecideKyc = canDecideCustomerKyc(scopeOf(staff), customer);
   const now = new Date();
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const capEval = evaluateCap(customer, now, todayUsedCents, 0, sendGateActive(partner), limits);
@@ -157,7 +161,12 @@ export default async function CustomerDetailPage({
                 decision needs a typed reason (10–500 characters) and is recorded
                 in the audit log; it sends the customer no message. Shown whenever
                 the Persona review panel below is not. */}
-            {isAdmin && !inReview && (canManualApprove || canManualReject) && (
+            {isAdmin && !canDecideKyc && (canManualApprove || canManualReject || inReview) && (
+              <p className="mt-4 rounded-lg border p-4 text-sm text-muted-foreground">
+                Flagged by SmartRemit screening. KYC decisions for this customer require SmartRemit platform staff.
+              </p>
+            )}
+            {isAdmin && canDecideKyc && !inReview && (canManualApprove || canManualReject) && (
               <div className="mt-4 space-y-3 rounded-lg border p-4">
                 <div className="text-sm font-medium">Manual KYC decision</div>
                 <p className="text-sm text-muted-foreground">
@@ -187,7 +196,7 @@ export default async function CustomerDetailPage({
               </div>
             )}
 
-            {isAdmin && inReview && (
+            {isAdmin && canDecideKyc && inReview && (
               <div className="mt-4 space-y-3 rounded-lg border p-4">
                 <p className="text-sm text-muted-foreground">
                   Persona {customer.kycReviewState === 'pending_review' ? 'passed — confirm to approve' : 'flagged — review required'}.

@@ -65,6 +65,30 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
     }
   });
 
+  it('sender legal name: set_sender_name is visible on WhatsApp and web, and every tool the prompt says asks for the name is visible on WhatsApp', () => {
+    expect(whatsappNames.has('set_sender_name')).toBe(true);
+    expect(toolSchemasForChannel('web').map((t) => t.function.name)).toContain('set_sender_name');
+    for (const prompt of Object.values(PROMPTS)) {
+      const rule = prompt.split('\n').find((l) => l.includes('returns needs_sender_name: true')) ?? '';
+      expect(rule, "the SENDER'S LEGAL NAME rule is present").not.toBe('');
+      const named = allToolNames.filter((n) => new RegExp(`\\b${n}\\b`).test(rule));
+      expect(named).toContain('send_approve_picker');
+      for (const n of named) expect(whatsappNames.has(n), `${n} is named in the name rule but hidden`).toBe(true);
+      expect(prompt).toContain('call set_sender_name with exactly the name they typed');
+    }
+    // The tool description and the prompt agree on what to do after saving.
+    expect(describeTool('set_sender_name')).toMatch(/call the tool that returned needs_sender_name again/);
+  });
+
+  it('recipient phone: the prompt and update_recipient_phone agree it is for unpaid transfers only', () => {
+    const line = SYSTEM_PROMPT.split('\n').find((l) => l.includes('update_recipient_phone')) ?? '';
+    expect(line).toMatch(/not been paid/i);
+    expect(line).toContain('request_human_help');
+    expect(whatsappNames.has('request_human_help')).toBe(true);
+    expect(describeTool('update_recipient_phone')).toMatch(/not been paid/i);
+    expect(describeTool('update_recipient_phone')).toMatch(/after payment/i);
+  });
+
   it('the [RECIPIENT SELECTED] note agent.ts injects does not ask for a funding method', () => {
     const agent = read('src/lib/agent.ts');
     const note = agent.slice(agent.indexOf('[RECIPIENT SELECTED] The customer tapped'), agent.indexOf('[RECIPIENT SELECTED] The customer tapped') + 600);

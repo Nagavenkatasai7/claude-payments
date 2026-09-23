@@ -5,6 +5,12 @@ import {
   cancelTransfer, assignTransfer, resendPaymentLink, releaseTransfer, rejectTransfer,
   issueRefund, approveRefund, dismissRefund, retryRefund, reverseB2bSettlement, canReleaseHeld,
 } from '@/lib/dashboard-ops';
+import { POSSIBLE_MATCH_REASON, LIST_UNAVAILABLE_REASON, SENDER_IDENTITY_MISSING_REASON } from '@/lib/compliance';
+import { AML_HOLD_REASON } from '@/lib/aml-hold';
+
+// Program-Fix 43 follow-up: releaseTransfer requires the staff audit context
+// with a non-blank reason (defence in depth behind releaseTransferAction).
+const REL = { actor: 'plat', reason: 'checked source of funds' };
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -355,10 +361,23 @@ describe('resendPaymentLink', () => {
 });
 
 describe('releaseTransfer', () => {
+  it('refuses (before any read or write) without an audit context or with a blank reason: stays in_review, no outbox row', async () => {
+    const store = createStore(fakeRedis(), db);
+    await store.saveTransfer(makeTransfer({ id: 'rel_noreason', status: 'in_review', complianceStatus: 'flagged' }));
+    for (const audit of [undefined, { actor: 'plat' }, { actor: 'plat', reason: null }, { actor: 'plat', reason: '   ' }]) {
+      await expect(
+        releaseTransfer(store, db, 'rel_noreason', audit as unknown as { actor: string; reason: string }),
+      ).rejects.toThrow(/reason is required/i);
+    }
+    expect((await store.getTransfer('rel_noreason'))?.status).toBe('in_review');
+    const r = await db.execute(sql`SELECT count(*)::int AS n FROM outbox`);
+    expect((r as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(0);
+  });
+
   it('release is a SETTLEMENT, not a status flip: in_review → paid + the mock-rail effect (delivery arrives via the mock.settle handler, never here)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel1', status: 'in_review', paidAt: '2026-05-30T00:00:00Z' }));
-    await releaseTransfer(store, db, 'rel1');
+    await releaseTransfer(store, db, 'rel1', REL);
     const loaded = await store.getTransfer('rel1');
     expect(loaded?.status).toBe('paid');
     expect(loaded?.deliveredAt).toBeUndefined();
@@ -368,19 +387,19 @@ describe('releaseTransfer', () => {
 
   it('throws when transfer is not found', async () => {
     const store = createStore(fakeRedis(), db);
-    await expect(releaseTransfer(store, db, 'missing')).rejects.toThrow(/not found/i);
+    await expect(releaseTransfer(store, db, 'missing', REL)).rejects.toThrow(/not found/i);
   });
 
   it('throws when transfer is not in_review (e.g. already delivered)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel2', status: 'delivered' }));
-    await expect(releaseTransfer(store, db, 'rel2')).rejects.toThrow(/not in_review/i);
+    await expect(releaseTransfer(store, db, 'rel2', REL)).rejects.toThrow(/not in_review/i);
   });
 
   it('throws when transfer is awaiting_payment (not yet charged)', async () => {
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel3', status: 'awaiting_payment' }));
-    await expect(releaseTransfer(store, db, 'rel3')).rejects.toThrow(/not in_review/i);
+    await expect(releaseTransfer(store, db, 'rel3', REL)).rejects.toThrow(/not in_review/i);
   });
 });
 
@@ -614,7 +633,7 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     const held = await store.getTransfer('rel_hold');
     expect(held?.status).toBe('in_review');
 
-    await releaseTransfer(store, db, 'rel_hold');
+    await releaseTransfer(store, db, 'rel_hold', REL);
     const loaded = await store.getTransfer('rel_hold');
     expect(loaded?.status).toBe('paid');                 // NOT delivered: delivery is the rail's callback, as for cleared money
     expect(loaded?.deliveredAt).toBeUndefined();
@@ -633,7 +652,7 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     const t = makeTransfer({ id: 'rel_mock', complianceStatus: 'flagged', fundingRef: 'mockfund-rel_mock' });
     await store.saveTransfer(t);
     await beginHold(db, t);
-    await releaseTransfer(store, db, 'rel_mock');
+    await releaseTransfer(store, db, 'rel_mock', REL);
     expect((await store.getTransfer('rel_mock'))?.status).toBe('paid');
     expect((await store.getTransfer('rel_mock'))?.paymentProviderRef).toBe('mock-rel_mock');
     expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['stage1:rel_mock', 'mocksettle:rel_mock']);
@@ -645,7 +664,7 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     const t = makeTransfer({ id: 'rel_b2b', complianceStatus: 'flagged', fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_deadbeef' });
     await store.saveTransfer(t);
     await beginHold(db, t);
-    await releaseTransfer(store, db, 'rel_b2b');
+    await releaseTransfer(store, db, 'rel_b2b', REL);
     expect((await store.getTransfer('rel_b2b'))?.status).toBe('paid');
     expect((await outboxRows()).map((x) => x.dedupe_key)).toContain('instruct:rel_b2b');
   });
@@ -654,12 +673,12 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
     await simulatorRail();
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'rel_x', status: 'awaiting_payment' }));
-    await expect(releaseTransfer(store, db, 'rel_x')).rejects.toThrow(/not in_review/);
+    await expect(releaseTransfer(store, db, 'rel_x', REL)).rejects.toThrow(/not in_review/);
     const t = makeTransfer({ id: 'rel_twice', complianceStatus: 'flagged', fundingRef: 'f' });
     await store.saveTransfer(t);
     await beginHold(db, t);
-    await releaseTransfer(store, db, 'rel_twice');
-    await expect(releaseTransfer(store, db, 'rel_twice')).rejects.toThrow(/not in_review/);
+    await releaseTransfer(store, db, 'rel_twice', REL);
+    await expect(releaseTransfer(store, db, 'rel_twice', REL)).rejects.toThrow(/not in_review/);
     expect((await outboxRows()).filter((x) => x.dedupe_key === 'instruct:rel_twice')).toHaveLength(1);
   });
 
@@ -694,25 +713,45 @@ describe('release / reject on a transfer HELD by beginHold (release is a SETTLEM
 describe('canReleaseHeld — who may release a compliance hold (owner decision 2026-09-16)', () => {
   const PLATFORM = { kind: 'platform' } as const;
   const PARTNER = { kind: 'partner', partnerId: 'p1' } as const;
+  const AMOUNT = { complianceReasons: ['Large transfer amount.'] };
+  const SCREEN = { complianceReasons: ['Large transfer amount.', POSSIBLE_MATCH_REASON] };
 
   it("platform staff may release any hold (ours, delegated, or an unknown partner)", () => {
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' })).toBe(true);
-    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' })).toBe(true);
-    expect(canReleaseHeld(PLATFORM, null)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, AMOUNT)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, null, AMOUNT)).toBe(true);
   });
 
   it("a partner-scoped admin may NOT release a hold SmartRemit's own screening flagged (kycMode 'ours', or unset ⇒ 'ours')", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' })).toBe(false);
-    expect(canReleaseHeld(PARTNER, {})).toBe(false); // absent kycMode defaults to 'ours'
+    expect(canReleaseHeld(PARTNER, { kycMode: 'ours' }, AMOUNT)).toBe(false);
+    expect(canReleaseHeld(PARTNER, {}, AMOUNT)).toBe(false); // absent kycMode defaults to 'ours'
   });
 
   it('fails CLOSED for a partner-scoped admin when the owning partner row is missing', () => {
-    expect(canReleaseHeld(PARTNER, null)).toBe(false);
-    expect(canReleaseHeld(PARTNER, undefined)).toBe(false);
+    expect(canReleaseHeld(PARTNER, null, AMOUNT)).toBe(false);
+    expect(canReleaseHeld(PARTNER, undefined, AMOUNT)).toBe(false);
   });
 
-  it("a partner-scoped admin may release a kycMode 'delegated' partner's hold", () => {
-    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' })).toBe(true);
+  it("a partner-scoped admin may release a kycMode 'delegated' partner's non-screening hold", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, AMOUNT)).toBe(true);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [AML_HOLD_REASON] })).toBe(true);
+  });
+
+  it("a hold for a missing sender identity is PLATFORM-only, even for a 'delegated' partner", () => {
+    const MISSING = { complianceReasons: [SENDER_IDENTITY_MISSING_REASON] };
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, MISSING)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: ['Large transfer amount.', SENDER_IDENTITY_MISSING_REASON] })).toBe(false);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, MISSING)).toBe(true);
+  });
+
+  // Program-Fix 43 follow-up: sanctions / name-screening holds are PLATFORM-only,
+  // whatever the partner's KYC mode.
+  it("a partner-scoped admin may NOT release a delegated partner's SCREENING hold; platform still may", () => {
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, SCREEN)).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [LIST_UNAVAILABLE_REASON] })).toBe(false);
+    expect(canReleaseHeld(PARTNER, { kycMode: 'delegated' }, { complianceReasons: [] })).toBe(false); // fail closed
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'delegated' }, SCREEN)).toBe(true);
+    expect(canReleaseHeld(PLATFORM, { kycMode: 'ours' }, SCREEN)).toBe(true);
   });
 });
 
@@ -729,7 +768,7 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     await store.saveTransfer(t);
     await beginHold(db, t);
     const stale = (await store.getTransfer('race_rej'))!; // in_review
-    await releaseTransfer(store, db, 'race_rej');           // now paid + rail effect
+    await releaseTransfer(store, db, 'race_rej', REL);           // now paid + rail effect
 
     await expect(rejectTransfer(staleView(store, stale), db, 'race_rej')).rejects.toThrow(/not in_review/i);
     const loaded = await store.getTransfer('race_rej');
@@ -742,7 +781,7 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'race_rej2', status: 'in_review', complianceStatus: 'flagged' }));
     const stale = (await store.getTransfer('race_rej2'))!;
-    await releaseTransfer(store, db, 'race_rej2');
+    await releaseTransfer(store, db, 'race_rej2', REL);
 
     await expect(rejectTransfer(staleView(store, stale), db, 'race_rej2')).rejects.toThrow(/not in_review/i);
     expect((await store.getTransfer('race_rej2'))?.status).toBe('paid');
@@ -752,7 +791,7 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'race_can', status: 'in_review', complianceStatus: 'flagged' }));
     const stale = (await store.getTransfer('race_can'))!;
-    await releaseTransfer(store, db, 'race_can');
+    await releaseTransfer(store, db, 'race_can', REL);
 
     await expect(cancelTransfer(staleView(store, stale), 'race_can')).rejects.toThrow(/use Reject/i); // a hold is refused at the decision (Task 5)
     expect((await store.getTransfer('race_can'))?.status).toBe('paid');
@@ -762,7 +801,7 @@ describe('stale-read races with a release — reject / cancel / assign are statu
     const store = createStore(fakeRedis(), db);
     await store.saveTransfer(makeTransfer({ id: 'race_asg', status: 'in_review', complianceStatus: 'flagged' }));
     const stale = (await store.getTransfer('race_asg'))!;
-    await releaseTransfer(store, db, 'race_asg');
+    await releaseTransfer(store, db, 'race_asg', REL);
 
     await expect(assignTransfer(staleView(store, stale), 'race_asg', 'agent1', 'look')).rejects.toThrow(/changed/i);
     const loaded = await store.getTransfer('race_asg');
@@ -879,12 +918,13 @@ describe('staff audit rows on the money transitions (Program-Fix 28)', () => {
     expect(rows[0]).toMatchObject({ action: 'refund.retry', meta: { previousRefundStatus: 'failed', refundStatus: 'pending' } });
   });
 
+  // Program-Fix 43 follow-up: releaseTransfer no longer accepts a call without
+  // an audit context (it refuses — see the releaseTransfer describe), so only
+  // reject / issueRefund keep the no-context semantics.
   it('calls WITHOUT an audit context write no audit row (existing semantics)', async () => {
     const store = createStore(fakeRedis(), db);
-    await store.saveTransfer(makeTransfer({ id: 'n_rel', status: 'in_review', complianceStatus: 'flagged' }));
     await store.saveTransfer(makeTransfer({ id: 'n_rej', status: 'in_review' }));
     await store.saveTransfer(makeTransfer({ id: 'n_iss', status: 'paid', fundingRef: 'f' }));
-    await releaseTransfer(store, db, 'n_rel');
     await rejectTransfer(store, db, 'n_rej');
     await issueRefund(db, 'n_iss');
     expect(await auditRows()).toHaveLength(0);

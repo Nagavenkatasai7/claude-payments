@@ -864,3 +864,12 @@ describe('Program-Fix 49B (main-session decision): compliance and recall wording
     }
   });
 });
+
+describe('recipient number changes are limited to unpaid transfers', { retry: 0 }, () => {
+  it('guides update_recipient_phone to unpaid transfers and a person otherwise', () => {
+    const line = SYSTEM_PROMPT.split('\n').find((l) => l.includes('update_recipient_phone')) ?? '';
+    expect(line).toMatch(/not been paid/i);
+    expect(line).toContain('request_human_help');
+    expect(SYSTEM_PROMPT).not.toMatch(/do not tell the user it cannot be fixed retroactively/i);
+  });
+});

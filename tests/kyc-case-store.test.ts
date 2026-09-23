@@ -285,6 +285,19 @@ describe('kyc-case-store.review with a db (Program-Fix 28)', () => {
     expect(await auditRows()).toHaveLength(1);
   });
 
+  // Program-Fix 43 follow-up: defence in depth inside the locked transaction.
+  // A watchlist / PEP hold is decided only when the caller says platform staff
+  // (allowScreeningHold: true); absent ⇒ refused, nothing written.
+  it.each([[{ watchlistHit: true }], [{ pepHit: true }]])('refuses a screening hold %j unless allowScreeningHold is true', async (flag) => {
+    await seed({ kycReviewState: 'needs_review', ...flag });
+    await expect(store.review('default', PHONE, 'approve', 'pb', 'docs look good', opts())).rejects.toThrow(/permission/i);
+    await expect(store.review('default', PHONE, 'approve', 'pb', 'docs look good', { ...opts(), allowScreeningHold: false })).rejects.toThrow(/permission/i);
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('pending');
+    expect(await auditRows()).toEqual([]);
+    await store.review('default', PHONE, 'approve', 'plat', 'docs look good', { ...opts(), allowScreeningHold: true });
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
+  });
+
   it('an unknown customer ⇒ null, nothing written', async () => {
     expect(await store.review('default', '15550000009', 'approve', 'plat', 'docs look good', opts())).toBeNull();
     expect(await auditRows()).toEqual([]);

@@ -33,6 +33,9 @@ import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
+import { rescreenBeforePay } from '@/lib/pay-rescreen';
+import { resolveCorridorRules } from '@/lib/compliance-config';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -574,9 +577,49 @@ export async function POST(
       }
       // fix 6 (ctx-01): `transfer` is the DEFAULT (masked) read — it renders every
       // stored value, real or poisoned, as "****<last4>". Decide on the explicit
-      // decrypted read; the value only feeds this boolean.
-      const storedDestination =
-        ((await store.getTransferDecrypted(transferId))?.payoutDestination ?? '').trim();
+      // decrypted read; the value only feeds this boolean (and, below, the
+      // recipient legal name only feeds the re-screen).
+      const decrypted = await store.getTransferDecrypted(transferId);
+      const storedDestination = (decrypted?.payoutDestination ?? '').trim();
+
+      // Program-Fix 14 follow-up: re-screen BOTH parties before any payout
+      // write or charge — the mint's verdict may be stale (a scheduled mint had
+      // no sender name to screen; lists change). Consumer rows only (the same
+      // predicate pay-finalize uses): a B2B payer is screened by business name.
+      let payable: Transfer = transfer;
+      if (transfer.transferType !== 'b2b') {
+        if (!hasSenderName(owner)) {
+          // Nothing screened or written; the SAME link works once the customer
+          // answers the name question in chat.
+          return NextResponse.json(
+            { ok: false, error: SENDER_NAME_REQUIRED_MESSAGE, reason: 'sender_name_required' },
+            { status: 400 },
+          );
+        }
+        const rescreen = await rescreenBeforePay(
+          getDb(),
+          transfer,
+          {
+            senderName: (owner?.fullName ?? '').trim(),
+            recipientName: (decrypted?.recipientLegalName ?? '').trim() || transfer.recipientName,
+          },
+          resolveCorridorRules(owningPartner, transfer.sourceCountry ?? 'US'),
+        );
+        switch (rescreen.kind) {
+          case 'blocked':
+            logWarn('pay.rescreen_blocked', 'existing transfer blocked by the pay-time re-screen', { transferId: transfer.id });
+            return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
+          case 'moved': {
+            const current = await store.getTransfer(transferId);
+            const nowRefused = current ? refuseUnlessAwaiting(current) : null;
+            return nowRefused ?? NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 409 });
+          }
+          case 'flagged':
+          case 'cleared':
+            payable = rescreen.transfer;
+            break;
+        }
+      }
       const hasDestination = storedDestination !== '' && !isMaskedDestination(storedDestination);
       // Sender-entered, server-validated, country-bound bank details (the page's
       // Step 1, or its "Edit bank details") fill or replace the payout of a
@@ -608,8 +651,9 @@ export async function POST(
           { status: 400 },
         );
       }
-      // Destination already set (re-opened link) → process exactly as before.
-      return await processTransferPayment(store, transfer);
+      // Destination already set (re-opened link) → process exactly as before
+      // (with the re-screened row: a flagged verdict takes the normal hold).
+      return await processTransferPayment(store, payable);
     }
 
     // ── Draft branch: treat id as a draftId and finalize at pay time ──────
@@ -649,6 +693,15 @@ export async function POST(
         // nothing was claimed or consumed; the SAME link re-submits.
         return NextResponse.json(
           { ok: false, error: 'Bank details are required to complete this transfer.', reason: 'bank_details_required' },
+          { status: 400 },
+        );
+      }
+      if (result.error === 'sender_name_required') {
+        // Program-Fix 14: the sender's legal name is not on file, so this send
+        // cannot be screened yet. Nothing was minted, claimed or consumed; the
+        // SAME link works once the customer answers the name question in chat.
+        return NextResponse.json(
+          { ok: false, error: SENDER_NAME_REQUIRED_MESSAGE, reason: 'sender_name_required' },
           { status: 400 },
         );
       }
