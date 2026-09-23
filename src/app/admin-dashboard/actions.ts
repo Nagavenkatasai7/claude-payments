@@ -22,6 +22,8 @@ import { hasPermission } from '@/lib/permissions';
 import { scopeOf, canSee } from '@/lib/staff-scope';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getDb } from '@/db/client';
+import { boundStaffNote } from '@/lib/send-limits';
+import type { StaffAuditCtx } from '@/lib/dashboard-ops';
 import type { Staff, StaffPermissions } from '@/lib/types';
 
 async function requirePermission(
@@ -44,6 +46,16 @@ async function requirePermission(
  * Platform staff (no partnerId) pass `canSee` for every partner; a partner-admin
  * only for their own. Closes the H1/H2 cross-tenant write holes.
  */
+/**
+ * Program-Fix 28: the audit context for a staff money decision. The actor is
+ * the SESSION's stable username (identity, never a form field); the reason is
+ * the optional `note` field, bounded (control characters stripped, 500-char
+ * cut). A blank note ⇒ null. Written INSIDE the decision's transaction.
+ */
+function staffAudit(staff: Staff, formData: FormData): StaffAuditCtx {
+  return { actor: staff.username, reason: boundStaffNote(formData.get('note')) };
+}
+
 async function getScopedTransfer(staff: Staff, id: string) {
   if (!id) throw new Error('Missing transfer id');
   const store = getStore();
@@ -120,7 +132,7 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
   if (!canReleaseHeld(scopeOf(staff), owner)) {
     throw new Error('You do not have permission to perform this action.');
   }
-  await releaseTransfer(store, getDb(), id);
+  await releaseTransfer(store, getDb(), id, staffAudit(staff, formData));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -134,7 +146,7 @@ export async function rejectTransferAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
-  await rejectTransfer(store, getDb(), id);
+  await rejectTransfer(store, getDb(), id, staffAudit(staff, formData));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -149,7 +161,7 @@ export async function issueRefundAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
-  await issueRefund(getDb(), id);
+  await issueRefund(getDb(), id, staffAudit(staff, formData));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -163,7 +175,7 @@ export async function approveRefundAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
-  await approveRefund(getDb(), id);
+  await approveRefund(getDb(), id, staffAudit(staff, formData));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -176,7 +188,7 @@ export async function dismissRefundAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
-  await dismissRefund(getDb(), id);
+  await dismissRefund(getDb(), id, staffAudit(staff, formData));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
@@ -189,7 +201,7 @@ export async function retryRefundAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
-  await retryRefund(getDb(), id);
+  await retryRefund(getDb(), id, staffAudit(staff, formData));
   revalidatePath('/admin-dashboard', 'layout');
 }
 
