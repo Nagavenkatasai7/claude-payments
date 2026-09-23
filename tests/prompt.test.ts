@@ -640,3 +640,11 @@ describe('SYSTEM_PROMPT — human help, history, cancel wording, repeat by id (f
     expect(SYSTEM_PROMPT).toMatch(/duplicate: true[^\n]*reply_hint/);
   });
 });
+
+describe('SYSTEM_PROMPT — a follow-up promise needs a case (fix 34B review)', () => {
+  it('ties any follow-up promise to a returned case_id and never promises an in-chat reply', () => {
+    expect(SYSTEM_PROMPT).toContain('unless a tool returned a case_id');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never say a teammate will reply inside this chat');
+    expect(SYSTEM_PROMPT).not.toContain("tell them you've flagged the bill and the team will follow up");
+  });
+});

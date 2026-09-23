@@ -973,7 +973,7 @@ export interface ToolContext {
   // Recall-dispute seam: the support-ticket repo (createTicket + listByCustomer)
   // open_recall_dispute writes to. Absent ⇒ a repo over the shared Pool (getDb())
   // is created lazily; tests inject one bound to PGlite.
-  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer'>;
+  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer' | 'findOpenHumanHelpCase'>;
   // Triage-enqueue seam: the outbox repo the recall-dispute path enqueues the
   // out-of-band 'ticket.triage' effect on. Absent ⇒ a repo over the shared Pool
   // (getDb()) is created lazily; tests inject one bound to PGlite so the enqueue
@@ -2384,7 +2384,7 @@ async function requestRefundTool(
       return {
         error_code: 'under_review',
         message:
-          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+          "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
     case 'already_requested':
       return {
@@ -2431,7 +2431,7 @@ async function requestRefundTool(
       return {
         error_code: 'under_review',
         message:
-          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+          "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
   }
 
@@ -2536,7 +2536,7 @@ async function openRecallDisputeTool(
         return {
           error_code: 'not_recall_eligible',
           reply_hint:
-            'this transfer is not within the recall window — explain its current state and offer to check in with our team',
+            "this transfer is not within the recall window — explain its current state; if they want more help, offer to open a case with a person (request_human_help)",
         };
     }
   }
@@ -2593,20 +2593,27 @@ const HELP_REASONS = ['question', 'complaint', 'payment_problem', 'account_acces
 type HelpReason = (typeof HELP_REASONS)[number];
 const HELP_SUMMARY_MAX = 300;
 
-/** The case-opened line the model relays. No response-time promise (owner decision, fix 34). */
+/**
+ * The case-opened line the model relays. No response-time promise (owner
+ * decision, fix 34). A staff reply reaches WhatsApp only as a link notice
+ * (admin-dashboard/tickets/actions.ts), so the copy never promises an in-chat
+ * reply (review M1; copy decided by the main session, owner to confirm).
+ */
 function helpReplyHint(ctx: ToolContext, caseId: string): string {
   return isWebChannel(ctx)
     ? `A teammate will reply on the Support page of your account. Your case number is ${caseId}.`
-    : `A teammate will reply here in this chat. Your case number is ${caseId}.`;
+    : `When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number). Your case number is ${caseId}.`;
 }
 
 /**
  * Opens (or reuses) the customer's help case in the staff Tickets queue.
  *
- * - One open case per (turn tenant, phone): an open case is one of THIS tenant's
- *   customer tickets, still open/pending/waiting, carrying category human_help
- *   OR the fixed help subject (staff may re-categorise a case; its subject never
- *   changes). A sibling tenant's case for the same phone is never reused.
+ * - One open case per (turn tenant, phone): ticketRepo.findOpenHumanHelpCase,
+ *   tenant-scoped in SQL — this tenant's customer ticket, still open/pending/
+ *   waiting, carrying category human_help OR the fixed help subject (staff may
+ *   re-categorise a case; its subject never changes). A sibling tenant's case
+ *   for the same phone is never reused. Find-then-create is not locked: on
+ *   WhatsApp the per-phone turn lock (34A) serialises it.
  * - Triage and the ops alert are enqueued on BOTH paths with dedupe keys, so a
  *   crash between the ticket insert and the enqueues is healed by the model's
  *   next call, and a repeat call adds nothing (the outbox dedupe index is not
@@ -2622,13 +2629,7 @@ async function requestHumanHelpTool(args: Record<string, unknown>, ctx: ToolCont
   const summary = boundUntrustedText(args.summary, HELP_SUMMARY_MAX);
 
   const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
-  const open = (await repo.listByCustomer(ctx.phone)).find(
-    (t) =>
-      t.partnerId === ctx.partnerId &&
-      t.kind === 'customer' &&
-      OPEN_STATUSES.has(t.status) &&
-      (t.category === HUMAN_HELP_CATEGORY || t.subject === HUMAN_HELP_SUBJECT),
-  );
+  const open = await repo.findOpenHumanHelpCase(ctx.partnerId, ctx.phone); // tenant-scoped in SQL
   const ticket =
     open ??
     (await repo.createTicket({
@@ -2874,7 +2875,7 @@ async function cancelBillTool(
             return {
               cancelled: false,
               reply_hint:
-                "The payment already settled and it's past the recall window — our team can look into it.",
+                "The payment already settled and it's past the recall window, so it can't be pulled back from here. If you'd like a person to look into it, just say so and I'll open a case.",
             };
           }
           return recall;
@@ -2966,7 +2967,7 @@ async function disputeBillTool(
   return {
     disputed: true,
     case_id: ticket.id,
-    reply_hint: "Thanks — we've flagged this bill as disputed and our team will follow up.",
+    reply_hint: `Thanks — we've flagged this bill as disputed and our team will follow up. Your case number is ${ticket.id}.`,
   };
 }
 

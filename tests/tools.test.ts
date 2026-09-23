@@ -3894,6 +3894,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(r.disputed).toBe(true);
       expect(String(r.case_id)).toMatch(/^tk_/);
       expect(String(r.reply_hint).toLowerCase()).toContain('disputed');
+      expect(String(r.reply_hint)).toContain(String(r.case_id)); // fix 34B review: the follow-up promise quotes its case
 
       const repo = createTicketRepo(db);
       const ticket = (await repo.listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
@@ -4893,7 +4894,11 @@ describe('request_human_help — a real case behind every "a person will help" (
     const ctx = await buildCtx(fakeRedis());
     const r = await executeTool('request_human_help', { reason: 'complaint', summary: 'My money has not arrived and I want to talk to someone.' }, ctx);
     expect(String(r.case_id)).toMatch(/^tk_/);
-    expect(r.reply_hint).toBe(`A teammate will reply here in this chat. Your case number is ${r.case_id}.`);
+    // Review M1 (copy decided by the main session): a staff reply reaches WhatsApp
+    // only as a link notice, so the hint must not promise an in-chat reply.
+    expect(r.reply_hint).toBe(
+      `When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number). Your case number is ${r.case_id}.`,
+    );
 
     const mine = await createTicketRepo(db).listByCustomer(ctx.phone);
     expect(mine).toHaveLength(1);
@@ -4933,6 +4938,30 @@ describe('request_human_help — a real case behind every "a person will help" (
     await createTicketRepo(db).updateStatus(String(first.case_id), 'resolved');
     const second = await executeTool('request_human_help', { reason: 'question', summary: 'help again' }, ctx);
     expect(second.case_id).not.toBe(first.case_id);
+  });
+
+  it('finds the open case with a tenant-scoped query even past 50 other tickets for the phone (review S1)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    const repo = createTicketRepo(db);
+    // 60 newer tickets for the SAME phone under a sibling tenant would push the
+    // case out of a phone-only `limit 50` read.
+    for (let i = 0; i < 60; i++) {
+      await repo.createTicket({ id: `tk_noise${i}`, partnerId: 'acme', kind: 'customer', customerPhone: ctx.phone, subject: `noise ${i}`, body: 'x' });
+    }
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'again' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+  });
+
+  it('ticket repo findOpenHumanHelpCase is tenant-scoped and open-only', async () => {
+    await seedPartner(db, 'acme');
+    const repo = createTicketRepo(db);
+    await repo.createTicket({ id: 'tk_h1', partnerId: 'acme', kind: 'customer', customerPhone: PHONE, subject: 'Customer asked for a person', body: 'x', category: 'human_help' });
+    expect(await repo.findOpenHumanHelpCase('default', PHONE)).toBeNull();
+    expect((await repo.findOpenHumanHelpCase('acme', PHONE))?.id).toBe('tk_h1');
+    await repo.updateStatus('tk_h1', 'resolved');
+    expect(await repo.findOpenHumanHelpCase('acme', PHONE)).toBeNull();
   });
 
   it("a sibling tenant's open case for the same phone is never reused", async () => {
