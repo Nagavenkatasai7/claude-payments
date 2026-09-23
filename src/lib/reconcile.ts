@@ -4,6 +4,9 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo, type OutboxRow } from '@/db/repos/outbox-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { settleOrHold } from '@/lib/settlement';
+import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
+import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
 
 // reconcile — the safety-net sweep (Stage 2d). Runs in every /api/worker
@@ -19,7 +22,8 @@ import type { Transfer } from '@/lib/types';
 //     HOLD for review (flagged) + alert,
 //   • cancelled + charged + unrefunded → alert (`cancelcharged:`),
 //   • a refund in flight for over an hour → alert (ops decides; no auto-retry),
-//   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert.
+//   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert,
+//   • customer tickets past their first-response target (fix 49C) → ONE digest a day.
 // Every enqueue is dedupe-keyed per transfer, so the sweep firing every minute
 // can never spam: one re-instruction and one alert per stuck transfer, ever.
 
@@ -45,7 +49,7 @@ export interface SweepResult {
   staleLocks?: number;
 }
 
-export async function reconcileSweep(db: Db): Promise<SweepResult> {
+export async function reconcileSweep(db: Db, now: Date = new Date()): Promise<SweepResult> {
   const transfers = createTransferRepo(db);
   const outbox = createOutboxRepo(db);
   const integrationsRepo = createIntegrationsRepo(db);
@@ -251,6 +255,15 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     );
   }
 
+  // TICKET SLA DIGEST (Program-Fix 49C): staff-facing, never customer-facing.
+  // Last, and isolated: a failed ticket read must never cost the money sweeps
+  // above their result. SweepResult is deliberately unchanged.
+  try {
+    await sweepTicketSlaDigest(db, now);
+  } catch (e) {
+    logWarn('reconcile', 'ticket SLA digest skipped', { error: e instanceof Error ? e.message : String(e) });
+  }
+
   return {
     stuckPaid: stuck.length,
     reinstructed,
@@ -259,6 +272,39 @@ export async function reconcileSweep(db: Db): Promise<SweepResult> {
     stuckRefunds,
     staleLocks: staleLocks.length,
   };
+}
+
+/** Oldest ticket ids named in the digest. */
+const TICKET_SLA_DIGEST_IDS = 5;
+
+/**
+ * ONE ops.alert per UTC day (`ticketsla:<yyyy-mm-dd>`) when any customer ticket
+ * is past its first-response target with no staff reply — never one alert per
+ * ticket (an old backlog would otherwise fire N alerts at deploy). The day's
+ * key is checked FIRST so the breach query runs at most until the digest is
+ * queued. Ids, priorities and counts only: never a subject or a phone.
+ * Returns whether a new digest row was queued.
+ */
+export async function sweepTicketSlaDigest(db: Db, now: Date): Promise<boolean> {
+  const outbox = createOutboxRepo(db);
+  const key = slaDigestKey(now);
+  if (await outbox.hasDedupeKey(key)) return false;
+  const breaches = await createTicketRepo(db).listSlaBreaches({ now, limit: TICKET_SLA_DIGEST_IDS });
+  if (breaches.total === 0) return false;
+  const h = FIRST_RESPONSE_DUE_HOURS;
+  const b = breaches.byPriority;
+  return outbox.enqueue(
+    'ops.alert',
+    {
+      message:
+        `⚠️ SmartRemit ops: ${breaches.total} customer ticket(s) have no staff reply past the internal ` +
+        `first-response target (urgent ${h.urgent}h / normal ${h.normal}h / low ${h.low}h): ` +
+        `${b.urgent} urgent, ${b.normal} normal, ${b.low} low. ` +
+        `Oldest: ${breaches.oldest.map((t) => `${t.id} (${t.priority}, partner ${t.partnerId})`).join(', ')}. ` +
+        `Work them from Tickets.`,
+    },
+    { dedupeKey: key },
+  );
 }
 
 // ── Ops data (consumed by the Stage-5 /admin-dashboard/ops page) ─────────────
