@@ -11,6 +11,16 @@ import type { B2bInvoice } from './types';
  */
 export const B2B_BILL_TTL_DAYS = 30;
 
+/** create_invoice's content-claim window (Redis TTL, seconds): a replay inside it reuses the same bill. */
+export const BILL_CLAIM_TTL_SEC = 120;
+
+/**
+ * How long a bill-link RE-SEND token holds (seconds). Covers the outbox's
+ * 2^n-second retry span (1+2+…+256 s ≈ 8.5 min over 8 attempts), so a replayed
+ * re-request turn reuses its token instead of messaging the seller twice.
+ */
+export const BILL_RESEND_WINDOW_SEC = 900;
+
 const TTL_MS = B2B_BILL_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 /** The oldest created_at that is still live (inclusive): now − TTL. */
