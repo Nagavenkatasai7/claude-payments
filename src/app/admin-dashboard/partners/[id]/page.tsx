@@ -895,7 +895,7 @@ curl -X POST ${env.appBaseUrl}/api/partner/v1/transactions \\
   -H "Authorization: Bearer sr_live_..." -H "Idempotency-Key: <unique-key>" \\
   -H "Content-Type: application/json" \\
   -d '{"amount_source": 200,
-       "sender": {"phone": "15551230000", "kyc_status": "verified"},
+       "sender": {"phone": "15551230000", "name": "Maria Lopez", "kyc_status": "verified"},
        "beneficiary": {"name": "Anita Kumar", "phone": "919876543210",
                        "payout_method": "bank", "payout_destination": "123456789012"}}'
 
