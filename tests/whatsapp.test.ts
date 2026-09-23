@@ -13,6 +13,7 @@ import {
   RECIPIENT_TEMPLATE_LANG,
   META_TIMEOUT_MS,
 } from '@/lib/whatsapp';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -854,5 +855,87 @@ describe('sendVerificationStatus free-form failure log is scrubbed (Program-Fix 
     expect(text).not.toMatch(/\d{7,}/);
     expect(text).toContain('4567');
     expect(text).toContain('whatsapp.verification-status');
+  });
+});
+
+// Program-Fix 25 PR A: honest sends — every Graph rejection is a typed
+// WhatsAppSendError whose MESSAGE is unchanged (ops-diagnosis + dead-row alerts
+// parse it) and whose code/kind drive the worker's terminal decision.
+describe('Graph rejections are WhatsAppSendError (Program-Fix 25)', () => {
+  const graph131030 = JSON.stringify({
+    error: { message: '(#131030) Recipient phone number not in allowed list', type: 'OAuthException', code: 131030 },
+  });
+
+  it('sendText: a 131030 reply throws WhatsAppSendError(permanent) with the unchanged message', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 400, text: async () => graph131030 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const err = await sendText('15550001111', 'hi').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WhatsAppSendError);
+    expect((err as WhatsAppSendError).message).toBe(`WhatsApp send failed (400): ${graph131030}`);
+    expect((err as WhatsAppSendError).code).toBe(131030);
+    expect((err as WhatsAppSendError).kind).toBe('permanent');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendTemplate: a 132001 reply throws WhatsAppSendError(permanent), message unchanged', async () => {
+    const body = JSON.stringify({ error: { message: '(#132001) Template name does not exist in the translation', code: 132001 } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, text: async () => body })));
+    const err = await sendTemplate('15550001111', 'transfer_delivered', 'en', ['a']).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WhatsAppSendError);
+    expect((err as Error).message).toBe(`WhatsApp template send failed (404): ${body}`);
+    expect((err as WhatsAppSendError).kind).toBe('permanent');
+  });
+
+  it('sendInteractive: 400 with code 131047 (window) falls back to text instead of throwing', async () => {
+    const calls: string[] = [];
+    const body = JSON.stringify({ error: { message: '(#131047) Re-engagement message', code: 131047 } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        calls.push(JSON.parse(init.body as string).type);
+        if (calls.length === 1) return { ok: false, status: 400, text: async () => body };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+    await sendInteractive('15550001111', 'Pick one', [{ id: 'recipient:new', title: 'New' }]);
+    expect(calls).toEqual(['interactive', 'text']);
+  });
+
+  it('sendInteractive: 470 with NO code and no readable body still falls back', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        calls.push(JSON.parse(init.body as string).type);
+        if (calls.length === 1) {
+          return { ok: false, status: 470, text: async () => { throw new Error('body already read'); } };
+        }
+        return { ok: true, text: async () => '' };
+      }),
+    );
+    await sendInteractive('15550001111', 'Pick one', [{ id: 'recipient:new', title: 'New' }]);
+    expect(calls).toEqual(['interactive', 'text']);
+  });
+
+  it('sendInteractive: a non-window rejection throws WhatsAppSendError with the unchanged message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 400, text: async () => graph131030 })));
+    const err = await sendInteractive('15550001111', 'pick', [{ id: 'recipient:new', title: 'New' }]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WhatsAppSendError);
+    expect((err as Error).message).toBe(`WhatsApp interactive send failed (400): ${graph131030}`);
+    expect((err as WhatsAppSendError).kind).toBe('permanent');
+  });
+
+  it('sendCtaUrl is unchanged: a 131030 rejection still falls back to text and never throws', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, init: RequestInit): Promise<{ ok: boolean; status?: number; text: () => Promise<string> }> => {
+        calls.push(JSON.parse(init.body as string).type);
+        if (calls.length === 1) return { ok: false, status: 400, text: async () => graph131030 };
+        return { ok: true, text: async () => '' };
+      }),
+    );
+    await sendCtaUrl('15550001111', 'Tap below to pay', { displayText: 'Pay now', url: 'https://example.com/pay/abc' });
+    expect(calls).toEqual(['interactive', 'text']);
   });
 });
