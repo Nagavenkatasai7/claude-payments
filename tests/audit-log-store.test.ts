@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { freshDb } from './helpers-db';
 import { createAuditLogStore, type StaffAuditEntry } from '@/lib/audit-log-store';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 
 // audit-log-store — Postgres-backed (audit_events, actor_type 'staff'). The
 // `at` on a listed entry is the DB's now() at insert time, NOT the value the
@@ -58,5 +59,20 @@ describe('audit-log-store (Postgres)', () => {
   it('returns an empty array when there is no history', async () => {
     const s = createAuditLogStore(await freshDb());
     expect(await s.list()).toEqual([]);
+  });
+
+  it('Program-Fix 14: high-volume system rows (one sanctions.screen per mint) never crowd staff entries out of the list', async () => {
+    const db = await freshDb();
+    const s = createAuditLogStore(db);
+    for (let i = 0; i < 3; i++) {
+      await s.record(entry(i));
+      await tick();
+    }
+    const repo = createAuditRepo(db);
+    for (let i = 0; i < 60; i++) {
+      await repo.record({ partnerId: 'default', actor: 'system:sanctions', actorType: 'system', action: 'sanctions.screen', subjectId: `t${i}`, meta: {} });
+    }
+    const log = await s.list(50);
+    expect(log.map((e) => e.target)).toEqual(['u2', 'u1', 'u0']);
   });
 });

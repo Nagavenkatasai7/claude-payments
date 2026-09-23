@@ -1,6 +1,7 @@
 import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
 import { screenTransfer } from './compliance';
+import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
@@ -331,6 +332,7 @@ interface PreparedMint {
  *   1. same-id replay (claim-first callers) → return the existing row, no
  *      second insert and no cap check;
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
+ *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction;
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
  *   5. evaluateCap on today's ledger spend → SendCapError (rolls back);
@@ -414,6 +416,16 @@ async function mintLocked(
     achTokenRef: input.achTokenRef,
     invoiceId: input.invoiceId,
   };
+  // ── Sanctions evidence (Program-Fix 14) ───────────────────────────────────
+  // One sanctions.screen audit row per screened mint, written through the
+  // lock's transaction BEFORE either insert path: a blocked, cleared or flagged
+  // mint commits it with its transfer row, and any later refusal (placeholder,
+  // SendCapError) rolls both back. A same-id replay returned above never
+  // re-screens, so it never writes a second row. No evidence ⇒ no row.
+  if (compliance.evidence) {
+    await ops.recordAudit(sanctionsAuditEvent(input.partnerId, transfer.id, compliance.evidence));
+  }
+
   // ── Blocked-row early return (fix 6 / ctx-01) ─────────────────────────────
   // complianceStatus is FINAL here (screenTransfer + the EDD merge above). A
   // watchlist hit is an auditable, never-charged, never-instructed row and
@@ -473,6 +485,8 @@ export interface BlockedAttemptInput {
   destinationCurrency: CurrencyCode;
   partnerId: PartnerId;
   reasons: string[];
+  /** Program-Fix 14: the quote-time screen's evidence (screen.evidence). */
+  evidence?: ScreeningEvidence;
 }
 
 /**
@@ -515,6 +529,18 @@ export async function recordBlockedAttempt(
     feeSource: input.feeSource,
     totalChargeSource: input.totalChargeSource,
   };
-  await store.saveTransfer(transfer);
+  if (input.evidence) {
+    // Program-Fix 14 (step 5): a blocked quote never reaches the mint, so this
+    // row IS the record of truth — the blocked row and its sanctions.screen
+    // evidence commit in ONE transaction (both or neither).
+    await store.recordBlockedWithEvidence(
+      transfer,
+      sanctionsAuditEvent(input.partnerId, transfer.id, input.evidence),
+    );
+  } else {
+    // No evidence supplied (a caller that predates Program-Fix 14): today's
+    // behaviour, the blocked row only and no evidence row.
+    await store.saveTransfer(transfer);
+  }
   return transfer;
 }
