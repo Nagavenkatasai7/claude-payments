@@ -17,8 +17,9 @@ export interface ResolvedCorridorRules {
   largeAmountUsd: number;      // USD-equivalent flag threshold
   velocityLimit: number;       // transfers/day before flagging
   kycCapHintUsd?: number;      // ADVISORY ONLY — consumed by the NEXT (KYC) batch
-  // Program-Fix 43: behavioural AML thresholds (alerts only — aml-sweep.ts) and
-  // the PR B per-partner×corridor hold switch (OFF; nothing reads it in PR A).
+  // Program-Fix 43: behavioural AML thresholds (alerts — aml-sweep.ts) and the
+  // PR B per-partner×corridor hold switch (OFF by default; read by mintLocked
+  // through aml-hold.ts amlHoldGate, which never holds a demo transfer).
   aml: AmlConfig;
   amlHolds: boolean;
 }

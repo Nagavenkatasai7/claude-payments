@@ -704,7 +704,7 @@ export interface CorridorComplianceRule {
   // Program-Fix 43: behavioural AML thresholds (alerts only). Any field may be
   // set; bad values fall back to the defaults (compliance-config.ts).
   aml?: { band?: number; count?: number; aggUsd?: number; firstUsd?: number; senders?: number };
-  amlHolds?: boolean;          // PR B (not built yet): per partner × corridor hold switch; unset = OFF
+  amlHolds?: boolean;          // PR B: per partner × corridor hold switch; only literal true = ON (never demo — aml-hold.ts)
 }
 
 // ── Destination-interest lead (non-India payout requests) ─────────────────────
