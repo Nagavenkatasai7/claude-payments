@@ -208,7 +208,10 @@ export interface ChatTool {
 }
 
 export type ScheduleFrequency = 'monthly' | 'weekly';
-export type ScheduleStatus = 'active' | 'cancelled';
+// Program-Fix 36: 'paused' is the staff kill switch (schedules.status is an
+// unconstrained text column, so no migration). Only 'active' fires; 'cancelled'
+// is terminal. The transition table lives in schedule-control.ts.
+export type ScheduleStatus = 'active' | 'paused' | 'cancelled';
 
 export interface Schedule {
   id: string;
