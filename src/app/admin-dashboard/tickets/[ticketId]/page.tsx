@@ -12,9 +12,10 @@ import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { getPartnerStore } from '@/lib/partner-store';
 import { Sidebar } from '../../sidebar';
 import { money } from '../../format';
+import { CustomerLink } from '../../customer-link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { TicketStatusPill, TicketPriorityPill } from '../pills';
 import { CopilotPanel } from '../copilot-panel';
 import {
@@ -318,11 +319,15 @@ export default async function TicketDetailPage({
                     <span className="text-xs">{new Date(transfer.createdAt).toLocaleString()}</span>
                   </div>
                   {staff.role === 'admin' && (
-                    <Button asChild size="sm" variant="outline" className="mt-1 w-full">
-                      <Link href={`/admin-dashboard/transactions?phone=${encodeURIComponent(transfer.phone)}`}>
-                        Open in transactions
-                      </Link>
-                    </Button>
+                    // Program-Fix 37: a POST link to the customer page (sealed-ref
+                    // URL; it lists the customer's transfers), never a phone query in a URL.
+                    <CustomerLink
+                      phone={transfer.phone}
+                      partnerId={transfer.partnerId}
+                      className={buttonVariants({ size: 'sm', variant: 'outline', className: 'mt-1 w-full' })}
+                    >
+                      Open customer
+                    </CustomerLink>
                   )}
                 </CardContent>
               </Card>

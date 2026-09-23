@@ -19,7 +19,8 @@ import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { ReviewCopilot } from './review-copilot';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { CustomerLink } from '../customer-link';
 import type { Transfer } from '@/lib/types';
 
 const REVIEW_COLUMNS: ExpandableColumn[] = [
@@ -308,11 +309,11 @@ export default async function CompliancePage() {
                 cells: [
                   phone,
                   <span key="count" className="font-semibold tabular-nums">{count}</span>,
-                  <Button key="link" asChild size="sm" variant="outline">
-                    <a href={`/admin-dashboard/transactions?phone=${encodeURIComponent(phone)}`}>
-                      View transfers
-                    </a>
-                  </Button>,
+                  // Program-Fix 37: a POST link to the customer page (sealed-ref URL,
+                  // it lists the transfers), never a phone query in a URL.
+                  <CustomerLink key="link" phone={phone} className={buttonVariants({ size: 'sm', variant: 'outline' })}>
+                    View customer
+                  </CustomerLink>,
                 ],
               }))}
             />

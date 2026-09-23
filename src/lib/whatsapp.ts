@@ -1,4 +1,5 @@
 import { env } from './env';
+import { logError, logWarn } from './log';
 import {
   authenticationTemplateParams,
   type AuthenticationTemplateComponent,
@@ -425,9 +426,12 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
     // Template path unavailable (e.g. not yet approved) → deliver in-session via
     // free-form text. Log only the masked phone + the error MESSAGE (never the
     // code, never the request body).
-    console.warn(
-      `OTP template send failed for ${maskPhone(phone)}; falling back to free-form text:`,
-      err instanceof Error ? err.message : 'unknown error',
+    // Program-Fix 37: through the scrubbing logger (a Graph body can echo the
+    // recipient). The code is never passed to the logger.
+    logWarn(
+      'whatsapp.otp-fallback',
+      `OTP template send failed; falling back to free-form text: ${err instanceof Error ? err.message : 'unknown error'}`,
+      { to: maskPhone(phone) },
     );
     await sendText(phone, otpMessage(code));
   }
@@ -452,11 +456,13 @@ export async function sendTemplateOrText(
   try {
     await send();
   } catch (err) {
-    console.warn('Template send failed; falling back to free-form text:', err);
+    // Program-Fix 37 (obs-13): the scrubbing logger only, with a masked phone
+    // (a Graph error can echo the recipient back inside `err`).
+    logWarn('whatsapp.template-fallback', err, { to: maskPhone(to) });
     try {
       await sendText(to, fallbackText, creds);
     } catch (textErr) {
-      console.error('Fallback sendText also failed for', to, textErr);
+      logError('whatsapp.fallback', textErr, { to: maskPhone(to) });
     }
   }
 }
@@ -570,7 +576,9 @@ export async function sendCtaUrl(
   // window 470, unsupported type, etc.), degrade gracefully to a plain text with
   // the link inline rather than throwing — the customer still gets a tappable link.
   const body = await res.text().catch(() => '');
-  console.warn(`sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`);
+  logWarn('whatsapp.cta-url-fallback', `sendCtaUrl failed (${res.status}: ${body}); falling back to sendText`, {
+    to: maskPhone(to),
+  });
   await sendText(to, fallbackText, creds);
 }
 
@@ -601,9 +609,11 @@ export async function sendVerificationStatus(
     try {
       await sendText(phone, fallbackText);
     } catch (err) {
-      console.warn(
-        'sendVerificationStatus free-form send failed (out of 24h window?):',
-        err instanceof Error ? err.message : 'unknown error',
+      // Program-Fix 37: scrubbing logger, masked phone.
+      logWarn(
+        'whatsapp.verification-status',
+        `sendVerificationStatus free-form send failed (out of 24h window?): ${err instanceof Error ? err.message : 'unknown error'}`,
+        { to: maskPhone(phone) },
       );
     }
     return;

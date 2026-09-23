@@ -113,7 +113,7 @@ describe('createAgent', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
     expect(reply).not.toContain('model-made-up.example'); // model's invented URL stripped
-    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical kyc_url appended
+    expect(reply).toContain('https://example.com/admin-dashboard/customers'); // canonical kyc_url appended
   });
 
   it('gate OFF: no verify link is ever appended, even when the model writes a verify-style reply', async () => {
@@ -174,7 +174,7 @@ describe('createAgent', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'resend the verify link');
     expect(reply).not.toContain('stale-from-history.example'); // model's echoed URL stripped
-    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`); // canonical link appended by the backstop
+    expect(reply).toContain('https://example.com/admin-dashboard/customers'); // canonical link appended by the backstop
   });
 
   it('backstop does NOT fire for a verified customer (no spurious verify link)', async () => {
@@ -194,7 +194,7 @@ describe('createAgent', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'am I verified?');
     expect(reply).toBe("You're all set — your identity is verified!");
-    expect(reply).not.toContain('/admin-dashboard/customers/'); // no link appended
+    expect(reply).not.toContain('/admin-dashboard/customers'); // no link appended
   });
 
   it('graceful error: a chat() failure returns the fallback line AND preserves history', async () => {
@@ -1476,7 +1476,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     });
     const reply = await agent.runAgentTurn(PHONE, 'send $500 to Mom');
     expect(reply).not.toContain('model-made-up.example');
-    expect(reply).toContain(`https://example.com/admin-dashboard/customers/${PHONE}`);
+    expect(reply).toContain('https://example.com/admin-dashboard/customers');
   });
 });
 
