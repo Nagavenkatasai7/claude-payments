@@ -9,7 +9,7 @@ import { getDestinationRates, getFxRates, RateUnavailableError } from './rate';
 import { quote, QuoteError } from './fx';
 import { isMaskedDestination, validatePayoutFields } from './payout-format';
 import { allowedSendCurrencies, resolveSendCurrency, countryForCurrency } from './partner-currency';
-import { createTransfer, TransferIdConflictError } from './transfer-create';
+import { createTransferWithOutcome, TransferIdConflictError } from './transfer-create';
 import { quoteCeilingUsd, resolveEffectiveSendLimits, SendBusyError, SendCapError } from './send-limits';
 import { isValidPhone, normalizePhone } from './phone';
 import { sendGateActive } from './kyc-gate';
@@ -421,8 +421,9 @@ export async function createTransaction(
   const senderKycStatus = (str(sender.kyc_status) || 'not_started') as KycStatus;
 
   let transfer: Transfer;
+  let replayed = false;
   try {
-    transfer = await createTransfer(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
+    ({ transfer, replayed } = await createTransferWithOutcome(deps.store, deps.partnerStore, deps.monthlyVolumeStore, {
       id: reservedId, // the idempotency-claimed id — crash-replay mints the same row
       phone: senderPhone,
       partnerId: partner.id, // authoritative: from the key, not the body
@@ -445,7 +446,7 @@ export async function createTransaction(
       // fix 5 (F43): an API mint never plants a saved recipient into the
       // customer's WhatsApp picker.
       saveRecipient: false,
-    });
+    }));
   } catch (e) {
     // Task 9: FX unavailable ⇒ 503. The key is bound to reservedId but nothing
     // was minted — exactly the crash-replay shape above: a retry with the SAME
@@ -473,7 +474,9 @@ export async function createTransaction(
   if (transfer.complianceStatus === 'blocked') {
     return err(422, 'This transfer was blocked by compliance screening.');
   }
-  if (!senderName) warnSenderNameMissing(partner.id, keyId);
+  // Only a REAL mint warns: a concurrent loser that fell through to the mint
+  // and replayed the winner's row (replayed) repeats nothing.
+  if (!senderName && !replayed) warnSenderNameMissing(partner.id, keyId);
   return ok(201, await transferViewWithName(deps, transfer));
 }
 
