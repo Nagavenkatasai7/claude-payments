@@ -38,7 +38,7 @@ import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields }
 import { logWarn } from './log';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
-import { BILL_TEXT_MAX, boundUntrustedText, ID_MAX, isCleanName, NAME_MAX } from './untrusted-text';
+import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -1739,9 +1739,11 @@ async function presentBillTool(
     has_bill: true,
     invoice: {
       invoice_id: invoice.id,
-      seller_business_name: boundUntrustedText(invoice.businessName, NAME_MAX),
+      // Program-Fix 38: and stripped of web addresses — a pre-fix row can never
+      // hand the model a domain to repeat (WhatsApp would linkify it).
+      seller_business_name: safeDisplayText(invoice.businessName, NAME_MAX) || 'your supplier',
       line_items: invoice.lineItems.map((li) => ({
-        description: boundUntrustedText(li.description, BILL_TEXT_MAX),
+        description: safeDisplayText(li.description, BILL_TEXT_MAX) || 'Item',
         qty: li.qty,
         unit_amount_usd: li.unitAmountUsd,
       })),
@@ -1787,6 +1789,15 @@ async function registerSellerTool(
     return {
       registered: false,
       reply_to_customer: `Please send your business name in ${NAME_MAX} characters or fewer, without brackets.`,
+    };
+  }
+  // Program-Fix 38: the business name is shown to buyers in system-sent
+  // messages, where WhatsApp turns a web address into a link — refuse one here,
+  // before any write or screen.
+  if (hasWebAddress(businessName)) {
+    return {
+      registered: false,
+      reply_to_customer: 'Please leave web addresses out of the business name.',
     };
   }
 
@@ -2029,7 +2040,17 @@ async function createInvoiceTool(
       reply_to_customer: `Please keep the bill description under ${BILL_TEXT_MAX} characters, without brackets.`,
     };
   }
-  const description = rawDescription || `Invoice from ${seller.businessName}`;
+  // Program-Fix 38: nor a web address — refused before the claim and the insert.
+  if (rawDescription !== '' && hasWebAddress(rawDescription)) {
+    return {
+      created: false,
+      reply_to_customer: 'Please leave web addresses out of the bill description.',
+    };
+  }
+  // Program-Fix 38: a pre-fix seller name is display-clamped before it becomes
+  // the default line item or the buyer push (a clean name is unchanged).
+  const sellerDisplayName = safeDisplayText(seller.businessName, NAME_MAX) || 'your supplier';
+  const description = rawDescription || `Invoice from ${sellerDisplayName}`;
 
   // Replay-safe minting (claim-first, the minting spine): the agent.turn outbox row
   // is at-least-once — a transient reply-send 5xx re-runs the WHOLE turn, and the
@@ -2112,7 +2133,7 @@ async function createInvoiceTool(
       'whatsapp.text',
       {
         to: buyerPhone,
-        body: `You have a new bill from ${seller.businessName} — pay securely: ${payUrl}`,
+        body: `You have a new bill from ${sellerDisplayName} — pay securely: ${payUrl}`,
         partnerId: routedSenderPartnerId(ctx),
       },
       { dedupeKey: `billpush:${invoiceId}` },
@@ -2828,7 +2849,7 @@ async function checkBillStatusTool(
       const partnerId = await resolveBuyerPartnerId(ctx);
       const invoice = await ctx.store.getB2bInvoiceScoped(transfer.invoiceId, partnerId);
       if (invoice) {
-        result.seller_business_name = boundUntrustedText(invoice.businessName, NAME_MAX); // fix 5: clamped at read
+        result.seller_business_name = safeDisplayText(invoice.businessName, NAME_MAX) || 'your supplier'; // fix 5 + 38: clamped at read, no web address
         result.invoice_status = invoice.status;
         result.invoice_paid = invoice.status === 'paid';
       }

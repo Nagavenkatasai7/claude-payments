@@ -12,7 +12,7 @@ import { logWarn } from '@/lib/log';
 import { handleRailFailure, alertRefusedDelivery } from '@/lib/rail-failure';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { env } from '@/lib/env';
-import { recipientTemplateParams, recipientDeliveredFallbackText, formatDestAmount } from '@/lib/payment';
+import { recipientTemplateParams, recipientDeliveredFallbackText, formatDestAmount, recipientDisplayName } from '@/lib/payment';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { logError } from '@/lib/log';
 import {
@@ -134,7 +134,7 @@ export async function POST(
         const waCreds = waCredsFrom(brandIntegrations);
         await sendText(
           updated.phone,
-          `🎉 ${formatDestAmount(updated.amountInr, updated.destinationCurrency ?? 'INR')} delivered to ${updated.recipientName}. Thanks for using ${brand}!`,
+          `🎉 ${formatDestAmount(updated.amountInr, updated.destinationCurrency ?? 'INR')} delivered to ${recipientDisplayName(updated)}. Thanks for using ${brand}!`,
           waCreds,
         );
         if (updated.recipientPhone) {
