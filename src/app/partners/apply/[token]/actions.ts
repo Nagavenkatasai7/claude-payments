@@ -121,6 +121,9 @@ function parseDocuments(raw: string, requestId: string): PartnerApplicationDocum
   return out;
 }
 
+/** Internal rollback signal: the request left 'invited' mid-submit. */
+class LinkNoLongerOpen extends Error {}
+
 export async function submitPartnerApplicationAction(formData: FormData): Promise<void> {
   const token = String(formData.get('token') ?? '').trim();
   const back = `/partners/apply/${encodeURIComponent(token)}`;
@@ -131,7 +134,9 @@ export async function submitPartnerApplicationAction(formData: FormData): Promis
   if (
     !request ||
     isApplicationTokenExpired(request.tokenExpiresAt) ||
-    request.applicationStatus === 'completed'
+    // Refuse unless invited (Program-Fix 49C): completed, approved and rejected
+    // links are all dead — a staff decision must never reopen one.
+    request.applicationStatus !== 'invited'
   ) {
     redirect(back); // the page renders the friendly invalid/thank-you status
   }
@@ -168,16 +173,28 @@ export async function submitPartnerApplicationAction(formData: FormData): Promis
   // ── PERSIST + single-use FLIP in ONE transaction ─────────────────────────
   // redirect() throws by design — keep it OUT of the transaction so it is never
   // swallowed. A genuine DB failure should surface, not fake success.
-  await getDb().transaction(async (tx) => {
-    await createPartnerApplicationRepo(tx).saveApplication({
-      id: `papp_${newTransferId()}`,
-      partnerRequestId: request.id,
-      details,
-      documents,
-      submittedAt: new Date().toISOString(),
+  // The flip is conditional on 'invited' (fix 49C): if the row moved on since the
+  // check above (a concurrent submit or a staff decision), ROLL BACK the insert
+  // and let the page show the row's real status.
+  const saved = await getDb()
+    .transaction(async (tx) => {
+      await createPartnerApplicationRepo(tx).saveApplication({
+        id: `papp_${newTransferId()}`,
+        partnerRequestId: request.id,
+        details,
+        documents,
+        submittedAt: new Date().toISOString(),
+      });
+      if (!(await createPartnerRequestRepo(tx).markApplicationCompleted(request.id))) {
+        throw new LinkNoLongerOpen();
+      }
+      return true;
+    })
+    .catch((e: unknown) => {
+      if (e instanceof LinkNoLongerOpen) return false;
+      throw e;
     });
-    await createPartnerRequestRepo(tx).markApplicationCompleted(request.id);
-  });
+  if (!saved) redirect(back);
 
   redirect(back); // status is now 'completed' → page shows the thank-you card
 }

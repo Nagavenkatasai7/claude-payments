@@ -5,7 +5,7 @@ import { PartnerApplicationForm } from './partner-application-form';
 
 // Public, token-gated detailed partner application (Stage 2). The URL token is a
 // capability: hash it, resolve the partner_request it points at, and only render
-// the form when the link is live (exists, not expired, not already completed).
+// the form when the link is live (exists, not expired, still 'invited').
 // Every miss is a FRIENDLY status card — never a 500 or a bare notFound. The
 // submit action and the upload route re-validate the same token independently;
 // nothing here is trusted by the server beyond this read.
@@ -71,8 +71,11 @@ export default async function PartnerApplyPage({
     );
   }
 
-  // Missing, expired, or otherwise unusable ⇒ a friendly dead-end (no 500).
-  if (!request || isApplicationTokenExpired(request.tokenExpiresAt)) {
+  // Missing, expired, decided (approved/rejected — Program-Fix 49C) or otherwise
+  // not 'invited' ⇒ a friendly dead-end (no 500). Refuse unless invited: a staff
+  // decision must never reopen the link, and a rejected applicant must not read
+  // "we are reviewing".
+  if (!request || isApplicationTokenExpired(request.tokenExpiresAt) || request.applicationStatus !== 'invited') {
     return (
       <StatusCard
         title="This application link is no longer available."

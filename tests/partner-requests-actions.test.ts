@@ -54,7 +54,11 @@ vi.mock('@/lib/partner-application-token', async (orig) => {
   };
 });
 
-import { resendApplicationInviteAction } from '@/app/admin-dashboard/partner-requests/actions';
+import {
+  resendApplicationInviteAction,
+  approveApplicationAction,
+  rejectApplicationAction,
+} from '@/app/admin-dashboard/partner-requests/actions';
 
 const REQ = 'preq_TestReq1';
 const ORIGINAL_TOKEN = 'a'.repeat(64);
@@ -236,5 +240,119 @@ describe('resendApplicationInviteAction', { retry: 0 }, () => {
     expect(await storedHash()).toBe(hashApplicationToken(ORIGINAL_TOKEN));
     expect(await auditCount()).toBe(0);
     expect(pokeWorkerMock).not.toHaveBeenCalled();
+  });
+});
+
+// Program-Fix 49C (partner-02): the staff decision on a SUBMITTED application.
+// Platform admins only; a reason is required; only completed → approved|rejected
+// (an 'invited' row has nothing to decide, and a decided row is final); the
+// application link's token hash is cleared so no decision can reopen it; one
+// audit row per decision; and NO email to anyone (the brief sends none).
+describe('approve / reject application (fix 49C)', { retry: 0 }, () => {
+  function decisionForm(reason = 'Licensed MT, documents reviewed.', id = REQ): FormData {
+    const f = new FormData();
+    f.set('id', id);
+    f.set('reason', reason);
+    return f;
+  }
+  async function decide(action: (f: FormData) => Promise<void>, f: FormData = decisionForm()): Promise<string> {
+    try {
+      await action(f);
+    } catch (e) {
+      if (e instanceof RedirectError) return e.to;
+      throw e;
+    }
+    throw new Error('expected a redirect');
+  }
+  async function status(): Promise<string> {
+    const r = (await db.execute(sql`SELECT application_status FROM partner_requests WHERE id = ${REQ}`)) as unknown as {
+      rows: Array<{ application_status: string }>;
+    };
+    return r.rows[0].application_status;
+  }
+  async function decisionAudits(): Promise<Array<{ action: string; actor: string; meta: { reason?: string } }>> {
+    const r = (await db.execute(
+      sql`SELECT action, actor, meta FROM audit_events WHERE starts_with(action, 'partner_application.') AND action <> 'partner_application.invite_resent' AND subject_id = ${REQ} ORDER BY id`,
+    )) as unknown as { rows: Array<{ action: string; actor: string; meta: { reason?: string } }> };
+    return r.rows;
+  }
+  async function emailRows(): Promise<number> {
+    const r = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'email.send'`)) as unknown as {
+      rows: Array<{ n: number }>;
+    };
+    return Number(r.rows[0].n);
+  }
+  const page = `/admin-dashboard/partner-requests/${REQ}`;
+
+  beforeEach(async () => {
+    configureSmtp();
+    await createPartnerRequestRepo(db).markApplicationCompleted(REQ);
+  });
+
+  it('non-admin refused (agent, support, and a partner-scoped admin): nothing changes', async () => {
+    for (const s of [staff({ role: 'agent' }), staff({ role: 'support' }), staff({ partnerId: 'acme' })]) {
+      currentStaff = s;
+      await expect(approveApplicationAction(decisionForm())).rejects.toThrow('NEXT_REDIRECT:/admin-dashboard');
+      await expect(rejectApplicationAction(decisionForm())).rejects.toThrow('NEXT_REDIRECT:/admin-dashboard');
+    }
+    expect(await status()).toBe('completed');
+    expect(await decisionAudits()).toEqual([]);
+  });
+
+  it('approve: completed → approved, token hash cleared, one audit row with the reason, no email', async () => {
+    expect(await decide(approveApplicationAction)).toBe(`${page}?decision=approved`);
+    expect(await status()).toBe('approved');
+    expect(await storedHash()).toBeNull();
+    expect(await createPartnerRequestRepo(db).getByTokenHash(hashApplicationToken(ORIGINAL_TOKEN))).toBeNull();
+    const audits = await decisionAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0].action).toBe('partner_application.approve');
+    expect(audits[0].actor).toBe('root');
+    expect(audits[0].meta.reason).toBe('Licensed MT, documents reviewed.');
+    expect(await emailRows()).toBe(0);
+    expect(pokeWorkerMock).not.toHaveBeenCalled();
+  });
+
+  it('reject: completed → rejected, token hash cleared, audited, no email', async () => {
+    expect(await decide(rejectApplicationAction, decisionForm('Out of scope for now.'))).toBe(`${page}?decision=rejected`);
+    expect(await status()).toBe('rejected');
+    expect(await storedHash()).toBeNull();
+    const audits = await decisionAudits();
+    expect(audits.map((a) => a.action)).toEqual(['partner_application.reject']);
+    expect(await emailRows()).toBe(0);
+  });
+
+  it('double-decide refused: the first decision stands, exactly one audit row', async () => {
+    await decide(approveApplicationAction);
+    expect(await decide(rejectApplicationAction)).toBe(`${page}?decision=not_decidable`);
+    expect(await decide(approveApplicationAction)).toBe(`${page}?decision=not_decidable`);
+    expect(await status()).toBe('approved');
+    expect(await decisionAudits()).toHaveLength(1);
+  });
+
+  it('an invited (not yet submitted) application cannot be decided', async () => {
+    await db.execute(sql`UPDATE partner_requests SET application_status = 'invited' WHERE id = ${REQ}`);
+    expect(await decide(approveApplicationAction)).toBe(`${page}?decision=not_decidable`);
+    expect(await status()).toBe('invited');
+    expect(await storedHash()).toBe(hashApplicationToken(ORIGINAL_TOKEN));
+    expect(await decisionAudits()).toEqual([]);
+  });
+
+  it('a blank or whitespace reason is refused before any write', async () => {
+    expect(await decide(approveApplicationAction, decisionForm('   '))).toBe(`${page}?decision=reason_required`);
+    expect(await status()).toBe('completed');
+    expect(await decisionAudits()).toEqual([]);
+  });
+
+  it('an unknown or malformed id is refused before any write', async () => {
+    await expect(approveApplicationAction(decisionForm('ok', 'preq_nope'))).rejects.toThrow('NEXT_REDIRECT:404');
+    await expect(rejectApplicationAction(decisionForm('ok', "x' OR 1=1"))).rejects.toThrow();
+    expect(await decisionAudits()).toEqual([]);
+  });
+
+  it('resend stays refused after a decision (the invite flow is untouched)', async () => {
+    await decide(approveApplicationAction);
+    expect(await resend()).toBe(`${page}?invite=not_invited`);
+    expect(await storedHash()).toBeNull();
   });
 });

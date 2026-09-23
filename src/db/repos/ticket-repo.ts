@@ -2,6 +2,7 @@ import { and, desc, eq, asc, sql, count, inArray, or } from 'drizzle-orm';
 import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
+import { FIRST_RESPONSE_DUE_HOURS } from '@/lib/ticket-sla';
 import type {
   PartnerId,
   Ticket,
@@ -296,6 +297,83 @@ export function createTicketRepo(db: DbOrTx) {
         .where(where)
         .orderBy(asc(ticketMessages.createdAt), asc(ticketMessages.id));
       return rows.map(rowToMessage);
+    },
+
+    /**
+     * Program-Fix 49C: the first PUBLIC staff reply per ticket (ISO), for the
+     * queue's staff-only SLA pill. One grouped read over the ids the caller
+     * already scoped (ticket_messages_ticket index); tickets with no staff reply
+     * are absent from the map. Internal notes and system lines never count.
+     */
+    async firstStaffResponses(ticketIds: string[]): Promise<Map<string, string>> {
+      const out = new Map<string, string>();
+      if (ticketIds.length === 0) return out;
+      const rows = await db
+        .select({
+          ticketId: ticketMessages.ticketId,
+          first: sql<string>`min(${ticketMessages.createdAt})`,
+        })
+        .from(ticketMessages)
+        .where(and(
+          inArray(ticketMessages.ticketId, ticketIds),
+          eq(ticketMessages.actorType, 'staff'),
+          eq(ticketMessages.internal, false),
+        ))
+        .groupBy(ticketMessages.ticketId);
+      for (const r of rows) if (r.first) out.set(r.ticketId, new Date(r.first).toISOString());
+      return out;
+    },
+
+    /**
+     * Program-Fix 49C: first-response SLA breaches — ACTIVE (open / pending /
+     * waiting_admin) CUSTOMER tickets with no public staff reply whose target
+     * (FIRST_RESPONSE_DUE_HOURS by priority) has passed. Returns the total, a
+     * per-priority count and the oldest `limit` rows (ids only, no customer
+     * text). partnerId undefined ⇒ platform-wide (the ops digest).
+     */
+    async listSlaBreaches(opts: { now: Date; partnerId?: PartnerId; limit?: number }): Promise<{
+      total: number;
+      byPriority: Record<TicketPriority, number>;
+      oldest: Array<{ id: string; partnerId: PartnerId; priority: TicketPriority; createdAt: string }>;
+    }> {
+      const h = FIRST_RESPONSE_DUE_HOURS;
+      const dueHours = sql`(CASE ${tickets.priority} WHEN 'urgent' THEN ${h.urgent}::int WHEN 'low' THEN ${h.low}::int ELSE ${h.normal}::int END)`;
+      const rows = await db
+        .select({
+          id: tickets.id,
+          partnerId: tickets.partnerId,
+          priority: tickets.priority,
+          createdAt: tickets.createdAt,
+          total: sql<number>`count(*) over ()`,
+          urgent: sql<number>`count(*) filter (where ${tickets.priority} = 'urgent') over ()`,
+          normal: sql<number>`count(*) filter (where ${tickets.priority} = 'normal') over ()`,
+          low: sql<number>`count(*) filter (where ${tickets.priority} = 'low') over ()`,
+        })
+        .from(tickets)
+        .where(and(
+          eq(tickets.kind, 'customer'),
+          inArray(tickets.status, ['open', 'pending', 'waiting_admin']),
+          sql`${tickets.createdAt} + make_interval(hours => ${dueHours}) < ${opts.now.toISOString()}::timestamptz`,
+          sql`NOT EXISTS (SELECT 1 FROM ${ticketMessages} WHERE ${ticketMessages.ticketId} = ${tickets.id} AND ${ticketMessages.actorType} = 'staff' AND ${ticketMessages.internal} = false)`,
+          ...(opts.partnerId ? [eq(tickets.partnerId, opts.partnerId)] : []),
+        ))
+        .orderBy(asc(tickets.createdAt), asc(tickets.id))
+        .limit(opts.limit ?? 5);
+      const first = rows[0];
+      return {
+        total: Number(first?.total ?? 0),
+        byPriority: {
+          urgent: Number(first?.urgent ?? 0),
+          normal: Number(first?.normal ?? 0),
+          low: Number(first?.low ?? 0),
+        },
+        oldest: rows.map((r) => ({
+          id: r.id,
+          partnerId: r.partnerId,
+          priority: r.priority as TicketPriority,
+          createdAt: r.createdAt.toISOString(),
+        })),
+      };
     },
 
     /** Queue aggregates for the dashboard summary / LiveRefresh stamp. */
