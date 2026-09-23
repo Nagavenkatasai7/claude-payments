@@ -8,7 +8,7 @@ import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
-import { validateSendLimitInput } from '@/lib/send-limits';
+import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
@@ -17,8 +17,8 @@ import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { createScopedStore } from '@/lib/scoped-store';
-import { sealCustomerRef } from '@/lib/customer-ref';
-import type { CountryCode, KycStatus, PartnerId } from '@/lib/types';
+import { sealCustomerRef, auditSubjectId } from '@/lib/customer-ref';
+import type { CountryCode, KycStatus, PartnerId, Staff } from '@/lib/types';
 
 const VALID_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
 
@@ -65,28 +65,54 @@ function targetPartnerId(staff: { partnerId?: string }, formData: FormData): Par
   return requested;
 }
 
-export async function markCustomerVerifiedAction(formData: FormData): Promise<void> {
+/** "Main Admin (forextransfer)" — the display string kept in kycApprovedBy / meta.reviewerName. */
+function reviewerDisplay(staff: Pick<Staff, 'name' | 'username'>): string {
+  return staff.name && staff.name !== staff.username ? `${staff.name} (${staff.username})` : staff.username;
+}
+
+/**
+ * Program-Fix 28 (compliance-04): the MANUAL KYC decision — the replacement
+ * for the removed one-click "Mark KYC verified / rejected" buttons.
+ * Server-action checklist, in order:
+ *  1. requireAdmin();
+ *  2. input validation BEFORE any read: phone, decision (approve | reject),
+ *     and a MANDATORY reason (bounded, 10–500 characters);
+ *  3. the tenant pin (partner staff pinned; platform staff must name it) and
+ *     the keyed read, with canSee as defence in depth — out of scope ⇒ "not found";
+ *  4. a no-op decision (approve an already verified/grandfathered customer,
+ *     reject an already rejected one) is refused — no audit row for nothing;
+ *  5. kyc-case-store.review with the durable options: ONE transaction locks the
+ *     row, writes the decision (kycApprovedBy on approve) and the
+ *     `kyc.manual_override.<decision>` audit_events row (meta.source 'manual',
+ *     keyed subject, actor = username).
+ * It sends NO WhatsApp message (as the removed buttons did not); only the
+ * Persona review (reviewKycAction) keeps its gate-dependent notify.
+ */
+export async function manualKycDecisionAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
   const phone = String(formData.get('phone') ?? '').trim();
+  const decision = String(formData.get('decision') ?? '');
+  if (decision !== 'approve' && decision !== 'reject') throw new Error('Invalid decision.');
+  const reason = requireStaffReason(formData.get('reason'));
   if (!phone) throw new Error('Phone is required.');
 
   const partnerId = targetPartnerId(staff, formData);
-  const cs = getCustomerStore(getStore());
-  const customer = await cs.getCustomer(partnerId, phone);
-  // H3 fix + fix 1: the read is keyed (tenant, phone) with partner staff pinned;
-  // canSee stays as defence-in-depth. Out-of-scope ⇒ not found.
+  const customer = await getCustomerStore(getStore()).getCustomer(partnerId, phone);
   if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
     throw new Error('Customer not found.');
   }
+  if (decision === 'approve' && (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered')) {
+    throw new Error('Customer is already verified.');
+  }
+  if (decision === 'reject' && customer.kycStatus === 'rejected') {
+    throw new Error('Customer is already rejected.');
+  }
 
-  const nowIso = new Date().toISOString();
-  await cs.saveCustomer({
-    ...customer,
-    kycStatus: 'verified',
-    kycVerifiedAt: nowIso,
-    kycRejectedReason: undefined,
-    updatedAt: nowIso,
-  });
+  const updated = await getKycCaseStore(getStore()).review(
+    customer.partnerId, customer.senderPhone, decision, reviewerDisplay(staff), reason,
+    { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.manual_override.${decision}`, source: 'manual' },
+  );
+  if (!updated) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
   revalidatePath('/admin-dashboard/customers');
   revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }
@@ -115,9 +141,13 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   }
 
   // Attribute the reviewer by display name + stable username, e.g. "Main Admin (forextransfer)".
-  const reviewer =
-    staff.name && staff.name !== staff.username ? `${staff.name} (${staff.username})` : staff.username;
-  await getKycCaseStore(getStore()).review(partnerId, phone, decision, reviewer, reason);
+  // Program-Fix 28: durable — the decision and its kyc.review.<decision>
+  // audit_events row commit together (actor = username, keyed subject).
+  const reviewed = await getKycCaseStore(getStore()).review(
+    partnerId, phone, decision, reviewerDisplay(staff), reason,
+    { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.review.${decision}`, source: 'persona_review' },
+  );
+  if (!reviewed) throw new Error('Customer not found.');
   // KYC is partner OPT-IN: the decision + audit above stand regardless, but the
   // customer-facing WhatsApp notify only fires when the partner's
   // verify-before-send gate is ON. Fail-soft — a notify hiccup never voids the review.
@@ -155,6 +185,18 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
     throw new Error('Phone must be 10–15 digits, including country code.');
   }
 
+  // Program-Fix 28 (compliance-04, second back door): creating a customer
+  // ALREADY verified or grandfathered is a manual KYC decision — it needs the
+  // same mandatory reason, validated before any read.
+  const kycChoice = String(formData.get('kycStatus') ?? 'not_started');
+  const kycStatus: KycStatus =
+    kycChoice === 'verified'
+      ? 'verified'
+      : kycChoice === 'grandfathered'
+        ? 'grandfathered'
+        : 'not_started';
+  const kycReason = kycStatus === 'not_started' ? null : requireStaffReason(formData.get('kycReason'));
+
   // Partner scope: partner-admin → own partner (identity authoritative, form ignored);
   // platform-admin → form choice, verified to exist.
   let partnerId: PartnerId = DEFAULT_PARTNER_ID;
@@ -181,18 +223,10 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
     ? (picked as CountryCode)
     : countryForPhone(normalized) ?? DEFAULT_SENDER_COUNTRY;
 
-  const kycChoice = String(formData.get('kycStatus') ?? 'not_started');
-  const kycStatus: KycStatus =
-    kycChoice === 'verified'
-      ? 'verified'
-      : kycChoice === 'grandfathered'
-        ? 'grandfathered'
-        : 'not_started';
-
   const fullName = String(formData.get('fullName') ?? '').trim() || undefined;
   const now = new Date().toISOString();
 
-  await cs.saveCustomer({
+  const fresh = {
     senderPhone: normalized,
     firstSeenAt: now,
     kycStatus,
@@ -202,36 +236,29 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
     partnerId,
     createdAt: now,
     updatedAt: now,
-  });
+  };
+
+  if (kycReason === null) {
+    await cs.saveCustomer(fresh);
+  } else {
+    // The create and its kyc.manual_override.create row commit together; a
+    // failed audit insert creates nothing. tx-bound handles only.
+    const reviewer = reviewerDisplay(staff);
+    await getDb().transaction(async (tx) => {
+      await createCustomerStore(tx, getStore()).saveCustomer({ ...fresh, kycApprovedBy: reviewer, kycApprovedAt: now });
+      await createAuditRepo(tx).record({
+        partnerId,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'kyc.manual_override.create',
+        subjectId: auditSubjectId(partnerId, normalized),
+        meta: { previousStatus: null, newStatus: kycStatus, reason: kycReason, source: 'manual', reviewerName: reviewer },
+      });
+    });
+  }
 
   revalidatePath('/admin-dashboard/customers');
   redirect(customerDetailPath(partnerId, normalized));
-}
-
-export async function markCustomerRejectedAction(formData: FormData): Promise<void> {
-  const staff = await requireAdmin();
-  const phone = String(formData.get('phone') ?? '').trim();
-  const reason =
-    String(formData.get('reason') ?? '').trim().slice(0, 500) || 'Manual rejection by staff';
-  if (!phone) throw new Error('Phone is required.');
-
-  const partnerId = targetPartnerId(staff, formData);
-  const cs = getCustomerStore(getStore());
-  const customer = await cs.getCustomer(partnerId, phone);
-  // H3 fix (see markCustomerVerifiedAction): reject out-of-scope.
-  if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
-    throw new Error('Customer not found.');
-  }
-
-  const nowIso = new Date().toISOString();
-  await cs.saveCustomer({
-    ...customer,
-    kycStatus: 'rejected',
-    kycRejectedReason: reason,
-    updatedAt: nowIso,
-  });
-  revalidatePath('/admin-dashboard/customers');
-  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }
 
 /**

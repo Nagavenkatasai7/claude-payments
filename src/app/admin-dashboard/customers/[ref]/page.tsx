@@ -13,17 +13,16 @@ import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { maskLast4 } from '@/lib/mask';
 import { getStore } from '@/lib/store';
-import { getKycCaseStore } from '@/lib/kyc-case-store';
+import { getKycCaseStore, mergeKycTrail } from '@/lib/kyc-case-store';
 import { Sidebar } from '../../sidebar';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { money } from '../../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { markCustomerVerifiedAction, markCustomerRejectedAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
+import { manualKycDecisionAction, reviewKycAction, setCustomerSendLimitAction } from '../actions';
 import { KycCopilotPanel } from './kyc-copilot-panel';
 import { CustomerLink } from '../../customer-link';
-import { openCustomerRef, auditIdentityView } from '@/lib/customer-ref';
+import { openCustomerRef, auditIdentityView, auditSubjectId } from '@/lib/customer-ref';
 import { SendLimitsCard } from '../../send-limits-card';
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
@@ -63,7 +62,7 @@ export default async function CustomerDetailPage({
   await auditIdentityView(getDb(), staff, customer);
   const siblingTenants = (await scoped.customerTenants(phone)).filter((id) => id !== customer.partnerId);
 
-  const [mine, todayUsedCents, partner, kycAudit, lastLimitChange] = await Promise.all([
+  const [mine, todayUsedCents, partner, legacyKycAudit, durableKycAudit, lastLimitChange] = await Promise.all([
     // Indexed WHERE partner_id = $1 AND phone = $2 (newest-first) — the F44 read sink is tenant-keyed.
     getStore().listTransfersByPhone(customer.partnerId, phone, 50),
     dailyVolumeStore.getTodayCents(customer.partnerId, phone),
@@ -71,6 +70,13 @@ export default async function CustomerDetailPage({
     getKycCaseStore(getStore())
       .getAudit(customer.partnerId, phone)
       .catch(() => [] as Awaited<ReturnType<ReturnType<typeof getKycCaseStore>['getAudit']>>),
+    // Program-Fix 28: the durable KYC decisions (audit_events, keyed subject).
+    createAuditRepo(getDb())
+      .listKycForSubject(customer.partnerId, auditSubjectId(customer.partnerId, customer.senderPhone))
+      .catch((err: unknown) => {
+        logWarn('admin.kyc_trail', err, { partnerId: customer.partnerId }); // tenant id only — no phone
+        return [];
+      }),
     // Program fix 16b: the last audited raise/clear for THIS (tenant, phone).
     createAuditRepo(getDb()).lastSendLimitChange(customer.partnerId, 'customer', phone).catch((err: unknown) => {
       // Never blank the card silently: log (tenant id only — no phone), then render "—".
@@ -78,8 +84,12 @@ export default async function CustomerDetailPage({
       return null;
     }),
   ]);
+  // Program-Fix 28: durable rows + the legacy Redis entries not tagged durable.
+  const kycAudit = mergeKycTrail(durableKycAudit, legacyKycAudit);
   const inReview =
     customer.kycReviewState === 'pending_review' || customer.kycReviewState === 'needs_review';
+  const canManualApprove = customer.kycStatus !== 'verified' && customer.kycStatus !== 'grandfathered';
+  const canManualReject = customer.kycStatus !== 'rejected';
   const now = new Date();
   const limits = resolveEffectiveSendLimits(partner, customer, now);
   const capEval = evaluateCap(customer, now, todayUsedCents, 0, sendGateActive(partner), limits);
@@ -143,20 +153,38 @@ export default async function CustomerDetailPage({
                 </>
               )}
             </dl>
-            {isAdmin && customer.kycStatus !== 'verified' && customer.kycStatus !== 'grandfathered' && (
-              <form action={markCustomerVerifiedAction} className="mt-4 flex flex-wrap items-center gap-2">
-                <input type="hidden" name="phone" value={customer.senderPhone} />
-                <input type="hidden" name="partnerId" value={customer.partnerId} />
-                <Button type="submit">Mark KYC verified</Button>
-              </form>
-            )}
-            {isAdmin && customer.kycStatus !== 'rejected' && (
-              <form action={markCustomerRejectedAction} className="mt-3 flex flex-wrap items-center gap-2">
-                <input type="hidden" name="phone" value={customer.senderPhone} />
-                <input type="hidden" name="partnerId" value={customer.partnerId} />
-                <Input type="text" name="reason" placeholder="Rejection reason (optional)" className="max-w-xs" />
-                <Button type="submit" variant="outline">Mark KYC rejected</Button>
-              </form>
+            {/* Program-Fix 28 (compliance-04): no one-click override. A manual
+                decision needs a typed reason (10–500 characters) and is recorded
+                in the audit log; it sends the customer no message. Shown whenever
+                the Persona review panel below is not. */}
+            {isAdmin && !inReview && (canManualApprove || canManualReject) && (
+              <div className="mt-4 space-y-3 rounded-lg border p-4">
+                <div className="text-sm font-medium">Manual KYC decision</div>
+                <p className="text-sm text-muted-foreground">
+                  A reason is required (at least 10 characters) and is recorded in the audit log with your name.
+                </p>
+                <form action={manualKycDecisionAction} className="space-y-3">
+                  <input type="hidden" name="phone" value={customer.senderPhone} />
+                  <input type="hidden" name="partnerId" value={customer.partnerId} />
+                  <textarea
+                    name="reason"
+                    required
+                    minLength={10}
+                    maxLength={500}
+                    placeholder="Reason for the decision (required)"
+                    rows={2}
+                    className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    {canManualApprove && <Button type="submit" name="decision" value="approve">Approve KYC</Button>}
+                    {canManualReject && (
+                      <Button type="submit" name="decision" value="reject" variant="outline">
+                        {customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered' ? 'Revoke KYC' : 'Reject KYC'}
+                      </Button>
+                    )}
+                  </div>
+                </form>
+              </div>
             )}
 
             {isAdmin && inReview && (

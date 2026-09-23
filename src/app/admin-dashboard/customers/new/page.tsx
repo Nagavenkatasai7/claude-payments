@@ -88,6 +88,14 @@ export default async function NewCustomerPage() {
                 </select>
               </label>
 
+              {/* Program-Fix 28: creating a customer already Verified or
+                  Grandfathered is a manual KYC decision — the server requires
+                  this reason (10–500 characters) and records it in the audit log. */}
+              <label className="block space-y-1.5">
+                <span className="block text-sm font-medium">KYC reason (required unless “Not started”)</span>
+                <Input type="text" name="kycReason" maxLength={500} placeholder="e.g. documents checked offline" />
+              </label>
+
               <Button type="submit">Create customer</Button>
             </form>
           </CardContent>
