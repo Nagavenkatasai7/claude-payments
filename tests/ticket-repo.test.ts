@@ -9,10 +9,10 @@ vi.mock('@/lib/log', async (orig) => {
 });
 import { freshDb, seedPartner } from './helpers-db';
 import { createTicketRepo, type TicketRepo } from '@/db/repos/ticket-repo';
-import type { Db } from '@/db/client';
-import { createCipheriv, randomBytes } from 'node:crypto';
+import type { Db, DbOrTx } from '@/db/client';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
-import { ticketMessages } from '@/db/schema';
+import { tickets, ticketMessages } from '@/db/schema';
 import { EnvKeyProvider, EnvKeyRing, aadFor, encryptField } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
 
@@ -176,14 +176,23 @@ describe('ticket-repo — body reader (fix 45 P3)', () => {
     expect(aadFor(ctx.ticketMessage('42'))).toBe('v2|k0|ticket_messages|body|42');
   });
 
-  it('GOLDEN: createTicket and appendMessage store the body as plaintext, byte-for-byte', async () => {
+  // Program-Fix 45 P4 flips this golden: new bodies are sealed at rest as a v2
+  // blob bound to their own message row, never stored as plaintext.
+  it('GOLDEN (P4): createTicket and appendMessage store a v2 blob sealed for the row id, never the plaintext', async () => {
     const r = createTicketRepo(db, { cryptoProvider: provider });
     const body = 'My transfer — नमस्ते 🌍 — has not arrived.';
     const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body });
     const appended = await r.appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'reply v2.k0.a.b.c.d' });
     const raw = await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id));
-    expect(raw.map((m) => m.body).sort()).toEqual([body, 'reply v2.k0.a.b.c.d'].sort());
+    expect(raw).toHaveLength(2);
+    const opened = raw.map((m) => {
+      expect(m.body).toMatch(/^v2\.k0\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{80}\.[A-Za-z0-9_-]+$/);
+      expect(m.body).not.toContain('arrived');
+      return openByHand(m.body, KEY, `v2|k0|ticket_messages|body|${m.id}`);
+    });
+    expect(opened.sort()).toEqual([body, 'reply v2.k0.a.b.c.d'].sort());
     expect(appended.body).toBe('reply v2.k0.a.b.c.d');
+    expect(appended.id).toBe(raw.find((m) => m.id === appended.id)?.id);
     const listed = await r.listMessages(t.id, { includeInternal: true });
     expect(listed.map((m) => m.body).sort()).toEqual([body, 'reply v2.k0.a.b.c.d'].sort());
   });
@@ -259,12 +268,146 @@ describe('ticket-repo — body reader (fix 45 P3)', () => {
     expect(logSpy.logWarn.mock.calls.filter((c) => c[0] === 'ticket.body_unreadable')).toHaveLength(0);
   });
 
-  it('plaintext rows never touch the key (no FIELD_ENCRYPTION_KEY needed)', async () => {
-    const r = createTicketRepo(db); // default provider; no key in the test env
-    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'plain' });
-    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe('plain');
+  // Pins insert-THEN-seal: the INSERT carries an empty body and only the
+  // UPDATE carries the sealed blob, so the plaintext never reaches the table
+  // even transiently (inserting the plaintext and re-sealing would still end
+  // in a sealed row, so only the insert values can catch it).
+  it('the INSERT writes an empty body; only the seal UPDATE writes the (sealed) body', async () => {
+    const inserted: Record<string, unknown>[] = [];
+    const updated: Record<string, unknown>[] = [];
+    const spy = (target: DbOrTx): DbOrTx =>
+      new Proxy(target, {
+        get(t, prop, recv) {
+          if (prop === 'insert') {
+            return (table: unknown) => {
+              const b = (t as unknown as { insert: (x: unknown) => { values: (v: unknown) => unknown } }).insert(table);
+              return new Proxy(b, {
+                get(bt, bp) {
+                  if (bp === 'values') {
+                    return (v: Record<string, unknown>) => {
+                      if (table === ticketMessages) inserted.push(v);
+                      return bt.values(v);
+                    };
+                  }
+                  const val = Reflect.get(bt, bp);
+                  return typeof val === 'function' ? val.bind(bt) : val;
+                },
+              });
+            };
+          }
+          if (prop === 'update') {
+            return (table: unknown) => {
+              const b = (t as unknown as { update: (x: unknown) => { set: (v: unknown) => unknown } }).update(table);
+              return new Proxy(b, {
+                get(bt, bp) {
+                  if (bp === 'set') {
+                    return (v: Record<string, unknown>) => {
+                      if (table === ticketMessages) updated.push(v);
+                      return bt.set(v);
+                    };
+                  }
+                  const val = Reflect.get(bt, bp);
+                  return typeof val === 'function' ? val.bind(bt) : val;
+                },
+              });
+            };
+          }
+          if (prop === 'transaction') {
+            const tx = (t as unknown as { transaction?: (fn: (x: DbOrTx) => Promise<unknown>) => Promise<unknown> }).transaction;
+            return tx ? (fn: (x: DbOrTx) => Promise<unknown>) => tx.call(t, (inner) => fn(spy(inner))) : undefined;
+          }
+          const val = Reflect.get(t, prop, recv);
+          return typeof val === 'function' ? val.bind(t) : val;
+        },
+      });
+    const r = createTicketRepo(spy(db), { cryptoProvider: provider });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'first body' });
+    await r.appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'second body' });
+    expect(inserted).toHaveLength(2);
+    expect(inserted.map((v) => v.body)).toEqual(['', '']);
+    expect(updated).toHaveLength(2);
+    for (const u of updated) expect(String(u.body)).toMatch(/^v2\.k0\./);
+    expect(JSON.stringify([inserted, updated])).not.toContain('first body');
+    expect(JSON.stringify([inserted, updated])).not.toContain('second body');
+  });
+
+  it('inside a caller\'s transaction, a seal failure rolls back the caller\'s other writes too', async () => {
+    const ok = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await ok.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'first' });
+    const broken = { wrapDataKey: () => { throw new Error('kms down'); }, unwrapDataKey: () => { throw new Error('kms down'); } };
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.update(tickets).set({ subject: 'changed in the same tx' }).where(eq(tickets.id, t.id));
+        await createTicketRepo(tx, { cryptoProvider: broken }).appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'never' });
+      }),
+    ).rejects.toThrow();
+    expect((await ok.getTicket(t.id))?.subject).toBe('s');
+    expect(await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id))).toHaveLength(1);
+
+    // …and the happy path inside a caller's tx commits a sealed row.
+    await db.transaction(async (tx) => {
+      await createTicketRepo(tx, { cryptoProvider: provider }).appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'in tx' });
+    });
+    const rows = await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.body.startsWith('v2.k0.'))).toBe(true);
+    expect((await ok.listMessages(t.id, { includeInternal: true })).map((m) => m.body)).toEqual(['first', 'in tx']);
+  });
+
+  it('legacy plaintext rows (written before P4) read back unchanged', async () => {
+    const r = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'x' });
+    await db.insert(ticketMessages).values({ ticketId: t.id, actorType: 'customer', actorId: '1', body: 'legacy plain body' });
+    const bodies = (await r.listMessages(t.id, { includeInternal: true })).map((m) => m.body);
+    expect(bodies).toContain('legacy plain body');
+    expect(bodies).toContain('x');
+  });
+
+  it('the default provider (env key) seals and reads back', async () => {
+    const r = createTicketRepo(db);
+    const t = await r.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'env sealed' });
+    const row = await firstMessageRow(t.id);
+    expect(row.body.startsWith('v2.k0.')).toBe(true);
+    expect((await r.listMessages(t.id, { includeInternal: true }))[0].body).toBe('env sealed');
+  });
+
+  it('a seal failure rolls the whole ticket back (no plaintext, no half-written ticket)', async () => {
+    const broken = {
+      wrapDataKey: () => {
+        throw new Error('kms down');
+      },
+      unwrapDataKey: () => {
+        throw new Error('kms down');
+      },
+    };
+    const r = createTicketRepo(db, { cryptoProvider: broken });
+    const id = tid();
+    await expect(
+      r.createTicket({ id, partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'never stored' }),
+    ).rejects.toThrow();
+    expect(await r.getTicket(id)).toBeNull();
+    const all = await db.select().from(ticketMessages);
+    expect(all.some((m) => m.body === 'never stored' || m.body === '')).toBe(false);
+
+    const ok = createTicketRepo(db, { cryptoProvider: provider });
+    const t = await ok.createTicket({ id: tid(), partnerId: 'default', kind: 'customer', customerPhone: '1', subject: 's', body: 'first' });
+    await expect(r.appendMessage({ ticketId: t.id, actorType: 'staff', actorId: 'sup1', body: 'never appended' })).rejects.toThrow();
+    const after = await db.select().from(ticketMessages).where(eq(ticketMessages.ticketId, t.id));
+    expect(after).toHaveLength(1);
   });
 });
+
+function openByHand(blob: string, masterKey: Buffer, aad: string): string {
+  const [ivS, tagS, wS, ctS] = blob.split('.').slice(-4);
+  const wrapped = Buffer.from(wS, 'base64url');
+  const w = createDecipheriv('aes-256-gcm', masterKey, wrapped.subarray(0, 12));
+  w.setAuthTag(wrapped.subarray(12, 28));
+  const dek = Buffer.concat([w.update(wrapped.subarray(28)), w.final()]);
+  const d = createDecipheriv('aes-256-gcm', dek, Buffer.from(ivS, 'base64url'));
+  d.setAAD(Buffer.from(aad, 'utf8'));
+  d.setAuthTag(Buffer.from(tagS, 'base64url'));
+  return Buffer.concat([d.update(Buffer.from(ctS, 'base64url')), d.final()]).toString('utf8');
+}
 
 function sealK1(masterKey: Buffer, plain: string, aad: string): string {
   const dek = randomBytes(32);

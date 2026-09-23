@@ -217,11 +217,17 @@ export const env = {
     return process.env.FIELD_ENCRYPTION_PREVIOUS_KEYS ?? '';
   },
   get fieldEncryptionCurrentKid(): string {
-    // Program-Fix 45: the kid NEW field-crypto writes will use, default 'k0'.
-    // INERT in P3 (the reader): no code path reads it yet and every write stays
-    // k0 (pinned by tests/key-ring-reader.test.ts). The P4 writer consumes it.
-    // Optional, unset in production, never boot-required.
-    return process.env.FIELD_ENCRYPTION_CURRENT_KID || 'k0';
+    // Program-Fix 45 P4: the kid NEW context-bound field-crypto writes use,
+    // default 'k0' (unset / blank). field-crypto's currentWriteKid validates it
+    // AT USE and fails closed (a malformed kid or one the key ring lacks refuses
+    // the write). Optional, UNSET in production (no rotation), never
+    // boot-required: the accepting code tolerates its absence.
+    // ROTATION ORDER (owner, reviewed plan only): env is a per-deployment
+    // snapshot, so first ship the new key in FIELD_ENCRYPTION_PREVIOUS_KEYS to
+    // EVERY serving deployment (incl. skew-pinned ones, up to the Skew
+    // Protection max age), and only then set this — otherwise a build without
+    // the key cannot open what the new one writes.
+    return (process.env.FIELD_ENCRYPTION_CURRENT_KID ?? '').trim() || 'k0';
   },
   get sanctionsList(): string {
     // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER

@@ -15,9 +15,9 @@ afterEach(() => {
 });
 
 describe('password — Argon2id', () => {
-  it('hashPassword emits a $argon2id$ PHC string', async () => {
+  it('hashPassword emits a $pv=p0$-tagged $argon2id$ PHC string (Program-Fix 45 P4)', async () => {
     const stored = await hashPassword('s3cret!');
-    expect(stored.startsWith('$argon2id$v=19$m=19456,t=2,p=1$')).toBe(true);
+    expect(stored.startsWith('$pv=p0$$argon2id$v=19$m=19456,t=2,p=1$')).toBe(true);
   });
 
   it('verifyPassword is true for the correct password', async () => {
