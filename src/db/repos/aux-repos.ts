@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   auditEvents,
   b2bInvoices,
@@ -349,6 +349,28 @@ export function createAuditRepo(db: DbOrTx) {
 
     async listRecent(limit = 50) {
       return db.select().from(auditEvents).orderBy(desc(auditEvents.at)).limit(limit);
+    },
+
+    /**
+     * Program-Fix 17a: the newest rows whose `action` is one of `actions`,
+     * filtered IN SQL (`action IN (…)`), optionally also by `actor_type`. The
+     * Team feed uses it so high-volume auth.* rows can never push the five team
+     * actions off a LIMITed read. Ties on `at` break on id (insert order).
+     * An empty `actions` list returns [] without a query (no `IN ()`).
+     */
+    async listRecentByActions(
+      actions: readonly string[],
+      limit = 50,
+      opts: { actorType?: AuditEvent['actorType'] } = {},
+    ) {
+      if (actions.length === 0) return [];
+      const byAction = inArray(auditEvents.action, [...actions]);
+      return db
+        .select()
+        .from(auditEvents)
+        .where(opts.actorType ? and(byAction, eq(auditEvents.actorType, opts.actorType)) : byAction)
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(limit);
     },
 
     /**

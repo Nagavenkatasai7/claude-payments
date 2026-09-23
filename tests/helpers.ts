@@ -36,6 +36,11 @@ export function fakeRedis(): FakeRedis {
       map.set(key, String(next));
       return next;
     },
+    async decr(key: string) {
+      const next = (map.has(key) ? parseInt(map.get(key)!, 10) : 0) - 1;
+      map.set(key, String(next));
+      return next;
+    },
     async sadd(key: string, member: string) {
       let s = sets.get(key);
       if (!s) {

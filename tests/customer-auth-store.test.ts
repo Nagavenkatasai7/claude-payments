@@ -627,3 +627,57 @@ describe('resolveSession rejects sessions older than the last password change (f
     expect((await s.resolveSession(token))?.senderPhone).toBe(NORM);
   });
 });
+
+describe('lazy rehash is a single-column compare-and-set (Program-Fix 17a)', () => {
+  async function legacyRow() {
+    const redis = fakeRedis();
+    const db = await freshDb();
+    const customers = createCustomerStore(db, createStore(fakeRedis(), db));
+    const legacy = legacyScryptHash('legacy secret pw');
+    await customers.saveCustomer({
+      senderPhone: NORM,
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
+      kycStatus: 'not_started',
+      senderCountry: 'US',
+      partnerId: 'default',
+      passwordHash: legacy,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    return { redis, db, customers, legacy };
+  }
+
+  it('reset between verify and rehash is not reverted (and a concurrent KYC write survives)', async () => {
+    const { redis, customers } = await legacyRow();
+    const s0 = createCustomerAuthStore(redis, customers);
+    // The concurrent writer: a password reset + a KYC update that land after the
+    // verify read the row and before the rehash writes.
+    const racing = {
+      ...customers,
+      async upgradePasswordHash(...args: Parameters<typeof customers.upgradePasswordHash>) {
+        await s0.setPassword(PHONE, 'brand new password', { pwnedCheck: neverPwned() });
+        const fresh = (await customers.getCustomer('default', NORM))!;
+        await customers.saveCustomer({ ...fresh, kycStatus: 'pending' });
+        return customers.upgradePasswordHash(...args);
+      },
+    };
+    const saveSpy = vi.spyOn(racing, 'saveCustomer');
+    const s = createCustomerAuthStore(redis, racing);
+    const c = await s.verifyCustomerPassword(PHONE, 'legacy secret pw');
+    expect(c).not.toBeNull(); // the verify itself succeeded
+    expect(saveSpy).not.toHaveBeenCalled(); // no whole-row upsert on the rehash path
+    const persisted = (await customers.getCustomer('default', NORM))!;
+    expect(await verifyPassword('brand new password', persisted.passwordHash!)).toBe(true);
+    expect(await verifyPassword('legacy secret pw', persisted.passwordHash!)).toBe(false);
+    expect(persisted.kycStatus).toBe('pending');
+  });
+
+  it('upgradePasswordHash (repo): true on a match, false on a stale old hash, tenant-keyed', async () => {
+    const { customers, legacy } = await legacyRow();
+    expect(await customers.upgradePasswordHash('default', NORM, 'stale', 'H1')).toBe(false);
+    expect(await customers.upgradePasswordHash('acme', NORM, legacy, 'H1')).toBe(false); // other tenant: no row
+    expect((await customers.getCustomer('default', NORM))!.passwordHash).toBe(legacy);
+    expect(await customers.upgradePasswordHash('default', NORM, legacy, 'H1')).toBe(true);
+    expect((await customers.getCustomer('default', NORM))!.passwordHash).toBe('H1');
+  });
+});

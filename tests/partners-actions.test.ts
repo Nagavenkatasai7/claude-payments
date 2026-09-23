@@ -63,6 +63,13 @@ vi.mock('next/navigation', () => ({
 }));
 
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+// Program-Fix 17a: createPartnerStaffAction runs the staff password policy
+// (breach check fail-closed). Never dial HIBP from a unit test.
+const pwnedStatus = vi.hoisted(() => vi.fn(async (_pw: string): Promise<'pwned' | 'clean' | 'unavailable'> => 'clean'));
+vi.mock('@/lib/pwned', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/pwned')>('@/lib/pwned');
+  return { ...actual, pwnedPasswordStatus: pwnedStatus };
+});
 
 beforeEach(async () => {
   currentStaff = { username: 'admin', role: 'admin' }; // platform admin

@@ -17,6 +17,7 @@ import {
 } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
+import { assertStaffPasswordPolicy } from '@/lib/staff-password';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
 import {
@@ -196,6 +197,7 @@ export async function createPartnerStaffAction(
     throw new Error('That username already exists.');
   }
 
+  await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
   await authStore.saveStaff({
     username,
     name,

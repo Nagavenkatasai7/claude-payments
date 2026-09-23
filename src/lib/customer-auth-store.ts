@@ -316,15 +316,23 @@ export function createCustomerAuthStore(
       if (!ok) return null;
 
       if (needsRehash(customer.passwordHash)) {
-        const upgraded: Customer = {
-          ...customer,
-          passwordHash: await hashPassword(password),
-          // passwordUpdatedAt is NOT bumped: the password is unchanged, and
-          // resolveSession (fix 20) kills every session older than that stamp.
-          updatedAt: new Date(now()).toISOString(),
-        };
-        await saveCustomer(upgraded);
-        return upgraded;
+        // Program-Fix 17a: a single-column compare-and-set keyed on the hash
+        // this verify just checked (customer-repo.upgradePasswordHash), never a
+        // whole-row upsert, so a reset or KYC write that lands between the
+        // verify and here is never reverted. passwordUpdatedAt is NOT bumped:
+        // the password is unchanged, and resolveSession (fix 20) kills every
+        // session older than that stamp.
+        const newHash = await hashPassword(password);
+        const wrote = await customers.upgradePasswordHash(
+          customer.partnerId,
+          customer.senderPhone,
+          customer.passwordHash,
+          newHash,
+        );
+        // Lost the race: the row changed under us. Return the verified
+        // customer as read, and write nothing.
+        if (!wrote) return customer;
+        return { ...customer, passwordHash: newHash, updatedAt: new Date(now()).toISOString() };
       }
       return customer;
     },

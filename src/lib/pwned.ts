@@ -48,3 +48,40 @@ export async function isPwnedPassword(
     return false;
   }
 }
+
+/** Deadline for one HIBP range call on the tri-state path (staff create/reset). */
+export const PWNED_TIMEOUT_MS = 3000;
+
+export type PwnedStatus = 'pwned' | 'clean' | 'unavailable';
+
+/**
+ * Program-Fix 17a: the TRI-STATE breach check for callers that must tell an
+ * outage apart from "not breached" (staff create/reset refuse on an outage;
+ * self-change allows with a warning — see staff-password.ts). Same k-anonymity
+ * request as isPwnedPassword (only the 5-char prefix leaves the process), plus
+ * an AbortSignal deadline so a hung HIBP call is an outage, not a hang.
+ * isPwnedPassword above is deliberately left as it was (customer paths).
+ */
+export async function pwnedPasswordStatus(
+  password: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+  timeoutMs: number = PWNED_TIMEOUT_MS,
+): Promise<PwnedStatus> {
+  try {
+    const sha1 = createHash('sha1').update(password).digest('hex').toUpperCase();
+    const prefix = sha1.slice(0, 5);
+    const suffix = sha1.slice(5);
+    const res = await fetchImpl(`https://api.pwnedpasswords.com/range/${prefix}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return 'unavailable';
+    const body = await res.text();
+    for (const line of body.split('\n')) {
+      const lineSuffix = line.split(':')[0]?.trim();
+      if (lineSuffix && lineSuffix.toUpperCase() === suffix) return 'pwned';
+    }
+    return 'clean';
+  } catch {
+    return 'unavailable';
+  }
+}

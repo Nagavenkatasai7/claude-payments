@@ -182,3 +182,70 @@ describe('auth-store sessions are stored only as hashes (fix 20)', () => {
     expect(await s.getSessionUser(tOther)).toBe('admin');
   });
 });
+
+describe('auth-store password hash compare-and-set (Program-Fix 17a)', () => {
+  const base = (over: Partial<Staff> = {}): Staff => ({
+    username: 'ops',
+    name: 'Ops',
+    role: 'agent',
+    permissions: { canCancel: false, canResend: false, canAssign: false },
+    passwordHash: 'H-old',
+    createdAt: '2026-01-01T00:00:00Z',
+    ...over,
+  });
+
+  it('updatePasswordHash writes only when the stored hash still equals the expected one', async () => {
+    const store = createAuthStore(fakeRedis());
+    await store.saveStaff(base());
+    expect(await store.updatePasswordHash('ops', 'H-old', 'H-new')).toBe(true);
+    expect((await store.getStaff('ops'))!.passwordHash).toBe('H-new');
+  });
+
+  it('updatePasswordHash: a reset between verify and rehash is not reverted', async () => {
+    const store = createAuthStore(fakeRedis());
+    await store.saveStaff(base());
+    // An admin reset lands after the login verified against H-old …
+    await store.saveStaff(base({ passwordHash: 'H-reset' }));
+    // … so the lazy rehash (expecting H-old) must not write.
+    expect(await store.updatePasswordHash('ops', 'H-old', 'H-rehash')).toBe(false);
+    expect((await store.getStaff('ops'))!.passwordHash).toBe('H-reset');
+  });
+
+  it('updatePasswordHash no-ops on a suspended or missing record', async () => {
+    const redis = fakeRedis();
+    const store = createAuthStore(redis);
+    await store.saveStaff(base({ status: 'suspended' }));
+    expect(await store.updatePasswordHash('ops', 'H-old', 'H-new')).toBe(false);
+    expect((await store.getStaff('ops'))!.passwordHash).toBe('H-old');
+    expect(await store.updatePasswordHash('ghost', 'x', 'y')).toBe(false);
+    expect(redis.dump.has('staff:ghost')).toBe(false);
+  });
+
+  it('setPasswordHash works on a suspended record and does NOT reactivate it', async () => {
+    const store = createAuthStore(fakeRedis());
+    await store.saveStaff(base({ status: 'suspended' }));
+    expect(await store.setPasswordHash('ops', 'H-old', 'H-new')).toBe(true);
+    const got = (await store.getStaff('ops'))!;
+    expect(got.passwordHash).toBe('H-new');
+    expect(got.status).toBe('suspended');
+  });
+
+  it('setPasswordHash returns false on a stale expected hash or a missing record', async () => {
+    const redis = fakeRedis();
+    const store = createAuthStore(redis);
+    await store.saveStaff(base({ passwordHash: 'H-current' }));
+    expect(await store.setPasswordHash('ops', 'H-stale', 'H-new')).toBe(false);
+    expect((await store.getStaff('ops'))!.passwordHash).toBe('H-current');
+    expect(await store.setPasswordHash('ghost', 'x', 'y')).toBe(false);
+    expect(redis.dump.has('staff:ghost')).toBe(false);
+  });
+
+  it('setPasswordHash changes only passwordHash (every other field survives)', async () => {
+    const store = createAuthStore(fakeRedis());
+    await store.saveStaff(base({ role: 'admin', lastLoginAt: '2026-09-01T00:00:00Z', partnerId: 'acme' }));
+    await store.setPasswordHash('ops', 'H-old', 'H-new');
+    expect(await store.getStaff('ops')).toEqual(
+      base({ role: 'admin', lastLoginAt: '2026-09-01T00:00:00Z', partnerId: 'acme', passwordHash: 'H-new' }),
+    );
+  });
+});

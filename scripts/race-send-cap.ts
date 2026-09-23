@@ -69,7 +69,7 @@ if (!/^ep-[a-z0-9-]+(?:\.[a-z0-9-]+)+\.aws\.neon\.tech$/.test(targetHost)) {
 
 // No Redis is touched by the mint path any more (fix 16); an inert stub keeps createStore happy.
 const noRedis: RedisLike = {
-  get: async () => null, set: async () => 'OK', del: async () => 1, incr: async () => 1,
+  get: async () => null, set: async () => 'OK', del: async () => 1, incr: async () => 1, decr: async () => 0,
   sadd: async () => 1, srem: async () => 1, smembers: async () => [], hset: async () => 1,
   hget: async () => null, hgetall: async () => null, hdel: async () => 1, getdel: async () => null,
   exists: async () => 0, expire: async () => 1,

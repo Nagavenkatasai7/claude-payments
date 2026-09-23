@@ -13,6 +13,15 @@ export type StaffAuditAction =
   | 'reactivated'
   | 'removed';
 
+/** The five team actions the Team feed shows (Program-Fix 17a: filtered in SQL). */
+export const STAFF_AUDIT_ACTIONS: readonly StaffAuditAction[] = [
+  'created',
+  'updated',
+  'suspended',
+  'reactivated',
+  'removed',
+];
+
 export interface StaffAuditEntry {
   at: string; // ISO-8601
   actor: string; // username who performed the action
@@ -34,9 +43,12 @@ export function createAuditLogStore(db: DbOrTx) {
       });
     },
     async list(limit = 50): Promise<StaffAuditEntry[]> {
-      const rows = await repo.listRecent(limit);
+      // Program-Fix 17a: filter IN the query on BOTH the team actions and
+      // actor_type 'staff'. Taking the newest N rows of every kind and filtering
+      // afterwards let high-volume rows (auth.* sign-ins, system rows) push every
+      // team change off the list.
+      const rows = await repo.listRecentByActions(STAFF_AUDIT_ACTIONS, limit, { actorType: 'staff' });
       return rows
-        .filter((r) => r.actorType === 'staff')
         .map((r) => {
           const e: StaffAuditEntry = {
             at: r.at.toISOString(),

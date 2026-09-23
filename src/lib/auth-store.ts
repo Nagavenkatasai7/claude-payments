@@ -57,18 +57,45 @@ export function createAuthStore(redis: RedisLike) {
       await redis.set(`staff:${username}`, JSON.stringify(staff));
     },
     /**
-     * Fix 21: lazy scrypt → Argon2id upgrade after a successful login. Same
-     * re-read-then-SET discipline as recordLogin: only `passwordHash` changes on
-     * the FRESH record, and a missing or suspended record is left untouched (a
-     * stale snapshot from earlier in the request can never resurrect it).
+     * Fix 21 lazy scrypt → Argon2id upgrade after a successful login, as a
+     * COMPARE-AND-SET (Program-Fix 17a): re-reads the FRESH record and writes
+     * only when its hash still equals `expectedOldHash` (the one the login just
+     * verified), so an admin reset or a password change that lands between the
+     * verify and this write is never reverted to the old password. A missing or
+     * suspended record is left untouched (no resurrection). Returns whether it
+     * wrote.
+     *
+     * RESIDUAL (stated in PR 17a): this is GET → compare → SET over the REST
+     * client, NOT atomic — RedisLike has no `eval`. The window is the few ms
+     * between the GET and the SET. The atomic fix (Lua, or staff in Postgres)
+     * belongs to fix 45.
      */
-    async updatePasswordHash(username: string, passwordHash: string): Promise<void> {
+    async updatePasswordHash(username: string, expectedOldHash: string, newHash: string): Promise<boolean> {
       const raw = await redis.get(`staff:${username}`);
-      if (!raw) return;
+      if (!raw) return false;
       const staff = JSON.parse(raw) as Staff;
-      if (staff.status === 'suspended') return;
-      staff.passwordHash = passwordHash;
+      if (staff.status === 'suspended') return false;
+      if (staff.passwordHash !== expectedOldHash) return false;
+      staff.passwordHash = newHash;
       await redis.set(`staff:${username}`, JSON.stringify(staff));
+      return true;
+    },
+    /**
+     * Program-Fix 17a: the password CHANGE / RESET write. Same compare-and-set
+     * as updatePasswordHash (and the same non-atomic residual), but it also
+     * applies to a SUSPENDED record — an admin may reset a suspended member's
+     * password — and it never changes `status` (a reset does not reactivate).
+     * Only `passwordHash` changes on the fresh record. Returns whether it wrote;
+     * callers surface `false` ("changed concurrently"), never swallow it.
+     */
+    async setPasswordHash(username: string, expectedOldHash: string, newHash: string): Promise<boolean> {
+      const raw = await redis.get(`staff:${username}`);
+      if (!raw) return false;
+      const staff = JSON.parse(raw) as Staff;
+      if (staff.passwordHash !== expectedOldHash) return false;
+      staff.passwordHash = newHash;
+      await redis.set(`staff:${username}`, JSON.stringify(staff));
+      return true;
     },
     async createSession(username: string): Promise<string> {
       const token = randomBytes(32).toString('hex');
