@@ -17,10 +17,10 @@ const PRIVATE_PATHS = ['/pay', '/onboard', '/partners/apply', '/account', '/admi
 
 // The enforced CSP, pinned byte-for-byte: any CSP change must be a deliberate,
 // reviewed edit. Program-Fix 47: adds https: images (partner logos) and
-// object-src 'none'; script-src is unchanged.
+// object-src 'none'; PR2 drops 'unsafe-eval' outside `next dev`.
 const PINNED_CSP =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+  "script-src 'self' 'unsafe-inline'; " +
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: blob: https:; " +
   "media-src 'self' https://*.public.blob.vercel-storage.com; " +
@@ -81,6 +81,26 @@ describe('next.config.ts headers', () => {
     expect(routes[0].source).toBe('/:path*');
     const csp = routes[0].headers.find((h) => h.key === 'Content-Security-Policy');
     expect(csp?.value).toBe(PINNED_CSP);
+  });
+
+  // Program-Fix 47 PR2: next.config reads NODE_ENV once, at load. A production
+  // build ships no 'unsafe-eval'; only `next dev` (HMR / React refresh) keeps it.
+  it.each([
+    ['production', false],
+    ['development', true],
+  ] as const)('NODE_ENV=%s: unsafe-eval present = %s', async (env, expected) => {
+    vi.resetModules();
+    vi.stubEnv('NODE_ENV', env);
+    try {
+      const { default: config } = await import('../next.config');
+      const routes = await config.headers!();
+      const csp = routes[0].headers.find((h) => h.key === 'Content-Security-Policy')?.value ?? '';
+      expect(csp).toContain("script-src 'self' 'unsafe-inline'");
+      expect(csp.includes('unsafe-eval')).toBe(expected);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 });
 

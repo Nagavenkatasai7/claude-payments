@@ -16,9 +16,11 @@ const securityHeaders = [
     key: 'Content-Security-Policy',
     // Built by src/lib/csp.ts (imported by relative path: next.config is loaded
     // outside the `@/` alias). Program-Fix 47: the same policy as before plus
-    // https: images (partner logos) and object-src 'none'. 'unsafe-inline' and
-    // 'unsafe-eval' remain for now; dropping 'unsafe-eval' in production and a
-    // nonce-based script-src are the tracked follow-ups.
+    // https: images (partner logos) and object-src 'none'. PR2: 'unsafe-eval'
+    // only under `next dev` (NODE_ENV=development); `next build`/`next start`
+    // default NODE_ENV to production (node_modules/next/dist/bin/next:65,84),
+    // so production ships none. 'unsafe-inline' remains; a nonce-based
+    // script-src is the tracked follow-up.
     value: buildCsp({ isDev: process.env.NODE_ENV === 'development' }),
   },
 ];
