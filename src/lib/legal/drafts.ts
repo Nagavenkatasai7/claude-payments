@@ -109,7 +109,7 @@ export const TERMS_DRAFT: LegalDraft = {
       id: 'service-availability',
       heading: 'Service availability',
       paragraphs: [
-        'The service may be unavailable from time to time, and delivery times are estimates. Some features shown today are demonstrations that use simulated money movement; the pay page says so when that applies.',
+        'The service may be unavailable from time to time, and delivery times are estimates. Some money movement on this site is simulated today, for demonstration.',
       ],
     },
     {
@@ -188,7 +188,7 @@ export const PRIVACY_DRAFT: LegalDraft = {
       heading: 'WhatsApp and the chat assistant',
       paragraphs: [
         'If you use the service on WhatsApp, your messages pass through WhatsApp, which is operated by Meta under its own terms and privacy policy. WhatsApp shows the service your phone number, your WhatsApp profile name and the messages you send.',
-        'Your messages are processed by an AI model provider to generate replies. Conversation history is kept for up to 30 days to continue a conversation, and then deleted; transfer records are kept separately, as described below.',
+        'Your messages are processed by an AI model provider to generate replies. Conversation history used to continue a conversation is kept for about 30 days; operational records of message processing are kept for a limited time; transfer records are kept separately, as described below.',
         'Never send card numbers, bank passwords or one-time codes in the chat. Payment details are entered only on the pay page.',
       ],
     },
@@ -237,7 +237,7 @@ export const REMITTANCE_RIGHTS_DRAFT: LegalDraft = {
       id: 'error-resolution',
       heading: 'What to do if you think there has been an error or problem',
       paragraphs: [
-        'If you think there has been an error or problem with your remittance transfer, contact the licensed partner named on your receipt, using the phone number or website printed on it.',
+        'If you think there has been an error or problem with your remittance transfer, contact the licensed partner named on your receipt, or reply in the WhatsApp chat where you arranged the transfer, quoting the transfer ID shown on your receipt.',
         'You must contact the partner within 180 days of the date the funds were promised to be available to your recipient. When you do, tell them:',
       ],
       bullets: [
@@ -259,7 +259,7 @@ export const REMITTANCE_RIGHTS_DRAFT: LegalDraft = {
       id: 'cancellation',
       heading: 'What to do if you want to cancel a remittance transfer',
       paragraphs: [
-        'You have the right to cancel a remittance transfer and obtain a refund of all funds paid, including any fees. To cancel, you must contact the licensed partner named on your receipt within 30 minutes of paying for the transfer.',
+        'You have the right to cancel a remittance transfer and obtain a refund of all funds paid, including any fees. To cancel, you must contact the licensed partner named on your receipt, or reply in the WhatsApp chat where you arranged the transfer, within 30 minutes of paying for the transfer.',
         'When you contact the partner, give information that identifies the transfer, including the amount and where the funds were sent. The partner will refund your money within three business days of your request, as long as the funds have not already been picked up or deposited into your recipient’s account.',
         'Many transfers are delivered within minutes. If the funds have already been deposited or picked up, the transfer can no longer be cancelled, but you may still report an error as described above.',
       ],
@@ -286,7 +286,7 @@ export const LICENSING_DRAFT: LegalDraft = {
       heading: 'Who provides your transfer',
       paragraphs: [
         'Transfers are provided by the licensed partner named on your receipt. That partner is the money transmitter for your transfer and holds the licences required to provide it.',
-        'Your receipt shows the partner’s name, phone number and website, and its licence and state-regulator details when the partner has supplied them. Where those details are not yet available, the receipt says so rather than showing anything invented.',
+        'The partner’s name and contact details, and its licence and state-regulator details where the partner has supplied them, are shown with your transfer receipt. Where a detail has not been supplied, nothing is shown in its place.',
       ],
     },
     {
