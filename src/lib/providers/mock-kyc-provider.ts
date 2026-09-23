@@ -3,7 +3,7 @@ import type { KycProvider, KycStartResult, KycStatus, KycWebhookResult } from '.
 
 /**
  * MockKycProvider: B1 stand-in. startVerification returns the dashboard URL
- * for the customer detail page (staff manually flips kycStatus there).
+ * of the customers list (staff open the customer and flip kycStatus there).
  * B2 will replace this with PersonaKycProvider behind the same interface.
  */
 export class MockKycProvider implements KycProvider {
@@ -18,7 +18,11 @@ export class MockKycProvider implements KycProvider {
     existingInquiryId?: string;
   }): Promise<KycStartResult> {
     return {
-      url: `${this.appBaseUrl}/admin-dashboard/customers/${input.senderPhone}`,
+      // Program-Fix 37: the customers LIST, never a phone-keyed URL. This link
+      // is sent to the customer, and the detail route is keyed on a sealed ref
+      // now. providerRef keeps `mock-<phone>`: it is server-side only, and
+      // getStatus below parses it.
+      url: `${this.appBaseUrl}/admin-dashboard/customers`,
       providerRef: input.existingInquiryId ?? `mock-${input.senderPhone}`,
     };
   }

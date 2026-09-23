@@ -145,6 +145,14 @@ export default async function PayPage({
   let brandPartnerId: string | null = null;
 
   if (transfer) {
+    // Program-Fix 32: a cancelled transfer (an expired unpaid link, a staff
+    // cancel, an admin reject) is a dead link — the ONE generic sheet with
+    // default branding, byte-equal to not-found, and never "Payment complete".
+    // Returned before the decrypted payout read. (The POST still refuses it:
+    // refuseUnlessAwaiting in api/pay/[transferId]/route.ts.)
+    if (transfer.status === 'cancelled') {
+      return <InactiveSheet branding={resolvePartnerBranding(null)} />;
+    }
     brandPartnerId = transfer.partnerId;
     // fix 6 (ctx-01): decide Step 1 and the Edit offer on the explicit decrypted
     // read (boolean + last-4 label only); Edit only where the guarded write would

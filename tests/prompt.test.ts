@@ -657,3 +657,52 @@ describe('SYSTEM_PROMPT — Program-Fix 33 (the server owns the send currency; s
     expect(SYSTEM_PROMPT).toMatch(/do NOT call create_schedule for a non-India recipient/);
   });
 });
+
+// ── Program-Fix 34B: no promise of a person without a case; history from the tool ──
+describe('SYSTEM_PROMPT — human help, history, cancel wording, repeat by id (fix 34B)', () => {
+  const both = [buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: true }), buildSystemPrompt({ brand: 'SmartRemit', kycGateActive: false })];
+
+  it('never tells the customer to "reply help" or that a teammate will reach out (prompt-03 / bot-14)', () => {
+    for (const p of both) {
+      expect(p).not.toMatch(/reply 'help'/i);
+      expect(p.toLowerCase()).not.toContain('teammate will reach out');
+    }
+  });
+
+  it('routes every request for a person through request_human_help and its case_id', () => {
+    for (const p of both) {
+      expect(p).toContain('request_human_help');
+      expect(p).toContain('case_id');
+      expect(p.toLowerCase()).toContain("say you'd like to talk to a person");
+    }
+    // The owner decided: no response-time promise.
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never promise a response time');
+  });
+
+  it('answers history ONLY from list_recent_transfers, and a draft or unpaid card is not a transfer (live-10)', () => {
+    expect(SYSTEM_PROMPT).toContain('call list_recent_transfers');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never answer from conversation memory');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('is not a transfer');
+  });
+
+  it('acknowledges the dropped plan when cancel_draft finds nothing (live-08)', () => {
+    expect(SYSTEM_PROMPT).toMatch(/cancelled: false[^\n]*reply_hint/);
+  });
+
+  it('repeats by transfer_id and asks which one when "same person" is ambiguous (prompt-09)', () => {
+    expect(SYSTEM_PROMPT).toMatch(/repeat_transfer with (its|that|the) transfer_id/);
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('ask which one');
+  });
+
+  it('a duplicate approve card is relayed as text (34A review S3)', () => {
+    expect(SYSTEM_PROMPT).toMatch(/duplicate: true[^\n]*reply_hint/);
+  });
+});
+
+describe('SYSTEM_PROMPT — a follow-up promise needs a case (fix 34B review)', () => {
+  it('ties any follow-up promise to a returned case_id and never promises an in-chat reply', () => {
+    expect(SYSTEM_PROMPT).toContain('unless a tool returned a case_id');
+    expect(SYSTEM_PROMPT.toLowerCase()).toContain('never say a teammate will reply inside this chat');
+    expect(SYSTEM_PROMPT).not.toContain("tell them you've flagged the bill and the team will follow up");
+  });
+});

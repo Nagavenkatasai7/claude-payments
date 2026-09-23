@@ -26,9 +26,13 @@ import { env } from '@/lib/env';
  * wrap/unwrap call out to AWS/GCP KMS (master key in an HSM) — call sites
  * (`encryptField`/`decryptField`) never change.
  *
- * A leaked Redis token therefore yields only ciphertext + wrapped DEKs, which
- * are useless without the master key — keeping a dump out of the FTC
- * 30-day-notification + CCPA per-consumer-penalty triggers.
+ * For the fields sealed here, a leaked Redis token or DB dump yields only
+ * ciphertext + wrapped DEKs, which are useless without the master key.
+ *
+ * What is NOT sealed (Program-Fix 37, crypto-06; an honest claim): sender and
+ * recipient phone numbers (they are the lookup keys), `recipient_name`, ticket
+ * bodies, and 30-day chat history in Redis stay plaintext. So a dump is NOT
+ * ciphertext-only. Encrypting those is deferred to Phase 3 (fixes 45/46).
  */
 
 const VERSION = 'v1';

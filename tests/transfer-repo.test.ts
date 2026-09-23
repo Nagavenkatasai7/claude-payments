@@ -415,6 +415,17 @@ describe('transfer-repo — fix 6 (ctx-01): guarded payout write + rehydration p
     expect((await repo.setPayoutIfEditable('p_draft', 'default', NEW))?.id).toBe('p_draft');
   });
 
+  it('Program-Fix 32: a schedule claim (sched:<scheduleId>:<day> under the schedule partner) does NOT lock the payout', async () => {
+    // A cron mint binds its key claim-first; a scheduled link is often minted
+    // with an EMPTY destination the customer enters on the pay page, so the
+    // schedule claim must not read as "partner-API-minted".
+    await seedPartner(db, 'acme');
+    await repo.saveTransfer(fixture({ id: 'p_sched', partnerId: 'acme', payoutDestination: '' }));
+    await createIdempotencyRepo(db).claim('acme', 'sched:s_1:2026-06-09', 'p_sched');
+    expect(await repo.isPayoutEditable('p_sched', 'acme')).toBe(true);
+    expect((await repo.setPayoutIfEditable('p_sched', 'acme', NEW))?.id).toBe('p_sched');
+  });
+
   it('hasB2bTransferTo is an exact (tenant, sender, recipient, b2b) probe', async () => {
     await repo.saveTransfer(fixture({ id: 'b_1', transferType: 'b2b', recipientPhone: '919822222222' }));
     expect(await repo.hasB2bTransferTo('default', '15551230000', '919822222222')).toBe(true);

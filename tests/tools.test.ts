@@ -117,7 +117,7 @@ async function seedMonthSpend(phone: string, amountUsd: number, partnerId = 'def
 }
 
 describe('toolSchemas', () => {
-  it('exposes all twenty-seven tools', () => {
+  it('exposes all twenty-eight tools', () => {
     const names = toolSchemas.map((t) => t.function.name).sort();
     expect(names).toEqual([
       'cancel_bill',
@@ -141,6 +141,7 @@ describe('toolSchemas', () => {
       'present_bill',
       'register_seller',
       'repeat_transfer',
+      'request_human_help',
       'request_refund',
       'resolve_recipient',
       'send_approve_picker',
@@ -1184,7 +1185,12 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     const first = await executeTool('send_approve_picker', args, ctx);
     const second = await executeTool('send_approve_picker', args, ctx); // the retry re-runs the turn
     expect(first.sent).toBe(true);
-    expect(second.sent).toBe(true);   // still reports sent so the agent suppresses trailing text (no dup text either)
+    // Program-Fix 34A: a deduped card is NOT a sent card — reporting sent:true made the
+    // agent return '' and the customer saw nothing. The model gets a hint to answer in text.
+    expect(second.sent).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect(second.draft_id).toEqual(expect.any(String));
+    expect(String(second.reply_hint)).toMatch(/already above/);
     expect(ctaSends).toBe(1);         // the "Approve & Pay" card was sent EXACTLY once
   });
 
@@ -2595,7 +2601,7 @@ describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () =>
 // ── B5: web channel — allowlist filters BOTH schemas and dispatch ────────────
 
 describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
-  it('the allowlist is exactly the thirteen read-only/refund/recall/pay-link tools', () => {
+  it('the allowlist is exactly the fourteen read-only/refund/recall/help/pay-link tools', () => {
     expect([...WEB_TOOL_ALLOWLIST].sort()).toEqual([
       'check_payment_status',
       'check_send_limit',
@@ -2607,6 +2613,7 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
       'list_schedules',
       'open_recall_dispute',
       'repeat_transfer',
+      'request_human_help',
       'request_refund',
       'resolve_recipient',
       'validate_phone',
@@ -2625,8 +2632,11 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
 
   it("toolSchemasForChannel('whatsapp') is the full set MINUS web-only tools", () => {
     const names = toolSchemasForChannel('whatsapp').map((t) => t.function.name);
-    // Every roster tool except the web-only ones (list_recent_transfers).
-    expect(names).not.toContain('list_recent_transfers');
+    // Program-Fix 34B: history answers come from the tool on WhatsApp too, so no
+    // tool is web-only any more (the gate stays for a future one).
+    expect(WEB_ONLY_TOOLS.size).toBe(0);
+    expect(names).toContain('list_recent_transfers');
+    expect(names).toContain('request_human_help');
     expect(names).toContain('create_transfer'); // a WhatsApp-only tool is still present
     expect(toolSchemasForChannel('whatsapp')).toHaveLength(toolSchemas.length - WEB_ONLY_TOOLS.size);
   });
@@ -2831,15 +2841,29 @@ describe('list_recent_transfers (web-only history lookup)', () => {
     expect((theirs.transfers as Array<Record<string, unknown>>).map((t) => t.recipient_name)).toEqual(['Dad']);
   });
 
-  it('is BLOCKED off the web channel (web-only) — returns not available here', async () => {
-    const base = await buildCtx(fakeRedis());
+  it('Program-Fix 34B: runs on WhatsApp too — own tenant + phone only, masked, names clamped', async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const base = await buildCtx(redis);
     await send(base, 'Mom', '919876543210', 30);
-    // default channel (absent ⇒ whatsapp)
-    expect(await executeTool('list_recent_transfers', {}, base)).toEqual({ error: 'not available here' });
-    // explicit whatsapp
-    expect(
+    // A long, outsider-written recipient name (pre-fix row) is clamped at read.
+    const long = 'N'.repeat(300);
+    const t = (await base.store.listTransfersByPhone('default', base.phone, 5))[0];
+    await base.store.saveTransfer({ ...t, recipientName: long });
+    // The same phone under a sibling tenant never leaks in.
+    const sibling = await buildCtx(redis, PHONE, 'acme');
+    await send(sibling, 'Dad', '919811112222', 40);
+
+    for (const r of [
+      await executeTool('list_recent_transfers', {}, base), // default channel (absent ⇒ whatsapp)
       await executeTool('list_recent_transfers', {}, { ...base, channel: 'whatsapp' as const }),
-    ).toEqual({ error: 'not available here' });
+    ]) {
+      const rows = r.transfers as Array<Record<string, unknown>>;
+      expect(rows).toHaveLength(1);
+      expect(Object.keys(rows[0]).sort()).toEqual(['amount', 'date', 'recipient_name', 'status', 'transfer_id']);
+      expect(String(rows[0].recipient_name).length).toBeLessThanOrEqual(80);
+      expect(JSON.stringify(r)).not.toContain('okhdfc'); // no payout field, masked or not
+    }
   });
 });
 
@@ -3873,6 +3897,7 @@ describe('B2B buyer lifecycle controls (L1)', () => {
       expect(r.disputed).toBe(true);
       expect(String(r.case_id)).toMatch(/^tk_/);
       expect(String(r.reply_hint).toLowerCase()).toContain('disputed');
+      expect(String(r.reply_hint)).toContain(String(r.case_id)); // fix 34B review: the follow-up promise quotes its case
 
       const repo = createTicketRepo(db);
       const ticket = (await repo.listByCustomer(ctx.phone)).find((t) => t.id === r.case_id)!;
@@ -4032,7 +4057,9 @@ describe('tools are tenant-scoped (fix 1)', () => {
     expect(await acme.store.listTransfers()).toHaveLength(0);            // nothing minted under acme
     expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();      // and default's draft was not consumed
     // Cancel is guarded the same way: acme's "cancel" cannot see default's pointer.
-    expect(await executeTool('cancel_draft', {}, acme)).toEqual({ cancelled: false, reason: 'no_active_draft' });
+    // (answers exactly like "no pointer" — the same reason and the same fix 34B hint)
+    expect(await executeTool('cancel_draft', {}, acme)).toEqual(await executeTool('cancel_draft', {}, await buildCtx(fakeRedis(), '15550008888')));
+    expect(await executeTool('cancel_draft', {}, acme)).toMatchObject({ cancelled: false, reason: 'no_active_draft' });
     expect(await dflt.draftStore.getDraft(draftId)).not.toBeNull();
   });
 });
@@ -5207,5 +5234,185 @@ describe('Program-Fix 33 — destination-country authority', () => {
     it('no schema string says "Defaults to India"', () => {
       expect(JSON.stringify(toolSchemas)).not.toContain('Defaults to India');
     });
+  });
+});
+
+// ── Program-Fix 34B: human help, cancel wording, repeat by id ────────────────
+
+describe('request_human_help — a real case behind every "a person will help" (fix 34B)', () => {
+  async function outboxRows(kind: string) {
+    const r = await db.execute(sql`SELECT payload, dedupe_key FROM outbox WHERE kind = ${kind} ORDER BY id`);
+    return r.rows as Array<{ payload: Record<string, unknown>; dedupe_key: string | null }>;
+  }
+
+  it('opens ONE customer/human_help case under the turn tenant, enqueues triage + one alert, and returns case_id', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('request_human_help', { reason: 'complaint', summary: 'My money has not arrived and I want to talk to someone.' }, ctx);
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    // Review M1 (copy decided by the main session): a staff reply reaches WhatsApp
+    // only as a link notice, so the hint must not promise an in-chat reply.
+    expect(r.reply_hint).toBe(
+      `When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number). Your case number is ${r.case_id}.`,
+    );
+
+    const mine = await createTicketRepo(db).listByCustomer(ctx.phone);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ id: r.case_id, partnerId: 'default', kind: 'customer', category: 'human_help', status: 'open' });
+    expect(mine[0].subject).toBe('Customer asked for a person');
+
+    const triage = await outboxRows('ticket.triage');
+    expect(triage.map((x) => x.dedupe_key)).toEqual([`triage:${r.case_id}`]);
+    const alerts = await outboxRows('ops.alert');
+    expect(alerts.map((x) => x.dedupe_key)).toEqual([`help:${r.case_id}`]);
+    // The alert carries no customer content: no phone, no summary.
+    expect(JSON.stringify(alerts[0].payload)).not.toContain(ctx.phone);
+    expect(JSON.stringify(alerts[0].payload)).not.toContain('arrived');
+  });
+
+  it('a second request while the case is open returns the SAME case_id and creates nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    const second = await executeTool('request_human_help', { reason: 'other', summary: 'still need help' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+    expect(await createTicketRepo(db).listByCustomer(ctx.phone)).toHaveLength(1);
+    expect(await outboxRows('ticket.triage')).toHaveLength(1);
+    expect(await outboxRows('ops.alert')).toHaveLength(1);
+  });
+
+  it('reuses the open case even after staff re-categorise it (matched by its fixed subject)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    await createTicketRepo(db).setTriage(String(first.case_id), { category: 'kyc' });
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'help again' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+  });
+
+  it('a resolved case is not reused — a new request opens a new case', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    await createTicketRepo(db).updateStatus(String(first.case_id), 'resolved');
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'help again' }, ctx);
+    expect(second.case_id).not.toBe(first.case_id);
+  });
+
+  it('finds the open case with a tenant-scoped query even past 50 other tickets for the phone (review S1)', async () => {
+    await seedPartner(db, 'acme');
+    const ctx = await buildCtx(fakeRedis());
+    const first = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    const repo = createTicketRepo(db);
+    // 60 newer tickets for the SAME phone under a sibling tenant would push the
+    // case out of a phone-only `limit 50` read.
+    for (let i = 0; i < 60; i++) {
+      await repo.createTicket({ id: `tk_noise${i}`, partnerId: 'acme', kind: 'customer', customerPhone: ctx.phone, subject: `noise ${i}`, body: 'x' });
+    }
+    const second = await executeTool('request_human_help', { reason: 'question', summary: 'again' }, ctx);
+    expect(second.case_id).toBe(first.case_id);
+  });
+
+  it('ticket repo findOpenHumanHelpCase is tenant-scoped and open-only', async () => {
+    await seedPartner(db, 'acme');
+    const repo = createTicketRepo(db);
+    await repo.createTicket({ id: 'tk_h1', partnerId: 'acme', kind: 'customer', customerPhone: PHONE, subject: 'Customer asked for a person', body: 'x', category: 'human_help' });
+    expect(await repo.findOpenHumanHelpCase('default', PHONE)).toBeNull();
+    expect((await repo.findOpenHumanHelpCase('acme', PHONE))?.id).toBe('tk_h1');
+    await repo.updateStatus('tk_h1', 'resolved');
+    expect(await repo.findOpenHumanHelpCase('acme', PHONE)).toBeNull();
+  });
+
+  it("a sibling tenant's open case for the same phone is never reused", async () => {
+    await seedPartner(db, 'acme');
+    const redis = fakeRedis();
+    const acme = await buildCtx(redis, PHONE, 'acme');
+    const theirs = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, acme);
+    const ctx = await buildCtx(redis);
+    const mine = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    expect(mine.case_id).not.toBe(theirs.case_id);
+    const tickets = await createTicketRepo(db).listByCustomer(PHONE);
+    expect(tickets.find((t) => t.id === mine.case_id)!.partnerId).toBe('default');
+  });
+
+  it('bounds the summary (fix 5) and rejects an unknown reason', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const bad = await executeTool('request_human_help', { reason: 'lawsuit', summary: 'x' }, ctx);
+    expect(bad.error).toBeDefined();
+    expect(bad.case_id).toBeUndefined();
+    const r = await executeTool('request_human_help', { reason: 'other', summary: 'A'.repeat(2000) }, ctx);
+    const msgs = await createTicketRepo(db).listMessages(String(r.case_id), { includeInternal: true });
+    expect(msgs[0].body.length).toBeLessThanOrEqual(400);
+  });
+
+  it('on the web channel the hint points at the Support page, not "this chat"', async () => {
+    const ctx = { ...(await buildCtx(fakeRedis())), channel: 'web' as const };
+    const r = await executeTool('request_human_help', { reason: 'question', summary: 'help' }, ctx);
+    expect(String(r.case_id)).toMatch(/^tk_/);
+    expect(String(r.reply_hint)).not.toContain('in this chat');
+    expect(String(r.reply_hint)).toContain(String(r.case_id));
+  });
+});
+
+describe('cancel_draft — "nothing to cancel" never reads as "nothing was set up" (fix 34B)', () => {
+  it('no active draft ⇒ the reply_hint says nothing will be charged', async () => {
+    const ctx = await buildCtx(fakeRedis(), '15550006666');
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.cancelled).toBe(false);
+    expect(r.reason).toBe('no_active_draft');
+    expect(String(r.reply_hint)).toContain('nothing will be charged');
+  });
+
+  it('an expired draft ⇒ the same hint', async () => {
+    const redis = fakeRedis();
+    const ctx = await buildCtx(redis, '15550007777');
+    await redis.set(`active_draft:default:${ctx.phone}`, 'gone-draft'); // pointer outlived its draft
+    const r = await executeTool('cancel_draft', {}, ctx);
+    expect(r.reason).toBe('draft_not_found_or_expired');
+    expect(String(r.reply_hint)).toContain('nothing will be charged');
+  });
+});
+
+describe('repeat_transfer — by transfer_id (fix 34B, prompt-09)', () => {
+  async function mint(ctx: Awaited<ReturnType<typeof buildCtx>>, name: string, phone: string, amount: number) {
+    await ctx.store.upsertRecipient(ctx.partnerId, ctx.phone, {
+      name, recipientPhone: phone, payoutMethod: 'upi', payoutDestination: `${name.toLowerCase()}@okhdfc`,
+      lastUsedAt: new Date().toISOString(),
+    });
+    const r = await executeTool('create_transfer', {
+      amount_usd: amount, recipient_name: name, recipient_phone: phone, funding_method: 'bank_transfer',
+    }, ctx);
+    return r.transfer_id as string;
+  }
+
+  it('schema: transfer_id is optional and nothing is required', () => {
+    const tool = toolSchemas.find((t) => t.function.name === 'repeat_transfer')!;
+    expect(tool.function.parameters.required ?? []).toEqual([]);
+    expect(Object.keys(tool.function.parameters.properties as object)).toContain('transfer_id');
+  });
+
+  it('hydrates THAT transfer’s recipient, not the latest one', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const momId = await mint(ctx, 'Mom', '919876543210', 60);
+    await mint(ctx, 'Dad', '919811112222', 70); // newer, different recipient
+    const r = await executeTool('repeat_transfer', { transfer_id: momId }, ctx);
+    expect(r.sent).toBe(true);
+    const draft = await ctx.draftStore.consumeDraft(r.draft_id as string);
+    expect(draft?.recipient.recipientPhone).toBe('919876543210');
+    expect(draft?.amountSource).toBe(60);
+  });
+
+  it("another customer's id gives the same not-found error as a random id (404-never-403)", async () => {
+    const redis = fakeRedis();
+    const owner = await buildCtx(redis);
+    const id = await mint(owner, 'Mom', '919876543210', 60);
+    const stranger = await buildCtx(redis, '15559990000');
+    const theirs = await executeTool('repeat_transfer', { transfer_id: id }, stranger);
+    const random = await executeTool('repeat_transfer', { transfer_id: 'zzzzzzzz' }, stranger);
+    expect(theirs.error).toBeDefined();
+    expect(theirs).toEqual(random);
+  });
+
+  it('neither argument ⇒ an error naming both options', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('repeat_transfer', {}, ctx);
+    expect(String(r.error)).toContain('transfer_id');
+    expect(String(r.error)).toContain('recipient_phone');
   });
 });

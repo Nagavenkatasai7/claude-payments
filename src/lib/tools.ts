@@ -36,6 +36,7 @@ import {
 import { screenTransfer } from './compliance';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
+import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
 
@@ -66,6 +67,8 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'repeat_transfer',
   'request_refund',
   'open_recall_dispute',
+  // Program-Fix 34B: a signed-in web customer can ask for a person too.
+  'request_human_help',
   'generate_payment_link',
   // fix 5: the round-0 synthetic call names this tool on BOTH channels, so it
   // must be a real, dispatchable tool on each.
@@ -74,15 +77,16 @@ export const WEB_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
 
 /**
  * Tools that exist ONLY on the web channel — the mirror image of the allowlist.
- * The web account is an authenticated, single-customer surface, so a richer
- * self-service history read (list_recent_transfers) is safe there but is kept
- * off WhatsApp (where a turn isn't always identity-bound the same way). Stripped
- * from the WhatsApp schemas AND blocked at dispatch (defense-in-depth), exactly
- * mirroring the web-channel gate.
+ * Stripped from the WhatsApp schemas AND blocked at dispatch (defense-in-depth),
+ * exactly mirroring the web-channel gate.
+ *
+ * Empty since Program-Fix 34B: list_recent_transfers moved onto WhatsApp so a
+ * history answer always comes from the ledger, never from conversation memory
+ * (live-10). It is own-tenant, own-phone, masked and read-only, and the same rows
+ * already reach the model through get_customer_context. The gate stays for any
+ * future web-only tool.
  */
-export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  'list_recent_transfers',
-]);
+export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
 
 /** The tool schemas the model is shown for a given channel. */
 export function toolSchemasForChannel(channel: AgentChannel): ChatTool[] {
@@ -622,6 +626,29 @@ export const toolSchemas: ChatTool[] = [
   {
     type: 'function',
     function: {
+      name: 'request_human_help',
+      description:
+        "Open a support case so a person on our team picks up this conversation. Call it whenever the customer asks for a person, a human, an agent or a manager, or has a complaint or problem you cannot resolve. It returns case_id — quote it to the customer. Never tell a customer that a person will help or contact them without calling this first. Calling it again while their case is still open returns the same case_id.",
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            enum: ['question', 'complaint', 'payment_problem', 'account_access', 'other'],
+            description: "Why they want a person: 'question', 'complaint', 'payment_problem', 'account_access', or 'other'.",
+          },
+          summary: {
+            type: 'string',
+            description: 'One or two sentences, in your own words, on what the customer needs help with. No card or bank numbers.',
+          },
+        },
+        required: ['reason'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'request_refund',
       description:
         "Request a refund when the customer asks for their money back. transfer_id is OPTIONAL — omit it and we resolve the customer's most recent refund-relevant transfer automatically. For a transfer the customer has PAID for but that has NOT been delivered yet, this flags it for our team to review (it never moves money itself, and approval is not guaranteed). If the money was ALREADY DELIVERED but within the last 24 hours, this returns error_code 'use_recall' — call open_recall_dispute instead to open a recall case.",
@@ -896,12 +923,14 @@ export const toolSchemas: ChatTool[] = [
       parameters: {
         type: 'object',
         properties: {
-          recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210)." },
+          transfer_id: { type: 'string', description: 'The transfer_id of the past transfer to repeat (from list_recent_transfers or get_customer_context). Preferred over recipient_phone.' },
+          recipient_phone: { type: 'string', description: "The recipient's WhatsApp number, from a past transfer (e.g. 919876543210). Use when you have no transfer_id." },
           amount_source: { type: 'number', description: "Optional. New send amount in the sender's own currency; if omitted, reuse the last amount sent to this recipient." },
           amount_usd: { type: 'number', description: 'Back-compat alias of amount_source.' },
           funding_method: { type: 'string', enum: ['credit_card', 'debit_card', 'bank_transfer'], description: "Optional. Defaults to the sender's remembered method, then the last transfer's method." },
         },
-        required: ['recipient_phone'],
+        // Program-Fix 34B: one of transfer_id / recipient_phone; the tool says so when both are missing.
+        required: [],
       },
     },
   },
@@ -976,7 +1005,7 @@ export interface ToolContext {
   // Recall-dispute seam: the support-ticket repo (createTicket + listByCustomer)
   // open_recall_dispute writes to. Absent ⇒ a repo over the shared Pool (getDb())
   // is created lazily; tests inject one bound to PGlite.
-  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer'>;
+  ticketRepo?: Pick<ReturnType<typeof createTicketRepo>, 'createTicket' | 'listByCustomer' | 'findOpenHumanHelpCase'>;
   // Triage-enqueue seam: the outbox repo the recall-dispute path enqueues the
   // out-of-band 'ticket.triage' effect on. Absent ⇒ a repo over the shared Pool
   // (getDb()) is created lazily; tests inject one bound to PGlite so the enqueue
@@ -1188,8 +1217,8 @@ export async function executeTool(
     });
     return { error: 'not available here' };
   }
-  // Symmetric gate: a web-only tool named OFF the web channel (e.g. a WhatsApp
-  // model reaching for list_recent_transfers) gets a flat error and runs nothing.
+  // Symmetric gate: a web-only tool named OFF the web channel gets a flat error
+  // and runs nothing (the set is empty today — see WEB_ONLY_TOOLS).
   if (!isWebChannel(ctx) && WEB_ONLY_TOOLS.has(name)) {
     logWarn('web-only.tool-blocked', `blocked web-only tool off web channel: ${name}`, {
       phone: ctx.phone,
@@ -1223,6 +1252,8 @@ export async function executeTool(
       return requestRefundTool(args, ctx);
     case 'open_recall_dispute':
       return openRecallDisputeTool(args, ctx);
+    case 'request_human_help':
+      return requestHumanHelpTool(args, ctx);
     case 'update_recipient_phone':
       return updateRecipientPhoneTool(args, ctx);
     case 'create_schedule':
@@ -2242,7 +2273,7 @@ function clampLimit(raw: unknown, def: number, max: number): number {
 
 /**
  * Lists the customer's OWN recent transfers (newest first), optionally filtered
- * to a recipient they name (web-only — see WEB_ONLY_TOOLS). Ownership is implicit
+ * to a recipient they name (both channels since Program-Fix 34B). Ownership is implicit
  * and unforgeable: listTransfersByPhone(ctx.partnerId, ctx.phone) is an INDEXED own-customer query
  * and the tool takes no transfer_id, so it can never surface another customer's
  * data — there is nothing to 404 on. Each row is shaped by the shared
@@ -2443,7 +2474,7 @@ async function requestRefundTool(
       return {
         error_code: 'under_review',
         message:
-          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+          "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
     case 'already_requested':
       return {
@@ -2479,7 +2510,7 @@ async function requestRefundTool(
       return {
         error_code: 'cancelled',
         message:
-          "This transfer was already cancelled. If you believe you were charged for it, reply 'help' and our team will take a look.",
+          "This transfer was already cancelled. If you believe you were charged for it, say you'd like to talk to a person and I'll open a case for our team.",
       };
     case 'refundable':
       break; // the one eligible state — handled below
@@ -2490,7 +2521,7 @@ async function requestRefundTool(
       return {
         error_code: 'under_review',
         message:
-          'This transfer is currently under review, so a refund can\'t be requested yet — our team will follow up shortly.',
+          "This transfer is currently under review, so a refund can't be requested yet. If you'd like to talk to a person about it, just say so and I'll open a case.",
       };
   }
 
@@ -2595,7 +2626,7 @@ async function openRecallDisputeTool(
         return {
           error_code: 'not_recall_eligible',
           reply_hint:
-            'this transfer is not within the recall window — explain its current state and offer to check in with our team',
+            "this transfer is not within the recall window — explain its current state; if they want more help, offer to open a case with a person (request_human_help)",
         };
     }
   }
@@ -2644,6 +2675,75 @@ async function openRecallDisputeTool(
     reply_hint:
       'a recall case is open and our team will look into it — recovery is not guaranteed once funds are delivered; we will follow up',
   };
+}
+
+// ── Program-Fix 34B: "a person will help" only with a real case ─────────────
+
+const HELP_REASONS = ['question', 'complaint', 'payment_problem', 'account_access', 'other'] as const;
+type HelpReason = (typeof HELP_REASONS)[number];
+const HELP_SUMMARY_MAX = 300;
+
+/**
+ * The case-opened line the model relays. No response-time promise (owner
+ * decision, fix 34). A staff reply reaches WhatsApp only as a link notice
+ * (admin-dashboard/tickets/actions.ts), so the copy never promises an in-chat
+ * reply (review M1; copy decided by the main session, owner to confirm).
+ */
+function helpReplyHint(ctx: ToolContext, caseId: string): string {
+  return isWebChannel(ctx)
+    ? `A teammate will reply on the Support page of your account. Your case number is ${caseId}.`
+    : `When a teammate replies, you'll get a message here with a link to read it (sign in with this WhatsApp number). Your case number is ${caseId}.`;
+}
+
+/**
+ * Opens (or reuses) the customer's help case in the staff Tickets queue.
+ *
+ * - One open case per (turn tenant, phone): ticketRepo.findOpenHumanHelpCase,
+ *   tenant-scoped in SQL — this tenant's customer ticket, still open/pending/
+ *   waiting, carrying category human_help OR the fixed help subject (staff may
+ *   re-categorise a case; its subject never changes). A sibling tenant's case
+ *   for the same phone is never reused. Find-then-create is not locked: on
+ *   WhatsApp the per-phone turn lock (34A) serialises it.
+ * - Triage and the ops alert are enqueued on BOTH paths with dedupe keys, so a
+ *   crash between the ticket insert and the enqueues is healed by the model's
+ *   next call, and a repeat call adds nothing (the outbox dedupe index is not
+ *   partial on status).
+ * - The alert carries the tenant and case id only — no phone, no summary.
+ * - The summary is outsider text: bounded (fix 5) before it is stored.
+ */
+async function requestHumanHelpTool(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const reason = asEnum(HELP_REASONS, args.reason) as HelpReason | undefined;
+  if (!reason) {
+    return { error: `reason must be one of: ${HELP_REASONS.join(', ')}.` };
+  }
+  const summary = boundUntrustedText(args.summary, HELP_SUMMARY_MAX);
+
+  const repo = ctx.ticketRepo ?? createTicketRepo(getDb());
+  const open = await repo.findOpenHumanHelpCase(ctx.partnerId, ctx.phone); // tenant-scoped in SQL
+  const ticket =
+    open ??
+    (await repo.createTicket({
+      id: `tk_${newTransferId()}`,
+      partnerId: ctx.partnerId,
+      kind: 'customer',
+      customerPhone: ctx.phone,
+      subject: HUMAN_HELP_SUBJECT,
+      body: summary ? `Reason: ${reason}. ${summary}` : `Reason: ${reason}.`,
+      category: HUMAN_HELP_CATEGORY,
+    }));
+
+  const outbox = ctx.outboxRepo ?? createOutboxRepo(getDb());
+  await outbox.enqueue('ticket.triage', { ticketId: ticket.id }, { dedupeKey: `triage:${ticket.id}` });
+  await outbox.enqueue(
+    'ops.alert',
+    {
+      message: `🙋 SmartRemit ops: a customer asked for a person — case ${ticket.id} (${ticket.partnerId}) is in the Tickets queue.`,
+    },
+    { dedupeKey: `help:${ticket.id}` },
+  );
+  pokeWorker();
+
+  return { case_id: ticket.id, reply_hint: helpReplyHint(ctx, ticket.id) };
 }
 
 // Source-currency amount for the recall case body (mirrors recent-transfers'
@@ -2865,7 +2965,7 @@ async function cancelBillTool(
             return {
               cancelled: false,
               reply_hint:
-                "The payment already settled and it's past the recall window — our team can look into it.",
+                "The payment already settled and it's past the recall window, so it can't be pulled back from here. If you'd like a person to look into it, just say so and I'll open a case.",
             };
           }
           return recall;
@@ -2957,7 +3057,7 @@ async function disputeBillTool(
   return {
     disputed: true,
     case_id: ticket.id,
-    reply_hint: "Thanks — we've flagged this bill as disputed and our team will follow up.",
+    reply_hint: `Thanks — we've flagged this bill as disputed and our team will follow up. Your case number is ${ticket.id}.`,
   };
 }
 
@@ -3356,7 +3456,7 @@ async function sendApprovePickerTool(
       return {
         blocked: true,
         reply_to_customer:
-          "This transfer can't be completed, and our team has been notified. If you have any questions, reply 'help' and we'll follow up.",
+          "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team.",
       };
     }
 
@@ -3434,29 +3534,39 @@ async function sendApprovePickerTool(
     // (e.g. the reply send to Meta threw a transient 5xx) re-runs this whole turn
     // and would emit a SECOND card + a NEW pay link; the model can also call this
     // tool twice in one turn. Dedupe the card SEND by sender+content within a
-    // short TTL — a duplicate is a silent no-op, a genuinely new send still goes
+    // short TTL — a duplicate is not re-sent (and says so, below), a genuinely new send still goes
     // through. The draft above is single-use/30-min TTL, so an unsent one is harmless.
     // Content-keyed (NOT by draftId, which changes every call): two byte-identical
     // sends inside the TTL intentionally collide — a true "same amount, same
     // recipient, right now" duplicate is rare and worth suppressing.
     const cardKey = `${ctx.phone}|${recipientPhone}|${amountSource}|${sourceCurrency}|${destinationCountry}`;
-    if (await ctx.store.markApproveCardSent(cardKey)) {
-      try {
-        await sendCtaUrl(
-          ctx.phone,
-          `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
-          { displayText: 'Approve & Pay', url: payUrl },
-          undefined,
-          undefined,
-          ctx.waCreds, // WL2 — approve card leaves from the partner's number
-        );
-      } catch (sendErr) {
-        // The send itself failed AFTER we claimed the key — release it so the
-        // at-least-once retry can actually deliver the card. (A failure in a
-        // LATER step keeps the key, so that retry stays deduped.)
-        await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
-        throw sendErr;
-      }
+    if (!(await ctx.store.markApproveCardSent(cardKey))) {
+      // Program-Fix 34A: a DEDUPED card was not sent — never report sent:true
+      // (the agent would treat the card as the reply and the customer would see
+      // nothing). The model answers in text, pointing at the card above.
+      return {
+        sent: false,
+        duplicate: true,
+        draft_id: draftId,
+        reply_hint:
+          'The payment card for this exact send is already above — ask the customer to tap it, or say what to change.',
+      };
+    }
+    try {
+      await sendCtaUrl(
+        ctx.phone,
+        `${summary}\n\nTap to pay securely, or reply cancel to stop.`,
+        { displayText: 'Approve & Pay', url: payUrl },
+        undefined,
+        undefined,
+        ctx.waCreds, // WL2 — approve card leaves from the partner's number
+      );
+    } catch (sendErr) {
+      // The send itself failed AFTER we claimed the key — release it so the
+      // at-least-once retry can actually deliver the card. (A failure in a
+      // LATER step keeps the key, so that retry stays deduped.)
+      await ctx.store.clearApproveCardSent(cardKey).catch(() => {});
+      throw sendErr;
     }
     return { sent: true, draft_id: draftId };
   } catch (err) {
@@ -3471,23 +3581,37 @@ async function repeatTransferTool(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  const recipientPhone = normalizePhone(args.recipient_phone);
-  if (!isValidPhone(recipientPhone)) {
-    return { error: "I need the recipient's WhatsApp number to repeat a transfer." };
+  // Program-Fix 34B (prompt-09): a transfer_id names the exact past send, so
+  // "same person" never has to be guessed from a name. recipient_phone stays the
+  // fallback; with neither, the error names both options.
+  const transferIdArg = typeof args.transfer_id === 'string' ? args.transfer_id.trim().replace(/^#/, '') : '';
+  const phoneArg = normalizePhone(args.recipient_phone ?? '');
+  if (!transferIdArg && !isValidPhone(phoneArg)) {
+    return {
+      error:
+        'To repeat a transfer I need either its transfer_id (from list_recent_transfers) or the recipient_phone of a past recipient.',
+    };
   }
   // fix 6: funding_method is a closed set (the schema's consumer enum).
   const repeatFundingArg = parseFundingArg(CONSUMER_FUNDING_METHODS, args.funding_method);
   if (repeatFundingArg === null) return { error: fundingMethodError(CONSUMER_FUNDING_METHODS) };
 
-  // Hydrate the most-recent transfer to this recipient (own phone, newest-first).
-  // Stage 4: indexed per-phone page, then a small in-JS recipient filter.
-  const mine = (await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, 100)).filter(
-    (t) => t.recipientPhone === recipientPhone,
-  );
-  const last = mine[0];
+  // Hydrate from the customer's OWN transfers (own tenant + phone, newest-first).
+  // Stage 4: indexed per-phone page, then a small in-JS filter. By id: an id that
+  // is not in this page (another customer's, or made up) reads exactly like "no
+  // past transfer" — 404, never 403.
+  const page = await ctx.store.listTransfersByPhone(ctx.partnerId, ctx.phone, 100);
+  const last = transferIdArg
+    ? page.find((t) => t.id === transferIdArg)
+    : page.find((t) => t.recipientPhone === phoneArg);
   if (!last) {
-    return { error: "I don't see a past transfer to that number — who would you like to send to?" };
+    return {
+      error: transferIdArg
+        ? "I don't see a past transfer with that id — who would you like to send to?"
+        : "I don't see a past transfer to that number — who would you like to send to?",
+    };
   }
+  const recipientPhone = last.recipientPhone;
   // fix 5: the past row's name may be pre-fix outsider-written text. It seeds
   // the new draft (and the web summary returned to the model), so it is clamped
   // once here; a name that clamps to nothing is not reused.
@@ -3565,6 +3689,14 @@ async function repeatTransferTool(
   );
 }
 
+/**
+ * Program-Fix 34B (live-08): with no open card, the model told a customer
+ * mid-conversation that "nothing was set up". The hint makes it acknowledge the
+ * plan they are dropping instead.
+ */
+const NOTHING_TO_CANCEL_HINT =
+  "No payment was set up yet, so nothing will be charged — confirm you have dropped the send you were discussing.";
+
 async function cancelDraftTool(
   _args: Record<string, unknown>,
   ctx: ToolContext,
@@ -3577,18 +3709,18 @@ async function cancelDraftTool(
       ? ctx.turn.buttonTap.draftId
       : await ctx.draftStore.getActiveDraftId(ctx.partnerId, ctx.phone);
   if (!draftId) {
-    return { cancelled: false, reason: 'no_active_draft' };
+    return { cancelled: false, reason: 'no_active_draft', reply_hint: NOTHING_TO_CANCEL_HINT };
   }
   const draft = await ctx.draftStore.consumeDraft(draftId);
   if (!draft) {
-    return { cancelled: false, reason: 'draft_not_found_or_expired' };
+    return { cancelled: false, reason: 'draft_not_found_or_expired', reply_hint: NOTHING_TO_CANCEL_HINT };
   }
   // D12 (fix 1): same hard tenant guard as the approve tap — put another
   // tenant's draft back untouched and answer exactly like "no pointer".
   if ((draft.partnerId ?? DEFAULT_PARTNER_ID) !== ctx.partnerId) {
     await ctx.draftStore.restoreDraft(draft, draftId);
     logWarn('draft.tenant_mismatch', 'draft resolved under another tenant', { draftId });
-    return { cancelled: false, reason: 'no_active_draft' };
+    return { cancelled: false, reason: 'no_active_draft', reply_hint: NOTHING_TO_CANCEL_HINT };
   }
   return { cancelled: true };
 }

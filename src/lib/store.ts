@@ -304,6 +304,25 @@ export function createStore(redis: RedisLike, db: Db) {
     async clearApproveCardSent(key: string): Promise<void> {
       await redis.del(`approvecard:${key}`);
     },
+    // Program-Fix 34A: at most ONE agent.turn runs per (tenant, phone) at a
+    // time — two concurrent drains would otherwise interleave the last-writer-
+    // wins conversation history. SET NX EX 90 (the web chat's lock shape): a
+    // holder killed mid-turn self-heals after 90 s. `token` is the outbox row
+    // id, so only the row that took the lock releases it. Throws on a Redis
+    // error; the worker treats a throw as "no lock" and FAILS OPEN.
+    async tryTurnLock(partnerId: PartnerId, phone: string, token: string): Promise<boolean> {
+      const result = await redis.set(`turnlock:${partnerId}:${phone}`, token, { ex: 90, nx: true });
+      return result !== null;
+    },
+    // Release only a lock we still hold. GET-compare-DEL is not atomic (the
+    // same trade-off as the web chat's lock): a holder that outlived the 90 s
+    // TTL could, in a narrow window, delete a successor's lock. RedisLike has
+    // no eval, so no Lua compare-and-delete; the FIFO guard in the worker keeps
+    // replies in order even then.
+    async releaseTurnLock(partnerId: PartnerId, phone: string, token: string): Promise<void> {
+      const key = `turnlock:${partnerId}:${phone}`;
+      if ((await redis.get(key)) === token) await redis.del(key);
+    },
     // Replay-safe bill creation (create_invoice). The agent.turn outbox row is
     // at-least-once — a transient reply-send 5xx re-runs the WHOLE turn (and the
     // model can emit two calls in one turn) — so binding a content key → invoiceId

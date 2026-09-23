@@ -16,9 +16,40 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
+import { createScopedStore } from '@/lib/scoped-store';
+import { sealCustomerRef } from '@/lib/customer-ref';
 import type { CountryCode, KycStatus, PartnerId } from '@/lib/types';
 
 const VALID_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
+
+// Program-Fix 37 (dash-04): the detail route is keyed on a sealed ref, never
+// the phone. Revalidation targets the dynamic route pattern (every ref), per
+// revalidatePath(originalPath, 'page') in
+// node_modules/next/dist/server/web/spec-extension/revalidate.d.ts:32.
+const CUSTOMER_DETAIL_ROUTE = '/admin-dashboard/customers/[ref]';
+
+function customerDetailPath(partnerId: PartnerId, phone: string): string {
+  return `/admin-dashboard/customers/${sealCustomerRef(partnerId, phone)}`;
+}
+
+/**
+ * Program-Fix 37 (dash-04): open a customer's detail page. Customer links are
+ * small POST forms (CustomerLink), so the phone travels only in this request
+ * body and the browser lands on the sealed-ref URL: no phone in the address
+ * bar, request logs, history or referrers. Self-gated (requireScope bounces
+ * support), then re-resolved UNDER THE CALLER'S SCOPE (createScopedStore pins
+ * partner staff to their tenant whatever partnerId is posted). The ref seals
+ * the RESOLVED row's own (partnerId, senderPhone), never the form fields.
+ */
+export async function openCustomerAction(formData: FormData): Promise<void> {
+  const { staff } = await requireScope();
+  const phone = String(formData.get('phone') ?? '').trim();
+  const partnerId = String(formData.get('partnerId') ?? '').trim();
+  if (!phone) throw new Error('Customer not found.');
+  const customer = await createScopedStore(staff).getCustomer(phone, { partnerId: partnerId || undefined });
+  if (!customer) throw new Error('Customer not found.');
+  redirect(customerDetailPath(customer.partnerId, customer.senderPhone));
+}
 
 /**
  * The tenant an admin action targets (fix 1): partner staff are PINNED to their
@@ -57,7 +88,7 @@ export async function markCustomerVerifiedAction(formData: FormData): Promise<vo
     updatedAt: nowIso,
   });
   revalidatePath('/admin-dashboard/customers');
-  revalidatePath(`/admin-dashboard/customers/${phone}`);
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }
 
 /**
@@ -101,7 +132,7 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
 
   revalidatePath('/admin-dashboard/compliance');
   revalidatePath('/admin-dashboard/customers');
-  revalidatePath(`/admin-dashboard/customers/${phone}`);
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }
 
 /**
@@ -174,7 +205,7 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
   });
 
   revalidatePath('/admin-dashboard/customers');
-  redirect(`/admin-dashboard/customers/${normalized}?partner=${encodeURIComponent(partnerId)}`);
+  redirect(customerDetailPath(partnerId, normalized));
 }
 
 export async function markCustomerRejectedAction(formData: FormData): Promise<void> {
@@ -200,7 +231,7 @@ export async function markCustomerRejectedAction(formData: FormData): Promise<vo
     updatedAt: nowIso,
   });
   revalidatePath('/admin-dashboard/customers');
-  revalidatePath(`/admin-dashboard/customers/${phone}`);
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }
 
 /**
@@ -255,5 +286,5 @@ export async function setCustomerSendLimitAction(formData: FormData): Promise<vo
     });
   });
   revalidatePath('/admin-dashboard/customers');
-  revalidatePath(`/admin-dashboard/customers/${phone}`);
+  revalidatePath(CUSTOMER_DETAIL_ROUTE, 'page');
 }

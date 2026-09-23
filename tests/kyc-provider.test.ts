@@ -14,10 +14,11 @@ beforeEach(async () => {
 });
 
 describe('MockKycProvider', () => {
-  it('startVerification returns a URL pointing at the admin-dashboard customer page and a providerRef', async () => {
+  it('startVerification returns the admin-dashboard customers LIST url (no phone, Program-Fix 37) and a providerRef', async () => {
     const provider = new MockKycProvider(cs, 'https://example.com');
     const r = await provider.startVerification({ customerId: PHONE, senderPhone: PHONE });
-    expect(r.url).toBe(`https://example.com/admin-dashboard/customers/${PHONE}`);
+    expect(r.url).toBe('https://example.com/admin-dashboard/customers');
+    expect(r.url).not.toMatch(/\d{4,}/); // no digits of the phone in a customer-facing link
     expect(r.providerRef).toBe(`mock-${PHONE}`);
   });
 
