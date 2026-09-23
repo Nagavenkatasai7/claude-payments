@@ -5,7 +5,7 @@ import { sql } from 'drizzle-orm';
 import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createSanctionsListRepo } from '@/db/repos/sanctions-list-repo';
-import { runOfacSdnLoad, SANCTIONS_LOAD_AUDIT_ACTION } from '@/lib/sanctions/list-loader';
+import { runOfacSdnLoad, SANCTIONS_LOAD_AUDIT_ACTION, OFAC_SDN_MIN_ENTRIES } from '@/lib/sanctions/list-loader';
 
 // Program-Fix 14 PR C: the daily OFAC SDN loader. Tests never touch the
 // network: fetch is always a stub returning the checked-in fixture.
@@ -35,7 +35,7 @@ describe('runOfacSdnLoad', () => {
   });
 
   it('fetches, stores and activates the list, and writes one audit row (counts + hash, no names)', async () => {
-    const res = await runOfacSdnLoad({ db, fetchImpl: okFetch(), now: NOW });
+    const res = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(), now: NOW });
     expect(res).toMatchObject({ status: 'activated', version: '2026-09-18', entryCount: 5 });
     expect((await createSanctionsListRepo(db).activeVersion('ofac-sdn'))!.version).toBe('2026-09-18');
     const rows = await audits(db);
@@ -47,15 +47,15 @@ describe('runOfacSdnLoad', () => {
   });
 
   it('a second run on the same list is "unchanged" (no new version)', async () => {
-    await runOfacSdnLoad({ db, fetchImpl: okFetch(), now: NOW });
-    const res = await runOfacSdnLoad({ db, fetchImpl: okFetch(), now: NOW + 4 * 3600_000 });
+    await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(), now: NOW });
+    const res = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(), now: NOW + 4 * 3600_000 });
     expect(res.status).toBe('unchanged');
   });
 
   it('a network failure fails SOFT: keeps the last good version, raises ONE ops alert per day, never throws', async () => {
-    await runOfacSdnLoad({ db, fetchImpl: okFetch(), now: NOW });
-    const first = await runOfacSdnLoad({ db, fetchImpl: failFetch(503), now: NOW + 86_400_000 });
-    const again = await runOfacSdnLoad({ db, fetchImpl: failFetch(503), now: NOW + 86_400_000 + 4 * 3600_000 });
+    await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(), now: NOW });
+    const first = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: failFetch(503), now: NOW + 86_400_000 });
+    const again = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: failFetch(503), now: NOW + 86_400_000 + 4 * 3600_000 });
     expect(first).toMatchObject({ status: 'failed', reason: 'fetch' });
     expect(again).toMatchObject({ status: 'failed', reason: 'fetch' });
     expect((await createSanctionsListRepo(db).activeVersion('ofac-sdn'))!.version).toBe('2026-09-18');
@@ -70,12 +70,12 @@ describe('runOfacSdnLoad', () => {
 
   it('a thrown fetch (DNS, timeout) fails soft the same way', async () => {
     const boom = vi.fn(async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
-    await expect(runOfacSdnLoad({ db, fetchImpl: boom, now: NOW })).resolves.toMatchObject({ status: 'failed', reason: 'fetch' });
+    await expect(runOfacSdnLoad({ db, minEntries: 1, fetchImpl: boom, now: NOW })).resolves.toMatchObject({ status: 'failed', reason: 'fetch' });
     expect(await alerts(db)).toHaveLength(1);
   });
 
   it('an unparseable document is refused (reason parse) and never becomes an empty "clean" list', async () => {
-    const res = await runOfacSdnLoad({ db, fetchImpl: okFetch('<html>maintenance</html>'), now: NOW });
+    const res = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch('<html>maintenance</html>'), now: NOW });
     expect(res).toMatchObject({ status: 'failed', reason: 'parse' });
     expect(await createSanctionsListRepo(db).activeVersion('ofac-sdn')).toBeNull();
   });
@@ -87,16 +87,31 @@ describe('runOfacSdnLoad', () => {
         `<sdnEntry><uid>${5000 + i}</uid><lastName>SYNTHETIC ${i}</lastName><sdnType>Entity</sdnType><programList><program>X</program></programList></sdnEntry>`,
       ).join('') + '</sdnList>',
     );
-    await runOfacSdnLoad({ db, fetchImpl: okFetch(big), now: NOW });
-    const res = await runOfacSdnLoad({ db, fetchImpl: okFetch(FIXTURE.replace('09/18/2026', '09/22/2026')), now: NOW + 86_400_000 });
+    await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(big), now: NOW });
+    const res = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(FIXTURE.replace('09/18/2026', '09/22/2026')), now: NOW + 86_400_000 });
     expect(res).toMatchObject({ status: 'failed', reason: 'shrink' });
     expect((await createSanctionsListRepo(db).activeVersion('ofac-sdn'))!.entryCount).toBe(25);
     expect(await alerts(db)).toHaveLength(1);
   });
 
+  it('an older publication is refused (reason stale) and alerts', async () => {
+    await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(), now: NOW });
+    const older = FIXTURE.replace('09/18/2026', '09/01/2026').replace('SEA FIXTURE', 'SEA FIXTURE TWO');
+    const res = await runOfacSdnLoad({ db, minEntries: 1, fetchImpl: okFetch(older), now: NOW + 86_400_000 });
+    expect(res).toMatchObject({ status: 'failed', reason: 'stale' });
+    expect(await alerts(db)).toHaveLength(1);
+  });
+
+  it('production floor: the real loader refuses a list with too few entries', async () => {
+    const res = await runOfacSdnLoad({ db, fetchImpl: okFetch(), now: NOW, minEntries: OFAC_SDN_MIN_ENTRIES });
+    expect(OFAC_SDN_MIN_ENTRIES).toBeGreaterThanOrEqual(5000);
+    expect(res).toMatchObject({ status: 'failed', reason: 'shrink' });
+  });
+
   it('still returns the failure when even the alert cannot be written', async () => {
     const res = await runOfacSdnLoad({
       db,
+      minEntries: 1,
       fetchImpl: failFetch(500),
       now: NOW,
       enqueueAlert: async () => { throw new Error('outbox down'); },

@@ -11,7 +11,8 @@
 -- it NULL) or the new tables. Apply BEFORE merging the code that writes them.
 --
 -- Locks: ADD COLUMN (nullable, no default) is catalog-only but takes an ACCESS
--- EXCLUSIVE lock on "transfers" for that instant. The two CREATE INDEX on
+-- EXCLUSIVE lock on "transfers", held until COMMIT — so it is the LAST
+-- statement (if 0022 is applied in the same run, its brief lock comes first). The two CREATE INDEX on
 -- "audit_events" take a SHARE lock for the index build (blocks INSERTs into
 -- audit_events, not reads, for the build — the table is small today). The
 -- drizzle migrator runs every pending migration inside ONE transaction
@@ -46,9 +47,11 @@ CREATE TABLE "sanctions_list_versions" (
 	"checked_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "transfers" ADD COLUMN "screening" jsonb;--> statement-breakpoint
 ALTER TABLE "sanctions_list_entries" ADD CONSTRAINT "sanctions_list_entries_version_id_sanctions_list_versions_id_fk" FOREIGN KEY ("version_id") REFERENCES "public"."sanctions_list_versions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "sanctions_list_versions_source_hash" ON "sanctions_list_versions" USING btree ("source","hash");--> statement-breakpoint
 CREATE UNIQUE INDEX "sanctions_list_versions_one_active" ON "sanctions_list_versions" USING btree ("source") WHERE "sanctions_list_versions"."active";--> statement-breakpoint
 CREATE INDEX "audit_subject_action" ON "audit_events" USING btree ("subject_id","action");--> statement-breakpoint
-CREATE INDEX "audit_actor_type_at" ON "audit_events" USING btree ("actor_type","at" DESC NULLS LAST);
+CREATE INDEX "audit_actor_type_at" ON "audit_events" USING btree ("actor_type","at" DESC NULLS LAST);--> statement-breakpoint
+-- LAST on purpose: the ACCESS EXCLUSIVE lock on "transfers" is held until
+-- COMMIT, so nothing else (the audit_events index builds) runs while it is held.
+ALTER TABLE "transfers" ADD COLUMN "screening" jsonb;

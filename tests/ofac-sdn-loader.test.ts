@@ -55,6 +55,15 @@ describe('parseOfacSdnXml (fixture: 5 SDN entries)', () => {
     expect(() => parseOfacSdnXml(FIXTURE.replace(/<Publish_Date>.*<\/Publish_Date>/, ''))).toThrow();
     expect(() => parseOfacSdnXml(FIXTURE.replace(/<sdnEntry>[\s\S]*<\/sdnEntry>/, ''))).toThrow();
   });
+
+  it('refuses a truncated document (no closing </sdnList>) even when whole entries parsed', () => {
+    const cut = FIXTURE.slice(0, FIXTURE.indexOf('<uid>1003</uid>'));
+    expect(() => parseOfacSdnXml(cut)).toThrow(/OFAC SDN:/);
+  });
+
+  it('a malformed numeric entity is a parse error (OFAC SDN:), not a crash', () => {
+    expect(() => parseOfacSdnXml(FIXTURE.replace('SEA FIXTURE', 'SEA &#x110000; FIXTURE'))).toThrow(/OFAC SDN:/);
+  });
 });
 
 describe('fetchOfacSdn (never called in prod unless SANCTIONS_LIST is set; here with a stub)', () => {

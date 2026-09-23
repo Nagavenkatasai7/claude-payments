@@ -77,8 +77,21 @@ export function hashEntries(entries: SanctionsListEntry[]): string {
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
-/** Pure parser. Throws on a document without a publish date or without entries. */
+/** Pure parser. Throws ('OFAC SDN: …') on a truncated document, or one without a publish date or entries. */
 export function parseOfacSdnXml(xml: string): SanctionsList {
+  try {
+    return parseUnchecked(xml);
+  } catch (err) {
+    // Every parse failure (incl. a RangeError from a malformed entity) is
+    // reported as a parse error, prefixed 'OFAC SDN:'.
+    if (err instanceof Error && err.message.startsWith('OFAC SDN:')) throw err;
+    throw new Error(`OFAC SDN: unparseable document (${err instanceof Error ? err.name : 'unknown'})`);
+  }
+}
+
+function parseUnchecked(xml: string): SanctionsList {
+  // A body cut off after N whole entries would otherwise parse cleanly.
+  if (!/<\/sdnList>\s*$/.test(xml)) throw new Error('OFAC SDN: truncated document (no closing </sdnList>)');
   const publishDate = tag(xml, 'Publish_Date');
   if (!publishDate) throw new Error('OFAC SDN: missing Publish_Date');
   const version = toIsoDate(publishDate);

@@ -28,6 +28,13 @@ export class SanctionsListShrinkError extends Error {
   }
 }
 
+export class SanctionsListStaleError extends Error {
+  constructor(readonly active: string, readonly next: string) {
+    super(`sanctions list refused: publication ${next} is older than the active ${active}`);
+    this.name = 'SanctionsListStaleError';
+  }
+}
+
 export interface ActiveSanctionsVersion {
   id: number;
   source: string;
@@ -90,6 +97,10 @@ export function createSanctionsListRepo(db: Db) {
         if (weak.length > 0) e.weakNames = weak;
         return e;
       });
+      // Defence in depth: the store is atomic, but never screen a partial version.
+      if (entries.length !== v.entryCount) {
+        throw new Error(`sanctions list version ${v.id}: ${entries.length} entries stored, ${v.entryCount} expected`);
+      }
       return { source: v.source, version: v.version, hash: v.hash, entries };
     },
 
@@ -105,7 +116,7 @@ export function createSanctionsListRepo(db: Db) {
      * rolls the whole store back. Superseded versions beyond
      * KEEP_INACTIVE_VERSIONS are pruned (their entries cascade).
      */
-    async storeList(list: SanctionsList): Promise<StoreListResult> {
+    async storeList(list: SanctionsList, opts: { minEntries?: number } = {}): Promise<StoreListResult> {
       // Duplicate ids: first wins (never fail a whole load over one repeat).
       const seen = new Set<string>();
       const entries = list.entries.filter((e) => (seen.has(e.id) ? false : (seen.add(e.id), true)));
@@ -131,8 +142,28 @@ export function createSanctionsListRepo(db: Db) {
           };
         }
 
-        if (active && entries.length < active.entryCount * MIN_ENTRY_RATIO) {
-          throw new SanctionsListShrinkError(active.entryCount, entries.length);
+        // The list only moves FORWARD: an older publication (a replayed or
+        // stale export) would silently drop designations added since.
+        // YYYY-MM-DD compares as a string. A manual rollback is an operator
+        // step, never something the cron can do.
+        if (active && list.version < active.version) {
+          throw new SanctionsListStaleError(active.version, list.version);
+        }
+        // Integrity floors, applied even with no active version (first load,
+        // or after a manual deactivation): an absolute minimum, and the ratio
+        // against the NEWEST stored version whatever its active flag.
+        if (entries.length < (opts.minEntries ?? 1)) {
+          throw new SanctionsListShrinkError(opts.minEntries ?? 1, entries.length);
+        }
+        const newest = await tx
+          .select({ entryCount: sanctionsListVersions.entryCount })
+          .from(sanctionsListVersions)
+          .where(eq(sanctionsListVersions.source, list.source))
+          .orderBy(desc(sanctionsListVersions.id))
+          .limit(1);
+        const reference = Math.max(active?.entryCount ?? 0, newest[0]?.entryCount ?? 0);
+        if (entries.length < reference * MIN_ENTRY_RATIO) {
+          throw new SanctionsListShrinkError(reference, entries.length);
         }
 
         const existing = await tx

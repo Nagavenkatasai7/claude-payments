@@ -182,6 +182,11 @@ export class ListSanctionsScreener implements SanctionsScreener {
     let bestId: string | undefined;
     for (const keys of [idx.keys, this.extraKeys]) {
       for (const k of keys) {
+        // Jaro-Winkler ≥ 0.9 needs shorter/longer ≥ 0.5 (JW ≤ 0.6·jaro + 0.4 and
+        // jaro ≤ (2 + s/L)/3), so such keys can never reach the threshold:
+        // skipping them loses no match and bounds the cost of a huge name.
+        const lk = k.key.length;
+        if (Math.min(lk, key.length) * 2 < Math.max(lk, key.length)) continue;
         const score = jaroWinkler(key, k.key);
         if (score > best) {
           best = score;

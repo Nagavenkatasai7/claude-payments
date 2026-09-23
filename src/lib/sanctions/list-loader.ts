@@ -21,7 +21,7 @@
 import type { Db } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { createSanctionsListRepo, SanctionsListShrinkError } from '@/db/repos/sanctions-list-repo';
+import { createSanctionsListRepo, SanctionsListShrinkError, SanctionsListStaleError } from '@/db/repos/sanctions-list-repo';
 import { logError } from '../log';
 import { SANCTIONS_AUDIT_ACTOR } from './evidence';
 import { fetchOfacSdn } from './ofac-sdn-loader';
@@ -29,7 +29,10 @@ import type { SanctionsList } from './list-source';
 
 export const SANCTIONS_LOAD_AUDIT_ACTION = 'sanctions.list.load';
 
-export type LoadFailureReason = 'fetch' | 'parse' | 'shrink' | 'store';
+export type LoadFailureReason = 'fetch' | 'parse' | 'shrink' | 'stale' | 'store';
+
+/** The live SDN list has ~18,000 entries (2026); anything under this is not the whole list. */
+export const OFAC_SDN_MIN_ENTRIES = 5000;
 
 export type LoadResult =
   | { status: 'activated' | 'unchanged'; version: string; hash: string; entryCount: number; nameCount: number }
@@ -39,6 +42,8 @@ export interface LoadDeps {
   db: Db;
   fetchImpl?: typeof fetch;
   now?: number;
+  /** Absolute entry floor (default OFAC_SDN_MIN_ENTRIES; tests with the 5-entry fixture lower it). */
+  minEntries?: number;
   /** Test seam: replaces the outbox enqueue of the failure alert. */
   enqueueAlert?: (message: string, dedupeKey: string) => Promise<void>;
 }
@@ -53,7 +58,8 @@ function easternDay(now: number): string {
 const REASON_TEXT: Record<LoadFailureReason, string> = {
   fetch: 'the download from the Treasury Sanctions List Service failed',
   parse: 'the downloaded file did not parse as the SDN list',
-  shrink: 'the downloaded list has far fewer entries than the active one and was refused',
+  shrink: 'the downloaded list has too few entries (against the minimum or the last stored version) and was refused',
+  stale: 'the downloaded list is an OLDER publication than the active one and was refused',
   store: 'saving the list to the database failed',
 };
 
@@ -73,7 +79,9 @@ export async function runOfacSdnLoad(deps: LoadDeps): Promise<LoadResult> {
       throw err;
     }
     stage = 'store';
-    const res = await createSanctionsListRepo(deps.db).storeList(list);
+    const res = await createSanctionsListRepo(deps.db).storeList(list, {
+      minEntries: deps.minEntries ?? OFAC_SDN_MIN_ENTRIES,
+    });
     result = {
       status: res.status,
       version: res.version,
@@ -82,7 +90,8 @@ export async function runOfacSdnLoad(deps: LoadDeps): Promise<LoadResult> {
       nameCount: res.nameCount,
     };
   } catch (err) {
-    const reason: LoadFailureReason = err instanceof SanctionsListShrinkError ? 'shrink' : stage;
+    const reason: LoadFailureReason =
+      err instanceof SanctionsListShrinkError ? 'shrink' : err instanceof SanctionsListStaleError ? 'stale' : stage;
     logError('sanctions.list-load', err instanceof Error ? `${err.name}: ${err.message}` : 'unknown', {
       source: SOURCE,
       reason,

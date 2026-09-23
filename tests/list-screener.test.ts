@@ -105,6 +105,14 @@ describe('ListSanctionsScreener', () => {
     expect(hit).toMatchObject({ matched: false, possibleMatch: true, matchScore: 1, entryId: 'sdn:1002' });
   });
 
+  it('a very long name is screened fast (keys that cannot reach the threshold are skipped) and still fuzzy-matches', async () => {
+    const s = new ListSanctionsScreener(fixtureSource());
+    const t0 = performance.now();
+    expect(await s.screen({ name: 'x'.repeat(4000), sourceCountry: 'US' })).toEqual({ matched: false });
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect((await s.screen({ name: 'Banco Ejemplo Nacionel', sourceCountry: 'US' })).possibleMatch).toBe(true);
+  });
+
   it('weak a.k.a.s are exact-only: a near miss on one is not a hit', async () => {
     const s = new ListSanctionsScreener(fixtureSource());
     expect(await s.screen({ name: 'Benn', sourceCountry: 'US' })).toEqual({ matched: false });

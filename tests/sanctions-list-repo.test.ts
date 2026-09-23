@@ -9,6 +9,7 @@ import type { SanctionsList } from '@/lib/sanctions/list-source';
 import {
   createSanctionsListRepo,
   SanctionsListShrinkError,
+  SanctionsListStaleError,
   KEEP_INACTIVE_VERSIONS,
 } from '@/db/repos/sanctions-list-repo';
 
@@ -122,14 +123,44 @@ describe('sanctions list repo (Postgres, migration 0023)', () => {
     expect(ids.length).toBe(KEEP_INACTIVE_VERSIONS + 1);
   });
 
-  it('a list whose content was seen before (a re-publish) is re-activated, not re-inserted', async () => {
+  it('an OLDER publication (a replayed or stale export) is refused: the list only moves forward', async () => {
     const repo = createSanctionsListRepo(db);
     await repo.storeList(variant(1));
     await repo.storeList(variant(2));
-    const res = await repo.storeList(variant(1));
+    await expect(repo.storeList(variant(1))).rejects.toBeInstanceOf(SanctionsListStaleError);
+    await expect(repo.storeList({ ...variant(3), version: '2026-09-01' })).rejects.toBeInstanceOf(SanctionsListStaleError);
+    expect((await repo.activeVersion('ofac-sdn'))!.hash).toBe(variant(2).hash);
+  });
+
+  it('content seen before under a same-or-newer date is re-activated, not re-inserted', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(variant(1));
+    await repo.storeList(variant(2));
+    const res = await repo.storeList({ ...variant(1), version: '2026-09-25' });
     expect(res.status).toBe('activated');
     expect(await versions(db)).toHaveLength(2);
-    expect((await repo.activeVersion('ofac-sdn'))!.hash).toBe(variant(1).hash);
+  });
+
+  it('refuses a list below the absolute entry floor, even with no active version (first load)', async () => {
+    const repo = createSanctionsListRepo(db);
+    await expect(repo.storeList(LIST, { minEntries: 6 })).rejects.toBeInstanceOf(SanctionsListShrinkError);
+    expect(await repo.activeVersion('ofac-sdn')).toBeNull();
+  });
+
+  it('the shrink ratio also applies when the newest version was deactivated by hand', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(variant(1, 20));
+    await db.execute(sql`UPDATE sanctions_list_versions SET active = false`);
+    await expect(repo.storeList({ ...variant(2), entries: LIST.entries.slice(0, 3) })).rejects.toBeInstanceOf(
+      SanctionsListShrinkError,
+    );
+  });
+
+  it('loadList refuses a version whose stored entries do not match its entry count', async () => {
+    const repo = createSanctionsListRepo(db);
+    await repo.storeList(LIST);
+    const active = (await repo.activeVersion('ofac-sdn'))!;
+    await expect(repo.loadList({ ...active, entryCount: 6 })).rejects.toThrow(/entries/);
   });
 
   it('stores duplicate entry ids once (first wins) instead of failing the whole load', async () => {
