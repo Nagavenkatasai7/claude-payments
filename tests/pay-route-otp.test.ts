@@ -180,13 +180,36 @@ describe('POST /api/pay/[transferId] — request_otp send honesty (Program-Fix 2
     expect(await status()).toBe('awaiting_payment');
   });
 
-  it('after a failed send, an immediate second request_otp really sends (cooldown released)', async () => {
+  it('after a failed send, an immediate retry gets the cooldown answer (200 sent:true, no send); after ~10 s it sends', async () => {
+    let nowMs = Date.now();
+    txOtp = createTransactionOtpStore(fakeRedis(), { now: () => nowMs, randomInt: () => 654321 });
     sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
-    await POST(req({ action: 'request_otp' }), ctx);
-    const again = await POST(req({ action: 'request_otp' }), ctx);
-    expect(again.status).toBe(200);
-    expect(await again.json()).toEqual({ ok: true, sent: true });
+    expect((await POST(req({ action: 'request_otp' }), ctx)).status).toBe(502);
+    const soon = await POST(req({ action: 'request_otp' }), ctx);
+    expect(soon.status).toBe(200);
+    expect(await soon.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(1);
+    nowMs += 10_001;
+    const later = await POST(req({ action: 'request_otp' }), ctx);
+    expect(await later.json()).toEqual({ ok: true, sent: true });
     expect(sendTransactionOtp).toHaveBeenCalledTimes(2);
+  });
+
+  it('hammering Resend during a WhatsApp outage cannot reach locked within one minute', async () => {
+    let nowMs = Date.now();
+    txOtp = createTransactionOtpStore(fakeRedis(), { now: () => nowMs, randomInt: () => 654321 });
+    sendTransactionOtp.mockRejectedValue(new Error('WhatsApp send failed (500): outage'));
+    try {
+      const statuses: number[] = [];
+      for (let t = 0; t <= 60_000; t += 1_000) {
+        nowMs = nowMs + (t === 0 ? 0 : 1_000);
+        statuses.push((await POST(req({ action: 'request_otp' }), ctx)).status);
+      }
+      expect(statuses).not.toContain(429);
+      expect(sendTransactionOtp.mock.calls.length).toBeLessThan(10);
+    } finally {
+      sendTransactionOtp.mockReset().mockResolvedValue(undefined);
+    }
   });
 
   it('a cooldown (code sent < 30 s ago) still answers 200 {ok:true, sent:true} without a second send', async () => {
@@ -197,9 +220,9 @@ describe('POST /api/pay/[transferId] — request_otp send honesty (Program-Fix 2
     expect(sendTransactionOtp).toHaveBeenCalledTimes(1);
   });
 
-  it('a releaseCooldown error still answers the 502 (never a 500)', async () => {
+  it('a shortenCooldown error still answers the 502 (never a 500)', async () => {
     sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
-    vi.spyOn(txOtp, 'releaseCooldown').mockRejectedValueOnce(new Error('redis down'));
+    vi.spyOn(txOtp, 'shortenCooldown').mockRejectedValueOnce(new Error('redis down'));
     const res = await POST(req({ action: 'request_otp' }), ctx);
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });

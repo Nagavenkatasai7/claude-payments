@@ -303,22 +303,35 @@ describe('getTransactionOtpStore — wires the fail-closed ops signal (fix 45)',
   });
 });
 
-// Program-Fix 25 PR B (§3.6 cooldown trap): a code whose SEND failed never
-// reached the customer, so a Resend must really send instead of landing in the
-// 30-s cooldown. releaseCooldown deletes ONLY the cooldown marker.
-describe('transaction-otp releaseCooldown (Program-Fix 25 PR B)', () => {
-  it('after a release, an immediate re-issue sends a fresh code', async () => {
+// Program-Fix 25 PR B (§3.6 cooldown trap, review r1): a code whose SEND failed
+// never reached the customer, so the 30-s cooldown is SHORTENED to a 10-s floor
+// (not deleted): a retry soon works, but Resend cannot be hammered through the
+// lifetime issue budget during a WhatsApp outage.
+describe('transaction-otp shortenCooldown (Program-Fix 25 PR B)', { retry: 0 }, () => {
+  it('an immediate re-issue is still in cooldown; after the 10-s floor it issues a fresh code', async () => {
     expect((await store.issue(TX, PHONE)).ok).toBe(true);
+    await store.shortenCooldown(TX);
     expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'cooldown' });
-    await store.releaseCooldown(TX);
-    expect(redis.dump.has(cdKeyFor(TX))).toBe(false);
+    nowMs += 9_000;
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'cooldown' });
+    nowMs += 1_001;
     expect((await store.issue(TX, PHONE)).ok).toBe(true);
   });
 
-  it('keeps every issue/verify budget (only the cooldown marker goes)', async () => {
+  it('touches only the cooldown marker (every issue/verify budget is kept)', async () => {
     await store.issue(TX, PHONE);
-    const before = [...redis.dump.keys()].filter((k) => k !== cdKeyFor(TX)).sort();
-    await store.releaseCooldown(TX);
-    expect([...redis.dump.keys()].sort()).toEqual(before);
+    const before = new Map([...redis.dump.entries()].filter(([k]) => k !== cdKeyFor(TX)));
+    await store.shortenCooldown(TX);
+    const after = new Map([...redis.dump.entries()].filter(([k]) => k !== cdKeyFor(TX)));
+    expect(after).toEqual(before);
+    expect(redis.dump.has(cdKeyFor(TX))).toBe(true);
+  });
+
+  it('never LENGTHENS a cooldown that has less than 10 s left', async () => {
+    await store.issue(TX, PHONE);
+    nowMs += 25_000; // 5 s of the 30-s cooldown left
+    await store.shortenCooldown(TX);
+    nowMs += 5_001;
+    expect((await store.issue(TX, PHONE)).ok).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -2209,6 +2209,12 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
   });
 
   it('PR B (d): two 131030 deaths in the same hour raise ONE alert; a different code still gets its own', async () => {
+    // Pinned mid-hour (after freshDb in beforeEach; Date only) so the hour
+    // bucket can never roll over between the two deaths.
+    const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hour + 30 * 60_000);
+    onTestFinished(() => { vi.useRealTimers(); });
     sendText.mockRejectedValueOnce(graphErr(131030)).mockRejectedValueOnce(graphErr(131030));
     sendTemplate.mockRejectedValueOnce(graphErr(132001, 'WhatsApp template send failed'));
     await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'a', partnerId: 'acme' });

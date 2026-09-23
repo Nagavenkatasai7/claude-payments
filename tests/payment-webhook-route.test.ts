@@ -574,7 +574,7 @@ describe('POST /api/payment-webhook — delivered-notice honesty (Program-Fix 25
     expect(notifyAlerts()).toEqual([]);
   });
 
-  it('132001 template + a failing fallback → exactly one notifyfail:<transferId> alert (no PII)', async () => {
+  it('132001 template + a failing fallback → exactly one notifyfail:<code>:<hour> alert naming the transfer (no PII)', async () => {
     sendTemplate.mockRejectedValueOnce(graphErr(132001));
     sendText.mockResolvedValueOnce(undefined).mockRejectedValueOnce(graphErr(132001));
     await post('uniteller', body, sig(body));
@@ -582,12 +582,40 @@ describe('POST /api/payment-webhook — delivered-notice honesty (Program-Fix 25
     const a = notifyAlerts();
     expect(a).toHaveLength(1);
     expect(a[0].kind).toBe('ops.alert');
-    expect(a[0].dedupeKey).toBe('notifyfail:wh_1');
+    expect(a[0].dedupeKey).toMatch(/^notifyfail:132001:\d+$/);
     const msg = (a[0].payload as { message: string }).message;
     expect(msg).toContain('wh_1');
     expect(msg).toContain('#132001');
     expect(msg).not.toMatch(/\d{7,}/); // no phone number
     expect(msg).not.toContain('Mom');
+  });
+
+  // Review r1: on a production number the notice often hits 131047 (window
+  // closed). Coalesce per code per hour so a real outage still alerts ONCE.
+  it('two transfers failing with the same code in one hour → ONE alert; another code → its own', async () => {
+    const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hour + 30 * 60_000); // mid-hour: never straddles a bucket boundary
+    try {
+      sendText.mockRejectedValueOnce(graphErr(131047));
+      await post('uniteller', body, sig(body));
+      await flushAfter();
+      sendText.mockRejectedValueOnce(graphErr(131047));
+      updateTransferFromWebhook.mockResolvedValueOnce({ ...deliveredTransfer, id: 'wh_9' });
+      await post('uniteller', body, sig(body));
+      await flushAfter();
+      expect(notifyAlerts()).toHaveLength(1);
+      expect((notifyAlerts()[0].payload as { message: string }).message).toContain('wh_1');
+      sendText.mockRejectedValueOnce(new Error('network down')); // no Graph code
+      await post('uniteller', body, sig(body));
+      await flushAfter();
+      expect(notifyAlerts().map((x) => x.dedupeKey!.replace(/:\d+$/, '')).sort()).toEqual([
+        'notifyfail:131047',
+        'notifyfail:none',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('the SENDER notice throwing (non-131030) → one alert; a 131030 throw → none', async () => {

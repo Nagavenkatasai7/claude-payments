@@ -45,9 +45,9 @@ vi.mock('@/lib/monthly-volume-store', () => ({ getMonthlyVolumeStore: () => ({})
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 const verify = vi.hoisted(() => vi.fn());
 const issue = vi.hoisted(() => vi.fn());
-const releaseCooldown = vi.hoisted(() => vi.fn());
+const shortenCooldown = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/transaction-otp', () => ({
-  getTransactionOtpStore: () => ({ issue, verify, releaseCooldown }),
+  getTransactionOtpStore: () => ({ issue, verify, shortenCooldown }),
 }));
 // Program-Fix 45: spy on delivery so the request_otp mapping can be pinned.
 const sendTransactionOtp = vi.hoisted(() => vi.fn());
@@ -141,13 +141,13 @@ describe('POST /api/pay/b2b/[invoiceId] — request_otp at an issue cap (fix 45)
     expect(sendTransactionOtp).not.toHaveBeenCalled();
   });
 
-  it('a send that throws → 502 otp_send_failed and the cooldown is released', async () => {
+  it('a send that throws → 502 otp_send_failed and the cooldown is shortened', async () => {
     buyerPhone = '15551112222';
-    releaseCooldown.mockReset().mockResolvedValue(undefined);
+    shortenCooldown.mockReset().mockResolvedValue(undefined);
     sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
     const res = await requestOtp();
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
-    expect(releaseCooldown).toHaveBeenCalledWith('inv_1');
+    expect(shortenCooldown).toHaveBeenCalledWith('inv_1');
   });
 });
