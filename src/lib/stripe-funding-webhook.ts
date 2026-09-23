@@ -3,8 +3,7 @@ import type { Db, DbOrTx } from '@/db/client';
 import { fundingEvents } from '@/db/schema';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
-import { settleOrHold } from '@/lib/settlement';
+import { settleFundedTransfer, type FundedSettleDeps } from '@/lib/stripe-funded-settle';
 import { toMinorUnits } from '@/lib/funding-amount';
 import { logError } from '@/lib/log';
 import type { StripeFundingEvent } from '@/lib/providers/stripe-funding-provider';
@@ -25,8 +24,8 @@ import type { PartnerId, Transfer } from '@/lib/types';
 //    (a crash rolls both back and Stripe redelivers); the guarded transition
 //    is the primary guard (a second event id for the same object is a no-op),
 //    and settleOrHold's claims are idempotent.
-//  • Durability. The funded transition commits first; settleOrHold runs right
-//    after as the fast path. If it fails, the row is "charged but awaiting"
+//  • Durability. The funded transition commits first; settleFundedTransfer
+//    (re-screen, then settleOrHold) runs right after as the fast path. If it fails, the row is "charged but awaiting"
 //    (funding_ref set, funding_state succeeded) and the reconcile crash-resume
 //    sweep (listAwaitingWithFunding) settles it — the same recovery the
 //    synchronous capture always had.
@@ -64,6 +63,8 @@ export interface ProcessDeps {
   allowTestMode?: boolean;
   /** Injection seam for tests (crash-in-transaction). */
   transferRepo?: typeof createTransferRepo;
+  /** Pre-settlement re-screen (default: the pay route's rescreenBeforePay inputs). */
+  rescreen?: FundedSettleDeps['rescreen'];
 }
 
 const PROVIDER = 'stripe';
@@ -220,20 +221,13 @@ export async function processStripeFundingEvent(
   });
 
   if (result.settle) {
-    const t = result.settle;
     try {
-      const rail = await createIntegrationsRepo(db).getIntegrations(t.settlementPartnerId ?? t.partnerId);
-      const settled = await settleOrHold(db, t, rail);
-      if (settled.kind === 'refused') {
-        await alert(
-          db,
-          `fundblocked:${t.id}`,
-          `transfer ${t.id} (partner ${t.partnerId}) was CHARGED through Stripe but is BLOCKED by compliance — NOT settled. Refund it in the partner's Stripe dashboard.`,
-        );
-      }
+      // Re-screen (sanctions always runs — the debit may have taken days) and
+      // settle through the one paid-flip path. A failure leaves the row
+      // charged-but-awaiting; the reconcile sweep retries the same function.
+      await settleFundedTransfer(db, result.settle, { rescreen: deps.rescreen });
     } catch (err) {
-      // Funds are durably recorded; the reconcile crash-resume sweep settles it.
-      logError('stripe-funding.settle', err, { transferId: t.id });
+      logError('stripe-funding.settle', err, { transferId: result.settle.id });
     }
   }
   return { outcome: result.outcome, ...(result.transferId ? { transferId: result.transferId } : {}) };

@@ -18,6 +18,17 @@ import { freshDb, seedPartner } from './helpers-db';
 import type { Transfer } from '@/lib/types';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
+
+// Review M2: the pre-settlement re-screen reads Redis-backed stores in
+// production; here it is stubbed to 'cleared' (its own suite covers the
+// blocked / flagged / error branches: tests/stripe-funded-settle.test.ts).
+vi.mock('@/lib/pay-rescreen', () => ({
+  rescreenBeforePay: async (_db: unknown, t: unknown) => ({ kind: 'cleared', transfer: t }),
+}));
+vi.mock('@/lib/store', () => ({ getStore: () => ({ getTransferDecrypted: async () => null }) }));
+vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({ getCustomer: async () => ({ fullName: 'Test Sender' }) }) }));
+vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => null, ensureDefaultPartner: async () => ({ id: 'default' }) }) }));
+
 vi.mock('@/db/client', async (orig) => {
   const real = await orig<typeof import('@/db/client')>();
   return { ...real, getDb: () => db };
@@ -83,8 +94,16 @@ describe('POST /api/funding-webhook/stripe/[partnerId]', () => {
     expect(limiter).toHaveBeenCalledTimes(1);
   });
 
-  it('flag OFF ⇒ 401 even with a valid signature; nothing moves', async () => {
+  it('flag OFF: a verified event for an ALREADY-bound debit is still applied (review M5 — in-flight debits are never lost)', async () => {
     delete process.env.STRIPE_FUNDING_ENABLED;
+    const raw = succeededBody();
+    expect((await post('stripe', 'acme', raw, sign(raw))).status).toBe(200);
+    expect((await createTransferRepo(db).getTransfer('w1'))?.status).toBe('paid');
+  });
+
+  it('flag OFF and no partner config ⇒ the same 401 (production today)', async () => {
+    delete process.env.STRIPE_FUNDING_ENABLED;
+    await createIntegrationsRepo(db).setFundingConfig('acme', null);
     const raw = succeededBody();
     expect((await post('stripe', 'acme', raw, sign(raw))).status).toBe(401);
     expect((await createTransferRepo(db).getTransfer('w1'))?.status).toBe('awaiting_payment');

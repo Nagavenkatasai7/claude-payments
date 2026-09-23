@@ -58,7 +58,7 @@ describe('StripeFundingProvider.capture', () => {
     expect(init.method).toBe('POST');
     const h = new Headers(init.headers);
     expect(h.get('authorization')).toBe(`Bearer ${KEY}`);
-    expect(h.get('idempotency-key')).toBe('srfund-tx_1');
+    expect(h.get('idempotency-key')).toBe('srfund-tx_1-19999'); // review L3: amount-bound key
     expect(h.get('content-type')).toBe('application/x-www-form-urlencoded');
     const form = new URLSearchParams(String(init.body));
     expect(form.get('amount')).toBe('19999');
@@ -92,6 +92,12 @@ describe('StripeFundingProvider.capture', () => {
       const p = new StripeFundingProvider({ secretKey: KEY }, fetchImpl as unknown as typeof fetch);
       await expect(p.capture(transfer({ fundingIntentRef: 'pi_123' }))).rejects.toThrow();
     }
+  });
+
+  it('refuses to re-present a CANCELED intent (review M1: never hand out a dead secret)', async () => {
+    const fetchImpl = vi.fn(async () => okJson({ ...PI, status: 'canceled' }));
+    const p = new StripeFundingProvider({ secretKey: KEY }, fetchImpl as unknown as typeof fetch);
+    await expect(p.capture(transfer({ fundingIntentRef: 'pi_123' }))).rejects.toThrow(/canceled/);
   });
 
   it('refuses a created intent that echoes a different amount (never trusts the processor blindly)', async () => {

@@ -444,6 +444,27 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /**
+     * Program-Fix 7 (review M1): awaiting rows bound to a PSP intent that is
+     * still pending / failed and older than the cutoff — neither voidable (the
+     * intent may still be confirmed) nor settleable. Cross-tenant by design (a
+     * system sweep that only raises alerts). Bounded.
+     */
+    async listStaleFundingIntents(cutoff: Date, limit = 50): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          eq(transfers.status, 'awaiting_payment'),
+          isNotNull(transfers.fundingIntentRef),
+          sql`${transfers.fundingState} IN ('pending', 'failed')`,
+          lt(transfers.createdAt, cutoff),
+        ))
+        .orderBy(transfers.createdAt)
+        .limit(limit);
+      return rows.map((r) => toDomain(r));
+    },
+
     /** Program-Fix 7: (partner, intent) → transfer, tenant-scoped (masked read). */
     async findByFundingIntent(partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
       const rows = await db

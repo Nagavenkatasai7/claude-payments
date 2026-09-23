@@ -16,7 +16,7 @@ import type { FundingProvider, FundingWebhookEvent, PendingCaptureResult, Refund
 //    re-created: Stripe prunes idempotency keys after 24h
 //    (https://docs.stripe.com/api/idempotent_requests.md), so the key alone
 //    cannot prevent a second intent on a late retry. The create call still
-//    sends Idempotency-Key `srfund-<transferId>` for the in-flight retry.
+//    sends Idempotency-Key `srfund-<transferId>-<cents>` for the in-flight retry.
 //  • Every intent is cross-checked against the transfer (id, metadata
 //    transfer/partner, amount in minor units, currency) — a mismatch throws,
 //    so the pay route answers 402 and nothing is persisted as charged.
@@ -109,6 +109,9 @@ export class StripeFundingProvider implements FundingProvider {
     if (t.fundingIntentRef) {
       pi = asIntent(await this.call('GET', `/v1/payment_intents/${encodeURIComponent(t.fundingIntentRef)}`));
       this.assertMatches(pi, t, t.fundingIntentRef);
+      // Review M1: a canceled intent can never be confirmed — never hand out
+      // its secret (the pay route answers 402; ops cancels/voids the row).
+      if (pi.status === 'canceled') throw new Error('stripe: the bound intent is canceled');
     } else {
       const form = new URLSearchParams();
       form.set('amount', String(cents));
@@ -120,7 +123,9 @@ export class StripeFundingProvider implements FundingProvider {
       form.append('allowed_payment_method_types[]', 'card');
       form.set('metadata[transfer_id]', t.id);
       form.set('metadata[partner_id]', t.partnerId);
-      pi = asIntent(await this.call('POST', '/v1/payment_intents', form, `srfund-${t.id}`));
+      // Review L3: the key binds the amount too, so an edited amount can never
+      // collide with a stale key (Stripe rejects same-key/different-params).
+      pi = asIntent(await this.call('POST', '/v1/payment_intents', form, `srfund-${t.id}-${cents}`));
       this.assertMatches(pi, t);
     }
     if (!pi.client_secret) throw new Error('stripe: intent has no client secret');

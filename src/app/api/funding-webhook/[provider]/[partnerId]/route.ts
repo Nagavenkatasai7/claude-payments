@@ -19,7 +19,7 @@ import { processStripeFundingEvent } from '@/lib/stripe-funding-webhook';
 // Order (every refusal is fail-closed, before any money logic):
 //   1. per-IP rate limit (loose; Stripe retries on non-2xx) — before any read;
 //   2. provider must be 'stripe' (404 otherwise); partner id shape-checked;
-//   3. flag OFF / unknown partner / no config / no endpoint secret ⇒ 401 — the
+//   3. unknown partner / no config / no endpoint secret ⇒ 401 — the
 //      SAME 401 as a bad signature, so the route never reveals who is set up;
 //   4. Stripe-Signature v1 over the RAW body, 5-min tolerance
 //      (https://docs.stripe.com/webhooks, "Verify webhook signatures manually");
@@ -49,7 +49,11 @@ export async function POST(
   if (Buffer.byteLength(raw, 'utf8') > MAX_BODY_BYTES) {
     return NextResponse.json({ ok: false }, { status: 413 });
   }
-  if (!env.stripeFundingEnabled) return unauthorized();
+  // Review M5: NOT gated on STRIPE_FUNDING_ENABLED. The flag stops NEW binds
+  // (selectFundingProvider); a debit already bound while it was ON must still
+  // be recorded when it lands, or the partner holds the sender's money with no
+  // ledger trace. Without a partner Stripe config (production today) this is
+  // the same 401. Unbound intents stay 'unknown_intent' (alert, nothing moves).
 
   const db = getDb();
   let secrets: string[] = [];

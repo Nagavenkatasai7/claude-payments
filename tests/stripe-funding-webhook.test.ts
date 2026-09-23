@@ -16,7 +16,7 @@
  *  - everything is tenant-scoped to the partner whose endpoint secret
  *    verified the event.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { freshDb, seedPartner } from './helpers-db';
@@ -25,6 +25,17 @@ import type { StripeFundingEvent } from '@/lib/providers/stripe-funding-provider
 import type { Transfer } from '@/lib/types';
 
 let db: Awaited<ReturnType<typeof freshDb>>;
+
+// Review M2: the pre-settlement re-screen reads Redis-backed stores in
+// production; here it is stubbed to 'cleared' (its own suite covers the
+// blocked / flagged / error branches: tests/stripe-funded-settle.test.ts).
+vi.mock('@/lib/pay-rescreen', () => ({
+  rescreenBeforePay: async (_db: unknown, t: unknown) => ({ kind: 'cleared', transfer: t }),
+}));
+vi.mock('@/lib/store', () => ({ getStore: () => ({ getTransferDecrypted: async () => null }) }));
+vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({ getCustomer: async () => ({ fullName: 'Test Sender' }) }) }));
+vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => null, ensureDefaultPartner: async () => ({ id: 'default' }) }) }));
+
 let repo: ReturnType<typeof createTransferRepo>;
 
 function makeTransfer(o: Partial<Transfer> & { id: string }): Transfer {
@@ -144,6 +155,22 @@ describe('payment_intent.succeeded', () => {
     expect(t).toMatchObject({ status: 'awaiting_payment', fundingRef: 'pi_bl1' });
     expect(await outboxRows('mock.settle')).toHaveLength(0);
     expect(await outboxRows('ops.alert')).toHaveLength(1);
+  });
+});
+
+describe('pre-settlement re-screen (review M2)', () => {
+  it('a success whose re-screen BLOCKS is funded but never settled (one alert)', async () => {
+    await boundTransfer('rs1');
+    const r = await processStripeFundingEvent(db, 'acme', succeeded('rs1'), {
+      rescreen: async (x) => {
+        await repo.applyRescreenIfAwaiting(x.id, x.partnerId, 'blocked', ['sanctions_match']);
+        return { kind: 'blocked' };
+      },
+    });
+    expect(r.outcome).toBe('funded');
+    expect(await repo.getTransfer('rs1')).toMatchObject({ status: 'awaiting_payment', fundingState: 'succeeded' });
+    expect((await outboxRows('ops.alert')).map((a) => a.dedupe_key)).toEqual(['fundblocked:rs1']);
+    expect(await outboxRows('mock.settle')).toHaveLength(0);
   });
 });
 
