@@ -5514,3 +5514,85 @@ describe('repeat_transfer — by transfer_id (fix 34B, prompt-09)', () => {
     expect(String(r.error)).toContain('recipient_phone');
   });
 });
+
+// Program-Fix 44 (P3, b2b-04): the bill TTL and the durable duplicate-bill check.
+describe('Program-Fix 44: bill expiry + durable open-twin check', { retry: 0 }, () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  beforeEach(async () => {
+    await db.execute(sql`TRUNCATE sellers CASCADE`);
+    await db.execute(sql`TRUNCATE b2b_invoices`);
+  });
+
+  async function seedSeller(ctx: Awaited<ReturnType<typeof buildCtx>>) {
+    await ctx.store.createSeller({
+      id: 's_f44', partnerId: 'default', phone: PHONE, businessName: 'Acme Exports Inc', country: 'US', currency: 'USD',
+    });
+    expect((await ctx.store.completeSellerOnboarding(PHONE, 'default', '021000021|12345678'))?.status).toBe('active');
+  }
+  const twinRow = (id: string, createdAt: string) => ({
+    id, partnerId: 'default', businessName: 'Acme Exports Inc', buyerPhone: '15559876543',
+    lineItems: [{ description: 'Work', qty: 1, unitAmountUsd: 250 }], amountUsd: 250, currency: 'USD' as const,
+    sellerId: 's_f44', invoicedAmount: 250, invoicedCurrency: 'USD' as const, status: 'unpaid' as const, createdAt,
+  });
+  const countInvoices = async () =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM b2b_invoices`)) as unknown as { rows: { n: number }[] }).rows[0].n;
+
+  it('create_invoice with a LIVE unpaid twin in the ledger (the 120 s claim long gone) returns that bill: no claim, no insert, no push', async () => {
+    const ctx = await buildCtx(fakeRedis()); // empty Redis ⇒ no claim held
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date(Date.now() - 2 * DAY).toISOString()));
+    const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(r).toMatchObject({ created: true, invoice_id: 'inv_twin', amount: 250, currency: 'USD' });
+    expect(String(r.pay_url)).toMatch(/\/pay\/b2b\/inv_twin$/);
+    expect(claim).not.toHaveBeenCalled();
+    expect(await countInvoices()).toBe(1);
+    const pushes = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE dedupe_key LIKE 'billpush:%'`)) as unknown as { rows: { n: number }[] };
+    expect(pushes.rows[0].n).toBe(0);
+  });
+
+  it('an EXPIRED unpaid twin does not block a new bill', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_dead', new Date(Date.now() - 31 * DAY).toISOString()));
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(r.created).toBe(true);
+    expect(r.invoice_id).not.toBe('inv_dead');
+    expect(await countInvoices()).toBe(2);
+  });
+
+  it('a different amount is a new bill, not a twin', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date().toISOString()));
+    const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 251 }, ctx);
+    expect(r.created).toBe(true);
+    expect(r.invoice_id).not.toBe('inv_twin');
+  });
+
+  it('present_bill does not surface an expired bill', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_old', partnerId: 'default', businessName: 'Globex', buyerPhone: PHONE,
+      lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 40 }], amountUsd: 40, currency: 'USD',
+      status: 'unpaid', createdAt: new Date(Date.now() - 31 * DAY).toISOString(),
+    });
+    expect(await executeTool('present_bill', {}, ctx)).toEqual({ has_bill: false });
+  });
+
+  it('a chat B2B send naming an EXPIRED bill id is refused like a closed bill (the other pay path)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await ctx.store.saveB2bInvoice({
+      id: 'inv_old', partnerId: 'default', businessName: 'Globex Trading LLC', buyerPhone: PHONE,
+      lineItems: [{ description: 'Widgets', qty: 1, unitAmountUsd: 400 }], amountUsd: 400, currency: 'USD',
+      status: 'unpaid', createdAt: new Date(Date.now() - 31 * DAY).toISOString(),
+    });
+    const r = await executeTool('create_transfer', {
+      amount_source: 400, recipient_name: 'Globex Trading LLC', recipient_phone: '919876543210',
+      funding_method: 'ach_pull', entity_type: 'business',
+      sender_business_name: 'Acme Imports Ltd', recipient_business_name: 'Globex Trading LLC',
+      invoice_id: 'inv_old',
+    }, ctx);
+    expect(r).toEqual({ error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' });
+  });
+});
