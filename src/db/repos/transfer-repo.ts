@@ -1003,6 +1003,90 @@ export function createTransferRepo(
         .orderBy(transfers.paidAt);
       return rows.map((r) => toDomain(r));
     },
+
+    // ── Program-Fix 43: behavioural AML sweep reads (aml-sweep.ts) ──────────
+
+    /**
+     * The sweep's keyset scan: rows strictly after `after` in (created_at, id)
+     * order and created strictly before `before` (the commit-lag guard, so a
+     * slow mint transaction is never skipped), ascending, bounded. MASKED rows;
+     * the sweep decrypts one row at a time with getTransfer. Cross-tenant by
+     * design (a system sweep). No leading created_at index exists, so this is a
+     * sequential scan of transfers — acceptable at the current size; PR C's
+     * migration slice can add one.
+     */
+    async listCreatedSince(after: { at: Date; id: string }, before: Date, limit: number): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          or(
+            sql`${transfers.createdAt} > ${after.at}`,
+            and(sql`${transfers.createdAt} = ${after.at}`, sql`${transfers.id} > ${after.id}`),
+          ),
+          lt(transfers.createdAt, before),
+        ))
+        .orderBy(asc(transfers.createdAt), asc(transfers.id))
+        .limit(limit);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
+     * One sender's AML aggregates over rows STRICTLY BEFORE `anchor` in
+     * (created_at, id) order, tenant-keyed (partner_id, phone), excluding
+     * blocked and cancelled rows (a cancelled row moved no money — fix 16):
+     *   bandCount7d     — amount_usd in [band·T, T) within 7 days before;
+     *   subTSumCents30d — Σ amount_usd (cents) of rows < T within 30 days before;
+   *   subTCount30d    — how many rows < T within 30 days before;
+     *   priorCount      — all-time earlier rows.
+     * Anchored on the transfer, not the sweep clock, so a re-scan is deterministic.
+     * Served by transfers_phone_created.
+     */
+    async senderAmlStats(
+      partnerId: PartnerId,
+      phone: string,
+      anchor: { at: Date; id: string },
+      largeAmountUsd: number,
+      band: number,
+    ): Promise<{ bandCount7d: number; subTSumCents30d: number; subTCount30d: number; priorCount: number }> {
+      const d7 = new Date(anchor.at.getTime() - 7 * 86_400_000);
+      const d30 = new Date(anchor.at.getTime() - 30 * 86_400_000);
+      const lower = band * largeAmountUsd;
+      const rows = await db
+        .select({
+          bandCount7d: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${d7} and ${transfers.amountUsd} >= ${lower} and ${transfers.amountUsd} < ${largeAmountUsd})::int`,
+          subTSumCents30d: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.createdAt} >= ${d30} and ${transfers.amountUsd} < ${largeAmountUsd}), 0)::bigint`,
+          subTCount30d: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${d30} and ${transfers.amountUsd} < ${largeAmountUsd})::int`,
+          priorCount: sql<number>`count(*)::int`,
+        })
+        .from(transfers)
+        .where(and(
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, phone),
+          sql`${transfers.status} not in ('blocked', 'cancelled')`,
+          or(
+            sql`${transfers.createdAt} < ${anchor.at}`,
+            and(sql`${transfers.createdAt} = ${anchor.at}`, sql`${transfers.id} < ${anchor.id}`),
+          ),
+        ));
+      const r = rows[0];
+      return {
+        bandCount7d: Number(r?.bandCount7d ?? 0),
+        subTSumCents30d: Number(r?.subTSumCents30d ?? 0),
+        subTCount30d: Number(r?.subTCount30d ?? 0),
+        priorCount: Number(r?.priorCount ?? 0),
+      };
+    },
+
+    /** Masked rows by id, pinned to `partnerId` when given (the compliance alerts card). */
+    async listByIdsScoped(ids: string[], partnerId?: PartnerId): Promise<Transfer[]> {
+      if (ids.length === 0) return [];
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(inArray(transfers.id, ids), partnerId ? eq(transfers.partnerId, partnerId) : undefined));
+      return rows.map((r) => toDomain(r));
+    },
   };
 }
 
