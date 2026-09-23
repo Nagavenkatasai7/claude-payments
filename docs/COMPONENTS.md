@@ -6,7 +6,7 @@ its own `component/<name>` branch on GitHub and a path map in `.claude/hooks/com
 
 | Component | Owns (representative paths) | Branch |
 |---|---|---|
-| whatsapp-agent | `src/lib/agent.ts` `prompt.ts` `tools.ts` `ollama.ts` `whatsapp*.ts` `web-chat.ts` · `src/app/api/whatsapp/` `api/copilot/` | `component/whatsapp-agent` |
+| whatsapp-agent | `src/lib/agent.ts` `agent-fallback.ts` `prompt.ts` `tools.ts` `ollama.ts` `whatsapp*.ts` `inbound-throttle.ts` (fix 34A: 20/min, 300/day per sender) `web-chat.ts` · `src/app/api/whatsapp/` `api/copilot/` | `component/whatsapp-agent` |
 | money-paths | `settlement.ts` `rail-failure.ts` `pay-finalize.ts` `transfer-create.ts` `payment.ts` `refund-policy.ts` `schedule*.ts` · providers (payment/funding/webhook-verify) · `api/pay/` `api/payment-webhook/` `api/funding-webhook/` `api/partner-rail/` · dashboard transactions/refunds/schedules | `component/money-paths` |
 | outbox-worker | `outbox.ts` `outbox-worker.ts` `reconcile.ts` `worker-cadence.ts` `cron-run.ts` · `api/worker/` `api/cron/` · `worker-heartbeat.yml` · `scripts/outbox-status.ts` | `component/outbox-worker` |
 | compliance-kyc | `compliance*.ts` `kyc-*.ts` `consent.ts` `tier-rules.ts` · providers (kyc/persona/sanctions) · `api/persona-webhook/` · dashboard compliance/kyc | `component/compliance-kyc` |

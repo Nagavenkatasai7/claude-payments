@@ -230,6 +230,65 @@ export function createOutboxRepo(db: DbOrTx) {
     },
 
     /**
+     * OWNER-ONLY (Program-Fix 34A): hand a claimed agent.turn back UNCHARGED and
+     * due in `delaySec` — the turn could not start because an older turn for the
+     * same (tenant, phone) is still waiting or holds the per-phone lock. Not a
+     * failure: the claim's attempt is refunded, so a busy turn never spends the
+     * MAX_ATTEMPTS budget and can never dead-letter by waiting. Unlike
+     * releaseUnstarted the row is NOT due at once (it would be re-claimed on
+     * every pass). Same CAS guard as releaseUnstarted; false ⇒ lease lost.
+     */
+    async deferUncharged(id: number, owner: string, delaySec: number): Promise<boolean> {
+      const rows = await db
+        .update(outbox)
+        .set({
+          status: 'pending',
+          attempts: sql`greatest(${outbox.attempts} - 1, 0)`,
+          nextAttemptAt: sql`now() + make_interval(secs => ${delaySec})`,
+          leaseUntil: null,
+          leaseOwner: null,
+          lockedAt: null,
+          lockedBy: null,
+        })
+        .where(and(eq(outbox.id, id), eq(outbox.status, 'processing'), eq(outbox.leaseOwner, owner)))
+        .returning({ id: outbox.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Program-Fix 34A: the in-order gate for one agent.turn row, in ONE query.
+     *  • `olderWaiting` — another agent.turn with a LOWER id for the same phone
+     *    and the same routed tenant is still pending/failed/processing (a dead
+     *    or done row never blocks). The tenant compares
+     *    coalesce(payload->>'routedPartnerId','') on BOTH sides: the shared
+     *    number enqueues routedPartnerId null, and `=` never matches NULL.
+     *    `routedPartnerId` here is the row's RAW payload value ('' for null).
+     *  • `pastBound` — the row itself was created more than `maxWaitSec` ago,
+     *    computed by Postgres (now() − created_at), never by JS date parsing.
+     */
+    async agentTurnGate(
+      id: number,
+      routedPartnerId: string,
+      phone: string,
+      maxWaitSec: number,
+    ): Promise<{ olderWaiting: boolean; pastBound: boolean }> {
+      const res = await db.execute(sql`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM outbox o
+            WHERE o.kind = 'agent.turn'
+              AND o.status IN ('pending','failed','processing')
+              AND o.id < ${id}
+              AND o.payload ->> 'phone' = ${phone}
+              AND coalesce(o.payload ->> 'routedPartnerId', '') = ${routedPartnerId}
+          ) AS older_waiting,
+          coalesce((SELECT now() - created_at > make_interval(secs => ${maxWaitSec}) FROM outbox WHERE id = ${id}), false) AS past_bound
+      `);
+      const r = (res as unknown as { rows: Array<Record<string, unknown>> }).rows[0] ?? {};
+      return { olderWaiting: r.older_waiting === true, pastBound: r.past_bound === true };
+    },
+
+    /**
      * 'processing' rows whose lease expired more than `minutes` ago and were
      * STILL not reclaimed. The reclaim lives in claimBatch, so an expired lease
      * normally disappears within one drain; one that survives this long means

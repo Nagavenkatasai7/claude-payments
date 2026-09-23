@@ -24,6 +24,9 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn } from '@/lib/log';
+import { FALLBACK_REPLY } from '@/lib/agent-fallback';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { pokeWorker } from '@/lib/outbox';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
@@ -154,6 +157,38 @@ export class RowDeadlineError extends Error {
 
 /** Kinds whose handler is NOT idempotent: a deadline is terminal, never a retry. */
 const TERMINAL_ON_DEADLINE: ReadonlySet<string> = new Set(['agent.turn']);
+
+/**
+ * Program-Fix 34A: how long a turn waits (uncharged) before it is re-tried when
+ * an older turn for the same (tenant, phone) is still waiting or running.
+ */
+export const TURN_BUSY_DEFER_SEC = 3;
+
+/**
+ * Program-Fix 34A: the most a turn may spend BLOCKED behind its phone's other
+ * turns, measured from the row's created_at (in Postgres). Past it, a blocked
+ * turn is answered with FALLBACK_REPLY and one ops alert, then marked done —
+ * never dead-lettered. The per-phone lock is SET NX EX 90, so a stuck lock
+ * self-heals long before this; the bound catches an older turn stuck in a
+ * failure backoff. A turn past the bound that is NOT blocked simply runs.
+ */
+export const TURN_BUSY_MAX_WAIT_MS = 10 * 60_000;
+
+/**
+ * Program-Fix 34A: thrown by the agent.turn handler when the turn cannot START
+ * yet (an older turn for the same phone is waiting, or the per-phone lock is
+ * held). drainOnce catches it BEFORE markFailed and defers the row UNCHARGED
+ * (outbox.deferUncharged) — it is not a failure, spends no attempt, and counts
+ * as `released` so the route's release-only-pass stop still ends churn.
+ */
+export class TurnBusyError extends Error {
+  constructor(readonly delaySec: number = TURN_BUSY_DEFER_SEC) {
+    super('turn_busy');
+    this.name = 'TurnBusyError';
+  }
+}
+
+const hourBucket = (): number => Math.floor(Date.now() / 3_600_000);
 
 /**
  * Race `work` against the row deadline. The handler already holds `signal`
@@ -590,29 +625,99 @@ async function handle(
         }
         routedPartnerId = requested;
       }
-      // Re-resolve the routing partner's outbound creds at RUN time (the
-      // payload never carries tokens; rotation is picked up automatically).
-      const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
-      const reply = await deps.runAgentTurn(
-        phone,
-        str(p.messageText),
-        (p.turn ?? {}) as TurnContext,
-        waCreds,
-        { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
-      );
-      // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
-      // and the row is already dead — never send its late reply (a second
-      // customer message for the same inbound). The COOPERATIVE path is not
-      // abandoned: the agent saw `signal.aborted` at (deadline − COOP_GRACE_MS),
-      // returned FALLBACK_REPLY and saved history inside the grace — but
-      // `signal.aborted` is true there too, so the discriminator is `abandoned`
-      // (set only by the race timer), never `aborted`.
-      if (signal.abandoned) {
-        logWarn('worker.agent', 'agent.turn reply dropped: row deadline already passed', { id: row.id, kind: row.kind });
+      // ── Program-Fix 34A: one turn at a time per (tenant, phone), in order ──
+      // Order of checks: the bound (computed with the FIFO check in ONE query),
+      // then the FIFO guard, then the per-phone lock. Blocked ⇒ defer uncharged
+      // (TurnBusyError), or — past the bound — the fallback line, never silence.
+      const tenant: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
+      const outbox = createOutboxRepo(deps.db);
+      // FIFO compares the RAW payload tenant ('' for the shared number's null).
+      const gate = await outbox.agentTurnGate(row.id, requested, phone, TURN_BUSY_MAX_WAIT_MS / 1000);
+      let blocked = gate.olderWaiting;
+      let lockHeld = false;
+      if (!blocked) {
+        try {
+          lockHeld = await deps.store.tryTurnLock(tenant, phone, String(row.id));
+          blocked = !lockHeld;
+        } catch {
+          // FAIL OPEN: a Redis outage must not stop the bot answering. The
+          // reply's reply:<id> dedupe still prevents a double answer.
+          logWarn('worker.agent', 'turn lock unavailable — running unlocked (fail open)', { id: row.id, kind: row.kind });
+        }
+      }
+      if (blocked) {
+        if (!gate.pastBound) throw new TurnBusyError();
+        // Waited past the bound: answer with the fallback line (deduped on this
+        // row id) and raise ONE hourly alert per (tenant, phone) — counts only,
+        // no message content — then finish the row. Never dead-lettered.
+        await outbox.enqueue(
+          'whatsapp.text',
+          { to: phone, body: FALLBACK_REPLY, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+          { dedupeKey: `reply:${row.id}` },
+        );
+        await outbox.enqueue(
+          'ops.alert',
+          { message: `⚠️ SmartRemit ops: an agent.turn (outbox #${row.id}) waited over ${TURN_BUSY_MAX_WAIT_MS / 60_000} minutes behind the same customer's other turns and was answered with the fallback line. Check the outbox for a stuck or failing agent.turn.` },
+          { dedupeKey: `turnbusy:${tenant}:${phone}:${hourBucket()}` },
+        );
+        logWarn('worker.agent', 'agent.turn blocked past the wait bound — fallback reply queued', { id: row.id, kind: row.kind });
         return;
       }
-      if (reply.trim()) await deps.sendText(phone, reply, waCreds);
-      return;
+      try {
+        // Re-resolve the routing partner's outbound creds at RUN time (the
+        // payload never carries tokens; rotation is picked up automatically).
+        // They still ride the turn for its interactive sends (cards, pickers).
+        const waCreds = routedPartnerId ? (await partner(routedPartnerId)).waCreds : undefined;
+        const reply = await deps.runAgentTurn(
+          phone,
+          str(p.messageText),
+          (p.turn ?? {}) as TurnContext,
+          waCreds,
+          { signal, routedPartnerId }, // the tenant the turn runs under (fix 1) + fix 7's cooperative deadline
+        );
+        // A turn that outlived its HARD deadline was ABANDONED by withRowDeadline
+        // and the row is already dead — never send its late reply (a second
+        // customer message for the same inbound). The COOPERATIVE path is not
+        // abandoned: the agent saw `signal.aborted` at (deadline − COOP_GRACE_MS),
+        // returned FALLBACK_REPLY and saved history inside the grace — but
+        // `signal.aborted` is true there too, so the discriminator is `abandoned`
+        // (set only by the race timer), never `aborted`.
+        if (signal.abandoned) {
+          logWarn('worker.agent', 'agent.turn reply dropped: row deadline already passed', { id: row.id, kind: row.kind });
+          return;
+        }
+        // Program-Fix 34A: the reply is its OWN outbox row, deduped on this turn's
+        // id — a Meta 5xx retries the SEND, never the model, and a re-run turn
+        // can never answer twice. partnerId (never creds) picks the sending
+        // number at drain time; none ⇒ the shared number. '' ⇒ a card was the
+        // reply (the agent never returns '' otherwise).
+        if (reply.trim()) {
+          await outbox.enqueue(
+            'whatsapp.text',
+            { to: phone, body: reply, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+            { dedupeKey: `reply:${row.id}` },
+          );
+        }
+        if (reply === FALLBACK_REPLY) {
+          await outbox.enqueue(
+            'ops.alert',
+            { message: '⚠️ SmartRemit ops: the WhatsApp bot answered with its fallback line ("having trouble") at least once this hour. Check the model and worker logs.' },
+            { dedupeKey: `botfallback:${hourBucket()}` },
+          );
+        }
+        return;
+      } finally {
+        if (lockHeld) {
+          try {
+            await deps.store.releaseTurnLock(tenant, phone, String(row.id));
+          } catch {
+            logWarn('worker.agent', 'turn lock release failed — it expires in 90s', { id: row.id, kind: row.kind });
+          }
+          // A turn deferred behind this one is due in TURN_BUSY_DEFER_SEC; nudge
+          // a drain so it (and this reply row, if the loop has stopped) goes out.
+          pokeWorker();
+        }
+      }
     }
 
     default:
@@ -727,6 +832,17 @@ export async function drainOnce(
         logWarn('worker.lease', 'markDone refused: lease no longer ours', { id: row.id, kind: row.kind });
       }
     } catch (err) {
+      // Program-Fix 34A: a busy turn is NOT a failure — hand it back uncharged,
+      // due in a few seconds. Checked BEFORE markFailed so waiting can never
+      // spend the attempt budget or dead-letter a customer's message.
+      if (err instanceof TurnBusyError) {
+        if (await outbox.deferUncharged(row.id, workerId, err.delaySec)) {
+          result.released++;
+        } else {
+          logWarn('worker.lease', 'deferUncharged refused: lease no longer ours', { id: row.id, kind: row.kind });
+        }
+        continue;
+      }
       const message = err instanceof Error ? err.message : 'unknown error';
       // TERMINAL deadline: an abandoned non-idempotent handler (agent.turn) must
       // never be retried beside its own ghost — force the dead ceiling so the

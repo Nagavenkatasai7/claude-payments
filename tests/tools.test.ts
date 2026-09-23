@@ -1183,7 +1183,12 @@ describe('send_approve_picker — one-tap CTA pay (Batch 1)', () => {
     const first = await executeTool('send_approve_picker', args, ctx);
     const second = await executeTool('send_approve_picker', args, ctx); // the retry re-runs the turn
     expect(first.sent).toBe(true);
-    expect(second.sent).toBe(true);   // still reports sent so the agent suppresses trailing text (no dup text either)
+    // Program-Fix 34A: a deduped card is NOT a sent card — reporting sent:true made the
+    // agent return '' and the customer saw nothing. The model gets a hint to answer in text.
+    expect(second.sent).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect(second.draft_id).toEqual(expect.any(String));
+    expect(String(second.reply_hint)).toMatch(/already above/);
     expect(ctaSends).toBe(1);         // the "Approve & Pay" card was sent EXACTLY once
   });
 
