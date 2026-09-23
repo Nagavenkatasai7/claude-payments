@@ -133,18 +133,37 @@ const WEB_TLDS = [
   'com', 'net', 'org', 'io', 'ai', 'app', 'co', 'me', 'ly', 'link', 'xyz', 'info', 'in', 'uk', 'us',
   'example', 'dev', 'biz', 'gg', 'ru', 'cn', 'tk', 'ca', 'au', 'nz', 'sg', 'ae', 'hk', 'mx', 'de',
   'fr', 'eu', 'tv', 'cc', 'gov', 'edu',
+  // cheap TLDs common in abuse, none of them an English word
+  'icu', 'pw', 'cfd', 'sbs', 'cyou',
 ];
+/**
+ * Short words that often come before a dot and a slash in ordinary bill text
+ * ("Hrs.approx/week", "Mon.Fri/Sat"). The host+path rule never treats them as
+ * a host. Host labels under 3 characters ("sq.ft/month", "Mr.Rahul/Priya")
+ * are skipped too.
+ */
+const PATH_RULE_ABBREVIATIONS = [
+  'hrs', 'min', 'mins', 'sec', 'secs', 'day', 'days', 'wk', 'wks', 'mon', 'tue', 'tues', 'wed', 'thu', 'thur', 'thurs',
+  'fri', 'sat', 'sun', 'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec',
+  'approx', 'qty', 'pcs', 'nos', 'max', 'est', 'ref', 'inv', 'per', 'mrs', 'kgs', 'lbs', 'sqft', 'unit', 'units',
+];
+/** The detector reads at most this many characters (a cap on the regex work). */
+const DETECT_MAX = 4096;
 const LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]*[\\p{L}\\p{N}])?';
 const WEB_ADDRESS = new RegExp(
   [
     '://',
     '(?<![\\p{L}\\p{N}])www\\.',
     '(?<![\\p{L}\\p{N}.])\\d{1,3}(?:\\.\\d{1,3}){3}(?![\\p{L}\\p{N}])',
-    // host with a path: "evil.whatever/x" — the last label is letters (or an
-    // IDN "xn--" label), so "3.5/hr" and "no.12/2026" are not hosts.
-    `${LABEL}(?:\\.${LABEL})*\\.(?:\\p{L}{2,}|xn--[\\p{L}\\p{N}-]+)/`,
+    // host with a path: "evil.whatever/x". The match starts at the start of
+    // the dotted chain. Its first label has 3+ characters and is not a common
+    // abbreviation, and its last label is letters (or an IDN "xn--" label),
+    // so "3.5/hr", "no.12/2026", "sq.ft/month" and "Mon.Fri/Sat" are not hosts.
+    `(?<![\\p{L}\\p{N}.-])(?!(?:${PATH_RULE_ABBREVIATIONS.join('|')})\\.)[\\p{L}\\p{N}][\\p{L}\\p{N}-]*[\\p{L}\\p{N}](?<=[\\p{L}\\p{N}-]{3})(?:\\.${LABEL})*\\.(?:\\p{L}{2,}|xn--[\\p{L}\\p{N}-]+)/`,
     // host ending in a known TLD: "acme.com", "pay.evil.example"
-    `${LABEL}\\.(?:${WEB_TLDS.join('|')})(?![\\p{L}\\p{N}-])`,
+    `(?<![\\p{L}\\p{N}-])${LABEL}\\.(?:${WEB_TLDS.join('|')})(?![\\p{L}\\p{N}-])`,
+    // host ending in an IDN (punycode) label: "pay.xn--p1ai"
+    `(?<![\\p{L}\\p{N}-])${LABEL}\\.xn--[\\p{L}\\p{N}-]+`,
   ].join('|'),
   'iu',
 );
@@ -152,7 +171,7 @@ const WEB_ADDRESS = new RegExp(
 const IDEOGRAPHIC_DOTS = /[。｡]/gu;
 
 function detectForm(v: unknown): string {
-  return boundUntrustedText(v, Number.MAX_SAFE_INTEGER).replace(IDEOGRAPHIC_DOTS, '.').toLowerCase();
+  return boundUntrustedText(v, DETECT_MAX).replace(IDEOGRAPHIC_DOTS, '.').toLowerCase();
 }
 
 /** Whether a value carries a web address (heuristic; see the note above). Pure. */

@@ -626,6 +626,9 @@ describe('fix 38: the persona sets tone only, and a fixed trailer always follows
     }
     expect(VOICE_TRAILER).not.toContain('\n');
     expect(VOICE_TRAILER.length).toBeLessThanOrEqual(260);
+    // On WhatsApp a "voice note" is an audio message — never call the persona that.
+    expect(VOICE_TRAILER).not.toMatch(/voice note/i);
+    expect(VOICE_TRAILER.startsWith('The brand voice above')).toBe(true);
   });
 
   it('a pre-fix persona with a web address reaches the prompt without it (read-side strip); a hostile one is still followed by the trailer', () => {

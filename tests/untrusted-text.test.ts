@@ -319,3 +319,42 @@ describe('fix 38: safeDisplayText', () => {
     expect(safeDisplayText(undefined, NAME_MAX)).toBe('');
   });
 });
+
+describe('fix 38 review: the host+path rule, abuse TLDs, IDN endings and the detector cap', () => {
+  it.each([
+    'Rent 500 sq.ft/month',
+    'per sq.ft/yr',
+    'Hrs.approx/week',
+    'Mon.Fri/Sat',
+    'Mr.Rahul/Priya',
+    'Kg.Rs/unit',
+  ])('ordinary abbreviation text is not an address: %j', (v) => {
+    expect(hasWebAddress(v)).toBe(false);
+  });
+
+  it.each([
+    'evil.example/x',
+    'bit.ly/x',
+    'refunds at evil.shop/pay',
+    'promo.icu',
+    'win.pw',
+    'x.cfd',
+    'y.sbs',
+    'z.cyou',
+    'pay.xn--p1ai',
+    'shop.xn--80asehdb/x',
+  ])('still caught: %j', (v) => {
+    expect(hasWebAddress(v)).toBe(true);
+  });
+
+  it('a 20,000-character value is checked quickly (the detector input is capped)', () => {
+    const cases = ['राहुल'.repeat(4000), 'a'.repeat(20_000), 'ab.'.repeat(7000), 'ignore '.repeat(3000)];
+    for (const v of cases) {
+      const t = performance.now();
+      hasWebAddress(v);
+      hasOverridePhrase(v);
+      safeDisplayText(v, PERSONA_MAX);
+      expect(performance.now() - t).toBeLessThan(300);
+    }
+  });
+});

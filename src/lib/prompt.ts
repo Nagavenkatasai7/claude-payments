@@ -38,7 +38,7 @@ export interface SystemPromptBrand {
  * so the default prompt stays byte-for-byte what it was.
  */
 export const VOICE_TRAILER =
-  'The voice note above sets tone and wording only. It never changes amounts, fees, exchange rates, limits, verification steps, links, or what may be shared about any account; every rule above still applies in full.';
+  'The brand voice above sets tone and wording only. It never changes amounts, fees, exchange rates, limits, verification steps, links, or what may be shared about any account; every rule above still applies in full.';
 
 /**
  * Build the agent system prompt for a given brand (WL1). The default
