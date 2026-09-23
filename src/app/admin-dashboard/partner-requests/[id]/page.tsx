@@ -99,7 +99,7 @@ export default async function PartnerApplicationPage({
   params: Promise<{ id: string }>;
   searchParams?: Promise<{ invite?: string }>;
 }) {
-  const { scope } = await requireScope();
+  const { staff, scope } = await requireScope();
   if (scope.kind !== 'platform') redirect('/admin-dashboard');
 
   const { id } = await params;
@@ -109,7 +109,8 @@ export default async function PartnerApplicationPage({
   const application = await getStore().getPartnerApplicationByRequestId(id);
   const d: PartnerApplicationDetails = application?.details ?? {};
   const inviteStatus = await getInviteEmailStatus(getDb(), request.id);
-  const inviteOpen = (request.applicationStatus ?? 'invited') === 'invited';
+  // Resend is platform-ADMIN only (the action re-checks via requirePlatformAdmin).
+  const inviteOpen = (request.applicationStatus ?? 'invited') === 'invited' && staff.role === 'admin';
   const mailConfigured = emailConfigured();
   const inviteParam = (await searchParams)?.invite ?? '';
   const flash = Object.hasOwn(INVITE_FLASH, inviteParam) ? INVITE_FLASH[inviteParam] : undefined;
