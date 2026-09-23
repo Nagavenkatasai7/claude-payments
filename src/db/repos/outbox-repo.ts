@@ -30,7 +30,8 @@ export type OutboxKind =
   | 'agent.turn'
   | 'ticket.triage'
   | 'ops.alert'
-  | 'email.send';
+  | 'email.send'
+  | 'ops.webhook';
 
 export type OutboxRow = typeof outbox.$inferSelect;
 

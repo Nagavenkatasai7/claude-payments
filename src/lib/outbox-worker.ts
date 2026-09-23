@@ -25,7 +25,7 @@ import { renderSealedText } from '@/lib/sealed-text';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
-import { logWarn } from '@/lib/log';
+import { logWarn, scrub } from '@/lib/log';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
@@ -640,9 +640,38 @@ async function handle(
 
     // ── Stuck-money / dead-letter alerts to the ops phone ───────────────────
     case 'ops.alert': {
+      // Program-Fix 26: the email/webhook mirror is enqueued FIRST — before the
+      // phone check, so it still goes out when OPS_ALERT_PHONE is empty, and
+      // before sendText, so a WhatsApp outage cannot stop it. Its dedupe keys
+      // (opsmail:/opshook:<row.id>) make a WhatsApp retry re-enqueue nothing.
+      await enqueueAlertMirror(deps, row, str(p.message));
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)
       await deps.sendText(to, str(p.message));
+      return;
+    }
+
+    // ── Ops-alert webhook mirror (Program-Fix 26) ───────────────────────────
+    // The URL is a bearer secret: it is read from env at SEND time and never
+    // stored in the row, last_error or a log line. Unset/invalid now ⇒ drop.
+    // deps.fetchFn is safeFetch in the worker route: same-origin 307/308 only,
+    // private addresses refused at connect time.
+    case 'ops.webhook': {
+      const url = opsWebhookUrl(env.opsAlertWebhookUrl);
+      if (!url) return;
+      let res: Response;
+      try {
+        res = await deps.fetchFn(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: str(p.text) }),
+          signal: AbortSignal.timeout(OPS_WEBHOOK_TIMEOUT_MS),
+        });
+      } catch (err) {
+        // Fixed text: a fetch error can echo the URL.
+        throw new Error(`ops.webhook: request failed (${err instanceof Error ? err.name : 'error'})`);
+      }
+      if (!res.ok) throw new Error(`ops.webhook: HTTP ${res.status}`); // status only, never the body
       return;
     }
 
@@ -779,6 +808,59 @@ async function handle(
   }
 }
 
+// ── Program-Fix 26: the ops-alert mirror ──────────────────────────────────────
+
+export const OPS_ALERT_SUBJECT = 'SmartRemit ops alert';
+/** Deadline on the ops webhook POST. */
+export const OPS_WEBHOOK_TIMEOUT_MS = 5_000;
+/** Dedupe-key prefixes of mirror children. A dead mirror row never alerts (no loop). */
+const MIRROR_KEY_PREFIXES = ['opsmail:', 'opshook:'] as const;
+
+function isMirrorRow(row: OutboxRow): boolean {
+  const key = row.dedupeKey ?? '';
+  return MIRROR_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+/** The ops webhook URL when it is a credential-free https URL; otherwise null. Pure. */
+export function opsWebhookUrl(raw: string): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'https:' && !u.username && !u.password ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Enqueue the email / webhook copies of one ops alert. A no-op when neither
+ * OPS_ALERT_EMAIL nor OPS_ALERT_WEBHOOK_URL is set. The text is scrub()bed
+ * first: dead-row alerts embed a raw handler error, which can echo a phone or
+ * an email, and these channels leave our boundary.
+ */
+async function enqueueAlertMirror(deps: WorkerDeps, row: OutboxRow, message: string): Promise<void> {
+  const emails = env.opsAlertEmails;
+  const rawHook = env.opsAlertWebhookUrl;
+  if (emails.length === 0 && !rawHook) return;
+  const text = scrub(message);
+  const outbox = createOutboxRepo(deps.db);
+  if (emails.length > 0) {
+    await outbox.enqueue(
+      'email.send',
+      { to: emails, subject: OPS_ALERT_SUBJECT, text },
+      { dedupeKey: `opsmail:${row.id}` },
+    );
+  }
+  if (rawHook) {
+    if (opsWebhookUrl(rawHook)) {
+      await outbox.enqueue('ops.webhook', { text }, { dedupeKey: `opshook:${row.id}` });
+    } else {
+      // Never echo the value: it may be a secret with a typo in it.
+      logWarn('ops.webhook', 'OPS_ALERT_WEBHOOK_URL is not a credential-free https URL; webhook mirror skipped', { id: row.id });
+    }
+  }
+}
+
 /** How many due reply rows drainOnce claims right after an agent.turn finishes (review S2). */
 const INLINE_REPLY_CLAIM = 5;
 
@@ -809,11 +891,15 @@ export interface DrainOptions {
 /**
  * Exactly one ops alert per dead row: every dead-letter path (handler failure at
  * the ceiling, terminal row deadline, poison reclaim) shares the `dead:<id>`
- * dedupe key. Never recursive — a dead ops.alert row does not alert about
- * itself. Ids, kinds, counts and a trimmed error only; never the payload.
+ * dedupe key. Never recursive — a dead ops.alert row (or its mirror copy)
+ * does not alert about itself. Ids, kinds, counts and a trimmed error only; never the payload.
  */
 async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Promise<void> {
   if (row.kind === 'ops.alert') return;
+  // Program-Fix 26: nor does a dead mirror row (email/webhook copy of an alert).
+  // Each dead:<id> key is new, so a dead SMTP would otherwise loop forever:
+  // dead → alert → mail → dead. The row stays visible on the dashboard.
+  if (isMirrorRow(row)) return;
   await outbox.enqueue(
     'ops.alert',
     { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${text}` },
