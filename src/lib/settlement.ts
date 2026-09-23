@@ -65,19 +65,15 @@ export async function recordStaffTransferAudit(
   });
 }
 
-/** Program-Fix 44 P2: the one "is this a sandbox transfer?" rule (absent ⇒ live). */
+/**
+ * Program-Fix 44 P2: the one "is this a sandbox transfer?" rule (absent ⇒ live).
+ * A customer-facing outbox payload for a sandbox transfer carries
+ * `sandbox: true` (inlined at each enqueue so the payload-secrets static check
+ * can read it); the worker completes such a row WITHOUT sending. Live payloads
+ * never carry the key, so they are byte-identical to before.
+ */
 export function isSandbox(t: Pick<Transfer, 'environment'>): boolean {
   return t.environment === 'test';
-}
-
-/**
- * Program-Fix 44 P2: the marker a customer-facing outbox payload carries for a
- * sandbox transfer. The worker completes such a row WITHOUT sending, so no
- * real phone is ever messaged from the sandbox. Live payloads are byte-
- * identical to before (the key is absent, never `sandbox: false`).
- */
-export function sandboxMark(t: Pick<Transfer, 'environment'>): { sandbox?: true } {
-  return isSandbox(t) ? { sandbox: true } : {};
 }
 
 export type SettlementResult =
@@ -179,7 +175,7 @@ export async function beginSettlement(
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
       // Program-Fix 49A: essential (a settlement stage message survives STOP).
-      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId, category: 'essential', ...sandboxMark(paid) },
+      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId, category: 'essential', ...(isSandbox(paid) ? { sandbox: true } : {}) },
       { dedupeKey: `stage1:${paid.id}` },
     );
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
@@ -216,7 +212,7 @@ export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult>
     // as the paid stage-1: the OWNING partnerId, never creds (fix 11 / F49).
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
-      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId, category: 'essential', ...sandboxMark(held) },
+      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId, category: 'essential', ...(isSandbox(held) ? { sandbox: true } : {}) },
       { dedupeKey: `stage1:${held.id}` },
     );
     return { kind: 'held' };

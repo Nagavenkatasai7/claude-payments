@@ -28,7 +28,7 @@ import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
 import { logWarn, scrub } from '@/lib/log';
-import { isSandbox, sandboxMark } from '@/lib/settlement';
+import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
@@ -666,7 +666,7 @@ async function handle(
         await createOutboxRepo(tx).enqueue(
           'whatsapp.text',
           // Program-Fix 49A: essential (a refund notice survives STOP).
-          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential', ...sandboxMark(transfer) },
+          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential', ...(isSandbox(transfer) ? { sandbox: true } : {}) },
           { dedupeKey: `refundmsg:${transferId}` },
         );
       });
