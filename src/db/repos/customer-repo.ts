@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
@@ -327,6 +327,28 @@ export function createCustomerRepo(
         .set({ sendLimitOverride: value, updatedAt: new Date() })
         .where(tenantKey(partnerId, senderPhone));
       return { found: true, previous };
+    },
+
+    /**
+     * Program-Fix 14: the set-once writer of a customer's own legal name — a
+     * single-column conditional UPDATE keyed (partner_id, phone) that lands
+     * only while no name is on file (NULL, or the '' sealOptional keeps for an
+     * empty value). Sealed exactly as customerToRow seals it (same provider,
+     * same (partner_id, phone, 'full_name_enc') context), so getCustomer opens
+     * it. It never rewrites another column, so a concurrent KYC / consent
+     * write to the row survives, and a name already there (including one that
+     * landed after the caller's read) is never replaced. Returns whether this
+     * call wrote it; false for a missing row or a name already on file.
+     */
+    async setFullNameIfUnset(partnerId: PartnerId, senderPhone: string, fullName: string): Promise<boolean> {
+      const sealed = sealOptional(fullName, provider, customerRowCtx({ partnerId, phone: senderPhone }, 'full_name_enc'));
+      if (!sealed) return false;
+      const rows = await db
+        .update(customers)
+        .set({ fullNameEnc: sealed, updatedAt: new Date() })
+        .where(and(tenantKey(partnerId, senderPhone), or(isNull(customers.fullNameEnc), eq(customers.fullNameEnc, ''))))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
     },
 
     async setOptedOut(partnerId: PartnerId, senderPhone: string): Promise<void> {

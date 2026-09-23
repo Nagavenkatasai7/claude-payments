@@ -140,7 +140,8 @@ export async function handleRailFailure(
  * any state but 'none' (a staff refund racing the delivery) ⇒ ONE deduped
  * `railconflict:<id>` alert; the row is not changed. Anything else stays
  * silent as before: a duplicate paid_out on a delivered row (refunding or
- * not), blocked, in_review, or a missing row. Returns true when the alert was
+ * not), blocked, in_review, or a missing row (a held row is signalled by
+ * alertCallbackOnHold below instead). Returns true when the alert was
  * enqueued (false on dedupe or no conflict).
  */
 export async function alertRefusedDelivery(db: Db, transferId: string): Promise<boolean> {
@@ -158,5 +159,40 @@ export async function alertRefusedDelivery(db: Db, transferId: string): Promise<
         `AND the sender refunded (money may have moved twice). Reconcile with the rail.`,
     },
     { dedupeKey: `railconflict:${transferId}` },
+  );
+}
+
+/**
+ * Program-Fix 14: payment status updates respect compliance holds. A signed
+ * `funded` / `paid_out` that updateTransferFromWebhook did not apply is checked
+ * against the LEDGER (a fresh read — never the route's pre-verification read):
+ * when the row is under compliance review — in_review, blocked (status or
+ * compliance), or awaiting_payment and not 'cleared' — ONE deduped
+ * `railhold:<id>` ops alert tells staff the rail reported payment on a held
+ * transfer. The row is never changed here: the hold stands until staff decide
+ * (release / reject). Anything else stays silent: a duplicate on a paid or
+ * delivered row (including a released hold, which stays 'flagged'), cancelled
+ * (alertRefusedDelivery owns that), or a missing row. Transfer id only — no
+ * partner, phone or name. Returns true when the alert was enqueued.
+ */
+export async function alertCallbackOnHold(db: Db, transferId: string): Promise<boolean> {
+  const t = await createTransferRepo(db).getTransfer(transferId);
+  if (!t) return false;
+  const open = t.status !== 'cancelled' && t.status !== 'delivered';
+  const held =
+    t.status === 'in_review' ||
+    t.status === 'blocked' ||
+    (open && t.complianceStatus === 'blocked') ||
+    (t.status === 'awaiting_payment' && t.complianceStatus !== 'cleared');
+  if (!held) return false;
+  return createOutboxRepo(db).enqueue(
+    'ops.alert',
+    {
+      message:
+        `⚠️ SmartRemit ops: transfer ${t.id} — the rail reported payment while the transfer is under ` +
+        `compliance review (status ${t.status}). The status was NOT advanced; the hold stands. ` +
+        `Review the transfer, then reconcile with the rail.`,
+    },
+    { dedupeKey: `railhold:${t.id}` },
   );
 }

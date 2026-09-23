@@ -179,7 +179,8 @@ export function createTransferRepo(
     /**
      * Atomic, forward-only webhook transition — ONE guarded UPDATE, immune to
      * the concurrent funded/paid_out race. Terminal states (cancelled, blocked,
-     * in_review) never move; equal-or-backward ranks no-op. Non-null return ⇒
+     * in_review) never move; equal-or-backward ranks no-op; an awaiting_payment
+     * row that is not compliance-cleared never moves (Program-Fix 14). Non-null return ⇒
      * a REAL transition (the caller's notify contract, unchanged).
      */
     async updateTransferFromWebhook(
@@ -207,6 +208,16 @@ export function createTransferRepo(
             // non-refunding transfers are unaffected. refund_status defaults to
             // 'none'.
             sql`(${status} <> 'delivered' OR COALESCE(${transfers.refundStatus}, 'none') = 'none')`,
+            // COMPLIANCE HOLDS (Program-Fix 14): a status update advances a row
+            // out of awaiting_payment ONLY when the ledger says 'cleared' — the
+            // same predicate as markPaidIfAwaiting, IN the UPDATE so a stale
+            // read can never decide. A paid row already passed a gate (the
+            // cleared claim, or the audited staff release — which keeps
+            // compliance_status 'flagged' as evidence), so paid → delivered is
+            // not re-gated on 'cleared'. Blocked never advances. Null ⇒ the
+            // caller's alertCallbackOnHold (rail-failure.ts) raises the signal.
+            sql`(${transfers.status} <> 'awaiting_payment' OR ${transfers.complianceStatus} = 'cleared')`,
+            ne(transfers.complianceStatus, 'blocked'),
           ),
         )
         .returning();
