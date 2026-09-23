@@ -93,14 +93,16 @@ export function mergeKycTrail(
 }
 
 /**
- * Program-Fix 35: the options for the webhook's durable apply. `alert` builds
- * the kycmatch ops-alert payload (ids only) from the committed row; it is
- * enqueued only for a `*.matched` event.
+ * Program-Fix 35: the options for the webhook's durable apply. `alertMessage`
+ * builds the kycmatch ops-alert text (ids only) for the committed review state
+ * — 'held' or the human-terminal state the match left untouched; it is
+ * enqueued only for a `*.matched` event. It receives only that literal, never
+ * the customer row (the outbox payload scan, tests/outbox-payload-secrets).
  */
 export interface PersonaApplyOpts {
   db: Db;
   store: Store;
-  alert?: (after: Customer) => Record<string, unknown>;
+  alertMessage?: (state: 'held' | 'approved' | 'rejected') => string;
 }
 
 export interface PersonaApplyResult {
@@ -182,8 +184,14 @@ export function createKycCaseStore(
         const changed = Object.keys(delta).length > 0;
         const after: Customer = changed ? { ...before, ...delta, updatedAt: nowIso } : before;
         if (changed) await txCustomers.saveCustomer(after);
-        if (event.matchKind !== undefined && opts.alert) {
-          await createOutboxRepo(tx).enqueue('ops.alert', opts.alert(after), {
+        if (event.matchKind !== undefined && opts.alertMessage) {
+          const message =
+            after.kycReviewState === 'approved'
+              ? opts.alertMessage('approved')
+              : after.kycReviewState === 'rejected'
+                ? opts.alertMessage('rejected')
+                : opts.alertMessage('held');
+          await createOutboxRepo(tx).enqueue('ops.alert', { message }, {
             dedupeKey: `kycmatch:${event.eventId}`,
           });
         }

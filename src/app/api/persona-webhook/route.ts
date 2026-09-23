@@ -195,25 +195,27 @@ async function applyEvent(event: PersonaEvent, cases: KycCaseStore): Promise<App
   const result = await cases.applyPersonaEvent(customer.partnerId, customer.senderPhone, event, {
     db: getDb(),
     store: getStore(),
-    alert: matchKind ? (after) => matchAlert(event, matchKind, after) : undefined,
+    alertMessage: matchKind ? (state) => matchAlertMessage(event, matchKind, customer, state) : undefined,
   });
   if (!result) return null;
   return { customer: result.after, nextState: result.after.kycReviewState };
 }
 
-/** The kycmatch alert payload — ids only: never a phone, a name or a Persona id. */
-function matchAlert(event: PersonaEvent, matchKind: string, after: Customer): Record<string, unknown> {
-  const subject = auditSubjectId(after.partnerId, after.senderPhone);
-  const state = after.kycReviewState;
-  const stillTerminal = state === 'approved' || state === 'rejected';
-  return {
-    message:
-      `🔎 SmartRemit KYC: Persona reported a ${matchKind} match (${event.name}) for customer ${subject} ` +
-      `(partner ${after.partnerId}). ` +
-      (stillTerminal
-        ? `The customer's review is already ${state}; ` +
-          (matchKind === 'other' ? '' : 'the flag is recorded and ') +
-          'sending is NOT blocked. Staff decide.'
-        : 'The customer is held for review (needs_review). Open the KYC review queue.'),
-  };
+/** The kycmatch alert text — ids only: never a phone, a name or a Persona id. */
+function matchAlertMessage(
+  event: PersonaEvent,
+  matchKind: string,
+  customer: Customer,
+  state: 'held' | 'approved' | 'rejected',
+): string {
+  const subject = auditSubjectId(customer.partnerId, customer.senderPhone);
+  return (
+    `🔎 SmartRemit KYC: Persona reported a ${matchKind} match (${event.name}) for customer ${subject} ` +
+    `(partner ${customer.partnerId}). ` +
+    (state === 'held'
+      ? 'The customer is held for review (needs_review). Open the KYC review queue.'
+      : `The customer's review is already ${state}; ` +
+        (matchKind === 'other' ? '' : 'the flag is recorded and ') +
+        'sending is NOT blocked. Staff decide.')
+  );
 }

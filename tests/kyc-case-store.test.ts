@@ -334,7 +334,7 @@ describe('kyc-case-store.applyPersonaEvent (Program-Fix 35)', () => {
     eventId: 'evt_p', name: 'inquiry.completed', createdAt: '', inquiryId: 'inq_1', referenceId: PHONE, status: 'completed', ...over,
   });
   const pep = evt({ eventId: 'evt_pep', name: 'report/politically-exposed-person.matched', referenceId: null, reportId: 'rep_1', matchKind: 'pep', status: 'ready' });
-  const opts = () => ({ db, store: createStore(fakeRedis(), db), alert: () => ({ message: 'kyc match' }) });
+  const opts = () => ({ db, store: createStore(fakeRedis(), db), alertMessage: () => 'kyc match' });
   const alerts = async () => (await db.select().from(outbox)).filter((r) => (r.dedupeKey ?? '').startsWith('kycmatch:'));
 
   it('a match: the hold, the flag and ONE alert commit together; the audit line follows', async () => {
