@@ -17,6 +17,8 @@ import {
 } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { hashPassword } from '@/lib/password';
+import { assertStaffPasswordPolicy } from '@/lib/staff-password';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
 import {
@@ -200,6 +202,8 @@ export async function createPartnerStaffAction(
     throw new Error('That username already exists.');
   }
 
+  await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
+  await getStaffMfaStore().reset(username); // Program-Fix 17b: no stale enrolment on a re-used name
   await authStore.saveStaff({
     username,
     name,
@@ -209,7 +213,7 @@ export async function createPartnerStaffAction(
     permissions:
       role === 'support'
         ? { ...SUPPORT_DEFAULT_PERMISSIONS }
-        : { canCancel: false, canResend: false, canAssign: false },
+        : { canCancel: false, canResend: false, canAssign: false, canRevealPii: false },
     passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     partnerId,                  // taken from URL, not form
@@ -232,6 +236,7 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   }
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);
+  await getStaffMfaStore().reset(username); // Program-Fix 17b
   revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
 }
 

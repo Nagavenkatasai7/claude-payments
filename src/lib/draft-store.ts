@@ -4,7 +4,11 @@ import type { RedisLike } from './store';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import type { Draft, PartnerId } from './types';
 
-const DRAFT_TTL_SECONDS = 1800; // 30 minutes
+import { DRAFT_TTL_SECONDS } from './draft-ttl';
+
+// Program-Fix 49B: the value lives in ./draft-ttl (dependency-free) so the legal
+// drafts can state the same lock; re-exported here for existing importers.
+export { DRAFT_TTL_SECONDS };
 
 export function createDraftStore(redis: RedisLike) {
   return {

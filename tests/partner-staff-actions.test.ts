@@ -16,6 +16,11 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+// Program-Fix 17b: creating/removing a member clears its MFA keys.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
+});
 // Partner store is Postgres-backed now; rebuilt from a fresh PGlite per test.
 // The vi.mock factory closes over the let-variable (assigned in beforeEach).
 let db: Db;
@@ -26,6 +31,13 @@ vi.mock('@/lib/partner-store', async () => {
 });
 vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+// Program-Fix 17a: createPartnerStaffAction runs the staff password policy
+// (breach check fail-closed). Never dial HIBP from a unit test.
+const pwnedStatus = vi.hoisted(() => vi.fn(async (_pw: string): Promise<'pwned' | 'clean' | 'unavailable'> => 'clean'));
+vi.mock('@/lib/pwned', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/pwned')>('@/lib/pwned');
+  return { ...actual, pwnedPasswordStatus: pwnedStatus };
+});
 
 import { createPartnerStaffAction, removePartnerStaffAction } from '@/app/admin-dashboard/partners/actions';
 import { createAuthStore } from '@/lib/auth-store';
@@ -49,7 +61,7 @@ function form(values: Record<string, string>): FormData {
 describe('createPartnerStaffAction', () => {
   it('creates a staff record scoped to the given partnerId from the URL', async () => {
     await createPartnerStaffAction('acme', form({
-      username: 'p1', name: 'Partner One', password: 'hunter2', role: 'admin',
+      username: 'p1', name: 'Partner One', password: 'partner-one-password', role: 'admin',
     }));
     const got = await createAuthStore(redis).getStaff('p1');
     expect(got?.partnerId).toBe('acme');
@@ -60,11 +72,26 @@ describe('createPartnerStaffAction', () => {
   it('refuses to honour partnerId from the form (URL param is authoritative)', async () => {
     // The form might try to override partnerId; we ignore it.
     await createPartnerStaffAction('acme', form({
-      username: 'p2', name: 'P Two', password: 'pw', role: 'agent',
+      username: 'p2', name: 'P Two', password: 'partner-two-password', role: 'agent',
       partnerId: 'OVERRIDE',
     }));
     const got = await createAuthStore(redis).getStaff('p2');
     expect(got?.partnerId).toBe('acme');
+  });
+
+  it('Program-Fix 17a: refuses a short or breached password, and an HIBP outage (fail-closed), without writing', async () => {
+    await expect(createPartnerStaffAction('acme', form({
+      username: 'p3', name: 'P3', password: 'hunter2', role: 'agent',
+    }))).rejects.toThrow(/12 characters/);
+    pwnedStatus.mockImplementationOnce(async () => 'pwned');
+    await expect(createPartnerStaffAction('acme', form({
+      username: 'p3', name: 'P3', password: 'partner-three-password', role: 'agent',
+    }))).rejects.toThrow(/breach/);
+    pwnedStatus.mockImplementationOnce(async () => 'unavailable');
+    await expect(createPartnerStaffAction('acme', form({
+      username: 'p3', name: 'P3', password: 'partner-three-password', role: 'agent',
+    }))).rejects.toThrow(/unavailable/i);
+    expect(await createAuthStore(redis).getStaff('p3')).toBeNull();
   });
 
   it('throws on invalid role', async () => {

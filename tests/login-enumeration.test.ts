@@ -20,8 +20,10 @@ vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n) } : undefined),
     set: (n: string, v: string) => cookieJar.set(n, v),
-    delete: (n: string) => cookieJar.delete(n),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
+  // Program-Fix 17a: login reads the client IP (none here ⇒ 'unknown', ring skipped).
+  headers: async () => new Headers(),
 }));
 const redirectMock = vi.hoisted(() =>
   vi.fn((p: string) => {
@@ -34,11 +36,27 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
 });
+// Program-Fix 17b: login() asks whether the account enrolled in TOTP.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(redis) };
+});
 vi.mock('@/lib/partner-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/partner-store')>('@/lib/partner-store');
   return { ...actual, getPartnerStore: () => pgPartnerStore };
 });
 vi.mock('@/lib/seed', () => ({ ensureSeedAdmin: async () => {} }));
+// Program-Fix 17a: the login now reads the client IP, reserves an attempt on
+// the staff-login guard and writes a best-effort auth.* audit row. Keep both
+// on the in-memory fakes (no Upstash / Neon dial from a unit test).
+vi.mock('@/lib/staff-login-guard', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-login-guard')>('@/lib/staff-login-guard');
+  return { ...actual, getStaffLoginGuard: () => actual.createStaffLoginGuard(redis) };
+});
+vi.mock('@/lib/staff-auth-audit', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-auth-audit')>('@/lib/staff-auth-audit');
+  return { ...actual, getStaffAuthAudit: () => actual.createStaffAuthAudit({ record: async () => {} }) };
+});
 
 // Partial mock: the real password module, with a spy on the one function the
 // login action must call on EVERY attempt.
@@ -133,11 +151,32 @@ describe('staff lazy scrypt → Argon2id rehash (fix 21)', () => {
     expect((await getAuthStore().getStaff('ops'))!.passwordHash).toBe(legacy);
 
     // The store guard itself: a stale caller can't resurrect / rewrite a suspended record …
-    await getAuthStore().updatePasswordHash('ops', await hashPassword('legacy-pw'));
+    expect(await getAuthStore().updatePasswordHash('ops', legacy, await hashPassword('legacy-pw'))).toBe(false);
     expect((await getAuthStore().getStaff('ops'))!.passwordHash).toBe(legacy);
     // … and a missing record is never created.
-    await getAuthStore().updatePasswordHash('ghost', await hashPassword('x'));
+    expect(await getAuthStore().updatePasswordHash('ghost', 'x', await hashPassword('x'))).toBe(false);
     expect(await getAuthStore().getStaff('ghost')).toBeNull();
     expect(redis.dump.has('staff:ghost')).toBe(false);
+  });
+});
+
+describe('staff lazy rehash is a compare-and-set (Program-Fix 17a)', () => {
+  it('reset between verify and rehash is not reverted', async () => {
+    await getAuthStore().saveStaff(staffRow({ passwordHash: legacyScryptHash('legacy-pw') }));
+    const resetHash = await hashPassword('the-admin-reset-password');
+    // The verify runs for real, then an admin reset lands before the rehash write.
+    const actual = await vi.importActual<typeof import('@/lib/password')>('@/lib/password');
+    pw.verifyPasswordOrDummy.mockImplementationOnce(async (plain: string, stored?: string | null) => {
+      const ok = await actual.verifyPasswordOrDummy(plain, stored);
+      const fresh = (await getAuthStore().getStaff('ops'))!;
+      await getAuthStore().saveStaff({ ...fresh, passwordHash: resetHash });
+      return ok;
+    });
+    await expect(login(null, form({ username: 'ops', password: 'legacy-pw' }))).rejects.toThrow(
+      'REDIRECT:/admin-dashboard',
+    );
+    const stored = (await getAuthStore().getStaff('ops'))!;
+    expect(stored.passwordHash).toBe(resetHash); // the reset stands
+    expect(await verifyPassword('legacy-pw', stored.passwordHash)).toBe(false);
   });
 });

@@ -13,18 +13,19 @@
 export interface CspOptions {
   /** Per-request nonce. When set, script-src trusts it instead of 'unsafe-inline'. */
   nonce?: string;
-  /** `process.env.NODE_ENV === 'development'` — adds 'unsafe-eval' to a nonce policy for React dev stacks. */
+  /** `process.env.NODE_ENV === 'development'` (i.e. `next dev`) — the only case that adds 'unsafe-eval'. */
   isDev: boolean;
 }
 
 export function buildCsp({ nonce, isDev }: CspOptions): string {
-  // Without a nonce (the enforced policy on every route) 'unsafe-eval' stays
-  // for now, in every environment: dropping it in production is the tracked
-  // follow-up (Program-Fix 47 PR2). With a nonce it is dev-only (guide :42).
+  // 'unsafe-eval' is dev-only, with or without a nonce (Program-Fix 47 PR2):
+  // `next dev` HMR / React refresh evaluate code, a production build does not
+  // (guide :42; the production client bundle was grepped for eval / new
+  // Function / Function( before this was dropped).
   const script = nonce
     ? ["'self'", `'nonce-${nonce}'`, "'strict-dynamic'"]
-    : ["'self'", "'unsafe-inline'", "'unsafe-eval'"];
-  if (nonce && isDev) script.push("'unsafe-eval'");
+    : ["'self'", "'unsafe-inline'"];
+  if (isDev) script.push("'unsafe-eval'");
   return [
     "default-src 'self'",
     `script-src ${script.join(' ')}`,

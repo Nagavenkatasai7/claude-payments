@@ -19,6 +19,10 @@ import {
   setStaffStatusAction,
   removeStaffAction,
 } from './actions';
+import { ResetMfaForm } from './reset-mfa-form';
+import { seedAdminUsername } from '@/lib/staff-login-guard';
+import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { ResetPasswordForm } from './reset-password-form';
 
 const STAFF_COLUMNS: ExpandableColumn[] = [
   { label: 'Member', primary: true },
@@ -51,7 +55,18 @@ function PartnerOptions({ partners }: { partners: Partner[] }) {
   );
 }
 
-function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: Partner[]; partnerName: (id?: string) => string }) {
+function staffRow(
+  s: Staff,
+  opts: {
+    isSelf: boolean;
+    isTest: boolean;
+    mfaOn: boolean;
+    /** Only the seed admin may reset the seed admin (the action enforces it too). */
+    mayResetMfa: boolean;
+    partners: Partner[];
+    partnerName: (id?: string) => string;
+  },
+) {
   const status = s.status === 'suspended' ? 'suspended' : 'active';
   const initial = s.name.charAt(0).toUpperCase();
 
@@ -72,6 +87,7 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
             {s.name}
             {opts.isSelf ? <Badge variant="outline">You</Badge> : null}
             {opts.isTest ? <Badge variant="outline" className="text-muted-foreground">test fixture</Badge> : null}
+            {opts.mfaOn ? <Badge variant="outline">2FA</Badge> : null}
           </span>
           <span className="block text-xs text-muted-foreground">{s.username}</span>
         </span>
@@ -116,6 +132,9 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
         <label className="flex items-center gap-1.5 text-xs">
           <input type="checkbox" name="canAssign" defaultChecked={s.permissions.canAssign} /> Assign
         </label>
+        <label className="flex items-center gap-1.5 text-xs">
+          <input type="checkbox" name="canRevealPii" defaultChecked={s.permissions.canRevealPii === true} /> Reveal payout
+        </label>
         <Button type="submit" size="sm" variant="outline">Save</Button>
       </form>,
       opts.isSelf ? (
@@ -133,6 +152,11 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
             <input type="hidden" name="username" value={s.username} />
             <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
           </form>
+          <ResetPasswordForm username={s.username} name={s.name} />
+          {opts.mfaOn && opts.mayResetMfa ? (
+            // Program-Fix 17b: lost authenticator → turn two-step off (audited, signs them out).
+            <ResetMfaForm username={s.username} name={s.name} />
+          ) : null}
         </span>
       ),
     ],
@@ -159,6 +183,8 @@ export default async function TeamPage() {
   const realStaff = allStaff.filter((s) => !isTestStaff(s));
   const testStaff = allStaff.filter((s) => isTestStaff(s));
   const orderedStaff = [...realStaff, ...testStaff];
+  const mfaOn = await getStaffMfaStore().enrolledAmong(allStaff.map((s) => s.username));
+  const seed = seedAdminUsername();
 
   return (
     <>
@@ -202,7 +228,14 @@ export default async function TeamPage() {
             <ExpandableTable
               columns={STAFF_COLUMNS}
               rows={orderedStaff.map((s) =>
-                staffRow(s, { isSelf: s.username === me.username, isTest: isTestStaff(s), partners, partnerName }),
+                staffRow(s, {
+                  isSelf: s.username === me.username,
+                  isTest: isTestStaff(s),
+                  mfaOn: mfaOn.has(s.username),
+                  mayResetMfa: s.username !== seed || me.username === seed,
+                  partners,
+                  partnerName,
+                }),
               )}
               empty={<>No teammates yet — add your first.</>}
             />

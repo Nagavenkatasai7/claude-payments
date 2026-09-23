@@ -1378,7 +1378,12 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(29); // fix 34B: + request_human_help, + list_recent_transfers; fix 14: + set_sender_name
+    // fix 34B: + request_human_help, + list_recent_transfers; fix 14: + set_sender_name.
+    // Program-Fix 49B: create_transfer and generate_payment_link are hidden on WhatsApp (29 → 27).
+    expect(seenTools).toHaveLength(27);
+    expect(seenTools.map((t) => t.function.name)).not.toContain('create_transfer');
+    expect(seenTools.map((t) => t.function.name)).not.toContain('generate_payment_link');
+    expect(seenTools.map((t) => t.function.name)).toContain('set_sender_name');
     const dn = seenTools.map((t) => t.function.name);
     expect(dn).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(dn).toContain('send_approve_picker');

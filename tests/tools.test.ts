@@ -6,6 +6,10 @@ import {
   toolSchemasForChannel,
   WEB_TOOL_ALLOWLIST,
   WEB_ONLY_TOOLS,
+  WHATSAPP_HIDDEN_TOOLS,
+  rateLockMinutes,
+  rateLockLine,
+  RATE_LOCK_MINUTES,
   buildApproveSummary,
   maskAccount,
 } from '@/lib/tools';
@@ -1484,7 +1488,8 @@ describe('buildApproveSummary — enriched single approve body (A1/A2)', () => {
     // The card now shows ONLY the last 4 — no IFSC/routing code, no IBAN body —
     // so it is leak-proof in every country format.
     expect(s).not.toContain('HDFC0001234');
-    expect(s).toContain('Rate locked ~10 min');
+    expect(s).toContain(`Rate locked for ${RATE_LOCK_MINUTES} min.`);
+    expect(s).not.toContain('~10 min');
   });
   it('masks the account even when fields arrive reversed (ifsc before acct) — never leaks the full number', () => {
     const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer');
@@ -2775,15 +2780,20 @@ describe('WEB_TOOL_ALLOWLIST + toolSchemasForChannel (B5)', () => {
     expect(names).not.toContain('create_schedule');
   });
 
-  it("toolSchemasForChannel('whatsapp') is the full set MINUS web-only tools", () => {
+  it("toolSchemasForChannel('whatsapp') is the full set MINUS web-only and WhatsApp-hidden tools", () => {
     const names = toolSchemasForChannel('whatsapp').map((t) => t.function.name);
     // Program-Fix 34B: history answers come from the tool on WhatsApp too, so no
     // tool is web-only any more (the gate stays for a future one).
     expect(WEB_ONLY_TOOLS.size).toBe(0);
     expect(names).toContain('list_recent_transfers');
     expect(names).toContain('request_human_help');
-    expect(names).toContain('create_transfer'); // a WhatsApp-only tool is still present
-    expect(toolSchemasForChannel('whatsapp')).toHaveLength(toolSchemas.length - WEB_ONLY_TOOLS.size);
+    expect(names).toContain('create_schedule'); // a WhatsApp-only tool is still present
+    // Program-Fix 49B (prompt-07): hidden from the WhatsApp schemas only.
+    expect(names).not.toContain('create_transfer');
+    expect(names).not.toContain('generate_payment_link');
+    expect(toolSchemasForChannel('whatsapp')).toHaveLength(
+      toolSchemas.length - WEB_ONLY_TOOLS.size - WHATSAPP_HIDDEN_TOOLS.size,
+    );
   });
 });
 
@@ -5733,6 +5743,66 @@ describe('Program-Fix 44: bill expiry + durable open-twin check', { retry: 0 }, 
       invoice_id: 'inv_old',
     }, ctx);
     expect(r).toEqual({ error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' });
+  });
+});
+
+// ── Program-Fix 49B (prompt-05 / prompt-07) ──────────────────────────────────
+describe('Program-Fix 49B: rate-lock copy is derived, never a literal (prompt-05)', () => {
+  const NOW = 1_800_000_000_000;
+  it('a fresh rate: the lock is the draft lifetime (30 min)', () => {
+    expect(rateLockMinutes(NOW, NOW)).toBe(RATE_LOCK_MINUTES);
+    expect(rateLockMinutes(undefined, NOW)).toBe(RATE_LOCK_MINUTES);
+  });
+  it('an aged rate: the lock is what is left before the mint refuses it (FX_MAX_AGE_MS)', () => {
+    // 50 min old → the 60-min ceiling leaves 10 min, below the 30-min draft.
+    expect(rateLockMinutes(NOW - 50 * 60_000, NOW)).toBe(10);
+    // Never negative; a rate at the ceiling shows 0.
+    expect(rateLockMinutes(NOW - 70 * 60_000, NOW)).toBe(0);
+  });
+  it('under 2 minutes left, the card never states a lock time (no "Rate locked for 0 min.")', () => {
+    for (const m of [0, 1]) {
+      const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', m);
+      expect(s).not.toMatch(/Rate locked for \d+ min/);
+      expect(s).toContain('Rate valid for a moment — tap soon.');
+    }
+    const two = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 2);
+    expect(two).toContain('Rate locked for 2 min.');
+    expect(rateLockLine(0)).toBe('Rate valid for a moment — tap soon.');
+    expect(rateLockLine(30)).toBe('Rate locked for 30 min.');
+  });
+  it('the approve card states the derived minutes for the quote it shows', () => {
+    const s = buildApproveSummary(baseQuote(), 'Mom', 'bank', 'HDFC0001234 123456789', 'bank_transfer', 'INR', 12);
+    expect(s).toContain('Rate locked for 12 min.');
+  });
+  it('tools.ts carries no hard-coded 10-minute rate-lock claim', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../src/lib/tools.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/Rate locked ~10 min|locked for about 10 minutes/);
+  });
+});
+
+describe('Program-Fix 49B: WhatsApp hides create_transfer + generate_payment_link (prompt-07)', () => {
+  it('the hidden set is exactly the two tools', () => {
+    expect([...WHATSAPP_HIDDEN_TOOLS].sort()).toEqual(['create_transfer', 'generate_payment_link']);
+  });
+  it('web keeps generate_payment_link (it is allowlisted there)', () => {
+    const names = toolSchemasForChannel('web').map((t) => t.function.name);
+    expect(names).toContain('generate_payment_link');
+  });
+  it('dispatch still runs both on WhatsApp (schema filter only — an in-flight call still works)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const r = await executeTool('create_transfer', {
+      amount_usd: 200,
+      recipient_name: 'Mom',
+      recipient_phone: '919876543210',
+      destination_country: 'IN',
+      funding_method: 'credit_card', // a legacy value is still accepted at dispatch
+    }, ctx);
+    expect(r.error).not.toBe('not available here');
+    expect(typeof r.transfer_id).toBe('string');
+    const link = await executeTool('generate_payment_link', { transfer_id: r.transfer_id }, ctx);
+    expect(link.error).toBeUndefined();
+    expect(typeof link.url).toBe('string');
   });
 });
 

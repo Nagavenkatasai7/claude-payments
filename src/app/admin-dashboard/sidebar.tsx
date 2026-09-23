@@ -20,7 +20,7 @@ const navItemIdle = 'text-muted-foreground hover:bg-secondary hover:text-foregro
 const navItemActive =
   "bg-sidebar-accent font-semibold text-sidebar-accent-foreground before:absolute before:-left-3 before:top-1/2 before:h-[18px] before:w-[3px] before:-translate-y-1/2 before:rounded-r-[3px] before:bg-primary before:content-['']";
 
-export async function Sidebar({ active }: { active: SidebarActive }) {
+export async function Sidebar({ active }: { active?: SidebarActive }) {
   const staff = await requireStaff();
   const groups = visibleNavGroups(staff);
 

@@ -237,6 +237,29 @@ export function createCustomerRepo(
     },
 
     /**
+     * Program-Fix 17a: the lazy scrypt → Argon2id upgrade as a single-column
+     * COMPARE-AND-SET — `UPDATE customers SET password_hash = $new,
+     * updated_at = now() WHERE partner_id = $p AND phone = $ph AND
+     * password_hash = $old`. Unlike saveCustomer's whole-row upsert it can never
+     * revert a concurrent password reset (the old hash no longer matches) or a
+     * concurrent KYC / consent write (no other column is named). Returns whether
+     * a row was updated (via RETURNING, not a driver-specific rowCount).
+     */
+    async upgradePasswordHash(
+      partnerId: PartnerId,
+      senderPhone: string,
+      oldHash: string,
+      newHash: string,
+    ): Promise<boolean> {
+      const rows = await db
+        .update(customers)
+        .set({ passwordHash: newHash, updatedAt: new Date() })
+        .where(and(tenantKey(partnerId, senderPhone), eq(customers.passwordHash, oldHash)))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
      * Resolve-or-create WITHOUT implying WhatsApp consent (no optInAt). The
      * partner API mints for senders who never messaged anyone; opt-in is a
      * channel fact recorded only by the inbound webhook (upsertOnFirstInbound).

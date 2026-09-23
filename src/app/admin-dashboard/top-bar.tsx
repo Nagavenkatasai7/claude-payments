@@ -1,4 +1,5 @@
 import Image from 'next/image';
+import Link from 'next/link';
 import { requireStaff } from '@/lib/auth';
 import { logout } from '../login/actions';
 import { Button } from '@/components/ui/button';
@@ -38,10 +39,16 @@ export async function TopBar() {
       <CommandPalette items={commandItems} />
       <div className="ml-auto flex flex-none items-center gap-3.5">
         <LiveRefresh />
-        <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
-          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-xs font-bold text-accent-foreground uppercase">{initial}</div>
+        {/* Program-Fix 17a: the account page (change your own password). */}
+        <Link
+          href="/admin-dashboard/account"
+          title="Your account"
+          className="flex items-center gap-2 rounded-md text-[13px] font-medium text-foreground hover:underline"
+        >
+          <span className="sr-only">Account: </span>
+          <div aria-hidden="true" className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-xs font-bold text-accent-foreground uppercase">{initial}</div>
           <span className="hidden min-[1025px]:inline">{staff.name}</span>
-        </div>
+        </Link>
         <form action={logout}>
           <Button type="submit" variant="outline">
             <Icon name="logout" />

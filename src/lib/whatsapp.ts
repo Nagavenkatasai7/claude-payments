@@ -280,17 +280,59 @@ async function postWithBackoff(
   throw WhatsAppSendError.fromResponse(errLabel, lastStatus, lastBody);
 }
 
+/**
+ * Program-Fix 49B (prompt-08): Meta rejects a text body over 4,096 characters
+ * ("Maximum 4096 characters",
+ * https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/text-messages),
+ * which would retry to a dead outbox row. We split below that, with headroom.
+ */
+export const WA_TEXT_CHUNK_MAX = 4000;
+
+/**
+ * Splits a body into parts of at most `max` UTF-16 units: at the last line break
+ * before the limit, else the last space, else a hard cut that never separates a
+ * surrogate pair. The break character itself is dropped. A body within the limit
+ * is returned unchanged as the single part.
+ */
+export function splitWhatsAppText(text: string, max: number = WA_TEXT_CHUNK_MAX): string[] {
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    const window = rest.slice(0, max + 1); // a break exactly at `max` still counts
+    let cut = window.lastIndexOf('\n');
+    if (cut <= 0) cut = window.lastIndexOf(' ');
+    if (cut > 0) {
+      parts.push(rest.slice(0, cut));
+      rest = rest.slice(cut + 1);
+      continue;
+    }
+    let hard = max;
+    const code = rest.charCodeAt(hard - 1);
+    if (code >= 0xd800 && code <= 0xdbff) hard -= 1; // keep the pair together
+    parts.push(rest.slice(0, hard));
+    rest = rest.slice(hard);
+  }
+  parts.push(rest);
+  return parts;
+}
+
 export async function sendText(to: string, text: string, creds?: WaCreds): Promise<void> {
-  return postWithBackoff(
-    GRAPH_MESSAGES_URL(creds),
-    authedJsonInit({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: text },
-    }, creds),
-    'WhatsApp send failed',
-  );
+  // One POST for every normal reply (byte-for-byte as before). An over-long body
+  // goes out as ordered parts; if a later part fails, the outbox retry re-sends
+  // the whole body, so the customer may see an earlier part twice (rare, and
+  // better than the dead row a 4,096+ body produced).
+  for (const body of splitWhatsAppText(text)) {
+    await postWithBackoff(
+      GRAPH_MESSAGES_URL(creds),
+      authedJsonInit({
+        messaging_product: 'whatsapp',
+        to,
+        type: 'text',
+        text: { body },
+      }, creds),
+      'WhatsApp send failed',
+    );
+  }
 }
 
 export async function sendTemplate(

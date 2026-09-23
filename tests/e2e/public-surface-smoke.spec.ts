@@ -134,5 +134,7 @@ for (const path of ['/', '/about', '/docs', '/login', '/account/login', '/terms'
     expect(enforced[0].match(/default-src/g)).toHaveLength(1);
     expect(enforced[0]).toContain("img-src 'self' data: blob: https:");
     expect(enforced[0]).toContain("object-src 'none'");
+    // Program-Fix 47 PR2: production ships no 'unsafe-eval'.
+    expect(enforced[0]).not.toContain('unsafe-eval');
   });
 }

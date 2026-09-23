@@ -56,6 +56,11 @@ vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(sharedRedis) };
 });
+// Program-Fix 17b: creating/removing a member clears its MFA keys.
+vi.mock('@/lib/staff-mfa-store', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/staff-mfa-store')>('@/lib/staff-mfa-store');
+  return { ...actual, getStaffMfaStore: () => actual.createStaffMfaStore(sharedRedis) };
+});
 
 vi.mock('next/navigation', () => ({
   redirect: vi.fn(),
@@ -63,6 +68,13 @@ vi.mock('next/navigation', () => ({
 }));
 
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+// Program-Fix 17a: createPartnerStaffAction runs the staff password policy
+// (breach check fail-closed). Never dial HIBP from a unit test.
+const pwnedStatus = vi.hoisted(() => vi.fn(async (_pw: string): Promise<'pwned' | 'clean' | 'unavailable'> => 'clean'));
+vi.mock('@/lib/pwned', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/pwned')>('@/lib/pwned');
+  return { ...actual, pwnedPasswordStatus: pwnedStatus };
+});
 
 beforeEach(async () => {
   currentStaff = { username: 'admin', role: 'admin' }; // platform admin
@@ -492,7 +504,7 @@ describe('createPartnerStaffAction roles', () => {
     const got = await getAuthStore().getStaff('p1sup');
     expect(got?.role).toBe('support');
     expect(got?.partnerId).toBe('p1');
-    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false });
+    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false, canRevealPii: false });
   });
 
   it('still rejects unknown roles', async () => {

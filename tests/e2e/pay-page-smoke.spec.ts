@@ -41,6 +41,8 @@ test('/pay carries exactly one enforced CSP, with the Program-Fix 47 additions',
   expect(enforced[0].match(/default-src/g)).toHaveLength(1);
   expect(enforced[0]).toContain("img-src 'self' data: blob: https:");
   expect(enforced[0]).toContain("object-src 'none'");
+  // Program-Fix 47 PR2: production ships no 'unsafe-eval'.
+  expect(enforced[0]).not.toContain('unsafe-eval');
 });
 
 test('a random 22-character id renders the generic inactive sheet with a 200', async ({ page }) => {
