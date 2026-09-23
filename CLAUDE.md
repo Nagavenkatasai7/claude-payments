@@ -69,10 +69,7 @@ Plugins, hooks (`.claude/hooks/`) and skills (`.claude/skills/`) are inventoried
 
 ## Subagent model routing (usage budget)
 
-Pass `model:` explicitly on every Agent call:
-- **Fable 5.1** — money paths, settlement/outbox/reconcile, auth, crypto, compliance, migrations, and every final review.
-- **Opus 5** — multi-file features off the money path, refactors, plan authoring, PR-level review.
-- **Sonnet 5** — read-only exploration, doc lookups, test scaffolding, log triage, formatting.
+**Permanent owner rule (2026-09-22):** every agent — builders, reviewers, fixers, lookups, money/security paths included — runs on **Opus 5.5 at medium effort**: `subagent_type: "opus-worker"` (`~/.claude/agents/opus-worker.md`) with `model: "opus"`. **Never run an agent on Fable**; Fable is used only as the advisor (`advisorModel`). A user-level PreToolUse hook (`~/.claude/hooks/block-fable-agents.mjs`) denies any Agent launch on a Fable model. Main sessions and loops also run Opus 5.5 at medium effort. Quality comes from TDD, the independent review, CI, the post-deploy smoke and the live check — not from a bigger model.
 
 ## Branching model
 
