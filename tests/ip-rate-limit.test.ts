@@ -173,8 +173,10 @@ describe('isIpRateLimited — page guard (fail-open, never throws)', () => {
         throw new Error('upstash down');
       },
     };
-    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing })).resolves.toBe(false);
-    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing })).resolves.toBe(false);
+    const alert = vi.fn(); // hermetic: never the real outbox path
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing, alert })).resolves.toBe(false);
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: throwing, alert })).resolves.toBe(false);
+    expect(alert).toHaveBeenCalledWith(PAY_PAGE_SCOPE);
   });
 
   it('a Redis whose expire throws (after a successful incr) still fails open', async () => {
@@ -184,7 +186,9 @@ describe('isIpRateLimited — page guard (fail-open, never throws)', () => {
         throw new Error('expire failed');
       },
     };
-    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: half })).resolves.toBe(false);
+    const alert = vi.fn();
+    await expect(isIpRateLimited(fwd('1.2.3.4'), PAY_PAGE_SCOPE, 1, 60, { redis: half, alert })).resolves.toBe(false);
+    expect(alert).toHaveBeenCalledOnce();
   });
 
   it('no forwarded headers (IP "unknown") fails open and never touches Redis', async () => {
@@ -197,7 +201,7 @@ describe('isIpRateLimited — page guard (fail-open, never throws)', () => {
 
   it('a headers object whose get() throws fails open and never throws', async () => {
     const hostile = { get: () => { throw new Error('boom'); } } as unknown as Headers;
-    await expect(isIpRateLimited(hostile, PAY_PAGE_SCOPE, 1, 60, { redis: fakeRedis() })).resolves.toBe(false);
+    await expect(isIpRateLimited(hostile, PAY_PAGE_SCOPE, 1, 60, { redis: fakeRedis(), alert: vi.fn() })).resolves.toBe(false);
   });
 });
 

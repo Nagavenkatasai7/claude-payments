@@ -51,6 +51,9 @@ vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft }) }));
 vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({}) }));
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// Program-Fix 45: the limiter-down ops signal stays hermetic (never the real outbox).
+const raiseLimiterDownAlert = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert }));
 vi.mock('@/db/repos/transfer-repo', () => ({
   createTransferRepo: () => ({ isPayoutEditable: async () => false }),
 }));
@@ -138,6 +141,7 @@ describe('/pay/[transferId] — guard runs before any read (Program-Fix 23)', ()
     expect(html).toContain('Secure payment');
     expect(html).toContain('Total charge');
     expect(html).toContain('Acme Money Co');
+    expect(raiseLimiterDownAlert).toHaveBeenCalledWith('paypage', 'fail-open'); // fix 45 ops signal
   });
 
   it('no forwarded header (IP unknown): renders normally, fail-open', async () => {
