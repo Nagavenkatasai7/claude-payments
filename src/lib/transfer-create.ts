@@ -1,6 +1,6 @@
 import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
-import { screenTransfer } from './compliance';
+import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
@@ -90,6 +90,11 @@ export interface CreateTransferInput {
   // chat / pay-page / cron mint). The partner API passes false: an external
   // caller must never plant a saved recipient into its customers' picker.
   saveRecipient?: boolean;
+  // Program-Fix 14 follow-up: the caller could not supply the sender's name, so
+  // the sender side cannot be name-screened. Absent/false ⇒ unchanged. true ⇒
+  // a non-blocked mint is HELD (flagged + SENDER_IDENTITY_MISSING_REASON), in
+  // the same transaction as the insert. Only the partner API sets it today.
+  senderIdentityMissing?: boolean;
 }
 
 /**
@@ -409,6 +414,13 @@ async function mintLocked(
     } catch (err) {
       logError('aml.hold_check', err, { partnerId: input.partnerId });
     }
+  }
+  // ── Missing sender identity (Program-Fix 14 follow-up) ────────────────────
+  // AFTER screening, EDD and the AML gate so their verdicts are unchanged; it
+  // only ever ADDS a hold. A watchlist BLOCK still wins (never downgraded).
+  if (input.senderIdentityMissing && complianceStatus !== 'blocked') {
+    complianceStatus = 'flagged';
+    complianceReasons = [...complianceReasons, SENDER_IDENTITY_MISSING_REASON];
   }
   const transfer: Transfer = {
     id,

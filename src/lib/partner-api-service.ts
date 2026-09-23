@@ -41,6 +41,7 @@ import {
 } from './settlement-statement';
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
+import { logWarn } from './log';
 
 // partner-api-service — the business logic behind /api/partner/v1/*. Pure-ish and
 // dependency-injected so it's TDD'd with fakeRedis (the route files are thin
@@ -428,6 +429,10 @@ export async function createTransaction(
       requiresKyc,
       senderKycStatus,
       senderName: senderName || undefined,
+      // Program-Fix 14 follow-up: no sender name ⇒ the sender side cannot be
+      // name-screened, so the mint is HELD for review (flagged), never rejected
+      // (sender.name stays optional for backward compatibility).
+      senderIdentityMissing: !senderName,
       recipientName: benName,
       recipientPhone: benPhone,
       payoutMethod,
@@ -468,7 +473,35 @@ export async function createTransaction(
   if (transfer.complianceStatus === 'blocked') {
     return err(422, 'This transfer was blocked by compliance screening.');
   }
+  if (!senderName) warnSenderNameMissing(partner.id, keyId);
   return ok(201, await transferViewWithName(deps, transfer));
+}
+
+// ── sender.name deprecation warning (Program-Fix 14 follow-up) ────────────
+// sender.name is optional today and will become required. A mint without it
+// is held for review (createTransaction); ops also get ONE structured warning
+// per API key per hour. PII-free by construction: only the partner id and the
+// API key's row id (the audit actor — never the secret, the phone, the name or
+// the Idempotency-Key). The dedupe is per server instance and bounded; a
+// duplicate line on another instance is harmless.
+const SENDER_NAME_WARN_MAX_KEYS = 1_000;
+const senderNameWarned = new Map<string, number>(); // keyId → hour bucket last logged
+
+function warnSenderNameMissing(partnerId: PartnerId, keyId: string, nowMs = Date.now()): void {
+  const hour = Math.floor(nowMs / 3_600_000);
+  if (senderNameWarned.get(keyId) === hour) return;
+  if (senderNameWarned.size >= SENDER_NAME_WARN_MAX_KEYS) senderNameWarned.clear();
+  senderNameWarned.set(keyId, hour);
+  logWarn(
+    'partner_api.sender_name_missing',
+    'Transaction created without sender.name; it is held for manual review. sender.name will become required.',
+    { partnerId, keyId },
+  );
+}
+
+/** Test-only: forget which keys were already warned this hour. */
+export function resetSenderNameDeprecationLogForTests(): void {
+  senderNameWarned.clear();
 }
 
 // ── GET /transactions (keyset list, ownership-scoped) ─────────────────────

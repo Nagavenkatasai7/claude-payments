@@ -23,11 +23,17 @@ export const POSSIBLE_MATCH_REASON = 'Name screening needs manual review.';
 export const LIST_UNAVAILABLE_REASON = 'Screening list unavailable; needs manual review.';
 export const RECIPIENT_WATCHLIST_REASON = 'Recipient is on the compliance watchlist.';
 export const SENDER_WATCHLIST_REASON = 'Sender is on the compliance watchlist.';
+// Program-Fix 14 follow-up: a partner-API mint with no sender name cannot be
+// name-screened on the sender side, so it is held for review (mintLocked, via
+// CreateTransferInput.senderIdentityMissing). Screening-derived: a delegated
+// partner's staff may not release it — KYC may be delegated, sanctions may not.
+export const SENDER_IDENTITY_MISSING_REASON = 'Sender identity missing.';
 export const SCREENING_REASONS: readonly string[] = [
   POSSIBLE_MATCH_REASON,
   LIST_UNAVAILABLE_REASON,
   RECIPIENT_WATCHLIST_REASON,
   SENDER_WATCHLIST_REASON,
+  SENDER_IDENTITY_MISSING_REASON,
 ];
 
 /**
