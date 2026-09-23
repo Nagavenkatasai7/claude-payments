@@ -14,7 +14,7 @@ White‑label, non‑custodial remittance **infrastructure**. Customers send mon
 - **Compliance is built in, not bolted on** — sanctions screening always runs; KYC, transaction limits, velocity, and enhanced due diligence are first‑class.
 - **Production‑grade reliability** — every external effect is durable and retried; money paths are transactional and idempotent; nothing is silently lost.
 
-**The stack:** Next.js 16 (App Router) on Vercel · TypeScript · Neon Postgres (the ledger, via Drizzle ORM) · Upstash Redis (hot/ephemeral) · Kimi K2.6 on Ollama Cloud (the agent) · Meta WhatsApp Cloud API · ~140 automated test files / ~1,665 tests.
+**The stack:** Next.js 16 (App Router) on Vercel · TypeScript · Neon Postgres (the ledger, via Drizzle ORM) · Upstash Redis (hot/ephemeral) · Kimi K2.6 on Ollama Cloud (the agent) · Meta WhatsApp Cloud API · a Vitest + PGlite (real in‑process Postgres) test suite (`npx vitest run`).
 
 ---
 
@@ -196,7 +196,7 @@ A first‑time **US → India** send, step by step:
 - **Channels:** WhatsApp (full toolset, interactive buttons) and the web account portal (restricted toolset).
 - **Inbound pipeline:** Meta signature verification (fail‑closed) → message de‑duplication → STOP/START consent handling → partner routing by phone‑number‑ID → durable enqueue.
 
-**The 18 agent tools** — `get_quote`, `create_transfer`, `generate_payment_link`, `check_payment_status`, `request_refund`, `update_recipient_phone`, `create_schedule`, `list_schedules`, `cancel_schedule`, `list_saved_recipients`, `send_recipient_picker`, `send_approve_picker`, `cancel_draft`, `check_send_limit`, `validate_phone`, `resolve_recipient`, `repeat_transfer`, `capture_corridor_request`. (10 of these are allow‑listed on the web channel.)
+**The agent tools** (about two dozen, including B2B invoicing; `src/lib/tools.ts` is the source of truth) — transfers: `get_quote`, `create_transfer`, `generate_payment_link`, `check_payment_status`, `cancel_draft`, `check_send_limit`, `repeat_transfer`, `list_recent_transfers`; recipients: `list_saved_recipients`, `send_recipient_picker`, `send_approve_picker`, `resolve_recipient`, `validate_phone`, `update_recipient_phone`; context: `get_customer_context`; schedules: `create_schedule`, `list_schedules`, `cancel_schedule`; after‑sale: `request_refund`, `open_recall_dispute`; B2B invoicing: `register_seller`, `create_invoice`, `present_bill`, `check_bill_status`, `cancel_bill`, `dispute_bill`; demand: `capture_corridor_request`. (The web channel is narrowed to an allow‑list, `WEB_TOOL_ALLOWLIST`.)
 
 **Customer‑facing surfaces**
 - **Hosted pay page** (`/pay/<id>`) — branded; collects payout + payment details, shows the locked quote with a masked recipient account, OTP step‑up, unframable + IP‑rate‑limited.
@@ -212,9 +212,9 @@ A first‑time **US → India** send, step by step:
 - **Per‑IP rate limits** (fail‑open) on the pay page, webhooks, and login.
 - **PII‑scrubbing logger** — phone numbers, accounts, emails masked to last‑4 in all money‑path logs; tokens/OTPs never logged.
 
-**The data model (Postgres ledger, 14 tables)** — `partners`, `transfers`, `customers`, `partner_integrations`, `partner_rates`, `api_keys`, `schedules`, `beneficiaries`, `recipients`, `audit_events`, `idempotency_keys`, `outbox`, `kyc_cases`, `corridor_requests` (plus support tickets). **Storage split:** Neon Postgres is the durable money ledger; Upstash Redis holds only hot/ephemeral data — conversations (30‑day TTL), drafts, OTPs, throttles, message de‑dup, velocity counters, and the FX cache.
+**The data model (Postgres ledger, 21 tables in `src/db/schema.ts`)** — `partners`, `transfers`, `customers`, `partner_integrations`, `partner_rates`, `api_keys`, `schedules`, `beneficiaries`, `recipients`, `audit_events`, `idempotency_keys`, `outbox`, `kyc_cases`, `corridor_requests`, `tickets`, `ticket_messages`, `sellers`, `b2b_invoices`, `partner_requests`, `partner_applications`, `waitlist_signups`. **Storage split:** Neon Postgres is the durable money ledger; Upstash Redis holds only hot/ephemeral data — conversations (30‑day TTL), drafts, OTPs, throttles, message de‑dup, velocity counters, and the FX cache.
 
-**The stack** — Next.js 16 (App Router) on Vercel (serverless / Fluid Compute) · TypeScript · Drizzle ORM · Tailwind v4 + shadcn/ui · Recharts · Meta WhatsApp Cloud API · Persona (KYC) · Frankfurter (FX) · ~140 test files / ~1,665 automated tests with a post‑deploy browser smoke suite.
+**The stack** — Next.js 16 (App Router) on Vercel (serverless / Fluid Compute) · TypeScript · Drizzle ORM · Tailwind v4 + shadcn/ui · Recharts · Meta WhatsApp Cloud API · Persona (KYC) · Frankfurter (FX) · a Vitest + PGlite test suite with a post‑deploy browser smoke suite.
 
 ---
 
@@ -226,4 +226,4 @@ A first‑time **US → India** send, step by step:
 - **Signed end to end** — every settlement instruction and callback is HMAC‑signed and fail‑closed.
 - **Encrypted & audited** — PII encrypted at rest, masked by default, reveals audited.
 - **Multi‑tenant & isolated** — every partner fully separated, branded, and self‑served.
-- **Proven by tests** — ~1,665 automated tests plus a post‑deploy smoke suite on every release.
+- **Proven by tests** — an automated Vitest + PGlite suite on every PR plus a post‑deploy smoke suite on every release.

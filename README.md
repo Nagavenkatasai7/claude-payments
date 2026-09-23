@@ -1,75 +1,88 @@
-# SmartRemit (smartremit.ai) — WhatsApp US→India Remittance (Prototype)
+# SmartRemit (smartremit.ai)
 
-A prototype, inspired by Felix Pago, that lets a US user send money to family
-in India entirely through a WhatsApp conversation. An AI agent (Kimi K2.6 on
-Ollama Cloud) guides the chat in English / Hindi / Hinglish, hands the user a
-mock payment page, then sends WhatsApp confirmations to both sender and
-recipient.
+White-label, non-custodial remittance **infrastructure** over WhatsApp.
+Customers chat with an AI agent in WhatsApp to send money across borders
+(US→India first; the corridor set is configured per partner). **Partners**,
+the licensed money transmitters, get a branded bot, a hosted pay page, signed
+settlement webhooks, a REST API and a self-service dashboard. SmartRemit runs
+the conversation, quoting, compliance screening, KYC flows and settlement
+instructions. It **never holds funds**.
 
-**Status:** real conversation, dashboard, and notification layers; everything
-else (money movement, KYC, sanctions, payout rail) is a convincing mock. See
-[docs/ROADMAP.md](docs/ROADMAP.md) for the full feature inventory and what
-turning this into a live service would require.
+Live at **https://smartremit.ai**. Partner API guide: **https://smartremit.ai/docs**.
 
-## What's actually live
+## Status: what is real, what is simulated
 
-- WhatsApp Cloud API on Meta's **test number** `+1 555-629-8293`
-  (~5 verified recipients).
-- Live FX from Frankfurter (cached 1 hour).
-- Mock card / bank-link page at `/pay/[id]` that flips a transfer to *paid*,
-  then to *delivered* ~2 minutes later via Vercel `after()` background work.
-- Real WhatsApp delivery confirmation to the recipient via the approved
-  `transfer_delivered` Utility template.
-- Admin dashboard at `smartremit.ai/dashboard` with per-page
-  views for Transactions, Schedules, Compliance, Analytics, and Team — all
-  refreshing live every 5 seconds.
-- Multi-user staff auth (scrypt + Redis sessions, role = admin/operator/viewer).
-- Recurring transfers via daily Vercel Cron.
+Real today: the AI conversation (Kimi K2.6 on Ollama Cloud), live FX quoting
+(Frankfurter), the signed instruction-and-callback settlement loop, durable
+processing through the outbox, the admin and partner dashboards, the customer
+account portal, and WhatsApp notifications.
 
-## What's mocked
+Simulated today:
 
-| Layer | What we have | What real looks like |
+| Layer | Today | What production needs |
 |---|---|---|
-| US funding pull | Mock card form on `/pay/[id]` | Plaid + FedNow/RTP or a BaaS partner |
-| KYC | None | Persona / Onfido / Veriff |
-| Sanctions | Hardcoded watchlist + per-day velocity counter | ComplyAdvantage / Sanctions.io |
-| INR payout | ~2-min mock auto-advance | NIUM / M2P / direct AD-II partner |
+| Fund movement (US funding pull) | Mock card / bank form on the hosted pay page | A funding provider (Plaid + FedNow/RTP, or a BaaS partner) |
+| Payout rail | A reference **simulator** rail that runs the exact signed instruction→callback loop a production rail would | The partner's own rail (UPI/IMPS via an AD-II partner, etc.) |
+| Sanctions list | Always-on screening against a built-in reference rule set (`MockSanctionsScreener`) | A commercial sanctions/AML feed behind the same `SanctionsScreener` seam |
+| Identity verification | Persona integration (hosted flow + signed webhook, human-only approval); the production vendor account is not live | A production KYC vendor account (or the partner's own KYC) |
+| WhatsApp number | Meta **test number** for the platform default; partners may bring their own numbers | Meta Business Verification |
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the honest scorecard.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the full feature inventory.
 
 ## Architecture
 
 ```
-Customer WhatsApp ⇄ Meta WhatsApp Cloud API (test number)
-                      ⇣
-Next.js on Vercel: /api/whatsapp · /api/pay · /api/cron · /pay · /login · /dashboard/*
+Customer WhatsApp ⇄ Meta WhatsApp Cloud API (platform or per-partner number)
+                      ⇣  signed webhook, de-duplicated
+Next.js 16 on Vercel
+  /api/whatsapp · /api/pay · /api/worker · /api/cron · /api/partner/v1/*
+  /pay/<id> (hosted pay page) · /account (customer portal)
+  /admin-dashboard (staff + partner staff) · /docs (partner API guide)
                       ⇣                          ⇣
-                  Upstash Redis           Ollama Cloud (Kimi K2.6)
+  Neon Postgres — THE ledger             Ollama Cloud (Kimi K2.6)
+  (transfers, customers, partners,       the agent; money math lives in
+   audit, idempotency keys, outbox)      deterministic TypeScript tools
+  Upstash Redis — hot/ephemeral only
+  (sessions, conversations, drafts, OTPs, throttles, rate limits, FX cache)
 ```
 
-The agent loop lives in [src/lib/agent.ts](src/lib/agent.ts) and calls
-TypeScript tools (`get_quote`, `create_transfer`, `generate_payment_link`,
-`check_payment_status`, `cancel_transfer`, `schedule_recurring_transfer`) so
-all money math is deterministic and auditable.
+- **Durable outbox.** Every external effect (WhatsApp sends, settlement
+  instructions, rail callbacks, agent turns, ops alerts) is an `outbox` row
+  written in the same transaction as the state change that implies it.
+  `/api/worker` drains it with retries and dead-lettering; see
+  [src/lib/outbox-worker.ts](src/lib/outbox-worker.ts) and
+  [docs/SYSTEM-ARCHITECTURE.md](docs/SYSTEM-ARCHITECTURE.md) for the cadence.
+- **Transactional money paths.** `beginSettlement()`
+  ([src/lib/settlement.ts](src/lib/settlement.ts)) commits the paid flip, the
+  customer message and the rail instruction together; minting is claim-first
+  on an idempotency key.
+- **Tenant isolation** at the app level: partner-facing queries always carry
+  the partner id.
+- **Encryption at rest** (AES-256-GCM envelope) for payout destinations,
+  recipient names, customer PII and integration secrets; reads are masked by
+  default and staff reveals are audited.
+- **Sanctions screening always runs**, in every KYC mode.
+
+The agent loop lives in [src/lib/agent.ts](src/lib/agent.ts) and calls the
+tools in [src/lib/tools.ts](src/lib/tools.ts) (quotes, transfers, pay links,
+saved recipients, schedules, refunds, B2B bills and more), so all money math is
+deterministic and auditable.
 
 ## Setup
 
 1. **Install:** `npm install`
-2. **Upstash Redis:** in the Vercel dashboard, add the Upstash Redis
-   integration from the Marketplace. It sets `KV_REST_API_URL` and
-   `KV_REST_API_TOKEN` automatically.
-3. **Ollama Cloud:** set `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, and `OLLAMA_MODEL`
-   (the exact Kimi K2.6 model tag).
-4. **Meta WhatsApp:** create a Meta app with WhatsApp, note the test number's
-   `WHATSAPP_PHONE_NUMBER_ID` and a permanent System User `WHATSAPP_TOKEN`. Add
-   each demo recipient's phone number to the test number's allowed-recipients
-   list.
-5. **Deploy:** push to Vercel. Set `APP_BASE_URL` to the deployed URL.
-6. **Webhook:** in the Meta app, set the WhatsApp webhook callback URL to
-   `https://<your-app>/api/whatsapp` and the verify token to your
-   `WHATSAPP_VERIFY_TOKEN`. Subscribe to the `messages` field.
-
-Copy `.env.example` to `.env.local` for local development.
+2. **Environment:** copy `.env.example` to `.env.local` and fill it in. The
+   file lists every variable `src/lib/env.ts` reads, grouped by purpose; the
+   first group is the eight that production refuses to boot without
+   (`src/lib/boot-assert.ts`). `FIELD_ENCRYPTION_KEY` and `PASSWORD_PEPPER` are
+   set-once: never rotate them.
+3. **Neon Postgres and Upstash Redis:** add both from the Vercel Marketplace;
+   they inject `DATABASE_URL` and `KV_REST_API_URL` / `KV_REST_API_TOKEN`.
+4. **Migrations are manual:** `set -a; source .env.local; set +a; npx drizzle-kit migrate`
+   (SQL files in `drizzle/`). Nothing in CI or Vercel applies them.
+5. **Meta WhatsApp:** set `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_TOKEN` and
+   `META_APP_SECRET`. Point the app's webhook at `https://<your-app>/api/whatsapp`
+   with your `WHATSAPP_VERIFY_TOKEN`, subscribed to `messages`.
 
 ## Dev commands
 
@@ -77,43 +90,38 @@ Copy `.env.example` to `.env.local` for local development.
 npm run dev          # Local Next.js dev server
 npm run build        # Production build
 npm run typecheck    # tsc --noEmit
-npm run lint         # ESLint (next/core-web-vitals)
-npm test             # Vitest run (29 files / ~209 tests)
+npm run lint         # ESLint, zero warnings allowed
+npm test             # Vitest + PGlite (in-process Postgres) suite
 npm run test:watch   # Vitest watch mode
-npm run e2e          # Playwright smoke test (BASE_URL defaults to prod)
+npm run e2e          # Playwright smoke (self-provisioning fixtures)
 ```
+
+The full Vitest suite is memory-heavy (many suites boot PGlite); the config
+caps local workers at 4. While iterating, run targeted files:
+`npx vitest run tests/<file>.test.ts --maxWorkers=2`.
 
 ## Contributing / CI
 
-The deploy pipeline is GitHub-driven:
-
-1. Branch from `main` (`git checkout -b feat/your-thing`).
-2. Push. Open a PR. CI runs typecheck + lint + test + build; Vercel
-   posts a preview URL.
-3. Once `ci / ci` is green, merge (squash). `main` is protected — direct
-   pushes are rejected.
-4. The merge auto-deploys to `smartremit.ai`. A Playwright
-   smoke test then logs into the live dashboard; failure shows up on the
-   commit's status check.
+1. Branch from `main` (`fix/<component>/<slug>` or `feat/<component>/<slug>`;
+   components are listed in [docs/COMPONENTS.md](docs/COMPONENTS.md)).
+2. Open a PR. CI (`ci / ci`) runs typecheck, lint, the Vitest shards, the migration drift
+   check and the build; Vercel posts a preview.
+3. Squash-merge once `ci / ci` is green. `main` is protected.
+4. The merge deploys to `smartremit.ai` as a rolling release; the post-deploy
+   Playwright smoke (`smoke.yml`) runs once it reaches 100% of traffic.
 
 ## Project layout
 
 ```
 src/
-  app/                Next.js routes (api/, dashboard/, pay/, login/, receipt/)
-  lib/                Domain modules — agent, tools, store, fx, compliance,
-                      auth, schedules, whatsapp, payments, ollama
-tests/                Vitest specs (one per src/lib/* module + e2e)
-docs/                 ROADMAP.md + brainstorm specs and implementation plans
-                      under docs/superpowers/
+  app/            Next.js routes: api/, pay/, account/, admin-dashboard/,
+                  docs/, about/, login/, onboard/, partners/
+  lib/            Domain modules: agent, tools, prompt, settlement, outbox,
+                  compliance, KYC, FX, partner config, field crypto, ...
+  db/             Drizzle schema and repositories
+drizzle/          Checked-in SQL migrations (applied manually)
+tests/            Vitest specs; tests/e2e/ is the Playwright smoke
+docs/             Architecture, roadmap, component map, plans
 ```
 
-See [CLAUDE.md](CLAUDE.md) for the working conventions Claude follows in this
-repo (live-update pattern, server-action boundary, deploy gate, etc.).
-
-## Scope
-
-This is a concept demo. Out of scope: real KYC, real payment/payout rails,
-AML/compliance, voice notes, and corridors other than US→India. Lane C of the
-roadmap describes what would have to change to lift those constraints — it's
-mostly partnerships and licensing, not code.
+See [CLAUDE.md](CLAUDE.md) for the working conventions in this repo.
