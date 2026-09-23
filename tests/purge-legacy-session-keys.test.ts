@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { fakeRedis } from './helpers';
 import { purgeLegacySessionKeys, type PurgeRedis } from '../scripts/purge-legacy-session-keys';
 
@@ -21,8 +22,16 @@ function withScan(pageSize = 2) {
     return [next, page] as [string, string[]];
   });
   const del = vi.spyOn(r, 'del');
-  const redis: PurgeRedis = { scan, del: (k: string) => r.del(k) };
-  return { r, redis, scan, del };
+  const sadd = vi.spyOn(r, 'sadd');
+  const expire = vi.spyOn(r, 'expire');
+  const redis: PurgeRedis = {
+    scan,
+    del: (k: string) => r.del(k),
+    smembers: (k: string) => r.smembers(k),
+    sadd: (k: string, m: string) => r.sadd(k, m),
+    expire: (k: string, s: number) => r.expire(k, s),
+  };
+  return { r, redis, scan, del, sadd, expire };
 }
 
 async function seed(r: ReturnType<typeof fakeRedis>) {
@@ -64,15 +73,40 @@ describe('purgeLegacySessionKeys', () => {
     expect(r.sets.has('sr_sess_idx:15550102030')).toBe(true); // customer untouched
   });
 
-  it('--customer --delete removes only the legacy index sets, never session records', async () => {
+  it('--customer --delete MIGRATES each legacy member as sha256 into sr_sess_ix (12-h TTL), then deletes the legacy set', async () => {
     const { r, redis } = withScan();
     await seed(r);
+    await r.sadd('sr_sess_idx:15550102030', 'eeee');
+    const expire = vi.spyOn(r, 'expire');
     const report = await purgeLegacySessionKeys(redis, { staff: false, customer: true, del: true }, () => {});
-    expect(report).toEqual({ 'sr_sess_idx:*': 1 });
+    expect(report).toEqual({ 'sr_sess_idx:*': 1, 'sr_sess_idx:* members migrated': 2 });
+    const sha = (t: string) => createHash('sha256').update(t).digest('hex');
+    const ix = r.sets.get('sr_sess_ix:15550102030')!;
+    expect(ix.has(sha('cccc'))).toBe(true);
+    expect(ix.has(sha('eeee'))).toBe(true);
+    expect(ix.has('dddd')).toBe(true); // pre-existing new-index member kept
+    expect(ix.has('cccc')).toBe(false); // never the raw token
+    expect(expire).toHaveBeenCalledWith('sr_sess_ix:15550102030', 12 * 60 * 60);
     expect(r.sets.has('sr_sess_idx:15550102030')).toBe(false);
     expect(r.dump.has('sr_sess:dddd')).toBe(true);
     expect(r.sets.has('sr_sess_ix:15550102030')).toBe(true);
     expect(r.dump.has('session:aaaa')).toBe(true); // staff untouched
+  });
+
+  it('--customer dry run reports what it WOULD migrate and delete, and writes nothing', async () => {
+    const { r, redis, del, sadd, expire } = withScan();
+    await seed(r);
+    vi.clearAllMocks(); // only writes made by the purge count
+    const lines: string[] = [];
+    const report = await purgeLegacySessionKeys(redis, { staff: false, customer: true, del: false }, (l) => lines.push(l));
+    expect(report).toEqual({ 'sr_sess_idx:*': 1, 'sr_sess_idx:* members migrated': 1 });
+    expect(del).not.toHaveBeenCalled();
+    expect(sadd).not.toHaveBeenCalled();
+    expect(expire).not.toHaveBeenCalled();
+    expect(r.sets.get('sr_sess_idx:15550102030')?.has('cccc')).toBe(true);
+    const out = lines.join('\n');
+    expect(out).toMatch(/would migrate 1/);
+    for (const secret of ['cccc', '15550102030']) expect(out).not.toContain(secret);
   });
 
   it('pages the cursor to "0" and dedupes a key returned twice', async () => {
@@ -83,7 +117,7 @@ describe('purgeLegacySessionKeys', () => {
       return cursor === '0' ? ['7', ['session:aaaa']] : ['0', ['session:aaaa']];
     });
     const report = await purgeLegacySessionKeys(
-      { scan, del: (k: string) => r.del(k) },
+      { scan, del: (k: string) => r.del(k), smembers: async () => [], sadd: async () => 1, expire: async () => 1 },
       { staff: true, customer: false, del: false },
       () => {},
     );

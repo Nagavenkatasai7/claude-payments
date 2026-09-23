@@ -12,10 +12,12 @@
  * --staff    `session:*` (token → username) and `staff_sessions:*` (raw-token index).
  *            Run once the fix-20 deploy is at 100% (smoke green): every staff
  *            member has re-signed-in under `staff_sess:<sha256>` by then.
- * --customer `sr_sess_idx:*` (the raw-token revoke index) ONLY. The session
- *            records `sr_sess:<sha256>` are already hashed and are NEVER touched.
- *            Run at least 12 h after the deploy (the customer absolute session
- *            limit), when every session a legacy index points at has expired.
+ * --customer `sr_sess_idx:*` (the raw-token revoke index) ONLY. MIGRATE, then
+ *            delete: each member is SADDed as sha256(member) into
+ *            `sr_sess_ix:<phone>` (TTL re-armed to 12 h) BEFORE the legacy set
+ *            is deleted, so a still-live pre-fix session stays revocable no
+ *            matter when this runs. The records `sr_sess:<sha256>` are never
+ *            touched. Recommended at least 12 h after the deploy anyway.
  *
  * Upstash `scan(cursor, { match, count })` returns `[nextCursor, keys]` with a
  * STRING cursor; the loop ends when it is '0' (@upstash/redis 1.38.1
@@ -23,11 +25,15 @@
  * https://redis.io/commands/scan). SCAN may return a key more than once, so
  * keys are de-duplicated before counting or deleting.
  */
+import { createHash } from 'node:crypto';
 import { getRedis } from '@/lib/redis';
 
 export interface PurgeRedis {
   scan(cursor: string | number, opts: { match: string; count?: number }): Promise<[string | number, string[]]>;
   del(key: string): Promise<unknown>;
+  smembers(key: string): Promise<string[]>;
+  sadd(key: string, member: string): Promise<unknown>;
+  expire(key: string, seconds: number): Promise<unknown>;
 }
 
 export interface PurgeOptions {
@@ -39,6 +45,12 @@ export interface PurgeOptions {
 
 export const STAFF_PATTERNS = ['session:*', 'staff_sessions:*'] as const;
 export const CUSTOMER_PATTERNS = ['sr_sess_idx:*'] as const;
+const LEGACY_CUSTOMER_INDEX = 'sr_sess_idx:';
+const CUSTOMER_HASH_INDEX = 'sr_sess_ix:';
+/** Mirrors customer-auth-store's SESSION_INDEX_TTL_SECONDS (ABSOLUTE_MS / 1000). */
+const CUSTOMER_INDEX_TTL_SECONDS = 12 * 60 * 60;
+
+const sha256hex = (s: string) => createHash('sha256').update(s).digest('hex');
 
 async function scanAll(redis: PurgeRedis, match: string): Promise<string[]> {
   const seen = new Set<string>();
@@ -65,6 +77,21 @@ export async function purgeLegacySessionKeys(
   for (const match of patterns) {
     const keys = await scanAll(redis, match);
     report[match] = keys.length;
+    if (match === 'sr_sess_idx:*') {
+      // Migrate first: carry each raw member into the hashed index, so the
+      // delete below can never make a live pre-fix session unrevocable.
+      let members = 0;
+      for (const k of keys) {
+        const raw = await redis.smembers(k);
+        members += raw.length;
+        if (!opts.del || raw.length === 0) continue;
+        const target = CUSTOMER_HASH_INDEX + k.slice(LEGACY_CUSTOMER_INDEX.length);
+        for (const t of raw) await redis.sadd(target, sha256hex(t));
+        await redis.expire(target, CUSTOMER_INDEX_TTL_SECONDS);
+      }
+      report[`${match} members migrated`] = members;
+      log(`  ${match}: ${opts.del ? `${members} member(s) migrated as sha256 into sr_sess_ix:*` : `would migrate ${members} member(s) as sha256 into sr_sess_ix:*`}`);
+    }
     if (opts.del) {
       for (const k of keys) await redis.del(k);
       log(`  ${match}: ${keys.length} key(s) DELETED`);
@@ -95,7 +122,9 @@ async function main() {
     { staff, customer, del },
     (line) => console.log(line),
   );
-  const total = Object.values(report).reduce((a, b) => a + b, 0);
+  const total = Object.entries(report)
+    .filter(([k]) => !k.endsWith('migrated'))
+    .reduce((a, [, n]) => a + n, 0);
   console.log(`\nSUMMARY: ${total} legacy key(s) ${del ? 'deleted' : 'found'}.\n`);
 }
 
