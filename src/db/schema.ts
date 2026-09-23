@@ -551,7 +551,13 @@ export const waitlistSignups = pgTable(
 // The detailed partner application (Stage 2) — one row per submitted application,
 // linked to its partner_request. The KYB/compliance/commercial answers live in a
 // typed `details` jsonb (the 4 sections); uploaded documents are a jsonb array of
-// {label,url,size,contentType} pointing at private Vercel Blob objects.
+// {label,url,size,contentType}. Fix 24: the urls point at a PRIVATE Vercel Blob
+// store (`<store>.private.blob.vercel-storage.com/partner-applications/<requestId>/…`)
+// and need the store token on every read, so a url is not a capability; staff
+// read them only through the audited route
+// admin-dashboard/partner-requests/[id]/documents/[index] (one `partner_doc.view`
+// audit row per read). Rows written before fix 24 held public-store urls; the
+// owner-run scripts/migrate-partner-docs-private.ts re-issues those.
 export const partnerApplications = pgTable(
   'partner_applications',
   {
