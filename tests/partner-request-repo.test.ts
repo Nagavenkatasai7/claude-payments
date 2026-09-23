@@ -55,7 +55,7 @@ describe('sendEmail — no-op when SMTP unconfigured', () => {
   it('never builds a transport, never sends, and never throws when SMTP creds are unset', async () => {
     // SMTP_HOST/USER/PASS are unset in the test env ⇒ sendEmail must short-circuit
     // so the outbox never dead-letters just because email isn't configured.
-    await expect(sendEmail({ to: ['x@y.com'], subject: 's', text: 't' })).resolves.toBeUndefined();
+    await expect(sendEmail({ to: ['x@y.com'], subject: 's', text: 't' })).resolves.toBe('skipped_unconfigured');
     expect(createTransportMock).not.toHaveBeenCalled();
     expect(sendMailMock).not.toHaveBeenCalled();
   });

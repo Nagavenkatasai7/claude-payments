@@ -28,8 +28,10 @@ import type {
 //
 // TENANT IDENTITY (fix 1 / F44): the key is (partner_id, phone). Every read and
 // write takes partnerId FIRST and carries it in the WHERE; a phone alone never
-// selects a row. The one cross-tenant read is findByPhone, used by portal auth,
-// the platform-staff detail page and the Persona webhook only. upsertOnFirstInbound
+// selects a row. The cross-tenant reads are findByPhone, used by portal auth,
+// the platform-staff detail page and the Persona webhook only, and
+// findByKycInquiryId (Program-Fix 35), used by the Persona webhook only to bind
+// a report event (which carries no phone) by the inquiry the row recorded. upsertOnFirstInbound
 // NEVER moves a row between tenants — a partner-signed inbound for a phone that
 // exists under another partner creates that partner's OWN sibling row. The
 // grandfather check is the indexed MIN(created_at) for (partner, phone).
@@ -200,6 +202,23 @@ export function createCustomerRepo(
         .select()
         .from(customers)
         .where(eq(customers.phone, senderPhone))
+        .orderBy(asc(customers.createdAt), asc(customers.partnerId));
+      return rows.map(rowToCustomer);
+    },
+
+    /**
+     * Program-Fix 35: every tenant's row that recorded this Persona inquiry id
+     * (oldest first). Cross-tenant, like findByPhone — the Persona webhook only;
+     * it binds a report event when exactly ONE row matches and fails closed
+     * otherwise. An empty id matches nothing. (No index on kyc_inquiry_id:
+     * a scan is acceptable at today's customer count; add one if it grows.)
+     */
+    async findByKycInquiryId(inquiryId: string): Promise<Customer[]> {
+      if (!inquiryId) return [];
+      const rows = await db
+        .select()
+        .from(customers)
+        .where(eq(customers.kycInquiryId, inquiryId))
         .orderBy(asc(customers.createdAt), asc(customers.partnerId));
       return rows.map(rowToCustomer);
     },

@@ -5,6 +5,7 @@ import {
   beneficiaries,
   corridorRequests,
   idempotencyKeys,
+  outbox,
   partnerApplications,
   partnerRequests,
   recipients,
@@ -13,6 +14,7 @@ import {
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { isPartnerType } from '@/lib/partner-type';
+import { deriveInviteEmailStatus, inviteDedupeKey, type InviteEmailStatus } from '@/lib/partner-invite-email';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
 import type {
@@ -328,6 +330,7 @@ export interface AuditEvent {
 export function createAuditRepo(db: DbOrTx) {
   return {
     ...createAuditCaseQueries(db), // Program-Fix 43 (defined below, own region)
+    ...createEmailAuditQueries(db), // Program-Fix 39 (defined below, own region)
     async record(e: AuditEvent): Promise<void> {
       await db.insert(auditEvents).values({
         partnerId: e.partnerId ?? null,
@@ -888,3 +891,57 @@ export function createSellerRepo(db: DbOrTx) {
   };
 }
 export type SellerRepo = ReturnType<typeof createSellerRepo>;
+
+// ── Program-Fix 39: honest-email audit reads (domain-11) ─────────────────────
+// Own region (spread into createAuditRepo) so it never overlaps another change.
+
+function createEmailAuditQueries(db: DbOrTx) {
+  return {
+    /** How many `action` rows were written in the last `sinceDays` days (exact match). */
+    async countByAction(action: string, sinceDays: number): Promise<number> {
+      const rows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(auditEvents)
+        .where(
+          sql`${auditEvents.action} = ${action}
+            AND ${auditEvents.at} >= now() - make_interval(days => ${Math.max(0, Math.floor(sinceDays))})`,
+        );
+      return Number(rows[0]?.n ?? 0);
+    },
+  };
+}
+
+/**
+ * The newest partner-invite email's status for ONE partner request: the newest
+ * 'email.send' row keyed `partner_app_invite:<id>` or `partner_app_invite:<id>:r…`
+ * (exact / starts_with — never LIKE, whose `_` wildcard both prefixes contain),
+ * plus the `email.skipped` audit rows naming that request. Platform staff only
+ * (the caller's page gate); reads no address.
+ */
+export async function getInviteEmailStatus(db: DbOrTx, requestId: string): Promise<InviteEmailStatus> {
+  const key = inviteDedupeKey(requestId);
+  const rows = await db
+    .select({ id: outbox.id, status: outbox.status })
+    .from(outbox)
+    .where(
+      sql`${outbox.kind} = 'email.send'
+        AND (${outbox.dedupeKey} = ${key} OR starts_with(${outbox.dedupeKey}, ${`${key}:r`}))`,
+    )
+    .orderBy(desc(outbox.id))
+    .limit(1);
+  const newest = rows[0] ? { id: Number(rows[0].id), status: rows[0].status } : null;
+  if (!newest || newest.status !== 'done') return deriveInviteEmailStatus(newest, []);
+  const skips = await db
+    .select({ meta: auditEvents.meta })
+    .from(auditEvents)
+    .where(sql`${auditEvents.action} = 'email.skipped' AND ${auditEvents.subjectId} = ${requestId}`)
+    .orderBy(desc(auditEvents.id))
+    .limit(50);
+  return deriveInviteEmailStatus(
+    newest,
+    skips.map((r) => {
+      const id = Number((r.meta as Record<string, unknown> | null)?.outboxId);
+      return { outboxId: Number.isSafeInteger(id) ? id : null };
+    }),
+  );
+}

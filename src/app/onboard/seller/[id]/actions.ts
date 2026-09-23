@@ -47,8 +47,9 @@ export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean 
       if (!r.allowed) return { ok: false };
     } catch { /* never block on a limiter error */ }
 
-    const issued = await getTransactionOtpStore().issue(sellerId, seller.phone);
-    if (!issued.ok) return { ok: false }; // cooldown
+    // Program-Fix 45: its own per-phone budget (kind 'seller', the seller's partner).
+    const issued = await getTransactionOtpStore().issue(sellerId, seller.phone, { kind: 'seller', partnerId: seller.partnerId });
+    if (!issued.ok) return { ok: false }; // cooldown, or an issue cap (locked): same bare answer
     // Deliver from the seller's partner WhatsApp number when configured.
     let creds: WaCreds | undefined;
     try {

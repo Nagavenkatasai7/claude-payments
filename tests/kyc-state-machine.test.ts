@@ -193,3 +193,95 @@ describe('applyKycEvent — kycSubmittedAt follows the rank guard (Program-Fix 4
     expect(delta.kycSubmittedAt).toBeUndefined();
   });
 });
+
+describe('applyKycEvent — report/*.matched holds (Program-Fix 35)', () => {
+  // A report event as parsePersonaEvent builds it: referenceId null, the rep_ id
+  // in reportId, the inquiry from relationships in inquiryId.
+  const report = (name: string, matchKind?: PersonaEvent['matchKind']): PersonaEvent =>
+    ev({
+      name,
+      status: 'ready',
+      referenceId: null,
+      inquiryId: 'inq_1',
+      reportId: 'rep_1',
+      ...(matchKind ? { matchKind } : {}),
+      ...(matchKind === 'watchlist' ? { watchlistMatched: true } : {}),
+    });
+
+  it('PEP match gives needs_review + pepHit (and no watchlist flag)', () => {
+    const c = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const d = applyKycEvent(c, report('report/politically-exposed-person.matched', 'pep'));
+    expect(d).toEqual({ kycReviewState: 'needs_review', pepHit: true });
+  });
+
+  it('a later inquiry.approved cannot clear a PEP hold', () => {
+    const held = { ...base, kycReviewState: 'needs_review', pepHit: true } as Customer;
+    expect(applyKycEvent(held, ev({ name: 'inquiry.approved', status: 'approved' }))).toEqual({});
+  });
+
+  it('a report event never overwrites kycInquiryId / kycProviderRef', () => {
+    const c = { ...base, kycReviewState: 'inquiry_started', kycInquiryId: 'inq_1', kycProviderRef: 'inq_1' } as Customer;
+    for (const e of [
+      report('report/watchlist.matched', 'watchlist'),
+      report('report/politically-exposed-person.matched', 'pep'),
+      report('report/adverse-media.matched', 'other'),
+      report('report/politically-exposed-person.ready'),
+    ]) {
+      const d = applyKycEvent(c, e);
+      expect(d.kycInquiryId, e.name).toBeUndefined();
+      expect(d.kycProviderRef, e.name).toBeUndefined();
+    }
+  });
+
+  it('PEP .dismissed / .ready / .errored give an empty delta', () => {
+    for (const s of ['pending_review', 'inquiry_started', 'needs_review'] as const) {
+      const c = { ...base, kycReviewState: s } as Customer;
+      for (const n of ['dismissed', 'ready', 'errored']) {
+        expect(applyKycEvent(c, report(`report/politically-exposed-person.${n}`)), `${s} ${n}`).toEqual({});
+      }
+    }
+  });
+
+  it('any other *.matched kind holds without setting a flag', () => {
+    const c = { ...base, kycReviewState: 'pending_review' } as Customer;
+    expect(applyKycEvent(c, report('report/adverse-media.matched', 'other'))).toEqual({ kycReviewState: 'needs_review' });
+  });
+
+  it('a watchlist match from a report sets watchlistHit + needs_review', () => {
+    const c = { ...base, kycReviewState: 'inquiry_started' } as Customer;
+    expect(applyKycEvent(c, report('report/watchlist.matched', 'watchlist'))).toEqual({ kycReviewState: 'needs_review', watchlistHit: true });
+  });
+
+  it('a repeat PEP match on an already-held customer is a no-op re-apply (same state, same flag)', () => {
+    const held = { ...base, kycReviewState: 'needs_review', pepHit: true } as Customer;
+    expect(applyKycEvent(held, report('report/politically-exposed-person.matched', 'pep'))).toEqual({ kycReviewState: 'needs_review', pepHit: true });
+  });
+
+  it('approved + PEP match sets the flag only; the state stays approved (C2 default)', () => {
+    const approved = { ...base, kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' } as Customer;
+    expect(applyKycEvent(approved, report('report/politically-exposed-person.matched', 'pep'))).toEqual({ pepHit: true });
+  });
+
+  it('rejected + watchlist match sets the flag only', () => {
+    const rejected = { ...base, kycStatus: 'rejected', kycReviewState: 'rejected' } as Customer;
+    expect(applyKycEvent(rejected, report('report/watchlist.matched', 'watchlist'))).toEqual({ watchlistHit: true });
+  });
+
+  it('approved + another *.matched kind gives an empty delta (no flag column for it)', () => {
+    const approved = { ...base, kycStatus: 'verified', kycReviewState: 'approved' } as Customer;
+    expect(applyKycEvent(approved, report('report/adverse-media.matched', 'other'))).toEqual({});
+  });
+
+  it('approved + a non-match report event gives an empty delta', () => {
+    const approved = { ...base, kycStatus: 'verified', kycReviewState: 'approved' } as Customer;
+    expect(applyKycEvent(approved, report('report/watchlist.ready'))).toEqual({});
+  });
+
+  it('a report-named match with no matchKind (legacy event shape) still holds', () => {
+    const c = { ...base, kycReviewState: 'pending_review' } as Customer;
+    const d = applyKycEvent(c, ev({ name: 'report/politically-exposed-person.matched', status: null }));
+    expect(d.kycReviewState).toBe('needs_review');
+    expect(d.pepHit).toBe(true);
+    expect(d.kycInquiryId).toBeUndefined();
+  });
+});

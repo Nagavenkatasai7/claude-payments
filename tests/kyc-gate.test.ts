@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isSendVerified, SEND_GATE_REASON, sendGateActive } from '@/lib/kyc-gate';
+import { gateOffOnLiveRail, isSendVerified, SEND_GATE_REASON, sendGateActive } from '@/lib/kyc-gate';
 import type { Customer, Partner } from '@/lib/types';
 
 const now = '2026-06-08T00:00:00Z';
@@ -59,5 +59,37 @@ describe('sendGateActive (WL1 per-partner gate)', () => {
   it("'delegated' ⇒ gate OFF (partner runs KYC); opting back in flips it ON", () => {
     expect(sendGateActive(partner({ kycMode: 'delegated' }))).toBe(false);
     expect(sendGateActive(partner({ kycMode: 'delegated', requireKycBeforeSend: true }))).toBe(true);
+  });
+});
+
+describe('gateOffOnLiveRail (Program-Fix 35: partner page warning, read-only)', () => {
+  const rail = (providerType?: string) => ({ payment: providerType === undefined ? {} : { providerType } });
+
+  it('gate OFF + a live settlement provider (not mock / simulator) → true', () => {
+    expect(gateOffOnLiveRail(partner({}), rail('http'))).toBe(true);
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: false, kycMode: 'ours' }), rail('http'))).toBe(true);
+  });
+
+  it('the simulator is a demo rail, not a live one → false (orchestrator decision b)', () => {
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: false }), rail('simulator'))).toBe(false);
+  });
+
+  it('a delegated partner runs KYC on its side → never warned', () => {
+    expect(gateOffOnLiveRail(partner({ kycMode: 'delegated' }), rail('http'))).toBe(false);
+  });
+
+  it('gate OFF on the mock (or unset / blank) provider → false', () => {
+    expect(gateOffOnLiveRail(partner({}), rail('mock'))).toBe(false);
+    expect(gateOffOnLiveRail(partner({}), rail(undefined))).toBe(false);
+    expect(gateOffOnLiveRail(partner({}), rail(''))).toBe(false);
+  });
+
+  it('gate ON never warns, whatever the rail', () => {
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: true }), rail('http'))).toBe(false);
+    expect(gateOffOnLiveRail(partner({ requireKycBeforeSend: true }), rail('mock'))).toBe(false);
+  });
+
+  it('a missing partner is gate OFF (the resolver default)', () => {
+    expect(gateOffOnLiveRail(null, rail('http'))).toBe(true);
   });
 });

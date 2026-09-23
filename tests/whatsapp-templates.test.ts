@@ -220,3 +220,26 @@ describe('OTP copy — brand interpolated (Program-Fix 49A)', () => {
     expect(transactionOtpMessage('123456')).toContain('Your SmartRemit confirmation code is 123456');
   });
 });
+
+// Program-Fix 45 (P2): the pay-page confirmation code is free-form in-session
+// text (no Meta template), so the "never share" line is added to the text itself.
+import { transactionOtpMessage } from '@/lib/whatsapp-templates';
+
+describe('transactionOtpMessage — never-share wording (fix 45)', () => {
+  it('tells the customer never to share the code and that the brand never asks for it', () => {
+    const msg = transactionOtpMessage('123456');
+    expect(msg).toContain('123456');
+    expect(msg).toMatch(/never share this code/i);
+    expect(msg).toContain('SmartRemit will never ask for it');
+    // The code appears exactly once.
+    expect(msg.split('123456').length - 1).toBe(1);
+  });
+
+  it('takes an optional brand for the never-ask line', () => {
+    expect(transactionOtpMessage('123456', 'Acme Pay')).toContain('Acme Pay will never ask for it');
+  });
+
+  it('a blank brand falls back to SmartRemit', () => {
+    expect(transactionOtpMessage('123456', '   ')).toContain('SmartRemit will never ask for it');
+  });
+});

@@ -95,7 +95,8 @@ export async function POST(
     // ── OTP step-up (keyed on the invoice; the code is bound to this bill) ─────
     const otpStore = getTransactionOtpStore();
     if (typeof body.action === 'string' && body.action === 'request_otp') {
-      const issued = await otpStore.issue(invoiceId, buyerPhone);
+      // Program-Fix 45: the buyer code draws from its own per-phone budget (kind 'b2b', this invoice's partner).
+      const issued = await otpStore.issue(invoiceId, buyerPhone, { kind: 'b2b', partnerId: invoice.partnerId });
       if (issued.ok) {
         let otpCreds: WaCreds | undefined;
         try {
