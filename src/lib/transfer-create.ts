@@ -1,6 +1,6 @@
 import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
-import { screenTransfer } from './compliance';
+import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
@@ -90,6 +90,11 @@ export interface CreateTransferInput {
   // chat / pay-page / cron mint). The partner API passes false: an external
   // caller must never plant a saved recipient into its customers' picker.
   saveRecipient?: boolean;
+  // Program-Fix 14 follow-up: the caller could not supply the sender's name, so
+  // the sender side cannot be name-screened. Absent/false ⇒ unchanged. true ⇒
+  // a non-blocked mint is HELD (flagged + SENDER_IDENTITY_MISSING_REASON), in
+  // the same transaction as the insert. Only the partner API sets it today.
+  senderIdentityMissing?: boolean;
 }
 
 /**
@@ -193,13 +198,28 @@ export class TransferIdConflictError extends Error {
 
 export async function createTransfer(
   store: Store,
+  partnerStore: PartnerStore,
+  _monthlyVolumeStore: MonthlyVolumeStore,
+  input: CreateTransferInput,
+): Promise<Transfer> {
+  return (await createTransferWithOutcome(store, partnerStore, _monthlyVolumeStore, input)).transfer;
+}
+
+/**
+ * createTransfer plus whether the locked mint REPLAYED an existing row (a
+ * claim-first same-id re-mint) instead of inserting. Same arguments, same
+ * behaviour; the partner API uses it so a concurrent loser that replays the
+ * winner never repeats a mint-only side effect (the deprecation warning).
+ */
+export async function createTransferWithOutcome(
+  store: Store,
   partnerStore: PartnerStore,           // NEW (P5): to resolve corridor rules
   // Program fix 16: UNUSED. The rolling-month EDD total is read from the
   // ledger INSIDE the sender lock (SenderLedgerOps.totals). The parameter is
   // kept so the six mint call sites keep their signature.
   _monthlyVolumeStore: MonthlyVolumeStore,
   input: CreateTransferInput,
-): Promise<Transfer> {
+): Promise<{ transfer: Transfer; replayed: boolean }> {
   // Phase 3 backstop: the chokepoint refuses to mint a transfer for an unverified
   // sender. Callers gate earlier with friendly UX (a kyc_url hand-off / a cron
   // skip); this is the last line of defense so no future caller can bypass it.
@@ -281,7 +301,7 @@ export async function createTransfer(
   // A same-id replay is a MASKED read of the existing row and a blocked row is
   // evidence only: neither reaches the address-book write below (a replay
   // must never write ****last4 into the sender's saved recipients — ctx-01).
-  if (minted.replayed || transfer.status === 'blocked') return transfer;
+  if (minted.replayed || transfer.status === 'blocked') return { transfer, replayed: minted.replayed };
   // (transfer count, today's spend and the month total are DERIVED from the
   // ledger — no counter to bump: the minted row IS the accrual.)
 
@@ -307,7 +327,7 @@ export async function createTransfer(
     }
   }
 
-  return transfer;
+  return { transfer, replayed: false };
 }
 
 /** Everything the locked body needs, read on the root handle BEFORE the lock. */
@@ -409,6 +429,13 @@ async function mintLocked(
     } catch (err) {
       logError('aml.hold_check', err, { partnerId: input.partnerId });
     }
+  }
+  // ── Missing sender identity (Program-Fix 14 follow-up) ────────────────────
+  // AFTER screening, EDD and the AML gate so their verdicts are unchanged; it
+  // only ever ADDS a hold. A watchlist BLOCK still wins (never downgraded).
+  if (input.senderIdentityMissing && complianceStatus !== 'blocked') {
+    complianceStatus = 'flagged';
+    complianceReasons = [...complianceReasons, SENDER_IDENTITY_MISSING_REASON];
   }
   const transfer: Transfer = {
     id,
