@@ -1,7 +1,8 @@
 // "What's inside" product mockups — stylized JSX recreations of the REAL
 // product surfaces (no screenshots, no client JS). Every number and label
 // reflects an actual product truth: non-custodial settlement, sanctions
-// screening that never turns off, 8 corridors, live mid-market FX.
+// screening that never turns off, the corridor count from ./corridors (10 at the
+// time of writing), live mid-market FX.
 //
 // Light brand theme: white surfaces on the #f5f9ff page, navy (#0b1b3f) text,
 // slate (#475569 / #52607a) secondary. Brand green is too light for text on
