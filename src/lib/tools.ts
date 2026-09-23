@@ -40,6 +40,7 @@ import { logWarn } from './log';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from './ticket-category';
 import { BANK_FIELDS_BY_COUNTRY, isMaskedDestination, ACCOUNT_ON_FILE_PLACEHOLDER, NO_BANK_DETAILS_PLACEHOLDER } from './payout-format';
 import { BILL_TEXT_MAX, boundUntrustedText, hasWebAddress, ID_MAX, isCleanName, NAME_MAX, safeDisplayText } from './untrusted-text';
+import { BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC, isBillExpired } from './b2b-bill-expiry';
 
 // ── Channel seam (B5) ────────────────────────────────────────────────────────
 // The agent brain serves two surfaces: the WhatsApp bot (full tool set) and the
@@ -357,7 +358,8 @@ async function refuseUnlessOwnOpenBill(
     return { error: 'A business bill payment needs entity_type business, funding_method ach_pull and the invoice_id from present_bill.' };
   }
   const invoice = await ctx.store.getB2bInvoiceScoped(b2b.invoiceId, ctx.partnerId);
-  if (!invoice || invoice.status !== 'unpaid' || invoice.buyerPhone !== ctx.phone) {
+  // Program-Fix 44: an unpaid bill past the TTL is closed on this pay path too.
+  if (!invoice || invoice.status !== 'unpaid' || invoice.buyerPhone !== ctx.phone || isBillExpired(invoice)) {
     return { error: 'That bill is not open for this account. Call present_bill to fetch the current bill.' };
   }
   if (invoice.sellerId) {
@@ -463,7 +465,7 @@ export const toolSchemas: ChatTool[] = [
     function: {
       name: 'create_invoice',
       description:
-        "Create a cross-border bill (invoice) FOR an active registered SELLER to charge one of their buyers. Call this when a registered seller says 'bill / invoice / charge <someone> for <amount>'. The bill may be denominated in the SELLER's own currency (the default — the seller then nets that exact amount and the buyer pays the live FX equivalent + fees at payment time) OR in the BUYER's currency (the buyer then pays that exact amount + fees and the seller receives the live-converted equivalent at payment time). Never convert the amount yourself. Pass buyer_phone (the customer's WhatsApp number with country code) and amount; pass currency ONLY when the seller named one (e.g. 'bill them 1200 MXN' → currency 'MXN'); description is optional (what the bill is for). Returns { created: true, invoice_id, pay_url, amount, currency } — relay the secure pay_url back to the SELLER so they can forward it (we also try to message the buyer directly). If the seller is not registered/active yet it returns { created: false, needs_registration: true, reply_to_customer } — relay that and call register_seller to get them set up first. Invalid buyer number, a non-positive amount, or a currency that is neither the seller's nor the buyer's returns { created: false, reply_to_customer } — relay it (it names the allowed currencies). A seller can only bill from their OWN active profile (their number is the key).",
+        "Create a cross-border bill (invoice) FOR an active registered SELLER to charge one of their buyers. Call this when a registered seller says 'bill / invoice / charge <someone> for <amount>'. The bill may be denominated in the SELLER's own currency (the default — the seller then nets that exact amount and the buyer pays the live FX equivalent + fees at payment time) OR in the BUYER's currency (the buyer then pays that exact amount + fees and the seller receives the live-converted equivalent at payment time). Never convert the amount yourself. Pass buyer_phone (the customer's WhatsApp number with country code) and amount; pass currency ONLY when the seller named one (e.g. 'bill them 1200 MXN' → currency 'MXN'); description is optional (what the bill is for). Returns { created: true, invoice_id, pay_url, amount, currency } — relay the secure pay_url back to the SELLER so they can forward it (we also try to message the buyer directly). An identical bill that is still open returns { created: false, already_open: true, reply_to_customer } (its link is re-sent to the seller) — relay it. If the seller is not registered/active yet it returns { created: false, needs_registration: true, reply_to_customer } — relay that and call register_seller to get them set up first. Invalid buyer number, a non-positive amount, or a currency that is neither the seller's nor the buyer's returns { created: false, reply_to_customer } — relay it (it names the allowed currencies). A seller can only bill from their OWN active profile (their number is the key).",
       parameters: {
         type: 'object',
         properties: {
@@ -2079,15 +2081,76 @@ async function createInvoiceTool(
   // send_approve_picker's content-keyed card dedup. Keyed on the RESOLVED
   // denomination so a 500-USD bill and a 500-MXN bill to the same buyer are
   // distinct claims (Case S keys are byte-identical to before).
-  const billKey = `${seller.id}|${buyerPhone}|${amount}|${invoicedCurrency}`;
-  const candidateId = `inv_${newTransferId()}`;
-  const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
-  const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
   // Case B copy is explicit that the seller's side floats: the customer pays the
   // exact billed figure; the seller receives the converted amount at payment.
   const sellerReply = buyerDenominated
     ? `Your bill for ${amount} ${invoicedCurrency} is ready — your customer pays exactly ${amount} ${invoicedCurrency}, and you'll receive the converted ${seller.currency} amount at payment time. I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`
     : `Your bill for ${amount} ${invoicedCurrency} is ready — I've just sent you a secure link to share with your customer (and messaged it to them directly if they're reachable).`;
+
+  // Program-Fix 44 (b2b-04): the DURABLE duplicate check, read from the ledger
+  // BEFORE the claim. The 120 s Redis claim below only catches a replay inside
+  // its TTL; an identical bill (same tenant, seller, buyer, amount, currency)
+  // that is still unpaid and not expired is returned instead of minting a
+  // second payable twin — after any TTL. Checked before the claim so a hit never
+  // leaves the claim bound to an id that was never inserted. Concurrent first
+  // mints still collapse on the claim. A paid (or expired) twin does not block
+  // a legitimate repeat bill.
+  const openTwin = await ctx.store.findOpenTwinInvoice({
+    partnerId: seller.partnerId,
+    sellerId: seller.id,
+    buyerPhone,
+    invoicedAmount: amount,
+    invoicedCurrency,
+  });
+  if (openTwin) {
+    const twinUrl = `${env.appBaseUrl}/pay/b2b/${openTwin.id}`;
+    const twinAgeMs = Date.now() - Date.parse(openTwin.createdAt);
+    if (twinAgeMs < BILL_CLAIM_TTL_SEC * 1000) {
+      // A REPLAY of the turn that created this bill (at-least-once agent.turn):
+      // same result as the original run. Re-enqueueing its own seller copy is a
+      // no-op (the dedupe key is permanently unique) unless the original run
+      // died before enqueueing it, in which case this heals the delivery.
+      await enqueueSellerLink(
+        ctx,
+        ctx.phone,
+        `Your bill for ${amount} ${invoicedCurrency} is ready — share this secure link with your customer to get paid: ${twinUrl}`,
+        `sellerbill:${openTwin.id}`,
+      );
+      return { created: true, invoice_id: openTwin.id, pay_url: twinUrl, amount, currency: invoicedCurrency, reply_to_customer: sellerReply };
+    }
+    // A GENUINE later re-request (the seller lost the link, or asked twice):
+    // refuse the duplicate honestly and RE-SEND the open bill's link. The pay
+    // link is system-delivered (the bot never types URLs, and pay_url is appended
+    // only on the web channel). The resend token is claim-first, so a replay of
+    // THIS turn reuses it and its enqueue collapses on the dedupe key. If Redis
+    // is down, a time bucket keeps replays inside the window collapsing too.
+    let token: string;
+    try {
+      token = await ctx.store.claimBillResendToken(openTwin.id, String(Date.now()));
+    } catch {
+      token = `b${Math.floor(Date.now() / (BILL_RESEND_WINDOW_SEC * 1000))}`;
+    }
+    await enqueueSellerLink(
+      ctx,
+      ctx.phone,
+      `Here's the link to your open bill for ${amount} ${invoicedCurrency} again — share it with your customer to get paid: ${twinUrl}`,
+      `sellerbill:${openTwin.id}:resend:${token}`,
+    );
+    return {
+      created: false,
+      already_open: true,
+      invoice_id: openTwin.id,
+      pay_url: twinUrl,
+      amount,
+      currency: invoicedCurrency,
+      reply_to_customer: `You already have an open bill for ${amount} ${invoicedCurrency} to this customer, so I didn't create a second one — I've re-sent its link to you to share.`,
+    };
+  }
+
+  const billKey = `${seller.id}|${buyerPhone}|${amount}|${invoicedCurrency}`;
+  const candidateId = `inv_${newTransferId()}`;
+  const invoiceId = await ctx.store.claimBillInvoiceId(billKey, candidateId);
+  const payUrl = `${env.appBaseUrl}/pay/b2b/${invoiceId}`;
 
   if (invoiceId !== candidateId) {
     // Duplicate within the TTL — the original run already created the bill and

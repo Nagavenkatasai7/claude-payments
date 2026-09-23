@@ -9,15 +9,19 @@ import { cancelTransfer, reverseB2bSettlement } from '@/lib/dashboard-ops';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { newTransferId } from '@/lib/id';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
+import { canSee } from '@/lib/staff-scope';
 import { DEFAULT_PARTNER_ID, DEFAULT_SOURCE_CURRENCY } from '@/lib/defaults';
 import type { B2bInvoice, InvoiceLineItem, Staff } from '@/lib/types';
 
 /**
- * B2B admin actions — platform-only. Server actions are public POST endpoints,
- * so EVERY action self-gates (requireScope → platform) before touching the
- * store; a partner-scoped staffer who POSTs here is rejected. The B2B surface
- * crosses no tenant boundary today (single default partner), so platform scope
- * is the bar.
+ * B2B admin actions. Server actions are public POST endpoints, so EVERY action
+ * self-gates before touching the store:
+ *   • seed / cancel / reverse are platform-only (requirePlatformStaff);
+ *   • void / reissue act on an INVOICE, whose owning tenant is resolved from the
+ *     row itself (Program-Fix 44, b2b-04): platform staff act on any tenant's
+ *     bill, a partner-scoped ADMIN on its own tenant's bill only
+ *     (requireInvoiceActor). A bill the caller cannot see reads exactly like a
+ *     missing one (404-never-403), before any status-naming message.
  *
  * NON-CUSTODIAL is sacred across every lifecycle action below: SmartRemit holds
  * no funds, so cancelling a *paid* ACH-pull transfer NEVER does a bare status
@@ -35,6 +39,27 @@ async function requirePlatformStaff(): Promise<Staff> {
     throw new Error('Forbidden: platform scope required.');
   }
   return staff;
+}
+
+/**
+ * Self-gate for the invoice lifecycle actions (Program-Fix 44). Resolves the
+ * invoice UNSCOPED, then authorizes against its owning tenant: platform scope
+ * passes; a partner scope passes only for its own tenant AND only as an admin.
+ * Missing and cross-tenant both throw the SAME 'Invoice not found.', so a
+ * foreign id never reveals that it exists or what state it is in.
+ */
+async function requireInvoiceActor(
+  formData: FormData,
+): Promise<{ staff: Staff; id: string; invoice: B2bInvoice }> {
+  const { staff, scope } = await requireScope();
+  if (scope.kind === 'partner' && staff.role !== 'admin') {
+    throw new Error('Forbidden: admin role required.');
+  }
+  const id = String(formData.get('id') ?? '').trim();
+  if (!id) throw new Error('Missing invoice id.');
+  const invoice = await getStore().getB2bInvoice(id);
+  if (!invoice || !canSee(scope, invoice.partnerId)) throw new Error('Invoice not found.');
+  return { staff, id, invoice };
 }
 
 /**
@@ -181,20 +206,15 @@ export async function reverseB2bTransferAction(formData: FormData): Promise<void
  * the actual status instead of a bare "not voidable".
  */
 export async function voidB2bInvoiceAction(formData: FormData): Promise<void> {
-  const staff = await requirePlatformStaff();
-  const id = String(formData.get('id') ?? '').trim();
-  if (!id) throw new Error('Missing invoice id.');
+  const { staff, id, invoice: existing } = await requireInvoiceActor(formData);
+  const partnerId = existing.partnerId;
 
-  const store = getStore();
-  const existing = await store.getB2bInvoiceScoped(id, DEFAULT_PARTNER_ID);
-  if (!existing) throw new Error('Invoice not found.');
-
-  const voided = await store.voidB2bInvoice(id, DEFAULT_PARTNER_ID);
+  const voided = await getStore().voidB2bInvoice(id, partnerId);
   if (!voided) {
     throw new Error(`Cannot void a ${existing.status} invoice — only unpaid invoices are voidable.`);
   }
   await createAuditRepo(getDb()).record({
-    partnerId: DEFAULT_PARTNER_ID,
+    partnerId,
     actor: staff.username,
     actorType: 'staff',
     action: 'b2b.invoice.void',
@@ -219,21 +239,16 @@ export async function voidB2bInvoiceAction(formData: FormData): Promise<void> {
  * latest dead clone.
  */
 export async function reissueB2bInvoiceAction(formData: FormData): Promise<void> {
-  const staff = await requirePlatformStaff();
-  const id = String(formData.get('id') ?? '').trim();
-  if (!id) throw new Error('Missing invoice id.');
-
-  const store = getStore();
-  const existing = await store.getB2bInvoiceScoped(id, DEFAULT_PARTNER_ID);
-  if (!existing) throw new Error('Invoice not found.');
+  const { staff, id, invoice: existing } = await requireInvoiceActor(formData);
+  const partnerId = existing.partnerId;
 
   const newId = `reissue-${id}`;
-  const reissued = await store.reissueB2bInvoice(id, DEFAULT_PARTNER_ID, newId);
+  const reissued = await getStore().reissueB2bInvoice(id, partnerId, newId);
   if (!reissued) {
     throw new Error(`Cannot reissue a ${existing.status} invoice — only voided or disputed invoices can be reissued.`);
   }
   await createAuditRepo(getDb()).record({
-    partnerId: DEFAULT_PARTNER_ID,
+    partnerId,
     actor: staff.username,
     actorType: 'staff',
     action: 'b2b.invoice.reissue',

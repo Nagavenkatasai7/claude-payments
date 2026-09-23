@@ -19,6 +19,7 @@ const THROTTLED_IP = '203.0.113.7';
 const FRESH_IP = '198.51.100.9';
 const DOWN_IP = '192.0.2.44';
 const T0 = 1_750_000_000_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const INACTIVE = 'This bill is no longer active';
 
 const limiter = fakeRedis();
@@ -63,7 +64,8 @@ function invoice(o: Partial<B2bInvoice> = {}): B2bInvoice {
     buyerPhone: '15551234567', // US buyer ⇒ USD, BANK_FIELDS_BY_COUNTRY.US exists
     lineItems: [], amountUsd: 12, currency: 'USD',
     sellerId: 's_1', invoicedAmount: 1000, invoicedCurrency: 'INR',
-    status: 'unpaid', createdAt: '2026-06-01T00:00:00Z', ...o,
+    // Relative to the faked clock (T0) — the bill TTL (Program-Fix 44) is a time window.
+    status: 'unpaid', createdAt: new Date(T0 - DAY_MS).toISOString(), ...o,
   };
 }
 function seller(o: Partial<Seller> = {}): Seller {
@@ -166,8 +168,23 @@ describe('/pay/b2b/[invoiceId] — one message for every dead bill (Program-Fix 
     expect(getPartner).not.toHaveBeenCalled();
   });
 
+  it('expired unpaid bill (older than the 30-day TTL, Program-Fix 44)', async () => {
+    getB2bInvoice.mockResolvedValue(invoice({ createdAt: new Date(T0 - 31 * DAY_MS).toISOString() }));
+    expectGenericDead(await render(LIVE, FRESH_IP));
+    expect(getPartner).not.toHaveBeenCalled();
+    expect(resolveCheckoutBillQuote).not.toHaveBeenCalled();
+  });
+
+  it('control: a 29-day-old unpaid bill is still payable (Program-Fix 44)', async () => {
+    getB2bInvoice.mockResolvedValue(invoice({ createdAt: new Date(T0 - 29 * DAY_MS).toISOString() }));
+    expect(await render(LIVE, FRESH_IP)).toContain('Pay your bill');
+  });
+
   it('every dead sheet is byte-identical', async () => {
     const missing = await render('inv_doesnotexist', FRESH_IP);
+    getB2bInvoice.mockResolvedValue(invoice({ createdAt: new Date(T0 - 31 * DAY_MS).toISOString() }));
+    const expired = await render(LIVE, FRESH_IP);
+    expect(expired).toBe(missing);
     getB2bInvoice.mockResolvedValue(invoice({ status: 'paid' }));
     const settled = await render(LIVE, FRESH_IP);
     getB2bInvoice.mockResolvedValue(invoice());
