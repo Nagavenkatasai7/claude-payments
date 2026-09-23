@@ -426,9 +426,12 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
     // Template path unavailable (e.g. not yet approved) → deliver in-session via
     // free-form text. Log only the masked phone + the error MESSAGE (never the
     // code, never the request body).
-    console.warn(
-      `OTP template send failed for ${maskPhone(phone)}; falling back to free-form text:`,
-      err instanceof Error ? err.message : 'unknown error',
+    // Program-Fix 37: through the scrubbing logger (a Graph body can echo the
+    // recipient). The code is never passed to the logger.
+    logWarn(
+      'whatsapp.otp-fallback',
+      `OTP template send failed; falling back to free-form text: ${err instanceof Error ? err.message : 'unknown error'}`,
+      { to: maskPhone(phone) },
     );
     await sendText(phone, otpMessage(code));
   }
@@ -606,9 +609,11 @@ export async function sendVerificationStatus(
     try {
       await sendText(phone, fallbackText);
     } catch (err) {
-      console.warn(
-        'sendVerificationStatus free-form send failed (out of 24h window?):',
-        err instanceof Error ? err.message : 'unknown error',
+      // Program-Fix 37: scrubbing logger, masked phone.
+      logWarn(
+        'whatsapp.verification-status',
+        `sendVerificationStatus free-form send failed (out of 24h window?): ${err instanceof Error ? err.message : 'unknown error'}`,
+        { to: maskPhone(phone) },
       );
     }
     return;

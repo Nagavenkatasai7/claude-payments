@@ -47,7 +47,32 @@ ${GUARDRAILS}`;
 // decision needs "name/DOB provided or missing", the ID type + last 4, the
 // screening and review state, and the declared enums; it never needs the full
 // name, DOB, phone or address, so none of them leaves for the external model.
-// Only a real inquiry id is printed: a provider ref can be `mock-<phone>`.
+// Only a real Persona inquiry id (`inq_…`) is printed. startVerification
+// writes the provider ref into kycInquiryId AND kycProviderRef, and the mock
+// provider's ref is `mock-<phone>`, so anything else prints `on file`.
+const PERSONA_INQUIRY = /^inq_[A-Za-z0-9]+$/;
+
+function inquiryLine(customer: Customer): string {
+  const id = customer.kycInquiryId;
+  if (id && PERSONA_INQUIRY.test(id)) return id;
+  return id || customer.kycProviderRef ? 'on file' : 'none';
+}
+
+// A phone-shaped actor (the customer's own kyc.start / resend entries use
+// their phone as the actor) is shown as `customer`; any 7+ digit run in
+// free text is replaced, never masked to a last 4.
+const PHONE_LIKE = /^\+?[\d\s().-]{7,}$/;
+
+function actorLabel(actor: string, customer: Customer): string {
+  const digits = actor.replace(/\D/g, '');
+  if (actor === customer.senderPhone || (digits.length >= 7 && PHONE_LIKE.test(actor.trim()))) return 'customer';
+  return scrubDigits(actor);
+}
+
+function scrubDigits(text: string): string {
+  return text.replace(/\d[\d\s().-]{5,}\d/g, (m) => (m.replace(/\D/g, '').length >= 7 ? '[number]' : m));
+}
+
 function providedOrMissing(value: string | undefined | null): 'provided' | 'missing' {
   return value && value.trim() ? 'provided' : 'missing';
 }
@@ -58,7 +83,7 @@ function fieldLines(customer: Customer): string {
     : customer.pepHit
       ? 'PEP HIT'
       : 'clear';
-  const inquiry = customer.kycInquiryId ?? (customer.kycProviderRef ? 'on file' : 'none');
+  const inquiry = inquiryLine(customer);
   return [
     `KYC status: ${customer.kycStatus}`,
     `Review state: ${customer.kycReviewState ?? 'none'}`,
@@ -75,10 +100,13 @@ function fieldLines(customer: Customer): string {
   ].join('\n');
 }
 
-function auditLines(audit: AuditEntry[]): string {
+function auditLines(audit: AuditEntry[], customer: Customer): string {
   if (audit.length === 0) return '(no prior KYC audit events)';
   return audit
-    .map((e) => `${e.at} · ${e.actor} · ${e.action}${e.reason ? ` — ${e.reason}` : ''}`)
+    .map(
+      (e) =>
+        `${e.at} · ${actorLabel(e.actor, customer)} · ${e.action}${e.reason ? ` — ${scrubDigits(e.reason)}` : ''}`,
+    )
     .join('\n');
 }
 
@@ -108,7 +136,7 @@ export async function suggestKycReview(
     content:
       `First seen: ${customer.firstSeenAt}\n\n` +
       `KYC fields:\n${fieldLines(customer)}\n\n` +
-      `KYC audit trail (oldest first):\n${auditLines(audit)}\n\n` +
+      `KYC audit trail (oldest first):\n${auditLines(audit, customer)}\n\n` +
       `Summarize the case and suggest a review decision.`,
   };
   const reply = await chat([{ role: 'system', content: REVIEW_SYSTEM }, user], []);

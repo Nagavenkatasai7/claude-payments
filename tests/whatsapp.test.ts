@@ -6,6 +6,7 @@ import {
   sendTemplate,
   sendInteractive,
   sendCtaUrl,
+  sendVerificationStatus,
   sendTemplateWithButton,
   sendTemplateOrText,
   RECIPIENT_TEMPLATE_NAME,
@@ -787,5 +788,24 @@ describe('WhatsApp error-path logging masks phones (Program-Fix 37)', () => {
     const text = logArgs([warn]);
     expect(text).not.toMatch(/\d{7,}/);
     expect(text).toContain('4567');
+  });
+});
+
+describe('sendVerificationStatus free-form failure log is scrubbed (Program-Fix 37)', () => {
+  it('logs through the scrubbing logger: no 7+ digit run, the masked last 4', async () => {
+    const saved = process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE;
+    delete process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE; // free-form path
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 400, text: async (): Promise<string> => 'outside window for 15551234567' })),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(sendVerificationStatus('15551234567', 'verified', 'Asha')).resolves.toBeUndefined();
+    if (saved !== undefined) process.env.WHATSAPP_VERIFICATION_VERIFIED_TEMPLATE = saved;
+    expect(warn).toHaveBeenCalled();
+    const text = warn.mock.calls.flat().map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join('\n');
+    expect(text).not.toMatch(/\d{7,}/);
+    expect(text).toContain('4567');
+    expect(text).toContain('whatsapp.verification-status');
   });
 });

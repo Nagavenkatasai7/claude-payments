@@ -260,3 +260,45 @@ describe('suggestKycReview — identity minimisation (Program-Fix 37)', () => {
     expect(text).toContain('Persona inquiry: on file');
   });
 });
+
+// Program-Fix 37 review M1: the PRODUCTION shape. startVerification writes the
+// provider ref into BOTH kycInquiryId and kycProviderRef (the mock's ref is
+// `mock-<phone>`), and account/verify writes a `kyc.start` audit entry whose
+// actor IS the customer's phone. Neither may reach the model.
+describe('suggestKycReview — production shapes carry no phone (Program-Fix 37, M1)', () => {
+  const PHONE = '15551230000';
+  const prod: Customer = {
+    ...customer,
+    senderPhone: PHONE,
+    kycInquiryId: `mock-${PHONE}`,
+    kycProviderRef: `mock-${PHONE}`,
+  };
+  const prodAudit: AuditEntry[] = [
+    { at: '2026-06-01T00:00:00.000Z', actor: PHONE, action: 'kyc.start' },
+    { at: '2026-06-01T01:00:00.000Z', actor: '+1 555 123 0000', action: 'kyc.resend' },
+    { at: '2026-06-02T00:00:00.000Z', actor: 'alice', action: 'review.note', reason: 'customer called from 15551230000, ok' },
+    { at: '2026-06-02T01:00:00.000Z', actor: 'persona', action: 'inquiry.completed' },
+  ];
+
+  async function sentText(c: Customer, a: AuditEntry[]): Promise<string> {
+    chatMock.mockResolvedValueOnce(reply(GOOD));
+    await suggestKycReview(c, a);
+    return chatMock.mock.calls[0][0].map((m) => m.content ?? '').join('\n');
+  }
+
+  it('a mock-<phone> inquiry id and a phone actor never reach the model; no 4+ digit run of the phone appears', async () => {
+    const text = await sentText(prod, prodAudit);
+    expect(text).not.toMatch(/\d{7,}/);
+    for (let i = 0; i + 4 <= PHONE.length; i++) expect(text).not.toContain(PHONE.slice(i, i + 4));
+    expect(text).toContain('Persona inquiry: on file');
+    expect(text).toContain('customer · kyc.start');
+    expect(text).toContain('customer · kyc.resend');
+    expect(text).toContain('alice · review.note');
+    expect(text).toContain('persona · inquiry.completed');
+  });
+
+  it('a real Persona inquiry id (inq_…) is still printed', async () => {
+    const text = await sentText({ ...prod, kycInquiryId: 'inq_ABC123def', kycProviderRef: 'inq_ABC123def' }, []);
+    expect(text).toContain('Persona inquiry: inq_ABC123def');
+  });
+});
