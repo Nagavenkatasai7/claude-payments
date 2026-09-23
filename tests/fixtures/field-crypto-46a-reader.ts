@@ -4,7 +4,6 @@
 // blob the 46B writer produces with THIS decryptField, proving that rolling
 // production back to the 46A build still reads every v2 row written during the
 // 46B soak. Updating this file to match a newer field-crypto defeats the test.
-/* eslint-disable */
 
 import {
   randomBytes,

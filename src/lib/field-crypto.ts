@@ -36,7 +36,7 @@ import { env } from '@/lib/env';
  */
 
 const VERSION = 'v1';
-/** Program-Fix 46: the context-bound envelope. Read now (46A); written from 46B. */
+/** Program-Fix 46: the context-bound envelope. Read since 46A; written since 46B. */
 const VERSION_V2 = 'v2';
 /**
  * The one key id a v2 blob may carry today. It is a slot in the blob AND bound
@@ -195,15 +195,15 @@ export function aadFor(ctx: CryptoContext, kid: string = FIELD_KID): string {
   return [VERSION_V2, kid, ctx.table, ctx.column, row].join('|');
 }
 
-// Test-only seam (Program-Fix 46A): the repo round-trip tests turn on v2 writes
-// for context-carrying encryptField calls. Production never flips it (46B makes
-// v2 the default instead) and the setter refuses to run there.
-let writeV2ForTests = false;
+// Retired test seam (Program-Fix 46A → 46B). 46A used it to switch v2 writes on
+// inside tests; since 46B v2 IS the default for every context-carrying write, so
+// it is a deliberate NO-OP in both directions: an afterEach(false) must never
+// bring the unbound v1 writer back. Kept (with its production refusal) only so
+// existing tests compile; pinned by field-crypto.test.ts.
 export function __setFieldCryptoWriteV2ForTests(on: boolean): void {
   if (on && process.env.NODE_ENV === 'production') {
     throw new Error('field-crypto: the v2 write seam is test-only');
   }
-  writeV2ForTests = on;
 }
 
 /** Reject lone UTF-16 surrogates (see encryptField). */
@@ -221,8 +221,9 @@ function utf8Plaintext(plaintext: string): Buffer {
 /**
  * Seal one value as a v2, context-bound blob:
  *   `v2.<kid>.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
- * with AAD = aadFor(ctx, kid). 46A uses it only in tests and the (never
- * auto-run) re-encrypt script; 46B routes encryptField through it.
+ * with AAD = aadFor(ctx, kid). Since 46B encryptField routes every
+ * context-carrying write through it (the never-auto-run re-encrypt script calls
+ * it directly).
  */
 export function sealFieldV2(
   plaintext: string,
@@ -243,20 +244,29 @@ export function sealFieldV2(
 }
 
 /**
- * Encrypt one field value. Returns a compact, self-describing string:
- *   `v1.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
- * Two calls on the same plaintext produce DIFFERENT blobs (random DEK + IVs).
+ * Encrypt one field value.
  *
- * `ctx` (Program-Fix 46A): where the value will be stored. 46A still WRITES v1
- * and ignores it (every serving build must read v2 before any is written; 46B
- * flips this). Callers pass it now so the flip is a one-line change.
+ * With a storage `ctx` (Program-Fix 46B — every src/ call site passes one; the
+ * AST guard tests/field-crypto-ctx-guard.test.ts fails otherwise) it writes the
+ * context-bound v2 envelope via `sealFieldV2`:
+ *   `v2.<kid>.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
+ * which opens only under that exact (table, column, row). Every serving build
+ * since 46A reads it, so rolling back to 46A stays safe; a pre-46A build does
+ * NOT (never roll production back below 46A).
+ *
+ * Without a ctx it still writes the legacy v1 envelope
+ *   `v1.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
+ * (AAD = the literal version): there is nothing to bind it to. Only tests and
+ * legacy fixtures do that.
+ *
+ * Two calls on the same plaintext produce DIFFERENT blobs (random DEK + IVs).
  */
 export function encryptField(
   plaintext: string,
   provider: EncryptionKeyProvider = defaultProvider(),
   ctx?: CryptoContext,
 ): string {
-  if (writeV2ForTests && ctx) return sealFieldV2(plaintext, provider, ctx);
+  if (ctx) return sealFieldV2(plaintext, provider, ctx);
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
   const plaintextBuf = utf8Plaintext(plaintext);
@@ -312,8 +322,13 @@ function openWith(
 /**
  * Decrypt a blob produced by `encryptField` / `sealFieldV2`. Branches on the
  * VERSION before counting segments:
- *  - `v1.` — 5 segments, AAD `'v1'`; `ctx` is IGNORED (never read, never
- *    validated), so a legacy row opens exactly as it did before fix 46;
+ *  - `v1.` — 5 segments, AAD `'v1'`; `ctx` is never validated, so a legacy
+ *    row opens exactly as it did before fix 46 — UNLESS the optional
+ *    FIELD_CRYPTO_REJECT_V1 switch (46B, default off) is on and `ctx` is a
+ *    storage context that is not permanently v1-exempt (`ctx.v1Exempt`:
+ *    customer_ref, staff MFA). The switch is meant to be flipped only after the
+ *    re-encrypt backfill has left no v1 rows; a ctx-less read is never refused
+ *    (the AST guard keeps every src/ read context-carrying);
  *  - `v2.` — 6 segments, a known kid, and `ctx` is REQUIRED; AAD = aadFor(ctx,
  *    kid), so a blob opens only under the context it was sealed for.
  * Throws on format / unknown-version errors, a wrapped DEK that doesn't unwrap
@@ -350,6 +365,11 @@ export function decryptField(
   const [version, ivB64, tagB64, wrappedB64, ctB64] = parts;
   if (version !== VERSION) {
     throw new Error(`field-crypto: unsupported version "${version}"`);
+  }
+  if (ctx && ctx.v1Exempt !== true && env.fieldCryptoRejectV1) {
+    // Program-Fix 46B: an unbound v1 blob could have been moved here from any
+    // other column or row. Never echo the context (it holds row keys).
+    throw new Error('field-crypto: v1 blob refused (FIELD_CRYPTO_REJECT_V1)');
   }
   const { iv, tag } = ivAndTag(ivB64, tagB64);
   return openWith(provider, iv, tag, fromB64url(wrappedB64), fromB64url(ctB64), Buffer.from(version));
