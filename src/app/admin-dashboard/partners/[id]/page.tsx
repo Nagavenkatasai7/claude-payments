@@ -19,11 +19,13 @@ import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { resolveEffectiveSendLimits } from '@/lib/send-limits';
 import { ExpandableTable, type ExpandableColumn } from '../../expandable-table';
 import { IssueKeyButton } from '../issue-key-button';
+import { displayKeyPrefix, keyModeFromId, scopesForMode } from '@/lib/partner-api-scopes';
 import { CopyField } from '../copy-field';
 import { LogoUpload } from '../logo-upload';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { gateOffOnLiveRail, sendGateActive } from '@/lib/kyc-gate';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -36,6 +38,7 @@ import {
   savePaymentConfigAction,
   savePricingAction,
   saveSupportConfigAction,
+  saveDisclosureConfigAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
 } from '../actions';
@@ -44,6 +47,7 @@ import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
 import { narratePartnerHealth } from '@/lib/partner-health-ai';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -169,6 +173,10 @@ export default async function PartnerDetailPage({
   // Support tab: the absent-config default (portal ON) interpreted ONCE for
   // both the badge and the checkbox.
   const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
+  // Program-Fix 15 PR B: the stored Reg E disclosure block (form defaults) and
+  // what customers actually see (the resolver — demo on the default tenant).
+  const disclosureCfg = partner.supportConfig?.disclosure;
+  const disclosureShown = resolvePartnerDisclosure(partner);
 
   // Partner health (U4): a deterministic struggling/stalled scorer over the data
   // already loaded above — surfaces a partner before they churn. The AI
@@ -309,6 +317,17 @@ export default async function PartnerDetailPage({
                   <dt>Countries</dt><dd>{partner.countries.join(', ')}</dd>
                   <dt>KYC mode</dt>
                   <dd>{partner.kycMode === 'delegated' ? 'partner-run (delegated)' : 'SmartRemit-run'}</dd>
+                  {/* Program-Fix 35: the verify-before-send gate state, read-only (changed on the Settings tab). */}
+                  <dt>Verify-before-send</dt>
+                  <dd>
+                    {sendGateActive(partner) ? 'ON' : 'OFF (customers can send without verification)'}
+                    {gateOffOnLiveRail(partner, integrations) ? (
+                      <>
+                        {' '}
+                        <Badge variant="destructive">Live rail with verification off</Badge>
+                      </>
+                    ) : null}
+                  </dd>
                   {/* Program fix 16b: the send-limits ladder moved to its own card (Settings tab). */}
                   <dt>Primary color</dt>
                   <dd>
@@ -634,6 +653,90 @@ export default async function PartnerDetailPage({
                   </form>
                 </CardContent>
               </Card>
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Remittance disclosure (draft)</CardTitle>
+                  <CardDescription>
+                    The licensed money transmitter customers see on the pay page and the receipt as the
+                    provider of their transfer (Reg E, 12 CFR 1005.31). Enter only details the licensed
+                    partner has supplied; nothing is filled in for you. The disclosure wording itself is a
+                    draft for counsel review.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className={DL_CLASS}>
+                    <dt>Customers see</dt>
+                    <dd>
+                      {disclosureShown.demo ? (
+                        <Badge variant="outline" className="text-muted-foreground">demo note (no licensed partner)</Badge>
+                      ) : disclosureShown.configured ? (
+                        <Badge variant="outline" className="border-success/50 text-success">{disclosureShown.licensedEntity}</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-muted-foreground">details pending</Badge>
+                      )}
+                    </dd>
+                  </dl>
+                  {disclosureShown.demo && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      This is the default (demo) tenant: customers always see the demonstration note here,
+                      whatever is saved below, so SmartRemit is never shown as the licensed transmitter.
+                    </p>
+                  )}
+                  <form action={saveDisclosureConfigAction} className="mt-4 space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-entity">Licensed entity (legal name)</Label>
+                      <Input id="d-entity" name="licensedEntity" maxLength={120} defaultValue={disclosureCfg?.licensedEntity ?? ''} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-licences">Licence ids (comma-separated, e.g. NMLS id)</Label>
+                      <Input id="d-licences" name="licenseIds" defaultValue={(disclosureCfg?.licenseIds ?? []).join(', ')} />
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-phone">Customer-service phone</Label>
+                        <Input id="d-phone" name="phone" type="tel" defaultValue={disclosureCfg?.phone ?? ''} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-website">Website (https://)</Label>
+                        <Input id="d-website" name="website" type="url" defaultValue={disclosureCfg?.website ?? ''} />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-reg-name">State regulator</Label>
+                      <Input id="d-reg-name" name="regulatorName" maxLength={120} defaultValue={disclosureCfg?.stateRegulator?.name ?? ''} />
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-reg-phone">Regulator phone</Label>
+                        <Input id="d-reg-phone" name="regulatorPhone" type="tel" defaultValue={disclosureCfg?.stateRegulator?.phone ?? ''} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-reg-website">Regulator website (https://)</Label>
+                        <Input id="d-reg-website" name="regulatorWebsite" type="url" defaultValue={disclosureCfg?.stateRegulator?.website ?? ''} />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-days">Delivery estimate (business days after payment, 0-10; blank = 1)</Label>
+                      <Input
+                        id="d-days"
+                        name="deliveryBusinessDays"
+                        type="number"
+                        min={0}
+                        max={10}
+                        step={1}
+                        className="w-28"
+                        defaultValue={disclosureCfg?.deliveryEstimate?.businessDays ?? ''}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Saving changes only this block (the support settings above are kept) and is recorded in
+                      the audit log. Clear every field to remove it.
+                    </p>
+                    <Button type="submit">Save disclosure details</Button>
+                  </form>
+                </CardContent>
+              </Card>
             </TabsContent>
           )}
 
@@ -645,6 +748,7 @@ export default async function PartnerDetailPage({
                   <CardTitle>API keys</CardTitle>
                   <CardDescription>
                     Connect your systems to the Partner API. Keys are shown once at issue and stored hashed.
+                    To rotate, issue a new key, switch over, then revoke the old one once its last use stops moving.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -654,14 +758,21 @@ export default async function PartnerDetailPage({
                     <dl className={DL_CLASS}>
                       {apiKeys.map((k) => (
                         <div key={k.keyId} className="contents">
-                          <dt><code>sr_live_…{k.last4}</code></dt>
+                          <dt><code>{displayKeyPrefix(keyModeFromId(k.keyId))}…{k.last4}</code></dt>
                           <dd className="flex flex-wrap items-center gap-2.5">
+                            <Badge variant={keyModeFromId(k.keyId) === 'live' ? 'secondary' : 'outline'}>{keyModeFromId(k.keyId)}</Badge>
                             {k.revokedAt ? (
                               <Badge variant="outline" className="text-muted-foreground">revoked</Badge>
                             ) : (
                               <Badge variant="secondary">active</Badge>
                             )}
                             <span className="text-xs text-muted-foreground">issued {new Date(k.createdAt).toLocaleDateString()}</span>
+                            <span className="text-xs text-muted-foreground">
+                              last used {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleDateString() : 'never'}
+                            </span>
+                            <span className="text-xs text-muted-foreground" title={scopesForMode(keyModeFromId(k.keyId)).join(', ')}>
+                              scopes: {keyModeFromId(k.keyId) === 'live' ? 'all' : scopesForMode(keyModeFromId(k.keyId)).join(', ')}
+                            </span>
                             {!k.revokedAt && (
                               <form action={revokeApiKeyAction.bind(null, partner.id)}>
                                 <input type="hidden" name="keyId" value={k.keyId} />
@@ -784,7 +895,7 @@ curl -X POST ${env.appBaseUrl}/api/partner/v1/transactions \\
   -H "Authorization: Bearer sr_live_..." -H "Idempotency-Key: <unique-key>" \\
   -H "Content-Type: application/json" \\
   -d '{"amount_source": 200,
-       "sender": {"phone": "15551230000", "kyc_status": "verified"},
+       "sender": {"phone": "15551230000", "name": "Maria Lopez", "kyc_status": "verified"},
        "beneficiary": {"name": "Anita Kumar", "phone": "919876543210",
                        "payout_method": "bank", "payout_destination": "123456789012"}}'
 

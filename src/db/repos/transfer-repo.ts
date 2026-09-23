@@ -3,6 +3,7 @@ import { auditEvents, idempotencyKeys, transfers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
+import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from '@/lib/types';
 import {
@@ -178,7 +179,8 @@ export function createTransferRepo(
     /**
      * Atomic, forward-only webhook transition — ONE guarded UPDATE, immune to
      * the concurrent funded/paid_out race. Terminal states (cancelled, blocked,
-     * in_review) never move; equal-or-backward ranks no-op. Non-null return ⇒
+     * in_review) never move; equal-or-backward ranks no-op; an awaiting_payment
+     * row that is not compliance-cleared never moves (Program-Fix 14). Non-null return ⇒
      * a REAL transition (the caller's notify contract, unchanged).
      */
     async updateTransferFromWebhook(
@@ -206,6 +208,16 @@ export function createTransferRepo(
             // non-refunding transfers are unaffected. refund_status defaults to
             // 'none'.
             sql`(${status} <> 'delivered' OR COALESCE(${transfers.refundStatus}, 'none') = 'none')`,
+            // COMPLIANCE HOLDS (Program-Fix 14): a status update advances a row
+            // out of awaiting_payment ONLY when the ledger says 'cleared' — the
+            // same predicate as markPaidIfAwaiting, IN the UPDATE so a stale
+            // read can never decide. A paid row already passed a gate (the
+            // cleared claim, or the audited staff release — which keeps
+            // compliance_status 'flagged' as evidence), so paid → delivered is
+            // not re-gated on 'cleared'. Blocked never advances. Null ⇒ the
+            // caller's alertCallbackOnHold (rail-failure.ts) raises the signal.
+            sql`(${transfers.status} <> 'awaiting_payment' OR ${transfers.complianceStatus} = 'cleared')`,
+            ne(transfers.complianceStatus, 'blocked'),
           ),
         )
         .returning();
@@ -439,6 +451,48 @@ export function createTransferRepo(
     },
 
     /**
+     * Program-Fix 14 follow-up: record a pay-time RE-SCREEN verdict on a row
+     * that is still this tenant's awaiting_payment transfer. ONE guarded,
+     * column-targeted UPDATE (compliance_status, compliance_reasons and, for a
+     * block, status) — never a whole-row re-save.
+     *  • 'blocked' always wins. An UNCHARGED row becomes status 'blocked' (the
+     *    same shape a mint-time hit lands in). A CHARGED row (funding_ref set:
+     *    a crash between capture and settlement) keeps status awaiting_payment
+     *    so the funding-resume sweep still reaches settleOrHold → refused and
+     *    raises its fundblocked:<id> alert for a refund.
+     *  • 'flagged' never downgrades a blocked row.
+     * `reasons` is the caller's merged list (existing + new, de-duplicated).
+     * Null ⇒ a guard failed (moved, cancelled, blocked, another tenant); the
+     * caller re-reads and reports current truth.
+     * Drizzle 0.45.2: update().set().where().returning() —
+     * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:43,143,166.
+     */
+    async applyRescreenIfAwaiting(
+      id: string,
+      partnerId: PartnerId,
+      verdict: 'blocked' | 'flagged',
+      reasons: string[],
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set(verdict === 'blocked'
+          ? {
+              complianceStatus: 'blocked',
+              complianceReasons: reasons,
+              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
+            }
+          : { complianceStatus: 'flagged', complianceReasons: reasons })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'awaiting_payment'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Atomically claim the in_review → paid transition — the STAFF RELEASE.
      * Deliberately NO 'cleared' predicate: a released transfer keeps
      * compliance_status = 'flagged' forever (the evidence is never rewritten),
@@ -538,6 +592,40 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0]) : null;
     },
 
+    /**
+     * The customer's update_recipient_phone edit: ONE UPDATE that sets only
+     * recipient_phone (a plain, unencrypted column), scoped to the tenant AND
+     * the owning sender in the WHERE. Every other column stays as the ledger
+     * has it at write time. Null ⇒ no such row for this owner/tenant now; the
+     * caller refuses and never falls back to saveTransfer.
+     * Unpaid only: the WHERE also requires status awaiting_payment with no
+     * paid_at, no captured funding (funding_ref) and no settlement instruction
+     * acknowledged (payment_provider_ref), so the check and the write are one
+     * atomic statement. Null also covers "money already involved"; the caller
+     * re-reads to tell that apart from a missing row.
+     */
+    async updateRecipientPhone(
+      id: string,
+      partnerId: PartnerId,
+      ownerPhone: string,
+      recipientPhone: string,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ recipientPhone })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, ownerPhone),
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.paidAt),
+          isNull(transfers.fundingRef),
+          isNull(transfers.paymentProviderRef),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
     /** fix 6: may the pay page write this transfer's payout? (the same guard setPayoutIfEditable applies) */
     async isPayoutEditable(id: string, partnerId: PartnerId): Promise<boolean> {
       const rows = await db.select({ id: transfers.id }).from(transfers).where(payoutEditable(id, partnerId)).limit(1);
@@ -563,7 +651,9 @@ export function createTransferRepo(
         .update(transfers)
         .set({
           payoutMethod: payout.payoutMethod,
-          payoutDestinationEnc: payout.payoutDestination ? encryptField(payout.payoutDestination, provider) : '',
+          payoutDestinationEnc: payout.payoutDestination
+            ? encryptField(payout.payoutDestination, provider, ctx.transfer(id, 'payout_destination_enc')) // row id = the WHERE's id
+            : '',
           payoutDestinationLast4: last4(payout.payoutDestination),
         })
         .where(payoutEditable(id, partnerId))
@@ -1001,6 +1091,90 @@ export function createTransferRepo(
           ),
         )
         .orderBy(transfers.paidAt);
+      return rows.map((r) => toDomain(r));
+    },
+
+    // ── Program-Fix 43: behavioural AML sweep reads (aml-sweep.ts) ──────────
+
+    /**
+     * The sweep's keyset scan: rows strictly after `after` in (created_at, id)
+     * order and created strictly before `before` (the commit-lag guard, so a
+     * slow mint transaction is never skipped), ascending, bounded. MASKED rows;
+     * the sweep decrypts one row at a time with getTransfer. Cross-tenant by
+     * design (a system sweep). No leading created_at index exists, so this is a
+     * sequential scan of transfers — acceptable at the current size; PR C's
+     * migration slice can add one.
+     */
+    async listCreatedSince(after: { at: Date; id: string }, before: Date, limit: number): Promise<Transfer[]> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(
+          or(
+            sql`${transfers.createdAt} > ${after.at}`,
+            and(sql`${transfers.createdAt} = ${after.at}`, sql`${transfers.id} > ${after.id}`),
+          ),
+          lt(transfers.createdAt, before),
+        ))
+        .orderBy(asc(transfers.createdAt), asc(transfers.id))
+        .limit(limit);
+      return rows.map((r) => toDomain(r));
+    },
+
+    /**
+     * One sender's AML aggregates over rows STRICTLY BEFORE `anchor` in
+     * (created_at, id) order, tenant-keyed (partner_id, phone), excluding
+     * blocked and cancelled rows (a cancelled row moved no money — fix 16):
+     *   bandCount7d     — amount_usd in [band·T, T) within 7 days before;
+     *   subTSumCents30d — Σ amount_usd (cents) of rows < T within 30 days before;
+   *   subTCount30d    — how many rows < T within 30 days before;
+     *   priorCount      — all-time earlier rows.
+     * Anchored on the transfer, not the sweep clock, so a re-scan is deterministic.
+     * Served by transfers_phone_created.
+     */
+    async senderAmlStats(
+      partnerId: PartnerId,
+      phone: string,
+      anchor: { at: Date; id: string },
+      largeAmountUsd: number,
+      band: number,
+    ): Promise<{ bandCount7d: number; subTSumCents30d: number; subTCount30d: number; priorCount: number }> {
+      const d7 = new Date(anchor.at.getTime() - 7 * 86_400_000);
+      const d30 = new Date(anchor.at.getTime() - 30 * 86_400_000);
+      const lower = band * largeAmountUsd;
+      const rows = await db
+        .select({
+          bandCount7d: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${d7} and ${transfers.amountUsd} >= ${lower} and ${transfers.amountUsd} < ${largeAmountUsd})::int`,
+          subTSumCents30d: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.createdAt} >= ${d30} and ${transfers.amountUsd} < ${largeAmountUsd}), 0)::bigint`,
+          subTCount30d: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${d30} and ${transfers.amountUsd} < ${largeAmountUsd})::int`,
+          priorCount: sql<number>`count(*)::int`,
+        })
+        .from(transfers)
+        .where(and(
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.phone, phone),
+          sql`${transfers.status} not in ('blocked', 'cancelled')`,
+          or(
+            sql`${transfers.createdAt} < ${anchor.at}`,
+            and(sql`${transfers.createdAt} = ${anchor.at}`, sql`${transfers.id} < ${anchor.id}`),
+          ),
+        ));
+      const r = rows[0];
+      return {
+        bandCount7d: Number(r?.bandCount7d ?? 0),
+        subTSumCents30d: Number(r?.subTSumCents30d ?? 0),
+        subTCount30d: Number(r?.subTCount30d ?? 0),
+        priorCount: Number(r?.priorCount ?? 0),
+      };
+    },
+
+    /** Masked rows by id, pinned to `partnerId` when given (the compliance alerts card). */
+    async listByIdsScoped(ids: string[], partnerId?: PartnerId): Promise<Transfer[]> {
+      if (ids.length === 0) return [];
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(inArray(transfers.id, ids), partnerId ? eq(transfers.partnerId, partnerId) : undefined));
       return rows.map((r) => toDomain(r));
     },
   };

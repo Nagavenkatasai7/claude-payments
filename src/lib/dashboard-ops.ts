@@ -1,3 +1,4 @@
+import { suppressForOptOut, type OptOutLookup } from './consent-gate';
 import { env } from './env';
 import { isPartnerPulled } from './funding-method';
 import { CANCEL_REFUSAL, decideStaffCancel } from './dashboard-cancel-policy';
@@ -10,7 +11,8 @@ export type { StaffAuditCtx } from './settlement';
 import type { Db } from '@/db/client';
 import type { Store } from './store';
 import type { Scope } from './staff-scope';
-import type { Partner } from './types';
+import type { Partner, Transfer } from './types';
+import { isScreeningHold } from './compliance-config';
 
 /**
  * Staff "Cancel" = VOID an UNFUNDED draft, and nothing else (Phase 1 Task 5 /
@@ -110,14 +112,24 @@ export async function assignTransfer(
   }
 }
 
+/**
+ * Program-Fix 49A: a pay-link resend is NONESSENTIAL — refused, with a
+ * staff-readable reason, when the customer opted out (STOP) under the
+ * transfer's own tenant. `consent` is injected (the action passes the
+ * customer store) so the check runs on the caller's database.
+ */
 export async function resendPaymentLink(
   store: Store,
   sendText: (to: string, text: string) => Promise<void>,
   id: string,
+  consent?: OptOutLookup,
 ): Promise<void> {
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');
+  }
+  if (consent && (await suppressForOptOut(consent, transfer.partnerId, transfer.phone, 'nonessential'))) {
+    throw new Error('Cannot resend: this customer has opted out of WhatsApp messages (replied STOP).');
   }
   const url = `${env.appBaseUrl}/pay/${id}`;
   await sendText(transfer.phone, `Here is your secure payment link again: ${url}`);
@@ -129,6 +141,9 @@ export async function resendPaymentLink(
  * 'ours', which is also the default when kycMode is unset — requires PLATFORM
  * staff. A partner-scoped admin may release only a 'delegated'-mode partner's
  * hold. A missing partner row fails CLOSED for partner-scoped staff.
+ * Program-Fix 43 follow-up: even under 'delegated', a hold whose reasons came
+ * from sanctions / name screening (isScreeningHold — KYC may be delegated,
+ * sanctions may not) stays PLATFORM-only; a hold with no reasons fails closed.
  * Sanctions-blocked rows stay unreleasable for everyone regardless of this
  * (markPaidIfInReview carries compliance_status <> 'blocked').
  * Pure: the server action (authoritative gate) and the compliance page (which
@@ -137,9 +152,11 @@ export async function resendPaymentLink(
 export function canReleaseHeld(
   scope: Scope,
   owner: Pick<Partner, 'kycMode'> | null | undefined,
+  transfer: Pick<Transfer, 'complianceReasons'>,
 ): boolean {
   if (scope.kind === 'platform') return true;
-  return owner?.kycMode === 'delegated';
+  if (owner?.kycMode !== 'delegated') return false;
+  return !isScreeningHold(transfer);
 }
 
 /**
@@ -153,7 +170,13 @@ export function canReleaseHeld(
  * guarded claim inside releaseHold, so a race can never release twice.
  * Called by the compliance dashboard "Release" action (admin-gated, audited).
  */
-export async function releaseTransfer(store: Store, db: Db, id: string, audit?: StaffAuditCtx): Promise<void> {
+export async function releaseTransfer(store: Store, db: Db, id: string, audit: StaffAuditCtx): Promise<void> {
+  // Program-Fix 43 follow-up (defence in depth behind releaseTransferAction):
+  // every release records WHO and WHY, so no audit context or a blank reason
+  // is refused before any read or write.
+  if (!audit || typeof audit.reason !== 'string' || audit.reason.trim() === '') {
+    throw new Error('A release reason is required.');
+  }
   const transfer = await store.getTransfer(id);
   if (!transfer) {
     throw new Error('Transfer not found');

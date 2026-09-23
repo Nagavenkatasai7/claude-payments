@@ -496,3 +496,64 @@ describe('getOpsSnapshot', () => {
     expect(snap.staleLocks.map((o) => o.kind)).toEqual(['agent.turn']);
   });
 });
+
+// Program-Fix 49C (tickets-01): the ticket first-response SLA is an OPS digest —
+// ONE ops.alert per UTC day (`ticketsla:<yyyy-mm-dd>`) carrying the count and the
+// oldest ids, never one alert per ticket (a months-old backlog would otherwise
+// fire N alerts at deploy). The alert text carries ids and counts only — never a
+// subject or a phone (customer-written text).
+describe('reconcileSweep — ticket SLA digest (fix 49C)', () => {
+  const HOUR = 3_600_000;
+  async function overdueTicket(id: string, hoursAgo: number, priority = 'urgent'): Promise<void> {
+    await db.execute(sql`
+      INSERT INTO tickets (id, partner_id, kind, customer_phone, subject, status, priority, created_at, updated_at)
+      VALUES (${id}, 'acme', 'customer', '15551230000', 'Private subject line', 'open', ${priority},
+              now() - make_interval(hours => ${hoursAgo}), now())
+    `);
+    await db.execute(sql`
+      INSERT INTO ticket_messages (ticket_id, actor_type, actor_id, body, internal, created_at)
+      VALUES (${id}, 'customer', '15551230000', 'help', false, now() - make_interval(hours => ${hoursAgo}))
+    `);
+  }
+  async function digestRows(): Promise<Array<{ dedupe_key: string; message: string }>> {
+    const r = await db.execute(sql`
+      SELECT dedupe_key, payload->>'message' AS message FROM outbox
+      WHERE kind = 'ops.alert' AND starts_with(dedupe_key, 'ticketsla:') ORDER BY id`);
+    return (r as unknown as { rows: Array<{ dedupe_key: string; message: string }> }).rows;
+  }
+
+  it('N breaches → exactly 1 digest per day, deduped across sweeps; the SweepResult shape is unchanged', async () => {
+    await overdueTicket('tk_b1', 24 * 90);
+    await overdueTicket('tk_b2', 10);
+    await overdueTicket('tk_b3', 30, 'normal');
+    const today = new Date();
+    const r = await reconcileSweep(db, today);
+    expect(r).toEqual({ stuckPaid: 0, reinstructed: 0, staleReviews: 0, fundingResumed: 0, stuckRefunds: 0, staleLocks: 0 });
+    await reconcileSweep(db, today);
+    await reconcileSweep(db, new Date(today.getTime() + 60_000));
+    const rows = await digestRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dedupe_key).toBe(`ticketsla:${today.toISOString().slice(0, 10)}`);
+    expect(rows[0].message).toContain('3 ');
+    expect(rows[0].message).toContain('tk_b1');
+    expect(rows[0].message).not.toContain('Private subject line');
+    expect(rows[0].message).not.toContain('15551230000');
+  });
+
+  it('the next UTC day gets its own digest', async () => {
+    await overdueTicket('tk_b1', 24 * 90);
+    const day1 = new Date();
+    await reconcileSweep(db, day1);
+    await reconcileSweep(db, new Date(day1.getTime() + 24 * HOUR));
+    expect((await digestRows()).map((x) => x.dedupe_key)).toEqual([
+      `ticketsla:${day1.toISOString().slice(0, 10)}`,
+      `ticketsla:${new Date(day1.getTime() + 24 * HOUR).toISOString().slice(0, 10)}`,
+    ]);
+  });
+
+  it('no breaches → no digest row at all', async () => {
+    await overdueTicket('tk_fresh', 1);
+    await reconcileSweep(db);
+    expect(await digestRows()).toHaveLength(0);
+  });
+});

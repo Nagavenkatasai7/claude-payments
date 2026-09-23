@@ -4,7 +4,7 @@ import { listCorridors } from '@/lib/partner-api-service';
 
 // GET /api/partner/v1/corridors — the partner's data-driven corridor discovery.
 export async function GET(req: NextRequest) {
-  const g = await guardPartner(req);
+  const g = await guardPartner(req, 'corridors:read');
   if (!g.ok) return g.response;
   return NextResponse.json(listCorridors(g.ctx.partner));
 }

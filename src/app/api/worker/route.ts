@@ -6,6 +6,7 @@ import { getStore } from '@/lib/store';
 import { getAuthStore } from '@/lib/auth-store';
 import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import { reconcileSweep, type SweepResult } from '@/lib/reconcile';
+import { amlSweep, amlRedis, type AmlSweepResult } from '@/lib/aml-sweep';
 import { sweepFxHealth, sweepStaleRates } from '@/lib/rate-staleness';
 import { escalateStuckPaid } from '@/lib/stale-money';
 import {
@@ -147,6 +148,18 @@ async function run(req: NextRequest): Promise<NextResponse> {
     logError('worker.sweep', err);
   }
 
+  // Behavioural AML monitoring (Program-Fix 43): alerts + review items only —
+  // never a hold, never a transfer write. Locked (a concurrent poke skips),
+  // cursor-driven and time-boxed (a few seconds) so it never eats the drain's
+  // window below; its ops alerts drain in this same invocation. A throw never
+  // blocks the drain.
+  let aml: AmlSweepResult | null = null;
+  try {
+    aml = await amlSweep(deps.db, amlRedis(), { now });
+  } catch (err) {
+    logError('worker.aml-sweep', err);
+  }
+
   // Pricing staleness sweep (same heartbeat): each expired pushed partner rate
   // raises exactly one deduped ops alert. Failures never block the drain.
   let staleRates = 0;
@@ -225,7 +238,7 @@ async function run(req: NextRequest): Promise<NextResponse> {
   // Nothing parses this body (the heartbeat curls to /dev/null; the poke ignores
   // it), so adding fields is safe across a rolling release.
   return NextResponse.json({
-    ok: true, source, processed, failed, dead, released, sweep, staleRates, escalated, fxHealth, drainGap, cronQuiet,
+    ok: true, source, processed, failed, dead, released, sweep, aml, staleRates, escalated, fxHealth, drainGap, cronQuiet,
   });
 }
 

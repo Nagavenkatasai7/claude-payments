@@ -326,6 +326,21 @@ export interface TicketMessage {
 export interface PartnerSupportConfig {
   enableSupportPortal?: boolean;        // default true — customer /account/support visibility
   autoAssign?: 'none' | 'round_robin';  // default 'none'
+  // Program-Fix 15 PR B: the licensed partner's Reg E identity (the remittance
+  // transfer provider of record), shown on the pay page and the receipt through
+  // resolvePartnerDisclosure. Absent ⇒ "partner licensing details pending".
+  // Written ONLY by saveDisclosureConfigAction (validated + audited).
+  disclosure?: PartnerDisclosureConfig;
+}
+
+/** Program-Fix 15 PR B — staff-entered, never invented. Every field optional in storage. */
+export interface PartnerDisclosureConfig {
+  licensedEntity?: string;              // legal name of the licensed money transmitter
+  licenseIds?: string[];                // e.g. NMLS id / state licence numbers
+  phone?: string;                       // customer-service phone
+  website?: string;                     // https URL
+  stateRegulator?: { name: string; phone?: string; website?: string };
+  deliveryEstimate?: { businessDays: number }; // §1005.32 estimate; absent ⇒ 1 business day
 }
 
 export interface Draft {
@@ -403,7 +418,20 @@ export interface TurnContext {
 
 export type IncomingMessage =
   | { kind: 'text'; from: string; text: string; messageId: string }
-  | { kind: 'button'; from: string; buttonId: string; messageId: string };
+  | { kind: 'button'; from: string; buttonId: string; messageId: string }
+  // Program-Fix 49A (whatsapp-08): a message the bot cannot read (image, voice,
+  // document, …). Never downloaded; the inbound pipeline answers it honestly.
+  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string };
+
+/** Inbound Meta message types the bot answers with the "typed messages only" reply. */
+export type UnsupportedMediaType =
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'document'
+  | 'sticker'
+  | 'location'
+  | 'contacts';
 
 export type KycStatus =
   | 'not_started'
@@ -673,6 +701,10 @@ export interface CorridorComplianceRule {
   largeAmountUsd?: number;     // USD-equivalent flag threshold; overrides LARGE_AMOUNT_USD
   velocityLimit?: number;      // transfers/day before 'High transfer velocity.'; overrides VELOCITY_LIMIT
   kycCapHintUsd?: number;      // ADVISORY ONLY — hook for the NEXT (KYC) batch; NOT read by screenTransfer in P5
+  // Program-Fix 43: behavioural AML thresholds (alerts only). Any field may be
+  // set; bad values fall back to the defaults (compliance-config.ts).
+  aml?: { band?: number; count?: number; aggUsd?: number; firstUsd?: number; senders?: number };
+  amlHolds?: boolean;          // PR B: per partner × corridor hold switch; only literal true = ON (never demo — aml-hold.ts)
 }
 
 // ── Destination-interest lead (non-India payout requests) ─────────────────────
@@ -689,6 +721,14 @@ export interface CorridorRequest {
   capturedAt: string;           // ISO-8601
 }
 
+/**
+ * Stage-2 application lifecycle (partner_requests.application_status is free
+ * text with no CHECK). invited = the emailed link is live; completed = the form
+ * was submitted; approved | rejected = a platform admin decided (Program-Fix 49C).
+ * Only 'invited' may use the link; only 'completed' may be decided.
+ */
+export type PartnerApplicationStatus = 'invited' | 'completed' | 'approved' | 'rejected';
+
 /** An inbound "Partner with us" lead from the public landing form. */
 export interface PartnerRequest {
   id: string;
@@ -699,7 +739,7 @@ export interface PartnerRequest {
   comments?: string;
   capturedAt: string;           // ISO-8601
   // Stage-2 detailed application (the emailed link → form).
-  applicationStatus?: string;   // 'invited' | 'completed'
+  applicationStatus?: PartnerApplicationStatus;
   tokenExpiresAt?: string;      // ISO-8601 — when the application link expires
   // "I am a:" (src/lib/partner-type.ts). Absent on rows captured before 0017.
   partnerType?: 'referral' | 'business' | 'licensed_mt';

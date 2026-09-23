@@ -66,3 +66,19 @@ describe('consent reply copy', () => {
     expect(OPT_OUT_REMINDER).not.toBe(OPT_OUT_REPLY);
   });
 });
+
+// Program-Fix 49A: the reminder carries the tenant's brand; media gets an honest reply.
+describe('optOutReminder / MEDIA_REPLY (Program-Fix 49A)', () => {
+  it('optOutReminder(brand) names the partner; OPT_OUT_REMINDER stays the SmartRemit default', async () => {
+    const { optOutReminder } = await import('@/lib/consent');
+    expect(optOutReminder('Acme Remit')).toBe("You're unsubscribed from Acme Remit. Reply START to resume.");
+    expect(optOutReminder('')).toBe(OPT_OUT_REMINDER);
+  });
+
+  it('MEDIA_REPLY says only typed messages are read and warns against ID photos and bank details', async () => {
+    const { MEDIA_REPLY } = await import('@/lib/consent');
+    expect(MEDIA_REPLY).toBe(
+      'I can only read typed messages here. Please type your question. Never send ID photos or bank details in chat.',
+    );
+  });
+});

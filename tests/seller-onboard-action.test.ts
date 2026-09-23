@@ -217,3 +217,52 @@ describe('requestSellerOtpAction', () => {
     expect(sendTransactionOtp).not.toHaveBeenCalled();
   });
 });
+
+// Program-Fix 45 (P2): an issue refused at a cap (`locked`) maps to the same
+// bare { ok: false } as a cooldown; nothing is sent.
+describe('requestSellerOtpAction — issue cap (fix 45)', { retry: 0 }, () => {
+  it('past the lifetime cap → { ok: false } and no send', async () => {
+    const id = await seedPendingSeller();
+    let nowMs = Date.now();
+    txOtp = createTransactionOtpStore(redis, { now: () => nowMs });
+    for (let i = 0; i < 10; i++) {
+      if (i > 0) nowMs += 31_000;
+      expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    }
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
+    nowMs += 31_000;
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
+  });
+
+  it('draws from the seller budget of the seller partner', async () => {
+    const id = await seedPendingSeller();
+    const issue = vi.spyOn(txOtp, 'issue');
+    await requestSellerOtpAction(id);
+    expect(issue).toHaveBeenCalledWith(id, PHONE, { kind: 'seller', partnerId: 'default' });
+  });
+});
+
+// Program-Fix 25 PR B (§3.6): a failed send is reported (reason otp_send_failed)
+// and releases the cooldown so the seller's Resend really sends. A cooldown is
+// unchanged: the bare { ok: false }.
+describe('requestSellerOtpAction — send honesty (Program-Fix 25 PR B)', { retry: 0 }, () => {
+  it('a send that throws → { ok: false, reason: "otp_send_failed" }; a retry works after the ~10-s floor', async () => {
+    const id = await seedPendingSeller();
+    let nowMs = Date.now();
+    txOtp = createTransactionOtpStore(redis, { now: () => nowMs });
+    sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false }); // still in the short cooldown
+    nowMs += 10_001;
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(2);
+  });
+
+  it('a cooldown stays the bare { ok: false }', async () => {
+    const id = await seedPendingSeller();
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: true });
+    expect(await requestSellerOtpAction(id)).toEqual({ ok: false });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(1);
+  });
+});

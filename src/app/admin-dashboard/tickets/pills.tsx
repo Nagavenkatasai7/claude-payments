@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { TicketPriority, TicketStatus } from '@/lib/types';
+import { formatSlaDuration, type SlaInfo } from '@/lib/ticket-sla';
 
 // Ticket status/priority pills — same Radix-ramp recipe as the transactions
 // pills (transactions-tabs.tsx); server-safe (no hooks, no client directive).
@@ -53,4 +54,22 @@ export function TicketPriorityPill({ priority }: { priority: TicketPriority }) {
   const tone: PillTone =
     priority === 'urgent' ? 'danger' : priority === 'low' ? 'neutral' : 'info';
   return <Pill tone={tone}>{priority === 'urgent' ? 'Urgent' : priority === 'low' ? 'Low' : 'Normal'}</Pill>;
+}
+
+/**
+ * Program-Fix 49C: the STAFF-ONLY "Age / SLA" pill (internal first-response
+ * target — never shown to customers). Age since the ticket opened, then the
+ * first-response state: time left, overdue by, or replied (on time / late).
+ */
+export function TicketSlaPill({ sla, now }: { sla: SlaInfo; now: Date }) {
+  const age = formatSlaDuration(sla.ageMs);
+  const left = sla.dueAt.getTime() - now.getTime();
+  const [tone, text]: [PillTone, string] =
+    sla.state === 'breached' ? ['danger', `${age} · no reply, ${formatSlaDuration(-left)} over`]
+    : sla.state === 'due_soon' ? ['warning', `${age} · reply due in ${formatSlaDuration(left)}`]
+    : sla.state === 'ok' ? ['info', `${age} · reply due in ${formatSlaDuration(left)}`]
+    : sla.state === 'met' ? ['success', `${age} · replied on time`]
+    : sla.state === 'late' ? ['neutral', `${age} · replied late`]
+    : ['neutral', age];
+  return <Pill tone={tone}>{text}</Pill>;
 }

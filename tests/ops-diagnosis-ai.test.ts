@@ -187,6 +187,49 @@ describe('diagnoseOps — bundle facts reach the model (masked, deterministic)',
     expect(sent).toMatch(/3 \(this row excluded\)/);
   });
 
+  it('an 8-attempt dead row keeps the "exhausted all retries" wording', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps(deadBundle);
+    expect(JSON.stringify(chatMock.mock.calls[0][0])).toContain('Subject: a DEAD outbox effect (exhausted all retries).');
+  });
+
+  // Program-Fix 25: a permanent WhatsApp error (or a terminal row deadline) is
+  // dead at attempt 1 — the model must not assume 8 retries happened.
+  it('a row dead at attempt 1 is described as TERMINAL, not as exhausted retries', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps({
+      subjectKind: 'dead_letter',
+      deadLetter: { ...deadBundle.deadLetter!, kind: 'whatsapp.text', attempts: 1, lastError: 'WhatsApp send failed (400): (#131030) x' },
+    });
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    expect(sent).toContain('terminal at attempt 1');
+    expect(sent).not.toContain('exhausted all retries');
+  });
+
+  // Program-Fix 25 PR B (c): the wording also keys on the permanent code in
+  // last_error, so an old-build row that retried a permanent code 8 times says so.
+  it('a multi-attempt dead row whose last_error is a permanent code names the code as permanent', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps({
+      subjectKind: 'dead_letter',
+      deadLetter: { ...deadBundle.deadLetter!, kind: 'agent.turn', attempts: 8, lastError: 'WhatsApp send failed (400): (#132001) x' },
+    });
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    expect(sent).toContain('Subject: a DEAD outbox effect (exhausted all retries).');
+    expect(sent).toContain('permanent WhatsApp rejection (#132001)');
+  });
+
+  it('a row dead at attempt 1 with a permanent code names the code', async () => {
+    chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
+    await diagnoseOps({
+      subjectKind: 'dead_letter',
+      deadLetter: { ...deadBundle.deadLetter!, kind: 'whatsapp.text', attempts: 1, lastError: 'WhatsApp send failed (400): (#131030) x' },
+    });
+    const sent = JSON.stringify(chatMock.mock.calls[0][0]);
+    expect(sent).toContain('terminal at attempt 1');
+    expect(sent).toContain('permanent WhatsApp rejection (#131030)');
+  });
+
   it('the stuck-transfer prompt carries the masked amount, age, and provider type', async () => {
     chatMock.mockResolvedValue(reply('{"failure_class":"unknown","suggested_action":"investigate","blast_radius":"isolated","rationale":"r"}'));
     await diagnoseOps(stuckBundle);
@@ -227,6 +270,13 @@ describe('isPermanentSendError — deterministic Retry-disable for permanent sen
   });
   it('flags 131031 (account restricted)', () => {
     expect(isPermanentSendError('Graph error (#131031) account restricted')).toBe(true);
+  });
+  it('PR B (b): flags every code the worker treats as permanent (one list, derived from the classifier)', () => {
+    for (const code of [131026, 132000, 132001, 133010]) {
+      expect(isPermanentSendError(`WhatsApp send failed (400): {"error":{"message":"(#${code}) x"`)).toBe(true);
+    }
+    // 131047 is the 24h window: a Retry after the customer writes back can succeed.
+    expect(isPermanentSendError('WhatsApp send failed (400): (#131047) re-engagement')).toBe(false);
   });
   it('does NOT flag transient/other errors (a Retry could help)', () => {
     expect(isPermanentSendError('WhatsApp send failed (400): (#131056) rate limited')).toBe(false);

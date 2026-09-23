@@ -7,6 +7,12 @@
 // order is unit-testable without any network mock.
 
 import type { CurrencyCode, Schedule, Transfer } from './types';
+import { DEFAULT_BRAND } from './partner-config';
+
+/** Program-Fix 49A: a blank/absent brand falls back to the SmartRemit default. */
+function brandOr(brand: string | undefined): string {
+  return brand?.trim() || DEFAULT_BRAND;
+}
 
 // All new UTILITY templates use language code 'en' — matches the live
 // transfer_delivered template (created as "English" => 'en', not 'en_US').
@@ -228,9 +234,16 @@ export function verificationStatusFallbackText(
  * free-form text (the customer is actively paying → inside the 24-h window), so
  * it needs no AUTHENTICATION template. Pure (testable); the code is interpolated
  * by the caller and must never be logged.
+ *
+ * Program-Fix 45: ends with the "never share" line. `brand` is optional (every
+ * caller today sends the SmartRemit default); a blank brand falls back to it.
  */
-export function transactionOtpMessage(code: string): string {
-  return `Your SmartRemit confirmation code is ${code}. Enter it on the payment page to send this transfer. It expires in 10 minutes.`;
+export function transactionOtpMessage(code: string, brand?: string): string {
+  const name = brandOr(brand);
+  return (
+    `Your ${name} confirmation code is ${code}. Enter it on the payment page to send this transfer. ` +
+    `It expires in 10 minutes. Never share this code; ${name} will never ask for it.`
+  );
 }
 
 /**
@@ -238,8 +251,8 @@ export function transactionOtpMessage(code: string): string {
  * approved Meta AUTHENTICATION template is preferred, but until it's live this
  * free-form text is the in-session fallback so a customer still receives the
  * code. Pure (testable); the code is interpolated by the caller and must never
- * be logged.
+ * be logged. `brand` (Program-Fix 49A): the owning partner's name; absent ⇒ SmartRemit.
  */
-export function otpMessage(code: string): string {
-  return `Your SmartRemit verification code is ${code}. It expires in 10 minutes. Don't share it with anyone.`;
+export function otpMessage(code: string, brand?: string): string {
+  return `Your ${brandOr(brand)} verification code is ${code}. It expires in 10 minutes. Don't share it with anyone.`;
 }

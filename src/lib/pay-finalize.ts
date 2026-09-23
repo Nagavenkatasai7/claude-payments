@@ -8,6 +8,7 @@ import { DEFAULT_DESTINATION_CURRENCY, DEFAULT_PARTNER_ID } from './defaults';
 import { newTransferId } from './id';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
+import { hasSenderName } from './sender-identity';
 import { createIdempotencyRepo } from '@/db/repos/aux-repos';
 import type { DbOrTx } from '@/db/client';
 import type { Store } from './store';
@@ -51,7 +52,13 @@ export type FinalizeResult =
       // send for this customer is in flight). Retryable — the draft and its
       // claim are untouched (a bound-but-unminted id replays); the route
       // answers 503 "Please try again."
-      error: 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable' | 'bank_details_required' | 'busy';
+      // 'sender_name_required' (Program-Fix 14): a consumer draft whose sender
+      // has no legal name on file cannot be screened, so it is never minted.
+      // Nothing was claimed or consumed; the route answers 400 and the SAME
+      // link works once the customer gives their name in chat.
+      error:
+        | 'expired_or_used' | 'cap' | 'blocked' | 'kyc_required' | 'fx_unavailable'
+        | 'bank_details_required' | 'busy' | 'sender_name_required';
       transferId?: string;
       // Task 9 (review): set only on 'fx_unavailable' when the draft's stored
       // quote aged past the ceiling — a retry can never succeed (the customer
@@ -176,6 +183,12 @@ export async function finalizeDraftPayment(
   const idem = createIdempotencyRepo(db);
   const priorClaim = await idem.find(DEFAULT_PARTNER_ID, `draft:${draftId}`);
   const alreadyMinted = priorClaim !== null && (await store.getTransfer(priorClaim)) !== null;
+  // Program-Fix 14 (defense in depth, mirrors B2B buyer_unscreened): a consumer
+  // mint needs a screenable sender name. Pre-claim, so the draft and its key
+  // stay untouched; skipped for an already-minted draft (its replay converges).
+  if (!alreadyMinted && draft.transferType !== 'b2b' && !hasSenderName(customer)) {
+    return { ok: false, error: 'sender_name_required' };
+  }
   if (!alreadyMinted) {
     try {
       if (quoteOverride) {

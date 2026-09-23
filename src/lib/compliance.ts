@@ -2,6 +2,10 @@ import type { ComplianceStatus, CountryCode } from './types';
 import {
   type ResolvedCorridorRules,
   GLOBAL_DEFAULTS,
+  POSSIBLE_MATCH_REASON,
+  LIST_UNAVAILABLE_REASON,
+  RECIPIENT_WATCHLIST_REASON,
+  SENDER_WATCHLIST_REASON,
 } from './compliance-config';
 import {
   type SanctionsHit,
@@ -14,6 +18,19 @@ import { SanctionsListUnavailableError } from './sanctions/list-screener';
 // Re-export the canonical screening constants so existing importers keep working
 // without changing their import paths (compliance-config is now the source of truth).
 export { WATCHLIST, LARGE_AMOUNT_USD, VELOCITY_LIMIT } from './compliance-config';
+// Program-Fix 43 follow-up: the screening-derived reason constants and the
+// predicate that makes such a hold platform-only to release.
+export {
+  POSSIBLE_MATCH_REASON,
+  LIST_UNAVAILABLE_REASON,
+  RECIPIENT_WATCHLIST_REASON,
+  SENDER_WATCHLIST_REASON,
+  SENDER_IDENTITY_MISSING_REASON,
+  SCREENING_REASONS,
+  isScreeningHold,
+  isScreeningCustomerHold,
+  canDecideCustomerKyc,
+} from './compliance-config';
 
 export interface ComplianceResult {
   status: ComplianceStatus;
@@ -22,10 +39,7 @@ export interface ComplianceResult {
   evidence?: ScreeningEvidence;
 }
 
-// Generic on purpose: reasons reach staff views and must never name a list
-// entry, the screened person, or the word "sanctions" to a customer surface.
-const POSSIBLE_MATCH_REASON = 'Name screening needs manual review.';
-const LIST_UNAVAILABLE_REASON = 'Screening list unavailable; needs manual review.';
+// The screening reasons (POSSIBLE_MATCH_REASON etc.) live in compliance-config.
 
 function party(role: 'recipient' | 'sender', name: string, hit: SanctionsHit): ScreeningEvidenceParty {
   // matchedName is deliberately NOT copied: the mock's list entries are names.
@@ -106,8 +120,8 @@ export async function screenTransfer(input: {
 
   if (anyMatch) {
     const blockReasons: string[] = [];
-    if (recipientHit.matched) blockReasons.push('Recipient is on the compliance watchlist.');
-    if (senderHit.matched)    blockReasons.push('Sender is on the compliance watchlist.');
+    if (recipientHit.matched) blockReasons.push(RECIPIENT_WATCHLIST_REASON);
+    if (senderHit.matched)    blockReasons.push(SENDER_WATCHLIST_REASON);
     return { status: 'blocked', reasons: blockReasons, evidence };
   }
 

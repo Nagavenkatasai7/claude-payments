@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { getFxRates, FALLBACK_FX_RATE } from '@/lib/rate';
-import { waLink, WA_MESSAGES, corridorMessage } from './landing/wa';
+import { waLink, WA_MESSAGES, corridorMessage, WA_PHONE, formatWaPhone } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
 import BrandLogo from './landing/BrandLogo';
 import SocialLinks from './landing/SocialLinks';
@@ -25,7 +25,7 @@ const TITLE = 'SmartRemit.ai — Global money transfers, made simpler.';
 // The corridor count follows ./landing/corridors (one list), never a literal.
 const CORRIDOR_COUNT = WAITLIST_DESTINATIONS.length;
 const DESCRIPTION =
-  `Send money across borders by chatting on WhatsApp. An AI agent quotes the live mid-market rate, a hosted page takes payment, and licensed partners settle. Non-custodial, sanctions-screened, ${CORRIDOR_COUNT} corridors — any direction.`;
+  `Send money across borders by chatting on WhatsApp. An AI agent quotes the live mid-market rate, a hosted page takes payment, and licensed partners settle. Non-custodial, ${CORRIDOR_COUNT} corridors — any direction. Sanctions screening runs on every transfer (demo: reference list; production feed per partner).`;
 
 export const metadata: Metadata = {
   title: TITLE,
@@ -294,8 +294,9 @@ export default async function LandingPage({
               </p>
               <p className="mt-3 max-w-[52ch] text-[16.5px] leading-relaxed text-[#475569]">
                 An AI agent quotes the live mid-market rate in WhatsApp, a hosted page takes
-                payment, and a licensed partner settles — every step signed, screened, and
-                audited.
+                payment, and a licensed partner settles — every step signed and audited.
+                Sanctions screening runs on every transfer (demo: reference list; production
+                feed per partner).
               </p>
 
               <ul className="mt-8 grid max-w-[560px] gap-3 sm:grid-cols-3">
@@ -372,7 +373,7 @@ export default async function LandingPage({
                 <BadgeIcon /> Licensed-partner settled
               </li>
               <li className="inline-flex items-center gap-2.5">
-                <ShieldIcon /> Sanctions screening on every transfer
+                <ShieldIcon /> Sanctions screening runs on every transfer (demo: reference list)
               </li>
               <li className="inline-flex items-center gap-2.5">
                 <AuditIcon /> Full audit trail
@@ -458,7 +459,8 @@ export default async function LandingPage({
                   <p className={SHOWCASE_COPY}>
                     Customers get an agent that answers in plain language. The platform runs
                     compliance on every transfer — sanctions screening is structurally
-                    impossible to switch off, in every KYC mode.
+                    impossible to switch off, in every KYC mode (demo: reference list;
+                    production feed per partner).
                   </p>
                 </div>
                 <div className="lg:order-1">
@@ -900,7 +902,7 @@ export default async function LandingPage({
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  WhatsApp: +1 555 629 8293
+                  {`WhatsApp: ${formatWaPhone(WA_PHONE)}`}
                 </a>
               </li>
               <li>
@@ -924,6 +926,18 @@ export default async function LandingPage({
             receives, or disburses customer money. Exchange rates are indicative and locked
             when you confirm a transfer.
           </p>
+          {/* Program-Fix 15 PR A: the legal drafts (Terms, Privacy, Legal). */}
+          <nav aria-label="Legal" className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-[13px] text-[#52607a]">
+            <a className="hover:text-[#0b1b3f]" href="/terms">
+              Terms
+            </a>
+            <a className="hover:text-[#0b1b3f]" href="/privacy">
+              Privacy
+            </a>
+            <a className="hover:text-[#0b1b3f]" href="/legal">
+              Licensing &amp; your rights
+            </a>
+          </nav>
         </div>
       </footer>
 

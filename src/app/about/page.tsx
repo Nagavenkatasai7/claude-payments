@@ -8,6 +8,7 @@ import AboutDemoVideo from './AboutDemoVideo';
 import { SHARE_IMAGE } from '../landing/share-image';
 import { SMARTREMIT_ICONS } from '../brand-icons';
 import { SkipLink } from '@/components/skip-link';
+import { DEMO_NO_PARTNER_NOTE } from '@/lib/legal/drafts';
 
 // Public /about page — the story, how a send works, and the partner platform.
 // Styled with the SAME inline-Tailwind light brand conventions as the landing
@@ -251,7 +252,22 @@ export default function AboutPage() {
             <BrandLogo height={40} />
             <span>Non-custodial remittance infrastructure.</span>
           </span>
-          <span>[Placeholder: licensing &amp; regulatory disclosures]</span>
+          {/* Program-Fix 15 PR A: the licensing line + the legal drafts. */}
+          <nav aria-label="Legal" className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span>
+              Transfers are provided by the licensed partner named on your receipt.{' '}
+              {DEMO_NO_PARTNER_NOTE}
+            </span>
+            <a className="underline-offset-4 hover:text-[#0b1b3f] hover:underline" href="/legal">
+              Licensing
+            </a>
+            <a className="underline-offset-4 hover:text-[#0b1b3f] hover:underline" href="/terms">
+              Terms
+            </a>
+            <a className="underline-offset-4 hover:text-[#0b1b3f] hover:underline" href="/privacy">
+              Privacy
+            </a>
+          </nav>
         </div>
       </footer>
     </div>

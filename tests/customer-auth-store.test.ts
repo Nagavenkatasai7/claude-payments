@@ -14,7 +14,8 @@ import { freshDb, seedPartner } from './helpers-db';
 import { createCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
 import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
-import { EnvKeyProvider, decryptField } from '@/lib/field-crypto';
+import { EnvKeyProvider, decryptField, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { customerEmailCtx } from '@/lib/crypto-context';
 import { verifyPassword } from '@/lib/password';
 import type { Customer } from '@/lib/types';
 
@@ -679,5 +680,50 @@ describe('lazy rehash is a single-column compare-and-set (Program-Fix 17a)', () 
     expect((await customers.getCustomer('default', NORM))!.passwordHash).toBe(legacy);
     expect(await customers.upgradePasswordHash('default', NORM, legacy, 'H1')).toBe(true);
     expect((await customers.getCustomer('default', NORM))!.passwordHash).toBe('H1');
+  });
+});
+
+// Program-Fix 46A (F70 + the email storage context).
+describe('registerCustomer email bound and storage context (fix 46A)', () => {
+  it('300-char email refused, nothing saved', async () => {
+    const { s, customers } = await mkAuth();
+    const longEmail = `${'a'.repeat(288)}@example.com`; // 300 chars
+    expect(longEmail).toHaveLength(300);
+    await expect(
+      s.registerCustomer(
+        { phone: PHONE, email: longEmail, password: 'correct horse battery' },
+        { pwnedCheck: neverPwned(), cryptoProvider: crypto },
+      ),
+    ).rejects.toBeInstanceOf(CustomerInputError);
+    expect(await customers.findByPhone(NORM)).toEqual([]);
+  });
+
+  it('a 254-char email is still accepted', async () => {
+    const { s } = await mkAuth();
+    const email = `${'a'.repeat(242)}@example.com`;
+    expect(email).toHaveLength(254);
+    const c = await s.registerCustomer(
+      { phone: PHONE, email, password: 'correct horse battery' },
+      { pwnedCheck: neverPwned(), cryptoProvider: crypto },
+    );
+    expect(decryptField(c.email!, crypto)).toBe(email);
+  });
+
+  it('seals the email for the row it lands in (existing tenant row) — v2 forced in-test', async () => {
+    const { s, customers, db } = await mkAuth();
+    await seedPartner(db, 'acme');
+    await customers.upsertOnFirstInbound('acme', NORM);
+    __setFieldCryptoWriteV2ForTests(true);
+    try {
+      const c = await s.registerCustomer(
+        { phone: PHONE, email: 'a@example.com', password: 'correct horse battery' },
+        { pwnedCheck: neverPwned(), cryptoProvider: crypto },
+      );
+      expect(c.email!.startsWith('v2.k0.')).toBe(true);
+      const persisted = (await customers.getCustomer('acme', NORM))!;
+      expect(decryptField(persisted.email!, crypto, customerEmailCtx(persisted))).toBe('a@example.com');
+    } finally {
+      __setFieldCryptoWriteV2ForTests(false);
+    }
   });
 });

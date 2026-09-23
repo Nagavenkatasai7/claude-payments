@@ -34,7 +34,7 @@ function eligible(seller: Seller): boolean {
  * bound to BOTH this onboarding id AND their number. No state change. Returns a
  * bare { ok } — never leaks whether the id exists beyond "can't send".
  */
-export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean }> {
+export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean; reason?: 'otp_send_failed' }> {
   const sellerId = String(id ?? '');
   try {
     const seller = await getStore().getSellerById(sellerId);
@@ -47,14 +47,23 @@ export async function requestSellerOtpAction(id: string): Promise<{ ok: boolean 
       if (!r.allowed) return { ok: false };
     } catch { /* never block on a limiter error */ }
 
-    const issued = await getTransactionOtpStore().issue(sellerId, seller.phone);
-    if (!issued.ok) return { ok: false }; // cooldown
+    // Program-Fix 45: its own per-phone budget (kind 'seller', the seller's partner).
+    const otpStore = getTransactionOtpStore();
+    const issued = await otpStore.issue(sellerId, seller.phone, { kind: 'seller', partnerId: seller.partnerId });
+    if (!issued.ok) return { ok: false }; // cooldown, or an issue cap (locked): same bare answer
     // Deliver from the seller's partner WhatsApp number when configured.
     let creds: WaCreds | undefined;
     try {
       creds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(seller.partnerId));
     } catch { /* fall back to the shared env number */ }
-    try { await sendTransactionOtp(seller.phone, issued.code, creds); } catch { /* generic surface; never log the code */ }
+    try {
+      await sendTransactionOtp(seller.phone, issued.code, creds);
+    } catch {
+      // Program-Fix 25 PR B: the code never arrived — shorten the cooldown to a
+      // ~10-s floor so a Resend works soon, and tell the form. Never log the code.
+      try { await otpStore.shortenCooldown(sellerId); } catch { /* the 30-s cooldown simply runs out */ }
+      return { ok: false, reason: 'otp_send_failed' };
+    }
     return { ok: true };
   } catch (err) {
     logError('seller-onboard.request-otp', err, { sellerId });

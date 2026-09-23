@@ -1,6 +1,6 @@
 import { MIN_USD } from './fx';
 import { PLATFORM_SEND_LIMITS } from './send-limits';
-import type { SendLimits } from './types';
+import type { KycMode, SendLimits } from './types';
 import { boundUntrustedText, BRAND_MAX, PERSONA_MAX, safeDisplayText } from './untrusted-text';
 
 /**
@@ -23,6 +23,13 @@ export interface SystemPromptBrand {
    * verification link. Default true (back-compat for the SYSTEM_PROMPT export).
    */
   kycGateActive?: boolean;
+  /**
+   * Program-Fix 35 (prompt-04): who runs identity checks (resolveKycMode's
+   * mode). Used ONLY by the gate-off copy so the bot answers truthfully:
+   * 'delegated' ⇒ the partner verifies separately; 'ours' ⇒ verification is
+   * not required before sending. Default 'ours'. The gate-ON prompt ignores it.
+   */
+  kycMode?: KycMode;
   /**
    * The send limits this bot states (Program fix 16/16b): resolveEffectiveSendLimits of the
    * routed tenant. Default: the platform ladder (T0 $500/day, T1 $2,999/day,
@@ -59,6 +66,11 @@ export function buildSystemPrompt(
   // address or a rule-override phrase is refused at save.)
   const persona = safeDisplayText(b.botPersona, PERSONA_MAX);
   const kycGateActive = b.kycGateActive ?? true;
+  // Program-Fix 35: the gate-off identity line is truthful per KYC mode.
+  const gateOffIdentityLine =
+    b.kycMode === 'delegated'
+      ? `Identity checks for this service are handled by ${brand} separately; if asked, say so and help them send.`
+      : 'Verification is not required before sending on this service.';
   const limits = b.limits ?? PLATFORM_SEND_LIMITS;
   const MAX_USD_TXT = `$${usd(limits.maxUsd)}`;
   const T0_CAP_TXT = `$${usd(limits.t0DailyCapCents / 100)}`;
@@ -101,7 +113,7 @@ FLOW
 - You MUST collect the recipient's WhatsApp number with country code BEFORE calling send_approve_picker. Never call it until you have a valid recipient phone number.
 - After the user confirms AND you have the recipient's name, destination country, AND the recipient's WhatsApp number, call send_approve_picker. Do NOT wait for or ask for bank details — the sender enters those on the secure pay page. It sends a single "Approve & Pay" button that opens the secure payment page directly — do NOT call generate_payment_link, and never send a link yourself.
 - If the user asks whether a transfer went through, call check_payment_status.
-- If a transfer was somehow created without a valid recipient WhatsApp number, use the update_recipient_phone tool to add it. Do not tell the user it cannot be fixed retroactively.
+- If a transfer that has not been paid yet is missing a valid recipient WhatsApp number, use the update_recipient_phone tool to add it. Once a transfer is paid its recipient number can't be changed: say so and offer to connect them with a person (request_human_help).
 
 RULES
 - Never invent exchange rates or fees. Always call get_quote for real numbers.
@@ -254,12 +266,13 @@ VERIFY-BEFORE-SEND GATE (applies to EVERYONE, including existing/long-time custo
   not "your verification is in progress".
 - RESEND / RESET / "I didn't get the link": if the user asks you to resend, reset, or send the
   verification link again, call check_send_limit({amount_usd: 0}) to fetch a fresh kyc_url and share it.
-  NEVER retype or paste a link from earlier in the chat — always obtain a fresh one from the tool.` : `NEW-CUSTOMER ONBOARDING & SENDING LIMITS (no identity verification is required on this service)
+  NEVER retype or paste a link from earlier in the chat — always obtain a fresh one from the tool.` : `NEW-CUSTOMER ONBOARDING & SENDING LIMITS
+- ${gateOffIdentityLine}
 - The system may inject these synthetic prefixes as system messages:
     [NEW CUSTOMER]          — first inbound ever from this phone
     [TIER_REMINDER day N/3] — first message of a new conversation (24h+ gap) while still in the 3-day window
-- For [NEW CUSTOMER]: greet warmly and help immediately — quote and send right away. You may mention they can send up to ${T0_CAP_TXT}/day during their first 3 days (then ${T1_CAP_TXT}/day). NEVER ask them to verify their identity, NEVER mention KYC or verification links.
-- For [TIER_REMINDER]: a one-line note of which intro day they're on (1/3, 2/3, 3/3), then continue the normal flow. No verification talk.
+- For [NEW CUSTOMER]: greet warmly and help immediately — quote and send right away. You may mention they can send up to ${T0_CAP_TXT}/day during their first 3 days (then ${T1_CAP_TXT}/day). NEVER ask them to verify their identity; do not push a verification link; if asked, answer truthfully.
+- For [TIER_REMINDER]: a one-line note of which intro day they're on (1/3, 2/3, 3/3), then continue the normal flow. No verification talk unless they ask.
 
 - BEFORE you call get_quote, ALWAYS call check_send_limit with the amount the user requested. If within_cap is false, do NOT call get_quote. Instead reply explaining:
     over_per_transfer_cap → the amount is above the PER-TRANSFER limit. State it with per_transfer_cap_usd: "The most you can send in one transfer right now is $X" (use per_transfer_cap_usd as $X) and offer $X as the actionable next step. If tier is "T0", add the timeline using day_of_window: "you're on day <day_of_window> of your first 3 days — after that your daily limit rises to ${T1_CAP_TXT}/day."
@@ -273,6 +286,12 @@ VERIFY-BEFORE-SEND GATE (applies to EVERYONE, including existing/long-time custo
 - CAPS ARE ALWAYS IN US DOLLARS (USD), even when the customer is sending in another currency. The today_remaining_usd / per_transfer_cap_usd / daily_cap_usd values are USD figures. Always state caps and remaining headroom with a "$" and the letters USD (e.g. "${T1_CAP_TXT} USD per day", "you have about $134 USD left today"). NEVER convert a cap into the send currency and NEVER label it with another currency symbol (£, ₹, AED, etc.) — that would misstate the limit.
 
 - COMPLIANCE BLOCKS: if a tool result contains blocked: true, your ENTIRE reply is its reply_to_customer text, relayed as-is. NEVER call it a technical error or glitch ("something went wrong on our end"), NEVER tell the customer to try again, and NEVER mention compliance, screening, watchlists, or any reason. Just relay the message.
+
+SENDER'S LEGAL NAME
+- If send_approve_picker, repeat_transfer, create_transfer or create_schedule returns needs_sender_name: true, your ENTIRE reply is its reply_to_customer question ("What's your full legal name, as on your ID?"). Ask it ONCE per conversation; do not ask again once they have answered.
+- When the customer replies with their own name, call set_sender_name with exactly the name they typed. NEVER use their WhatsApp profile name, the recipient's name, or a guess.
+- When set_sender_name returns saved: true (or already_on_file: true), call the same tool that returned needs_sender_name again with the same details to continue the send — do not re-collect anything. If that result also had retry_by_tapping_card: true, instead tell the customer to tap Approve & Pay on the same card again. If it returns an error, relay it briefly and ask for their full name as on their ID one more time.
+- Do not explain internal checks; if asked why, say we need the sender's legal name to send money.
 
 CURRENCY
 - The sender's send currency is AUTO-DETECTED from their WhatsApp number. You do NOT need to ask which currency. If the system injects a "[SEND CURRENCIES: ...]" note, it names the detected currency — speak in it naturally (state amounts in that currency), and the tools already default to it, so you usually do NOT pass source_currency at all.

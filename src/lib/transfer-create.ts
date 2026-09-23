@@ -1,11 +1,12 @@
 import { quote } from './fx';
 import { FX_MAX_AGE_MS, RateUnavailableError, getDestinationRates, getFxRates } from './rate';
-import { screenTransfer } from './compliance';
+import { screenTransfer, SENDER_IDENTITY_MISSING_REASON } from './compliance';
 import { sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { resolveCorridorRules, type ResolvedCorridorRules } from './compliance-config';
 import { newTransferId } from './id';
 import { sendGateActive } from './kyc-gate';
-import { logWarn } from './log';
+import { logError, logWarn } from './log';
+import { amlHoldGate, amlHoldHit, amlHoldRailEligible, applyAmlHold } from './aml-hold';
 import { isMaskedDestination } from './payout-format';
 import { isPartnerPulled } from './funding-method';
 import { countryForCurrency } from './partner-currency';
@@ -89,6 +90,11 @@ export interface CreateTransferInput {
   // chat / pay-page / cron mint). The partner API passes false: an external
   // caller must never plant a saved recipient into its customers' picker.
   saveRecipient?: boolean;
+  // Program-Fix 14 follow-up: the caller could not supply the sender's name, so
+  // the sender side cannot be name-screened. Absent/false ⇒ unchanged. true ⇒
+  // a non-blocked mint is HELD (flagged + SENDER_IDENTITY_MISSING_REASON), in
+  // the same transaction as the insert. Only the partner API sets it today.
+  senderIdentityMissing?: boolean;
 }
 
 /**
@@ -192,13 +198,28 @@ export class TransferIdConflictError extends Error {
 
 export async function createTransfer(
   store: Store,
+  partnerStore: PartnerStore,
+  _monthlyVolumeStore: MonthlyVolumeStore,
+  input: CreateTransferInput,
+): Promise<Transfer> {
+  return (await createTransferWithOutcome(store, partnerStore, _monthlyVolumeStore, input)).transfer;
+}
+
+/**
+ * createTransfer plus whether the locked mint REPLAYED an existing row (a
+ * claim-first same-id re-mint) instead of inserting. Same arguments, same
+ * behaviour; the partner API uses it so a concurrent loser that replays the
+ * winner never repeats a mint-only side effect (the deprecation warning).
+ */
+export async function createTransferWithOutcome(
+  store: Store,
   partnerStore: PartnerStore,           // NEW (P5): to resolve corridor rules
   // Program fix 16: UNUSED. The rolling-month EDD total is read from the
   // ledger INSIDE the sender lock (SenderLedgerOps.totals). The parameter is
   // kept so the six mint call sites keep their signature.
   _monthlyVolumeStore: MonthlyVolumeStore,
   input: CreateTransferInput,
-): Promise<Transfer> {
+): Promise<{ transfer: Transfer; replayed: boolean }> {
   // Phase 3 backstop: the chokepoint refuses to mint a transfer for an unverified
   // sender. Callers gate earlier with friendly UX (a kyc_url hand-off / a cron
   // skip); this is the last line of defense so no future caller can bypass it.
@@ -280,7 +301,7 @@ export async function createTransfer(
   // A same-id replay is a MASKED read of the existing row and a blocked row is
   // evidence only: neither reaches the address-book write below (a replay
   // must never write ****last4 into the sender's saved recipients — ctx-01).
-  if (minted.replayed || transfer.status === 'blocked') return transfer;
+  if (minted.replayed || transfer.status === 'blocked') return { transfer, replayed: minted.replayed };
   // (transfer count, today's spend and the month total are DERIVED from the
   // ledger — no counter to bump: the minted row IS the accrual.)
 
@@ -306,7 +327,7 @@ export async function createTransfer(
     }
   }
 
-  return transfer;
+  return { transfer, replayed: false };
 }
 
 /** Everything the locked body needs, read on the root handle BEFORE the lock. */
@@ -332,6 +353,8 @@ interface PreparedMint {
  *   1. same-id replay (claim-first callers) → return the existing row, no
  *      second insert and no cap check;
  *   2. ledger totals → sanctions (velocity) + EDD (month used);
+ *   2a. the optional AML hold (Program-Fix 43 PR B: OFF by default, never
+ *       demo, cleared → flagged only, never throws);
  *   2b. the sanctions.screen evidence row (Program-Fix 14), same transaction;
  *   3. a watchlist hit inserts the `blocked` row and returns (never consumes cap);
  *   4. a display placeholder throws (rolls back);
@@ -378,8 +401,44 @@ async function mintLocked(
     complianceStatus = 'flagged';
     complianceReasons = [...complianceReasons, eddCheck.flagReason];
   }
+  const id = input.id ?? newTransferId();
+  // ── Optional AML hold (Program-Fix 43 PR B) ──────────────────────────────
+  // OFF unless the partner's corridor switch is the literal `true`; never on
+  // the default (demo) tenant on either side; never on a non-http rail; only
+  // ever cleared → flagged. The gate is pure, so OFF / demo / an already
+  // flagged or blocked verdict costs ZERO statements. Past it, the two reads
+  // run in a savepoint that never throws (null ⇒ failed, alert queued ⇒ no
+  // hold), and this block is wrapped again: it can never fail the mint.
+  if (amlHoldGate({
+    amlHolds: p.rules.amlHolds,
+    partnerId: input.partnerId,
+    railPartnerId: p.settlementPartnerId ?? input.partnerId,
+    complianceStatus,
+  })) {
+    try {
+      const inputs = await ops.amlHoldInputs({
+        railPartnerId: p.settlementPartnerId ?? input.partnerId,
+        anchor: { at: now, id },
+        largeAmountUsd: p.rules.largeAmountUsd,
+        band: p.rules.aml.band,
+      });
+      if (inputs?.prior && amlHoldRailEligible(inputs.railProviderType)) {
+        const hit = amlHoldHit(inputs.prior, q.amountUsd, { ...p.rules.aml, largeAmountUsd: p.rules.largeAmountUsd });
+        ({ complianceStatus, complianceReasons } = applyAmlHold({ complianceStatus, complianceReasons }, hit));
+      }
+    } catch (err) {
+      logError('aml.hold_check', err, { partnerId: input.partnerId });
+    }
+  }
+  // ── Missing sender identity (Program-Fix 14 follow-up) ────────────────────
+  // AFTER screening, EDD and the AML gate so their verdicts are unchanged; it
+  // only ever ADDS a hold. A watchlist BLOCK still wins (never downgraded).
+  if (input.senderIdentityMissing && complianceStatus !== 'blocked') {
+    complianceStatus = 'flagged';
+    complianceReasons = [...complianceReasons, SENDER_IDENTITY_MISSING_REASON];
+  }
   const transfer: Transfer = {
-    id: input.id ?? newTransferId(),
+    id,
     phone: input.phone,
     amountUsd: q.amountUsd,
     feeUsd: q.feeUsd,

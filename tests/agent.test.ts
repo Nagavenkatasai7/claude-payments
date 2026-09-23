@@ -50,6 +50,17 @@ function freshScheduleStore(_redis = fakeRedis()) {
 
 const PHONE = '15551234567';
 
+// Program-Fix 14: sender identity is required before screening, so a test
+// that drives a consumer send to a card or a mint seeds a legal name.
+async function seedNamedSender(customerStore: ReturnType<typeof createCustomerStore>, phone = PHONE) {
+  const nowIso = new Date().toISOString();
+  await customerStore.saveCustomer({
+    senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
+    senderCountry: 'US', partnerId: 'default', optInAt: nowIso, fullName: 'Alex Rivera',
+    createdAt: nowIso, updatedAt: nowIso,
+  });
+}
+
 beforeEach(async () => {
   resetRateCacheForTests();
   db = await freshDb();
@@ -717,6 +728,7 @@ describe('createAgent — TurnContext', () => {
       ...extraDeps(redis, store),
       chat: async () => responses[i++],
     });
+    await seedNamedSender(extraDeps(redis, store).customerStore);
     const reply = await agent.runAgentTurn('15551234567', '[Tapped: Approve & pay]', {
       isNewConversation: false,
       buttonTap: { kind: 'approve', draftId },
@@ -1042,6 +1054,29 @@ describe('createAgent — [NEW CUSTOMER] and [TIER_REMINDER] notes', () => {
     expect(sys.join('\n')).not.toContain('999,999');
   });
 
+  it('Program-Fix 35: a delegated, gate-OFF tenant\'s system prompt says the partner runs identity checks', async () => {
+    const b = build();
+    const dflt = await b.partnerStore.ensureDefaultPartner();
+    await b.partnerStore.savePartner({ ...dflt, kycMode: 'delegated', requireKycBeforeSend: false, updatedAt: new Date().toISOString() });
+    const seen: ChatMessage[][] = [];
+    const agent = createAgent({
+      store: b.store,
+      scheduleStore: freshScheduleStore(b.redis),
+      draftStore: createDraftStore(b.redis),
+      customerStore: b.customerStore,
+      dailyVolumeStore: b.dailyVolumeStore,
+      monthlyVolumeStore: b.monthlyVolumeStore,
+      kycProvider: b.kycProvider,
+      partnerStore: b.partnerStore,
+      chat: async (messages) => { seen.push(messages); return { role: 'assistant', content: 'ok' }; },
+    });
+    await agent.runAgentTurn('15551234567', 'do I need to verify my ID?');
+    const sys = String(seen[0].find((m) => m.role === 'system')?.content ?? '');
+    expect(sys).toContain('Identity checks for this service are handled by');
+    expect(sys).not.toContain('Verification is not required before sending on this service.');
+    expect(sys).not.toContain('no identity verification is required');
+  });
+
   it('[NEW CUSTOMER] and the system prompt state a tenant\'s tighter T0 cap ($200) — fix 16', async () => {
     const b = build();
     const dflt = await b.partnerStore.ensureDefaultPartner();
@@ -1298,7 +1333,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     const nowIso = new Date().toISOString();
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: nowIso, kycStatus: 'verified',
-      senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+      senderCountry: 'US', partnerId: 'default', optInAt: nowIso, fullName: 'Alex Rivera',
       createdAt: nowIso, updatedAt: nowIso,
     });
   };
@@ -1328,7 +1363,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
     expect(names).toContain('list_recent_transfers'); // web-only history lookup
     expect(names).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(names).toContain('request_human_help'); // fix 34B: a signed-in customer can ask for a person
-    expect(names).toHaveLength(14);
+    expect(names).toHaveLength(15); // Program-Fix 14: + set_sender_name
   });
 
   it('default channel: the model still sees the full WhatsApp tool set (call sites unchanged)', async () => {
@@ -1343,7 +1378,7 @@ describe('web channel (B5) — schemas, dispatch, note, links', () => {
       chat: async (_messages, tools) => { seenTools = tools; return { role: 'assistant', content: 'hi' }; },
     });
     await agent.runAgentTurn(PHONE, 'hello');
-    expect(seenTools).toHaveLength(28); // fix 34B: + request_human_help, + list_recent_transfers
+    expect(seenTools).toHaveLength(29); // fix 34B: + request_human_help, + list_recent_transfers; fix 14: + set_sender_name
     const dn = seenTools.map((t) => t.function.name);
     expect(dn).toContain('get_customer_context'); // fix 5: the round-0 context tool
     expect(dn).toContain('send_approve_picker');
@@ -1488,7 +1523,7 @@ describe('row deadline (fix 7)', () => {
     const now = new Date().toISOString();
     await deps.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'verified', senderCountry: 'US',
-      partnerId: 'default', optInAt: now, createdAt: now, updatedAt: now,
+      partnerId: 'default', optInAt: now, fullName: 'Alex Rivera', createdAt: now, updatedAt: now,
     });
     const ctrl = new AbortController();
     const chat = vi.fn(async (_messages: ChatMessage[], _tools: unknown, opts?: { signal?: AbortSignal }): Promise<ChatMessage> => {
@@ -1611,6 +1646,7 @@ describe('fix 5 (F43): outsider-written text never reaches the system role; cont
       }
       return { role: 'assistant', content: '' };
     });
+    await seedNamedSender(createCustomerStore(db, store));
     await store.upsertRecipient('default', PHONE, { name: 'Mom', recipientPhone: MOM, payoutMethod: 'bank', payoutDestination: ACCOUNT, lastUsedAt: new Date().toISOString() });
     const turn: TurnContext = { isNewConversation: false, buttonTap: { kind: 'recipient', recipientPhone: MOM } };
 
@@ -1692,10 +1728,11 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
 
   function build(chat: (messages: ChatMessage[]) => Promise<ChatMessage>, redis = fakeRedis()) {
     const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
     const agent = createAgent({
-      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store), chat,
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps, chat,
     });
-    return { agent, store };
+    return { agent, store, deps };
   }
 
   it('a DUPLICATE approve card (same card within the dedupe TTL) is not silence: the tool says sent:false/duplicate and the model text is the reply', async () => {
@@ -1707,6 +1744,7 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
     // Turn 1: the card is sent; the card IS the reply ('').
     let round = 0;
     const first = build(async () => (++round === 1 ? pickerCall('a1') : { role: 'assistant', content: '' }), redis);
+    await seedNamedSender(first.deps.customerStore);
     expect(await first.agent.runAgentTurn(PHONE, 'send $100 to Mom')).toBe('');
     // Turn 2 (same card, inside 120 s): the send is deduped, so the tool must NOT report sent:true.
     round = 0;

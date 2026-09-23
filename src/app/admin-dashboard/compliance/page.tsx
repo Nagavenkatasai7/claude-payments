@@ -6,6 +6,10 @@ import { WATCHLIST } from '@/lib/compliance';
 import { resolveCorridorRules } from '@/lib/compliance-config';
 import { resolveSenderNames, senderNameKey } from '@/lib/sender-names';
 import { getDb } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import { reviewAmlAlertAction, setAmlHoldsAction } from './actions';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { Sidebar } from '../sidebar';
 import { SenderCell } from '../sender-cell';
 import { money } from '../format';
@@ -20,6 +24,7 @@ import { ReviewCopilot } from './review-copilot';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
+import Link from 'next/link';
 import { Input } from '@/components/ui/input';
 import { CustomerLink } from '../customer-link';
 import type { Transfer } from '@/lib/types';
@@ -47,7 +52,25 @@ const CORRIDOR_COLUMNS: ExpandableColumn[] = [
   { label: 'Large-amount (USD)' },
   { label: 'Velocity / day' },
   { label: 'Watchlist' },
+  { label: 'AML holds' },
 ];
+
+const AML_COLUMNS: ExpandableColumn[] = [
+  { label: 'Rule', primary: true },
+  { label: 'Transfer', primary: true },
+  { label: 'Sender' },
+  { label: 'Raised' },
+  { label: 'Review' },
+];
+
+// Program-Fix 43: staff-facing names for the behavioural rules (aml-rules.ts).
+// Staff only — rule names never reach the customer, the bot or the partner API.
+const AML_RULE_LABEL: Record<string, string> = {
+  structuring: 'Possible structuring',
+  first_transfer: 'Large first transfer',
+  new_beneficiary: 'Large send to a new beneficiary',
+  cluster: 'Many senders → one beneficiary',
+};
 
 const VELOCITY_COLUMNS: ExpandableColumn[] = [
   { label: 'Phone', primary: true },
@@ -99,13 +122,25 @@ export default async function CompliancePage() {
   // whole ledger and filtering in JS per render.
   const { inReview, flagged, blocked, topVelocity: topVel } = await scoped.complianceViews();
 
+  // Program-Fix 43: open behavioural AML alerts (an aml.alert with no
+  // aml.reviewed), pinned to the staff member's tenant at the WHERE; the
+  // transfers they name are loaded masked and tenant-pinned too.
+  const tenant = scoped.scope.kind === 'partner' ? scoped.scope.partnerId : undefined;
+  const amlAlerts = await createAuditRepo(getDb()).listOpenAmlAlerts(tenant ?? null, 100);
+  const amlTransfers = new Map(
+    (await createTransferRepo(getDb()).listByIdsScoped(
+      [...new Set(amlAlerts.map((a) => a.subjectId).filter((id): id is string => Boolean(id)))],
+      tenant,
+    )).map((t) => [t.id, t]),
+  );
+
   // Resolve decrypted sender names for every transfer shown on the page in ONE
   // batched query, so each Sender cell can show the KYC name (linked to the
   // profile) instead of a bare phone — phones with no captured name fall back to
   // the phone inside SenderCell.
   const senderNames = await resolveSenderNames(
     getDb(),
-    [...inReview, ...flagged, ...blocked],
+    [...inReview, ...flagged, ...blocked, ...amlTransfers.values()],
   );
 
   const partners = await scoped.listPartners();
@@ -114,15 +149,20 @@ export default async function CompliancePage() {
   // PLATFORM staff only, so partner-scoped admins don't see a Release that
   // would refuse. Owner decision 2026-09-16.
   const partnersById = new Map(partners.map((p) => [p.id, p]));
-  const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId));
+  // Program-Fix 43 follow-up: a sanctions / name-screening hold is PLATFORM-only
+  // in every KYC mode — canReleaseHeld reads the transfer's hold reasons.
+  const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId), t);
   const corridorRows = partners.flatMap((p) =>
     (p.countries ?? [])
       .filter((c) => c !== 'IN')
       .map((country) => {
         const rules = resolveCorridorRules(p, country);
         return {
+          partnerId: p.id,
+          country,
           partnerName: p.name ?? '',
           corridor: `${country} → IN`,
+          amlHolds: rules.amlHolds,
           largeAmountUsd: rules.largeAmountUsd,
           velocityLimit: rules.velocityLimit,
           watchlistSize: rules.baseWatchlist.length + rules.watchlistExtra.length,
@@ -130,6 +170,9 @@ export default async function CompliancePage() {
         };
       }),
   );
+  // Program-Fix 43 PR B: only platform admins may switch a partner's AML
+  // holds (setAmlHoldsAction re-checks — the action is the authority).
+  const canSetAmlHolds = staff.role === 'admin' && scoped.scope.kind !== 'partner';
   corridorRows.sort((a, b) => (a.partnerName + a.corridor).localeCompare(b.partnerName + b.corridor));
 
   return (
@@ -165,10 +208,28 @@ export default async function CompliancePage() {
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
                       {canRelease(t) ? (
-                        <form action={releaseTransferAction} className="flex items-center gap-1">
+                        <form action={releaseTransferAction} className="flex flex-col gap-1">
                           <input type="hidden" name="id" value={t.id} />
-                          <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
-                          <Button type="submit" size="sm">Release</Button>
+                          <div className="flex items-center gap-1">
+                            {/* Program-Fix 43 follow-up: a release reason is
+                                REQUIRED (the action refuses a blank one) and
+                                is written to the audit log with the actor. */}
+                            <Input
+                              name="note"
+                              required
+                              pattern=".*\S.*"
+                              title="Enter a reason (not just spaces)"
+                              maxLength={500}
+                              placeholder="Reason (required)"
+                              aria-label="Release reason (required)"
+                              aria-describedby={`release-help-${t.id}`}
+                              className="h-8 w-36"
+                            />
+                            <Button type="submit" size="sm">Release</Button>
+                          </div>
+                          <span id={`release-help-${t.id}`} className="text-xs text-muted-foreground">
+                            Why is this hold being released? Recorded in the audit log.
+                          </span>
                         </form>
                       ) : (
                         <Button
@@ -247,6 +308,48 @@ export default async function CompliancePage() {
 
         <Card className="mb-6">
           <CardHeader>
+            <CardTitle>Behavioural alerts</CardTitle>
+            <CardDescription>
+              {amlAlerts.length} open {amlAlerts.length === 1 ? 'alert' : 'alerts'} — review items only.
+              These never hold a transfer and are never shown to the customer.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ExpandableTable
+              columns={AML_COLUMNS}
+              empty={<>No open behavioural alerts.</>}
+              rows={amlAlerts.map((a) => {
+                const t = a.subjectId ? amlTransfers.get(a.subjectId) : undefined;
+                const label = AML_RULE_LABEL[String(a.meta.rule)] ?? 'Behavioural alert';
+                return {
+                  key: String(a.id),
+                  label,
+                  cells: [
+                    <span key="rule" className="font-semibold">{label}</span>,
+                    a.subjectId ? (
+                      <Link key="transfer" href={`/admin-dashboard/transactions/${a.subjectId}`} className="font-mono text-xs hover:underline">
+                        {a.subjectId}
+                      </Link>
+                    ) : '—',
+                    t ? (
+                      <SenderCell key="sender" name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} />
+                    ) : '—',
+                    new Date(a.at).toLocaleString(),
+                    <form key="review" action={reviewAmlAlertAction} className="flex flex-wrap items-center gap-1">
+                      <input type="hidden" name="alertId" value={a.id} />
+                      <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
+                      <Button type="submit" size="sm" variant="outline" name="disposition" value="no_action">No action</Button>
+                      <Button type="submit" size="sm" name="disposition" value="escalated">Escalate</Button>
+                    </form>,
+                  ],
+                };
+              })}
+            />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-6">
+          <CardHeader>
             <CardTitle>Watchlist</CardTitle>
             <CardDescription>
               Recipient names that hard-block a transfer (read-only)
@@ -263,7 +366,9 @@ export default async function CompliancePage() {
           <CardHeader>
             <CardTitle>Corridor rules</CardTitle>
             <CardDescription>
-              Resolved compliance rules per corridor (read-only). Full rule-creation UI is deferred.
+              Resolved compliance rules per corridor. AML holds are OFF by default: when ON, a transfer on
+              that partner&apos;s live (http) rail that trips a behavioural rule is held for review. Demo
+              transfers are never held.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -289,6 +394,23 @@ export default async function CompliancePage() {
                       </div>
                     )}
                   </span>,
+                  r.partnerId === DEFAULT_PARTNER_ID ? (
+                    <span key="aml-holds" className="text-muted-foreground">Never (demo)</span>
+                  ) : (
+                    <span key="aml-holds" className="inline-flex flex-wrap items-center gap-2">
+                      <Badge variant={r.amlHolds ? 'destructive' : 'outline'}>{r.amlHolds ? 'On' : 'Off'}</Badge>
+                      {canSetAmlHolds && (
+                        <form action={setAmlHoldsAction}>
+                          <input type="hidden" name="partnerId" value={r.partnerId} />
+                          <input type="hidden" name="country" value={r.country} />
+                          <input type="hidden" name="on" value={r.amlHolds ? 'off' : 'on'} />
+                          <Button type="submit" size="sm" variant="outline">
+                            {r.amlHolds ? 'Turn off' : 'Turn on'}
+                          </Button>
+                        </form>
+                      )}
+                    </span>
+                  ),
                 ],
               }))}
             />

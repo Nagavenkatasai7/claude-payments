@@ -10,8 +10,11 @@ import { getStore } from '@/lib/store';
 import { createCustomerStore, getCustomerStore } from '@/lib/customer-store';
 import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
+import { canDecideCustomerKyc } from '@/lib/compliance-config';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
+import { optOutSuppresses } from '@/lib/consent-gate';
+import { partnerWaContext } from '@/lib/whatsapp-creds';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
@@ -101,6 +104,12 @@ export async function manualKycDecisionAction(formData: FormData): Promise<void>
   if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
     throw new Error('Customer not found.');
   }
+  // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to
+  // decide — refused before any mutation (re-checked on the locked row).
+  const platformStaff = scopeOf(staff).kind === 'platform';
+  if (!canDecideCustomerKyc(scopeOf(staff), customer)) {
+    throw new Error('You do not have permission to perform this action.');
+  }
   if (decision === 'approve' && (customer.kycStatus === 'verified' || customer.kycStatus === 'grandfathered')) {
     throw new Error('Customer is already verified.');
   }
@@ -110,7 +119,7 @@ export async function manualKycDecisionAction(formData: FormData): Promise<void>
 
   const updated = await getKycCaseStore(getStore()).review(
     customer.partnerId, customer.senderPhone, decision, reviewerDisplay(staff), reason,
-    { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.manual_override.${decision}`, source: 'manual' },
+    { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.manual_override.${decision}`, source: 'manual', allowScreeningHold: platformStaff },
   );
   if (!updated) throw new Error('Customer not found.'); // raced a delete ⇒ nothing written
   revalidatePath('/admin-dashboard/customers');
@@ -139,13 +148,19 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   if (!customer || !canSee(scopeOf(staff), customer.partnerId)) {
     throw new Error('Customer not found.');
   }
+  // Program-Fix 43 follow-up: a watchlist / PEP hold is PLATFORM-only to
+  // decide — refused before any mutation (re-checked on the locked row).
+  const platformStaff = scopeOf(staff).kind === 'platform';
+  if (!canDecideCustomerKyc(scopeOf(staff), customer)) {
+    throw new Error('You do not have permission to perform this action.');
+  }
 
   // Attribute the reviewer by display name + stable username, e.g. "Main Admin (forextransfer)".
   // Program-Fix 28: durable — the decision and its kyc.review.<decision>
   // audit_events row commit together (actor = username, keyed subject).
   const reviewed = await getKycCaseStore(getStore()).review(
     partnerId, phone, decision, reviewerDisplay(staff), reason,
-    { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.review.${decision}`, source: 'persona_review' },
+    { db: getDb(), store: getStore(), actor: staff.username, slug: `kyc.review.${decision}`, source: 'persona_review', allowScreeningHold: platformStaff },
   );
   if (!reviewed) throw new Error('Customer not found.');
   // KYC is partner OPT-IN: the decision + audit above stand regardless, but the
@@ -154,8 +169,11 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   const partner =
     (await getPartnerStore().getPartner(customer.partnerId)) ??
     (await getPartnerStore().ensureDefaultPartner());
-  if (sendGateActive(partner)) {
-    await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName).catch(
+  // Program-Fix 49A: the decision notice is nonessential (not sent after
+  // STOP) and leaves from the owning partner's own number (fail-soft resolver).
+  if (sendGateActive(partner) && !optOutSuppresses(customer, 'nonessential')) {
+    const { waCreds } = await partnerWaContext(customer.partnerId);
+    await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName, waCreds).catch(
       () => {},
     );
   }

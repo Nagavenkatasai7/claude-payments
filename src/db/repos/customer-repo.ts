@@ -1,8 +1,9 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { openOptional, sealOptional } from './mappers';
+import { customerRowCtx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { countryForPhone } from '@/lib/partner-currency';
 import type {
@@ -28,8 +29,10 @@ import type {
 //
 // TENANT IDENTITY (fix 1 / F44): the key is (partner_id, phone). Every read and
 // write takes partnerId FIRST and carries it in the WHERE; a phone alone never
-// selects a row. The one cross-tenant read is findByPhone, used by portal auth,
-// the platform-staff detail page and the Persona webhook only. upsertOnFirstInbound
+// selects a row. The cross-tenant reads are findByPhone, used by portal auth,
+// the platform-staff detail page and the Persona webhook only, and
+// findByKycInquiryId (Program-Fix 35), used by the Persona webhook only to bind
+// a report event (which carries no phone) by the inquiry the row recorded. upsertOnFirstInbound
 // NEVER moves a row between tenants — a partner-signed inbound for a phone that
 // exists under another partner creates that partner's OWN sibling row. The
 // grandfather check is the indexed MIN(created_at) for (partner, phone).
@@ -59,11 +62,13 @@ export function createCustomerRepo(
     set('kycVerifiedAt', isoOpt(row.kycVerifiedAt));
     set('kycProviderRef', row.kycProviderRef);
     set('kycRejectedReason', row.kycRejectedReason);
-    set('fullName', openOptional(row.fullNameEnc, provider));
-    set('dateOfBirth', openOptional(row.dateOfBirthEnc, provider));
-    set('residentialAddress', openOptional(row.residentialAddressEnc, provider));
+    // Contexts come from the FETCHED row's own key (Program-Fix 46A); a mismatch
+    // throws (openOptional never swallows) — the sanctions screen reads fullName.
+    set('fullName', openOptional(row.fullNameEnc, provider, customerRowCtx(row, 'full_name_enc')));
+    set('dateOfBirth', openOptional(row.dateOfBirthEnc, provider, customerRowCtx(row, 'date_of_birth_enc')));
+    set('residentialAddress', openOptional(row.residentialAddressEnc, provider, customerRowCtx(row, 'residential_address_enc')));
     set('govIdType', (row.govIdType ?? undefined) as GovIdType | undefined);
-    set('govIdNumber', openOptional(row.govIdNumberEnc, provider));
+    set('govIdNumber', openOptional(row.govIdNumberEnc, provider, customerRowCtx(row, 'gov_id_number_enc')));
     set('nationality', (row.nationality ?? undefined) as CountryCode | undefined);
     set('pepDeclared', row.pepDeclared ?? undefined);
     set('sourceOfFunds', (row.sourceOfFunds ?? undefined) as SourceOfFunds | undefined);
@@ -98,9 +103,11 @@ export function createCustomerRepo(
 
   function customerToRow(c: Customer): typeof customers.$inferInsert {
     const dateOpt = (s: string | undefined): Date | null => (s ? new Date(s) : null);
+    // The row key AS WRITTEN — every sealed column below binds to it.
+    const key = { partnerId: c.partnerId ?? DEFAULT_PARTNER_ID, phone: c.senderPhone };
     return {
-      phone: c.senderPhone,
-      partnerId: c.partnerId ?? DEFAULT_PARTNER_ID,
+      phone: key.phone,
+      partnerId: key.partnerId,
       firstSeenAt: new Date(c.firstSeenAt),
       senderCountry: c.senderCountry,
       kycStatus: c.kycStatus,
@@ -113,11 +120,11 @@ export function createCustomerRepo(
       kycApprovedBy: c.kycApprovedBy ?? null,
       kycApprovedAt: dateOpt(c.kycApprovedAt),
       kycRejectedAt: dateOpt(c.kycRejectedAt),
-      fullNameEnc: sealOptional(c.fullName, provider) ?? null,
-      dateOfBirthEnc: sealOptional(c.dateOfBirth, provider) ?? null,
-      residentialAddressEnc: sealOptional(c.residentialAddress, provider) ?? null,
+      fullNameEnc: sealOptional(c.fullName, provider, customerRowCtx(key, 'full_name_enc')) ?? null,
+      dateOfBirthEnc: sealOptional(c.dateOfBirth, provider, customerRowCtx(key, 'date_of_birth_enc')) ?? null,
+      residentialAddressEnc: sealOptional(c.residentialAddress, provider, customerRowCtx(key, 'residential_address_enc')) ?? null,
       emailEnc: c.email ?? null, // already a field-crypto blob — stored verbatim
-      govIdNumberEnc: sealOptional(c.govIdNumber, provider) ?? null,
+      govIdNumberEnc: sealOptional(c.govIdNumber, provider, customerRowCtx(key, 'gov_id_number_enc')) ?? null,
       govIdType: c.govIdType ?? null,
       idLast4: c.idLast4 ?? null,
       idDocType: c.idDocType ?? null,
@@ -200,6 +207,23 @@ export function createCustomerRepo(
         .select()
         .from(customers)
         .where(eq(customers.phone, senderPhone))
+        .orderBy(asc(customers.createdAt), asc(customers.partnerId));
+      return rows.map(rowToCustomer);
+    },
+
+    /**
+     * Program-Fix 35: every tenant's row that recorded this Persona inquiry id
+     * (oldest first). Cross-tenant, like findByPhone — the Persona webhook only;
+     * it binds a report event when exactly ONE row matches and fails closed
+     * otherwise. An empty id matches nothing. (No index on kyc_inquiry_id:
+     * a scan is acceptable at today's customer count; add one if it grows.)
+     */
+    async findByKycInquiryId(inquiryId: string): Promise<Customer[]> {
+      if (!inquiryId) return [];
+      const rows = await db
+        .select()
+        .from(customers)
+        .where(eq(customers.kycInquiryId, inquiryId))
         .orderBy(asc(customers.createdAt), asc(customers.partnerId));
       return rows.map(rowToCustomer);
     },
@@ -326,6 +350,28 @@ export function createCustomerRepo(
         .set({ sendLimitOverride: value, updatedAt: new Date() })
         .where(tenantKey(partnerId, senderPhone));
       return { found: true, previous };
+    },
+
+    /**
+     * Program-Fix 14: the set-once writer of a customer's own legal name — a
+     * single-column conditional UPDATE keyed (partner_id, phone) that lands
+     * only while no name is on file (NULL, or the '' sealOptional keeps for an
+     * empty value). Sealed exactly as customerToRow seals it (same provider,
+     * same (partner_id, phone, 'full_name_enc') context), so getCustomer opens
+     * it. It never rewrites another column, so a concurrent KYC / consent
+     * write to the row survives, and a name already there (including one that
+     * landed after the caller's read) is never replaced. Returns whether this
+     * call wrote it; false for a missing row or a name already on file.
+     */
+    async setFullNameIfUnset(partnerId: PartnerId, senderPhone: string, fullName: string): Promise<boolean> {
+      const sealed = sealOptional(fullName, provider, customerRowCtx({ partnerId, phone: senderPhone }, 'full_name_enc'));
+      if (!sealed) return false;
+      const rows = await db
+        .update(customers)
+        .set({ fullNameEnc: sealed, updatedAt: new Date() })
+        .where(and(tenantKey(partnerId, senderPhone), or(isNull(customers.fullNameEnc), eq(customers.fullNameEnc, ''))))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
     },
 
     async setOptedOut(partnerId: PartnerId, senderPhone: string): Promise<void> {

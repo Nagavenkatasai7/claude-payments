@@ -4,6 +4,7 @@ import { resolvePartnerBranding, type ResolvedBranding } from '@/lib/partner-con
 import { getB2bQuoteStore, resolveCheckoutBillQuote } from '@/lib/b2b-quote-store';
 import { billDenomination, quoteCrossBorderBill, quoteBuyerDenominatedBill } from '@/lib/b2b-quote';
 import { getFxRates } from '@/lib/rate';
+import { isBillExpired } from '@/lib/b2b-bill-expiry';
 import { countryForPhone, currencyForPhone } from '@/lib/partner-currency';
 import { BANK_FIELDS_BY_COUNTRY } from '@/lib/payout-format';
 import { BillPayForm } from './bill-pay-form';
@@ -96,7 +97,8 @@ export default async function CrossBorderBillPayPage({
   if (!invoice || !isCrossBorder) {
     return <Inactive message={INACTIVE_MESSAGE} />;
   }
-  if (invoice.status !== 'unpaid') {
+  // Program-Fix 44: an unpaid bill past the TTL is dead — the same generic sheet.
+  if (invoice.status !== 'unpaid' || isBillExpired(invoice)) {
     return <Inactive message={INACTIVE_MESSAGE} />;
   }
 

@@ -1,13 +1,19 @@
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { getRedis } from './redis';
 import { easternDayStart, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
-import { getDb, type Db } from '@/db/client';
+import { getDb, type Db, type Tx } from '@/db/client';
+import { partnerIntegrations } from '@/db/schema';
 import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
+import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { logError } from './log';
+import { amlHoldRailEligible } from './aml-hold';
+import type { SenderAmlStats } from './aml-rules';
 import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
+import { billExpiryCutoff, BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC } from './b2b-bill-expiry';
 import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
 
 /**
@@ -22,6 +28,87 @@ export interface SenderLedgerOps {
   insertTransfer(t: Transfer): Promise<void>;
   /** Program-Fix 14: the sanctions.screen evidence row, in the SAME transaction as the insert. */
   recordAudit(e: AuditEvent): Promise<void>;
+  /**
+   * Program-Fix 43 PR B: the optional AML hold's two reads — the RAIL
+   * partner's payment provider type (a plain column, no decrypt) and, only on
+   * an `http` rail, the sender's AML aggregates before `anchor`. mintLocked
+   * calls it ONLY past amlHoldGate (setting ON, not demo, verdict cleared), so
+   * a partner with the setting OFF pays zero statements.
+   *
+   * NEVER throws. Both reads run inside a SAVEPOINT: a failed statement rolls
+   * back to it and the mint transaction carries on (without the savepoint any
+   * SQL error would abort the whole mint). On failure it logs (scrubbed),
+   * queues ONE hour-deduped ops.alert in this transaction, and returns null ⇒
+   * the caller does not hold (fail to "no hold" + alert).
+   */
+  amlHoldInputs(q: AmlHoldQuery): Promise<AmlHoldInputs | null>;
+}
+
+export interface AmlHoldQuery {
+  railPartnerId: PartnerId;
+  anchor: { at: Date; id: string };
+  largeAmountUsd: number;
+  band: number;
+}
+
+export interface AmlHoldInputs {
+  railProviderType: string | null;
+  /** Null when the rail is not eligible (the stats are never read then). */
+  prior: SenderAmlStats | null;
+}
+
+/**
+ * Run `fn` in a SAVEPOINT on `tx` (drizzle's nested transaction:
+ * node_modules/drizzle-orm/neon-serverless/session.js:199-207,
+ * pglite/session.js:139-152). A failure rolls back to the savepoint ONLY, so
+ * the outer transaction stays usable; it is returned, never thrown.
+ */
+export async function inSavepoint<T>(
+  tx: Tx,
+  fn: (sp: Tx) => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  try {
+    return { ok: true, value: await tx.transaction(fn) };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+async function readAmlHoldInputs(
+  tx: Tx,
+  partnerId: PartnerId,
+  phone: string,
+  q: AmlHoldQuery,
+): Promise<AmlHoldInputs | null> {
+  const read = await inSavepoint(tx, async (sp): Promise<AmlHoldInputs> => {
+    const rows = await sp
+      .select({ providerType: partnerIntegrations.paymentProviderType })
+      .from(partnerIntegrations)
+      .where(eq(partnerIntegrations.partnerId, q.railPartnerId))
+      .limit(1);
+    const railProviderType = rows[0]?.providerType ?? null;
+    if (!amlHoldRailEligible(railProviderType)) return { railProviderType, prior: null };
+    const prior = await createTransferRepo(sp).senderAmlStats(partnerId, phone, q.anchor, q.largeAmountUsd, q.band);
+    return { railProviderType, prior };
+  });
+  if (read.ok) return read.value;
+  logError('aml.hold_check', read.error, { partnerId });
+  const hour = Math.floor(Date.now() / 3_600_000);
+  const alerted = await inSavepoint(tx, (sp) =>
+    // Inline literal payload (tests/outbox-payload-secrets.test.ts). Ids only:
+    // never a phone, a name, a transfer amount or the error text.
+    createOutboxRepo(sp).enqueue(
+      'ops.alert',
+      {
+        message:
+          `⚠️ SmartRemit ops: the AML hold check failed for partner ${partnerId}; ` +
+          `transfers are being minted WITHOUT it (no hold) until it recovers. Check the aml.hold_check logs.`,
+      },
+      { dedupeKey: `aml-hold-check:${partnerId}:${hour}` },
+    ),
+  );
+  if (!alerted.ok) logError('aml.hold_check_alert', alerted.error, { partnerId });
+  return null;
 }
 
 /** SQLSTATE 55P03 lock_not_available — from `SET LOCAL lock_timeout` — direct or wrapped. */
@@ -166,6 +253,18 @@ export function createStore(redis: RedisLike, db: Db) {
     async cancelTransferIfUnfunded(id: string, partnerId: PartnerId): Promise<Transfer | null> {
       return transfersRepo.cancelIfCancellable(id, partnerId);
     },
+    /** update_recipient_phone: sets ONLY recipient_phone, scoped to tenant +
+     *  owning sender, unpaid transfers only (transfer-repo.updateRecipientPhone).
+     *  Null ⇒ no editable row for this owner now; the caller refuses and never
+     *  falls back to saveTransfer. */
+    async updateRecipientPhone(
+      id: string,
+      partnerId: PartnerId,
+      ownerPhone: string,
+      recipientPhone: string,
+    ): Promise<Transfer | null> {
+      return transfersRepo.updateRecipientPhone(id, partnerId, ownerPhone, recipientPhone);
+    },
     async updateTransferFromWebhook(
       transferId: string,
       status: TransferStatus,
@@ -291,6 +390,7 @@ export function createStore(redis: RedisLike, db: Db) {
               getTransfer: (id) => repo.getTransfer(id),
               insertTransfer: (t) => repo.saveTransfer(t),
               recordAudit: (e) => audit.record(e),
+              amlHoldInputs: (q) => readAmlHoldInputs(tx, partnerId, phone, q),
             });
           },
           { isolationLevel: 'read committed' },
@@ -358,7 +458,7 @@ export function createStore(redis: RedisLike, db: Db) {
     // duplicate collides; a genuinely new bill (different amount/buyer, or after
     // the TTL) gets its own id.
     async claimBillInvoiceId(key: string, candidateId: string): Promise<string> {
-      const claimed = await redis.set(`billclaim:${key}`, candidateId, { ex: 120, nx: true });
+      const claimed = await redis.set(`billclaim:${key}`, candidateId, { ex: BILL_CLAIM_TTL_SEC, nx: true });
       if (claimed !== null) return candidateId;
       const existing = await redis.get(`billclaim:${key}`);
       return typeof existing === 'string' && existing ? existing : candidateId;
@@ -368,6 +468,18 @@ export function createStore(redis: RedisLike, db: Db) {
     // in a LATER step (after the insert) keeps the claim, so that retry stays deduped.
     async clearBillInvoiceClaim(key: string): Promise<void> {
       await redis.del(`billclaim:${key}`);
+    },
+    // Program-Fix 44: the seller re-asked for a bill that is still open, so its
+    // link is re-sent under `sellerbill:<id>:resend:<token>` (outbox dedupe keys
+    // are permanently unique). The token is claim-first like the bill claim: the
+    // first re-request binds it (SET NX EX), and an at-least-once replay of that
+    // turn reads the SAME token back, so its enqueue is a no-op instead of a
+    // second message. A genuine re-request after the window gets a new token.
+    async claimBillResendToken(invoiceId: string, candidate: string): Promise<string> {
+      const claimed = await redis.set(`billresend:${invoiceId}`, candidate, { ex: BILL_RESEND_WINDOW_SEC, nx: true });
+      if (claimed !== null) return candidate;
+      const existing = await redis.get(`billresend:${invoiceId}`);
+      return typeof existing === 'string' && existing ? existing : candidate;
     },
     async getLastInboundAt(partnerId: PartnerId, senderPhone: string): Promise<string | null> {
       return redis.get(`lastmsg:${partnerId}:${senderPhone}`); // no legacy read: a stale null only means "treat as a new conversation" once
@@ -434,7 +546,22 @@ export function createStore(redis: RedisLike, db: Db) {
       buyerPhone: string,
       partnerId: import('./types').PartnerId,
     ): Promise<import('./types').B2bInvoice | null> {
-      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId);
+      // Program-Fix 44: an unpaid bill past the TTL is dead — the bot never presents or disputes it.
+      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId, billExpiryCutoff());
+    },
+    // Program-Fix 44: the durable duplicate-bill check (see the repo's findOpenTwin).
+    async findOpenTwinInvoice(q: {
+      partnerId: import('./types').PartnerId;
+      sellerId: string;
+      buyerPhone: string;
+      invoicedAmount: number;
+      invoicedCurrency: import('./types').CurrencyCode;
+    }): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.findOpenTwin({ ...q, createdNotBefore: billExpiryCutoff() });
+    },
+    // Program-Fix 44: platform-only cross-tenant list (the B2B dashboard page gates on platform scope).
+    async listAllB2bInvoices(): Promise<import('./types').B2bInvoice[]> {
+      return b2bInvoiceRepo.listAllInvoices();
     },
     async getB2bInvoice(id: string): Promise<import('./types').B2bInvoice | null> {
       return b2bInvoiceRepo.getInvoice(id);

@@ -19,6 +19,24 @@ export const env = {
   get opsAlertPhone(): string {
     return process.env.OPS_ALERT_PHONE ?? '';
   },
+  // Program-Fix 26 — the ops-alert MIRROR. Both OPTIONAL (never boot-asserted):
+  // unset ⇒ ops alerts go to OPS_ALERT_PHONE only, exactly as before.
+  /** Comma-separated mailbox(es) that also receive every ops alert by email. */
+  get opsAlertEmails(): string[] {
+    return (process.env.OPS_ALERT_EMAIL ?? '').split(',').map((e) => e.trim()).filter(Boolean);
+  },
+  /** Incoming-webhook URL (Slack/PagerDuty style, JSON `{text}`) — a bearer secret; https only. */
+  get opsAlertWebhookUrl(): string {
+    return process.env.OPS_ALERT_WEBHOOK_URL ?? '';
+  },
+  /**
+   * Sentry DSN for server error reports (Program-Fix 26). Documented here for the
+   * env contract only: src/lib/error-report.ts reads process.env.SENTRY_DSN
+   * DIRECTLY so it stays edge-safe. Unset ⇒ no error is ever sent.
+   */
+  get sentryDsn(): string {
+    return process.env.SENTRY_DSN ?? '';
+  },
   // Email (Hostinger SMTP, via nodemailer) — used for "Partner with us" lead
   // notifications. All OPTIONAL (NOT money-grade, so boot-assert never requires
   // them): unset ⇒ the email effect no-ops and the lead still lands in the admin
@@ -205,6 +223,18 @@ export const env = {
   },
   get whatsappVerificationFailedTemplate(): string {
     return process.env.WHATSAPP_VERIFICATION_FAILED_TEMPLATE ?? '';
+  },
+  // Program-Fix 25 — both OPTIONAL, unset ⇒ today's behaviour byte-for-byte.
+  // The approved UTILITY template (one body variable) for ops alerts. '' ⇒ the
+  // ops.alert row sends free-form text exactly as before.
+  get whatsappOpsAlertTemplate(): string {
+    return process.env.WHATSAPP_OPS_ALERT_TEMPLATE ?? '';
+  },
+  // 'true' ⇒ sendBusinessInitiated checks the 24h customer-service window
+  // (lastmsg:) and skips a doomed free-form send outside it. Turn on only after
+  // the production number is live and the templates are approved.
+  get whatsappWindowAware(): boolean {
+    return process.env.WHATSAPP_WINDOW_AWARE === 'true';
   },
   paymentWebhookSecret(provider: string): string {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.

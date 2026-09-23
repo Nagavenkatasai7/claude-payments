@@ -9,6 +9,7 @@ import {
   type Field,
 } from '@/lib/payout-format';
 import { requestSellerOtpAction, activateSellerAction } from './actions';
+import { OTP_SEND_FAILED_MESSAGE } from '@/lib/otp-send-copy';
 
 type Status = 'idle' | 'saving' | 'done' | 'error';
 
@@ -78,6 +79,8 @@ export function SellerOnboardForm({
   const [sent, setSent] = useState(false);
   const [otpError, setOtpError] = useState('');
   const [requesting, setRequesting] = useState(false);
+  // Program-Fix 25 PR B: shown only when the WhatsApp send itself failed.
+  const [requestError, setRequestError] = useState('');
 
   function setField(key: string, v: string) {
     setValues((prev) => ({ ...prev, [key]: v }));
@@ -92,8 +95,10 @@ export function SellerOnboardForm({
   async function requestCode() {
     setRequesting(true);
     try {
+      setRequestError('');
       const res = await requestSellerOtpAction(sellerId);
       if (res.ok) setSent(true);
+      else if (res.reason === 'otp_send_failed') setRequestError(OTP_SEND_FAILED_MESSAGE);
     } catch {
       /* leave !sent so the button stays available to retry */
     } finally {
@@ -221,9 +226,12 @@ export function SellerOnboardForm({
 
       <div className="mt-5">
         {!sent ? (
-          <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-            {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
-          </button>
+          <div>
+            <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
+              {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+            </button>
+            {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+          </div>
         ) : (
           <div>
             <label className={labelClasses}>
@@ -244,6 +252,7 @@ export function SellerOnboardForm({
             <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
               {requesting ? 'Sending…' : 'Resend code'}
             </button>
+            {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
           </div>
         )}
       </div>

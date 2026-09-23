@@ -3,12 +3,21 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { after } from 'next/server';
-import { getCustomerAuthStore, CustomerInputError } from '@/lib/customer-auth-store';
+import {
+  getCustomerAuthStore,
+  CustomerInputError,
+  EMAIL_MAX_LENGTH,
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+} from '@/lib/customer-auth-store';
 import { getOtpStore, type OtpPurpose } from '@/lib/otp-store';
 import { getPendingAuthStore } from '@/lib/pending-auth-store';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
 import { isPwnedPassword } from '@/lib/pwned';
 import { sendOtpCode } from '@/lib/whatsapp';
+import { partnerWaContext, type PartnerWaContext } from '@/lib/whatsapp-creds';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import type { PartnerId } from '@/lib/types';
 import { logWarn } from '@/lib/log';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getDb } from '@/db/client';
@@ -19,7 +28,9 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getStore } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { encryptField, defaultProvider } from '@/lib/field-crypto';
-import { clientIpFrom } from '@/lib/ip-rate-limit';
+import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
+import { getRedis } from '@/lib/redis';
+import { customerEmailCtx } from '@/lib/crypto-context';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -55,9 +66,15 @@ export interface AccountState {
 }
 
 const GENERIC_LOGIN_ERROR = 'Invalid phone or password.';
-const GENERIC_OTP_NOTE = 'We sent a 6-digit code to your WhatsApp.';
+// Program-Fix 25 PR B (portal-01): the SAME text on every branch (enumeration
+// safety), now with what to do when the code never arrives.
+const GENERIC_OTP_NOTE =
+  "We sent a 6-digit code to your WhatsApp. Didn't get it? Message us on WhatsApp first, then Resend.";
 const SESSION_EXPIRED = 'Your session expired — please start again.';
 const COOKIE_MAX_AGE = 12 * 60 * 60; // 12h absolute (matches the session ceiling)
+// Program-Fix 46A (F70): registrations per client IP per hour (own scope).
+const REGISTER_IP_SCOPE = 'register';
+const REGISTER_IP_LIMIT = 10;
 
 function field(formData: FormData, name: string): string {
   return String(formData.get(name) ?? '');
@@ -66,6 +83,22 @@ function field(formData: FormData, name: string): string {
 /** The caller's IP via the ONE shared trust rule (first x-forwarded-for hop, then x-real-ip, else 'unknown'). */
 async function clientIp(): Promise<string> {
   return clientIpFrom(await headers());
+}
+
+/**
+ * Program-Fix 49A: the WhatsApp identity an account OTP leaves from — the
+ * account row's owning partner (the shared number / default tenant when there
+ * is no single account row). Never throws: an OTP that arrives from the shared
+ * number beats one that never arrives.
+ */
+async function otpSendContext(phone: string): Promise<PartnerWaContext> {
+  let partnerId: PartnerId = DEFAULT_PARTNER_ID;
+  try {
+    partnerId = (await getCustomerAuthStore().getCustomer(phone))?.partnerId ?? DEFAULT_PARTNER_ID;
+  } catch {
+    // fall through to the default tenant
+  }
+  return partnerWaContext(partnerId);
 }
 
 /**
@@ -88,7 +121,10 @@ async function issueAndSend(phone: string, purpose: OtpPurpose, ip: string): Pro
     return;
   }
   try {
-    await sendOtpCode(phone, result.code);
+    // Program-Fix 49A (whatsapp-11): FROM the account's owning partner's number
+    // with its brand (fail-soft ⇒ the shared number + SmartRemit).
+    const { waCreds, brand } = await otpSendContext(phone);
+    await sendOtpCode(phone, result.code, waCreds, brand);
     await auth.recordOtpIp(ip);
   } catch (err) {
     // Delivery failure must NOT 500 the portal and the UI stays generic, but
@@ -140,7 +176,40 @@ export async function registerAction(
   const ip = await clientIp();
 
   if (!isValidPhone(phone)) return { step: 'register', error: 'Enter a valid phone number.' };
-  if (!email || !email.includes('@')) return { step: 'register', error: 'Enter a valid email address.' };
+  if (!email || !email.includes('@') || email.length > EMAIL_MAX_LENGTH) {
+    return { step: 'register', error: 'Enter a valid email address.' };
+  }
+  // The store's length policy, checked here too so a refusal never spends the
+  // per-IP budget below (same message registerCustomer uses).
+  if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+    return {
+      step: 'register',
+      error: `Password must be between ${PASSWORD_MIN} and ${PASSWORD_MAX} characters.`,
+    };
+  }
+
+  // Program-Fix 46A (F70): per-IP registration cap BEFORE any write — the same
+  // `ip` the OTP send keys on. Only attempts that reach registerCustomer count:
+  // phone / email / password-length refusals above return first, so a shared
+  // network full of typos cannot trip it. Skips an unknown IP (one shared bucket would lock
+  // out everyone behind a header-stripping proxy) and FAILS OPEN on any limiter
+  // error, as isIpRateLimited does (ip-rate-limit.ts).
+  if (ip !== 'unknown') {
+    let allowed = true;
+    try {
+      const r = await checkIpRateLimit(getRedis(), REGISTER_IP_SCOPE, ip, {
+        limit: REGISTER_IP_LIMIT,
+        windowSec: 3600,
+      });
+      allowed = r.allowed;
+    } catch (err) {
+      allowed = true; // availability wins — the per-phone OTP caps still hold
+      logWarn('portal.register_throttle', 'rate limiter unavailable; failing open', { error: err });
+    }
+    if (!allowed) {
+      return { step: 'register', error: 'Too many sign-up attempts. Please try again later.' };
+    }
+  }
 
   try {
     await getCustomerAuthStore().registerCustomer(
@@ -411,7 +480,7 @@ const SETTINGS_PATH = '/account/settings';
 export async function updateEmailAction(formData: FormData): Promise<void> {
   const customer = await requireCustomer();
   const email = field(formData, 'email').trim();
-  if (!email || !email.includes('@') || email.length > 254) {
+  if (!email || !email.includes('@') || email.length > EMAIL_MAX_LENGTH) {
     redirect(`${SETTINGS_PATH}?err=email`);
   }
 
@@ -427,7 +496,8 @@ export async function updateEmailAction(formData: FormData): Promise<void> {
       const nowIso = new Date().toISOString();
       await customers.saveCustomer({
         ...fresh,
-        email: encryptField(email, defaultProvider()),
+        // Sealed for the row it is saved into (the re-read `fresh` row's key).
+        email: encryptField(email, defaultProvider(), customerEmailCtx(fresh)),
         updatedAt: nowIso,
       });
     }

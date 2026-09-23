@@ -17,7 +17,9 @@ import { getFundingProvider } from '@/lib/providers/funding-provider';
 import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { DELIVERY_DELAY_MS } from '@/lib/providers/payment-provider';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
-import { logError } from '@/lib/log';
+import { logError, logWarn } from '@/lib/log';
+import { disclosureProviderKind, isDisclosureAckVersion } from '@/lib/remittance-disclosure';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
 import { settleOrHold } from '@/lib/settlement';
@@ -29,7 +31,11 @@ import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { hasSenderName, SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
+import { rescreenBeforePay } from '@/lib/pay-rescreen';
+import { resolveCorridorRules } from '@/lib/compliance-config';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -317,6 +323,38 @@ function validateAndTokenizeAch(
   return { ok: true, token: `ach_${randomBytes(24).toString('hex')}` };
 }
 
+/**
+ * Program-Fix 15 PR B: one `remittance.disclosure_ack` audit row — subject the
+ * route id (the transfer, or the draft before it is minted), meta the version + provider kind
+ * only (no PII). Tenant: the transfer's partner, else the draft's (the same
+ * resolution the request_otp branch uses). Never throws.
+ */
+async function recordDisclosureAck(
+  store: ReturnType<typeof getStore>,
+  routeId: string,
+  draft: Awaited<ReturnType<ReturnType<typeof getDraftStore>['getDraft']>>,
+  version: string,
+): Promise<void> {
+  try {
+    const partnerId = draft
+      ? await draftTenant(draft, store.legacyTenantOf)
+      : (await store.getTransfer(routeId))?.partnerId ?? DEFAULT_PARTNER_ID;
+    // Which provider block the page showed (demo | pending | configured),
+    // resolved server-side from the tenant's current config — never client input.
+    const providerKind = disclosureProviderKind(resolvePartnerDisclosure(await getPartnerStore().getPartner(partnerId)));
+    await createAuditRepo(getDb()).record({
+      partnerId,
+      actor: 'pay-page',
+      actorType: 'system',
+      action: 'remittance.disclosure_ack',
+      subjectId: routeId,
+      meta: { version, providerKind },
+    });
+  } catch (err) {
+    logWarn('pay.disclosure_ack', err, { transferId: routeId });
+  }
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ transferId: string }> },
@@ -346,6 +384,7 @@ export async function POST(
       fields?: unknown;
       action?: unknown;
       otp?: unknown;
+      disclosureVersion?: unknown; // Program-Fix 15 PR B: OPTIONAL (old pages never send it)
       ach?: { routingNumber?: unknown; accountNumber?: unknown; accountType?: unknown };
     } = {};
     try {
@@ -363,20 +402,41 @@ export async function POST(
     // (1) "request_otp": issue + deliver a code in-session (free-form). No charge.
     if (typeof body.action === 'string' && body.action === 'request_otp') {
       if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
-      const issued = await getTransactionOtpStore().issue(transferId, otpPhone);
+      // The owning partner scopes the per-phone code budget (Program-Fix 45) and
+      // picks the sending number (WL2). The draft carries its tenant (fix 1); a
+      // pre-deploy draft resolves by the oldest-row rule.
+      let otpPartnerId: string | undefined;
+      try {
+        otpPartnerId = otpDraft
+          ? await draftTenant(otpDraft, store.legacyTenantOf)
+          : (await store.getTransfer(transferId))?.partnerId;
+      } catch { /* budget falls back to the default partner; send to the shared env number */ }
+      const otpStore = getTransactionOtpStore();
+      const issued = await otpStore.issue(transferId, otpPhone, {
+        kind: 'pay',
+        partnerId: otpPartnerId ?? DEFAULT_PARTNER_ID,
+      });
+      // Program-Fix 25 PR B: locked (an issue cap) is the ONE refusal that answers
+      // 429; a cooldown stays 200 sent:true because an earlier code WAS sent.
+      if (!issued.ok && issued.reason === 'locked') {
+        return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
+      }
       if (issued.ok) {
         // WL2: the code arrives from the number the customer is mid-payment with.
         let otpCreds: WaCreds | undefined;
         try {
-          // The draft carries its tenant (fix 1); a pre-deploy draft resolves by the oldest-row rule.
-          const otpPartnerId = otpDraft
-            ? await draftTenant(otpDraft, store.legacyTenantOf)
-            : (await store.getTransfer(transferId))?.partnerId;
           if (otpPartnerId) {
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
           }
         } catch { /* fall back to the shared env number */ }
-        try { await sendTransactionOtp(otpPhone, issued.code, otpCreds); } catch { /* generic surface; never log the code */ }
+        try {
+          await sendTransactionOtp(otpPhone, issued.code, otpCreds);
+        } catch {
+          // Program-Fix 25 PR B: honest — the code never arrived. Shorten the
+          // cooldown to a ~10-s floor so Resend works soon but cannot be hammered. Never log the code.
+          try { await otpStore.shortenCooldown(transferId); } catch { /* the 30-s cooldown simply runs out */ }
+          return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
+        }
       }
       return NextResponse.json({ ok: true, sent: true });
     }
@@ -390,6 +450,13 @@ export async function POST(
         { ok: false, error: 'Enter the confirmation code we sent to your WhatsApp.', reason: 'otp' },
         { status: 403 },
       );
+    }
+
+    // Program-Fix 15 PR B: the customer ticked "I have read this disclosure" on
+    // the page. Recorded AFTER the OTP passed, best-effort: a failed audit write
+    // never changes the payment outcome, and an absent/junk field records nothing.
+    if (isDisclosureAckVersion(body.disclosureVersion)) {
+      await recordDisclosureAck(store, transferId, otpDraft, body.disclosureVersion);
     }
 
     const country =
@@ -510,9 +577,49 @@ export async function POST(
       }
       // fix 6 (ctx-01): `transfer` is the DEFAULT (masked) read — it renders every
       // stored value, real or poisoned, as "****<last4>". Decide on the explicit
-      // decrypted read; the value only feeds this boolean.
-      const storedDestination =
-        ((await store.getTransferDecrypted(transferId))?.payoutDestination ?? '').trim();
+      // decrypted read; the value only feeds this boolean (and, below, the
+      // recipient legal name only feeds the re-screen).
+      const decrypted = await store.getTransferDecrypted(transferId);
+      const storedDestination = (decrypted?.payoutDestination ?? '').trim();
+
+      // Program-Fix 14 follow-up: re-screen BOTH parties before any payout
+      // write or charge — the mint's verdict may be stale (a scheduled mint had
+      // no sender name to screen; lists change). Consumer rows only (the same
+      // predicate pay-finalize uses): a B2B payer is screened by business name.
+      let payable: Transfer = transfer;
+      if (transfer.transferType !== 'b2b') {
+        if (!hasSenderName(owner)) {
+          // Nothing screened or written; the SAME link works once the customer
+          // answers the name question in chat.
+          return NextResponse.json(
+            { ok: false, error: SENDER_NAME_REQUIRED_MESSAGE, reason: 'sender_name_required' },
+            { status: 400 },
+          );
+        }
+        const rescreen = await rescreenBeforePay(
+          getDb(),
+          transfer,
+          {
+            senderName: (owner?.fullName ?? '').trim(),
+            recipientName: (decrypted?.recipientLegalName ?? '').trim() || transfer.recipientName,
+          },
+          resolveCorridorRules(owningPartner, transfer.sourceCountry ?? 'US'),
+        );
+        switch (rescreen.kind) {
+          case 'blocked':
+            logWarn('pay.rescreen_blocked', 'existing transfer blocked by the pay-time re-screen', { transferId: transfer.id });
+            return NextResponse.json({ ok: false, error: "We can't process this transfer." }, { status: 400 });
+          case 'moved': {
+            const current = await store.getTransfer(transferId);
+            const nowRefused = current ? refuseUnlessAwaiting(current) : null;
+            return nowRefused ?? NextResponse.json({ ok: false, error: 'Payment failed' }, { status: 409 });
+          }
+          case 'flagged':
+          case 'cleared':
+            payable = rescreen.transfer;
+            break;
+        }
+      }
       const hasDestination = storedDestination !== '' && !isMaskedDestination(storedDestination);
       // Sender-entered, server-validated, country-bound bank details (the page's
       // Step 1, or its "Edit bank details") fill or replace the payout of a
@@ -544,8 +651,9 @@ export async function POST(
           { status: 400 },
         );
       }
-      // Destination already set (re-opened link) → process exactly as before.
-      return await processTransferPayment(store, transfer);
+      // Destination already set (re-opened link) → process exactly as before
+      // (with the re-screened row: a flagged verdict takes the normal hold).
+      return await processTransferPayment(store, payable);
     }
 
     // ── Draft branch: treat id as a draftId and finalize at pay time ──────
@@ -585,6 +693,15 @@ export async function POST(
         // nothing was claimed or consumed; the SAME link re-submits.
         return NextResponse.json(
           { ok: false, error: 'Bank details are required to complete this transfer.', reason: 'bank_details_required' },
+          { status: 400 },
+        );
+      }
+      if (result.error === 'sender_name_required') {
+        // Program-Fix 14: the sender's legal name is not on file, so this send
+        // cannot be screened yet. Nothing was minted, claimed or consumed; the
+        // SAME link works once the customer answers the name question in chat.
+        return NextResponse.json(
+          { ok: false, error: SENDER_NAME_REQUIRED_MESSAGE, reason: 'sender_name_required' },
           { status: 400 },
         );
       }

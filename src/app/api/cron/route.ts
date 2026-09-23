@@ -66,7 +66,8 @@ export async function GET(req: NextRequest) {
       const { brand, waCreds } = await partnerSendContext(schedule.partnerId);
       await sendTemplateOrText(
         schedule.phone,
-        () => sendVerificationStatus(schedule.phone, 'needed', owner?.fullName),
+        // Program-Fix 49A (whatsapp-11): the template path uses the partner's creds too.
+        () => sendVerificationStatus(schedule.phone, 'needed', owner?.fullName, waCreds),
         `Verify your identity to resume your scheduled ${brand} transfer: ${kycUrl}`,
         waCreds,
       );

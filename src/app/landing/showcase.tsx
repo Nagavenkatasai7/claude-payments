@@ -213,7 +213,7 @@ export function AiMock() {
     <div
       className={`${shell} mx-auto grid w-full max-w-[520px] overflow-hidden sm:grid-cols-2`}
       role="img"
-      aria-label="SmartRemit's AI layer: a customer-facing agent that answers in plain language, beside the compliance checks that run on every transfer — sanctions screening always on."
+      aria-label="SmartRemit's AI layer: a customer-facing agent that answers in plain language, beside the compliance checks that run on every transfer — sanctions screening always on (demo: reference list)."
     >
       <div aria-hidden="true" className="bg-[#efeae2] p-4">
         <p className="mb-3 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[#475569]">
@@ -235,7 +235,7 @@ export function AiMock() {
         </p>
         <ul className="flex flex-col gap-2 text-[12.5px] text-[#0b1b3f]">
           <li className="flex items-baseline gap-2">
-            <span className="text-[#047857]">✓</span> Sanctions screening — always on
+            <span className="text-[#047857]">✓</span> Sanctions screening — always on (demo: reference list)
           </li>
           <li className="flex items-baseline gap-2">
             <span className="text-[#047857]">✓</span> Velocity limits per customer

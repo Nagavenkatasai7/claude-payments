@@ -46,6 +46,8 @@ async function seedVerifiedCustomer(
   await customerStore.saveCustomer({
     senderPhone: phone, firstSeenAt: nowIso, kycStatus: 'verified',
     senderCountry: 'US', partnerId: 'default', optInAt: nowIso,
+    // Program-Fix 14: sender identity is required before screening.
+    fullName: 'Alex Rivera',
     createdAt: nowIso, updatedAt: nowIso,
   });
 }

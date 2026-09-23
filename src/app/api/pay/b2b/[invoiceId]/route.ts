@@ -8,6 +8,7 @@ import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { getB2bQuoteStore } from '@/lib/b2b-quote-store';
 import { billDenomination } from '@/lib/b2b-quote';
+import { isBillExpired } from '@/lib/b2b-bill-expiry';
 import { getFxRates, RateUnavailableError } from '@/lib/rate';
 import { finalizeCrossBorderBillPayment } from '@/lib/b2b-pay-finalize';
 import { settleOrHold } from '@/lib/settlement';
@@ -77,7 +78,9 @@ export async function POST(
       invoice.invoicedAmount !== undefined &&
       invoice.invoicedAmount > 0 &&
       !!invoice.invoicedCurrency;
-    if (!invoice || !isCrossBorder) {
+    // Program-Fix 44: an unpaid bill past the TTL is dead — refused BEFORE the
+    // code step, so an expired link never sends a code or reaches the mint.
+    if (!invoice || !isCrossBorder || isBillExpired(invoice)) {
       return NextResponse.json({ ok: false, error: 'This bill is no longer active.' }, { status: 404 });
     }
 
@@ -95,7 +98,12 @@ export async function POST(
     // ── OTP step-up (keyed on the invoice; the code is bound to this bill) ─────
     const otpStore = getTransactionOtpStore();
     if (typeof body.action === 'string' && body.action === 'request_otp') {
-      const issued = await otpStore.issue(invoiceId, buyerPhone);
+      // Program-Fix 45: the buyer code draws from its own per-phone budget (kind 'b2b', this invoice's partner).
+      const issued = await otpStore.issue(invoiceId, buyerPhone, { kind: 'b2b', partnerId: invoice.partnerId });
+      // Program-Fix 25 PR B: locked answers 429; a cooldown stays 200 sent:true.
+      if (!issued.ok && issued.reason === 'locked') {
+        return NextResponse.json({ ok: false, reason: 'locked' }, { status: 429 });
+      }
       if (issued.ok) {
         let otpCreds: WaCreds | undefined;
         try {
@@ -106,7 +114,14 @@ export async function POST(
         try {
           await sendTransactionOtp(buyerPhone, issued.code, otpCreds);
         } catch {
-          /* generic surface; never log the code */
+          // Program-Fix 25 PR B: honest — shorten the cooldown to a ~10-s floor
+          // (Resend works soon, never hammered), and say so. Never log the code.
+          try {
+            await otpStore.shortenCooldown(invoiceId);
+          } catch {
+            /* the 30-s cooldown simply runs out */
+          }
+          return NextResponse.json({ ok: false, reason: 'otp_send_failed' }, { status: 502 });
         }
       }
       return NextResponse.json({ ok: true, sent: true });

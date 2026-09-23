@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -8,6 +8,7 @@ import { createOutboxRepo, MAX_ATTEMPTS, LEASE_MS } from '@/db/repos/outbox-repo
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
+import { createAuditRepo } from '@/db/repos/aux-repos';
 import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
@@ -15,6 +16,8 @@ import type { Db } from '@/db/client';
 import type { Transfer } from '@/lib/types';
 import { RAIL_TIMEOUT_MS } from '@/lib/providers/http-payment-provider';
 import { handleRailFailure } from '@/lib/rail-failure';
+import { createCustomerStore } from '@/lib/customer-store';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 
 // Spy on the integrations repo FACTORY: partnerContext() builds one repo per
 // resolution, so "how many were built during a drain" is an engine-independent
@@ -27,6 +30,27 @@ vi.mock('@/db/repos/integrations-repo', async (orig) => {
     createIntegrationsRepo: (...args: Parameters<typeof real.createIntegrationsRepo>) => {
       integrationsRepoSpy.calls++;
       return real.createIntegrationsRepo(...args);
+    },
+  };
+});
+
+// Program-Fix 31 PR B: a pass-through customer repo whose getCustomer can be
+// made to throw, proving the compliance block fails OPEN (the instruction
+// still goes out, originator null) and never dead-letters settlement.instruct.
+const customerRepoFault = vi.hoisted(() => ({ throwOnGet: false }));
+vi.mock('@/db/repos/customer-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/customer-repo')>();
+  return {
+    ...real,
+    createCustomerRepo: (...args: Parameters<typeof real.createCustomerRepo>) => {
+      const repo = real.createCustomerRepo(...args);
+      return {
+        ...repo,
+        getCustomer: async (...a: Parameters<typeof repo.getCustomer>) => {
+          if (customerRepoFault.throwOnGet) throw new Error('decrypt failed for 15551230000');
+          return repo.getCustomer(...a);
+        },
+      };
     },
   };
 });
@@ -196,6 +220,150 @@ describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () =>
   });
 });
 
+describe('drainOnce — settlement.instruct compliance block (Program-Fix 31)', { retry: 0 }, () => {
+  const SENDER_NAME = 'Test Sender Person';
+  beforeEach(async () => {
+    customerRepoFault.throwOnGet = false;
+    await store.saveTransfer({ ...transferFixture(), recipientLegalName: 'Anita Legal', purpose: 'family_support' });
+    const { createCustomerRepo } = await import('@/db/repos/customer-repo');
+    // Seeded under the OWNER ('acme') with the default key provider — the
+    // same one the worker's repo uses, so a positive read proves the wiring.
+    await createCustomerRepo(db, async () => null).saveCustomer({
+      senderPhone: '15551230000', firstSeenAt: '2026-01-01T00:00:00.000Z', kycStatus: 'verified',
+      kycVerifiedAt: '2026-01-05T00:00:00.000Z', fullName: SENDER_NAME, dateOfBirth: '1980-01-02',
+      residentialAddress: '1 Secret Lane', govIdType: 'passport', govIdNumber: 'X99887766',
+      idLast4: '7766', idDocType: 'passport', senderCountry: 'US', partnerId: 'acme',
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    } as Parameters<ReturnType<typeof createCustomerRepo>['saveCustomer']>[0]);
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn' },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+  afterEach(() => {
+    customerRepoFault.throwOnGet = false;
+  });
+
+  it('the POSTed body = every legacy key unchanged + compliance v1 with the OWNER-keyed originator; x-signature verifies over the final body', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    const raw = String(init.body);
+    const body = JSON.parse(raw) as Record<string, unknown> & { compliance: Record<string, unknown> };
+    const { buildSettlementInstruction } = await import('@/lib/providers/http-payment-provider');
+    const decrypted = await createTransferRepo(db).getTransfer('wk_t1', { decrypt: true });
+    const { compliance, ...legacy } = body;
+    expect(legacy).toEqual(JSON.parse(JSON.stringify({ ...buildSettlementInstruction(decrypted!), partner_id: 'acme' })));
+    expect(Object.keys(body).at(-1)).toBe('compliance');
+    expect(compliance.version).toBe(1);
+    expect(compliance.originator).toEqual({
+      entity_type: 'individual', name: SENDER_NAME, country: 'US', phone: '15551230000',
+      id_type: 'passport', id_last4: '7766',
+    });
+    expect(compliance.beneficiary).toMatchObject({ name: 'Anita Legal' });
+    expect(compliance.kyc).toMatchObject({ status: 'verified', tier: 'T1' });
+    expect(compliance.purpose_code).toBeNull();
+    for (const v of ['1980-01-02', 'Secret Lane', 'X99887766']) expect(raw).not.toContain(v);
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'sgn').update(raw).digest('hex'));
+    expect((await store.getTransfer('wk_t1'))!.paymentProviderRef).toBe('rail-c1');
+  });
+
+  it('carries the fix 14 screening reference (list source/version/decision) when the evidence row exists — never the party hashes', async () => {
+    await createAuditRepo(db).record({
+      partnerId: 'acme', actor: 'system:sanctions', actorType: 'system', action: 'sanctions.screen', subjectId: 'wk_t1',
+      meta: {
+        listSource: 'mock-watchlist', listVersion: 'v-test', listHash: 'h'.repeat(64), screenedAt: '2026-06-09T00:00:00.000Z',
+        decision: 'clear', parties: [{ role: 'recipient', inputHash: 'f'.repeat(64), matched: false, matchScore: 0 }],
+      },
+    });
+    // Its createdAt window is the fixture's 2026-06-09; the audit row's `at`
+    // is now(), so move the transfer's createdAt to now to fall in the window.
+    await store.saveTransfer({ ...transferFixture(), createdAt: new Date().toISOString() });
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c2' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const raw = String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body);
+    const screening = (JSON.parse(raw) as { compliance: { screening: Record<string, unknown> } }).compliance.screening;
+    expect(screening).toMatchObject({
+      status: 'cleared', list_source: 'mock-watchlist', list_version: 'v-test', decision: 'clear',
+      screened_at: '2026-06-09T00:00:00.000Z',
+    });
+    expect(raw).not.toContain('f'.repeat(64));
+    expect(raw).not.toContain('h'.repeat(64));
+  });
+
+  it('no evidence row ⇒ the screening list fields are omitted', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c3' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const body = JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body)) as { compliance: { screening: Record<string, unknown> } };
+    expect(Object.keys(body.compliance.screening).sort()).toEqual(['reasons', 'screened_at', 'status']);
+  });
+
+  it('FAIL-OPEN: getCustomer throws ⇒ the instruction is STILL POSTed (originator null), the row is done, a warn names the transfer id only', async () => {
+    customerRepoFault.throwOnGet = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rail-c4' }) });
+      await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+      const r = await drainOnce(deps(), 'w1');
+      expect(r.processed).toBe(1);
+      expect(r.failed).toBe(0);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      const raw = String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body);
+      const body = JSON.parse(raw) as { reference: string; compliance: Record<string, unknown> };
+      expect(body.reference).toBe('wk_t1');
+      expect(body.compliance.version).toBe(1);
+      expect(body.compliance.originator).toBeNull();
+      expect(raw).not.toContain(SENDER_NAME);
+      const rows = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'instruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
+      expect(rows.rows[0].status).toBe('done');
+      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('instruct.compliance_block'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('wk_t1');
+      expect(lines[0]).not.toContain('15551230000');
+      expect(lines[0]).not.toContain('decrypt failed');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ROUTED: the rail partner gets originator null + routed true, the kyc status still read under the OWNER, and no sender name or phone anywhere in the body', async () => {
+    await seedPartner(db, 'railp');
+    await store.saveTransfer({ ...transferFixture(), settlementPartnerId: 'railp' });
+    await createIntegrationsRepo(db, provider).saveIntegrations('railp', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: { settlementUrl: 'https://railp.example/settle', signingSecret: 'railp_sgn' },
+        webhookSecret: 'railp_whk',
+      },
+      whatsapp: {},
+    });
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'railp-c5' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://railp.example/settle');
+    const raw = String(init.body);
+    const body = JSON.parse(raw) as { partner_id: string; compliance: Record<string, unknown> };
+    expect(body.partner_id).toBe('railp');
+    expect(body.compliance.originator).toBeNull();
+    expect(body.compliance.routed).toBe(true);
+    expect(body.compliance.kyc).toMatchObject({ status: 'verified' });
+    expect(raw).not.toContain(SENDER_NAME);
+    expect(raw).not.toContain('15551230000');
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'railp_sgn').update(raw).digest('hex'));
+  });
+});
+
 describe('drainOnce — settlement.instruct (ROUTED via settlementPartnerId)', () => {
   beforeEach(async () => {
     // Owner 'acme' has its OWN rail config — which must NOT be used when routed.
@@ -333,6 +501,109 @@ describe('drainOnce — email.send (partner-lead notification)', () => {
       rows: Array<{ last_error: string }>;
     };
     expect(row.rows[0].last_error).toBe('sealed-text: no sealed value for {{apply_link}}');
+  });
+});
+
+describe('drainOnce — email.send reports skips honestly (Program-Fix 39)', () => {
+  type AuditRow = { action: string; actor: string; actor_type: string; subject_id: string | null; meta: Record<string, unknown> };
+  async function audits(): Promise<AuditRow[]> {
+    const r = (await db.execute(
+      sql`SELECT action, actor, actor_type, subject_id, meta FROM audit_events WHERE action LIKE 'email.%' ORDER BY id`,
+    )) as unknown as { rows: AuditRow[] };
+    return r.rows;
+  }
+  async function alertKeys(): Promise<string[]> {
+    const r = (await db.execute(
+      sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert' ORDER BY id`,
+    )) as unknown as { rows: Array<{ dedupe_key: string }> };
+    return r.rows.map((x) => x.dedupe_key);
+  }
+  async function statusOf(key: string): Promise<string> {
+    const r = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = ${key}`)) as unknown as {
+      rows: Array<{ status: string }>;
+    };
+    return r.rows[0].status;
+  }
+
+  it('skipped send writes one email.skipped audit row and one alert per day', async () => {
+    try {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2030-01-02T10:00:00Z'));
+      const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
+      await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 'New partner request: A', text: 't' }, { dedupeKey: 'preq:preq_aaa' });
+      await outbox.enqueue('email.send', { to: ['lead@example.test'], subject: 'Complete', text: 't' }, { dedupeKey: 'partner_app_invite:preq_aaa' });
+      const r = await drainOnce(d, 'w1');
+      expect(r.processed).toBe(2);
+      // No retry storm: both rows end done.
+      expect(await statusOf('preq:preq_aaa')).toBe('done');
+      expect(await statusOf('partner_app_invite:preq_aaa')).toBe('done');
+
+      const rows = await audits();
+      expect(rows).toHaveLength(2);
+      for (const a of rows) {
+        expect(a).toMatchObject({ action: 'email.skipped', actor: 'outbox', actor_type: 'system', subject_id: 'preq_aaa' });
+        expect(a.meta.reason).toBe('unconfigured');
+        expect(typeof a.meta.outboxId).toBe('number');
+        // Never an address in the audit meta.
+        expect(JSON.stringify(a.meta)).not.toContain('@');
+      }
+      expect(rows.map((a) => a.meta.dedupePrefix)).toEqual(['preq', 'partner_app_invite']);
+      // ONE alert for the day, however many sends skipped.
+      expect(await alertKeys()).toEqual(['email-unconfigured:2030-01-02']);
+
+      // Next UTC day: one more alert.
+      vi.setSystemTime(new Date('2030-01-03T00:05:00Z'));
+      await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_bbb' });
+      await drainOnce(d, 'w1');
+      expect((await alertKeys()).filter((k) => k.startsWith('email-unconfigured:'))).toEqual([
+        'email-unconfigured:2030-01-02',
+        'email-unconfigured:2030-01-03',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skipped_no_recipients writes an audit row with reason 'no_recipients' and raises NO alert", async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_no_recipients' };
+    await outbox.enqueue('email.send', { to: [], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_ccc' });
+    await drainOnce(d, 'w1');
+    expect(await statusOf('preq:preq_ccc')).toBe('done');
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ reason: 'no_recipients', dedupePrefix: 'preq' });
+    expect(await alertKeys()).toEqual([]);
+  });
+
+  it('an ops-alert EMAIL mirror (opsmail:) that skips is audited but raises NO alert (no ping-pong with fix 26)', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
+    await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 'SmartRemit ops alert', text: 't' }, { dedupeKey: 'opsmail:41' });
+    await drainOnce(d, 'w1');
+    expect(await statusOf('opsmail:41')).toBe('done');
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBeNull();
+    expect(rows[0].meta).toMatchObject({ reason: 'unconfigured', dedupePrefix: null });
+    expect(await alertKeys()).toEqual([]);
+  });
+
+  it('resend key → same preq subject', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
+    await outbox.enqueue('email.send', { to: ['lead@example.test'], subject: 's', text: 't' }, { dedupeKey: 'partner_app_invite:preq_ddd:r0123456789ab' });
+    await drainOnce(d, 'w1');
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBe('preq_ddd');
+    expect(rows[0].meta.dedupePrefix).toBe('partner_app_invite');
+  });
+
+  it("a 'sent' outcome and a void-returning sender both write NO audit row and NO alert", async () => {
+    await outbox.enqueue('email.send', { to: ['x@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_eee' });
+    await drainOnce({ ...deps(), sendEmail: async () => 'sent' }, 'w1');
+    await outbox.enqueue('email.send', { to: ['x@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_fff' });
+    await drainOnce({ ...deps(), sendEmail: async () => {} }, 'w1');
+    expect(await audits()).toEqual([]);
+    expect(await alertKeys()).toEqual([]);
   });
 });
 
@@ -1384,7 +1655,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     expect(texts).toHaveLength(1);
     expect(texts[0].dedupe_key).toBe(`reply:${turn.id}`);
     expect(texts[0].status).toBe('done');
-    expect(texts[0].payload).toEqual({ to: P, body: 'hi', partnerId: 'acme' });
+    expect(texts[0].payload).toEqual({ to: P, body: 'hi', partnerId: 'acme', category: 'essential' });
     expect(customerSends()).toEqual(['hi']);
   });
 
@@ -1392,7 +1663,7 @@ describe('drainOnce — agent.turn pipeline (Program-Fix 34A)', () => {
     runAgentTurn.mockResolvedValueOnce('yo').mockResolvedValueOnce('');
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'a', turn: {}, routedPartnerId: null });
     await drainOnce(deps(), 'w1');
-    expect((await outboxRows('whatsapp.text'))[0].payload).toEqual({ to: P, body: 'yo' });
+    expect((await outboxRows('whatsapp.text'))[0].payload).toEqual({ to: P, body: 'yo', category: 'essential' });
     await outbox.enqueue('agent.turn', { phone: P, messageText: 'b', turn: {}, routedPartnerId: null });
     await drainOnce(deps(), 'w1');
     await drainOnce(deps(), 'w1');
@@ -1682,5 +1953,387 @@ describe('drainOnce — rail signature v2, rotation, amount (fix 29)', () => {
     await db.execute(sql`UPDATE outbox SET status = 'done', payload = '{}'::jsonb`);
     expect(await outbox.hasDedupeKey('railamount:wk_t1')).toBe(true);
     expect(await outbox.hasDedupeKey('railamount:other')).toBe(false);
+  });
+});
+
+// ── Program-Fix 26: the ops-alert mirror (email + optional webhook) ─────────
+describe('drainOnce — ops-alert mirror (Program-Fix 26)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  type Row = { id: number; kind: string; dedupe_key: string | null; payload: Record<string, unknown>; status: string; last_error: string | null };
+  async function rows(kind: string): Promise<Row[]> {
+    const r = (await db.execute(
+      sql`SELECT id, kind, dedupe_key, payload, status, last_error FROM outbox WHERE kind = ${kind} ORDER BY id`,
+    )) as unknown as { rows: Row[] };
+    return r.rows;
+  }
+  const toBrink = (kind: string) =>
+    db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = ${kind}`);
+
+  it('FIRST: a mirror row that dies does NOT enqueue another alert (no dead → alert → mail → dead loop)', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => { throw new Error('smtp down'); } };
+    await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 's', text: 't' }, { dedupeKey: 'opsmail:41' });
+    await toBrink('email.send');
+    const r = await drainOnce(d, 'w1');
+    expect(r.dead).toBe(1);
+    expect(await rows('ops.alert')).toEqual([]);
+  });
+
+  it('a dead opshook: webhook row does NOT enqueue another alert either', async () => {
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'https://hooks.example.test/T000/B000/xyz');
+    fetchFn.mockResolvedValue({ ok: false, status: 500 });
+    await outbox.enqueue('ops.webhook', { text: 't' }, { dedupeKey: 'opshook:42' });
+    await toBrink('ops.webhook');
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(1);
+    expect(await rows('ops.alert')).toEqual([]);
+  });
+
+  it('env unset → no child rows (today\'s behaviour byte-for-byte)', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText.mock.calls[0]).toEqual(['15550000001', 'hello ops']);
+    expect(await rows('email.send')).toEqual([]);
+    expect(await rows('ops.webhook')).toEqual([]);
+  });
+
+  it('ops.alert retried 3× → exactly one opsmail row with the email.send payload shape', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    sendText.mockRejectedValue(new Error('graph down'));
+    const id = (await outbox.enqueue('ops.alert', { message: 'stuck money' }, { dedupeKey: 'dead:7' })) as unknown;
+    expect(id).toBeTruthy();
+    for (let i = 0; i < 3; i++) {
+      const r = await drainOnce(deps(), 'w1');
+      expect(r.failed).toBe(1);
+      await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'ops.alert'`);
+    }
+    const alert = (await rows('ops.alert'))[0];
+    const mails = await rows('email.send');
+    expect(mails).toHaveLength(1);
+    expect(mails[0].dedupe_key).toBe(`opsmail:${alert.id}`);
+    expect(mails[0].payload).toEqual({ to: ['ops@example.test'], subject: 'SmartRemit ops alert', text: 'stuck money' });
+  });
+
+  it('a dead-row alert whose error holds a phone number and an email → the opsmail text is SCRUBBED', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    const failing: WorkerDeps = {
+      ...deps(),
+      sendEmail: async () => { throw new Error('rejected recipient 15559871234 jane.doe@example.org'); },
+    };
+    await outbox.enqueue('email.send', { to: ['x@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:zz' });
+    await toBrink('email.send');
+    expect((await drainOnce(failing, 'w1')).dead).toBe(1);
+    // The dead:<id> alert now runs; its mirror child must be scrubbed.
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    const mail = (await rows('email.send')).find((m) => m.dedupe_key?.startsWith('opsmail:'));
+    expect(mail).toBeDefined();
+    const text = String(mail!.payload.text);
+    expect(text).toContain('…1234');
+    expect(text).toContain('<email>');
+    expect(text).not.toContain('15559871234');
+    expect(text).not.toContain('jane.doe@example.org');
+  });
+
+  it('OPS_ALERT_PHONE empty + OPS_ALERT_EMAIL set → one opsmail row, no sendText', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    await outbox.enqueue('ops.alert', { message: 'm' }, { dedupeKey: 'dead:9' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect((await rows('email.send')).map((m) => m.dedupe_key)).toEqual([expect.stringMatching(/^opsmail:\d+$/)]);
+  });
+
+  it('OPS_ALERT_WEBHOOK_URL (https) → one opshook row holding {text} only — never the URL', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'https://hooks.example.test/T000/B000/secretpart');
+    await outbox.enqueue('ops.alert', { message: 'call 15559871234' }, { dedupeKey: 'dead:10' });
+    await drainOnce(deps(), 'w1');
+    const hooks = await rows('ops.webhook');
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0].dedupe_key).toMatch(/^opshook:\d+$/);
+    expect(hooks[0].payload).toEqual({ text: 'call …1234' });
+    expect(JSON.stringify(hooks[0].payload)).not.toContain('secretpart');
+  });
+
+  it('an OPS_ALERT_WEBHOOK_URL that is not https → no opshook row and one warning', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'http://hooks.example.test/x');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await outbox.enqueue('ops.alert', { message: 'm' }, { dedupeKey: 'dead:11' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(await rows('ops.webhook')).toEqual([]);
+    const lines = warn.mock.calls.flat().join(' ');
+    expect(lines).toContain('ops.webhook');
+    expect(lines).not.toContain('hooks.example.test');
+    warn.mockRestore();
+  });
+
+  it('ops.webhook POSTs {text} to the env URL with a deadline; a non-2xx fails the row without leaking the URL', async () => {
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'https://hooks.example.test/T000/B000/secretpart');
+    fetchFn.mockResolvedValue({ ok: true, status: 200 });
+    await outbox.enqueue('ops.webhook', { text: 'hello' }, { dedupeKey: 'opshook:1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://hooks.example.test/T000/B000/secretpart');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ text: 'hello' });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+
+    fetchFn.mockReset();
+    fetchFn.mockRejectedValue(new TypeError('fetch failed https://hooks.example.test/T000/B000/secretpart'));
+    await outbox.enqueue('ops.webhook', { text: 'again' }, { dedupeKey: 'opshook:2' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    const failed = (await rows('ops.webhook')).find((h) => h.dedupe_key === 'opshook:2')!;
+    expect(failed.last_error).toBeTruthy();
+    expect(failed.last_error).not.toContain('secretpart');
+    expect(failed.last_error).not.toContain('hooks.example.test');
+  });
+
+  it('ops.webhook with the URL unset at send time → done, nothing fetched', async () => {
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    await outbox.enqueue('ops.webhook', { text: 'x' }, { dedupeKey: 'opshook:3' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+// ── Program-Fix 49A (whatsapp-10d): the worker honours STOP by category ──────
+describe('whatsapp.* rows honour opt-out by category (Program-Fix 49A)', { retry: 0 }, () => {
+  async function optOut(partnerId: string, phone: string) {
+    const customers = createCustomerStore(db, store);
+    await customers.ensureCustomer(partnerId, phone);
+    await customers.setOptedOut(partnerId, phone);
+  }
+  const doneCount = async () =>
+    ((await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE status = 'done'`)).rows[0] as { n: number }).n;
+
+  it('nonessential text to an opted-out customer completes WITHOUT sending', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'ticket reply', partnerId: 'acme', category: 'nonessential' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(await doneCount()).toBe(1);
+    expect(warn.mock.calls.flat().join(' ')).toContain('opted out');
+  });
+
+  it('nonessential template to an opted-out customer is suppressed too', async () => {
+    await optOut('acme', '919876543210');
+    await outbox.enqueue('whatsapp.template', {
+      to: '919876543210', template: 't', lang: 'en', params: [], partnerId: 'acme', category: 'nonessential',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await drainOnce(deps(), 'w1');
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('essential text to an opted-out customer still sends', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'stage 1', partnerId: 'acme', category: 'essential' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'stage 1', undefined);
+  });
+
+  it('a row with NO category (old build) to an opted-out customer still sends', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'legacy', partnerId: 'acme' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'legacy', undefined);
+  });
+
+  it('opt-out is per tenant: opted out under acme, a nonessential row for the default tenant (no partnerId) still sends', async () => {
+    await optOut('acme', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'default tenant', category: 'nonessential' });
+    await drainOnce(deps(), 'w1');
+    expect(sendText).toHaveBeenCalledWith('15551230000', 'default tenant', undefined);
+  });
+
+  it('a nonessential row with no partnerId checks the DEFAULT tenant', async () => {
+    await optOut('default', '15551230000');
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'x', category: 'nonessential' });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await drainOnce(deps(), 'w1');
+    expect(sendText).not.toHaveBeenCalled();
+  });
+});
+
+// Program-Fix 25 PR A: a PERMANENT Graph rejection (131030 not allow-listed,
+// 132001 template missing, …) is dead at attempt 1 — for whatsapp.text,
+// whatsapp.template and ops.alert ONLY. mock.settle keeps its normal retry
+// (attempt 2 finishes cleanly through the idempotent stage 2).
+describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)', { retry: 0 }, () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const graphErr = (code: number, label = 'WhatsApp send failed') =>
+    WhatsAppSendError.fromResponse(label, 400, JSON.stringify({ error: { message: `(#${code}) x`, code } }));
+  type AlertRow = { dedupe_key: string; payload: { message: string } };
+  async function alerts(): Promise<AlertRow[]> {
+    const r = (await db.execute(
+      sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert' ORDER BY id`,
+    )) as unknown as { rows: AlertRow[] };
+    return r.rows;
+  }
+  async function statusOf(kind: string): Promise<{ status: string; attempts: number }> {
+    const r = (await db.execute(sql`SELECT status, attempts FROM outbox WHERE kind = ${kind} ORDER BY id LIMIT 1`)) as unknown as {
+      rows: { status: string; attempts: number }[];
+    };
+    return r.rows[0];
+  }
+
+  it('a 131030 whatsapp.text row is dead at attempt 1 with exactly one per-code alert naming the code', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 0, failed: 0, dead: 1 });
+    expect(await statusOf('whatsapp.text')).toMatchObject({ status: 'dead', attempts: 1 });
+    const a = await alerts();
+    expect(a).toHaveLength(1);
+    // PR B (d): coalesced per code per hour, so a template misconfig cannot flood the ops phone.
+    expect(a[0].dedupe_key).toMatch(/^deadcode:131030:\d+$/);
+    expect(a[0].payload.message).toContain('DEAD (terminal: WhatsApp #131030)');
+    expect(a[0].payload.message).toMatch(/coalesced/i);
+  });
+
+  it('PR B (d): two 131030 deaths in the same hour raise ONE alert; a different code still gets its own', async () => {
+    // Pinned mid-hour (after freshDb in beforeEach; Date only) so the hour
+    // bucket can never roll over between the two deaths.
+    const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hour + 30 * 60_000);
+    onTestFinished(() => { vi.useRealTimers(); });
+    sendText.mockRejectedValueOnce(graphErr(131030)).mockRejectedValueOnce(graphErr(131030));
+    sendTemplate.mockRejectedValueOnce(graphErr(132001, 'WhatsApp template send failed'));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'a', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.text', { to: '15550002222', body: 'b', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.template', { to: '15550001111', template: 't', lang: 'en', params: [], partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 3 });
+    const keys = (await alerts()).map((x) => x.dedupe_key.replace(/:\d+$/, ''));
+    expect(keys.sort()).toEqual(['deadcode:131030', 'deadcode:132001']);
+  });
+
+  it('PR B (d): a non-permanent death (retries exhausted) keeps its own dead:<id> alert', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131049));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    await db.execute(sql`UPDATE outbox SET attempts = 7 WHERE kind = 'whatsapp.text'`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1 });
+    const a = await alerts();
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupe_key).toMatch(/^dead:\d+$/);
+  });
+
+  it('a 132001 whatsapp.template row is dead at attempt 1', async () => {
+    sendTemplate.mockRejectedValueOnce(graphErr(132001, 'WhatsApp template send failed'));
+    await outbox.enqueue('whatsapp.template', { to: '15550001111', template: 't', lang: 'en', params: [], partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1, failed: 0 });
+    expect((await alerts())[0].payload.message).toContain('DEAD (terminal: WhatsApp #132001)');
+  });
+
+  it('a 131030 ops.alert row is dead at attempt 1 and never alerts about itself', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:991' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1 });
+    expect(await alerts()).toHaveLength(1); // only the row itself
+  });
+
+  it.each([131047, 131049, 131056, 190])('a %i whatsapp.text row RETRIES (not terminal)', async (code) => {
+    sendText.mockRejectedValueOnce(graphErr(code));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    expect(await alerts()).toEqual([]);
+  });
+
+  it('a plain Error (no Graph code) still retries', async () => {
+    sendText.mockRejectedValueOnce(new Error('WhatsApp send failed (400): <html/>'));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    expect(await drainOnce(deps(), 'w1')).toMatchObject({ failed: 1, dead: 0 });
+  });
+
+  it('a 131030 thrown inside mock.settle still retries normally (never dead at attempt 1)', async () => {
+    await store.saveTransfer(transferFixture());
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    expect(await statusOf('mock.settle')).toMatchObject({ status: 'failed', attempts: 1 });
+    expect(await alerts()).toEqual([]);
+  });
+});
+
+// Program-Fix 25 PR A (§3.10): ops alerts on a production number. UNCHANGED
+// unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
+// skipping the free-form call would silence alerts.
+describe('drainOnce — ops.alert template path (Program-Fix 25)', { retry: 0 }, () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('WHATSAPP_OPS_ALERT_TEMPLATE unset → one free-form sendText exactly as today', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', '');
+    vi.stubEnv('WHATSAPP_WINDOW_AWARE', 'true'); // the flag alone changes nothing here
+    await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText.mock.calls).toEqual([['15550000001', 'hello ops']]);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('template set → the ops_alert template is sent with the message as its one body param; the mirror is still enqueued', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', 'ops_alert');
+    await outbox.enqueue('ops.alert', { message: 'stuck money\n  on  #12' }, { dedupeKey: 'dead:2' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBeGreaterThanOrEqual(1);
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    const [to, name, lang, params] = sendTemplate.mock.calls[0] as unknown[];
+    expect([to, name, lang]).toEqual(['15550000001', 'ops_alert', 'en']);
+    // Meta: a template parameter may not hold new-lines/tabs or >4 consecutive spaces.
+    expect(params).toEqual(['stuck money on #12']);
+    expect(sendText).not.toHaveBeenCalled();
+    const mirror = (await db.execute(sql`SELECT dedupe_key FROM outbox WHERE kind = 'email.send'`)) as unknown as {
+      rows: { dedupe_key: string }[];
+    };
+    expect(mirror.rows).toHaveLength(1);
+  });
+
+  it('template set and BOTH sends fail → the row fails with the ORIGINAL Graph error (retry / terminal as classified)', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('WHATSAPP_OPS_ALERT_TEMPLATE', 'ops_alert');
+    sendTemplate.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp template send failed', 404, JSON.stringify({ error: { code: 132001 } })),
+    );
+    sendText.mockRejectedValueOnce(
+      WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { code: 131049 } })),
+    );
+    await outbox.enqueue('ops.alert', { message: 'm' }, { dedupeKey: 'dead:3' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 1, dead: 0 });
+    const le = (await db.execute(sql`SELECT last_error FROM outbox WHERE kind = 'ops.alert'`)) as unknown as {
+      rows: { last_error: string }[];
+    };
+    expect(le.rows[0].last_error).toContain('WhatsApp send failed (400)');
   });
 });

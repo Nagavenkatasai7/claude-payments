@@ -15,7 +15,7 @@ import type { PartnerStore } from './partner-store';
 import { allowedSendCurrencies, currencyForPhone } from './partner-currency';
 import { getSenderDefaultsNote } from './sender-defaults'; // NEW (Bundle C)
 import { isSendVerified, sendGateActive } from './kyc-gate';
-import { resolvePartnerBranding } from './partner-config';
+import { resolveKycMode, resolvePartnerBranding } from './partner-config';
 import { looksLikeVerifyHandoff, issueVerifyLink } from './verify-link';
 import { selectSettlementRoute } from './partner-rates'; // best-rate routing
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
@@ -57,7 +57,7 @@ export interface AgentDeps {
 // mid-turn. Exported for the web-content-guard test — this string is shown to
 // the model verbatim, so it must stay free of tenant/internal terminology.
 export const WEB_CHANNEL_NOTE =
-  "[WEB CHAT] This conversation happens in the customer's secure web account, not WhatsApp — interactive buttons and approval cards cannot be sent here, and some actions are unavailable. You CAN: answer questions, look up the customer's recent transfers — optionally filtered to a recipient they name like 'Mom' — with list_recent_transfers, check a transfer's status, check sending limits, quote with get_quote, list saved recipients and schedules, validate numbers, request a refund with request_refund, and repeat a past send with repeat_transfer — when repeat_transfer returns a summary, relay it and tell the customer to tap the secure payment link below your reply to review and pay (the system appends it automatically). Handle ONE repeat per message — only the latest link is delivered, so if the customer asks to repeat several sends, do them one at a time. When the customer asks about their past transfers or history — including 'my recent transactions' or 'what did I send to Mom' — call list_recent_transfers (pass the recipient name to filter) and summarise what it returns: recipient, amount, date, and status for each. NEVER tell the customer you have no way to pull up their history — you do; their full history and receipts link is appended below your reply automatically. When a tool needs a transfer ID you don't have, the customer can find it on that transfer's receipt under Transfer history in this account — never invent one. You CANNOT start a brand-new transfer to a new recipient, create or cancel recurring schedules, cancel a pending payment, or change transfer details here — for those, kindly direct the customer to message us on WhatsApp. Money only ever moves through the secure payment page, never through this chat. NEVER write or guess URLs yourself — secure links are appended below your reply automatically.";
+  "[WEB CHAT] This conversation happens in the customer's secure web account, not WhatsApp — interactive buttons and approval cards cannot be sent here, and some actions are unavailable. You CAN: answer questions, look up the customer's recent transfers — optionally filtered to a recipient they name like 'Mom' — with list_recent_transfers, check a transfer's status, check sending limits, quote with get_quote, list saved recipients and schedules, validate numbers, request a refund with request_refund, and repeat a past send with repeat_transfer (if it asks for the customer's full legal name, save their answer with set_sender_name, then call repeat_transfer again) — when repeat_transfer returns a summary, relay it and tell the customer to tap the secure payment link below your reply to review and pay (the system appends it automatically). Handle ONE repeat per message — only the latest link is delivered, so if the customer asks to repeat several sends, do them one at a time. When the customer asks about their past transfers or history — including 'my recent transactions' or 'what did I send to Mom' — call list_recent_transfers (pass the recipient name to filter) and summarise what it returns: recipient, amount, date, and status for each. NEVER tell the customer you have no way to pull up their history — you do; their full history and receipts link is appended below your reply automatically. When a tool needs a transfer ID you don't have, the customer can find it on that transfer's receipt under Transfer history in this account — never invent one. You CANNOT start a brand-new transfer to a new recipient, create or cancel recurring schedules, cancel a pending payment, or change transfer details here — for those, kindly direct the customer to message us on WhatsApp. Money only ever moves through the secure payment page, never through this chat. NEVER write or guess URLs yourself — secure links are appended below your reply automatically.";
 
 /**
  * Strip every URL the model wrote and optionally append the canonical,
@@ -153,6 +153,8 @@ export function createAgent(deps: AgentDeps) {
     // (Sanctions are unaffected and still run inside createTransfer.)
     const branding = resolvePartnerBranding(notePartner);
     const gateActive = sendGateActive(notePartner);
+    // Program-Fix 35: who runs KYC — only the gate-off prompt copy reads it.
+    const kycMode = resolveKycMode(notePartner).mode;
     // Program fix 16/16b: the limits the bot STATES are this sender's EFFECTIVE
     // ladder (customer raise → partner default → platform) — the same figures
     // its tools refuse on. Never a literal.
@@ -217,7 +219,7 @@ export function createAgent(deps: AgentDeps) {
       // (only injected into the messages sent to the model this turn) so it
       // doesn't echo on every later turn.
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, limits: sendLimits }) },
+        { role: 'system', content: buildSystemPrompt({ brand: branding.brand, botPersona: branding.botPersona, kycGateActive: gateActive, kycMode, limits: sendLimits }) },
       ];
       // Web channel: injected EVERY round (not just round 0) so the model still
       // knows the channel's limits after tool results arrive. Never persisted.

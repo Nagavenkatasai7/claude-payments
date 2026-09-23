@@ -89,6 +89,7 @@ import {
   saveWhatsappConfigAction,
   setPartnerSendLimitAction,
   savePaymentConfigAction,
+  issueApiKeyAction,
 } from '@/app/admin-dashboard/partners/actions';
 import { sql as rawSql } from 'drizzle-orm';
 import { createPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
@@ -1056,5 +1057,23 @@ describe('savePaymentConfigAction — rail secret rotation (Program-Fix 29)', ()
     expect(p.credentials?.signingSecret).toMatch(/^[0-9a-f]{64}$/);
     expect(p.credentials?.previousWebhookSecret).toBeUndefined();
     expect(p.credentials?.previousSigningSecret).toBeUndefined();
+  });
+});
+
+// Program-Fix 44 P1: test keys are NOT issuable until sandbox isolation (P2)
+// ships. The action is a public POST endpoint, so a crafted extra argument must
+// never mint a test key — only the repo's issue(partner, 'test') can.
+describe('issueApiKeyAction — live keys only until sandbox isolation ships', () => {
+  it('issues an sr_live_ / pk_live_ key, ignoring a crafted mode argument', async () => {
+    await seedPartner(db, 'acme');
+    const crafted = issueApiKeyAction as unknown as (id: string, mode: string) => ReturnType<typeof issueApiKeyAction>;
+    const r = await crafted('acme', 'test');
+    expect(r.plaintext.startsWith('sr_live_')).toBe(true);
+    expect(r.keyId.startsWith('pk_live_')).toBe(true);
+  });
+
+  it('the setup wizard\'s first key is live', async () => {
+    const r = await wizardCreatePartnerAction({ name: 'Live Co', countries: ['CA'], payment: { providerType: 'simulator' } });
+    expect(r.apiKey.startsWith('sr_live_')).toBe(true);
   });
 });

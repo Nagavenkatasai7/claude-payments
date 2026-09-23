@@ -53,10 +53,18 @@ describe('robots.txt (robots.ts)', () => {
 });
 
 describe('sitemap.xml (sitemap.ts)', () => {
-  it('lists exactly the three public pages on the canonical host, with no hardcoded dates', async () => {
+  // Program-Fix 15 PR A adds the three legal drafts (/terms, /privacy, /legal).
+  it('lists exactly the six public pages on the canonical host, with no hardcoded dates', async () => {
     const { default: sitemap } = await import('@/app/sitemap');
     const entries = sitemap();
-    expect(entries.map((e) => e.url)).toEqual([`${SITE}/`, `${SITE}/about`, `${SITE}/docs`]);
+    expect(entries.map((e) => e.url)).toEqual([
+      `${SITE}/`,
+      `${SITE}/about`,
+      `${SITE}/docs`,
+      `${SITE}/terms`,
+      `${SITE}/privacy`,
+      `${SITE}/legal`,
+    ]);
     for (const e of entries) {
       expect(e.lastModified).toBeUndefined();
       for (const p of PRIVATE_PATHS) expect(e.url).not.toContain(p);

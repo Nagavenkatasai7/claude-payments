@@ -14,10 +14,12 @@ import {
   RAIL_TIMEOUT_MS,
 } from '@/lib/providers/http-payment-provider';
 import { signRailHeaders } from '@/lib/providers/rail-signature';
+import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { railSecrets } from '@/lib/partner-integrations';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
-import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
+import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
+import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
@@ -25,12 +27,16 @@ import { renderSealedText } from '@/lib/sealed-text';
 import type { PartnerIntegrations } from '@/lib/partner-integrations';
 import { env } from '@/lib/env';
 import { checkSettlementUrl, safeProviderRef } from '@/lib/settlement-url';
-import { logWarn } from '@/lib/log';
+import { logWarn, scrub } from '@/lib/log';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
+import { suppressForOptOut } from '@/lib/consent-gate';
+import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { sendBusinessInitiated, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 
 // outbox-worker — the durability engine (Stage 2b). Every external effect is an
@@ -89,10 +95,11 @@ export interface WorkerDeps {
   fundingProvider?: FundingProvider;
   /**
    * Email sender for the 'email.send' effect (partner-lead notifications).
-   * Optional — defaults to the real SMTP sender (which itself no-ops when SMTP
-   * creds are unset); tests inject a mock to assert recipients.
+   * Optional — defaults to the real SMTP sender (which reports a skip when SMTP
+   * creds are unset); tests inject a mock to assert recipients. A `void` result
+   * counts as 'sent' (Program-Fix 39 widened this from Promise<void>).
    */
-  sendEmail?: (msg: EmailMessage) => Promise<void>;
+  sendEmail?: (msg: EmailMessage) => Promise<EmailOutcome | void>;
   /**
    * The staff roster for the ticket load-balancer (ticket.triage auto-assign).
    * DI'd so PGlite tests inject a roster without touching the Redis auth store;
@@ -159,6 +166,17 @@ export class RowDeadlineError extends Error {
 
 /** Kinds whose handler is NOT idempotent: a deadline is terminal, never a retry. */
 const TERMINAL_ON_DEADLINE: ReadonlySet<string> = new Set(['agent.turn']);
+
+/**
+ * Program-Fix 25: kinds whose handler is ONE WhatsApp send, so a PERMANENT Graph
+ * rejection (131030 not allow-listed, 132001 no such template, …) is dead at
+ * attempt 1 instead of burning 8 retries. NEVER mock.settle: it marks the
+ * transfer delivered BEFORE sending, and its retry finishes cleanly through the
+ * idempotent stage 2. Accepted trade-off: a recipient allow-listed mid-backoff
+ * no longer gets the late retry.
+ */
+const PERMANENT_DEAD_KINDS: ReadonlySet<string> = new Set(['whatsapp.text', 'whatsapp.template', 'ops.alert']);
+const OPS_ALERT_TEMPLATE_LANG = 'en';
 
 /**
  * Program-Fix 34A: how long a turn waits (uncharged) before it is re-tried when
@@ -319,6 +337,22 @@ async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<W
 }
 
 /**
+ * Program-Fix 49A (whatsapp-10d): the consent gate for a plain customer-facing
+ * row. The tenant is the payload's partnerId (the ledger tenant the producer
+ * wrote), else the default tenant — the shared number IS the default tenant.
+ * Only a `nonessential` row reads the customer; a read error throws and rides
+ * the ordinary backoff (never a send to someone who may have opted out).
+ */
+async function optedOutSkip(deps: WorkerDeps, row: OutboxRow, p: Payload): Promise<boolean> {
+  const tenant = str(p.partnerId) || DEFAULT_PARTNER_ID;
+  const suppressed = await suppressForOptOut(createCustomerStore(deps.db, deps.store), tenant, str(p.to), p.category);
+  if (suppressed) {
+    logWarn('worker.optout', 'nonessential message suppressed: customer opted out', { id: row.id, kind: row.kind });
+  }
+  return suppressed;
+}
+
+/**
  * Run one agent turn and return ONLY its reply text (Program-Fix 34A). The
  * routing partner's outbound creds are re-resolved at RUN time (the payload
  * never carries tokens; rotation is picked up automatically) and live only in
@@ -353,11 +387,16 @@ async function handle(
   switch (row.kind) {
     // ── Plain customer-facing sends (the transactional message outbox) ──────
     // Payloads carry the OWNING partnerId, never creds (fix 11 / F49·F54·F58).
+    // Program-Fix 49A: a `nonessential` row to an opted-out customer completes
+    // WITHOUT sending (no retry, no dead letter). No category ⇒ essential, so
+    // rows from the previous build deliver exactly as before.
     case 'whatsapp.text': {
+      if (await optedOutSkip(deps, row, p)) return;
       await deps.sendText(str(p.to), str(p.body), await resolveSendCreds(p, partner));
       return;
     }
     case 'whatsapp.template': {
+      if (await optedOutSkip(deps, row, p)) return;
       await deps.sendTemplate(
         str(p.to),
         str(p.template),
@@ -451,9 +490,14 @@ async function handle(
       const signingSecrets = railSecrets(integrations.payment, 'signing', new Date());
       if (!settlementUrl) throw new Error('Settlement endpoint not configured.');
       assertSettlementUrl(settlementUrl); // fix 22: fail closed BEFORE the decrypted instruction is built or sent
+      // fix 31 (rail-10): the ADDITIVE compliance block goes AFTER every legacy
+      // key, so the signature below covers it. Built after the fail-closed URL
+      // check; loadComplianceBlock never throws (fail open, originator null).
+      const compliance = await loadComplianceBlock(deps.db, transfer);
       const rawBody = JSON.stringify({
         ...buildSettlementInstruction(transfer),
         partner_id: railPartnerId,
+        ...(compliance ? { compliance } : {}),
       });
       const res = await deps.fetchFn(settlementUrl, {
         method: 'POST',
@@ -575,7 +619,8 @@ async function handle(
         // id is persisted (fix 11 / F54); creds resolve when THIS row drains.
         await createOutboxRepo(tx).enqueue(
           'whatsapp.text',
-          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId },
+          // Program-Fix 49A: essential (a refund notice survives STOP).
+          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential' },
           { dedupeKey: `refundmsg:${transferId}` },
         );
       });
@@ -640,26 +685,100 @@ async function handle(
 
     // ── Stuck-money / dead-letter alerts to the ops phone ───────────────────
     case 'ops.alert': {
+      // Program-Fix 26: the email/webhook mirror is enqueued FIRST — before the
+      // phone check, so it still goes out when OPS_ALERT_PHONE is empty, and
+      // before sendText, so a WhatsApp outage cannot stop it. Its dedupe keys
+      // (opsmail:/opshook:<row.id>) make a WhatsApp retry re-enqueue nothing.
+      await enqueueAlertMirror(deps, row, str(p.message));
       const to = env.opsAlertPhone;
       if (!to) return; // unconfigured ⇒ drop silently (dashboard still shows it)
-      await deps.sendText(to, str(p.message));
+      // Program-Fix 25: unset ⇒ free-form exactly as before. alertDead skips
+      // ops.alert, so a skipped call would be a SILENT alert — never skip here.
+      const opsTemplate = env.whatsappOpsAlertTemplate;
+      if (!opsTemplate) {
+        await deps.sendText(to, str(p.message));
+        return;
+      }
+      const out = await sendBusinessInitiated(
+        to,
+        {
+          template: { name: opsTemplate, lang: OPS_ALERT_TEMPLATE_LANG, params: [toTemplateParam(str(p.message))] },
+          fallbackText: str(p.message),
+        },
+        undefined, // the platform number, as the free-form path
+        { partnerId: DEFAULT_PARTNER_ID, store: deps.store, sendText: deps.sendText, sendTemplate: deps.sendTemplate },
+      );
+      // Rethrow the ORIGINAL Graph error so the catch classifies it (and
+      // last_error keeps the parseable message).
+      if (!out.ok) throw out.error ?? new Error(`ops.alert not sent: ${out.reason}`);
+      return;
+    }
+
+    // ── Ops-alert webhook mirror (Program-Fix 26) ───────────────────────────
+    // The URL is a bearer secret: it is read from env at SEND time and never
+    // stored in the row, last_error or a log line. Unset/invalid now ⇒ drop.
+    // deps.fetchFn is safeFetch in the worker route: same-origin 307/308 only,
+    // private addresses refused at connect time.
+    case 'ops.webhook': {
+      const url = opsWebhookUrl(env.opsAlertWebhookUrl);
+      if (!url) return;
+      let res: Response;
+      try {
+        res = await deps.fetchFn(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: str(p.text) }),
+          signal: AbortSignal.timeout(OPS_WEBHOOK_TIMEOUT_MS),
+        });
+      } catch (err) {
+        // Fixed text: a fetch error can echo the URL.
+        throw new Error(`ops.webhook: request failed (${err instanceof Error ? err.name : 'error'})`);
+      }
+      if (!res.ok) throw new Error(`ops.webhook: HTTP ${res.status}`); // status only, never the body
       return;
     }
 
     // ── Transactional email (partner-lead notifications) ────────────────────
-    // Durable: the real sender no-ops when SMTP is unconfigured (no retry storm);
-    // when configured, a send failure throws and rides the backoff/dead-letter.
-    // `sealed` (optional) maps {{placeholders}} in text/html to field-crypto
-    // blobs — the partner-application invite link (fix 11 / F66). Opened at SEND
-    // time only; the row stays ciphertext. A missing blob throws naming the
-    // placeholder, never a value.
+    // Durable: when configured, a send failure throws and rides the
+    // backoff/dead-letter. `sealed` (optional) maps {{placeholders}} in
+    // text/html to field-crypto blobs — the partner-application invite link
+    // (fix 11 / F66). Opened at SEND time only; the row stays ciphertext. A
+    // missing blob throws naming the placeholder, never a value.
+    //
+    // Program-Fix 39 (domain-11): a SKIP is recorded, never passed off as a send.
+    // The row still ends done (no retry storm while SMTP is intentionally unset),
+    // but it writes an `email.skipped` audit row (prefix + outbox id, never an
+    // address) and, for 'skipped_unconfigured' only, ONE ops alert per UTC day.
+    // The alert is an ops.alert, keyed per UTC day, and a skipped ops-alert
+    // email mirror (opsmail:) never raises it, so it cannot loop.
     case 'email.send': {
-      await (deps.sendEmail ?? sendEmailDefault)({
+      const outcome: EmailOutcome | void = await (deps.sendEmail ?? sendEmailDefault)({
         to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
         subject: str(p.subject),
         text: renderSealedText(str(p.text), p.sealed),
         ...(typeof p.html === 'string' ? { html: renderSealedText(p.html, p.sealed) } : {}),
       });
+      if (outcome === 'skipped_unconfigured' || outcome === 'skipped_no_recipients') {
+        const { prefix, subjectId } = parseEmailDedupeKey(row.dedupeKey);
+        const reason = outcome === 'skipped_unconfigured' ? 'unconfigured' : 'no_recipients';
+        logWarn('email.skipped', outcome, { id: row.id, kind: row.kind, dedupePrefix: prefix });
+        await createAuditRepo(deps.db).record({
+          actorType: 'system',
+          actor: 'outbox',
+          action: 'email.skipped',
+          subjectId: subjectId ?? undefined,
+          meta: { reason, dedupePrefix: prefix, outboxId: row.id },
+        });
+        // Not for an ops-alert mirror row (Program-Fix 26's opsmail:): that
+        // email IS an alert copy, so alerting on its skip would ping-pong.
+        if (outcome === 'skipped_unconfigured' && !isMirrorRow(row)) {
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            { message: 'Email is not configured: partner lead or invite emails are being skipped. See /admin-dashboard/ops.' },
+            { dedupeKey: `email-unconfigured:${new Date().toISOString().slice(0, 10)}` },
+          );
+        }
+      }
       return;
     }
 
@@ -716,7 +835,8 @@ async function handle(
         // no message content — then finish the row. Never dead-lettered.
         await outbox.enqueue(
           'whatsapp.text',
-          { to: phone, body: FALLBACK_REPLY, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+          // Program-Fix 49A: essential — a reply to the customer's own message.
+          { to: phone, body: FALLBACK_REPLY, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
           { dedupeKey: `reply:${row.id}` },
         );
         await outbox.enqueue(
@@ -748,7 +868,7 @@ async function handle(
         if (reply.trim()) {
           await outbox.enqueue(
             'whatsapp.text',
-            { to: phone, body: reply, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+            { to: phone, body: reply, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
             { dedupeKey: `reply:${row.id}` },
           );
         }
@@ -776,6 +896,59 @@ async function handle(
 
     default:
       throw new Error(`Unknown outbox kind: ${row.kind}`);
+  }
+}
+
+// ── Program-Fix 26: the ops-alert mirror ──────────────────────────────────────
+
+export const OPS_ALERT_SUBJECT = 'SmartRemit ops alert';
+/** Deadline on the ops webhook POST. */
+export const OPS_WEBHOOK_TIMEOUT_MS = 5_000;
+/** Dedupe-key prefixes of mirror children. A dead mirror row never alerts (no loop). */
+const MIRROR_KEY_PREFIXES = ['opsmail:', 'opshook:'] as const;
+
+function isMirrorRow(row: OutboxRow): boolean {
+  const key = row.dedupeKey ?? '';
+  return MIRROR_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+/** The ops webhook URL when it is a credential-free https URL; otherwise null. Pure. */
+export function opsWebhookUrl(raw: string): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'https:' && !u.username && !u.password ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Enqueue the email / webhook copies of one ops alert. A no-op when neither
+ * OPS_ALERT_EMAIL nor OPS_ALERT_WEBHOOK_URL is set. The text is scrub()bed
+ * first: dead-row alerts embed a raw handler error, which can echo a phone or
+ * an email, and these channels leave our boundary.
+ */
+async function enqueueAlertMirror(deps: WorkerDeps, row: OutboxRow, message: string): Promise<void> {
+  const emails = env.opsAlertEmails;
+  const rawHook = env.opsAlertWebhookUrl;
+  if (emails.length === 0 && !rawHook) return;
+  const text = scrub(message);
+  const outbox = createOutboxRepo(deps.db);
+  if (emails.length > 0) {
+    await outbox.enqueue(
+      'email.send',
+      { to: emails, subject: OPS_ALERT_SUBJECT, text },
+      { dedupeKey: `opsmail:${row.id}` },
+    );
+  }
+  if (rawHook) {
+    if (opsWebhookUrl(rawHook)) {
+      await outbox.enqueue('ops.webhook', { text }, { dedupeKey: `opshook:${row.id}` });
+    } else {
+      // Never echo the value: it may be a secret with a typo in it.
+      logWarn('ops.webhook', 'OPS_ALERT_WEBHOOK_URL is not a credential-free https URL; webhook mirror skipped', { id: row.id });
+    }
   }
 }
 
@@ -809,17 +982,30 @@ export interface DrainOptions {
 /**
  * Exactly one ops alert per dead row: every dead-letter path (handler failure at
  * the ceiling, terminal row deadline, poison reclaim) shares the `dead:<id>`
- * dedupe key. Never recursive — a dead ops.alert row does not alert about
- * itself. Ids, kinds, counts and a trimmed error only; never the payload.
+ * dedupe key. Never recursive — a dead ops.alert row (or its mirror copy)
+ * does not alert about itself. Ids, kinds, counts and a trimmed error only; never the payload.
  */
-async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Promise<void> {
+async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string, dedupeKey = `dead:${row.id}`): Promise<void> {
   if (row.kind === 'ops.alert') return;
+  // Program-Fix 26: nor does a dead mirror row (email/webhook copy of an alert).
+  // Each dead:<id> key is new, so a dead SMTP would otherwise loop forever:
+  // dead → alert → mail → dead. The row stays visible on the dashboard.
+  if (isMirrorRow(row)) return;
   await outbox.enqueue(
     'ops.alert',
     { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${text}` },
-    { dedupeKey: `dead:${row.id}` },
+    { dedupeKey },
   );
 }
+
+/**
+ * Program-Fix 25 PR B: a PERMANENT WhatsApp death is dead at attempt 1, so one
+ * misconfiguration (a missing template, 132001; a sandbox number, 131030) would
+ * otherwise raise one alert PER ROW and flood the ops phone. Coalesce per code
+ * per hour: the FIRST death of a code in an hour alerts (never silenced), the
+ * rest of that hour stay visible on the dashboard's dead-letter list.
+ */
+const deadCodeKey = (code: number): string => `deadcode:${code}:${hourBucket()}`;
 
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
 export async function drainOnce(
@@ -914,7 +1100,14 @@ export async function drainOnce(
       // never be retried beside its own ghost — force the dead ceiling so the
       // ordinary dead-letter path (one deduped dead:<id> alert) handles it.
       const deadline = err instanceof RowDeadlineError;
-      const terminal = deadline && TERMINAL_ON_DEADLINE.has(row.kind);
+      const terminalDeadline = deadline && TERMINAL_ON_DEADLINE.has(row.kind);
+      // Program-Fix 25: a PERMANENT WhatsApp rejection on a single-send row is
+      // forced to the dead ceiling too — the same path, one dead:<id> alert.
+      const permanentCode =
+        err instanceof WhatsAppSendError && err.kind === 'permanent' && PERMANENT_DEAD_KINDS.has(row.kind)
+          ? err.code
+          : undefined;
+      const terminal = terminalDeadline || permanentCode !== undefined;
       // A RETRYABLE deadline: the abandoned handler may still be running in this
       // invocation (withRowDeadline cannot cancel it). Park the row for a full
       // LEASE_MS — past maxDuration — so no other worker runs it concurrently
@@ -932,11 +1125,22 @@ export async function drainOnce(
       }
       if (status === 'dead') {
         result.dead++;
-        // A terminal deadline is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
+        // A terminal row (deadline / permanent WhatsApp code) is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
         await alertDead(
           outbox,
           row,
-          `${terminal ? 'DEAD (terminal: row deadline exceeded)' : `DEAD after ${row.attempts} attempts`}: ${message.slice(0, 140)}`,
+          `${
+            terminalDeadline
+              ? 'DEAD (terminal: row deadline exceeded)'
+              : permanentCode !== undefined
+                ? `DEAD (terminal: WhatsApp #${permanentCode})`
+                : `DEAD after ${row.attempts} attempts`
+          }: ${message.slice(0, 140)}${
+            permanentCode !== undefined
+              ? ` — further #${permanentCode} deaths this hour are coalesced into this alert; see the dead-letter list`
+              : ''
+          }`,
+          permanentCode !== undefined && !terminalDeadline ? deadCodeKey(permanentCode) : undefined,
         );
       } else {
         result.failed++;

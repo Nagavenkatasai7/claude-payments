@@ -1,10 +1,11 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import {
   auditEvents,
   b2bInvoices,
   beneficiaries,
   corridorRequests,
   idempotencyKeys,
+  outbox,
   partnerApplications,
   partnerRequests,
   recipients,
@@ -13,8 +14,10 @@ import {
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { isPartnerType } from '@/lib/partner-type';
+import { deriveInviteEmailStatus, inviteDedupeKey, type InviteEmailStatus } from '@/lib/partner-invite-email';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { last4, openOptional } from './mappers';
+import { ctx, recipientRowCtx, sellerRowCtx } from '@/lib/crypto-context';
 import type {
   B2bInvoice,
   CorridorRequest,
@@ -25,6 +28,7 @@ import type {
   PartnerApplicationDetails,
   PartnerApplicationDocument,
   PartnerId,
+  PartnerApplicationStatus,
   PartnerRequest,
   PayoutMethod,
   Recipient,
@@ -43,13 +47,15 @@ export function createRecipientRepo(
 ) {
   return {
     async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<void> {
+      // The row key AS WRITTEN (the conflict target) — the sealed destination binds to it.
+      const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
       const row = {
-        partnerId,
-        senderPhone,
-        recipientPhone: r.recipientPhone,
+        ...key,
         name: r.name,
         payoutMethod: r.payoutMethod,
-        payoutDestinationEnc: r.payoutDestination ? encryptField(r.payoutDestination, provider) : '',
+        payoutDestinationEnc: r.payoutDestination
+          ? encryptField(r.payoutDestination, provider, recipientRowCtx(key))
+          : '',
         payoutDestinationLast4: last4(r.payoutDestination ?? ''),
         lastUsedAt: new Date(r.lastUsedAt),
       };
@@ -73,7 +79,7 @@ export function createRecipientRepo(
         name: row.name,
         recipientPhone: row.recipientPhone,
         payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+        payoutDestination: openOptional(row.payoutDestinationEnc, provider, recipientRowCtx(row)) ?? '',
         lastUsedAt: row.lastUsedAt.toISOString(),
       }));
     },
@@ -105,7 +111,9 @@ export function createBeneficiaryRepo(
         name: b.name,
         country: b.country,
         payoutMethod: b.payoutMethod,
-        payoutDestinationEnc: b.payoutDestination ? encryptField(b.payoutDestination, provider) : '',
+        payoutDestinationEnc: b.payoutDestination
+          ? encryptField(b.payoutDestination, provider, ctx.beneficiary(b.id))
+          : '',
         payoutDestinationLast4: last4(b.payoutDestination ?? ''),
         recipientPhone: b.recipientPhone ?? null,
         createdAt: new Date(b.createdAt),
@@ -127,7 +135,7 @@ export function createBeneficiaryRepo(
         name: row.name,
         country: row.country,
         payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider) ?? '',
+        payoutDestination: openOptional(row.payoutDestinationEnc, provider, ctx.beneficiary(row.id)) ?? '',
         recipientPhone: row.recipientPhone ?? undefined,
         createdAt: row.createdAt.toISOString(),
       };
@@ -178,7 +186,8 @@ function rowToPartnerRequest(row: PartnerRequestRow): PartnerRequest {
     phone: row.phone,
     corridors: (row.corridors as string[]) ?? [],
     capturedAt: row.capturedAt.toISOString(),
-    applicationStatus: row.applicationStatus,
+    // The raw stored value, never coerced: an unknown value must not read as 'invited' (open).
+    applicationStatus: row.applicationStatus as PartnerApplicationStatus,
   };
   if (row.comments) r.comments = row.comments;
   if (row.tokenExpiresAt) r.tokenExpiresAt = row.tokenExpiresAt.toISOString();
@@ -229,12 +238,33 @@ export function createPartnerRequestRepo(db: DbOrTx) {
       return rows[0] ? rowToPartnerRequest(rows[0]) : null;
     },
 
-    /** Single-use: flip to 'completed' so the link is dead. Idempotent. */
-    async markApplicationCompleted(id: string): Promise<void> {
-      await db
+    /**
+     * Single-use: flip invited → 'completed' so the link is dead. Conditional on
+     * 'invited' (Program-Fix 49C): a submit that raced a staff decision can never
+     * turn 'approved'/'rejected' back into 'completed'. Returns whether it flipped.
+     */
+    async markApplicationCompleted(id: string): Promise<boolean> {
+      const rows = await db
         .update(partnerRequests)
         .set({ applicationStatus: 'completed' })
-        .where(eq(partnerRequests.id, id));
+        .where(and(eq(partnerRequests.id, id), eq(partnerRequests.applicationStatus, 'invited')))
+        .returning({ id: partnerRequests.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Program-Fix 49C: the staff decision, atomically. completed → approved|rejected
+     * AND the link's token hash is cleared (a decided application's link can never
+     * resolve again). The WHERE is the guard: a second decision, or a decision on
+     * an application that was never submitted, updates nothing and returns false.
+     */
+    async decideApplication(id: string, decision: 'approved' | 'rejected'): Promise<boolean> {
+      const rows = await db
+        .update(partnerRequests)
+        .set({ applicationStatus: decision, applicationTokenHash: null })
+        .where(and(eq(partnerRequests.id, id), eq(partnerRequests.applicationStatus, 'completed')))
+        .returning({ id: partnerRequests.id });
+      return rows.length > 0;
     },
   };
 }
@@ -327,6 +357,8 @@ export interface AuditEvent {
 
 export function createAuditRepo(db: DbOrTx) {
   return {
+    ...createAuditCaseQueries(db), // Program-Fix 43 (defined below, own region)
+    ...createEmailAuditQueries(db), // Program-Fix 39 (defined below, own region)
     async record(e: AuditEvent): Promise<void> {
       await db.insert(auditEvents).values({
         partnerId: e.partnerId ?? null,
@@ -449,6 +481,111 @@ export interface SendLimitChange {
   at: string;
 }
 
+// ── Program-Fix 43: AML / case-surface audit reads (compliance-09, partial) ──
+// Kept in their own function (spread into createAuditRepo) so this region
+// never overlaps another change to createAuditRepo's body.
+
+/** One audit row as the AML review surfaces use it. */
+export interface AuditRow {
+  id: number;
+  partnerId: PartnerId | null;
+  actor: string;
+  actorType: string;
+  action: string;
+  subjectId: string | null;
+  meta: Record<string, unknown>;
+  at: string;
+}
+
+function toAuditRow(r: typeof auditEvents.$inferSelect): AuditRow {
+  return {
+    id: r.id,
+    partnerId: r.partnerId,
+    actor: r.actor,
+    actorType: r.actorType,
+    action: r.action,
+    subjectId: r.subjectId,
+    meta: (r.meta ?? {}) as Record<string, unknown>,
+    at: r.at.toISOString(),
+  };
+}
+
+/** `partnerId` null ⇒ no tenant filter (platform staff); a string pins the WHERE. */
+function tenantCond(partnerId: PartnerId | null | undefined) {
+  return partnerId ? eq(auditEvents.partnerId, partnerId) : undefined;
+}
+
+function createAuditCaseQueries(db: DbOrTx) {
+  return {
+    /** One audit row by id, pinned to `partnerId` when given (404-never-403 for the caller). */
+    async getById(partnerId: PartnerId | null, id: number): Promise<AuditRow | null> {
+      if (!Number.isSafeInteger(id) || id < 1) return null;
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.id, id), tenantCond(partnerId)))
+        .limit(1);
+      return rows[0] ? toAuditRow(rows[0]) : null;
+    },
+
+    /** Every audit row about one subject (a transfer id) in [from, to), tenant-keyed, oldest first. */
+    async listBySubject(partnerId: PartnerId | null, subjectId: string, from: Date, to: Date, limit = 200): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.subjectId, subjectId),
+          tenantCond(partnerId),
+          gte(auditEvents.at, from),
+          lt(auditEvents.at, to),
+        ))
+        .orderBy(asc(auditEvents.at), asc(auditEvents.id))
+        .limit(limit);
+      return rows.map(toAuditRow);
+    },
+
+    /** Rows of one action in [from, to), optionally tenant-pinned, newest first. */
+    async listByAction(
+      action: string,
+      opts: { partnerId?: PartnerId | null; from: Date; to: Date; limit: number },
+    ): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.action, action),
+          tenantCond(opts.partnerId),
+          gte(auditEvents.at, opts.from),
+          lt(auditEvents.at, opts.to),
+        ))
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(opts.limit);
+      return rows.map(toAuditRow);
+    },
+
+    /**
+     * Open AML review items: `aml.alert` rows with no `aml.reviewed` row
+     * naming them (meta.alertId) under the same tenant. Newest first, bounded.
+     */
+    async listOpenAmlAlerts(partnerId: PartnerId | null, limit = 100): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.action, 'aml.alert'),
+          tenantCond(partnerId),
+          sql`NOT EXISTS (SELECT 1 FROM audit_events r
+                WHERE r.action = 'aml.reviewed'
+                  AND r.partner_id IS NOT DISTINCT FROM ${auditEvents.partnerId}
+                  AND r.meta->>'alertId' = ${auditEvents.id}::text)`,
+        ))
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(limit);
+      return rows.map(toAuditRow);
+    },
+  };
+}
+
 // ── B2B mock invoices (the "ERP" stand-in for the test case) ─────────────────
 export function createB2bInvoiceRepo(db: DbOrTx) {
   const toDomain = (row: typeof b2bInvoices.$inferSelect): B2bInvoice => {
@@ -510,13 +647,22 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
      * `buyerPhone` is normalized on read too (defense-in-depth): match the
      * digits-only form we store, regardless of how the caller formatted it.
      */
-    async getUnpaidByBuyer(buyerPhone: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+    async getUnpaidByBuyer(
+      buyerPhone: string,
+      partnerId: PartnerId,
+      // Program-Fix 44: the oldest live created_at (inclusive). Omitted ⇒ no
+      // age filter (the store always passes the bill-TTL cutoff).
+      createdNotBefore?: Date,
+    ): Promise<B2bInvoice | null> {
       const phone = normalizePhone(buyerPhone);
+      const ageFilter = createdNotBefore
+        ? sql` AND ${b2bInvoices.createdAt} >= ${createdNotBefore.toISOString()}`
+        : sql``;
       const rows = await db
         .select()
         .from(b2bInvoices)
         .where(
-          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'`,
+          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'${ageFilter}`,
         )
         // id is the deterministic tiebreak when two invoices share a created_at.
         .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
@@ -526,6 +672,41 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
     async getInvoice(id: string): Promise<B2bInvoice | null> {
       const rows = await db.select().from(b2bInvoices).where(eq(b2bInvoices.id, id)).limit(1);
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /**
+     * Program-Fix 44 — the DURABLE duplicate-bill check: an open (unpaid, not
+     * older than `createdNotBefore`) bill from the SAME seller to the SAME buyer
+     * for the SAME obligation, tenant-scoped. create_invoice runs it before its
+     * 120 s Redis claim, so a duplicate is caught after the claim's TTL too. The
+     * amount compares as NUMERIC against the 2-dp string the write stored.
+     */
+    async findOpenTwin(q: {
+      partnerId: PartnerId;
+      sellerId: string;
+      buyerPhone: string;
+      invoicedAmount: number;
+      invoicedCurrency: CurrencyCode;
+      createdNotBefore: Date;
+    }): Promise<B2bInvoice | null> {
+      const phone = normalizePhone(q.buyerPhone);
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(
+          sql`${b2bInvoices.partnerId} = ${q.partnerId} AND ${b2bInvoices.sellerId} = ${q.sellerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.invoicedAmount} = ${q.invoicedAmount.toFixed(2)}::numeric AND ${b2bInvoices.invoicedCurrency} = ${q.invoicedCurrency} AND ${b2bInvoices.status} = 'unpaid' AND ${b2bInvoices.createdAt} >= ${q.createdNotBefore.toISOString()}`,
+        )
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /** Program-Fix 44 — every tenant's invoices, newest first (PLATFORM staff only; the caller gates). */
+    async listAllInvoices(limit = 500): Promise<B2bInvoice[]> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(limit);
+      return rows.map(toDomain);
     },
     async listInvoices(partnerId: PartnerId): Promise<B2bInvoice[]> {
       const rows = await db
@@ -723,7 +904,9 @@ export function createSellerRepo(db: DbOrTx) {
     ): Promise<(Seller & { payoutDestination: string }) | null> {
       const row = await fetchRow(phone, partnerId);
       if (!row) return null;
-      const payoutDestination = row.payoutDestinationEnc ? decryptField(row.payoutDestinationEnc) : '';
+      const payoutDestination = row.payoutDestinationEnc
+        ? decryptField(row.payoutDestinationEnc, undefined, sellerRowCtx(row))
+        : '';
       return { ...toDomain(row), payoutDestination };
     },
 
@@ -731,7 +914,8 @@ export function createSellerRepo(db: DbOrTx) {
       phone: string, partnerId: PartnerId, payoutDestination: string,
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
-      const enc = encryptField(payoutDestination);
+      // The UPDATE's WHERE key (partner_id, normalized phone) IS the row's key.
+      const enc = encryptField(payoutDestination, undefined, sellerRowCtx({ partnerId, phone: normalized }));
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)
@@ -790,7 +974,8 @@ export function createSellerRepo(db: DbOrTx) {
       payoutMethod: Seller['payoutMethod'] = 'bank',
     ): Promise<Seller | null> {
       const normalized = normalizePhone(phone);
-      const enc = encryptField(payoutDestination);
+      // The UPDATE's WHERE key (partner_id, normalized phone) IS the row's key.
+      const enc = encryptField(payoutDestination, undefined, sellerRowCtx({ partnerId, phone: normalized }));
       const tail = payoutDestination.replace(/\s+/g, '').slice(-4);
       const updated = await db
         .update(sellers)
@@ -804,3 +989,57 @@ export function createSellerRepo(db: DbOrTx) {
   };
 }
 export type SellerRepo = ReturnType<typeof createSellerRepo>;
+
+// ── Program-Fix 39: honest-email audit reads (domain-11) ─────────────────────
+// Own region (spread into createAuditRepo) so it never overlaps another change.
+
+function createEmailAuditQueries(db: DbOrTx) {
+  return {
+    /** How many `action` rows were written in the last `sinceDays` days (exact match). */
+    async countByAction(action: string, sinceDays: number): Promise<number> {
+      const rows = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(auditEvents)
+        .where(
+          sql`${auditEvents.action} = ${action}
+            AND ${auditEvents.at} >= now() - make_interval(days => ${Math.max(0, Math.floor(sinceDays))})`,
+        );
+      return Number(rows[0]?.n ?? 0);
+    },
+  };
+}
+
+/**
+ * The newest partner-invite email's status for ONE partner request: the newest
+ * 'email.send' row keyed `partner_app_invite:<id>` or `partner_app_invite:<id>:r…`
+ * (exact / starts_with — never LIKE, whose `_` wildcard both prefixes contain),
+ * plus the `email.skipped` audit rows naming that request. Platform staff only
+ * (the caller's page gate); reads no address.
+ */
+export async function getInviteEmailStatus(db: DbOrTx, requestId: string): Promise<InviteEmailStatus> {
+  const key = inviteDedupeKey(requestId);
+  const rows = await db
+    .select({ id: outbox.id, status: outbox.status })
+    .from(outbox)
+    .where(
+      sql`${outbox.kind} = 'email.send'
+        AND (${outbox.dedupeKey} = ${key} OR starts_with(${outbox.dedupeKey}, ${`${key}:r`}))`,
+    )
+    .orderBy(desc(outbox.id))
+    .limit(1);
+  const newest = rows[0] ? { id: Number(rows[0].id), status: rows[0].status } : null;
+  if (!newest || newest.status !== 'done') return deriveInviteEmailStatus(newest, []);
+  const skips = await db
+    .select({ meta: auditEvents.meta })
+    .from(auditEvents)
+    .where(sql`${auditEvents.action} = 'email.skipped' AND ${auditEvents.subjectId} = ${requestId}`)
+    .orderBy(desc(auditEvents.id))
+    .limit(50);
+  return deriveInviteEmailStatus(
+    newest,
+    skips.map((r) => {
+      const id = Number((r.meta as Record<string, unknown> | null)?.outboxId);
+      return { outboxId: Number.isSafeInteger(id) ? id : null };
+    }),
+  );
+}

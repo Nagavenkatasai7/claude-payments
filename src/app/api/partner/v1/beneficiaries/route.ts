@@ -4,7 +4,7 @@ import { createBeneficiary } from '@/lib/partner-api-service';
 
 // POST /api/partner/v1/beneficiaries — validate + store a partner-scoped beneficiary.
 export async function POST(req: NextRequest) {
-  const g = await guardPartner(req);
+  const g = await guardPartner(req, 'beneficiaries:write');
   if (!g.ok) return g.response;
   return svcResponse(await createBeneficiary(g.ctx.deps, g.ctx.partner.id, await readJson(req)));
 }

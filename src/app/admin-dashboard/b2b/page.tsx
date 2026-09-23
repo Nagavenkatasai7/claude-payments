@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { redirect } from 'next/navigation';
 import { requireScope } from '@/lib/auth';
 import { getStore } from '@/lib/store';
-import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { isBillExpired } from '@/lib/b2b-bill-expiry';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { decideStaffCancel } from '@/lib/dashboard-cancel-policy';
 import { Sidebar } from '../sidebar';
@@ -82,7 +82,8 @@ export default async function B2bPage() {
 
   const store = getStore();
   const [invoices, allTransfers] = await Promise.all([
-    store.listB2bInvoices(DEFAULT_PARTNER_ID),
+    // Program-Fix 44: platform staff see (and void / reissue) every tenant's bills.
+    store.listAllB2bInvoices(),
     store.listTransfers(),
   ]);
   const b2bTransfers = allTransfers.filter((t) => t.transferType === 'b2b');
@@ -189,7 +190,10 @@ export default async function B2bPage() {
                 key: inv.id,
                 label: inv.businessName,
                 cells: [
-                  <span key="seller" className="font-medium">{inv.businessName}</span>,
+                  <span key="seller" className="font-medium">
+                    {inv.businessName}
+                    <span className="block text-xs font-normal text-muted-foreground">{inv.partnerId}</span>
+                  </span>,
                   <span key="buyer" className="tabular-nums text-muted-foreground">{inv.buyerPhone}</span>,
                   <span key="items" className="block max-w-xs break-words text-muted-foreground">
                     {inv.lineItems
@@ -197,7 +201,13 @@ export default async function B2bPage() {
                       .join(', ')}
                   </span>,
                   <span key="total" className="tabular-nums">{money(inv.amountUsd, inv.currency)}</span>,
-                  <span key="status">{invoiceStatusBadge(inv.status)}</span>,
+                  <span key="status">
+                    {isBillExpired(inv) ? (
+                      <Badge variant="outline" className="border-muted-foreground/40 text-muted-foreground">Expired</Badge>
+                    ) : (
+                      invoiceStatusBadge(inv.status)
+                    )}
+                  </span>,
                   <span key="created" className="whitespace-nowrap text-muted-foreground">{shortDate(inv.createdAt)}</span>,
                   <span key="paid" className="whitespace-nowrap text-muted-foreground">{shortDate(inv.paidAt)}</span>,
                   inv.status === 'unpaid' ? (

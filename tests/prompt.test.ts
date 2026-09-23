@@ -706,3 +706,49 @@ describe('SYSTEM_PROMPT — a follow-up promise needs a case (fix 34B review)', 
     expect(SYSTEM_PROMPT).not.toContain("tell them you've flagged the bill and the team will follow up");
   });
 });
+
+describe('gate-off onboarding copy depends on who runs KYC (Program-Fix 35, prompt-04)', () => {
+  const ours = buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'ours' });
+  const delegated = buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false, kycMode: 'delegated' });
+
+  it('delegated: identity checks are the partner\'s, stated truthfully — never "no identity verification is required"', () => {
+    expect(delegated).toContain('Identity checks for this service are handled by Acme Pay separately; if asked, say so and help them send.');
+    expect(delegated).not.toContain('no identity verification is required');
+    expect(delegated).not.toContain('Verification is not required before sending on this service');
+  });
+
+  it('ours with the gate off: verification is not required before sending — truthful, no "NEVER mention KYC"', () => {
+    expect(ours).toContain('Verification is not required before sending on this service.');
+    expect(ours).toContain('do not push a verification link; if asked, answer truthfully');
+    expect(ours).not.toContain('NEVER mention KYC');
+    expect(ours).not.toContain('no identity verification is required');
+  });
+
+  it('both gate-off variants still never lead with verification or carry the gate / kyc_url', () => {
+    for (const p of [ours, delegated]) {
+      expect(p).toContain('NEVER ask them to verify their identity');
+      expect(p).not.toContain('VERIFY-BEFORE-SEND GATE');
+      expect(p).not.toContain('kyc_url');
+    }
+  });
+
+  it('kycMode defaults to ours; the gate-ON prompt is unchanged by kycMode', () => {
+    expect(buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: false })).toBe(ours);
+    const on = buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: true });
+    expect(buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: true, kycMode: 'delegated' })).toBe(on);
+    expect(buildSystemPrompt({ brand: 'Acme Pay', kycGateActive: true, kycMode: 'ours' })).toBe(on);
+  });
+
+  it('the default SmartRemit prompt (gate on) stays byte-for-byte', () => {
+    expect(SYSTEM_PROMPT).toBe(buildSystemPrompt({ brand: 'SmartRemit', kycMode: 'ours' }));
+  });
+});
+
+describe('recipient number changes are limited to unpaid transfers', { retry: 0 }, () => {
+  it('guides update_recipient_phone to unpaid transfers and a person otherwise', () => {
+    const line = SYSTEM_PROMPT.split('\n').find((l) => l.includes('update_recipient_phone')) ?? '';
+    expect(line).toMatch(/not been paid/i);
+    expect(line).toContain('request_human_help');
+    expect(SYSTEM_PROMPT).not.toMatch(/do not tell the user it cannot be fixed retroactively/i);
+  });
+});

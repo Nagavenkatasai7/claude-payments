@@ -23,9 +23,12 @@ vi.mock('@/lib/whatsapp', () => ({
   sendText: (...a: unknown[]) => sendText(...a),
   sendTemplate: (...a: unknown[]) => sendTemplate(...a),
   // Faithful to the real helper: run the template send, fall back to free-form
-  // text only if it throws (the recipient-delivery resilience under test).
+  // text only if it throws (the recipient-delivery resilience under test), and
+  // RETURN the outcome (Program-Fix 25 PR B) — never throw.
   sendTemplateOrText: async (to: string, send: () => Promise<void>, fallbackText: string, creds?: unknown) => {
-    try { await send(); } catch { await sendText(to, fallbackText, creds); }
+    const { sendOutcomeFromError } = await vi.importActual<typeof import('@/lib/whatsapp-errors')>('@/lib/whatsapp-errors');
+    try { await send(); return { ok: true, via: 'template' }; } catch { /* fall back */ }
+    try { await sendText(to, fallbackText, creds); return { ok: true, via: 'text' }; } catch (e) { return sendOutcomeFromError(e); }
   },
   RECIPIENT_TEMPLATE_NAME: 'transfer_delivered',
   RECIPIENT_TEMPLATE_LANG: 'en',
@@ -74,9 +77,11 @@ vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }))
 // answers.
 const handleRailFailure = vi.fn(async (..._a: unknown[]) => ({ kind: 'failed', refundStarted: true }));
 const alertRefusedDelivery = vi.fn(async (..._a: unknown[]) => false);
+const alertCallbackOnHold = vi.fn(async (..._a: unknown[]) => false);
 vi.mock('@/lib/rail-failure', () => ({
   handleRailFailure: (...a: unknown[]) => handleRailFailure(...a),
   alertRefusedDelivery: (...a: unknown[]) => alertRefusedDelivery(...a),
+  alertCallbackOnHold: (...a: unknown[]) => alertCallbackOnHold(...a),
 }));
 
 // fix 29: the replay guard (check-then-mark) is unit-tested in
@@ -106,6 +111,7 @@ vi.mock('@/lib/log', async (orig) => {
 });
 
 import { POST } from '@/app/api/payment-webhook/[provider]/route';
+import { WhatsAppSendError } from '@/lib/whatsapp-errors';
 
 const deliveredTransfer = {
   id: 'wh_1', phone: '15551230000', amountInr: 16600, recipientName: 'Mom',
@@ -134,7 +140,7 @@ const v2 = (b: string, s = SECRET, t = Math.floor(Date.now() / 1000)) =>
 beforeEach(() => {
   sendText.mockClear(); sendTemplate.mockClear();
   updateTransferFromWebhook.mockReset(); handleWebhook.mockReset();
-  handleRailFailure.mockClear(); alertRefusedDelivery.mockClear();
+  handleRailFailure.mockClear(); alertRefusedDelivery.mockClear(); alertCallbackOnHold.mockClear();
   fixtures.transfersById = {};
   fixtures.integrationsByPartner = {};
   fixtures.getPaymentProviderCalls.length = 0;
@@ -219,6 +225,33 @@ describe('POST /api/payment-webhook/[provider]', () => {
     expect((await post('uniteller', body, sig(body))).status).toBe(200);
     expect(alertRefusedDelivery).not.toHaveBeenCalled();
     expect(handleRailFailure).not.toHaveBeenCalled();
+  });
+
+  it('compliance holds: a refused paid / delivered update checks the row for a hold and answers the usual 200 { ok: true }', async () => {
+    for (const status of ['paid', 'delivered'] as const) {
+      alertCallbackOnHold.mockClear();
+      handleWebhook.mockResolvedValue({ transferId: 'wh_1', status });
+      updateTransferFromWebhook.mockResolvedValue(null); // the guarded UPDATE did not advance the row
+      const res = await post('uniteller', body, sig(body));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+      await flushAfter();
+      expect(alertCallbackOnHold).toHaveBeenCalledTimes(1);
+      expect(alertCallbackOnHold.mock.calls[0][1]).toBe('wh_1');
+    }
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('compliance holds: a REAL transition, or a refused non-advancing status, never checks for a hold', async () => {
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+    expect((await post('uniteller', body, sig(body))).status).toBe(200);
+    await flushAfter();
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'awaiting_payment' });
+    updateTransferFromWebhook.mockResolvedValue(null); // a `created` callback
+    expect((await post('uniteller', body, sig(body))).status).toBe(200);
+    expect(alertCallbackOnHold).not.toHaveBeenCalled();
   });
 
   it('malformed JSON → 400, no mutation', async () => {
@@ -538,5 +571,92 @@ describe('POST /api/payment-webhook — rail signature v2 (fix 29)', () => {
     handleWebhook.mockResolvedValue({ transferId: 'wh_1', failure: { code: 'failed', reason: 'unspecified' } });
     expect((await post('simulator', failedBody, undefined, v2(failedBody, 'owner_whk'))).status).toBe(200);
     expect(handleRailFailure).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Program-Fix 25 PR B (§3.7): the delivered notice is no longer silent on
+// failure. A failed send enqueues ONE deduped ops alert per transfer — except
+// 131030 (the sandbox allow-list), which fires on every demo delivery.
+describe('POST /api/payment-webhook — delivered-notice honesty (Program-Fix 25 PR B)', { retry: 0 }, () => {
+  const graphErr = (code: number) =>
+    WhatsAppSendError.fromResponse('WhatsApp send failed', 400, JSON.stringify({ error: { message: `(#${code}) x`, code } }));
+  const notifyAlerts = () => outboxFake.enqueued.filter((e) => e.dedupeKey?.startsWith('notifyfail:'));
+
+  beforeEach(() => {
+    sendText.mockReset().mockResolvedValue(undefined);
+    sendTemplate.mockReset().mockResolvedValue(undefined);
+    handleWebhook.mockResolvedValue({ transferId: 'wh_1', status: 'delivered' });
+    updateTransferFromWebhook.mockResolvedValue(deliveredTransfer);
+  });
+
+  it('both sends succeed → no alert', async () => {
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    expect(notifyAlerts()).toEqual([]);
+  });
+
+  it('131030 on the recipient template AND fallback → logged only, no ops alert', async () => {
+    sendTemplate.mockRejectedValueOnce(graphErr(131030));
+    sendText.mockResolvedValueOnce(undefined).mockRejectedValueOnce(graphErr(131030));
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    expect(notifyAlerts()).toEqual([]);
+  });
+
+  it('132001 template + a failing fallback → exactly one notifyfail:<code>:<hour> alert naming the transfer (no PII)', async () => {
+    sendTemplate.mockRejectedValueOnce(graphErr(132001));
+    sendText.mockResolvedValueOnce(undefined).mockRejectedValueOnce(graphErr(132001));
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    const a = notifyAlerts();
+    expect(a).toHaveLength(1);
+    expect(a[0].kind).toBe('ops.alert');
+    expect(a[0].dedupeKey).toMatch(/^notifyfail:132001:\d+$/);
+    const msg = (a[0].payload as { message: string }).message;
+    expect(msg).toContain('wh_1');
+    expect(msg).toContain('#132001');
+    expect(msg).not.toMatch(/\d{7,}/); // no phone number
+    expect(msg).not.toContain('Mom');
+  });
+
+  // Review r1: on a production number the notice often hits 131047 (window
+  // closed). Coalesce per code per hour so a real outage still alerts ONCE.
+  it('two transfers failing with the same code in one hour → ONE alert; another code → its own', async () => {
+    const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hour + 30 * 60_000); // mid-hour: never straddles a bucket boundary
+    try {
+      sendText.mockRejectedValueOnce(graphErr(131047));
+      await post('uniteller', body, sig(body));
+      await flushAfter();
+      sendText.mockRejectedValueOnce(graphErr(131047));
+      updateTransferFromWebhook.mockResolvedValueOnce({ ...deliveredTransfer, id: 'wh_9' });
+      await post('uniteller', body, sig(body));
+      await flushAfter();
+      expect(notifyAlerts()).toHaveLength(1);
+      expect((notifyAlerts()[0].payload as { message: string }).message).toContain('wh_1');
+      sendText.mockRejectedValueOnce(new Error('network down')); // no Graph code
+      await post('uniteller', body, sig(body));
+      await flushAfter();
+      expect(notifyAlerts().map((x) => x.dedupeKey!.replace(/:\d+$/, '')).sort()).toEqual([
+        'notifyfail:131047',
+        'notifyfail:none',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the SENDER notice throwing (non-131030) → one alert; a 131030 throw → none', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131026));
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    expect(notifyAlerts()).toHaveLength(1);
+
+    outboxFake.keys.clear(); outboxFake.enqueued.length = 0;
+    sendText.mockRejectedValueOnce(graphErr(131030));
+    await post('uniteller', body, sig(body));
+    await flushAfter();
+    expect(notifyAlerts()).toEqual([]);
   });
 });

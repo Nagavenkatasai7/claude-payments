@@ -8,6 +8,8 @@ import { createKycCaseStore, mergeKycTrail, type KycCaseStore } from '@/lib/kyc-
 import { createStore } from '@/lib/store';
 import type { Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
+import { outbox } from '@/db/schema';
+import type { PersonaEvent } from '@/lib/providers/persona-webhook-parse';
 
 // Customers live in Postgres now (PGlite per test); the audit hash + event
 // dedup stay on Redis (fakeRedis) — those assertions are unchanged.
@@ -21,6 +23,27 @@ const PHONE = '15551230000';
 // Program-Fix 28: the real audit repo with a switch that forces its insert to
 // fail (the customer write must roll back with it). Off by default.
 let failAudit = false;
+// Program-Fix 35: a switch that makes the next outbox enqueue throw (rollback test).
+const failEnqueue = vi.hoisted(() => ({ once: false }));
+vi.mock('@/db/repos/outbox-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/outbox-repo')>();
+  return {
+    ...real,
+    createOutboxRepo: (d: Parameters<typeof real.createOutboxRepo>[0]) => {
+      const r = real.createOutboxRepo(d);
+      return {
+        ...r,
+        enqueue: async (...a: Parameters<typeof r.enqueue>) => {
+          if (failEnqueue.once) {
+            failEnqueue.once = false;
+            throw new Error('ledger down');
+          }
+          return r.enqueue(...a);
+        },
+      };
+    },
+  };
+});
 vi.mock('@/db/repos/aux-repos', async (orig) => {
   const real = await orig<typeof import('@/db/repos/aux-repos')>();
   return {
@@ -56,6 +79,7 @@ beforeEach(async () => {
   cs = createCustomerStore(db, createStore(fakeRedis(), db));
   seq = 0;
   failAudit = false;
+  failEnqueue.once = false;
   store = createKycCaseStore(redis, cs, () => 1_700_000_000_000 + seq++); // monotonic clock
 });
 
@@ -63,6 +87,13 @@ describe('kyc-case-store', () => {
   it('markEventSeen is true once, false on replay (idempotency)', async () => {
     expect(await store.markEventSeen('evt_1')).toBe(true);
     expect(await store.markEventSeen('evt_1')).toBe(false);
+  });
+
+  it('unmarkEventSeen releases the id so a retry processes it (Program-Fix 35)', async () => {
+    expect(await store.markEventSeen('evt_rel')).toBe(true);
+    await store.unmarkEventSeen('evt_rel');
+    expect(await store.markEventSeen('evt_rel')).toBe(true);
+    expect(await store.markEventSeen('evt_rel')).toBe(false);
   });
 
   it('applyDelta merges fields + appends an audit entry', async () => {
@@ -254,6 +285,19 @@ describe('kyc-case-store.review with a db (Program-Fix 28)', () => {
     expect(await auditRows()).toHaveLength(1);
   });
 
+  // Program-Fix 43 follow-up: defence in depth inside the locked transaction.
+  // A watchlist / PEP hold is decided only when the caller says platform staff
+  // (allowScreeningHold: true); absent ⇒ refused, nothing written.
+  it.each([[{ watchlistHit: true }], [{ pepHit: true }]])('refuses a screening hold %j unless allowScreeningHold is true', async (flag) => {
+    await seed({ kycReviewState: 'needs_review', ...flag });
+    await expect(store.review('default', PHONE, 'approve', 'pb', 'docs look good', opts())).rejects.toThrow(/permission/i);
+    await expect(store.review('default', PHONE, 'approve', 'pb', 'docs look good', { ...opts(), allowScreeningHold: false })).rejects.toThrow(/permission/i);
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('pending');
+    expect(await auditRows()).toEqual([]);
+    await store.review('default', PHONE, 'approve', 'plat', 'docs look good', { ...opts(), allowScreeningHold: true });
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
+  });
+
   it('an unknown customer ⇒ null, nothing written', async () => {
     expect(await store.review('default', '15550000009', 'approve', 'plat', 'docs look good', opts())).toBeNull();
     expect(await auditRows()).toEqual([]);
@@ -292,5 +336,101 @@ describe('mergeKycTrail — the page trail (Program-Fix 28)', () => {
     expect(mergeKycTrail([{ actor: 'plat', action: 'kyc.review.approve', at: '2026-09-23T10:00:00.000Z', meta: { reason: { x: 1 }, reviewerName: 7 } }], [])).toEqual([
       { actor: 'plat', action: 'kyc.review.approve', at: '2026-09-23T10:00:00.000Z', reason: undefined },
     ]);
+  });
+});
+
+// ── Program-Fix 35: the webhook's durable apply. ONE transaction: lock the row,
+// re-read it, RECOMPUTE applyKycEvent on the locked row, save, and (for a
+// match) the kycmatch ops alert. The Redis audit line follows the commit.
+describe('kyc-case-store.applyPersonaEvent (Program-Fix 35)', () => {
+  const evt = (over: Partial<PersonaEvent>): PersonaEvent => ({
+    eventId: 'evt_p', name: 'inquiry.completed', createdAt: '', inquiryId: 'inq_1', referenceId: PHONE, status: 'completed', ...over,
+  });
+  const pep = evt({ eventId: 'evt_pep', name: 'report/politically-exposed-person.matched', referenceId: null, reportId: 'rep_1', matchKind: 'pep', status: 'ready' });
+  const opts = () => ({ db, store: createStore(fakeRedis(), db), alertMessage: () => 'kyc match' });
+  const alerts = async () => (await db.select().from(outbox)).filter((r) => (r.dedupeKey ?? '').startsWith('kycmatch:'));
+
+  it('a match: the hold, the flag and ONE alert commit together; the audit line follows', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    const r = await store.applyPersonaEvent('default', PHONE, pep, opts());
+    expect(r?.after.kycReviewState).toBe('needs_review');
+    const c = await cs.getCustomer('default', PHONE);
+    expect(c?.kycReviewState).toBe('needs_review');
+    expect(c?.pepHit).toBe(true);
+    expect(c?.kycInquiryId).toBe('inq_1');
+    const a = await alerts();
+    expect(a.map((x) => x.dedupeKey)).toEqual(['kycmatch:evt_pep']);
+    expect((await store.getAudit('default', PHONE)).map((e) => e.action)).toEqual(['report/politically-exposed-person.matched']);
+  });
+
+  it('a thrown alert enqueue rolls the customer save back', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    failEnqueue.once = true;
+    await expect(store.applyPersonaEvent('default', PHONE, pep, opts())).rejects.toThrow('ledger down');
+    const c = await cs.getCustomer('default', PHONE);
+    expect(c?.kycReviewState).toBe('pending_review');
+    expect(c?.pepHit).toBeUndefined();
+    expect(await alerts()).toHaveLength(0);
+    expect(await store.getAudit('default', PHONE)).toEqual([]);
+  });
+
+  it('the delta is RECOMPUTED on the locked row (a stale snapshot cannot undo a hold)', async () => {
+    // The row is already held (e.g. a match committed a moment ago); a clean
+    // inquiry.completed must see THAT state, not the caller's older read.
+    await seed({ kycReviewState: 'needs_review', pepHit: true, kycInquiryId: 'inq_1' });
+    const r = await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_done' }), opts());
+    expect(r?.changed).toBe(false);
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('needs_review');
+    expect(await store.getAudit('default', PHONE)).toEqual([]);
+  });
+
+  it('a non-match event commits the state, no alert', async () => {
+    await seed({ kycReviewState: 'inquiry_started', kycInquiryId: 'inq_1' });
+    const r = await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_c' }), opts());
+    expect(r?.changed).toBe(true);
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('pending_review');
+    expect(await alerts()).toHaveLength(0);
+  });
+
+  it('approved + another match kind: no state change, but the alert still commits', async () => {
+    await seed({ kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' });
+    const r = await store.applyPersonaEvent('default', PHONE, evt({ eventId: 'evt_o', name: 'report/adverse-media.matched', referenceId: null, reportId: 'rep_2', matchKind: 'other' }), opts());
+    expect(r?.changed).toBe(false);
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('approved');
+    expect(await alerts()).toHaveLength(1);
+  });
+
+  it('a Redis audit failure after the commit never fails the apply', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    redis.hset = (async () => { throw new Error('redis down'); }) as typeof redis.hset;
+    const r = await store.applyPersonaEvent('default', PHONE, pep, opts());
+    expect(r?.after.kycReviewState).toBe('needs_review');
+    expect((await cs.getCustomer('default', PHONE))?.pepHit).toBe(true);
+    expect(await alerts()).toHaveLength(1);
+  });
+
+  it('a missing row returns null and writes nothing', async () => {
+    expect(await store.applyPersonaEvent('default', PHONE, pep, opts())).toBeNull();
+    expect(await alerts()).toHaveLength(0);
+  });
+});
+
+describe('seen-mark lifetime (Program-Fix 35)', () => {
+  it('the first mark is short (5 min); confirmEventSeen extends it to 30 days', async () => {
+    const calls: Array<[string, ...unknown[]]> = [];
+    const r = fakeRedis();
+    const spyRedis = {
+      ...r,
+      set: async (k: string, v: string, o?: { ex?: number; nx?: boolean }) => { calls.push(['set', k, o]); return r.set(k, v, o); },
+      expire: async (k: string, sec: number) => { calls.push(['expire', k, sec]); return r.expire(k, sec); },
+    };
+    const s = createKycCaseStore(spyRedis as unknown as FakeRedis, cs);
+    expect(await s.markEventSeen('evt_ttl')).toBe(true);
+    await s.confirmEventSeen('evt_ttl');
+    expect(calls).toEqual([
+      ['set', 'sr_kyc_evt:evt_ttl', { nx: true, ex: 300 }],
+      ['expire', 'sr_kyc_evt:evt_ttl', 30 * 24 * 60 * 60],
+    ]);
+    expect(await s.markEventSeen('evt_ttl')).toBe(false);
   });
 });

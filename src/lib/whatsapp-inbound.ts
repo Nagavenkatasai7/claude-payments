@@ -4,7 +4,8 @@ import {
   isResumeKeyword,
   OPT_OUT_REPLY,
   OPT_IN_REPLY,
-  OPT_OUT_REMINDER,
+  optOutReminder,
+  MEDIA_REPLY,
 } from '@/lib/consent';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
 import { getStore } from '@/lib/store';
@@ -13,10 +14,15 @@ import { deriveTier } from '@/lib/tier-rules';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { pokeWorker } from '@/lib/outbox';
-import { logWarn } from '@/lib/log';
+import { logWarn, scrub } from '@/lib/log';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { waMessageRef } from '@/lib/wa-message-ref';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { getRedis } from '@/lib/redis';
 import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
+import { checkIpRateLimit } from '@/lib/ip-rate-limit';
+import { getPartnerStore } from '@/lib/partner-store';
+import { resolvePartnerBranding, DEFAULT_BRAND } from '@/lib/partner-config';
 import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
@@ -45,6 +51,37 @@ function synthesizeButtonText(tap: ButtonTap): string {
   }
 }
 
+/** Program-Fix 49A: one opted-out reminder per (tenant, phone) per hour. */
+export const OPT_OUT_REMINDER_SCOPE = 'wa-optout-reminder';
+const OPT_OUT_REMINDER_WINDOW_SEC = 60 * 60;
+
+/**
+ * Program-Fix 49A: may the opted-out reminder go out now? One per (tenant,
+ * phone) per hour — repeated taps on an old card get silence after the first.
+ * FAILS OPEN to "send": a limiter outage costs at most an extra reminder, never
+ * a silent consent state.
+ */
+async function reminderAllowed(tenantId: PartnerId, phone: string): Promise<boolean> {
+  try {
+    const r = await checkIpRateLimit(getRedis(), OPT_OUT_REMINDER_SCOPE, `${tenantId}|${phone}`, {
+      limit: 1,
+      windowSec: OPT_OUT_REMINDER_WINDOW_SEC,
+    });
+    return r.allowed;
+  } catch {
+    return true;
+  }
+}
+
+/** The tenant's customer-facing brand for the reminder; any read error ⇒ the default. */
+async function tenantBrand(tenantId: PartnerId): Promise<string> {
+  try {
+    return resolvePartnerBranding(await getPartnerStore().getPartner(tenantId)).brand;
+  } catch {
+    return DEFAULT_BRAND;
+  }
+}
+
 /** Returns the JSON-able response body; the route wraps it in NextResponse. */
 export async function processInboundWebhook(
   body: unknown,
@@ -58,14 +95,36 @@ export async function processInboundWebhook(
   const statusEvents = parseStatusEvent(body);
   if (statusEvents) {
     for (const ev of statusEvents) {
+      // Program-Fix 26: the message id is never logged or stored raw — only its
+      // keyed reference (src/lib/wa-message-ref.ts).
+      const msgRef = waMessageRef(ev.wamid);
       if (ev.status === 'failed') {
         // Stage 3: structured + PII-scrubbed (recipientId is a phone number).
         logWarn('whatsapp.delivery_failed', `code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`, {
           recipient: ev.recipientId,
-          wamid: ev.wamid,
+          msgRef: msgRef.slice(0, 16),
         });
+        // Program-Fix 26: persist the failure (no wamid→transfer map yet). Meta's
+        // code + title only — NEVER the recipient number, not even masked; the
+        // subject is the keyed message reference, never the raw id. A DB
+        // error must not turn this webhook into a non-200 (Meta would redeliver).
+        try {
+          await createAuditRepo(getDb()).record({
+            partnerId: routedPartnerId ?? DEFAULT_PARTNER_ID,
+            actor: 'whatsapp',
+            actorType: 'system',
+            action: 'whatsapp.delivery_failed',
+            subjectId: msgRef,
+            meta: {
+              code: ev.errorCode ?? null,
+              title: ev.errorTitle ? scrub(ev.errorTitle).slice(0, 200) : null,
+            },
+          });
+        } catch (err) {
+          logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
+        }
       } else {
-        console.debug(`WhatsApp status ${ev.status} — wamid=${ev.wamid}`);
+        console.debug(`WhatsApp status ${ev.status} — msgRef=${msgRef.slice(0, 16)}`);
       }
     }
     return { ok: true };
@@ -83,6 +142,10 @@ export async function processInboundWebhook(
   const tenantId: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
 
   // STOP / START consent short-circuit (order intentional — see consent.ts).
+  // Keywords are TEXT only (a template quick-reply parses to text, so its
+  // "Unsubscribe" lands here too); the opted-out STATE applies to EVERY kind —
+  // a button tap or a photo from an opted-out customer never reaches the
+  // agent (Program-Fix 49A, whatsapp-10a).
   if (incoming.kind === 'text') {
     if (isResumeKeyword(incoming.text)) {
       await customerStore.clearOptedOut(tenantId, incoming.from);
@@ -90,15 +153,24 @@ export async function processInboundWebhook(
       return { ok: true };
     }
     if (isOptOutKeyword(incoming.text)) {
+      // Program-Fix 49A (whatsapp-10c): a STOP from a phone with no row must
+      // not be lost. ensureCustomer creates the row WITHOUT opt-in (never
+      // upsertOnFirstInbound, which would stamp consent on a STOP), then the
+      // opt-out lands on it. An existing row is untouched by ensureCustomer.
+      await customerStore.ensureCustomer(tenantId, incoming.from);
       await customerStore.setOptedOut(tenantId, incoming.from);
       await sendText(incoming.from, OPT_OUT_REPLY, waCreds);
       return { ok: true };
     }
-    const existing = await customerStore.getCustomer(tenantId, incoming.from);
-    if (existing?.optedOutAt) {
-      await sendText(incoming.from, OPT_OUT_REMINDER, waCreds);
-      return { ok: true };
+  }
+  const existing = await customerStore.getCustomer(tenantId, incoming.from);
+  if (existing?.optedOutAt) {
+    // The rate check runs BEFORE the brand read, so a burst of taps costs one
+    // Redis INCR each and nothing else.
+    if (await reminderAllowed(tenantId, incoming.from)) {
+      await sendText(incoming.from, optOutReminder(await tenantBrand(tenantId)), waCreds);
     }
+    return { ok: true };
   }
 
   // Program-Fix 34A: per-(tenant, phone) inbound throttle — 20 a minute, 300 a
@@ -115,6 +187,20 @@ export async function processInboundWebhook(
       } catch {
         logWarn('whatsapp.throttled', 'slow-down note failed to send', { tenant: tenantId });
       }
+    }
+    return { ok: true };
+  }
+
+  // Program-Fix 49A (whatsapp-08): media the bot cannot read gets ONE honest
+  // reply (the wamid dedup above makes a redelivery silent) and no agent turn.
+  // Never downloaded. A direct send like the other consent replies; a Meta
+  // error is logged, never thrown (Meta would redeliver a non-200).
+  if (incoming.kind === 'unsupported') {
+    logWarn('whatsapp.unsupported_type', incoming.mediaType, { tenant: tenantId });
+    try {
+      await sendText(incoming.from, MEDIA_REPLY, waCreds);
+    } catch {
+      logWarn('whatsapp.unsupported_type', 'media reply failed to send', { tenant: tenantId });
     }
     return { ok: true };
   }
