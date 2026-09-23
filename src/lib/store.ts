@@ -13,6 +13,7 @@ import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRep
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
+import { SANCTIONS_AUDIT_ACTION, type ScreeningEvidence } from './sanctions/evidence';
 import { billExpiryCutoff, BILL_CLAIM_TTL_SEC, BILL_RESEND_WINDOW_SEC } from './b2b-bill-expiry';
 import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
 
@@ -25,7 +26,8 @@ import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride,
 export interface SenderLedgerOps {
   totals(now?: Date): Promise<SenderTotals>;
   getTransfer(id: string): Promise<Transfer | null>;
-  insertTransfer(t: Transfer): Promise<void>;
+  /** Program-Fix 14 PR C: `screening` is the mint's evidence, stored on the new row (transfers.screening). */
+  insertTransfer(t: Transfer, opts?: { screening?: ScreeningEvidence }): Promise<void>;
   /** Program-Fix 14: the sanctions.screen evidence row, in the SAME transaction as the insert. */
   recordAudit(e: AuditEvent): Promise<void>;
   /**
@@ -223,7 +225,14 @@ export function createStore(redis: RedisLike, db: Db) {
      */
     async recordBlockedWithEvidence(transfer: Transfer, audit: AuditEvent): Promise<void> {
       await db.transaction(async (tx) => {
-        await createTransferRepo(tx).saveTransfer(transfer);
+        // PR C: the same evidence (the audit row's meta) is stored on the new
+        // row's transfers.screening column.
+        await createTransferRepo(tx).saveTransfer(
+          transfer,
+          audit.action === SANCTIONS_AUDIT_ACTION && audit.meta
+            ? { screening: audit.meta as unknown as ScreeningEvidence }
+            : {},
+        );
         await createAuditRepo(tx).record(audit);
       });
     },
@@ -390,7 +399,7 @@ export function createStore(redis: RedisLike, db: Db) {
               totals: (now: Date = new Date()) =>
                 repo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now)),
               getTransfer: (id) => repo.getTransfer(id),
-              insertTransfer: (t) => repo.saveTransfer(t),
+              insertTransfer: (t, opts) => repo.saveTransfer(t, opts),
               recordAudit: (e) => audit.record(e),
               amlHoldInputs: (q) => readAmlHoldInputs(tx, partnerId, phone, q),
             });

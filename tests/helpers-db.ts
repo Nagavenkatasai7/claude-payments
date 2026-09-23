@@ -68,6 +68,8 @@ const ALL_TABLES = [
   'customers',
   'partners',
   'waitlist_signups',
+  'sanctions_list_entries',
+  'sanctions_list_versions',
   'staff',
 ].join(', ');
 

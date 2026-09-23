@@ -9,9 +9,10 @@
 // SLS rejects requests without a User-Agent (403, OFAC technical notice
 // 2024-05-16), so fetchOfacSdn always sends one.
 //
-// NOT wired to production: fetchOfacSdn is called only by the snapshot script
-// (scripts/sanctions/build-ofac-snapshot.ts, run with tsx), and the screener reads a
-// snapshot only when SANCTIONS_LIST=ofac-sdn is set (it is unset in prod).
+// PR C: fetchOfacSdn is called only by the daily list loader (list-loader.ts),
+// which runs from /api/cron ONLY when SANCTIONS_LOADER_ENABLED is set (unset in
+// prod), and the screener reads the loaded list only when SANCTIONS_LIST=ofac-sdn
+// is set (also unset in prod).
 
 import { createHash } from 'node:crypto';
 import type { SanctionsList, SanctionsListEntry } from './list-source';
@@ -64,14 +65,33 @@ function toIsoDate(publishDate: string): string {
 /** sha256 over the canonical entries — insensitive to XML layout, sensitive to content. */
 export function hashEntries(entries: SanctionsListEntry[]): string {
   const canonical = entries
-    .map((e) => JSON.stringify([e.id, e.type, [...e.programs].sort(), e.names]))
+    .map((e) =>
+      JSON.stringify(
+        e.weakNames && e.weakNames.length > 0
+          ? [e.id, e.type, [...e.programs].sort(), e.names, e.weakNames]
+          : [e.id, e.type, [...e.programs].sort(), e.names],
+      ),
+    )
     .sort()
     .join('\n');
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
-/** Pure parser. Throws on a document without a publish date or without entries. */
+/** Pure parser. Throws ('OFAC SDN: …') on a truncated document, or one without a publish date or entries. */
 export function parseOfacSdnXml(xml: string): SanctionsList {
+  try {
+    return parseUnchecked(xml);
+  } catch (err) {
+    // Every parse failure (incl. a RangeError from a malformed entity) is
+    // reported as a parse error, prefixed 'OFAC SDN:'.
+    if (err instanceof Error && err.message.startsWith('OFAC SDN:')) throw err;
+    throw new Error(`OFAC SDN: unparseable document (${err instanceof Error ? err.name : 'unknown'})`);
+  }
+}
+
+function parseUnchecked(xml: string): SanctionsList {
+  // A body cut off after N whole entries would otherwise parse cleanly.
+  if (!/<\/sdnList>\s*$/.test(xml)) throw new Error('OFAC SDN: truncated document (no closing </sdnList>)');
   const publishDate = tag(xml, 'Publish_Date');
   if (!publishDate) throw new Error('OFAC SDN: missing Publish_Date');
   const version = toIsoDate(publishDate);
@@ -84,32 +104,75 @@ export function parseOfacSdnXml(xml: string): SanctionsList {
     const primary = personName(own);
     if (!uid || !primary) continue;
     const akas: string[] = [];
+    const weak: string[] = [];
     const akaList = /<akaList>([\s\S]*?)<\/akaList>/.exec(block)?.[1] ?? '';
     for (const a of akaList.matchAll(/<aka>([\s\S]*?)<\/aka>/g)) {
       const n = personName(a[1]);
-      if (n) akas.push(n);
+      if (!n) continue;
+      // PR C: a weak a.k.a. is kept apart — review, never an automatic block.
+      if ((tag(a[1], 'category') ?? '').toLowerCase() === 'weak') weak.push(n);
+      else akas.push(n);
     }
     const programList = /<programList>([\s\S]*?)<\/programList>/.exec(block)?.[1] ?? '';
-    entries.push({
+    const entry: SanctionsListEntry = {
       id: `sdn:${uid}`,
       names: [primary, ...akas],
       type: tag(own, 'sdnType') ?? 'Unknown',
       programs: tags(programList, 'program'),
-    });
+    };
+    if (weak.length > 0) entry.weakNames = weak;
+    entries.push(entry);
   }
   if (entries.length === 0) throw new Error('OFAC SDN: no entries parsed');
   return { source: 'ofac-sdn', version, hash: hashEntries(entries), entries };
 }
 
+const SLS_HOST = new URL(OFAC_SDN_XML_URL).hostname;
+
+function allowedFinalUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname;
+    // SLS itself, or its signed S3 download bucket host in us-gov-west-1
+    // (observed 2026-09-23: <bucket>.s3.us-gov-west-1.amazonaws.com). Anchored
+    // at both ends. If Treasury moves the bucket, the load fails soft (the last
+    // good version stays active, one ops alert per day) until this is updated.
+    return h === SLS_HOST || /^[a-z0-9][a-z0-9.-]*\.s3\.us-gov-west-1\.amazonaws\.com$/.test(h);
+  } catch {
+    return false;
+  }
+}
+
+/** The live SDN.XML is ~30 MB (2026); anything past this is not the list. */
+export const OFAC_SDN_MAX_BYTES = 150 * 1024 * 1024;
+/** A hung download must not eat the cron's 300 s budget. */
+export const OFAC_SDN_FETCH_TIMEOUT_MS = 120_000;
+
 /**
- * Download and parse the live SDN list. Used ONLY by the snapshot script;
- * nothing in the request path calls it.
+ * Download and parse the live SDN list. Called ONLY by the daily list loader
+ * (src/lib/sanctions/list-loader.ts, OFF unless SANCTIONS_LOADER_ENABLED) —
+ * nothing in the request path calls it. Bounded: an abort signal and a size
+ * cap (declared Content-Length and the actual body).
  */
-export async function fetchOfacSdn(fetchImpl: typeof fetch = fetch): Promise<SanctionsList> {
+export async function fetchOfacSdn(
+  fetchImpl: typeof fetch = fetch,
+  opts: { maxBytes?: number; timeoutMs?: number } = {},
+): Promise<SanctionsList> {
+  const maxBytes = opts.maxBytes ?? OFAC_SDN_MAX_BYTES;
   const res = await fetchImpl(OFAC_SDN_XML_URL, {
     headers: { 'User-Agent': USER_AGENT, Accept: 'application/xml' },
     redirect: 'follow',
+    signal: AbortSignal.timeout(opts.timeoutMs ?? OFAC_SDN_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`OFAC SDN fetch failed: HTTP ${res.status}`);
-  return parseOfacSdnXml(await res.text());
+  // Redirect pinning: SLS answers 302 to a signed S3 download in
+  // us-gov-west-1, so the final URL must be https on the SLS host or that S3
+  // region — never anything else. (A stub without res.url is a test.)
+  if (res.url && !allowedFinalUrl(res.url)) throw new Error('OFAC SDN fetch failed: unexpected host after redirect');
+  const declared = Number(res.headers?.get?.('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) throw new Error('OFAC SDN fetch failed: body too large');
+  const body = await res.text();
+  if (body.length > maxBytes) throw new Error('OFAC SDN fetch failed: body too large');
+  return parseOfacSdnXml(body);
 }

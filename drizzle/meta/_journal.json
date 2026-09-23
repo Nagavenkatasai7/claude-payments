@@ -162,6 +162,13 @@
       "when": 1790185967409,
       "tag": "0022_staff_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1790187188168,
+      "tag": "0023_sanctions_lists",
+      "breakpoints": true
     }
   ]
 }

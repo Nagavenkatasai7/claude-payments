@@ -36,6 +36,7 @@ import {
   truncateLabel,
 } from './whatsapp-buttons';
 import { screenTransfer } from './compliance';
+import { warmSanctionsList } from './providers/sanctions-provider';
 import { errorEvidence, sanctionsAuditEvent, type ScreeningEvidence } from './sanctions/evidence';
 import { getRecentTransfers, transferSummaryFields, type TransferSummaryFields } from './recent-transfers';
 import { logWarn } from './log';
@@ -1995,6 +1996,9 @@ async function registerSellerTool(
   // decision 'error' when the screener threw) is recorded on the seller id below.
   let cleared: boolean;
   let screenEvidence: ScreeningEvidence;
+  // Program-Fix 14 PR C: refresh the OFAC list before the screen (a no-op
+  // unless SANCTIONS_LIST=ofac-sdn; never throws; no transaction is open here).
+  await warmSanctionsList();
   try {
     const screen = await screenTransfer({
       amountUsd: 0,
@@ -3759,6 +3763,9 @@ async function sendApprovePickerTool(
       settlementPartnerId = route.settlementPartnerId;
     }
 
+    // Program-Fix 14 PR C: refresh the OFAC list before the quote-time screen
+    // (a no-op unless SANCTIONS_LIST=ofac-sdn; never throws; no tx is open).
+    await warmSanctionsList();
     const screen = await screenTransfer({
       amountUsd,
       recipientName: String(args.recipient_name),
