@@ -45,14 +45,14 @@ Two invariants are structurally untoggleable:
 | Charts | **Recharts** | Analytics dashboard |
 | FX | **Frankfurter API** | Live USD/GBP/CAD/AED/SGD/AUD/NZD→INR rates, no key |
 | KYC vendor | **Persona** (hosted flow + webhook) | When SmartRemit runs verification |
-| Tests | **Vitest** (~122 files / ~1,315 tests) + **PGlite** (real in-process Postgres) + `fakeRedis` + **Playwright** (post-deploy smoke) | UNIQUE/SKIP LOCKED/transactions are tested against real Postgres semantics |
+| Tests | **Vitest** (run `npx vitest run`; no hand-kept count) + **PGlite** (real in-process Postgres) + `fakeRedis` + **Playwright** (post-deploy smoke) | UNIQUE/SKIP LOCKED/transactions are tested against real Postgres semantics |
 | CI/CD | GitHub Actions (`ci.yml` gate on PRs, `smoke.yml` post-deploy, `worker-heartbeat.yml` hourly backup to the Vercel per-minute worker cron) | Branch protection: no direct pushes to `main` |
 
 ---
 
 ## 3. Data layer
 
-### 3.1 Postgres — the ledger (14 tables, `src/db/schema.ts`, migrations in `drizzle/`)
+### 3.1 Postgres — the ledger (21 tables, `src/db/schema.ts`, migrations in `drizzle/`)
 
 | Table | Purpose | Notable engineering |
 |---|---|---|
@@ -68,6 +68,13 @@ Two invariants are structurally untoggleable:
 | `idempotency_keys` | **PK `(partner_id, key)`** — the duplicate-window killer | Claim-first minting (see §6.3) |
 | `kyc_cases` | KYC case records (state lives on `customers`; reserved) | |
 | `corridor_requests` | Unsupported-corridor demand capture from chat | Platform-only lead list |
+| `partner_requests` | Inbound "Partner with us" leads from the public landing form | Platform staff review them on `/admin-dashboard/partner-requests`; the stage-2 application link stores only the SHA-256 hash of its token |
+| `partner_applications` | The detailed stage-2 partner application (KYB, compliance, commercial answers + uploaded documents) | Documents live in a **private** Vercel Blob store; staff read them only through an audited route (`partner_doc.view`) |
+| `sellers` | Registered cross-border B2B sellers (issue bills, receive payouts in their own currency) | Payout destination encrypted, masked last4 in the clear; partner-scoped |
+| `b2b_invoices` | B2B bills a buyer pays in chat (mock "ERP" data) | Status CHECK `unpaid/paid/voided/disputed`; the paying transfer flips it on delivery |
+| `tickets` | Support tickets: customer queries and internal employee questions, one table by `kind` | `partner_id NOT NULL` tenant boundary |
+| `ticket_messages` | The message thread of each ticket | |
+| `waitlist_signups` | Public "Join waitlist" signups (SmartRemit's own list, no tenant) | PII envelope-encrypted; dedupe by keyed blind indexes; masked siblings for the admin list |
 | `partner_rates` | Per-partner conversion pricing per corridor (best-rate selection, §5.1) | UNIQUE `(partner_id, source_currency, destination_currency)`; pair index for selection; plain numerics — rates are not PII (migration `drizzle/0002_partner_rates.sql`) |
 | `outbox` | **The durability backbone** — every external effect | `dedupe_key` UNIQUE (where not null); drain partial index; see §7 |
 

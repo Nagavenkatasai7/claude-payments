@@ -70,6 +70,26 @@ export default function DocsPage() {
           </p>
         </section>
 
+        {/* Program-Fix 42 (docs-04): the honest status note, worded as on /about
+            (src/app/about/page.tsx "Honest status note" and "Sanctions screening
+            always on"), so a partner reading the API guide is not left to assume
+            a live rail, a live identity vendor or a commercial sanctions feed. */}
+        <Card role="note" aria-labelledby="docs-status-title" className="border-primary/30 bg-primary/5">
+          <CardHeader className="pb-2">
+            <CardTitle id="docs-status-title" className="text-base">
+              Where we are today
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>
+              {`SmartRemit is a working demonstration of production-grade remittance infrastructure. The AI conversation, live FX quoting, signed instruction-and-callback loop, durable processing, dashboards and WhatsApp notifications are real. Actual fund movement, the production identity-verification vendor, a commercial sanctions feed, and a live payout rail are simulated today — a reference "simulator" rail runs the exact signed loop a production rail would. We'll only describe those as live once they are.`}
+            </p>
+            <p>
+              {`Sanctions screening runs on every transfer and is structurally impossible to switch off, in every mode. (In today's demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.)`}
+            </p>
+          </CardContent>
+        </Card>
+
         <Separator />
 
         <section id="api" className="space-y-4">
