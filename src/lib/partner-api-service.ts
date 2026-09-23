@@ -31,6 +31,14 @@ import { newTransferId } from './id';
 import { DEFAULT_DESTINATION_COUNTRY, DEFAULT_DESTINATION_CURRENCY } from './defaults';
 import { destinationListText, parseDestinationCountry } from './destination-country';
 import { resolveSenderNames, senderNameKey } from './sender-names';
+import { createTransferRepo } from '@/db/repos/transfer-repo';
+import {
+  parseStatementQuery,
+  statementRow,
+  statementTotals,
+  toCsv,
+  type StatementRow,
+} from './settlement-statement';
 import type { CustomerStore } from './customer-store';
 import { boundUntrustedText, isBoundedPrintable, isCleanName, NAME_MAX } from './untrusted-text';
 
@@ -494,6 +502,65 @@ export async function getTransaction(
   // 404 (never 403) for a missing OR out-of-scope transfer — don't disclose existence.
   if (!t || t.partnerId !== partnerId) return err(404, 'Transaction not found.');
   return ok(200, await transferViewWithName(deps, t));
+}
+
+// ── GET /settlements (Program-Fix 31 PR A, rail-11) ───────────────────────
+//
+// The partner's settlements statement: the instruction ledger (non-custodial —
+// SmartRemit never holds funds) for a half-open UTC window [from, to) on
+// paid_at, keyset-paged ascending. Scope is ONLY the partnerId resolved from
+// the API key; the query's partner_id (if any) is never read. in_review rows
+// are never listed; a cancelled row only when a rail was instructed. Totals are
+// per currency, integer minor units, for THIS PAGE only.
+export type SettlementsResult =
+  | {
+      format: 'json';
+      body: {
+        settlements: StatementRow[];
+        next_cursor: string | null;
+        totals: ReturnType<typeof statementTotals>;
+        window: { from: string; to: string };
+      };
+    }
+  | { format: 'csv'; csv: string; filename: string; nextCursor: string | null };
+
+export async function listSettlements(
+  deps: PartnerApiDeps,
+  partnerId: PartnerId,
+  query: Record<string, string | null | undefined>,
+): Promise<SvcResult<SettlementsResult>> {
+  const now = deps.now ? new Date(deps.now()) : new Date();
+  // Validation (window, limit, format, cursor shape) happens here, BEFORE any
+  // SQL — a malformed cursor is a 400, never a ::timestamptz cast error.
+  const parsed = parseStatementQuery(
+    { from: query.from, to: query.to, limit: query.limit, cursor: query.cursor, format: query.format },
+    now,
+  );
+  if (!parsed.ok) return err(400, parsed.error);
+  const q = parsed.query;
+  const page = await createTransferRepo(deps.db).listSettledPage(partnerId, q.from, q.to, {
+    limit: q.limit,
+    cursor: q.cursor,
+  });
+  const rows = page.items.map(statementRow);
+  if (q.format === 'csv') {
+    const stamp = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/:/g, '-');
+    return ok(200, {
+      format: 'csv',
+      csv: toCsv(rows),
+      filename: `settlements_${stamp(q.from)}_${stamp(q.to)}.csv`,
+      nextCursor: page.nextCursor,
+    });
+  }
+  return ok(200, {
+    format: 'json',
+    body: {
+      settlements: rows,
+      next_cursor: page.nextCursor,
+      totals: statementTotals(rows),
+      window: { from: q.from.toISOString(), to: q.to.toISOString() },
+    },
+  });
 }
 
 // ── POST /transactions/:id/confirm (ownership-scoped) ─────────────────────
