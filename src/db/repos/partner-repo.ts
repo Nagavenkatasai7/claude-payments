@@ -99,6 +99,33 @@ export function createPartnerRepo(db: DbOrTx) {
       return { found: true, previous };
     },
 
+    /**
+     * Program-Fix 15 PR B: the column-targeted writer of partners.support_config.
+     * Reads the stored jsonb under FOR UPDATE, hands it to `merge` (which returns
+     * the whole next value, built by SPREADING the previous one — a support save
+     * never erases the disclosure block and vice versa), and writes only that
+     * column. Call it inside the caller's transaction so the audit row commits
+     * with the write. An unknown id ⇒ { found: false } and nothing written.
+     */
+    async updateSupportConfig(
+      id: PartnerId,
+      merge: (previous: PartnerSupportConfig) => PartnerSupportConfig,
+    ): Promise<{ found: boolean; previous: PartnerSupportConfig; next: PartnerSupportConfig }> {
+      const rows = await db
+        .select({ supportConfig: partners.supportConfig })
+        .from(partners)
+        .where(eq(partners.id, id))
+        .limit(1)
+        .for('update');
+      if (!rows[0]) return { found: false, previous: {}, next: {} };
+      const raw = rows[0].supportConfig;
+      const previous: PartnerSupportConfig =
+        raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as PartnerSupportConfig) : {};
+      const next = merge(previous);
+      await db.update(partners).set({ supportConfig: next, updatedAt: new Date() }).where(eq(partners.id, id));
+      return { found: true, previous, next };
+    },
+
     async listPartners(): Promise<Partner[]> {
       const rows = await db.select().from(partners).orderBy(asc(partners.createdAt));
       return rows.map(rowToPartner);

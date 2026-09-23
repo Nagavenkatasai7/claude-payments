@@ -326,6 +326,21 @@ export interface TicketMessage {
 export interface PartnerSupportConfig {
   enableSupportPortal?: boolean;        // default true — customer /account/support visibility
   autoAssign?: 'none' | 'round_robin';  // default 'none'
+  // Program-Fix 15 PR B: the licensed partner's Reg E identity (the remittance
+  // transfer provider of record), shown on the pay page and the receipt through
+  // resolvePartnerDisclosure. Absent ⇒ "partner licensing details pending".
+  // Written ONLY by saveDisclosureConfigAction (validated + audited).
+  disclosure?: PartnerDisclosureConfig;
+}
+
+/** Program-Fix 15 PR B — staff-entered, never invented. Every field optional in storage. */
+export interface PartnerDisclosureConfig {
+  licensedEntity?: string;              // legal name of the licensed money transmitter
+  licenseIds?: string[];                // e.g. NMLS id / state licence numbers
+  phone?: string;                       // customer-service phone
+  website?: string;                     // https URL
+  stateRegulator?: { name: string; phone?: string; website?: string };
+  deliveryEstimate?: { businessDays: number }; // §1005.32 estimate; absent ⇒ 1 business day
 }
 
 export interface Draft {

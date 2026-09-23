@@ -43,7 +43,7 @@ async function renderPage(route: 'terms' | 'privacy' | 'legal'): Promise<string>
 describe('src/lib/legal/drafts.ts', () => {
   it('exports the version id and the owner banner verbatim', async () => {
     const d = await drafts();
-    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-09-23');
+    expect(d.LEGAL_DRAFT_VERSION).toBe('draft-2026-09-23b'); // PR B: the receipt-disclosure wording changed
     expect(d.LEGAL_DRAFT_BANNER).toBe(BANNER);
   });
 
@@ -59,6 +59,12 @@ describe('src/lib/legal/drafts.ts', () => {
         expect(s.paragraphs.length + (s.bullets?.length ?? 0)).toBeGreaterThan(0);
       }
     }
+  });
+
+  it('PR B: no draft still says partner disclosures are a future feature (the receipt and pay page show them now)', async () => {
+    const text = allDraftText(await drafts());
+    expect(text).not.toMatch(/once partner disclosures are enabled/i);
+    expect(text).toMatch(/where the partner has supplied/i); // still conditional on what the partner supplied
   });
 
   it('no draft text claims approval (the banner is the only place the word appears)', async () => {
@@ -101,14 +107,21 @@ describe('src/lib/legal/drafts.ts', () => {
 });
 
 // PR #314 review: no draft may state as present fact something the product
-// does not do today (receipt partner details arrive with PR B, the cancel
-// mechanics with PR C, scheduling disclosures later).
+// does not do today (receipt partner details shipped with PR B; the cancel
+// mechanics arrive with PR C, scheduling disclosures later).
 describe('drafts claim only what the product does today', () => {
-  it('receipt partner details are conditional, not present fact', async () => {
-    const text = allDraftText(await drafts());
-    expect(text).not.toMatch(/(?<!will )appear on your receipt/i);
-    expect(text).not.toMatch(/are shown with your transfer receipt/i);
-    expect(text).not.toMatch(/receipt also names the state regulator/i);
+  // PR B ships the receipt + pay-page provider block, so the wording is present
+  // tense now — but every licence / regulator detail stays conditional on what
+  // the partner supplied, and the demo tenant's note is still carried.
+  it('receipt partner details: present tense (PR B shipped them), still conditional on what the partner supplied', async () => {
+    const d = await drafts();
+    const complaints = d.REMITTANCE_RIGHTS_DRAFT.sections.find((s) => s.id === 'complaints')!.paragraphs.join(' ');
+    expect(complaints).toMatch(/receipt also names the state regulator that licenses the partner, where the partner has supplied it/i);
+    const provider = d.LICENSING_DRAFT.sections.find((s) => s.id === 'provider')!.paragraphs;
+    expect(provider.join(' ')).toMatch(/where the partner has supplied them/i);
+    expect(provider.join(' ')).toMatch(/licensing details are pending/i);
+    expect(provider).toContain(d.DEMO_NO_PARTNER_NOTE);
+    expect(allDraftText(d)).not.toMatch(/are shown with your transfer receipt/i);
   });
 
   it('the rate is described as locked for about 10 minutes in the chat, not fixed on the pay page', async () => {
