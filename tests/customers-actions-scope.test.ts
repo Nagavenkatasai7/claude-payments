@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createStore } from '@/lib/store';
 import { createCustomerStore } from '@/lib/customer-store';
+import { createKycCaseStore } from '@/lib/kyc-case-store';
+import { auditSubjectId } from '@/lib/customer-ref';
 import type { Staff, Customer } from '@/lib/types';
 
 /** H3: a partner-admin must not flip another tenant's customer KYC. */
@@ -14,6 +17,8 @@ let currentStaff: Staff;
 let db: Awaited<ReturnType<typeof freshDb>>;
 let store: ReturnType<typeof createStore>;
 let cs: ReturnType<typeof createCustomerStore>;
+let kcs: ReturnType<typeof createKycCaseStore>;
+const notify = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@/lib/auth', () => ({
   requireAdmin: async () => currentStaff,
@@ -33,13 +38,19 @@ vi.mock('@/lib/customer-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/customer-store')>('@/lib/customer-store');
   return { ...actual, getCustomerStore: () => cs };
 });
+vi.mock('@/lib/kyc-case-store', async (o) => ({ ...(await o() as object), getKycCaseStore: () => kcs }));
+// Program-Fix 28: the durable manual decision runs its transaction on the freshDb() handle.
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
+// The manual decision must NEVER message the customer (spy asserts it).
+vi.mock('@/lib/whatsapp', () => ({ sendVerificationStatus: notify }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn() }));
 
 import { redirect } from 'next/navigation';
+import * as customerActions from '@/app/admin-dashboard/customers/actions';
 import {
-  markCustomerVerifiedAction,
-  markCustomerRejectedAction,
+  manualKycDecisionAction,
+  createCustomerAction,
   openCustomerAction,
 } from '@/app/admin-dashboard/customers/actions';
 import { openCustomerRef } from '@/lib/customer-ref';
@@ -82,29 +93,48 @@ beforeEach(async () => {
   await seedPartner(db, 'B');
   store = createStore(redis, db);
   cs = createCustomerStore(db, store);
+  kcs = createKycCaseStore(redis, cs);
+  notify.mockClear();
 });
 
-describe('markCustomerVerifiedAction partner scope (H3)', () => {
-  it('rejects a partner-admin verifying another partner’s customer', async () => {
+async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
+  const r = await db.execute(sql`SELECT partner_id, actor, action, subject_id, meta FROM audit_events ORDER BY id`);
+  return (r as unknown as { rows: Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }> }).rows;
+}
+
+const REASON = 'demo: documents checked offline';
+
+// Program-Fix 28 (compliance-04): the one-click override is GONE. The H3 /
+// fix-1 scope pins moved onto manualKycDecisionAction (reasoned + audited).
+describe('the one-click KYC override is removed (Program-Fix 28)', () => {
+  it('markCustomerVerifiedAction / markCustomerRejectedAction no longer exist', () => {
+    expect('markCustomerVerifiedAction' in customerActions).toBe(false);
+    expect('markCustomerRejectedAction' in customerActions).toBe(false);
+  });
+});
+
+describe('manualKycDecisionAction partner scope (H3 + fix 1, moved from markCustomer*)', () => {
+  it('rejects a partner-admin deciding another partner’s customer', async () => {
     await cs.saveCustomer(makeCustomer('15551112222', 'A'));
     currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await expect(markCustomerVerifiedAction(form({ phone: '15551112222', partnerId: 'A' }))).rejects.toThrow(
+    await expect(manualKycDecisionAction(form({ phone: '15551112222', partnerId: 'A', decision: 'approve', reason: REASON }))).rejects.toThrow(
       /not found/i,
     );
     expect((await cs.getCustomer('A', '15551112222'))?.kycStatus).toBe('not_started'); // untouched
+    expect(await auditRows()).toEqual([]);
   });
 
   it('lets a partner-admin verify their OWN customer', async () => {
     await cs.saveCustomer(makeCustomer('15553334444', 'B'));
     currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await markCustomerVerifiedAction(form({ phone: '15553334444', partnerId: 'B' }));
+    await manualKycDecisionAction(form({ phone: '15553334444', partnerId: 'B', decision: 'approve', reason: REASON }));
     expect((await cs.getCustomer('B', '15553334444'))?.kycStatus).toBe('verified');
   });
 
   it('lets a platform admin verify any customer', async () => {
     await cs.saveCustomer(makeCustomer('15555556666', 'A'));
     currentStaff = staff({ username: 'plat' });
-    await markCustomerVerifiedAction(form({ phone: '15555556666', partnerId: 'A' }));
+    await manualKycDecisionAction(form({ phone: '15555556666', partnerId: 'A', decision: 'approve', reason: REASON }));
     expect((await cs.getCustomer('A', '15555556666'))?.kycStatus).toBe('verified');
   });
 
@@ -112,32 +142,106 @@ describe('markCustomerVerifiedAction partner scope (H3)', () => {
     await seedPartner(db, 'acme'); await seedPartner(db, 'beta');
     await cs.saveCustomer(makeCustomer('15559990000', 'beta'));
     currentStaff = staff({ partnerId: 'acme' });
-    await expect(markCustomerVerifiedAction(form({ phone: '15559990000', partnerId: 'beta' }))).rejects.toThrow(/not found/i);
+    await expect(manualKycDecisionAction(form({ phone: '15559990000', partnerId: 'beta', decision: 'approve', reason: REASON }))).rejects.toThrow(/not found/i);
     expect((await cs.getCustomer('beta', '15559990000'))!.kycStatus).toBe('not_started');
   });
 
   it('platform staff MUST name the tenant: a form without partnerId is refused and the row is untouched', async () => {
     await cs.saveCustomer(makeCustomer('15559991111', 'A'));
     currentStaff = staff({ username: 'plat' });
-    await expect(markCustomerVerifiedAction(form({ phone: '15559991111' }))).rejects.toThrow('Partner is required.');
+    await expect(manualKycDecisionAction(form({ phone: '15559991111', decision: 'approve', reason: REASON }))).rejects.toThrow('Partner is required.');
     expect((await cs.getCustomer('A', '15559991111'))!.kycStatus).toBe('not_started');
   });
-});
 
-describe('markCustomerRejectedAction (H3 + L3)', () => {
   it('rejects a partner-admin rejecting another partner’s customer', async () => {
     await cs.saveCustomer(makeCustomer('15557778888', 'A'));
     currentStaff = staff({ username: 'pb', partnerId: 'B' });
-    await expect(markCustomerRejectedAction(form({ phone: '15557778888', partnerId: 'A' }))).rejects.toThrow(
+    await expect(manualKycDecisionAction(form({ phone: '15557778888', partnerId: 'A', decision: 'reject', reason: REASON }))).rejects.toThrow(
       /not found/i,
     );
   });
+});
 
-  it('caps the stored rejection reason at 500 chars (L3)', async () => {
-    await cs.saveCustomer(makeCustomer('15559990000', 'A'));
+describe('manualKycDecisionAction — reasoned, audited, silent (Program-Fix 28)', () => {
+  it('a missing or short reason throws BEFORE any read or write', async () => {
+    await cs.saveCustomer(makeCustomer('15551230001', 'A'));
     currentStaff = staff({ username: 'plat' });
-    await markCustomerRejectedAction(form({ phone: '15559990000', partnerId: 'A', reason: 'y'.repeat(900) }));
-    expect((await cs.getCustomer('A', '15559990000'))?.kycRejectedReason?.length).toBe(500);
+    await expect(manualKycDecisionAction(form({ phone: '15551230001', partnerId: 'A', decision: 'approve' }))).rejects.toThrow(/reason is required/i);
+    await expect(manualKycDecisionAction(form({ phone: '15551230001', partnerId: 'A', decision: 'approve', reason: 'too short' }))).rejects.toThrow(/at least 10/i);
+    // Reason is validated before the tenant/customer lookup: an unknown tenant still gets the reason error.
+    await expect(manualKycDecisionAction(form({ phone: '15551230001', decision: 'approve', reason: '' }))).rejects.toThrow(/reason is required/i);
+    expect((await cs.getCustomer('A', '15551230001'))!.kycStatus).toBe('not_started');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('an invalid decision is refused', async () => {
+    currentStaff = staff({ username: 'plat' });
+    await expect(manualKycDecisionAction(form({ phone: '15551230001', partnerId: 'A', decision: 'maybe', reason: REASON }))).rejects.toThrow(/decision/i);
+  });
+
+  it('approve: verified + kycApprovedBy set + ONE kyc.manual_override.approve row (keyed subject, username actor) + NO WhatsApp message', async () => {
+    await cs.saveCustomer(makeCustomer('15551230002', 'A'));
+    currentStaff = staff({ username: 'plat', name: 'Platform Admin' });
+    await manualKycDecisionAction(form({ phone: '15551230002', partnerId: 'A', decision: 'approve', reason: REASON }));
+    const c = await cs.getCustomer('A', '15551230002');
+    expect(c?.kycStatus).toBe('verified');
+    expect(c?.kycApprovedBy).toBe('Platform Admin (plat)');
+    expect(await auditRows()).toEqual([{
+      partner_id: 'A', actor: 'plat', action: 'kyc.manual_override.approve', subject_id: auditSubjectId('A', '15551230002'),
+      meta: { previousStatus: 'not_started', newStatus: 'verified', reason: REASON, source: 'manual', reviewerName: 'Platform Admin (plat)' },
+    }]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('revoke a VERIFIED customer: reject with a reason ⇒ rejected + kyc.manual_override.reject with previousStatus verified', async () => {
+    await cs.saveCustomer({ ...makeCustomer('15551230003', 'A'), kycStatus: 'verified' });
+    currentStaff = staff({ username: 'plat' });
+    await manualKycDecisionAction(form({ phone: '15551230003', partnerId: 'A', decision: 'reject', reason: 'y'.repeat(900) }));
+    const c = await cs.getCustomer('A', '15551230003');
+    expect(c?.kycStatus).toBe('rejected');
+    expect(c?.kycRejectedReason?.length).toBe(500); // L3 cap kept
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'kyc.manual_override.reject', meta: { previousStatus: 'verified', newStatus: 'rejected', source: 'manual' } });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('a no-op decision (approve an already-verified customer) is refused with no audit row', async () => {
+    await cs.saveCustomer({ ...makeCustomer('15551230004', 'A'), kycStatus: 'verified' });
+    currentStaff = staff({ username: 'plat' });
+    await expect(manualKycDecisionAction(form({ phone: '15551230004', partnerId: 'A', decision: 'approve', reason: REASON }))).rejects.toThrow(/already/i);
+    expect(await auditRows()).toEqual([]);
+  });
+});
+
+describe('createCustomerAction — creating an already-verified customer needs a reason (Program-Fix 28)', () => {
+  beforeEach(() => vi.mocked(redirect).mockClear());
+
+  it('not_started needs no reason and writes no audit row', async () => {
+    currentStaff = staff({ username: 'plat' });
+    await createCustomerAction(form({ phone: '15552220001', partnerId: 'A', kycStatus: 'not_started' }));
+    expect((await cs.getCustomer('A', '15552220001'))?.kycStatus).toBe('not_started');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('verified or grandfathered without a (10+ char) reason is refused and nothing is created', async () => {
+    currentStaff = staff({ username: 'plat' });
+    await expect(createCustomerAction(form({ phone: '15552220002', partnerId: 'A', kycStatus: 'verified' }))).rejects.toThrow(/reason is required/i);
+    await expect(createCustomerAction(form({ phone: '15552220002', partnerId: 'A', kycStatus: 'grandfathered', kycReason: 'short' }))).rejects.toThrow(/at least 10/i);
+    expect(await cs.getCustomer('A', '15552220002')).toBeNull();
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('verified with a reason: the customer + ONE kyc.manual_override.create row, keyed subject, kycApprovedBy set', async () => {
+    currentStaff = staff({ username: 'plat', name: 'Platform Admin' });
+    await createCustomerAction(form({ phone: '15552220003', partnerId: 'A', kycStatus: 'verified', kycReason: REASON }));
+    const c = await cs.getCustomer('A', '15552220003');
+    expect(c?.kycStatus).toBe('verified');
+    expect(c?.kycApprovedBy).toBe('Platform Admin (plat)');
+    expect(await auditRows()).toEqual([{
+      partner_id: 'A', actor: 'plat', action: 'kyc.manual_override.create', subject_id: auditSubjectId('A', '15552220003'),
+      meta: { previousStatus: null, newStatus: 'verified', reason: REASON, source: 'manual', reviewerName: 'Platform Admin (plat)' },
+    }]);
   });
 });
 

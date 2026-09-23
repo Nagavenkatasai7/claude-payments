@@ -81,7 +81,7 @@ async function seedTwoPartnersData(redis = fakeRedis()) {
   return { redis, store, customerStore, partnerStore, scheduleStore };
 }
 
-describe('createScopedStore', () => {
+describe('createScopedStore', { retry: 0 }, () => {
   it('platform staff sees every partner\'s data', async () => {
     const env = await seedTwoPartnersData();
     const scoped = createScopedStore(platformAdmin(), {
@@ -175,7 +175,7 @@ describe('createScopedStore', () => {
   });
 });
 
-describe('transfersPage (Stage 5b cursor paging)', () => {
+describe('transfersPage (Stage 5b cursor paging)', { retry: 0 }, () => {
   it('a partner-scoped viewer is PINNED to their tenant even with a hostile partnerFilter', async () => {
     const env = await seedTwoPartnersData();
     const scoped = createScopedStore(partnerStaff('acme'), {

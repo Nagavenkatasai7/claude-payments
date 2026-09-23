@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createStore } from '@/lib/store';
 import { beginSettlement, beginHold, settleOrHold, releaseHold } from '@/lib/settlement';
@@ -39,6 +39,31 @@ const MOCK: PartnerIntegrations = { kyc: {}, payment: {}, whatsapp: {} };
 let db: Db;
 let store: ReturnType<typeof createStore>;
 
+// Program-Fix 28: the real audit repo with a switch that forces its insert to
+// fail. Off by default, so every other case runs the real repo unchanged.
+let failAudit = false;
+vi.mock('@/db/repos/aux-repos', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/aux-repos')>();
+  return {
+    ...real,
+    createAuditRepo: (dbx: Parameters<typeof real.createAuditRepo>[0]) => {
+      const r = real.createAuditRepo(dbx);
+      return {
+        ...r,
+        record: async (e: Parameters<typeof r.record>[0]) => {
+          if (failAudit) throw new Error('audit insert failed');
+          return r.record(e);
+        },
+      };
+    },
+  };
+});
+
+async function auditRows(): Promise<Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }>> {
+  const r = await db.execute(sql`SELECT partner_id, actor, action, subject_id, meta FROM audit_events ORDER BY id`);
+  return (r as unknown as { rows: Array<{ partner_id: string | null; actor: string; action: string; subject_id: string | null; meta: Record<string, unknown> }> }).rows;
+}
+
 async function outboxRows(): Promise<Array<{ kind: string; dedupe_key: string | null }>> {
   const r = await db.execute(sql`SELECT kind, dedupe_key FROM outbox ORDER BY id`);
   return (r as unknown as { rows: Array<{ kind: string; dedupe_key: string | null }> }).rows;
@@ -48,9 +73,10 @@ beforeEach(async () => {
   db = await freshDb();
   store = createStore(fakeRedis(), db);
   await seedPartner(db, 'acme');
+  failAudit = false;
 });
 
-describe('beginSettlement — webhook-driven rail (http/simulator)', () => {
+describe('beginSettlement — webhook-driven rail (http/simulator)', { retry: 0 }, () => {
   it('ONE transaction: flips paid + enqueues the stage-1 message AND the signed instruct', async () => {
     await store.saveTransfer(fixture());
     const r = await beginSettlement(db, fixture(), SIMULATOR);
@@ -85,7 +111,7 @@ describe('beginSettlement — webhook-driven rail (http/simulator)', () => {
   });
 });
 
-describe('beginSettlement — mock rail (default partner sandbox)', () => {
+describe('beginSettlement — mock rail (default partner sandbox)', { retry: 0 }, () => {
   it('flips paid + enqueues the DELAYED mock settle + sets the deterministic providerRef', async () => {
     await store.saveTransfer(fixture());
     const r = await beginSettlement(db, fixture(), MOCK);
@@ -106,7 +132,7 @@ describe('beginSettlement — mock rail (default partner sandbox)', () => {
   });
 });
 
-describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3)', () => {
+describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3)', { retry: 0 }, () => {
   it('markInReviewIfAwaiting: ONE guarded UPDATE flips awaiting_payment → in_review and sets paidAt', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     const held = await createTransferRepo(db).markInReviewIfAwaiting('st_t1');
@@ -179,7 +205,7 @@ async function stage1Payload(id: string): Promise<Record<string, unknown>> {
   return (r as unknown as { rows: Array<{ payload: Record<string, unknown> }> }).rows[0].payload;
 }
 
-describe('stage-1 payloads never carry a secret (fix 11 / F49)', () => {
+describe('stage-1 payloads never carry a secret (fix 11 / F49)', { retry: 0 }, () => {
   it('beginSettlement: the stage-1 payload is exactly { to, body, partnerId } — the OWNING partner, no creds/token', async () => {
     await store.saveTransfer(fixture());
     await beginSettlement(db, fixture(), SIMULATOR);
@@ -223,7 +249,7 @@ async function stage1Body(id: string): Promise<string | null> {
   return (r as unknown as { rows: Array<{ body: string }> }).rows[0]?.body ?? null;
 }
 
-describe('beginSettlement — compliance gate (only cleared money reaches a rail)', () => {
+describe('beginSettlement — compliance gate (only cleared money reaches a rail)', { retry: 0 }, () => {
   it('REFUSES a flagged transfer: status stays awaiting_payment, ZERO outbox rows (no stage1, no settlement.instruct)', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     const r = await beginSettlement(db, { ...fixture(), complianceStatus: 'flagged' }, SIMULATOR);
@@ -248,7 +274,7 @@ describe('beginSettlement — compliance gate (only cleared money reaches a rail
   });
 });
 
-describe('beginHold — the transactional compliance hold', () => {
+describe('beginHold — the transactional compliance hold', { retry: 0 }, () => {
   it('ONE transaction: flips awaiting_payment → in_review, sets paidAt, enqueues exactly one stage1:<id> row and NO rail effect', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     const r = await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
@@ -293,7 +319,7 @@ describe('beginHold — the transactional compliance hold', () => {
   });
 });
 
-describe('settleOrHold — the ONE decision every settlement caller goes through', () => {
+describe('settleOrHold — the ONE decision every settlement caller goes through', { retry: 0 }, () => {
   it('cleared → started (settlement, rail effect enqueued)', async () => {
     await store.saveTransfer(fixture());
     expect(await settleOrHold(db, fixture(), SIMULATOR)).toEqual({ kind: 'started', webhookDriven: true });
@@ -327,7 +353,7 @@ describe('settleOrHold — the ONE decision every settlement caller goes through
   });
 });
 
-describe('releaseHold — the staff release IS a settlement (in_review → paid + the rail effect, one transaction)', () => {
+describe('releaseHold — the staff release IS a settlement (in_review → paid + the rail effect, one transaction)', { retry: 0 }, () => {
   it('webhook-driven rail: flips in_review → paid, keeps complianceStatus flagged, restarts paidAt at the release, enqueues instruct:<id> and NO second stage-1 message', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
@@ -370,5 +396,40 @@ describe('releaseHold — the staff release IS a settlement (in_review → paid 
     await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
     await releaseHold(db, (await store.getTransfer('st_t1'))!, SIMULATOR);
     expect((await store.updateTransferFromWebhook('st_t1', 'delivered'))?.status).toBe('delivered');
+  });
+});
+
+describe('releaseHold — staff audit context (Program-Fix 28)', { retry: 0 }, () => {
+  it('with an audit context: ONE transfer.release row, keyed on the OWNER partner, inside the release transaction', async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
+    const r = await releaseHold(db, (await store.getTransfer('st_t1'))!, SIMULATOR, { actor: 'plat', reason: 'docs ok' });
+    expect(r).toEqual({ kind: 'released', webhookDriven: true });
+    expect(await auditRows()).toEqual([{
+      partner_id: 'acme', actor: 'plat', action: 'transfer.release', subject_id: 'st_t1',
+      meta: { previousStatus: 'in_review', newStatus: 'paid', reason: 'docs ok' },
+    }]);
+  });
+
+  it("a null claim ('already') writes NO audit row", async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' }); // awaiting_payment, never held
+    expect(await releaseHold(db, fixture(), SIMULATOR, { actor: 'plat', reason: null })).toEqual({ kind: 'already' });
+    expect(await auditRows()).toHaveLength(0);
+  });
+
+  it('a failing audit insert rolls the release back: still in_review, only the hold\'s stage-1 row in the outbox', async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
+    failAudit = true;
+    await expect(releaseHold(db, (await store.getTransfer('st_t1'))!, SIMULATOR, { actor: 'plat', reason: null })).rejects.toThrow('audit insert failed');
+    expect((await store.getTransfer('st_t1'))?.status).toBe('in_review');
+    expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['stage1:st_t1']);
+  });
+
+  it('without an audit context: no audit row (existing callers unchanged)', async () => {
+    await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
+    await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
+    await releaseHold(db, (await store.getTransfer('st_t1'))!, SIMULATOR);
+    expect(await auditRows()).toHaveLength(0);
   });
 });

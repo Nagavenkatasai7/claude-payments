@@ -352,6 +352,31 @@ export function createAuditRepo(db: DbOrTx) {
     },
 
     /**
+     * Program-Fix 28: the durable KYC decision trail for ONE customer —
+     * tenant-keyed (partner_id) AND subject-keyed (the keyed auditSubjectId,
+     * never a phone), `kyc.*` slugs only, newest first. Feeds the customer
+     * page's "KYC audit trail".
+     */
+    async listKycForSubject(partnerId: PartnerId, subjectId: string, limit = 50): Promise<KycAuditRow[]> {
+      const rows = await db
+        .select({ actor: auditEvents.actor, action: auditEvents.action, meta: auditEvents.meta, at: auditEvents.at })
+        .from(auditEvents)
+        .where(
+          sql`${auditEvents.partnerId} = ${partnerId}
+            AND ${auditEvents.subjectId} = ${subjectId}
+            AND ${auditEvents.action} LIKE 'kyc.%'`,
+        )
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(limit);
+      return rows.map((r) => ({
+        actor: r.actor,
+        action: r.action,
+        meta: (r.meta ?? {}) as Record<string, unknown>,
+        at: r.at.toISOString(),
+      }));
+    },
+
+    /**
      * Program fix 16b: the newest send_limits.set / send_limits.clear row for
      * ONE subject — tenant-keyed, and keyed on the meta scope too so a partner
      * id and a phone can never read each other's history. Feeds the admin
@@ -385,6 +410,14 @@ export function createAuditRepo(db: DbOrTx) {
   };
 }
 export type AuditRepo = ReturnType<typeof createAuditRepo>;
+
+/** One durable KYC decision row, as the customer page renders it (Program-Fix 28). */
+export interface KycAuditRow {
+  actor: string;
+  action: string;
+  meta: Record<string, unknown>;
+  at: string;
+}
 
 /** One send-limit audit row, as the admin card renders it (fix 16b). */
 export interface SendLimitChange {

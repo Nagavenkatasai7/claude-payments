@@ -20,6 +20,7 @@ import { ReviewCopilot } from './review-copilot';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { CustomerLink } from '../customer-link';
 import type { Transfer } from '@/lib/types';
 
@@ -164,8 +165,9 @@ export default async function CompliancePage() {
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
                       {canRelease(t) ? (
-                        <form action={releaseTransferAction}>
+                        <form action={releaseTransferAction} className="flex items-center gap-1">
                           <input type="hidden" name="id" value={t.id} />
+                          <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
                           <Button type="submit" size="sm">Release</Button>
                         </form>
                       ) : (
@@ -178,8 +180,9 @@ export default async function CompliancePage() {
                           Release
                         </Button>
                       )}
-                      <form action={rejectTransferAction}>
+                      <form action={rejectTransferAction} className="flex items-center gap-1">
                         <input type="hidden" name="id" value={t.id} />
+                        <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
                         <Button
                           type="submit"
                           size="sm"
