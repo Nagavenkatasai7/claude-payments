@@ -80,6 +80,12 @@ export const ctx = {
   integration: (partnerId: PartnerId, column: IntegrationEncColumn): CryptoContext =>
     make('partner_integrations', column, [partnerId]),
   waitlist: (id: string, column: WaitlistEncColumn): CryptoContext => make('waitlist_signups', column, [id]),
+  /**
+   * Program-Fix 45: `ticket_messages.body`, keyed by the message row id. P3
+   * only READS it (ticket-repo opens v2 bodies sealed for their own row); the
+   * P4 writer seals new bodies under it. Pinned by tests/ticket-repo.test.ts.
+   */
+  ticketMessage: (id: number | string): CryptoContext => make('ticket_messages', 'body', [id]),
   /** For fix 17b (staff MFA secrets in Redis). Permanently v1-exempt. */
   staffMfa: (username: string): CryptoContext => make('staff_mfa', 'secret', [username], true),
   purpose: (purpose: CryptoPurpose): CryptoContext =>

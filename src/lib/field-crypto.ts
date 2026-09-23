@@ -39,11 +39,18 @@ const VERSION = 'v1';
 /** Program-Fix 46: the context-bound envelope. Read since 46A; written since 46B. */
 const VERSION_V2 = 'v2';
 /**
- * The one key id a v2 blob may carry today. It is a slot in the blob AND bound
- * into the AAD, so fix 45 (key ring / rotation) adds kids without a v3.
+ * The key id every write uses: k0 = FIELD_ENCRYPTION_KEY, always (set-once,
+ * never rotated). It is a slot in the v2 blob AND bound into the AAD, so fix 45
+ * (key ring) adds kids without a v3.
  */
 export const FIELD_KID = 'k0';
-const KNOWN_KIDS: ReadonlySet<string> = new Set([FIELD_KID]);
+/**
+ * Program-Fix 45 P3: the grammar of a key id — `k0`, `k1` … `k999`, no leading
+ * zeros, so one kid has exactly one spelling (the AAD binds its bytes). Checked
+ * before any key use or AAD build; anything else is an unknown key id.
+ */
+const KID_PATTERN = /^k(?:0|[1-9][0-9]{0,2})$/;
+const isKid = (kid: unknown): kid is string => typeof kid === 'string' && KID_PATTERN.test(kid);
 const GCM_IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 const DEK_BYTES = 32; // AES-256
@@ -136,12 +143,103 @@ export class EnvKeyProvider implements EncryptionKeyProvider {
   }
 }
 
+const RING_ENV = 'FIELD_ENCRYPTION_PREVIOUS_KEYS';
+
+/**
+ * Program-Fix 45 P3: parse the optional `FIELD_ENCRYPTION_PREVIOUS_KEYS` value —
+ * a comma list of `<kid>:<key>` entries, each key in the SAME shapes
+ * FIELD_ENCRYPTION_KEY accepts (decodeMasterKey). Returns a Map (never a plain
+ * object, so a kid can never resolve to a prototype property).
+ *
+ * Refuses (throws, naming only the env var — never an entry or a key): a
+ * malformed entry, a kid outside KID_PATTERN, a duplicate kid, a key that is
+ * not 32 bytes, and any `k0` entry — k0 is always FIELD_ENCRYPTION_KEY and can
+ * never be shadowed. Empty / unset ⇒ an empty ring.
+ */
+export function parseKeyRingEntries(raw: string | undefined): Map<string, Buffer> {
+  const ring = new Map<string, Buffer>();
+  for (const entry of (raw ?? '').split(',')) {
+    const trimmed = entry.trim();
+    if (trimmed === '') continue;
+    const colon = trimmed.indexOf(':');
+    if (colon <= 0) throw new Error(`field-crypto: ${RING_ENV} has a malformed entry`);
+    const kid = trimmed.slice(0, colon).trim();
+    if (!isKid(kid)) throw new Error(`field-crypto: ${RING_ENV} has an invalid key id`);
+    if (kid === FIELD_KID) {
+      throw new Error(`field-crypto: ${RING_ENV} may not redefine k0 (it is FIELD_ENCRYPTION_KEY)`);
+    }
+    if (ring.has(kid)) throw new Error(`field-crypto: ${RING_ENV} repeats a key id`);
+    let key: Buffer;
+    try {
+      key = decodeMasterKey(trimmed.slice(colon + 1).trim());
+    } catch {
+      // decodeMasterKey's message names FIELD_ENCRYPTION_KEY; say which env it is.
+      throw new Error(`field-crypto: ${RING_ENV} has a key that is not 32 bytes`);
+    }
+    ring.set(kid, key);
+  }
+  return ring;
+}
+
+/**
+ * A provider that also resolves OTHER key ids (a key ring). decryptField uses
+ * `providerForKid` only for a v2 blob whose kid is not k0; k0 and every v1 blob
+ * always go through the provider itself.
+ */
+export interface KeyRingProvider extends EncryptionKeyProvider {
+  /** The provider for a non-k0 kid, or undefined when the ring lacks it. */
+  providerForKid(kid: string): EncryptionKeyProvider | undefined;
+}
+
+function isKeyRingProvider(p: EncryptionKeyProvider): p is KeyRingProvider {
+  return typeof (p as Partial<KeyRingProvider>).providerForKid === 'function';
+}
+
+/**
+ * Program-Fix 45 P3: the env key ring — `{ k0: FIELD_ENCRYPTION_KEY,
+ * …FIELD_ENCRYPTION_PREVIOUS_KEYS }`. As an EncryptionKeyProvider it IS the k0
+ * EnvKeyProvider (wrap/unwrap under FIELD_ENCRYPTION_KEY, byte-for-byte as
+ * before), so every write and every k0 / v1 read is unchanged. The extra
+ * entries are parsed lazily, only when a non-k0 kid is looked up, so a
+ * malformed optional env can never break a k0 read, a v1 read or a write.
+ */
+export class EnvKeyRing extends EnvKeyProvider implements KeyRingProvider {
+  constructor(
+    rawKey: string | Buffer,
+    private readonly rawRing: string | undefined = '',
+  ) {
+    super(rawKey);
+  }
+
+  providerForKid(kid: string): EncryptionKeyProvider | undefined {
+    if (!isKid(kid) || kid === FIELD_KID) return undefined;
+    const key = parseKeyRingEntries(this.rawRing).get(kid);
+    return key ? new EnvKeyProvider(key) : undefined;
+  }
+}
+
 /**
  * Lazily build the default provider from env so callers can inject a fixed-key
  * provider in tests / a KMS provider in prod without import-time coupling.
+ * Since fix 45 P3 it is the env key ring; with FIELD_ENCRYPTION_PREVIOUS_KEYS
+ * unset (production) it is exactly the k0 EnvKeyProvider it was before.
  */
 export function defaultProvider(): EncryptionKeyProvider {
-  return new EnvKeyProvider(env.fieldEncryptionKey);
+  return new EnvKeyRing(env.fieldEncryptionKey, env.fieldEncryptionPreviousKeys);
+}
+
+/**
+ * The provider that unwraps a v2 blob of this kid. k0 → the given provider,
+ * exactly as before fix 45. Any other kid → ONLY a ring-capable provider that
+ * holds it; a plain (test / KMS) provider is never silently used for a non-k0
+ * kid. No trial decryption: exactly one key is ever tried.
+ */
+function providerForBlobKid(provider: EncryptionKeyProvider, kid: string): EncryptionKeyProvider {
+  if (!isKid(kid)) throw new Error('field-crypto: unknown key id');
+  if (kid === FIELD_KID) return provider;
+  const p = isKeyRingProvider(provider) ? provider.providerForKid(kid) : undefined;
+  if (!p) throw new Error('field-crypto: unknown key id');
+  return p;
 }
 
 function b64url(buf: Buffer): string {
@@ -188,7 +286,9 @@ export function aadFor(ctx: CryptoContext, kid: string = FIELD_KID): string {
   if (!Array.isArray(ctx.row) || ctx.row.some((part) => typeof part !== 'string')) {
     throw new Error('field-crypto: invalid context row');
   }
-  if (!KNOWN_KIDS.has(kid)) throw new Error('field-crypto: unknown key id');
+  // Program-Fix 45 P3: the blob's own kid is bound (k1 … as well as k0). The
+  // default stays k0, so every pinned `v2|k0|…` string is byte-identical.
+  if (!isKid(kid)) throw new Error('field-crypto: unknown key id');
   // Row arity is fixed per (table, column) by crypto-context.ts, so the
   // escaped '|'-joined parts are unambiguous within a column.
   const row = ctx.row.map((part) => encodeURIComponent(part)).join('|');
@@ -231,6 +331,9 @@ export function sealFieldV2(
   ctx: CryptoContext,
   kid: string = FIELD_KID,
 ): string {
+  // Program-Fix 45 P3 is the READER only: the writer stays locked to k0 (the
+  // key-ring writer, P4, is the one change allowed to lift this).
+  if (kid !== FIELD_KID) throw new Error('field-crypto: only k0 is written');
   const aad = aadFor(ctx, kid); // validates the context before any key use
   const plaintextBuf = utf8Plaintext(plaintext);
   const dek = randomBytes(DEK_BYTES);
@@ -329,8 +432,11 @@ function openWith(
  *    customer_ref, staff MFA). The switch is meant to be flipped only after the
  *    re-encrypt backfill has left no v1 rows; a ctx-less read is never refused
  *    (the AST guard keeps every src/ read context-carrying);
- *  - `v2.` — 6 segments, a known kid, and `ctx` is REQUIRED; AAD = aadFor(ctx,
- *    kid), so a blob opens only under the context it was sealed for.
+ *  - `v2.` — 6 segments, a well-formed kid, and `ctx` is REQUIRED; AAD =
+ *    aadFor(ctx, kid), so a blob opens only under the context it was sealed
+ *    for. The wrapped DEK is unwrapped by the key of THAT kid (fix 45 P3): k0
+ *    by the given provider, any other kid only by a KeyRingProvider holding
+ *    it (defaultProvider() is the env ring). v1 always opens under k0.
  * Throws on format / unknown-version errors, a wrapped DEK that doesn't unwrap
  * under this provider's master key, and any GCM auth-tag failure. Error text
  * never contains the context (it holds row keys: phones, partner ids).
@@ -349,7 +455,7 @@ export function decryptField(
       throw new Error('field-crypto: malformed blob');
     }
     const [, kid, ivB64, tagB64, wrappedB64, ctB64] = parts;
-    if (!KNOWN_KIDS.has(kid)) {
+    if (!isKid(kid)) {
       throw new Error('field-crypto: unknown key id');
     }
     if (!ctx) {
@@ -357,7 +463,10 @@ export function decryptField(
     }
     const aad = Buffer.from(aadFor(ctx, kid), 'utf8');
     const { iv, tag } = ivAndTag(ivB64, tagB64);
-    return openWith(provider, iv, tag, fromB64url(wrappedB64), fromB64url(ctB64), aad);
+    // Program-Fix 45 P3: unwrap with the ring key of the blob's own kid (bound
+    // into the AAD above, so an edited kid fails the GCM tag).
+    const keyProvider = providerForBlobKid(provider, kid);
+    return openWith(keyProvider, iv, tag, fromB64url(wrappedB64), fromB64url(ctB64), aad);
   }
   if (parts.length !== 5) {
     throw new Error('field-crypto: malformed blob');

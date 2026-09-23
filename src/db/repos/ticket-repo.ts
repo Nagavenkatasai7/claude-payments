@@ -3,6 +3,9 @@ import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
 import { FIRST_RESPONSE_DUE_HOURS } from '@/lib/ticket-sla';
+import { decryptField, defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
+import { logWarn } from '@/lib/log';
 import type {
   PartnerId,
   Ticket,
@@ -16,7 +19,9 @@ import type {
 // employee questions, discriminated by kind). Tenant isolation is app-level
 // as everywhere: partner-facing reads take partnerId in the WHERE; customer
 // reads are scoped by customer_phone AND never include internal notes.
-// Bodies are plaintext by design (queue search + AI triage/copilot read them);
+// Bodies are written as plaintext (queue search + AI triage/copilot read them);
+// since Program-Fix 45 P3 the reader also opens a v2 body sealed for its own
+// row (openTicketBody), ready for the P4 writer;
 // create-forms warn customers against posting account numbers, and any
 // transfer detail joined in stays masked (default ledger reads).
 
@@ -43,13 +48,37 @@ function rowToTicket(row: TicketRow): Ticket {
   return t;
 }
 
-function rowToMessage(row: MessageRow): TicketMessage {
+/**
+ * Program-Fix 45 P3: the ticket body READER. Every body written today is
+ * plaintext (and stays so until the P4 writer); P4 seals new bodies as a v2
+ * blob under `ctx.ticketMessage(<row id>)`. Bodies are customer-authored, so
+ * this opens ONLY a v2 envelope, and only under the row's OWN id: a pasted v1
+ * blob (which opens under any context) or a blob sealed for another row is
+ * shown as the text it is. Anything else — plain text, or an envelope that
+ * fails to open — falls back to the raw value; a failed open logs a PII-free
+ * warning (the message id only). The key is touched only for a v2-shaped body.
+ */
+function openTicketBody(row: MessageRow, provider?: EncryptionKeyProvider): string {
+  const body = row.body;
+  if (!body.startsWith('v2.') || body.split('.').length !== 6) return body;
+  try {
+    return decryptField(body, provider ?? defaultProvider(), ctx.ticketMessage(row.id));
+  } catch (err) {
+    logWarn('ticket.body_unreadable', err instanceof Error ? err.message : 'decrypt failed', { messageId: row.id });
+    return body;
+  }
+}
+
+function rowToMessage(
+  row: MessageRow,
+  provider?: EncryptionKeyProvider,
+): TicketMessage {
   return {
     id: row.id,
     ticketId: row.ticketId,
     actorType: row.actorType as TicketMessage['actorType'],
     actorId: row.actorId,
-    body: row.body,
+    body: openTicketBody(row, provider),
     internal: row.internal,
     createdAt: row.createdAt.toISOString(),
   };
@@ -68,7 +97,13 @@ export interface CreateTicketInput {
   body: string;             // the first message
 }
 
-export function createTicketRepo(db: DbOrTx) {
+export interface TicketRepoOptions {
+  /** Field-crypto provider for sealed bodies (tests); default: the env key ring. */
+  cryptoProvider?: EncryptionKeyProvider;
+}
+
+export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
+  const toMessage = (row: MessageRow) => rowToMessage(row, opts.cryptoProvider);
   const repo = {
     /** Create the ticket + its first message in ONE transaction. */
     async createTicket(input: CreateTicketInput): Promise<Ticket> {
@@ -280,7 +315,7 @@ export function createTicketRepo(db: DbOrTx) {
         })
         .returning();
       await db.update(tickets).set({ updatedAt: new Date() }).where(eq(tickets.id, input.ticketId));
-      return rowToMessage(rows[0]);
+      return toMessage(rows[0]);
     },
 
     /**
@@ -296,7 +331,7 @@ export function createTicketRepo(db: DbOrTx) {
         .from(ticketMessages)
         .where(where)
         .orderBy(asc(ticketMessages.createdAt), asc(ticketMessages.id));
-      return rows.map(rowToMessage);
+      return rows.map(toMessage);
     },
 
     /**
