@@ -94,7 +94,7 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
     await h.partnerStore.savePartner(partnerRecord({ id: 'acme', displayName: 'Acme Pay', kycMode: 'delegated', requireKycBeforeSend: false }));
     await h.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'acme', createdAt: now, updatedAt: now,
+      senderCountry: 'US', partnerId: 'acme', fullName: 'Alex Rivera', createdAt: now, updatedAt: now,
     });
 
     // Turn 1: the bot sends the Approve & Pay card despite the sender being unverified.
@@ -145,7 +145,7 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
     await h.partnerStore.savePartner(partnerRecord({ id: 'acme', displayName: 'Acme Pay', kycMode: 'delegated', requireKycBeforeSend: false }));
     await h.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'acme', createdAt: now, updatedAt: now,
+      senderCountry: 'US', partnerId: 'acme', fullName: 'Alex Rivera', createdAt: now, updatedAt: now,
     });
 
     // Legacy explicit-args create_transfer (no draft) with a WATCHLISTED recipient.
@@ -175,7 +175,7 @@ describe('WL1 default partner (no KYC gate configured)', () => {
     // Default partner (seeded, NO requireKycBeforeSend) + an UNVERIFIED customer.
     await h.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'default', createdAt: now, updatedAt: now,
+      senderCountry: 'US', partnerId: 'default', fullName: 'Alex Rivera', createdAt: now, updatedAt: now,
     });
 
     h.setScript([
@@ -201,7 +201,7 @@ describe('WL1 default partner (no KYC gate configured)', () => {
     await h.partnerStore.savePartner({ ...dflt, requireKycBeforeSend: true, updatedAt: now });
     await h.customerStore.saveCustomer({
       senderPhone: PHONE, firstSeenAt: now, kycStatus: 'not_started',
-      senderCountry: 'US', partnerId: 'default', createdAt: now, updatedAt: now,
+      senderCountry: 'US', partnerId: 'default', fullName: 'Alex Rivera', createdAt: now, updatedAt: now,
     });
 
     h.setScript([

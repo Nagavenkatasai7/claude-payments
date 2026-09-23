@@ -33,6 +33,7 @@ import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
+import { SENDER_NAME_REQUIRED_MESSAGE } from '@/lib/sender-identity';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
 
@@ -649,6 +650,15 @@ export async function POST(
         // nothing was claimed or consumed; the SAME link re-submits.
         return NextResponse.json(
           { ok: false, error: 'Bank details are required to complete this transfer.', reason: 'bank_details_required' },
+          { status: 400 },
+        );
+      }
+      if (result.error === 'sender_name_required') {
+        // Program-Fix 14: the sender's legal name is not on file, so this send
+        // cannot be screened yet. Nothing was minted, claimed or consumed; the
+        // SAME link works once the customer answers the name question in chat.
+        return NextResponse.json(
+          { ok: false, error: SENDER_NAME_REQUIRED_MESSAGE, reason: 'sender_name_required' },
           { status: 400 },
         );
       }

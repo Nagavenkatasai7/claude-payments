@@ -39,7 +39,7 @@ async function makeDraft(
   const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
   // Phase 3: these existing-behavior tests exercise the success path, so the
   // sender must be verified (upsertOnFirstInbound defaults to 'not_started').
-  await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+  await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
   return stores.draftStore.createDraft({
     senderPhone: PHONE,
     partnerId: 'default',
@@ -326,7 +326,7 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
   it('U7: a legacy non-USD draft missing feeSource/totalChargeSource falls back to the re-quote and mints', async () => {
     const stores = await buildStores();
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
 
     // Live GBP rates differ from the draft's stored quote — the re-quote must win
     // (never mix the draft's USD figures with a live source-side recomputation).
@@ -372,7 +372,7 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
     const stores = await buildStores();
     await seedPartner(stores.db, 'rail-partner-x');
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE,
       partnerId: 'default',
@@ -416,7 +416,7 @@ describe('finalizeDraftPayment', { retry: 0 }, () => {
     const stores = await buildStores();
     await seedPartner(stores.db, 'rail-partner-x');
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
 
     resetRateCacheForTests();
     vi.stubGlobal(
@@ -472,7 +472,7 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
   it('a B2B draft mints a b2b transfer with discriminators, business names, invoice link (never b2c)', async () => {
     const stores = await buildStores();
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE,
       partnerId: 'default',
@@ -523,7 +523,7 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
     const stores = await buildStores();
     await seedPartner(stores.db, 'acme');
     const { customer } = await stores.customerStore.upsertOnFirstInbound('acme', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE, partnerId: 'acme',
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
@@ -543,7 +543,7 @@ describe('finalizeDraftPayment — B2B (business-to-business) mint threads busin
     const stores = await buildStores();
     await seedPartner(stores.db, 'acme');
     const { customer } = await stores.customerStore.upsertOnFirstInbound('acme', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     // Simulate an in-flight legacy draft: written before fix 1, so no partnerId.
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE, partnerId: 'acme',
@@ -566,7 +566,7 @@ describe('finalizeDraftPayment — FX gate (Task 9): refuses BEFORE the claim, n
   // Ruling 7 pre-claim order: kyc → masked destination (fix 6) → FX (this) → cap (fix 10) → idem.claim.
   async function verifiedSender(stores: Awaited<ReturnType<typeof buildStores>>) {
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
   }
 
   it('a stored quote whose rate is older than the ceiling → fx_unavailable; no FX dial, draft kept, key unclaimed, nothing minted', async () => {
@@ -659,7 +659,7 @@ describe('finalizeDraftPayment — FX refused AFTER the claim (Task 9 review): m
   it('a legacy re-quote whose live rate becomes unavailable between the gate and the mint → fx_unavailable; the claimed id stays unminted and a retry mints THAT id', async () => {
     const stores = await buildStores();
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     const draftId = await stores.draftStore.createDraft({
       senderPhone: PHONE, partnerId: 'default',
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi' },
@@ -703,7 +703,7 @@ describe('fix 6 (ctx-01): the payout destination is settled BEFORE idem.claim �
     over: Record<string, unknown>,
   ): Promise<string> {
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     return stores.draftStore.createDraft({
       senderPhone: PHONE, partnerId: 'default',
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'bank', payoutDestination: '' },
@@ -813,7 +813,7 @@ describe('finalizeDraftPayment — cap from the ledger (Program fix 16)', { retr
   const staleQuote = () => ({ feeUsd: 0, fxRate: 85, amountInr: 17_000, fxFetchedAt: Date.now() - FX_MAX_AGE_MS - 1 });
   async function draftWith(stores: Awaited<ReturnType<typeof buildStores>>, over: { payoutDestination?: string; stale?: boolean }) {
     const { customer } = await stores.customerStore.upsertOnFirstInbound('default', PHONE);
-    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified' });
+    await stores.customerStore.saveCustomer({ ...customer, kycStatus: 'verified', fullName: 'Alex Rivera' });
     return stores.draftStore.createDraft({
       senderPhone: PHONE, partnerId: 'default',
       recipient: { name: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: over.payoutDestination ?? 'mom@upi' },
