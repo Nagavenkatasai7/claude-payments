@@ -1037,6 +1037,7 @@ export function createTransferRepo(
      * blocked and cancelled rows (a cancelled row moved no money — fix 16):
      *   bandCount7d     — amount_usd in [band·T, T) within 7 days before;
      *   subTSumCents30d — Σ amount_usd (cents) of rows < T within 30 days before;
+   *   subTCount30d    — how many rows < T within 30 days before;
      *   priorCount      — all-time earlier rows.
      * Anchored on the transfer, not the sweep clock, so a re-scan is deterministic.
      * Served by transfers_phone_created.
@@ -1047,7 +1048,7 @@ export function createTransferRepo(
       anchor: { at: Date; id: string },
       largeAmountUsd: number,
       band: number,
-    ): Promise<{ bandCount7d: number; subTSumCents30d: number; priorCount: number }> {
+    ): Promise<{ bandCount7d: number; subTSumCents30d: number; subTCount30d: number; priorCount: number }> {
       const d7 = new Date(anchor.at.getTime() - 7 * 86_400_000);
       const d30 = new Date(anchor.at.getTime() - 30 * 86_400_000);
       const lower = band * largeAmountUsd;
@@ -1055,6 +1056,7 @@ export function createTransferRepo(
         .select({
           bandCount7d: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${d7} and ${transfers.amountUsd} >= ${lower} and ${transfers.amountUsd} < ${largeAmountUsd})::int`,
           subTSumCents30d: sql<number>`coalesce(sum(round(${transfers.amountUsd} * 100)) filter (where ${transfers.createdAt} >= ${d30} and ${transfers.amountUsd} < ${largeAmountUsd}), 0)::bigint`,
+          subTCount30d: sql<number>`count(*) filter (where ${transfers.createdAt} >= ${d30} and ${transfers.amountUsd} < ${largeAmountUsd})::int`,
           priorCount: sql<number>`count(*)::int`,
         })
         .from(transfers)
@@ -1071,6 +1073,7 @@ export function createTransferRepo(
       return {
         bandCount7d: Number(r?.bandCount7d ?? 0),
         subTSumCents30d: Number(r?.subTSumCents30d ?? 0),
+        subTCount30d: Number(r?.subTCount30d ?? 0),
         priorCount: Number(r?.priorCount ?? 0),
       };
     },

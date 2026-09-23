@@ -37,7 +37,7 @@ import type { Partner, PartnerId, Transfer } from '@/lib/types';
 // Per row (blocked rows are skipped — the sanctions path owns them):
 //   R1 structuring and R2a first-ever send — ledger aggregates (tenant-keyed).
 //   R2b first send to a new destination — per-sender Redis set of destination
-//       blind indexes, aml:sd:<partner>:<senderBidx> (90-day TTL). When the set
+//       blind indexes, aml:sd:<partner>:<senderBidx> (90-day TTL, slid on every visit). When the set
 //       does not exist yet (first deploy, Redis flush, TTL lapse) it is SEEDED
 //       without alerting.
 //   R3 beneficiary clustering — per-partner ZSET aml:dst:<partner>:<destBidx>,
@@ -192,7 +192,15 @@ export async function amlSweep(db: Db, redis: AmlRedis, opts: AmlSweepOptions = 
         if (!partners.has(t.partnerId)) partners.set(t.partnerId, await partnerRepo.getPartner(t.partnerId));
         const rules = resolveCorridorRules(partners.get(t.partnerId) ?? null, t.sourceCountry);
         const cfg: AmlRuleConfig = { ...rules.aml, largeAmountUsd: rules.largeAmountUsd };
-        result.alerts += await evaluateRow(db, redis, t, cfg, opts.bidxKey, () => redisUp, markDown);
+        try {
+          result.alerts += await evaluateRow(db, redis, t, cfg, opts.bidxKey, () => redisUp, markDown);
+        } catch {
+          // A failing row (e.g. a DB error) stops THIS batch; the cursor still
+          // covers every completed row and the next poke retries from here.
+          // Only the id is logged — never the error text (it can echo values).
+          logWarn('aml.sweep', 'row evaluation failed — batch stopped', { transferId: t.id });
+          break;
+        }
       }
       result.scanned++;
       last = { at: new Date(t.createdAt), id: t.id };
@@ -242,6 +250,7 @@ async function evaluateRow(
   // ── Redis-backed rules (R2b, R3) ──
   let newDestination: boolean | null = null;
   let seed: { key: string; member: string } | null = null;
+  let sdKeyVisited: string | null = null;
   if (redisUp()) {
     let destB: string | null = null;
     let sendB: string | null = null;
@@ -259,6 +268,7 @@ async function evaluateRow(
     if (destB && sendB) {
       try {
         const sdKey = `aml:sd:${t.partnerId}:${sendB}`;
+        sdKeyVisited = sdKey;
         const existed = (await redis.exists(sdKey)) === 1;
         const known = existed ? (await redis.sismember(sdKey, destB)) === 1 : false;
         newDestination = existed ? !known : null; // missing set ⇒ seed without alerting
@@ -281,6 +291,7 @@ async function evaluateRow(
         markDown('rules');
         newDestination = null;
         seed = null;
+        sdKeyVisited = null;
       }
     }
   }
@@ -312,11 +323,14 @@ async function evaluateRow(
     if (raised) fresh++;
   }
 
-  // Remember the destination only after the alerts committed.
-  if (seed && redisUp()) {
+  // Remember the destination only after the alerts committed, and slide the
+  // set's TTL on EVERY visit: a sender who keeps using one beneficiary must not
+  // lose the set (a missing set is re-seeded silently, which would mask their
+  // next genuinely new beneficiary).
+  if (sdKeyVisited && redisUp()) {
     try {
-      await redis.sadd(seed.key, seed.member);
-      await redis.expire(seed.key, DEST_SET_TTL_S);
+      if (seed) await redis.sadd(seed.key, seed.member);
+      await redis.expire(sdKeyVisited, DEST_SET_TTL_S);
     } catch {
       markDown('seed');
     }

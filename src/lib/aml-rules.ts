@@ -41,6 +41,7 @@ export type AmlRuleConfig = AmlConfig & { largeAmountUsd: number };
 export interface SenderAmlStats {
   bandCount7d: number;      // sends in [band·T, T) within the 7 days before
   subTSumCents30d: number;  // Σ amount_usd (cents) of sends < T within the 30 days before
+  subTCount30d: number;     // how many sends < T within the 30 days before
   priorCount: number;       // all-time earlier sends
 }
 
@@ -74,7 +75,7 @@ export function structuring(prior: SenderAmlStats, amountUsd: number, cfg: AmlRu
     return { rule: 'structuring', window: '7d', count: bandAfter, sumUsd: sumAfter / 100 };
   }
   if (sumAfter >= aggCents) {
-    return { rule: 'structuring', window: '30d', count: prior.priorCount + 1, sumUsd: sumAfter / 100 };
+    return { rule: 'structuring', window: '30d', count: prior.subTCount30d + 1, sumUsd: sumAfter / 100 };
   }
   return null;
 }

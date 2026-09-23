@@ -16,7 +16,7 @@ const cfg = { ...AML_DEFAULTS, largeAmountUsd: T };
 
 /** Stats BEFORE the transfer under test (strictly earlier rows only). */
 function before(over: Partial<SenderAmlStats> = {}): SenderAmlStats {
-  return { bandCount7d: 0, subTSumCents30d: 0, priorCount: 0, ...over };
+  return { bandCount7d: 0, subTSumCents30d: 0, subTCount30d: 0, priorCount: 0, ...over };
 }
 
 describe('AML_DEFAULTS', () => {
@@ -48,8 +48,9 @@ describe('structuring (R1)', () => {
   });
 
   it('30-day aggregate of sub-threshold sends fires when it crosses aggUsd', () => {
-    const h = structuring(before({ subTSumCents30d: 280000 }), 200, cfg);
-    expect(h).toMatchObject({ rule: 'structuring', window: '30d', sumUsd: 3000 });
+    const h = structuring(before({ subTSumCents30d: 280000, subTCount30d: 7, priorCount: 40 }), 200, cfg);
+    // count is the 30-day sub-threshold count (the window the hit names), never the all-time count
+    expect(h).toMatchObject({ rule: 'structuring', window: '30d', sumUsd: 3000, count: 8 });
     expect(structuring(before({ subTSumCents30d: 279900 }), 100, cfg)).toBeNull();
   });
 

@@ -1,7 +1,28 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import { fakeAmlRedis, type FakeAmlRedis } from './helpers-aml-redis';
+// A switch that makes the outbox enqueue throw for one transfer id — the
+// "a DB error on one row" case (the real repo otherwise).
+const failBox = vi.hoisted(() => ({ failFor: null as string | null }));
+vi.mock('@/db/repos/outbox-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/outbox-repo')>();
+  return {
+    ...real,
+    createOutboxRepo: (dbx: Parameters<typeof real.createOutboxRepo>[0]) => {
+      const r = real.createOutboxRepo(dbx);
+      return {
+        ...r,
+        enqueue: async (...args: Parameters<typeof r.enqueue>) => {
+          const payload = args[1] as { message?: string };
+          if (failBox.failFor && String(payload.message ?? '').endsWith(failBox.failFor)) throw new Error('db down');
+          return r.enqueue(...args);
+        },
+      };
+    },
+  };
+});
+
 import { amlSweep, AML_CURSOR_KEY, AML_LOCK_KEY } from '@/lib/aml-sweep';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { settleOrHold } from '@/lib/settlement';
@@ -29,6 +50,7 @@ beforeEach(async () => {
   await seedPartner(db, 'p2');
   redis = fakeAmlRedis();
   now = new Date();
+  failBox.failFor = null;
 });
 
 async function seed(input: {
@@ -263,5 +285,35 @@ describe('amlSweep — Redis outage and PII', () => {
     expect(blobs).not.toMatch(/15558000/);
     expect(blobs).not.toContain('000011112222');
     expect(blobs).not.toContain('HDFC');
+  });
+});
+
+describe('amlSweep — resilience (review follow-ups)', () => {
+  it("the per-sender destination set's TTL slides on every visit, not only on a new destination", async () => {
+    await seed({ phone: '15551110001', amountUsd: 50, agoMs: 20 * MIN, dest: DEST_A });
+    await sweep();
+    const sdKey = [...redis.sets.keys()].find((k) => k.startsWith('aml:sd:default:'))!;
+    expect(redis.ttls.get(sdKey)).toBe(90 * 86_400);
+    redis.ttls.delete(sdKey);
+    await seed({ phone: '15551110001', amountUsd: 50, agoMs: 10 * MIN, dest: DEST_A }); // known destination
+    await sweep();
+    expect(redis.ttls.get(sdKey)).toBe(90 * 86_400);
+  });
+
+  it('a row that throws stops the batch but keeps progress: the cursor covers the completed rows, and the next poke resumes', async () => {
+    const a = await seed({ phone: '15551120001', amountUsd: 600, agoMs: 20 * MIN });
+    const b = await seed({ phone: '15551120002', amountUsd: 600, agoMs: 19 * MIN });
+    const c = await seed({ phone: '15551120003', amountUsd: 600, agoMs: 18 * MIN });
+    failBox.failFor = b;
+    const r1 = await sweep();
+    expect(r1.scanned).toBe(1);
+    expect(redis.strings.get(AML_CURSOR_KEY)).toMatch(new RegExp(`\\|${a}$`));
+    expect(redis.strings.has(AML_LOCK_KEY)).toBe(false);
+    failBox.failFor = null;
+    const r2 = await sweep();
+    expect(r2.scanned).toBe(2);
+    expect((await alerts('aml:first_transfer:')).map((r) => r.dedupe_key)).toEqual(
+      [a, b, c].map((id) => `aml:first_transfer:${id}`),
+    );
   });
 });

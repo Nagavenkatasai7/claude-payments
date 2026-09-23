@@ -35,7 +35,7 @@ describe('senderAmlStats', () => {
     await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 900, createdAt: ago(1000) });
 
     const s = await repo.senderAmlStats('default', PHONE, { at: ago(DAY), id: anchorId }, 1000, 0.8);
-    expect(s).toEqual({ bandCount7d: 2, subTSumCents30d: (900 + 850 + 900 + 200) * 100, priorCount: 6 });
+    expect(s).toEqual({ bandCount7d: 2, subTSumCents30d: (900 + 850 + 900 + 200) * 100, subTCount30d: 4, priorCount: 6 });
   });
 
   it('excludes blocked and cancelled rows and is tenant-keyed', async () => {
@@ -45,7 +45,7 @@ describe('senderAmlStats', () => {
     await seedLedgerSpend(db, { partnerId: 'p2', phone: PHONE, amountUsd: 900, createdAt: ago(2 * DAY) });
     const anchorId = await seedLedgerSpend(db, { partnerId: 'default', phone: PHONE, amountUsd: 900, createdAt: ago(DAY) });
     const s = await repo.senderAmlStats('default', PHONE, { at: ago(DAY), id: anchorId }, 1000, 0.8);
-    expect(s).toEqual({ bandCount7d: 0, subTSumCents30d: 0, priorCount: 0 });
+    expect(s).toEqual({ bandCount7d: 0, subTSumCents30d: 0, subTCount30d: 0, priorCount: 0 });
   });
 
   it('same-timestamp rows are ordered by id (strict tuple order)', async () => {
