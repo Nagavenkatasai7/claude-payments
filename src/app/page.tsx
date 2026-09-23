@@ -924,6 +924,18 @@ export default async function LandingPage({
             receives, or disburses customer money. Exchange rates are indicative and locked
             when you confirm a transfer.
           </p>
+          {/* Program-Fix 15 PR A: the legal drafts (Terms, Privacy, Legal). */}
+          <nav aria-label="Legal" className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-[13px] text-[#52607a]">
+            <a className="hover:text-[#0b1b3f]" href="/terms">
+              Terms
+            </a>
+            <a className="hover:text-[#0b1b3f]" href="/privacy">
+              Privacy
+            </a>
+            <a className="hover:text-[#0b1b3f]" href="/legal">
+              Licensing &amp; your rights
+            </a>
+          </nav>
         </div>
       </footer>
 
