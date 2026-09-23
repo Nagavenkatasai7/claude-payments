@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import {
   auditEvents,
   b2bInvoices,
@@ -327,6 +327,7 @@ export interface AuditEvent {
 
 export function createAuditRepo(db: DbOrTx) {
   return {
+    ...createAuditCaseQueries(db), // Program-Fix 43 (defined below, own region)
     async record(e: AuditEvent): Promise<void> {
       await db.insert(auditEvents).values({
         partnerId: e.partnerId ?? null,
@@ -425,6 +426,111 @@ export interface SendLimitChange {
   action: 'send_limits.set' | 'send_limits.clear';
   meta: Record<string, unknown>;
   at: string;
+}
+
+// ── Program-Fix 43: AML / case-surface audit reads (compliance-09, partial) ──
+// Kept in their own function (spread into createAuditRepo) so this region
+// never overlaps another change to createAuditRepo's body.
+
+/** One audit row as the AML review surfaces use it. */
+export interface AuditRow {
+  id: number;
+  partnerId: PartnerId | null;
+  actor: string;
+  actorType: string;
+  action: string;
+  subjectId: string | null;
+  meta: Record<string, unknown>;
+  at: string;
+}
+
+function toAuditRow(r: typeof auditEvents.$inferSelect): AuditRow {
+  return {
+    id: r.id,
+    partnerId: r.partnerId,
+    actor: r.actor,
+    actorType: r.actorType,
+    action: r.action,
+    subjectId: r.subjectId,
+    meta: (r.meta ?? {}) as Record<string, unknown>,
+    at: r.at.toISOString(),
+  };
+}
+
+/** `partnerId` null ⇒ no tenant filter (platform staff); a string pins the WHERE. */
+function tenantCond(partnerId: PartnerId | null | undefined) {
+  return partnerId ? eq(auditEvents.partnerId, partnerId) : undefined;
+}
+
+function createAuditCaseQueries(db: DbOrTx) {
+  return {
+    /** One audit row by id, pinned to `partnerId` when given (404-never-403 for the caller). */
+    async getById(partnerId: PartnerId | null, id: number): Promise<AuditRow | null> {
+      if (!Number.isSafeInteger(id) || id < 1) return null;
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.id, id), tenantCond(partnerId)))
+        .limit(1);
+      return rows[0] ? toAuditRow(rows[0]) : null;
+    },
+
+    /** Every audit row about one subject (a transfer id) in [from, to), tenant-keyed, oldest first. */
+    async listBySubject(partnerId: PartnerId | null, subjectId: string, from: Date, to: Date, limit = 200): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.subjectId, subjectId),
+          tenantCond(partnerId),
+          gte(auditEvents.at, from),
+          lt(auditEvents.at, to),
+        ))
+        .orderBy(asc(auditEvents.at), asc(auditEvents.id))
+        .limit(limit);
+      return rows.map(toAuditRow);
+    },
+
+    /** Rows of one action in [from, to), optionally tenant-pinned, newest first. */
+    async listByAction(
+      action: string,
+      opts: { partnerId?: PartnerId | null; from: Date; to: Date; limit: number },
+    ): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.action, action),
+          tenantCond(opts.partnerId),
+          gte(auditEvents.at, opts.from),
+          lt(auditEvents.at, opts.to),
+        ))
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(opts.limit);
+      return rows.map(toAuditRow);
+    },
+
+    /**
+     * Open AML review items: `aml.alert` rows with no `aml.reviewed` row
+     * naming them (meta.alertId) under the same tenant. Newest first, bounded.
+     */
+    async listOpenAmlAlerts(partnerId: PartnerId | null, limit = 100): Promise<AuditRow[]> {
+      const rows = await db
+        .select()
+        .from(auditEvents)
+        .where(and(
+          eq(auditEvents.action, 'aml.alert'),
+          tenantCond(partnerId),
+          sql`NOT EXISTS (SELECT 1 FROM audit_events r
+                WHERE r.action = 'aml.reviewed'
+                  AND r.partner_id IS NOT DISTINCT FROM ${auditEvents.partnerId}
+                  AND r.meta->>'alertId' = ${auditEvents.id}::text)`,
+        ))
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(limit);
+      return rows.map(toAuditRow);
+    },
+  };
 }
 
 // ── B2B mock invoices (the "ERP" stand-in for the test case) ─────────────────

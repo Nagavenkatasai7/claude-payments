@@ -64,3 +64,35 @@ describe('resolveCorridorRules — override merge', () => {
     expect(r.kycCapHintUsd).toBe(3000);
   });
 });
+
+// Program-Fix 43: the behavioural AML thresholds + the (PR B) hold switch
+// live INSIDE GLOBAL_DEFAULTS, so the dormant toEqual(GLOBAL_DEFAULTS) pins
+// above stay green; a corridor override merges field by field and untrusted
+// jsonb values fall back to the default.
+describe('resolveCorridorRules — AML (Program-Fix 43)', () => {
+  it('GLOBAL_DEFAULTS carries the AML defaults and amlHolds OFF', () => {
+    expect(GLOBAL_DEFAULTS.aml).toEqual({ band: 0.8, count: 3, aggUsd: 3000, firstUsd: 500, senders: 3 });
+    expect(GLOBAL_DEFAULTS.amlHolds).toBe(false);
+  });
+  it('fast path still returns the shared GLOBAL_DEFAULTS object', () => {
+    expect(resolveCorridorRules(null, 'US')).toBe(GLOBAL_DEFAULTS);
+  });
+  it('a corridor override without aml keeps the default aml + amlHolds false', () => {
+    const r = resolveCorridorRules(partner({ GB: { largeAmountUsd: 5000 } }), 'GB');
+    expect(r.aml).toEqual(GLOBAL_DEFAULTS.aml);
+    expect(r.amlHolds).toBe(false);
+  });
+  it('aml overrides merge per field', () => {
+    const r = resolveCorridorRules(partner({ GB: { aml: { count: 5, firstUsd: 250 } } }), 'GB');
+    expect(r.aml).toEqual({ band: 0.8, count: 5, aggUsd: 3000, firstUsd: 250, senders: 3 });
+  });
+  it('untrusted aml values (non-number, negative, non-finite, band outside (0,1]) fall back to defaults', () => {
+    const bad = { band: 7, count: -1, aggUsd: 'lots', firstUsd: Number.POSITIVE_INFINITY, senders: null } as unknown;
+    const r = resolveCorridorRules(partner({ GB: { aml: bad as never } }), 'GB');
+    expect(r.aml).toEqual(GLOBAL_DEFAULTS.aml);
+  });
+  it('amlHolds is true only for a literal true', () => {
+    expect(resolveCorridorRules(partner({ GB: { amlHolds: true } }), 'GB').amlHolds).toBe(true);
+    expect(resolveCorridorRules(partner({ GB: { amlHolds: 'yes' as never } }), 'GB').amlHolds).toBe(false);
+  });
+});
