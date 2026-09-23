@@ -6,7 +6,7 @@ import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { ensureSeedAdmin } from '@/lib/seed';
 import { hashPassword, needsRehash, verifyPasswordOrDummy } from '@/lib/password';
-import { SESSION_COOKIE } from '@/lib/session-cookie';
+import { clearStaffSessionCookies, setStaffSessionCookie, staffSessionTokens } from '@/lib/session-cookie';
 import { clientIpFrom, isIpRateLimited } from '@/lib/ip-rate-limit';
 import { getStaffLoginGuard, isSeedAdminRecord } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
@@ -122,14 +122,15 @@ export async function login(
   // Record an "active" signal for the Team page (re-reads fresh; won't clobber a
   // concurrent suspend/edit — see auth-store.recordLogin).
   await getAuthStore().recordLogin(username);
+  // Program-Fix 45 P1: this sign-in replaces the browser's session, so the
+  // sessions behind the cookies it presented (either name) are revoked, not
+  // left alive in Redis after their cookie is overwritten.
+  const jar = await cookies();
+  for (const { token: prior } of staffSessionTokens(jar)) await getAuthStore().deleteSession(prior);
   const token = await getAuthStore().createSession(username);
-  (await cookies()).set(SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 7 * 24 * 60 * 60,
-  });
+  // The __Host- cookie (12 h, matching the session's absolute window); the
+  // legacy cookie is expired in the same response.
+  setStaffSessionCookie(jar, token);
   // Best-effort and time-bounded (staff-auth-audit never throws); the
   // redirect below stays outside any try/catch.
   await audit.record({
@@ -145,23 +146,26 @@ export async function login(
 
 export async function logout(): Promise<void> {
   const jar = await cookies();
-  const token = jar.get(SESSION_COOKIE)?.value;
-  if (token) {
-    const store = getAuthStore();
-    const username = await store.getSessionUser(token);
+  // Program-Fix 45 P1: revoke the session behind EITHER cookie (the __Host-
+  // one and a legacy one may both be present), then expire both cookies with
+  // Path=/ and Secure, which a browser needs to drop a __Host- cookie.
+  const store = getAuthStore();
+  let username: string | null = null;
+  for (const { token } of staffSessionTokens(jar)) {
+    username ??= await store.getSessionUser(token);
     await store.deleteSession(token);
-    if (username) {
-      const staff = await store.getStaff(username);
-      await getStaffAuthAudit().record({
-        action: 'auth.logout',
-        actorType: 'staff',
-        actor: username,
-        subjectId: username,
-        partnerId: staff?.partnerId,
-        ip: clientIpFrom(await headers()),
-      });
-    }
   }
-  jar.delete(SESSION_COOKIE);
+  if (username) {
+    const staff = await store.getStaff(username);
+    await getStaffAuthAudit().record({
+      action: 'auth.logout',
+      actorType: 'staff',
+      actor: username,
+      subjectId: username,
+      partnerId: staff?.partnerId,
+      ip: clientIpFrom(await headers()),
+    });
+  }
+  clearStaffSessionCookies(jar);
   redirect('/login');
 }

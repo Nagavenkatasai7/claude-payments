@@ -211,7 +211,7 @@ export async function createPartnerStaffAction(
     permissions:
       role === 'support'
         ? { ...SUPPORT_DEFAULT_PERMISSIONS }
-        : { canCancel: false, canResend: false, canAssign: false },
+        : { canCancel: false, canResend: false, canAssign: false, canRevealPii: false },
     passwordHash: await hashPassword(password),
     createdAt: new Date().toISOString(),
     partnerId,                  // taken from URL, not form

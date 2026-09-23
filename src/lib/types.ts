@@ -248,6 +248,12 @@ export interface StaffPermissions {
   canCancel: boolean;
   canResend: boolean;
   canAssign: boolean;
+  /**
+   * Program-Fix 45 P1: may reveal a full payout destination (the audited
+   * decrypt). OPTIONAL because records saved before it lack the key; absent
+   * means no. Admins keep it through hasPermission's admin bypass.
+   */
+  canRevealPii?: boolean;
 }
 
 // Support staff get no money permissions — hasPermission() must resolve false
@@ -256,6 +262,7 @@ export const SUPPORT_DEFAULT_PERMISSIONS: StaffPermissions = {
   canCancel: false,
   canResend: false,
   canAssign: false,
+  canRevealPii: false,
 };
 
 export interface Staff {
