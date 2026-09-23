@@ -336,6 +336,97 @@ describe('drainOnce — email.send (partner-lead notification)', () => {
   });
 });
 
+describe('drainOnce — email.send reports skips honestly (Program-Fix 39)', () => {
+  type AuditRow = { action: string; actor: string; actor_type: string; subject_id: string | null; meta: Record<string, unknown> };
+  async function audits(): Promise<AuditRow[]> {
+    const r = (await db.execute(
+      sql`SELECT action, actor, actor_type, subject_id, meta FROM audit_events WHERE action LIKE 'email.%' ORDER BY id`,
+    )) as unknown as { rows: AuditRow[] };
+    return r.rows;
+  }
+  async function alertKeys(): Promise<string[]> {
+    const r = (await db.execute(
+      sql`SELECT dedupe_key FROM outbox WHERE kind = 'ops.alert' ORDER BY id`,
+    )) as unknown as { rows: Array<{ dedupe_key: string }> };
+    return r.rows.map((x) => x.dedupe_key);
+  }
+  async function statusOf(key: string): Promise<string> {
+    const r = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = ${key}`)) as unknown as {
+      rows: Array<{ status: string }>;
+    };
+    return r.rows[0].status;
+  }
+
+  it('skipped send writes one email.skipped audit row and one alert per day', async () => {
+    try {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2030-01-02T10:00:00Z'));
+      const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
+      await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 'New partner request: A', text: 't' }, { dedupeKey: 'preq:preq_aaa' });
+      await outbox.enqueue('email.send', { to: ['lead@example.test'], subject: 'Complete', text: 't' }, { dedupeKey: 'partner_app_invite:preq_aaa' });
+      const r = await drainOnce(d, 'w1');
+      expect(r.processed).toBe(2);
+      // No retry storm: both rows end done.
+      expect(await statusOf('preq:preq_aaa')).toBe('done');
+      expect(await statusOf('partner_app_invite:preq_aaa')).toBe('done');
+
+      const rows = await audits();
+      expect(rows).toHaveLength(2);
+      for (const a of rows) {
+        expect(a).toMatchObject({ action: 'email.skipped', actor: 'outbox', actor_type: 'system', subject_id: 'preq_aaa' });
+        expect(a.meta.reason).toBe('unconfigured');
+        expect(typeof a.meta.outboxId).toBe('number');
+        // Never an address in the audit meta.
+        expect(JSON.stringify(a.meta)).not.toContain('@');
+      }
+      expect(rows.map((a) => a.meta.dedupePrefix)).toEqual(['preq', 'partner_app_invite']);
+      // ONE alert for the day, however many sends skipped.
+      expect(await alertKeys()).toEqual(['email-unconfigured:2030-01-02']);
+
+      // Next UTC day: one more alert.
+      vi.setSystemTime(new Date('2030-01-03T00:05:00Z'));
+      await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_bbb' });
+      await drainOnce(d, 'w1');
+      expect((await alertKeys()).filter((k) => k.startsWith('email-unconfigured:'))).toEqual([
+        'email-unconfigured:2030-01-02',
+        'email-unconfigured:2030-01-03',
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skipped_no_recipients writes an audit row with reason 'no_recipients' and raises NO alert", async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_no_recipients' };
+    await outbox.enqueue('email.send', { to: [], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_ccc' });
+    await drainOnce(d, 'w1');
+    expect(await statusOf('preq:preq_ccc')).toBe('done');
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].meta).toMatchObject({ reason: 'no_recipients', dedupePrefix: 'preq' });
+    expect(await alertKeys()).toEqual([]);
+  });
+
+  it('resend key → same preq subject', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
+    await outbox.enqueue('email.send', { to: ['lead@example.test'], subject: 's', text: 't' }, { dedupeKey: 'partner_app_invite:preq_ddd:r0123456789ab' });
+    await drainOnce(d, 'w1');
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBe('preq_ddd');
+    expect(rows[0].meta.dedupePrefix).toBe('partner_app_invite');
+  });
+
+  it("a 'sent' outcome and a void-returning sender both write NO audit row and NO alert", async () => {
+    await outbox.enqueue('email.send', { to: ['x@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_eee' });
+    await drainOnce({ ...deps(), sendEmail: async () => 'sent' }, 'w1');
+    await outbox.enqueue('email.send', { to: ['x@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:preq_fff' });
+    await drainOnce({ ...deps(), sendEmail: async () => {} }, 'w1');
+    expect(await audits()).toEqual([]);
+    expect(await alertKeys()).toEqual([]);
+  });
+});
+
 describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11 / F49·F54·F58)', () => {
   const ACME_WA = { phoneNumberId: 'pn_acme', token: 'tok_acme' };
   async function byoWhatsApp(partnerId: string, whatsapp: Record<string, string>) {

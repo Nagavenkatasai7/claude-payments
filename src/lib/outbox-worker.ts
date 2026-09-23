@@ -17,7 +17,8 @@ import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { railSecrets } from '@/lib/partner-integrations';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
-import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
+import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
+import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
@@ -89,10 +90,11 @@ export interface WorkerDeps {
   fundingProvider?: FundingProvider;
   /**
    * Email sender for the 'email.send' effect (partner-lead notifications).
-   * Optional — defaults to the real SMTP sender (which itself no-ops when SMTP
-   * creds are unset); tests inject a mock to assert recipients.
+   * Optional — defaults to the real SMTP sender (which reports a skip when SMTP
+   * creds are unset); tests inject a mock to assert recipients. A `void` result
+   * counts as 'sent' (Program-Fix 39 widened this from Promise<void>).
    */
-  sendEmail?: (msg: EmailMessage) => Promise<void>;
+  sendEmail?: (msg: EmailMessage) => Promise<EmailOutcome | void>;
   /**
    * The staff roster for the ticket load-balancer (ticket.triage auto-assign).
    * DI'd so PGlite tests inject a roster without touching the Redis auth store;
@@ -676,19 +678,43 @@ async function handle(
     }
 
     // ── Transactional email (partner-lead notifications) ────────────────────
-    // Durable: the real sender no-ops when SMTP is unconfigured (no retry storm);
-    // when configured, a send failure throws and rides the backoff/dead-letter.
-    // `sealed` (optional) maps {{placeholders}} in text/html to field-crypto
-    // blobs — the partner-application invite link (fix 11 / F66). Opened at SEND
-    // time only; the row stays ciphertext. A missing blob throws naming the
-    // placeholder, never a value.
+    // Durable: when configured, a send failure throws and rides the
+    // backoff/dead-letter. `sealed` (optional) maps {{placeholders}} in
+    // text/html to field-crypto blobs — the partner-application invite link
+    // (fix 11 / F66). Opened at SEND time only; the row stays ciphertext. A
+    // missing blob throws naming the placeholder, never a value.
+    //
+    // Program-Fix 39 (domain-11): a SKIP is recorded, never passed off as a send.
+    // The row still ends done (no retry storm while SMTP is intentionally unset),
+    // but it writes an `email.skipped` audit row (prefix + outbox id, never an
+    // address) and, for 'skipped_unconfigured' only, ONE ops alert per UTC day.
+    // The alert is an ops.alert (WhatsApp), never email, so it cannot loop.
     case 'email.send': {
-      await (deps.sendEmail ?? sendEmailDefault)({
+      const outcome: EmailOutcome | void = await (deps.sendEmail ?? sendEmailDefault)({
         to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
         subject: str(p.subject),
         text: renderSealedText(str(p.text), p.sealed),
         ...(typeof p.html === 'string' ? { html: renderSealedText(p.html, p.sealed) } : {}),
       });
+      if (outcome === 'skipped_unconfigured' || outcome === 'skipped_no_recipients') {
+        const { prefix, subjectId } = parseEmailDedupeKey(row.dedupeKey);
+        const reason = outcome === 'skipped_unconfigured' ? 'unconfigured' : 'no_recipients';
+        logWarn('email.skipped', outcome, { id: row.id, kind: row.kind, dedupePrefix: prefix });
+        await createAuditRepo(deps.db).record({
+          actorType: 'system',
+          actor: 'outbox',
+          action: 'email.skipped',
+          subjectId: subjectId ?? undefined,
+          meta: { reason, dedupePrefix: prefix, outboxId: row.id },
+        });
+        if (outcome === 'skipped_unconfigured') {
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            { message: 'Email is not configured: partner lead or invite emails are being skipped. See /admin-dashboard/ops.' },
+            { dedupeKey: `email-unconfigured:${new Date().toISOString().slice(0, 10)}` },
+          );
+        }
+      }
       return;
     }
 
