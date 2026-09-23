@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { argon2id, argon2Verify } from 'hash-wasm';
 import { env } from './env';
+import { logWarn } from './log';
 
 // Argon2id parameters — OWASP ASVS v5 / NIST 800-63B AAL2 floor.
 // Store the full PHC string; verify back-compat with the legacy scrypt path.
@@ -89,7 +90,16 @@ export async function verifyPasswordOrDummy(
   stored: string | null | undefined,
 ): Promise<boolean> {
   if (!stored) {
-    await verifyPassword(plain, await dummyHash());
+    try {
+      await verifyPassword(plain, await dummyHash());
+    } catch (err) {
+      // Fail CLOSED. A broken WASM build (hashPassword rejecting) must not turn
+      // a missing account into a 500 while a real account gets the generic
+      // failure — that difference is itself an enumeration signal. The memo is
+      // already cleared by dummyHash()'s catch, so the next call retries.
+      // Fields never carry the plaintext or the stored hash.
+      logWarn('password.dummy_hash_failed', err, { path: 'dummy' });
+    }
     return false;
   }
   return verifyPassword(plain, stored);

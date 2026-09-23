@@ -50,6 +50,40 @@ describe('verifyPasswordOrDummy (fix 21, no timing oracle)', () => {
     expect(await verifyPasswordOrDummy('s3cret!', legacy)).toBe(true);
     expect(await verifyPasswordOrDummy('nope', legacy)).toBe(false);
   });
+
+  // Reviewer should-fix: if the dummy hash itself cannot be computed (broken
+  // WASM), an unknown account must still get `false` — not a thrown 500 that a
+  // known account (generic failure string) would never produce. The failure
+  // must not poison the memo either. A fresh module instance is needed because
+  // the dummy hash above is already memoized for this file's instance.
+  it('fails closed when the dummy hash cannot be computed: false, a scrubbed warn line, and the failure is not cached', async () => {
+    vi.resetModules();
+    const fresh = await import('@/lib/password');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      hw.argon2id.mockClear();
+      hw.argon2Verify.mockClear();
+      hw.argon2id.mockRejectedValueOnce(new Error('wasm broken'));
+
+      await expect(fresh.verifyPasswordOrDummy('pw-fail-plain', undefined)).resolves.toBe(false);
+      expect(hw.argon2id).toHaveBeenCalledTimes(1);
+      expect(hw.argon2Verify).not.toHaveBeenCalled();
+
+      const lines = warn.mock.calls.map((c) => JSON.parse(String(c[0])) as Record<string, unknown>);
+      const line = lines.find((l) => l.scope === 'password.dummy_hash_failed');
+      expect(line).toBeDefined();
+      expect(line?.level).toBe('warn');
+      expect(String(line?.msg)).toContain('wasm broken');
+      expect(JSON.stringify(line)).not.toContain('pw-fail-plain');
+
+      // Not cached: the next missing-account check re-hashes and pays the verify.
+      await expect(fresh.verifyPasswordOrDummy('pw-after', null)).resolves.toBe(false);
+      expect(hw.argon2id).toHaveBeenCalledTimes(2);
+      expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('password', () => {
