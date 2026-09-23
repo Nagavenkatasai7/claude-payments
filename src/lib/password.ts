@@ -58,8 +58,8 @@ function splitPepperId(stored: string): { id: string | null; phc: string } | nul
 
 /**
  * The pepper for an id: p0 → PASSWORD_PEPPER; any other id → its entry in
- * PASSWORD_PEPPER_PREVIOUS (parsed per call into a Map; a `p0` entry is
- * ignored so it can never shadow PASSWORD_PEPPER). Undefined when unknown or
+ * PASSWORD_PEPPER_PREVIOUS (parsed per call into a Map; a `p0` entry makes
+ * the env malformed, so it can never shadow PASSWORD_PEPPER). Undefined when unknown or
  * when the optional env is malformed (logged without any value).
  */
 function pepperForId(id: string): string | undefined {
@@ -71,11 +71,16 @@ function pepperForId(id: string): string | undefined {
     const colon = trimmed.indexOf(':');
     const entryId = colon > 0 ? trimmed.slice(0, colon).trim() : '';
     const pepper = colon > 0 ? trimmed.slice(colon + 1).trim() : '';
-    if (!PEPPER_ID_PATTERN.test(entryId) || pepper === '' || peppers.has(entryId)) {
+    if (
+      !PEPPER_ID_PATTERN.test(entryId) ||
+      entryId === PEPPER_ID_CURRENT || // p0 is PASSWORD_PEPPER; refused, as the field ring refuses k0
+      pepper === '' ||
+      peppers.has(entryId)
+    ) {
       logWarn('password.pepper_previous_malformed', 'PASSWORD_PEPPER_PREVIOUS is malformed');
       return undefined;
     }
-    if (entryId !== PEPPER_ID_CURRENT) peppers.set(entryId, pepper);
+    peppers.set(entryId, pepper);
   }
   return peppers.get(id);
 }

@@ -73,6 +73,13 @@ describe('$pv=<id>$ reader', () => {
     expect(await verifyPassword('pw-3', `$pv=p0$${underB}`)).toBe(false);
   });
 
+  it('a p0 entry makes PASSWORD_PEPPER_PREVIOUS malformed (as the field ring refuses k0): p1 is not served', async () => {
+    const underB = await hashUnder(PEPPER_B, 'pw-6');
+    vi.stubEnv('PASSWORD_PEPPER', PEPPER_A);
+    vi.stubEnv('PASSWORD_PEPPER_PREVIOUS', `p0:${PEPPER_A},p1:${PEPPER_B}`);
+    expect(await verifyPassword('pw-6', `$pv=p1$${underB}`)).toBe(false);
+  });
+
   it('never lets $pv= wrap the unpeppered legacy scrypt form (no downgrade)', async () => {
     const salt = randomBytes(16).toString('hex');
     const legacy = `${salt}:${scryptSync('pw-4', salt, 64).toString('hex')}`;
