@@ -149,7 +149,9 @@ export default async function CompliancePage() {
   // PLATFORM staff only, so partner-scoped admins don't see a Release that
   // would refuse. Owner decision 2026-09-16.
   const partnersById = new Map(partners.map((p) => [p.id, p]));
-  const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId));
+  // Program-Fix 43 follow-up: a sanctions / name-screening hold is PLATFORM-only
+  // in every KYC mode — canReleaseHeld reads the transfer's hold reasons.
+  const canRelease = (t: Transfer) => canReleaseHeld(scoped.scope, partnersById.get(t.partnerId), t);
   const corridorRows = partners.flatMap((p) =>
     (p.countries ?? [])
       .filter((c) => c !== 'IN')
@@ -206,10 +208,26 @@ export default async function CompliancePage() {
                   <div key="actions">
                     <div className="flex flex-wrap gap-2">
                       {canRelease(t) ? (
-                        <form action={releaseTransferAction} className="flex items-center gap-1">
+                        <form action={releaseTransferAction} className="flex flex-col gap-1">
                           <input type="hidden" name="id" value={t.id} />
-                          <Input name="note" maxLength={500} placeholder="Note (optional)" aria-label="Note (optional)" className="h-8 w-36" />
-                          <Button type="submit" size="sm">Release</Button>
+                          <div className="flex items-center gap-1">
+                            {/* Program-Fix 43 follow-up: a release reason is
+                                REQUIRED (the action refuses a blank one) and
+                                is written to the audit log with the actor. */}
+                            <Input
+                              name="note"
+                              required
+                              maxLength={500}
+                              placeholder="Reason (required)"
+                              aria-label="Release reason (required)"
+                              aria-describedby={`release-help-${t.id}`}
+                              className="h-8 w-36"
+                            />
+                            <Button type="submit" size="sm">Release</Button>
+                          </div>
+                          <span id={`release-help-${t.id}`} className="text-xs text-muted-foreground">
+                            Why is this hold being released? Recorded in the audit log.
+                          </span>
                         </form>
                       ) : (
                         <Button

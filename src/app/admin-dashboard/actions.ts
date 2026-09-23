@@ -120,8 +120,11 @@ export async function resendPaymentLinkAction(
  *   (b) getScopedTransfer — the transfer must be in the caller's scope (H2 fix:
  *       a partner-admin can no longer release another tenant's held transfer)
  *   (c) canReleaseHeld — a hold flagged by SmartRemit's own screening (owning
- *       partner kycMode 'ours') needs PLATFORM staff (owner decision 2026-09-16)
- *   (d) releaseTransfer re-verifies status === 'in_review'
+ *       partner kycMode 'ours') needs PLATFORM staff (owner decision 2026-09-16),
+ *       and a sanctions / name-screening hold is PLATFORM-only in every KYC
+ *       mode (Program-Fix 43 follow-up)
+ *   (d) a non-blank release reason (the bounded `note`) is REQUIRED
+ *   (e) releaseTransfer re-verifies status === 'in_review'
  */
 export async function releaseTransferAction(formData: FormData): Promise<void> {
   const staff = await requireAdmin();
@@ -130,11 +133,21 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
   // Owner decision (2026-09-16): a hold SmartRemit's own screening flagged
   // (kycMode 'ours') is released by PLATFORM staff only — refused BEFORE any
   // mutation, with the same generic permission copy as the other actions.
+  // Program-Fix 43 follow-up: a hold raised by sanctions / name screening is
+  // PLATFORM-only even for a 'delegated' partner (canReleaseHeld keys on
+  // isScreeningHold over the transfer's stored reasons).
   const owner = await getPartnerStore().getPartner(transfer.partnerId);
-  if (!canReleaseHeld(scopeOf(staff), owner)) {
+  if (!canReleaseHeld(scopeOf(staff), owner, transfer)) {
     throw new Error('You do not have permission to perform this action.');
   }
-  await releaseTransfer(store, getDb(), id, staffAudit(staff, formData));
+  // Program-Fix 43 follow-up: every release records WHO (the session actor)
+  // and WHY — the bounded note is MANDATORY here (blank after bounding ⇒
+  // refused before any mutation, platform staff included).
+  const audit = staffAudit(staff, formData);
+  if (audit.reason === null) {
+    throw new Error('A release reason is required. Add a note explaining why this hold is being released.');
+  }
+  await releaseTransfer(store, getDb(), id, audit);
   revalidatePath('/admin-dashboard', 'layout');
 }
 

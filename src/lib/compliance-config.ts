@@ -11,6 +11,39 @@ export const WATCHLIST = ['john doe', 'jane roe', 'test blocked'];
 export const LARGE_AMOUNT_USD = 1000;
 export const VELOCITY_LIMIT = 5; // raised from 3: 1-4 sends/day are normal behaviour
 
+// ── Screening-derived hold reasons (Program-Fix 43 follow-up) ──────────────
+// The exact complianceReasons strings sanctions / name screening writes
+// (screenTransfer in compliance.ts emits ONLY these constants). Generic on
+// purpose: reasons reach staff views and must never name a list entry, the
+// screened person, or the word "sanctions". Defined in this leaf module (no
+// provider / crypto imports) so dashboard-ops can key on them cheaply;
+// compliance.ts re-exports them. Changing a string here changes what new rows
+// carry, so a rename must keep the old string in SCREENING_REASONS.
+export const POSSIBLE_MATCH_REASON = 'Name screening needs manual review.';
+export const LIST_UNAVAILABLE_REASON = 'Screening list unavailable; needs manual review.';
+export const RECIPIENT_WATCHLIST_REASON = 'Recipient is on the compliance watchlist.';
+export const SENDER_WATCHLIST_REASON = 'Sender is on the compliance watchlist.';
+export const SCREENING_REASONS: readonly string[] = [
+  POSSIBLE_MATCH_REASON,
+  LIST_UNAVAILABLE_REASON,
+  RECIPIENT_WATCHLIST_REASON,
+  SENDER_WATCHLIST_REASON,
+];
+
+/**
+ * True when ANY of the hold's reasons came from sanctions / name screening.
+ * Such a hold is released by PLATFORM staff only (canReleaseHeld), whatever
+ * the owning partner's KYC mode: KYC may be delegated, sanctions may not.
+ * Fails CLOSED: a hold with no (or a malformed) reasons list has unknown
+ * provenance and counts as a screening hold. Every path that holds a transfer
+ * (screening, EDD, the optional AML hold) appends a non-empty reason.
+ */
+export function isScreeningHold(t: { complianceReasons?: readonly string[] | null }): boolean {
+  const reasons = t.complianceReasons;
+  if (!Array.isArray(reasons) || reasons.length === 0) return true;
+  return reasons.some((r) => SCREENING_REASONS.includes(r));
+}
+
 export interface ResolvedCorridorRules {
   baseWatchlist: string[];     // the screener's base list (today's WATCHLIST)
   watchlistExtra: string[];    // corridor-specific additions (possibly empty)
