@@ -20,6 +20,7 @@ Locked decisions: country/currency/calling code(s); payout fields + validation (
 | File | Change |
 |---|---|
 | `src/lib/types.ts` | `CountryCode`, `CurrencyCode`, `DEFAULT_CURRENCY_FOR_COUNTRY` |
+| `src/lib/destination-country.ts` | DERIVED from `DEFAULT_CURRENCY_FOR_COUNTRY` (Program-Fix 33) — verify only: `tests/destination-country.test.ts` must show the new code in `SUPPORTED_DESTINATIONS`; the chat tools, partner API and pay route read it, never a hand-typed set |
 | `src/lib/rate.ts` | `FALLBACK_FX_RATES.<CCY>` |
 | `src/lib/partner-currency.ts` | `CALLING_CODE_TO_COUNTRY`, `countryForCurrency` |
 | `src/lib/payout-format.ts` | `BANK_FIELDS_BY_COUNTRY.<CC>` + validation |
@@ -27,6 +28,8 @@ Locked decisions: country/currency/calling code(s); payout fields + validation (
 | `src/lib/prompt.ts`, `src/lib/tools.ts` | corridor lists, the count, `capture_corridor_request` description, unsupported-destination examples |
 | `src/lib/compliance-config.ts` | default per-corridor rule |
 | `src/app/page.tsx`, `src/app/partners*` | public corridor list + partner-with-us allow-list |
+| `src/app/page.tsx` `COUNTRIES` + `public/flags/<cc>.svg` | the flag pill on the landing page (`tests/landing-corridors.test.ts` fails without the SVG); the "N corridors" count follows `landing/corridors.ts` automatically |
+| `src/lib/tools.ts` `createScheduleTool` | schedules are India-only (Program-Fix 33, owner decision 1) until `schedules.destination_country` exists — a new corridor does NOT get recurring transfers; say so in the spec |
 | `src/app/admin-dashboard/corridors/` | platform corridor view |
 | `src/db/schema.ts` | only if a column is needed (then the migration rules apply) |
 

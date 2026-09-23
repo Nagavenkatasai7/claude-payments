@@ -35,6 +35,10 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // No `x-powered-by: Next.js` on any response: it only advertises the stack
+  // (node_modules/next/dist/docs/01-app/03-api-reference/05-config/
+  // 01-next-config-js/poweredByHeader.md).
+  poweredByHeader: false,
   // nodemailer is a Node CommonJS lib with dynamic/optional requires — keep it
   // external so Turbopack doesn't bundle it into the server build (it's only ever
   // imported server-side, in src/lib/email.ts → the /api/worker route).

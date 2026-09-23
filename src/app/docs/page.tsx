@@ -1,8 +1,11 @@
 import Link from 'next/link';
 import { SMARTREMIT_ICONS } from '../brand-icons';
+import { SHARE_IMAGE } from '../landing/share-image';
+import { SkipLink } from '@/components/skip-link';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { destinationListText } from '@/lib/destination-country';
 
 // /docs — the public partner integration hub (Stage 5, Tailwind-native).
 // Every endpoint, header, and payload shape on this page mirrors the actual
@@ -13,6 +16,8 @@ export const metadata = {
   title: 'SmartRemit — Partner API documentation',
   description:
     'Integrate the SmartRemit white-label remittance infrastructure: REST API, settlement webhooks, WhatsApp channel.',
+  // /docs is SmartRemit-owned, so its link preview may carry the share image.
+  openGraph: { images: [SHARE_IMAGE] },
   icons: SMARTREMIT_ICONS,
 };
 
@@ -42,12 +47,15 @@ function Endpoint({ method, path, desc }: { method: string; path: string; desc: 
 export default function DocsPage() {
   return (
     <div className="min-h-screen bg-background font-sans text-foreground antialiased">
+      <SkipLink />
       <header className="border-b border-border bg-card">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-6 py-4">
           <Link href="/" className="text-lg font-semibold tracking-tight">
             SmartRemit <span className="text-muted-foreground font-normal">/ docs</span>
           </Link>
-          <nav className="flex items-center gap-4 text-sm">
+          {/* Five links beside the brand overflow a phone (ui-05): below sm
+              only the brand shows; every section is still in the page. */}
+          <nav aria-label="Sections" className="hidden items-center gap-4 text-sm sm:flex">
             <a href="#api" className="text-muted-foreground hover:text-foreground">API</a>
             <a href="#rates" className="text-muted-foreground hover:text-foreground">Rates</a>
             <a href="#settlement" className="text-muted-foreground hover:text-foreground">Settlement</a>
@@ -57,7 +65,7 @@ export default function DocsPage() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-4xl space-y-10 px-6 py-10">
+      <main id="main" className="mx-auto max-w-4xl space-y-10 px-6 py-10">
         <section>
           <h1 className="text-3xl font-semibold tracking-tight">Partner integration guide</h1>
           <p className="mt-3 max-w-2xl text-muted-foreground">
@@ -113,10 +121,10 @@ curl -X POST $BASE/transactions \\
   }'`}</Code>
           <p className="text-sm text-muted-foreground">
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
-            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code> or <code>b2binvoice:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account.
+            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code> or <code>sched:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
           </p>
           <p className="text-sm text-muted-foreground">
-            Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
+            Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
           </p>
         </section>
 

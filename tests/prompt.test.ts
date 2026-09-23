@@ -599,3 +599,17 @@ describe('buildSystemPrompt — send limits (fix 16)', () => {
     expect(buildSystemPrompt({ brand: 'SmartRemit', limits: resolveEffectiveSendLimits(null, null) })).toBe(SYSTEM_PROMPT);
   });
 });
+
+describe('SYSTEM_PROMPT — Program-Fix 33 (the server owns the send currency; schedules are India-only)', () => {
+  it('makes the model restate amount_source_display verbatim, never changing the currency symbol', () => {
+    expect(SYSTEM_PROMPT).toContain('amount_source_display');
+    expect(SYSTEM_PROMPT).toMatch(/never change the currency symbol/i);
+    expect(SYSTEM_PROMPT).toMatch(/switches language/i);
+  });
+
+  it('says recurring transfers go to India only and offers a one-time send instead', () => {
+    expect(SYSTEM_PROMPT).toMatch(/Recurring transfers go to India only/);
+    expect(SYSTEM_PROMPT).toMatch(/offer a one-time send instead/i);
+    expect(SYSTEM_PROMPT).toMatch(/do NOT call create_schedule for a non-India recipient/);
+  });
+});

@@ -10,6 +10,9 @@ import { ExpandableTable, type ExpandableColumn } from '../expandable-table';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { hasPermission } from '@/lib/permissions';
+import { pauseScheduleAction, resumeScheduleAction, cancelScheduleAction } from './actions';
+import { CancelScheduleButton } from './cancel-schedule-button';
 import type { Schedule } from '@/lib/types';
 
 const WEEKDAYS = [
@@ -23,7 +26,19 @@ const SCHEDULE_COLUMNS: ExpandableColumn[] = [
   { label: 'When' },
   { label: 'Last run' },
   { label: 'Status', primary: true },
+  { label: 'Actions', primary: true },
 ];
+
+// Program-Fix 36: the staff kill switch. Only 'active' fires; 'paused' is
+// reversible; 'cancelled' is terminal (no buttons). The actions re-gate
+// permission + scope + transition server-side; this only decides what to offer.
+function statusVariant(status: Schedule['status']): 'secondary' | 'outline' | 'destructive' {
+  switch (status) {
+    case 'active': return 'secondary';
+    case 'paused': return 'destructive';
+    default: return 'outline';
+  }
+}
 
 function scheduleWhen(s: Schedule): string {
   if (s.frequency === 'monthly') return `Monthly · day ${s.dayOfMonth}`;
@@ -37,6 +52,9 @@ export default async function SchedulesPage({
 }) {
   const { staff } = await requireScope();
   const scoped = createScopedStore(staff);
+  // The buttons render only for staff who may cancel money (admins always;
+  // support never). The server actions enforce the same gate on every POST.
+  const canControl = hasPermission(staff, 'canCancel');
   const params = await searchParams;
   const showAll = params.show === 'all';
   const all = await scoped.listSchedules();
@@ -130,9 +148,31 @@ export default async function SchedulesPage({
                   s.lastRunAt
                     ? new Date(s.lastRunAt).toLocaleDateString()
                     : <span key="lastrun" className="text-xs text-muted-foreground">—</span>,
-                  <Badge key="status" variant={s.status === 'active' ? 'secondary' : 'outline'}>
+                  <Badge key="status" variant={statusVariant(s.status)}>
                     {s.status}
                   </Badge>,
+                  canControl && s.status !== 'cancelled' ? (
+                    <div key="actions" className="flex flex-wrap items-center gap-2">
+                      {s.status === 'active' ? (
+                        <form action={pauseScheduleAction}>
+                          <input type="hidden" name="id" value={s.id} />
+                          <Button type="submit" size="sm" variant="outline">Pause</Button>
+                        </form>
+                      ) : (
+                        <form action={resumeScheduleAction}>
+                          <input type="hidden" name="id" value={s.id} />
+                          <Button type="submit" size="sm" variant="outline">Resume</Button>
+                        </form>
+                      )}
+                      <CancelScheduleButton
+                        action={cancelScheduleAction}
+                        scheduleId={s.id}
+                        confirmText={`Cancel this recurring transfer to ${s.recipientName}? This is final — the customer would have to set it up again.`}
+                      />
+                    </div>
+                  ) : (
+                    <span key="actions" className="text-xs text-muted-foreground">—</span>
+                  ),
                 ],
               }))}
             />

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { requireScope } from '@/lib/auth';
 import { getDb } from '@/db/client';
 import { getOpsSnapshot, STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STALE_LOCK_MINUTES } from '@/lib/reconcile';
+import { isEscalated } from '@/lib/stale-money';
 import { getCadenceSnapshot, cadenceRedis, DRAIN_SLA_MINUTES, CRON_QUIET_MINUTES } from '@/lib/worker-cadence';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
@@ -248,7 +249,8 @@ export default async function OpsPage() {
               <CardTitle>Stuck in paid</CardTitle>
               <CardDescription>
                 Charged but no delivery confirmation. Webhook-driven rails were re-instructed once
-                by the sweep — chase the partner if these persist.
+                by the sweep — chase the partner if these persist. Ops is re-alerted at 1 h / 6 h /
+                24 h, then daily; the age turns red past 1 h.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -274,7 +276,11 @@ export default async function OpsPage() {
                       <TableCell><Badge variant="secondary">{t.partnerId}</Badge></TableCell>
                       <TableCell><SenderCell name={senderNames.get(senderNameKey(t.partnerId, t.phone))} phone={t.phone} partnerId={t.partnerId} /></TableCell>
                       <TableCell className="tabular-nums">{money(t.amountSource, t.sourceCurrency)}</TableCell>
-                      <TableCell>{age(t.paidAt)} ago</TableCell>
+                      <TableCell>
+                        {isEscalated(t.paidAt, Date.now())
+                          ? <Badge variant="destructive">{age(t.paidAt)} ago</Badge>
+                          : <>{age(t.paidAt)} ago</>}
+                      </TableCell>
                       <TableCell className="text-right">
                         <DiagnosePanel subjectId={t.id} kind="stuck_transfer" />
                       </TableCell>
