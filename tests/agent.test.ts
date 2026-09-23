@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAgent, sanitizeReply } from '@/lib/agent';
+import { createAgent, sanitizeReply, FALLBACK_REPLY } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -1657,5 +1657,52 @@ describe('fix 5 (F43): outsider-written text never reaches the system role; cont
       expect(call.filter((m) => m.tool_calls?.some((c) => c.id === 'ctx_r0'))).toHaveLength(1);
     }
     expect(JSON.stringify(await store.getConversation('default', PHONE))).not.toContain('ctx_r0');
+  });
+});
+
+describe('Program-Fix 34A: every inbound text gets exactly one visible answer', () => {
+  const MOM = '919876543210';
+
+  function build(chat: (messages: ChatMessage[]) => Promise<ChatMessage>, redis = fakeRedis()) {
+    const store = createStore(redis, db);
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...extraDeps(redis, store), chat,
+    });
+    return { agent, store };
+  }
+
+  it('a DUPLICATE approve card (same card within the dedupe TTL) is not silence: the tool says sent:false/duplicate and the model text is the reply', async () => {
+    const redis = fakeRedis();
+    const pickerCall = (id: string): ChatMessage => ({
+      role: 'assistant', content: null,
+      tool_calls: [{ id, type: 'function', function: { name: 'send_approve_picker', arguments: JSON.stringify({ amount_source: 100, recipient_name: 'Mom', recipient_phone: MOM, destination_country: 'IN' }) } }],
+    });
+    // Turn 1: the card is sent; the card IS the reply ('').
+    let round = 0;
+    const first = build(async () => (++round === 1 ? pickerCall('a1') : { role: 'assistant', content: '' }), redis);
+    expect(await first.agent.runAgentTurn(PHONE, 'send $100 to Mom')).toBe('');
+    // Turn 2 (same card, inside 120 s): the send is deduped, so the tool must NOT report sent:true.
+    round = 0;
+    const toolResults: string[] = [];
+    const second = build(async (messages) => {
+      round++;
+      if (round === 1) return pickerCall('a2');
+      toolResults.push(String(messages.filter((m) => m.role === 'tool' && m.tool_call_id === 'a2').pop()?.content));
+      return { role: 'assistant', content: 'The payment card is above — tap Approve & Pay.' };
+    }, redis);
+    const reply = await second.agent.runAgentTurn(PHONE, 'send $100 to Mom');
+    const result = JSON.parse(toolResults[0]) as Record<string, unknown>;
+    expect(result.sent).toBe(false);
+    expect(result.duplicate).toBe(true);
+    expect(typeof result.draft_id).toBe('string');
+    expect(String(result.reply_hint)).toMatch(/already above/);
+    expect(reply).toBe('The payment card is above — tap Approve & Pay.');
+  });
+
+  it('a reply that sanitizeReply empties (URL-only) becomes FALLBACK_REPLY, never an empty string', async () => {
+    const { agent } = build(async () => ({ role: 'assistant', content: 'https://x.y' }));
+    const reply = await agent.runAgentTurn(PHONE, 'link please');
+    expect(reply).toBe(FALLBACK_REPLY);
+    expect(reply.trim()).not.toBe('');
   });
 });

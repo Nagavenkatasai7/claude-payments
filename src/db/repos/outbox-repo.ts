@@ -73,6 +73,25 @@ export const MAX_ATTEMPTS = 8;
 export const LEASE_MS = 5 * 60_000;
 const LEASE_SEC = LEASE_MS / 1000;
 
+/** A raw `RETURNING *` outbox row → OutboxRow (claimBatch and claimReplies share it). */
+function rowFromSql(r: Record<string, unknown>): OutboxRow {
+  return {
+    id: Number(r.id),
+    kind: String(r.kind),
+    payload: r.payload,
+    status: String(r.status),
+    attempts: Number(r.attempts),
+    nextAttemptAt: new Date(String(r.next_attempt_at)),
+    lockedAt: r.locked_at ? new Date(String(r.locked_at)) : null,
+    lockedBy: (r.locked_by as string) ?? null,
+    leaseUntil: r.lease_until ? new Date(String(r.lease_until)) : null,
+    leaseOwner: (r.lease_owner as string) ?? null,
+    lastError: (r.last_error as string) ?? null,
+    dedupeKey: (r.dedupe_key as string) ?? null,
+    createdAt: new Date(String(r.created_at)),
+  } as OutboxRow;
+}
+
 export function createOutboxRepo(db: DbOrTx) {
   return {
     /**
@@ -134,21 +153,36 @@ export function createOutboxRepo(db: DbOrTx) {
         )
         RETURNING *;
       `);
-      return (rows as unknown as { rows: Record<string, unknown>[] }).rows.map((r) => ({
-        id: Number(r.id),
-        kind: String(r.kind),
-        payload: r.payload,
-        status: String(r.status),
-        attempts: Number(r.attempts),
-        nextAttemptAt: new Date(String(r.next_attempt_at)),
-        lockedAt: r.locked_at ? new Date(String(r.locked_at)) : null,
-        lockedBy: (r.locked_by as string) ?? null,
-        leaseUntil: r.lease_until ? new Date(String(r.lease_until)) : null,
-        leaseOwner: (r.lease_owner as string) ?? null,
-        lastError: (r.last_error as string) ?? null,
-        dedupeKey: (r.dedupe_key as string) ?? null,
-        createdAt: new Date(String(r.created_at)),
-      })) as OutboxRow[];
+      return (rows as unknown as { rows: Record<string, unknown>[] }).rows.map(rowFromSql);
+    },
+
+    /**
+     * Program-Fix 34A review S2: claim due agent REPLY rows only (whatsapp.text,
+     * dedupe `reply:<turn id>`), oldest first, with the same lease + attempt
+     * accounting as claimBatch. drainOnce calls it right after an agent.turn
+     * finishes, so a reply goes out before the next customer's turn in the
+     * batch runs instead of waiting for the next pass. SKIP LOCKED: a row
+     * another worker holds is left alone.
+     */
+    async claimReplies(limit: number, workerId: string, leaseMs = LEASE_MS): Promise<OutboxRow[]> {
+      const leaseSec = Math.ceil(leaseMs / 1000);
+      const rows = await db.execute(sql`
+        UPDATE outbox SET status = 'processing', locked_at = now(), locked_by = ${workerId},
+                          lease_until = now() + make_interval(secs => ${leaseSec}),
+                          lease_owner = ${workerId},
+                          attempts = attempts + 1
+        WHERE id IN (
+          SELECT id FROM outbox
+          WHERE kind = 'whatsapp.text'
+            AND dedupe_key LIKE 'reply:%'
+            AND status IN ('pending','failed') AND next_attempt_at <= now()
+          ORDER BY id
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *;
+      `);
+      return (rows as unknown as { rows: Record<string, unknown>[] }).rows.map(rowFromSql);
     },
 
     /**
@@ -227,6 +261,80 @@ export function createOutboxRepo(db: DbOrTx) {
         .where(and(inArray(outbox.id, ids), eq(outbox.status, 'processing'), eq(outbox.leaseOwner, owner)))
         .returning({ id: outbox.id });
       return rows.length;
+    },
+
+    /**
+     * OWNER-ONLY (Program-Fix 34A): hand a claimed agent.turn back UNCHARGED and
+     * due in `delaySec` — the turn could not start because an older turn for the
+     * same (tenant, phone) is still waiting or holds the per-phone lock. Not a
+     * failure: the claim's attempt is refunded, so a busy turn never spends the
+     * MAX_ATTEMPTS budget and can never dead-letter by waiting. Unlike
+     * releaseUnstarted the row is NOT due at once (it would be re-claimed on
+     * every pass). Same CAS guard as releaseUnstarted; false ⇒ lease lost.
+     */
+    async deferUncharged(id: number, owner: string, delaySec: number): Promise<boolean> {
+      const rows = await db
+        .update(outbox)
+        .set({
+          status: 'pending',
+          attempts: sql`greatest(${outbox.attempts} - 1, 0)`,
+          nextAttemptAt: sql`now() + make_interval(secs => ${delaySec})`,
+          leaseUntil: null,
+          leaseOwner: null,
+          lockedAt: null,
+          lockedBy: null,
+        })
+        .where(and(eq(outbox.id, id), eq(outbox.status, 'processing'), eq(outbox.leaseOwner, owner)))
+        .returning({ id: outbox.id });
+      return rows.length > 0;
+    },
+
+    /**
+     * Program-Fix 34A: the in-order gate for one agent.turn row, in ONE query.
+     *  • `olderWaiting` — another agent.turn with a LOWER id for the same phone
+     *    and the same routed tenant is still pending/failed/processing (a dead
+     *    or done row never blocks). The tenant compares
+     *    coalesce(payload->>'routedPartnerId','') on BOTH sides: the shared
+     *    number enqueues routedPartnerId null, and `=` never matches NULL.
+     *    `routedPartnerId` here is the row's RAW payload value ('' for null).
+     *    Review M1: an older turn's REPLY row (whatsapp.text, dedupe
+     *    `reply:<id>`) for the same phone and tenant that is not yet sent also
+     *    blocks — otherwise a newer turn's card, sent inline, would overtake
+     *    the older text reply. The reply payload keys are `to` and `partnerId`
+     *    (absent for the shared number, so the same coalesce applies). The
+     *    row's OWN reply (a re-run after a crash) never blocks it. No cycle: a
+     *    reply never waits on a turn, and the wait bound still applies.
+     *  • `pastBound` — the row itself was created more than `maxWaitSec` ago,
+     *    computed by Postgres (now() − created_at), never by JS date parsing.
+     */
+    async agentTurnGate(
+      id: number,
+      routedPartnerId: string,
+      phone: string,
+      maxWaitSec: number,
+    ): Promise<{ olderWaiting: boolean; pastBound: boolean }> {
+      const res = await db.execute(sql`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM outbox o
+            WHERE o.kind = 'agent.turn'
+              AND o.status IN ('pending','failed','processing')
+              AND o.id < ${id}
+              AND o.payload ->> 'phone' = ${phone}
+              AND coalesce(o.payload ->> 'routedPartnerId', '') = ${routedPartnerId}
+          ) OR EXISTS (
+            SELECT 1 FROM outbox r
+            WHERE r.kind = 'whatsapp.text'
+              AND r.status IN ('pending','failed','processing')
+              AND r.dedupe_key LIKE 'reply:%'
+              AND r.dedupe_key <> ${`reply:${id}`}
+              AND r.payload ->> 'to' = ${phone}
+              AND coalesce(r.payload ->> 'partnerId', '') = ${routedPartnerId}
+          ) AS older_waiting,
+          coalesce((SELECT now() - created_at > make_interval(secs => ${maxWaitSec}) FROM outbox WHERE id = ${id}), false) AS past_bound
+      `);
+      const r = (res as unknown as { rows: Array<Record<string, unknown>> }).rows[0] ?? {};
+      return { olderWaiting: r.older_waiting === true, pastBound: r.past_bound === true };
     },
 
     /**
