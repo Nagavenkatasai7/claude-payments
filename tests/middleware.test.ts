@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { RequestCookies, ResponseCookies } from 'next/dist/compiled/@edge-runtime/cookies';
-import { middleware } from '@/middleware';
+import { proxy, config } from '@/proxy';
+import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import {
   SESSION_COOKIE,
   LEGACY_SESSION_COOKIE,
@@ -64,10 +65,10 @@ beforeEach(() => {
   responseHeaders = new Headers();
 });
 
-describe('middleware', () => {
+describe('proxy (auth gate)', () => {
   it('redirects to /login when no session cookie is present', () => {
     const req = new NextRequest('https://app.test/admin-dashboard');
-    const res = middleware(req);
+    const res = proxy(req);
     expect(res.status).toBe(307);
     expect(res.headers.get('location')).toContain('/login');
   });
@@ -75,7 +76,7 @@ describe('middleware', () => {
   it('allows the request through when a session cookie exists', () => {
     const req = new NextRequest('https://app.test/admin-dashboard');
     req.cookies.set(SESSION_COOKIE, 'some-token');
-    const res = middleware(req);
+    const res = proxy(req);
     // NextResponse.next() has no redirect location
     expect(res.headers.get('location')).toBeNull();
   });
@@ -85,7 +86,40 @@ describe('middleware', () => {
   it('also passes a request carrying only the legacy cookie', () => {
     const req = new NextRequest('https://app.test/admin-dashboard');
     req.cookies.set(LEGACY_SESSION_COOKIE, 'some-token');
-    expect(middleware(req).headers.get('location')).toBeNull();
+    expect(proxy(req).headers.get('location')).toBeNull();
+  });
+
+  // Program-Fix 40 PR B: the middleware → proxy rename carries every behaviour.
+  it('redirects an anonymous /account request to /account/login', () => {
+    for (const path of ['/account', '/account/transfers']) {
+      const res = proxy(new NextRequest(`https://app.test${path}`));
+      expect(res.status).toBe(307);
+      expect(new URL(res.headers.get('location')!).pathname).toBe('/account/login');
+    }
+  });
+
+  it('keeps the /account auth entry points public', () => {
+    for (const path of ['/account/login', '/account/register', '/account/reset', '/account/verify', '/account/reset/abc']) {
+      expect(proxy(new NextRequest(`https://app.test${path}`)).headers.get('location')).toBeNull();
+    }
+  });
+
+  it('passes /account with the customer cookie, and a staff cookie does not open /account', () => {
+    const ok = new NextRequest('https://app.test/account');
+    ok.cookies.set(CUSTOMER_SESSION_COOKIE, 'tok');
+    expect(proxy(ok).headers.get('location')).toBeNull();
+    const staffOnly = new NextRequest('https://app.test/account');
+    staffOnly.cookies.set(SESSION_COOKIE, 'tok');
+    expect(new URL(proxy(staffOnly).headers.get('location')!).pathname).toBe('/account/login');
+  });
+
+  it('matches only the two gated trees (/login and /login/mfa stay unmatched)', () => {
+    expect(config.matcher).toEqual([
+      '/admin-dashboard',
+      '/admin-dashboard/:path*',
+      '/account',
+      '/account/:path*',
+    ]);
   });
 });
 
