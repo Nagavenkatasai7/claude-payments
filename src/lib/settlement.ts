@@ -156,7 +156,8 @@ export async function beginSettlement(
     // is persisted (fix 11 / F49): the worker resolves the creds at DRAIN time.
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
-      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId },
+      // Program-Fix 49A: essential (a settlement stage message survives STOP).
+      { to: paid.phone, body: buildStage1Message(paid), partnerId: paid.partnerId, category: 'essential' },
       { dedupeKey: `stage1:${paid.id}` },
     );
     const { webhookDriven } = await enqueueRailEffect(tx, paid, integrations);
@@ -193,7 +194,7 @@ export async function beginHold(db: Db, transfer: Transfer): Promise<HoldResult>
     // as the paid stage-1: the OWNING partnerId, never creds (fix 11 / F49).
     await createOutboxRepo(tx).enqueue(
       'whatsapp.text',
-      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId },
+      { to: held.phone, body: buildStage1Message(held, { held: true }), partnerId: held.partnerId, category: 'essential' },
       { dedupeKey: `stage1:${held.id}` },
     );
     return { kind: 'held' };

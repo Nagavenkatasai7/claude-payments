@@ -17,6 +17,7 @@ import {
   canReleaseHeld,
 } from '@/lib/dashboard-ops';
 import { getPartnerStore } from '@/lib/partner-store';
+import { getCustomerStore } from '@/lib/customer-store';
 import { requireStaff, requireAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { scopeOf, canSee } from '@/lib/staff-scope';
@@ -106,7 +107,8 @@ export async function resendPaymentLinkAction(
   const staff = await requirePermission('canResend');
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
-  await resendPaymentLink(store, sendText, id);
+  // Program-Fix 49A: refused when the customer opted out (nonessential).
+  await resendPaymentLink(store, sendText, id, getCustomerStore(store));
   revalidatePath('/admin-dashboard', 'layout');
 }
 

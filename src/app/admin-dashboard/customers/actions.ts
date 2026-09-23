@@ -12,6 +12,8 @@ import { validateSendLimitInput, requireStaffReason } from '@/lib/send-limits';
 import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
+import { optOutSuppresses } from '@/lib/consent-gate';
+import { partnerWaContext } from '@/lib/whatsapp-creds';
 import { getPartnerStore } from '@/lib/partner-store';
 import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { countryForPhone } from '@/lib/partner-currency';
@@ -154,8 +156,11 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
   const partner =
     (await getPartnerStore().getPartner(customer.partnerId)) ??
     (await getPartnerStore().ensureDefaultPartner());
-  if (sendGateActive(partner)) {
-    await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName).catch(
+  // Program-Fix 49A: the decision notice is nonessential (not sent after
+  // STOP) and leaves from the owning partner's own number (fail-soft resolver).
+  if (sendGateActive(partner) && !optOutSuppresses(customer, 'nonessential')) {
+    const { waCreds } = await partnerWaContext(customer.partnerId);
+    await sendVerificationStatus(phone, decision === 'approve' ? 'verified' : 'failed', customer.fullName, waCreds).catch(
       () => {},
     );
   }

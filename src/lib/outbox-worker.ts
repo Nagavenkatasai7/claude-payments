@@ -17,7 +17,8 @@ import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { railSecrets } from '@/lib/partner-integrations';
 import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
-import { sendEmail as sendEmailDefault, type EmailMessage } from '@/lib/email';
+import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
+import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
 import { buildRefundMessage, completePaymentStage2, recipientTemplateParams, recipientDeliveredFallbackText } from '@/lib/payment';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { waCredsFrom } from '@/lib/whatsapp-creds';
@@ -29,6 +30,8 @@ import { logWarn, scrub } from '@/lib/log';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
+import { suppressForOptOut } from '@/lib/consent-gate';
+import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
@@ -89,10 +92,11 @@ export interface WorkerDeps {
   fundingProvider?: FundingProvider;
   /**
    * Email sender for the 'email.send' effect (partner-lead notifications).
-   * Optional — defaults to the real SMTP sender (which itself no-ops when SMTP
-   * creds are unset); tests inject a mock to assert recipients.
+   * Optional — defaults to the real SMTP sender (which reports a skip when SMTP
+   * creds are unset); tests inject a mock to assert recipients. A `void` result
+   * counts as 'sent' (Program-Fix 39 widened this from Promise<void>).
    */
-  sendEmail?: (msg: EmailMessage) => Promise<void>;
+  sendEmail?: (msg: EmailMessage) => Promise<EmailOutcome | void>;
   /**
    * The staff roster for the ticket load-balancer (ticket.triage auto-assign).
    * DI'd so PGlite tests inject a roster without touching the Redis auth store;
@@ -319,6 +323,22 @@ async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<W
 }
 
 /**
+ * Program-Fix 49A (whatsapp-10d): the consent gate for a plain customer-facing
+ * row. The tenant is the payload's partnerId (the ledger tenant the producer
+ * wrote), else the default tenant — the shared number IS the default tenant.
+ * Only a `nonessential` row reads the customer; a read error throws and rides
+ * the ordinary backoff (never a send to someone who may have opted out).
+ */
+async function optedOutSkip(deps: WorkerDeps, row: OutboxRow, p: Payload): Promise<boolean> {
+  const tenant = str(p.partnerId) || DEFAULT_PARTNER_ID;
+  const suppressed = await suppressForOptOut(createCustomerStore(deps.db, deps.store), tenant, str(p.to), p.category);
+  if (suppressed) {
+    logWarn('worker.optout', 'nonessential message suppressed: customer opted out', { id: row.id, kind: row.kind });
+  }
+  return suppressed;
+}
+
+/**
  * Run one agent turn and return ONLY its reply text (Program-Fix 34A). The
  * routing partner's outbound creds are re-resolved at RUN time (the payload
  * never carries tokens; rotation is picked up automatically) and live only in
@@ -353,11 +373,16 @@ async function handle(
   switch (row.kind) {
     // ── Plain customer-facing sends (the transactional message outbox) ──────
     // Payloads carry the OWNING partnerId, never creds (fix 11 / F49·F54·F58).
+    // Program-Fix 49A: a `nonessential` row to an opted-out customer completes
+    // WITHOUT sending (no retry, no dead letter). No category ⇒ essential, so
+    // rows from the previous build deliver exactly as before.
     case 'whatsapp.text': {
+      if (await optedOutSkip(deps, row, p)) return;
       await deps.sendText(str(p.to), str(p.body), await resolveSendCreds(p, partner));
       return;
     }
     case 'whatsapp.template': {
+      if (await optedOutSkip(deps, row, p)) return;
       await deps.sendTemplate(
         str(p.to),
         str(p.template),
@@ -575,7 +600,8 @@ async function handle(
         // id is persisted (fix 11 / F54); creds resolve when THIS row drains.
         await createOutboxRepo(tx).enqueue(
           'whatsapp.text',
-          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId },
+          // Program-Fix 49A: essential (a refund notice survives STOP).
+          { to: transfer.phone, body: buildRefundMessage(transfer), partnerId: transfer.partnerId, category: 'essential' },
           { dedupeKey: `refundmsg:${transferId}` },
         );
       });
@@ -676,19 +702,46 @@ async function handle(
     }
 
     // ── Transactional email (partner-lead notifications) ────────────────────
-    // Durable: the real sender no-ops when SMTP is unconfigured (no retry storm);
-    // when configured, a send failure throws and rides the backoff/dead-letter.
-    // `sealed` (optional) maps {{placeholders}} in text/html to field-crypto
-    // blobs — the partner-application invite link (fix 11 / F66). Opened at SEND
-    // time only; the row stays ciphertext. A missing blob throws naming the
-    // placeholder, never a value.
+    // Durable: when configured, a send failure throws and rides the
+    // backoff/dead-letter. `sealed` (optional) maps {{placeholders}} in
+    // text/html to field-crypto blobs — the partner-application invite link
+    // (fix 11 / F66). Opened at SEND time only; the row stays ciphertext. A
+    // missing blob throws naming the placeholder, never a value.
+    //
+    // Program-Fix 39 (domain-11): a SKIP is recorded, never passed off as a send.
+    // The row still ends done (no retry storm while SMTP is intentionally unset),
+    // but it writes an `email.skipped` audit row (prefix + outbox id, never an
+    // address) and, for 'skipped_unconfigured' only, ONE ops alert per UTC day.
+    // The alert is an ops.alert, keyed per UTC day, and a skipped ops-alert
+    // email mirror (opsmail:) never raises it, so it cannot loop.
     case 'email.send': {
-      await (deps.sendEmail ?? sendEmailDefault)({
+      const outcome: EmailOutcome | void = await (deps.sendEmail ?? sendEmailDefault)({
         to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
         subject: str(p.subject),
         text: renderSealedText(str(p.text), p.sealed),
         ...(typeof p.html === 'string' ? { html: renderSealedText(p.html, p.sealed) } : {}),
       });
+      if (outcome === 'skipped_unconfigured' || outcome === 'skipped_no_recipients') {
+        const { prefix, subjectId } = parseEmailDedupeKey(row.dedupeKey);
+        const reason = outcome === 'skipped_unconfigured' ? 'unconfigured' : 'no_recipients';
+        logWarn('email.skipped', outcome, { id: row.id, kind: row.kind, dedupePrefix: prefix });
+        await createAuditRepo(deps.db).record({
+          actorType: 'system',
+          actor: 'outbox',
+          action: 'email.skipped',
+          subjectId: subjectId ?? undefined,
+          meta: { reason, dedupePrefix: prefix, outboxId: row.id },
+        });
+        // Not for an ops-alert mirror row (Program-Fix 26's opsmail:): that
+        // email IS an alert copy, so alerting on its skip would ping-pong.
+        if (outcome === 'skipped_unconfigured' && !isMirrorRow(row)) {
+          await createOutboxRepo(deps.db).enqueue(
+            'ops.alert',
+            { message: 'Email is not configured: partner lead or invite emails are being skipped. See /admin-dashboard/ops.' },
+            { dedupeKey: `email-unconfigured:${new Date().toISOString().slice(0, 10)}` },
+          );
+        }
+      }
       return;
     }
 
@@ -745,7 +798,8 @@ async function handle(
         // no message content — then finish the row. Never dead-lettered.
         await outbox.enqueue(
           'whatsapp.text',
-          { to: phone, body: FALLBACK_REPLY, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+          // Program-Fix 49A: essential — a reply to the customer's own message.
+          { to: phone, body: FALLBACK_REPLY, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
           { dedupeKey: `reply:${row.id}` },
         );
         await outbox.enqueue(
@@ -777,7 +831,7 @@ async function handle(
         if (reply.trim()) {
           await outbox.enqueue(
             'whatsapp.text',
-            { to: phone, body: reply, ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+            { to: phone, body: reply, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
             { dedupeKey: `reply:${row.id}` },
           );
         }

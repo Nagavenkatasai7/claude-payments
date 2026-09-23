@@ -403,7 +403,20 @@ export interface TurnContext {
 
 export type IncomingMessage =
   | { kind: 'text'; from: string; text: string; messageId: string }
-  | { kind: 'button'; from: string; buttonId: string; messageId: string };
+  | { kind: 'button'; from: string; buttonId: string; messageId: string }
+  // Program-Fix 49A (whatsapp-08): a message the bot cannot read (image, voice,
+  // document, …). Never downloaded; the inbound pipeline answers it honestly.
+  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string };
+
+/** Inbound Meta message types the bot answers with the "typed messages only" reply. */
+export type UnsupportedMediaType =
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'document'
+  | 'sticker'
+  | 'location'
+  | 'contacts';
 
 export type KycStatus =
   | 'not_started'

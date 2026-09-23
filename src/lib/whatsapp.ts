@@ -17,7 +17,8 @@ export const SCHEDULED_TEMPLATE_NAME = 'scheduled_payment_ready';
 // The transfer_delivered template was created with "English" => language code 'en'.
 export const RECIPIENT_TEMPLATE_LANG = 'en';
 
-import type { IncomingMessage } from './types';
+import type { IncomingMessage, UnsupportedMediaType } from './types';
+import { isOptOutKeyword, isResumeKeyword } from './consent';
 export type { IncomingMessage }; // re-export for any caller using @/lib/whatsapp
 
 /**
@@ -41,6 +42,8 @@ interface WebhookShape {
           from?: string;
           id?: string;
           text?: { body?: string };
+          // Template quick-reply tap (Meta webhook `type:"button"`).
+          button?: { payload?: string; text?: string };
           interactive?: {
             type?: string;
             button_reply?: { id?: string; title?: string };
@@ -161,11 +164,44 @@ export function parseIncoming(body: unknown): IncomingMessage | null {
         messageId: message.id,
       };
     }
+    // Program-Fix 49A (whatsapp-10b): a template QUICK-REPLY tap. Meta sends
+    // `"type":"button","button":{"payload":"Unsubscribe","text":"Unsubscribe"}`
+    // (webhooks reference, messages/button). It becomes TEXT so the consent
+    // block sees it: a payload that IS a consent keyword wins over a localized
+    // label ("Stop promotions"), otherwise the visible label, else the payload.
+    if (message.type === 'button' && message.button) {
+      const { payload, text } = message.button;
+      const keywordPayload =
+        payload && (isOptOutKeyword(payload) || isResumeKeyword(payload)) ? payload : undefined;
+      const chosen = keywordPayload ?? (text || payload);
+      if (!chosen) return null;
+      return { kind: 'text', from: message.from, text: chosen, messageId: message.id };
+    }
+    // Program-Fix 49A (whatsapp-08): media the bot cannot read. Never downloaded.
+    if (message.type && UNSUPPORTED_TYPES.has(message.type)) {
+      return {
+        kind: 'unsupported',
+        from: message.from,
+        mediaType: message.type as UnsupportedMediaType,
+        messageId: message.id,
+      };
+    }
+    // reaction, system, unknown ⇒ ignored (no reply).
     return null;
   } catch {
     return null;
   }
 }
+
+const UNSUPPORTED_TYPES: ReadonlySet<string> = new Set<UnsupportedMediaType>([
+  'image',
+  'audio',
+  'video',
+  'document',
+  'sticker',
+  'location',
+  'contacts',
+]);
 
 // ── Per-user rate-limit backoff (error 131056 = >1 msg / 6s to the same user) ──
 // Most of our sends are 1-per-user, so this is defense for bursts (e.g. a cron
@@ -339,9 +375,10 @@ export async function sendAuthTemplate(
   templateName: string,
   languageCode: string,
   components: AuthenticationTemplateComponent[],
+  creds?: WaCreds,
 ): Promise<void> {
   return postWithBackoff(
-    GRAPH_MESSAGES_URL(),
+    GRAPH_MESSAGES_URL(creds),
     authedJsonInit({
       messaging_product: 'whatsapp',
       to,
@@ -351,7 +388,7 @@ export async function sendAuthTemplate(
         language: { code: languageCode },
         components,
       },
-    }),
+    }, creds),
     'WhatsApp auth template send failed',
   );
 }
@@ -384,8 +421,18 @@ function maskPhone(phone: string): string {
  * the reason a verification code now arrives even before the template is live.
  * The code never appears in a log line; a thrown Graph error never echoes the
  * params, and the free-form fallback message is built by the pure otpMessage().
+ *
+ * Program-Fix 49A (whatsapp-11): optional trailing `creds` + `brand` — a
+ * BYO-number partner's customer gets the code FROM the partner's number with
+ * the partner's name on every path (free-form, template, fallback). Absent ⇒
+ * the shared env number and "SmartRemit", byte-for-byte as before.
  */
-export async function sendOtpCode(phone: string, code: string): Promise<void> {
+export async function sendOtpCode(
+  phone: string,
+  code: string,
+  creds?: WaCreds,
+  brand?: string,
+): Promise<void> {
   if (env.otpDevMode) {
     // No code in the log; no live send (used for local/CI, never prod).
     console.log(`[otp] dev-mode: code ready for ${maskPhone(phone)}`);
@@ -406,7 +453,7 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await sendText(phone, otpMessage(code));
+        await sendText(phone, otpMessage(code, brand), creds);
         return;
       } catch (err) {
         lastErr = err;
@@ -421,6 +468,7 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
       env.whatsappAuthTemplate,
       OTP_TEMPLATE_LANG,
       authenticationTemplateParams(code),
+      creds,
     );
   } catch (err) {
     // Template path unavailable (e.g. not yet approved) → deliver in-session via
@@ -433,7 +481,7 @@ export async function sendOtpCode(phone: string, code: string): Promise<void> {
       `OTP template send failed; falling back to free-form text: ${err instanceof Error ? err.message : 'unknown error'}`,
       { to: maskPhone(phone) },
     );
-    await sendText(phone, otpMessage(code));
+    await sendText(phone, otpMessage(code, brand), creds);
   }
 }
 
@@ -592,6 +640,7 @@ export async function sendVerificationStatus(
   phone: string,
   state: VerificationState,
   name?: string,
+  creds?: WaCreds, // Program-Fix 49A: the owning partner's number on every path
 ): Promise<void> {
   const params = verificationStatusParams(name ?? 'there', state);
   const templateName = {
@@ -607,7 +656,7 @@ export async function sendVerificationStatus(
   // configured path so a paused/rejected template degrades the same way.
   if (!templateName) {
     try {
-      await sendText(phone, fallbackText);
+      await sendText(phone, fallbackText, creds);
     } catch (err) {
       // Program-Fix 37: scrubbing logger, masked phone.
       logWarn(
@@ -620,8 +669,9 @@ export async function sendVerificationStatus(
   }
   await sendTemplateOrText(
     phone,
-    () => sendTemplate(phone, templateName, TEMPLATE_LANG, params),
+    () => sendTemplate(phone, templateName, TEMPLATE_LANG, params, creds),
     fallbackText,
+    creds,
   );
 }
 
@@ -632,6 +682,11 @@ export async function sendVerificationStatus(
  * failure (the caller surfaces a generic error; the pay route still won't
  * finalize without a verified code, so a failed send never lets money through).
  */
-export async function sendTransactionOtp(phone: string, code: string, creds?: WaCreds): Promise<void> {
-  await sendText(phone, transactionOtpMessage(code), creds);
+export async function sendTransactionOtp(
+  phone: string,
+  code: string,
+  creds?: WaCreds,
+  brand?: string, // Program-Fix 49A: absent ⇒ "SmartRemit" (callers unchanged)
+): Promise<void> {
+  await sendText(phone, transactionOtpMessage(code, brand), creds);
 }

@@ -111,7 +111,8 @@ export async function handleRailFailure(
     if (variant) {
       await outbox.enqueue(
         'whatsapp.text',
-        { to: updated.phone, body: buildRailFailureMessage(updated, variant), partnerId: updated.partnerId },
+        // Program-Fix 49A: essential (a rail-failure / refund notice survives STOP).
+        { to: updated.phone, body: buildRailFailureMessage(updated, variant), partnerId: updated.partnerId, category: 'essential' },
         { dedupeKey: `railfailmsg:${transferId}` },
       );
     }

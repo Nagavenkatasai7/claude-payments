@@ -12,6 +12,7 @@ import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
 import { issueApplicationToken } from '@/lib/partner-application-token';
+import { buildInviteEmail, inviteDedupeKey } from '@/lib/partner-invite-email';
 import { isPartnerType, partnerTypeLabel } from '@/lib/partner-type';
 import { getRedis } from '@/lib/redis';
 import { PARTNER_CORRIDOR_CODES } from '@/app/landing/corridors';
@@ -134,21 +135,18 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
 
     // Partner invite — the unique link to the detailed application form. Goes to
     // the email the partner submitted (NOT the internal lead list). The link is
-    // the {{apply_link}} placeholder, rendered from `sealed` at send time.
+    // the {{apply_link}} placeholder, rendered from `sealed` at send time. The
+    // text comes from the shared builder (the staff resend uses the same one).
+    const invite = buildInviteEmail();
     await outbox.enqueue(
       'email.send',
       {
         to: [email],
-        subject: 'Complete your SmartRemit partner application',
-        text:
-          `Hi,\n\n` +
-          `Thanks for your interest in partnering with SmartRemit. Please complete your detailed application here:\n\n` +
-          `{{apply_link}}\n\n` +
-          `This secure link is unique to you and expires in 30 days.\n\n` +
-          `— The SmartRemit team`,
-        sealed: { apply_link: sealedApplyLink },
+        subject: invite.subject,
+        text: invite.text,
+        sealed: { apply_link: sealedApplyLink }, // key = INVITE_LINK_PLACEHOLDER (a literal: the fix-11 scan refuses computed keys)
       },
-      { dedupeKey: `partner_app_invite:${id}` },
+      { dedupeKey: inviteDedupeKey(id) },
     );
   });
 

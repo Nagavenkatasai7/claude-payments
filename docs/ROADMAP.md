@@ -1,6 +1,6 @@
 # SmartRemit — Feature Inventory & Roadmap
 
-Honest status of what is built against the original end-to-end remittance vision. **Re-verified 2026-09-22 against `main @ 191828f`** (Program-Fix 42): every row below was re-read from the code it names. The previous version was dated 2026-05-23 and predated the Postgres ledger, Persona KYC, the partner platform and the outbox.
+Honest status of what is built against the original end-to-end remittance vision. **Re-verified 2026-09-22 against `main @ 191828f`** (Program-Fix 42): every row below was re-read from the code it names. The previous version was dated 2026-05-23 and predated the Postgres ledger, Persona KYC, the partner platform and the outbox. The Platform email row and the DNS and email runbook were updated on 2026-09-23 against `main @ 814705b` (Program-Fix 39).
 
 ## Where it stands
 
@@ -76,8 +76,33 @@ SmartRemit is white-label, non-custodial remittance **infrastructure**: a multi-
 | Partner REST API + signed webhooks | ✅ built | `/api/partner/v1/*`, documented at `/docs`. |
 | B2B invoicing | ✅ built (mock data) | Sellers issue bills the buyer pays in chat (`create_invoice`, `present_bill`, `b2b_invoices`, `sellers`). No real accounting integration. |
 | Customer account portal | ✅ built | `/account`: history, receipts, repeat sends, support tickets, web chat (restricted toolset). |
+| Partner email (lead alert + application invite) | ✅ built, honest when unset | SMTP via `src/lib/email.ts`, sent durably through the outbox. SMTP is optional: when it is unset a send is **skipped, not faked**. The worker writes an `email.skipped` audit row and raises one ops alert per day, `/admin-dashboard/ops` shows whether email is configured, and a platform admin can resend an invite (which issues a new link) from the partner request page. |
 | CI/CD | ✅ built | GitHub Actions `ci / ci` gate on PRs, Vercel rolling releases, post-deploy Playwright smoke (`smoke.yml`). |
 | Feature flags | ❌ not built | |
+
+#### DNS and email runbook
+
+Owner-run, in the DNS provider's console (the domain's DNS is hosted at Vercel). Always check records against a public resolver, for example `dig <name> TXT @1.1.1.1 +short`, never the local one.
+
+**App email is optional.** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM` and `PARTNER_LEAD_EMAILS` are listed in `.env.example` and are never required at boot. With the SMTP trio unset, partner emails are skipped and recorded (see the Platform row). To turn email on, set the trio in Vercel Production with `vercel env add … --value`, using a role mailbox rather than a personal one. The Email card on `/admin-dashboard/ops` then shows "Configured".
+
+**Record inventory to keep:**
+- MX for the mailbox provider.
+- SPF on the apex, covering only the mailbox provider's senders.
+- DKIM: the provider's selector records. Keep the provider's empty rotation slots too; they are not stale.
+- DMARC at `_dmarc`.
+- Optional: TLS-RPT at `_smtp._tls`.
+- Explicit records for the mail client hosts (`mail`, `autoconfig`, `autodiscover`), so they never fall through to a wildcard record.
+
+**DMARC ladder.** Each step is gated on the one before it.
+0. **Gate.** Send one mail from the mailbox and one from the app (the landing "Partner with us" form with your own address) to a Gmail account. "Show original" must show `dkim=pass`, `spf=pass` and `dmarc=pass` for both. If either fails, stop.
+1. **Day 0: `p=none` with reports.** `v=DMARC1; p=none; rua=mailto:dmarc@<domain>; adkim=r; aspf=r`. Create the report mailbox first.
+2. **After 1–2 weeks of clean reports:** move to `p=quarantine; pct=100`, and tighten SPF from `~all` to `-all`. Clean means the only senders are the mailbox provider and its relay.
+3. **After 2–4 more weeks of clean reports:** move to `p=reject`.
+
+**Second origin and HSTS preload.**
+- Redirect the `*.vercel.app` project alias to the canonical domain with a 308 in Vercel → Domains. Check with `curl -sI` for a `location:` header.
+- Submit to hstspreload.org **last**, only after the mail client hosts serve valid certificates. `includeSubDomains` forces HTTPS on every subdomain, and preload is slow to undo.
 
 ---
 
