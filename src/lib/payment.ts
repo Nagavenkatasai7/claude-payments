@@ -30,7 +30,7 @@ export function formatDestAmount(amount: number, currency: CurrencyCode | string
  * Format the source-side charge using Intl.NumberFormat.
  * Falls back to a plain numeric string for any unknown code.
  */
-function formatSourceCharge(amount: number, currency: CurrencyCode | string): string {
+export function formatSourceCharge(amount: number, currency: CurrencyCode | string): string {
   try {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',

@@ -131,6 +131,38 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0], opts?.decrypt ?? false) : null;
     },
 
+    /**
+     * Program-Fix 15 PR C: the row-locking read (`SELECT … FOR UPDATE`). Call
+     * inside a transaction. With `partnerId` the read is tenant-scoped (null for
+     * missing OR out-of-scope, 404-never-403). The settlement.instruct handler
+     * and reconcile's re-instruction take it before deciding a transfer is
+     * still payable, so a concurrent sender cancel is either fully committed
+     * (seen) or not started.
+     */
+    async getTransferForUpdate(
+      id: string,
+      opts: { decrypt?: boolean; partnerId?: PartnerId } = {},
+    ): Promise<Transfer | null> {
+      const where = opts.partnerId ? and(eq(transfers.id, id), eq(transfers.partnerId, opts.partnerId)) : eq(transfers.id, id);
+      const rows = await db.select().from(transfers).where(where).limit(1).for('update');
+      return rows[0] ? toDomain(rows[0], opts.decrypt ?? false) : null;
+    },
+
+    /**
+     * Program-Fix 15 PR C: how long ago paid_at was, by the DATABASE clock
+     * (ms; null when paid_at is unset or the row is missing). Only the sender
+     * cancel's fallback for a held (in_review) row with no stage1:<id> row.
+     */
+    async paidAgeMs(id: string): Promise<number | null> {
+      const rows = await db
+        .select({ ageMs: sql<string | null>`floor(extract(epoch FROM (now() - ${transfers.paidAt})) * 1000)::bigint` })
+        .from(transfers)
+        .where(eq(transfers.id, id))
+        .limit(1);
+      const v = rows[0]?.ageMs;
+      return v === null || v === undefined ? null : Number(v);
+    },
+
     /** Partner-scoped read: null for missing OR out-of-scope (404-never-403). */
     async getOwnedTransfer(partnerId: PartnerId, id: string): Promise<Transfer | null> {
       const rows = await db

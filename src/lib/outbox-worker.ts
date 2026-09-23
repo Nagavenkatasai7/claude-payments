@@ -467,7 +467,12 @@ async function handle(
     case 'settlement.instruct': {
       const transferId = str(p.transferId);
       const transferRepo = createTransferRepo(deps.db);
-      const transfer = await transferRepo.getTransfer(transferId, { decrypt: true });
+      // Program-Fix 15 PR C: a SHORT locking read (FOR UPDATE, committed before
+      // the POST below), so a concurrent sender cancel (sender-cancel.ts) is
+      // either fully committed — seen here as cancelled — or not yet started.
+      const transfer = await deps.db.transaction((tx) =>
+        createTransferRepo(tx).getTransferForUpdate(transferId, { decrypt: true }),
+      );
       if (!transfer) return; // gone ⇒ nothing to instruct (idempotent no-op)
       // Program-Fix 44 P2 — DEFENCE IN DEPTH behind the settlement chokepoint:
       // a sandbox (test-key) transfer is NEVER instructed to a real rail, however

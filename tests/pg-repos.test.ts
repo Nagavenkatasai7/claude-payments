@@ -370,6 +370,33 @@ describe('outbox-repo (durability backbone)', () => {
     expect(reclaimed).toHaveLength(1);
   });
 
+  // Program-Fix 15 PR C relies on this: the sender cancel's "never claimed"
+  // proof is locked_at IS NULL, which retryDead must NOT clear (a retried row
+  // may have reached the rail on an earlier run).
+  it('retryDead resets attempts to 0 but KEEPS locked_at (the row ran before)', { retry: 0 }, async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('settlement.instruct', { transferId: 'tr_1' }, { dedupeKey: 'instruct:tr_1' });
+    const [row] = await r.claimBatch(1, 'w1');
+    await r.markFailed(row.id, MAX_ATTEMPTS, 'down');
+    await r.retryDead(row.id);
+    const [locked] = await r.lockRailRowsForTransfer('tr_1');
+    expect(locked).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(locked.lockedAt).not.toBeNull();
+    expect(await r.markDoneLocked([locked.id], 'sender_cancel')).toBe(0); // never provably unrun
+  });
+
+  it('releaseUnstarted refunds the attempt but KEEPS locked_at (claim evidence for the sender cancel)', { retry: 0 }, async () => {
+    const r = createOutboxRepo(db);
+    await r.enqueue('settlement.instruct', { transferId: 'tr_2' }, { dedupeKey: 'instruct:tr_2' });
+    const [row] = await r.claimBatch(1, 'w1');
+    expect(await r.releaseUnstarted([row.id], 'w1')).toBe(1);
+    const [locked] = await r.lockRailRowsForTransfer('tr_2');
+    expect(locked).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(locked.lockedAt).not.toBeNull();
+    // Still claimable by the next drain (claimBatch never reads locked_at on a pending row).
+    expect(await r.claimBatch(1, 'w2')).toHaveLength(1);
+  });
+
   it('delayed effects only become claimable after their delay', async () => {
     const r = createOutboxRepo(db);
     await r.enqueue('mock.settle', { transferId: 'tr_1' }, { delayMs: 60_000 });
