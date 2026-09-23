@@ -19,8 +19,8 @@ const ARGON2_PARAMS = { memorySize: 19456, iterations: 2, parallelism: 1 } as co
  * to verify (the legacy-scrypt fallthrough does NOT cover Argon2id), locking out
  * those accounts. (Safe today: no customer accounts exist yet.) A future
  * versioned-pepper scheme — store the pepper id alongside the hash — is the
- * planned upgrade if rotation is ever required. Program-Fix 45 P3 ships its
- * READER (`$pv=<id>$`, below); hashPassword still writes the bare form.
+ * planned upgrade if rotation is ever required. Program-Fix 45 ships it:
+ * P3 the `$pv=<id>$` reader (below), P4 the writer (hashPassword tags p0).
  */
 function applyPepper(plain: string, pepper: string = env.passwordPepper): string {
   if (!pepper) return plain;
@@ -32,8 +32,9 @@ function applyPepper(plain: string, pepper: string = env.passwordPepper): string
 //   `$pv=<id>$<argon2 PHC>`   e.g. `$pv=p0$$argon2id$v=19$m=…`
 // p0 is always PASSWORD_PEPPER (set-once, never rotated); other ids come only
 // from the optional PASSWORD_PEPPER_PREVIOUS (`<id>:<pepper>` comma list,
-// unset in production). P3 only READS this form: hashPassword still writes the
-// bare `$argon2id$…` string (an implicit p0). The P4 writer emits `$pv=p0$`.
+// unset in production). Since P4, hashPassword writes `$pv=p0$<PHC>`; a bare
+// `$argon2id$…` (written before P4) is an implicit p0 and is re-tagged once
+// at the next successful login (needsRehash).
 // API-key hashes (api-key-repo.ts) are deliberately NOT versioned.
 
 /** The id of PASSWORD_PEPPER. Pinned by tests/password-pepper-id.test.ts. */
@@ -85,9 +86,16 @@ function pepperForId(id: string): string | undefined {
   return peppers.get(id);
 }
 
+/**
+ * Hash a new password. Program-Fix 45 P4: the result is tagged with the id of
+ * the pepper it was made under — `$pv=p0$<argon2id PHC>` — so a future pepper
+ * change can tell hashes apart. The PHC inside is byte-for-byte what was
+ * written before. ⚠ Never roll production back below fix 45 P3: an older
+ * verifyPassword rejects the `$pv=` form and would lock these accounts out.
+ */
 export async function hashPassword(plain: string): Promise<string> {
   const pre = applyPepper(plain);
-  return argon2id({
+  const phc = await argon2id({
     password: pre,
     salt: randomBytes(16),
     parallelism: ARGON2_PARAMS.parallelism,
@@ -96,6 +104,7 @@ export async function hashPassword(plain: string): Promise<string> {
     hashLength: 32,
     outputType: 'encoded',
   });
+  return `$pv=${PEPPER_ID_CURRENT}$${phc}`;
 }
 
 export async function verifyPassword(
@@ -155,7 +164,11 @@ function dummyHash(): Promise<string> {
 /** One Argon2 verify against the dummy hash; the result is discarded. */
 async function burnDummyVerify(plain: string): Promise<void> {
   try {
-    await argon2Verify({ password: applyPepper(plain), hash: await dummyHash() });
+    // Program-Fix 45 P4: the dummy is `$pv=p0$<PHC>`; hand argon2Verify the
+    // bare PHC, or it rejects at parse time and burns no work (timing oracle).
+    const dummy = await dummyHash();
+    const hash = splitPepperId(dummy)?.phc || dummy;
+    await argon2Verify({ password: applyPepper(plain), hash });
   } catch (err) {
     logWarn('password.dummy_hash_failed', err, { path: 'dummy' });
   }
@@ -194,11 +207,15 @@ export async function verifyPasswordOrDummy(
  * are below our target floor. Lets callers lazy-rehash transparently.
  */
 export function needsRehash(stored: string): boolean {
-  // Program-Fix 45 P3: strip `$pv=<id>$` first. A malformed prefix or a
+  // Program-Fix 45: strip `$pv=<id>$` first. A malformed prefix or a
   // non-current pepper id → rehash (moves the hash onto PASSWORD_PEPPER).
+  // P4: an UNTAGGED hash (legacy scrypt, or a bare `$argon2…` written before
+  // P4) → rehash once; hashPassword then writes `$pv=p0$…`, which (at target
+  // params) never needs a rehash again — so there is no rehash loop.
   const versioned = splitPepperId(stored);
-  if (versioned && versioned.id !== PEPPER_ID_CURRENT) return true;
-  const phc = versioned ? versioned.phc : stored;
+  if (!versioned) return true;
+  if (versioned.id !== PEPPER_ID_CURRENT) return true;
+  const phc = versioned.phc;
   if (!phc.startsWith('$argon2id$')) return true;
   const match = phc.match(/\$m=(\d+),t=(\d+),p=(\d+)\$/);
   if (!match) return true;

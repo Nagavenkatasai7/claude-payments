@@ -31,8 +31,10 @@ import { env } from '@/lib/env';
  *
  * What is NOT sealed (Program-Fix 37, crypto-06; an honest claim): sender and
  * recipient phone numbers (they are the lookup keys), `recipient_name`, ticket
- * bodies, and 30-day chat history in Redis stay plaintext. So a dump is NOT
- * ciphertext-only. Encrypting those is deferred to Phase 3 (fixes 45/46).
+ * bodies written BEFORE fix 45 P4 (new ones are sealed, see ticket-repo.ts),
+ * and 30-day chat history in Redis stay plaintext. So a dump is NOT
+ * ciphertext-only. Phones and `recipient_name` are a follow-up fix (a blind
+ * index); legacy ticket bodies have no backfill yet.
  */
 
 const VERSION = 'v1';
@@ -228,6 +230,24 @@ export function defaultProvider(): EncryptionKeyProvider {
   return new EnvKeyRing(env.fieldEncryptionKey, env.fieldEncryptionPreviousKeys);
 }
 
+const CURRENT_KID_ENV = 'FIELD_ENCRYPTION_CURRENT_KID';
+
+/**
+ * Program-Fix 45 P4: the kid new context-bound writes use —
+ * FIELD_ENCRYPTION_CURRENT_KID, default k0 (production: unset, so k0 and every
+ * write is byte-shaped as before). FAILS CLOSED: a kid outside KID_PATTERN, or
+ * one the given provider's ring does not hold, refuses the write (never a
+ * silent fallback to k0 or to a plain provider). Errors name only the env var.
+ */
+export function currentWriteKid(provider: EncryptionKeyProvider = defaultProvider()): string {
+  const kid = env.fieldEncryptionCurrentKid;
+  if (!isKid(kid)) throw new Error(`field-crypto: ${CURRENT_KID_ENV} is not a valid key id`);
+  if (kid === FIELD_KID) return kid;
+  const held = isKeyRingProvider(provider) ? provider.providerForKid(kid) : undefined;
+  if (!held) throw new Error(`field-crypto: ${CURRENT_KID_ENV} names a key id the key ring does not hold`);
+  return kid;
+}
+
 /**
  * The provider that unwraps a v2 blob of this kid. k0 → the given provider,
  * exactly as before fix 45. Any other kid → ONLY a ring-capable provider that
@@ -322,8 +342,9 @@ function utf8Plaintext(plaintext: string): Buffer {
  * Seal one value as a v2, context-bound blob:
  *   `v2.<kid>.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
  * with AAD = aadFor(ctx, kid). Since 46B encryptField routes every
- * context-carrying write through it (the never-auto-run re-encrypt script calls
- * it directly).
+ * context-carrying write through it (the never-auto-run re-encrypt scripts call
+ * it directly). Since fix 45 P4 the DEK is wrapped by the key of `kid` (k0 →
+ * the provider; another kid → only a ring holding it, else it throws).
  */
 export function sealFieldV2(
   plaintext: string,
@@ -331,9 +352,11 @@ export function sealFieldV2(
   ctx: CryptoContext,
   kid: string = FIELD_KID,
 ): string {
-  // Program-Fix 45 P3 is the READER only: the writer stays locked to k0 (the
-  // key-ring writer, P4, is the one change allowed to lift this).
-  if (kid !== FIELD_KID) throw new Error('field-crypto: only k0 is written');
+  // Program-Fix 45 P4: wrap the DEK with THIS kid's key, resolved exactly as
+  // the reader resolves it (k0 → the provider itself; any other kid → only a
+  // ring that holds it). Resolved before any randomness, so a kid nothing
+  // could open is refused rather than written.
+  const keyProvider = providerForBlobKid(provider, kid);
   const aad = aadFor(ctx, kid); // validates the context before any key use
   const plaintextBuf = utf8Plaintext(plaintext);
   const dek = randomBytes(DEK_BYTES);
@@ -342,7 +365,7 @@ export function sealFieldV2(
   cipher.setAAD(Buffer.from(aad, 'utf8'));
   const ct = Buffer.concat([cipher.update(plaintextBuf), cipher.final()]);
   const tag = cipher.getAuthTag();
-  const wrappedDek = provider.wrapDataKey(dek);
+  const wrappedDek = keyProvider.wrapDataKey(dek);
   return [VERSION_V2, kid, b64url(iv), b64url(tag), b64url(wrappedDek), b64url(ct)].join('.');
 }
 
@@ -357,6 +380,11 @@ export function sealFieldV2(
  * since 46A reads it, so rolling back to 46A stays safe; a pre-46A build does
  * NOT (never roll production back below 46A).
  *
+ * The kid is the configured current kid (fix 45 P4, `currentWriteKid`):
+ * FIELD_ENCRYPTION_CURRENT_KID, default k0 — unset in production, so every
+ * production write stays `v2.k0.` under FIELD_ENCRYPTION_KEY. A current kid
+ * that is malformed or missing from the key ring REFUSES the write.
+ *
  * Without a ctx it still writes the legacy v1 envelope
  *   `v1.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
  * (AAD = the literal version): there is nothing to bind it to. Only tests and
@@ -369,7 +397,7 @@ export function encryptField(
   provider: EncryptionKeyProvider = defaultProvider(),
   ctx?: CryptoContext,
 ): string {
-  if (ctx) return sealFieldV2(plaintext, provider, ctx);
+  if (ctx) return sealFieldV2(plaintext, provider, ctx, currentWriteKid(provider));
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
   const plaintextBuf = utf8Plaintext(plaintext);

@@ -34,21 +34,27 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/** The BARE argon2id PHC under a pepper (what main / P3 wrote; P4 prefixes `$pv=p0$`). */
 async function hashUnder(pepper: string, plain: string): Promise<string> {
   vi.stubEnv('PASSWORD_PEPPER', pepper);
   const h = await hashPassword(plain);
   vi.unstubAllEnvs();
-  return h;
+  return h.replace(/^\$pv=p0\$/, '');
 }
 
-describe('GOLDEN: hashPassword writes exactly what main writes', () => {
-  it('a bare $argon2id PHC with the target params, no $pv= prefix — even with PASSWORD_PEPPER_PREVIOUS set', async () => {
+describe('GOLDEN (fix 45 P4): hashPassword writes $pv=p0$ + the argon2id PHC', () => {
+  it('`$pv=p0$$argon2id$v=19$m=19456,t=2,p=1$…` — even with PASSWORD_PEPPER_PREVIOUS set', async () => {
     vi.stubEnv('PASSWORD_PEPPER', PEPPER_A);
     vi.stubEnv('PASSWORD_PEPPER_PREVIOUS', `p1:${PEPPER_B}`);
-    const h = await hashPassword(randomPw());
-    expect(h.startsWith('$argon2id$v=19$m=19456,t=2,p=1$')).toBe(true);
-    expect(h).not.toContain('$pv=');
-    expect(h.split('$')).toHaveLength(6);
+    const pw = randomPw();
+    const h = await hashPassword(pw);
+    expect(h.startsWith('$pv=p0$$argon2id$v=19$m=19456,t=2,p=1$')).toBe(true);
+    expect(h.split('$')).toHaveLength(8);
+    // The PHC inside is exactly what main wrote: it verifies under PASSWORD_PEPPER on its own.
+    const bare = h.slice('$pv=p0$'.length);
+    expect(await verifyPassword(pw, bare)).toBe(true);
+    expect(await verifyPassword(pw, h)).toBe(true);
+    expect(needsRehash(h)).toBe(false);
   });
 });
 
@@ -129,8 +135,8 @@ describe('needsRehash strips $pv=<id>$ first', () => {
   const GOOD = '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g';
   const WEAK = '$argon2id$v=19$m=4096,t=1,p=1$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g';
 
-  it('the bare forms behave as on main', () => {
-    expect(needsRehash(GOOD)).toBe(false);
+  it('the bare forms: weak and legacy rehash as on main; a GOOD bare hash now rehashes ONCE to $pv=p0$ (fix 45 P4)', () => {
+    expect(needsRehash(GOOD)).toBe(true);
     expect(needsRehash(WEAK)).toBe(true);
     expect(needsRehash('salt:hash')).toBe(true);
   });
@@ -168,6 +174,19 @@ describe('$pv= timing parity (fix 21): every path pays exactly one Argon2 verify
     hw.argon2Verify.mockClear();
     expect(await verifyPassword(randomPw(), '$pv=$')).toBe(false);
     expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+  });
+
+  // Program-Fix 45 P4: the dummy hash itself is now `$pv=p0$…` (hashPassword's
+  // new shape). The burned verify must run REAL Argon2 work over the bare PHC —
+  // a verify handed the tagged string rejects at parse time, doing no work.
+  it('the burned dummy verify does real Argon2 work (it resolves, never rejects on parse)', async () => {
+    vi.stubEnv('PASSWORD_PEPPER', PEPPER_A);
+    hw.argon2Verify.mockClear();
+    expect(await verifyPassword(randomPw(), '$pv=p9$$argon2id$v=19$m=19456,t=2,p=1$x$y')).toBe(false);
+    expect(hw.argon2Verify).toHaveBeenCalledTimes(1);
+    const call = hw.argon2Verify.mock.calls[0][0] as { hash: string };
+    expect(call.hash.startsWith('$argon2id$v=19$m=19456,t=2,p=1$')).toBe(true);
+    await expect(hw.argon2Verify.mock.results[0].value).resolves.toBe(false);
   });
 
   it('the known-id path makes exactly one verify', async () => {

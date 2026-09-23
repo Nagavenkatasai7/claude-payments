@@ -235,13 +235,18 @@ describe('GOLDEN: P3 writes exactly what main writes', () => {
   // wrapped DEK (12 + 16 + 32 B) → 80, ct = plaintext bytes in base64url.
   const b64urlLen = (n: number) => Math.ceil((n * 4) / 3);
 
-  it('the writer stays locked to k0: sealFieldV2 refuses any other kid', () => {
+  // Program-Fix 45 P4: the writer may now seal under a ring kid (see
+  // tests/key-ring-writer.test.ts); a kid the ring lacks is still refused.
+  it('sealFieldV2 refuses a kid the ring does not hold', () => {
     const ring = new EnvKeyRing(KEY_0, `k1:${hex(KEY_1)}`);
-    expect(() => sealFieldV2('x', ring, C, 'k1')).toThrow();
+    expect(() => sealFieldV2('x', ring, C, 'k2')).toThrow(/unknown key id/);
   });
 
-  it('encryptField with a ctx → v2.k0 under FIELD_ENCRYPTION_KEY, even with a k1 ring AND CURRENT_KID=k1 set', () => {
-    withRing(`k1:${b64(KEY_1)}`, 'k1');
+  // Program-Fix 45 P4 flips this: with CURRENT_KID=k1 the writer now writes k1
+  // (tests/key-ring-writer.test.ts). The PRODUCTION config (CURRENT_KID unset)
+  // still writes exactly this k0 shape, even with a k1 ring configured.
+  it('encryptField with a ctx → v2.k0 under FIELD_ENCRYPTION_KEY with a k1 ring and CURRENT_KID unset', () => {
+    withRing(`k1:${b64(KEY_1)}`);
     const plain = 'IFSC0001 / 000123456789';
     const blob = encryptField(plain, defaultProvider(), C);
     const parts = blob.split('.');

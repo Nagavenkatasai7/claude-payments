@@ -130,7 +130,7 @@ describe('staff lazy scrypt → Argon2id rehash (fix 21)', () => {
       'REDIRECT:/admin-dashboard',
     );
     const stored = (await getAuthStore().getStaff('ops'))!;
-    expect(stored.passwordHash.startsWith('$argon2id$')).toBe(true);
+    expect(stored.passwordHash.startsWith('$pv=p0$$argon2id$')).toBe(true); // Program-Fix 45 P4
     expect(await verifyPassword('legacy-pw', stored.passwordHash)).toBe(true);
     expect(stored.lastLoginAt).toBeTruthy(); // recordLogin still ran after the rehash
     expect(stored.role).toBe('admin'); // nothing else on the record changed
@@ -157,6 +157,23 @@ describe('staff lazy scrypt → Argon2id rehash (fix 21)', () => {
     expect(await getAuthStore().updatePasswordHash('ghost', 'x', await hashPassword('x'))).toBe(false);
     expect(await getAuthStore().getStaff('ghost')).toBeNull();
     expect(redis.dump.has('staff:ghost')).toBe(false);
+  });
+});
+
+describe('staff $pv=p0$ re-tag runs once (Program-Fix 45 P4)', () => {
+  it('a bare $argon2id hash becomes $pv=p0$ on the first login and is never rewritten again', async () => {
+    const pw = randomBytes(12).toString('base64url');
+    const bare = (await hashPassword(pw)).replace(/^\$pv=p0\$/, '');
+    expect(bare.startsWith('$argon2id$')).toBe(true); // precondition: the P3-era shape
+    await getAuthStore().saveStaff(staffRow({ passwordHash: bare }));
+    await expect(login(null, form({ username: 'ops', password: pw }))).rejects.toThrow('REDIRECT:/admin-dashboard');
+    const first = (await getAuthStore().getStaff('ops'))!.passwordHash;
+    expect(first.startsWith('$pv=p0$$argon2id$')).toBe(true);
+    for (let i = 0; i < 2; i += 1) {
+      cookieJar.clear();
+      await expect(login(null, form({ username: 'ops', password: pw }))).rejects.toThrow('REDIRECT:/admin-dashboard');
+      expect((await getAuthStore().getStaff('ops'))!.passwordHash).toBe(first);
+    }
   });
 });
 

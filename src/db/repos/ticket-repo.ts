@@ -3,7 +3,7 @@ import { tickets, ticketMessages } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { HUMAN_HELP_CATEGORY, HUMAN_HELP_SUBJECT } from '@/lib/ticket-category';
 import { FIRST_RESPONSE_DUE_HOURS } from '@/lib/ticket-sla';
-import { decryptField, defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
+import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
 import { logWarn } from '@/lib/log';
 import type {
@@ -19,9 +19,11 @@ import type {
 // employee questions, discriminated by kind). Tenant isolation is app-level
 // as everywhere: partner-facing reads take partnerId in the WHERE; customer
 // reads are scoped by customer_phone AND never include internal notes.
-// Bodies are written as plaintext (queue search + AI triage/copilot read them);
-// since Program-Fix 45 P3 the reader also opens a v2 body sealed for its own
-// row (openTicketBody), ready for the P4 writer;
+// Bodies are SEALED at rest since Program-Fix 45 P4 (a v2 blob bound to the
+// message row; insertSealedMessage) and opened by the one reader
+// (openTicketBody → rowToMessage), which every consumer — thread views, AI
+// triage/copilot, the outbox — goes through; rows written before P4 stay
+// plaintext and read back as they are;
 // create-forms warn customers against posting account numbers, and any
 // transfer detail joined in stays masked (default ledger reads).
 
@@ -49,9 +51,9 @@ function rowToTicket(row: TicketRow): Ticket {
 }
 
 /**
- * Program-Fix 45 P3: the ticket body READER. Every body written today is
- * plaintext (and stays so until the P4 writer); P4 seals new bodies as a v2
- * blob under `ctx.ticketMessage(<row id>)`. Bodies are customer-authored, so
+ * Program-Fix 45 P3: the ticket body READER. Rows written before P4 hold
+ * plaintext; since P4 every new body is sealed as a v2 blob under
+ * `ctx.ticketMessage(<row id>)` (insertSealedMessage). Bodies are customer-authored, so
  * this opens ONLY a v2 envelope, and only under the row's OWN id: a pasted v1
  * blob (which opens under any context) or a blob sealed for another row is
  * shown as the text it is. Anything else — plain text, or an envelope that
@@ -102,8 +104,39 @@ export interface TicketRepoOptions {
   cryptoProvider?: EncryptionKeyProvider;
 }
 
+type TxRunner = { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
+
+/** Run `fn` in a transaction when we hold a Db; inside an existing tx, share it. */
+function inTx<T>(db: DbOrTx, fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
+  const maybeTx = db as TxRunner;
+  return maybeTx.transaction ? maybeTx.transaction(fn) : fn(db);
+}
+
 export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
   const toMessage = (row: MessageRow) => rowToMessage(row, opts.cryptoProvider);
+
+  /**
+   * Program-Fix 45 P4: write one message with its body SEALED at rest, bound to
+   * its own row (`ctx.ticketMessage(id)`). The id is a generated identity, so
+   * the row is inserted with an empty body and sealed by an UPDATE in the SAME
+   * transaction (the caller's `tx`): the plaintext never reaches the table, and
+   * a seal failure rolls the whole write back. Returns the stored row.
+   */
+  const insertSealedMessage = async (
+    tx: DbOrTx,
+    values: Omit<typeof ticketMessages.$inferInsert, 'body' | 'id'>,
+    body: string,
+  ): Promise<MessageRow> => {
+    const [inserted] = await tx.insert(ticketMessages).values({ ...values, body: '' }).returning({ id: ticketMessages.id });
+    const sealed = encryptField(body, opts.cryptoProvider ?? defaultProvider(), ctx.ticketMessage(inserted.id));
+    const [row] = await tx
+      .update(ticketMessages)
+      .set({ body: sealed })
+      .where(eq(ticketMessages.id, inserted.id))
+      .returning();
+    return row;
+  };
+
   const repo = {
     /** Create the ticket + its first message in ONE transaction. */
     async createTicket(input: CreateTicketInput): Promise<Ticket> {
@@ -123,19 +156,19 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
             category: input.category ?? null,
           })
           .returning();
-        await tx.insert(ticketMessages).values({
-          ticketId: input.id,
-          actorType: input.kind === 'internal' ? 'staff' : 'customer',
-          actorId: input.kind === 'internal' ? (input.openedBy ?? '') : (input.customerPhone ?? ''),
-          body: input.body,
-          internal: false,
-        });
+        await insertSealedMessage(
+          tx,
+          {
+            ticketId: input.id,
+            actorType: input.kind === 'internal' ? 'staff' : 'customer',
+            actorId: input.kind === 'internal' ? (input.openedBy ?? '') : (input.customerPhone ?? ''),
+            internal: false,
+          },
+          input.body,
+        );
         return rowToTicket(rows[0]);
       };
-      // DbOrTx: run a real transaction when we hold a Db; inside an existing
-      // tx the statements already share it.
-      const maybeTx = db as { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
-      return maybeTx.transaction ? maybeTx.transaction(run) : run(db);
+      return inTx(db, run);
     },
 
     async getTicket(id: string): Promise<Ticket | null> {
@@ -304,18 +337,23 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
       body: string;
       internal?: boolean;
     }): Promise<TicketMessage> {
-      const rows = await db
-        .insert(ticketMessages)
-        .values({
-          ticketId: input.ticketId,
-          actorType: input.actorType,
-          actorId: input.actorId,
-          body: input.body,
-          internal: input.internal ?? false,
-        })
-        .returning();
-      await db.update(tickets).set({ updatedAt: new Date() }).where(eq(tickets.id, input.ticketId));
-      return toMessage(rows[0]);
+      // Program-Fix 45 P4: insert + seal + the updatedAt bump in ONE transaction.
+      const row = await inTx(db, async (tx) => {
+        const stored = await insertSealedMessage(
+          tx,
+          {
+            ticketId: input.ticketId,
+            actorType: input.actorType,
+            actorId: input.actorId,
+            internal: input.internal ?? false,
+          },
+          input.body,
+        );
+        await tx.update(tickets).set({ updatedAt: new Date() }).where(eq(tickets.id, input.ticketId));
+        return stored;
+      });
+      // Read back through the reader: proves the sealed row opens on every write.
+      return toMessage(row);
     },
 
     /**

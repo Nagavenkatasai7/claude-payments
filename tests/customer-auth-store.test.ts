@@ -16,7 +16,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createStore } from '@/lib/store';
 import { EnvKeyProvider, decryptField, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
 import { customerEmailCtx } from '@/lib/crypto-context';
-import { verifyPassword } from '@/lib/password';
+import { hashPassword, verifyPassword } from '@/lib/password';
 import type { Customer } from '@/lib/types';
 
 // Fixed crypto provider so the email-encryption path never touches env.
@@ -57,7 +57,7 @@ describe('registerCustomer', () => {
     expect(c.senderPhone).toBe(NORM);
     expect(c.partnerId).toBe('default');
     expect(c.senderCountry).toBe('US');
-    expect(c.passwordHash?.startsWith('$argon2id$')).toBe(true);
+    expect(c.passwordHash?.startsWith('$pv=p0$$argon2id$')).toBe(true); // Program-Fix 45 P4
     expect(c.passwordUpdatedAt).toBeTruthy();
     // email is a ciphertext blob, not the plaintext
     expect(c.email).toBeTruthy();
@@ -216,9 +216,36 @@ describe('verifyCustomerPassword', () => {
     const c = await s.verifyCustomerPassword(PHONE, 'legacy secret pw');
     expect(c).not.toBeNull();
     const persisted = (await customers.getCustomer('default', NORM))!;
-    expect(persisted.passwordHash?.startsWith('$argon2id$')).toBe(true);
+    expect(persisted.passwordHash?.startsWith('$pv=p0$$argon2id$')).toBe(true); // Program-Fix 45 P4
     // still verifies after the upgrade
     expect(await verifyPassword('legacy secret pw', persisted.passwordHash!)).toBe(true);
+  });
+
+  // Program-Fix 45 P4: a bare $argon2id hash (what main / P3 wrote) is re-tagged
+  // ONCE as $pv=p0$ on the next successful login, and never again after that.
+  it('re-tags a bare $argon2id hash as $pv=p0$ exactly once (no rehash loop)', async () => {
+    const { s, customers } = await mkAuth();
+    const pw = randomBytes(12).toString('base64url');
+    const bare = (await hashPassword(pw)).replace(/^\$pv=p0\$/, '');
+    expect(bare.startsWith('$argon2id$')).toBe(true); // precondition: the P3-era shape
+    await customers.saveCustomer({
+      senderPhone: NORM,
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
+      kycStatus: 'not_started',
+      senderCountry: 'US',
+      partnerId: 'default',
+      passwordHash: bare,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(await s.verifyCustomerPassword(PHONE, pw)).not.toBeNull();
+    const first = (await customers.getCustomer('default', NORM))!.passwordHash!;
+    expect(first.startsWith('$pv=p0$$argon2id$')).toBe(true);
+    expect(first).not.toBe(bare);
+    expect(await s.verifyCustomerPassword(PHONE, pw)).not.toBeNull();
+    expect((await customers.getCustomer('default', NORM))!.passwordHash).toBe(first); // no second rehash
+    expect(await s.verifyCustomerPassword(PHONE, pw)).not.toBeNull();
+    expect((await customers.getCustomer('default', NORM))!.passwordHash).toBe(first);
   });
 });
 
@@ -613,7 +640,7 @@ describe('resolveSession rejects sessions older than the last password change (f
     const otherDevice = await s.createSession(NORM, 'default');
     t += 60_000;
     const upgraded = await s.verifyCustomerPassword(PHONE, 'legacy pass 123');
-    expect(upgraded?.passwordHash?.startsWith('$argon2id$')).toBe(true); // precondition: rehash ran
+    expect(upgraded?.passwordHash?.startsWith('$pv=p0$$argon2id$')).toBe(true); // precondition: rehash ran (fix 45 P4 shape)
     expect((await s.resolveSession(otherDevice))?.senderPhone).toBe(NORM);
   });
 
