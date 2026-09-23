@@ -448,6 +448,23 @@ describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret
     );
   });
 
+  it('a ROUTED failed status is audited under THAT partner, not the default tenant (Program-Fix 26)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: {
+        metadata: { phone_number_id: 'pn_acme' },
+        statuses: [{ id: 'wamid.RS1', recipient_id: '15551230000', status: 'failed', errors: [{ code: 131026, title: 'Message undeliverable' }] }],
+      } }] }],
+    });
+    const res = await post(body, sign(body, 'acme_secret'));
+    expect(res.status).toBe(200);
+    expect(auditRecord).toHaveBeenCalledTimes(1);
+    expect(auditRecord.mock.calls[0][0]).toMatchObject({ partnerId: 'acme', subjectId: 'wamid.RS1', meta: { code: 131026, title: 'Message undeliverable' } });
+  });
+
   it('routed + partner has NO appSecret ⇒ 401 fail closed even when signed with the platform secret — no fallback for a routed event', async () => {
     partnerForPhoneNumberId.mockResolvedValue('acme');
     getIntegrations.mockResolvedValue(ACME_NO_SECRET);
