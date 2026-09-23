@@ -273,6 +273,18 @@ export function rateLockMinutes(fxFetchedAt: number | undefined, now: number = D
   return Math.max(0, Math.floor(Math.min(draftMs, fxLeftMs) / 60_000));
 }
 
+/**
+ * The card's rate-lock line. Under 2 minutes left (only when FX has been
+ * degraded for ~58+ minutes) no lock time is promised: "0 min" would read as
+ * already expired, and "1 min" can lapse before the page opens. If it lapses,
+ * the pay page refuses the mint with the expired-quote message and asks for a
+ * fresh quote, so this wording stays honest.
+ */
+export const RATE_LOCK_SHORT_LINE = 'Rate valid for a moment — tap soon.';
+export function rateLockLine(lockMinutes: number): string {
+  return lockMinutes < 2 ? RATE_LOCK_SHORT_LINE : `Rate locked for ${lockMinutes} min.`;
+}
+
 export function buildApproveSummary(
   q: import('./types').Quote,
   recipientName: string,
@@ -313,7 +325,7 @@ export function buildApproveSummary(
     `Rate: 1 ${q.sourceCurrency} = ${fmtDest(q.fxRate)}`,
     `They get ${fmtDest(q.amountInr)} ${q.deliveryEstimate}.`,
     `To: ${maskDestination(payoutMethod, payoutDestination)}`,
-    `Rate locked for ${lockMinutes} min.`,
+    rateLockLine(lockMinutes),
   ].join('\n');
 }
 
@@ -3654,7 +3666,11 @@ async function sendApprovePickerTool(
         summary,
         pay_url: payUrl,
         reply_hint:
-          `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`,
+          `show the summary and tell the customer to tap the secure payment link below your reply to review and pay — ${
+            rateLockMinutes(fxFetchedAt) < 2
+              ? 'the rate is valid only for a moment, so they should tap soon'
+              : `the rate is locked for ${rateLockMinutes(fxFetchedAt)} minutes`
+          }`,
       };
     }
     // Idempotency guard: the agent.turn outbox row is at-least-once, so a retry
