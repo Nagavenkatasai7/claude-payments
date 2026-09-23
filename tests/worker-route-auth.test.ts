@@ -134,10 +134,17 @@ describe('/api/worker — AML sweep wiring (Program-Fix 43)', () => {
     expect((r as unknown as { rows: unknown[] }).rows).toHaveLength(1);
   });
 
-  it('a throwing sweep is swallowed: the drain still answers 200 with aml null', async () => {
+  it('a throwing sweep is swallowed: the drain still runs (a due row is processed) and aml is null', async () => {
+    const { sql } = await import('drizzle-orm');
+    const { createOutboxRepo } = await import('@/db/repos/outbox-repo');
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'route test: due row' }, { dedupeKey: 'route-test:due' });
     amlBox.throwOnce = true;
     const res = await POST(req('POST', { authorization: `Bearer ${SECRET}` }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, aml: null });
+    const body = (await res.json()) as { ok: boolean; aml: unknown; processed: number };
+    expect(body).toMatchObject({ ok: true, aml: null });
+    expect(body.processed).toBeGreaterThanOrEqual(1);
+    const r = await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'route-test:due'`);
+    expect((r as unknown as { rows: Array<{ status: string }> }).rows[0].status).toBe('done');
   });
 });

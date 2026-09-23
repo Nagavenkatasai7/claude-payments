@@ -34,7 +34,8 @@ import type { Partner, PartnerId, Transfer } from '@/lib/types';
 //   • ≤ 200 rows and a wall-clock budget: the sweep runs BEFORE the outbox
 //     drain in the same invocation, so it must not eat the drain's window.
 //
-// Per row (blocked rows are skipped — the sanctions path owns them):
+// Per row (blocked rows are skipped — the sanctions path owns them — and so are
+// cancelled rows, which moved no money):
 //   R1 structuring and R2a first-ever send — ledger aggregates (tenant-keyed).
 //   R2b first send to a new destination — per-sender Redis set of destination
 //       blind indexes, aml:sd:<partner>:<senderBidx> (90-day TTL, slid on every visit). When the set
@@ -188,11 +189,13 @@ export async function amlSweep(db: Db, redis: AmlRedis, opts: AmlSweepOptions = 
 
     for (const t of rows) {
       if (clock() - started >= budgetMs) break;
-      if (t.status !== 'blocked') {
-        if (!partners.has(t.partnerId)) partners.set(t.partnerId, await partnerRepo.getPartner(t.partnerId));
-        const rules = resolveCorridorRules(partners.get(t.partnerId) ?? null, t.sourceCountry);
-        const cfg: AmlRuleConfig = { ...rules.aml, largeAmountUsd: rules.largeAmountUsd };
+      // Blocked rows belong to the sanctions path; cancelled rows moved no money
+      // (and the ledger aggregates exclude both). The cursor still passes them.
+      if (t.status !== 'blocked' && t.status !== 'cancelled') {
         try {
+          if (!partners.has(t.partnerId)) partners.set(t.partnerId, await partnerRepo.getPartner(t.partnerId));
+          const rules = resolveCorridorRules(partners.get(t.partnerId) ?? null, t.sourceCountry);
+          const cfg: AmlRuleConfig = { ...rules.aml, largeAmountUsd: rules.largeAmountUsd };
           result.alerts += await evaluateRow(db, redis, t, cfg, opts.bidxKey, () => redisUp, markDown);
         } catch {
           // A failing row (e.g. a DB error) stops THIS batch; the cursor still

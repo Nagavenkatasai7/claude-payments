@@ -23,6 +23,25 @@ vi.mock('@/db/repos/outbox-repo', async (orig) => {
   };
 });
 
+// A switch that makes the partner lookup throw for one partner id.
+const partnerFail = vi.hoisted(() => ({ id: null as string | null }));
+vi.mock('@/db/repos/partner-repo', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/partner-repo')>();
+  return {
+    ...real,
+    createPartnerRepo: (dbx: Parameters<typeof real.createPartnerRepo>[0]) => {
+      const r = real.createPartnerRepo(dbx);
+      return {
+        ...r,
+        getPartner: async (id: string) => {
+          if (partnerFail.id === id) throw new Error('partner lookup failed');
+          return r.getPartner(id);
+        },
+      };
+    },
+  };
+});
+
 import { amlSweep, AML_CURSOR_KEY, AML_LOCK_KEY } from '@/lib/aml-sweep';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { settleOrHold } from '@/lib/settlement';
@@ -51,6 +70,7 @@ beforeEach(async () => {
   redis = fakeAmlRedis();
   now = new Date();
   failBox.failFor = null;
+  partnerFail.id = null;
 });
 
 async function seed(input: {
@@ -315,5 +335,28 @@ describe('amlSweep — resilience (review follow-ups)', () => {
     expect((await alerts('aml:first_transfer:')).map((r) => r.dedupe_key)).toEqual(
       [a, b, c].map((id) => `aml:first_transfer:${id}`),
     );
+  });
+});
+
+describe('amlSweep — coordinator review follow-ups', () => {
+  it('a throwing partner lookup stops the batch like any row failure: the cursor covers completed rows, the lock is released', async () => {
+    const a = await seed({ phone: '15551130001', amountUsd: 600, agoMs: 20 * MIN });
+    await seed({ phone: '15551130002', amountUsd: 600, agoMs: 19 * MIN, partnerId: 'p2' });
+    partnerFail.id = 'p2';
+    const r = await sweep();
+    expect(r.scanned).toBe(1);
+    expect(redis.strings.get(AML_CURSOR_KEY)).toMatch(new RegExp(`\\|${a}$`));
+    expect(redis.strings.has(AML_LOCK_KEY)).toBe(false);
+    partnerFail.id = null;
+    expect((await sweep()).scanned).toBe(1);
+  });
+
+  it('cancelled rows are skipped (no alert), but the cursor moves past them', async () => {
+    const c = await seed({ phone: '15551140001', amountUsd: 600, agoMs: 20 * MIN, status: 'cancelled' });
+    const r = await sweep();
+    expect(r.scanned).toBe(1);
+    expect(await alerts()).toEqual([]);
+    expect(await amlAudits()).toEqual([]);
+    expect(redis.strings.get(AML_CURSOR_KEY)).toMatch(new RegExp(`\\|${c}$`));
   });
 });
