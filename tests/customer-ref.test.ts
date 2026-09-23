@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createHash, createHmac, hkdfSync } from 'node:crypto';
 import { freshDb, seedPartner } from './helpers-db';
-import { encryptField } from '@/lib/field-crypto';
+import { encryptField, sealFieldV2, defaultProvider, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import {
   sealCustomerRef,
   openCustomerRef,
@@ -49,6 +50,27 @@ describe('sealCustomerRef / openCustomerRef', () => {
     expect(openCustomerRef(encryptField('someone@x.com'))).toBeNull();
     expect(openCustomerRef(encryptField(`cref1|acme|not-a-phone`))).toBeNull();
     expect(openCustomerRef(encryptField(`cref1||${PHONE}`))).toBeNull();
+  });
+});
+
+describe('customer refs under the v2 envelope (fix 46A)', () => {
+  it('a v2 ref (sealed under the customer_ref purpose) opens', () => {
+    __setFieldCryptoWriteV2ForTests(true);
+    try {
+      const ref = sealCustomerRef('acme', PHONE);
+      expect(ref.startsWith('v2.k0.')).toBe(true);
+      expect(ref).toMatch(/^[A-Za-z0-9._-]+$/);
+      expect(openCustomerRef(ref)).toEqual({ partnerId: 'acme', phone: PHONE });
+    } finally {
+      __setFieldCryptoWriteV2ForTests(false);
+    }
+  });
+
+  it('a v2 blob under a different context is not a ref (null, never throws)', () => {
+    const other = sealFieldV2(`cref1|acme|${PHONE}`, defaultProvider(), ctx.customer('acme', PHONE, 'email_enc'));
+    expect(openCustomerRef(other)).toBeNull();
+    expect(openCustomerRef('v2.k0.a.b.c.d')).toBeNull();
+    expect(openCustomerRef('v2.k9.a.b.c.d.e')).toBeNull();
   });
 });
 

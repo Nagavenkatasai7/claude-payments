@@ -96,6 +96,15 @@ vi.mock('@/lib/whatsapp', () => ({
   }),
 }));
 vi.mock('@/lib/pwned', () => ({ isPwnedPassword: vi.fn(async () => false) }));
+// Program-Fix 46A (F70): the per-IP register throttle reads getRedis(); route it
+// to the shared fake (cleared in beforeEach). `limiterDown` simulates an outage.
+let limiterDown = false;
+vi.mock('@/lib/redis', () => ({
+  getRedis: () => {
+    if (limiterDown) throw new Error('redis unavailable');
+    return redis;
+  },
+}));
 vi.mock('@/lib/field-crypto', async () => {
   const actual = await vi.importActual<typeof import('@/lib/field-crypto')>('@/lib/field-crypto');
   return { ...actual, defaultProvider: () => crypto };
@@ -136,6 +145,7 @@ beforeEach(async () => {
   redirectMock.mockClear();
   afterQueue.length = 0;
   afterThrows = false;
+  limiterDown = false;
   const db = await freshDb();
   customerStore = createCustomerStore(db, createStore(fakeRedis(), db));
   authStore = createCustomerAuthStore(redis, customerStore);
@@ -579,5 +589,60 @@ describe('logoutAction', () => {
     await expect(logoutAction()).rejects.toThrow('REDIRECT:/account/login');
     expect(cookieDelete).toHaveBeenCalledWith(CUSTOMER_SESSION_COOKIE);
     expect(await authStore.getSession(token)).toBeNull();
+  });
+});
+
+
+// Program-Fix 46A (F70): bounded email + a per-IP registration cap.
+describe('registerAction — email bound and per-IP cap (fix 46A)', () => {
+  it('300-char email refused, nothing saved', async () => {
+    const longEmail = `${'a'.repeat(288)}@example.com`;
+    expect(longEmail).toHaveLength(300);
+    const spy = vi.spyOn(authStore, 'registerCustomer');
+    const state = await registerAction(null, form({ phone: PHONE, email: longEmail, password: PASSWORD }));
+    expect(spy).not.toHaveBeenCalled(); // refused by the action itself, before the store
+    spy.mockRestore();
+    expect(state.step).toBe('register');
+    expect(state.error).toBeTruthy();
+    expect(await authStore.getCustomer(NORM)).toBeNull();
+    expect(sentCodes).toHaveLength(0);
+  });
+
+  it('11th register from one IP refused (before any write)', async () => {
+    clientIpHeader = '203.0.113.7';
+    for (let i = 0; i < 10; i++) {
+      const phone = `+1 202 555 ${String(1000 + i)}`;
+      const st = await registerAction(null, form({ phone, email: `u${i}@example.com`, password: PASSWORD }));
+      expect(st.step).toBe('otp');
+    }
+    const eleventh = await registerAction(
+      null,
+      form({ phone: '+1 202 555 2000', email: 'u11@example.com', password: PASSWORD }),
+    );
+    expect(eleventh.step).toBe('register');
+    expect(eleventh.error).toBeTruthy();
+    expect(await authStore.getCustomer('12025552000')).toBeNull();
+    // Another IP is unaffected.
+    clientIpHeader = '198.51.100.20';
+    const other = await registerAction(null, form({ phone: '+1 202 555 2001', email: 'o@example.com', password: PASSWORD }));
+    expect(other.step).toBe('otp');
+  });
+
+  it('an unknown client IP is never throttled (no shared bucket)', async () => {
+    clientIpHeader = null;
+    for (let i = 0; i < 11; i++) {
+      const st = await registerAction(
+        null,
+        form({ phone: `+1 202 555 ${String(3000 + i)}`, email: `k${i}@example.com`, password: PASSWORD }),
+      );
+      expect(st.step).toBe('otp');
+    }
+  });
+
+  it('fails open when the limiter is unavailable', async () => {
+    clientIpHeader = '203.0.113.9';
+    limiterDown = true;
+    const st = await register();
+    expect(st.step).toBe('otp');
   });
 });

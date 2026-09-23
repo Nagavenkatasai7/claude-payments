@@ -1,4 +1,5 @@
 import { decryptField } from '@/lib/field-crypto';
+import { outboxSealedCtx } from '@/lib/crypto-context';
 
 // sealed-text — renders `{{key}}` placeholders in a durable email payload from a
 // map of field-crypto blobs. This is how the ONE outbox payload that must carry
@@ -11,13 +12,19 @@ import { decryptField } from '@/lib/field-crypto';
 // Pure, with an injectable opener so it is unit-tested without env. A missing
 // blob throws a message naming the PLACEHOLDER only — it lands in
 // outbox.last_error (sliced to 1000 chars), which the ops page renders.
+//
+// Program-Fix 46A: each placeholder opens under its purpose context
+// (outboxSealedCtx — the same mapping partners-action seals with); a v2 blob
+// opens only under the context it was sealed for. v1 blobs ignore the context
+// and open as before.
 
 const PLACEHOLDER = /\{\{([a-z_]+)\}\}/g;
 
 export function renderSealedText(
   text: string,
   sealed: unknown,
-  open: (blob: string) => string = (blob) => decryptField(blob),
+  open: (blob: string, key: string) => string = (blob, key) =>
+    decryptField(blob, undefined, outboxSealedCtx(key)),
 ): string {
   if (!sealed || typeof sealed !== 'object') return text;
   const map = sealed as Record<string, unknown>;
@@ -26,6 +33,6 @@ export function renderSealedText(
     if (typeof blob !== 'string') {
       throw new Error(`sealed-text: no sealed value for {{${key}}}`);
     }
-    return open(blob);
+    return open(blob, key);
   });
 }

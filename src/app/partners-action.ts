@@ -7,6 +7,7 @@ import { createPartnerRequestRepo } from '@/db/repos/aux-repos';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { env } from '@/lib/env';
 import { encryptField } from '@/lib/field-crypto';
+import { outboxSealedCtx } from '@/lib/crypto-context';
 import { newTransferId } from '@/lib/id';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { pokeWorker } from '@/lib/outbox';
@@ -106,7 +107,11 @@ export async function submitPartnerRequestAction(formData: FormData): Promise<vo
     // encryptField is CPU-only — the transaction gains no I/O.
     const { token, hash, expiresAt } = issueApplicationToken();
     await requests.setApplicationToken(id, hash, expiresAt);
-    const sealedApplyLink = encryptField(`${env.appBaseUrl}/partners/apply/${token}`);
+    const sealedApplyLink = encryptField(
+      `${env.appBaseUrl}/partners/apply/${token}`,
+      undefined,
+      outboxSealedCtx('apply_link'), // the same mapping sealed-text opens with
+    );
 
     // Team notification — internal lead alert.
     await outbox.enqueue(

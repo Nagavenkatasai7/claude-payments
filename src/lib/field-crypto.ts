@@ -36,6 +36,14 @@ import { env } from '@/lib/env';
  */
 
 const VERSION = 'v1';
+/** Program-Fix 46: the context-bound envelope. Read now (46A); written from 46B. */
+const VERSION_V2 = 'v2';
+/**
+ * The one key id a v2 blob may carry today. It is a slot in the blob AND bound
+ * into the AAD, so fix 45 (key ring / rotation) adds kids without a v3.
+ */
+export const FIELD_KID = 'k0';
+const KNOWN_KIDS: ReadonlySet<string> = new Set([FIELD_KID]);
 const GCM_IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 const DEK_BYTES = 32; // AES-256
@@ -145,23 +153,111 @@ function fromB64url(s: string): Buffer {
 }
 
 /**
+ * Program-Fix 46: WHERE a sealed value lives — the table, the column and the
+ * row's key parts (see `src/lib/crypto-context.ts`, the only place contexts are
+ * built). A v2 blob binds it into the GCM AAD, so the blob opens only in the
+ * exact (table, column, row) it was sealed for. `v1Exempt` is NOT part of the
+ * AAD: it marks the two purposes that keep reading v1 forever (46B's reject-v1
+ * switch honours it).
+ */
+export interface CryptoContext {
+  table: string;
+  column: string;
+  row: readonly string[];
+  v1Exempt?: boolean;
+}
+
+const IDENT = /^[a-z][a-z0-9_.]*$/;
+
+/**
+ * The exact AAD string for a context:
+ *   `v2|<kid>|<table>|<column>|<encodeURIComponent(part) joined by '|'>`.
+ * encodeURIComponent escapes '|', so part boundaries are unambiguous. PINNED by
+ * tests (field-crypto.test.ts, crypto-context.test.ts): changing it orphans every
+ * v2 row. Throws on an invalid context; only the v2 paths ever call it, so a v1
+ * read never depends on a context being well-formed.
+ */
+export function aadFor(ctx: CryptoContext, kid: string = FIELD_KID): string {
+  if (!ctx || typeof ctx !== 'object') throw new Error('field-crypto: invalid context');
+  if (typeof ctx.table !== 'string' || !IDENT.test(ctx.table)) {
+    throw new Error('field-crypto: invalid context table');
+  }
+  if (typeof ctx.column !== 'string' || !IDENT.test(ctx.column)) {
+    throw new Error('field-crypto: invalid context column');
+  }
+  if (!Array.isArray(ctx.row) || ctx.row.some((part) => typeof part !== 'string')) {
+    throw new Error('field-crypto: invalid context row');
+  }
+  if (!KNOWN_KIDS.has(kid)) throw new Error('field-crypto: unknown key id');
+  const row = ctx.row.map((part) => encodeURIComponent(part)).join('|');
+  return [VERSION_V2, kid, ctx.table, ctx.column, row].join('|');
+}
+
+// Test-only seam (Program-Fix 46A): the repo round-trip tests turn on v2 writes
+// for context-carrying encryptField calls. Production never flips it (46B makes
+// v2 the default instead) and the setter refuses to run there.
+let writeV2ForTests = false;
+export function __setFieldCryptoWriteV2ForTests(on: boolean): void {
+  if (on && process.env.NODE_ENV === 'production') {
+    throw new Error('field-crypto: the v2 write seam is test-only');
+  }
+  writeV2ForTests = on;
+}
+
+/** Reject lone UTF-16 surrogates (see encryptField). */
+function utf8Plaintext(plaintext: string): Buffer {
+  // Buffer.from(…,'utf8') silently replaces lone surrogates with U+FFFD, which
+  // would break the decrypt(encrypt(x)) === x invariant. Round-tripping through
+  // the buffer detects any such non-encodable input up front.
+  const buf = Buffer.from(plaintext, 'utf8');
+  if (buf.toString('utf8') !== plaintext) {
+    throw new Error('field-crypto: plaintext contains lone surrogates (not valid UTF-8)');
+  }
+  return buf;
+}
+
+/**
+ * Seal one value as a v2, context-bound blob:
+ *   `v2.<kid>.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
+ * with AAD = aadFor(ctx, kid). 46A uses it only in tests and the (never
+ * auto-run) re-encrypt script; 46B routes encryptField through it.
+ */
+export function sealFieldV2(
+  plaintext: string,
+  provider: EncryptionKeyProvider,
+  ctx: CryptoContext,
+  kid: string = FIELD_KID,
+): string {
+  const aad = aadFor(ctx, kid); // validates the context before any key use
+  const plaintextBuf = utf8Plaintext(plaintext);
+  const dek = randomBytes(DEK_BYTES);
+  const iv = randomBytes(GCM_IV_BYTES);
+  const cipher = createCipheriv('aes-256-gcm', dek, iv);
+  cipher.setAAD(Buffer.from(aad, 'utf8'));
+  const ct = Buffer.concat([cipher.update(plaintextBuf), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const wrappedDek = provider.wrapDataKey(dek);
+  return [VERSION_V2, kid, b64url(iv), b64url(tag), b64url(wrappedDek), b64url(ct)].join('.');
+}
+
+/**
  * Encrypt one field value. Returns a compact, self-describing string:
  *   `v1.<b64url(iv)>.<b64url(tag)>.<b64url(wrappedDek)>.<b64url(ct)>`
  * Two calls on the same plaintext produce DIFFERENT blobs (random DEK + IVs).
+ *
+ * `ctx` (Program-Fix 46A): where the value will be stored. 46A still WRITES v1
+ * and ignores it (every serving build must read v2 before any is written; 46B
+ * flips this). Callers pass it now so the flip is a one-line change.
  */
 export function encryptField(
   plaintext: string,
   provider: EncryptionKeyProvider = defaultProvider(),
+  ctx?: CryptoContext,
 ): string {
+  if (writeV2ForTests && ctx) return sealFieldV2(plaintext, provider, ctx);
   const dek = randomBytes(DEK_BYTES);
   const iv = randomBytes(GCM_IV_BYTES);
-  // Reject lone UTF-16 surrogates: Buffer.from(…,'utf8') silently replaces them
-  // with U+FFFD, which would break the decrypt(encrypt(x)) === x invariant. Round-
-  // tripping through the buffer detects any such non-encodable input up front.
-  const plaintextBuf = Buffer.from(plaintext, 'utf8');
-  if (plaintextBuf.toString('utf8') !== plaintext) {
-    throw new Error('field-crypto: plaintext contains lone surrogates (not valid UTF-8)');
-  }
+  const plaintextBuf = utf8Plaintext(plaintext);
   const cipher = createCipheriv('aes-256-gcm', dek, iv);
   cipher.setAAD(Buffer.from(VERSION)); // bind the version as AAD (anti-transplant)
   const ct = Buffer.concat([
@@ -179,32 +275,11 @@ export function encryptField(
   ].join('.');
 }
 
-/**
- * Decrypt a blob produced by `encryptField`. Throws on:
- *  - format / unknown-version errors,
- *  - a wrapped DEK that doesn't unwrap under this provider's master key,
- *  - any GCM auth-tag failure (tampered iv/tag/ct/wrappedDek).
- */
-export function decryptField(
-  blob: string,
-  provider: EncryptionKeyProvider = defaultProvider(),
-): string {
-  if (typeof blob !== 'string' || blob.length === 0) {
-    throw new Error('field-crypto: empty or non-string blob');
-  }
-  const parts = blob.split('.');
-  if (parts.length !== 5) {
-    throw new Error('field-crypto: malformed blob');
-  }
-  const [version, ivB64, tagB64, wrappedB64, ctB64] = parts;
-  if (version !== VERSION) {
-    throw new Error(`field-crypto: unsupported version "${version}"`);
-  }
+/** Decode + length-check the shared iv/tag segments of a v1 or v2 blob. */
+function ivAndTag(ivB64: string, tagB64: string): { iv: Buffer; tag: Buffer } {
   const iv = fromB64url(ivB64);
   const tag = fromB64url(tagB64);
-  const wrappedDek = fromB64url(wrappedB64);
-  const ct = fromB64url(ctB64);
-  // A well-formed v1 blob has a 12-byte IV and a 16-byte GCM tag. Reject a blob
+  // A well-formed blob has a 12-byte IV and a 16-byte GCM tag. Reject a blob
   // whose IV/tag decode to the wrong length up front, with a clear error, rather
   // than letting createDecipheriv/setAuthTag throw something opaque.
   if (iv.length !== GCM_IV_BYTES) {
@@ -213,11 +288,67 @@ export function decryptField(
   if (tag.length !== GCM_TAG_BYTES) {
     throw new Error('field-crypto: malformed blob (bad tag length)');
   }
+  return { iv, tag };
+}
 
+function openWith(
+  provider: EncryptionKeyProvider,
+  iv: Buffer,
+  tag: Buffer,
+  wrappedDek: Buffer,
+  ct: Buffer,
+  aad: Buffer,
+): string {
   const dek = provider.unwrapDataKey(wrappedDek); // throws if master key mismatches
   const decipher = createDecipheriv('aes-256-gcm', dek, iv);
-  decipher.setAAD(Buffer.from(version)); // must match the AAD bound at encrypt
+  decipher.setAAD(aad); // must match the AAD bound at encrypt
   decipher.setAuthTag(tag);
   const plain = Buffer.concat([decipher.update(ct), decipher.final()]);
   return plain.toString('utf8');
+}
+
+/**
+ * Decrypt a blob produced by `encryptField` / `sealFieldV2`. Branches on the
+ * VERSION before counting segments:
+ *  - `v1.` — 5 segments, AAD `'v1'`; `ctx` is IGNORED (never read, never
+ *    validated), so a legacy row opens exactly as it did before fix 46;
+ *  - `v2.` — 6 segments, a known kid, and `ctx` is REQUIRED; AAD = aadFor(ctx,
+ *    kid), so a blob opens only under the context it was sealed for.
+ * Throws on format / unknown-version errors, a wrapped DEK that doesn't unwrap
+ * under this provider's master key, and any GCM auth-tag failure. Error text
+ * never contains the context (it holds row keys: phones, partner ids).
+ */
+export function decryptField(
+  blob: string,
+  provider: EncryptionKeyProvider = defaultProvider(),
+  ctx?: CryptoContext,
+): string {
+  if (typeof blob !== 'string' || blob.length === 0) {
+    throw new Error('field-crypto: empty or non-string blob');
+  }
+  const parts = blob.split('.');
+  if (parts[0] === VERSION_V2) {
+    if (parts.length !== 6) {
+      throw new Error('field-crypto: malformed blob');
+    }
+    const [, kid, ivB64, tagB64, wrappedB64, ctB64] = parts;
+    if (!KNOWN_KIDS.has(kid)) {
+      throw new Error('field-crypto: unknown key id');
+    }
+    if (!ctx) {
+      throw new Error('field-crypto: a v2 blob needs its storage context');
+    }
+    const aad = Buffer.from(aadFor(ctx, kid), 'utf8');
+    const { iv, tag } = ivAndTag(ivB64, tagB64);
+    return openWith(provider, iv, tag, fromB64url(wrappedB64), fromB64url(ctB64), aad);
+  }
+  if (parts.length !== 5) {
+    throw new Error('field-crypto: malformed blob');
+  }
+  const [version, ivB64, tagB64, wrappedB64, ctB64] = parts;
+  if (version !== VERSION) {
+    throw new Error(`field-crypto: unsupported version "${version}"`);
+  }
+  const { iv, tag } = ivAndTag(ivB64, tagB64);
+  return openWith(provider, iv, tag, fromB64url(wrappedB64), fromB64url(ctB64), Buffer.from(version));
 }

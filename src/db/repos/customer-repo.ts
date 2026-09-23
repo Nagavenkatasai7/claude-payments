@@ -3,6 +3,7 @@ import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { defaultProvider, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { openOptional, sealOptional } from './mappers';
+import { customerRowCtx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { countryForPhone } from '@/lib/partner-currency';
 import type {
@@ -59,11 +60,13 @@ export function createCustomerRepo(
     set('kycVerifiedAt', isoOpt(row.kycVerifiedAt));
     set('kycProviderRef', row.kycProviderRef);
     set('kycRejectedReason', row.kycRejectedReason);
-    set('fullName', openOptional(row.fullNameEnc, provider));
-    set('dateOfBirth', openOptional(row.dateOfBirthEnc, provider));
-    set('residentialAddress', openOptional(row.residentialAddressEnc, provider));
+    // Contexts come from the FETCHED row's own key (Program-Fix 46A); a mismatch
+    // throws (openOptional never swallows) — the sanctions screen reads fullName.
+    set('fullName', openOptional(row.fullNameEnc, provider, customerRowCtx(row, 'full_name_enc')));
+    set('dateOfBirth', openOptional(row.dateOfBirthEnc, provider, customerRowCtx(row, 'date_of_birth_enc')));
+    set('residentialAddress', openOptional(row.residentialAddressEnc, provider, customerRowCtx(row, 'residential_address_enc')));
     set('govIdType', (row.govIdType ?? undefined) as GovIdType | undefined);
-    set('govIdNumber', openOptional(row.govIdNumberEnc, provider));
+    set('govIdNumber', openOptional(row.govIdNumberEnc, provider, customerRowCtx(row, 'gov_id_number_enc')));
     set('nationality', (row.nationality ?? undefined) as CountryCode | undefined);
     set('pepDeclared', row.pepDeclared ?? undefined);
     set('sourceOfFunds', (row.sourceOfFunds ?? undefined) as SourceOfFunds | undefined);
@@ -98,9 +101,11 @@ export function createCustomerRepo(
 
   function customerToRow(c: Customer): typeof customers.$inferInsert {
     const dateOpt = (s: string | undefined): Date | null => (s ? new Date(s) : null);
+    // The row key AS WRITTEN — every sealed column below binds to it.
+    const key = { partnerId: c.partnerId ?? DEFAULT_PARTNER_ID, phone: c.senderPhone };
     return {
-      phone: c.senderPhone,
-      partnerId: c.partnerId ?? DEFAULT_PARTNER_ID,
+      phone: key.phone,
+      partnerId: key.partnerId,
       firstSeenAt: new Date(c.firstSeenAt),
       senderCountry: c.senderCountry,
       kycStatus: c.kycStatus,
@@ -113,11 +118,11 @@ export function createCustomerRepo(
       kycApprovedBy: c.kycApprovedBy ?? null,
       kycApprovedAt: dateOpt(c.kycApprovedAt),
       kycRejectedAt: dateOpt(c.kycRejectedAt),
-      fullNameEnc: sealOptional(c.fullName, provider) ?? null,
-      dateOfBirthEnc: sealOptional(c.dateOfBirth, provider) ?? null,
-      residentialAddressEnc: sealOptional(c.residentialAddress, provider) ?? null,
+      fullNameEnc: sealOptional(c.fullName, provider, customerRowCtx(key, 'full_name_enc')) ?? null,
+      dateOfBirthEnc: sealOptional(c.dateOfBirth, provider, customerRowCtx(key, 'date_of_birth_enc')) ?? null,
+      residentialAddressEnc: sealOptional(c.residentialAddress, provider, customerRowCtx(key, 'residential_address_enc')) ?? null,
       emailEnc: c.email ?? null, // already a field-crypto blob — stored verbatim
-      govIdNumberEnc: sealOptional(c.govIdNumber, provider) ?? null,
+      govIdNumberEnc: sealOptional(c.govIdNumber, provider, customerRowCtx(key, 'gov_id_number_enc')) ?? null,
       govIdType: c.govIdType ?? null,
       idLast4: c.idLast4 ?? null,
       idDocType: c.idDocType ?? null,
