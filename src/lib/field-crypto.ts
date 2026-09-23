@@ -189,6 +189,8 @@ export function aadFor(ctx: CryptoContext, kid: string = FIELD_KID): string {
     throw new Error('field-crypto: invalid context row');
   }
   if (!KNOWN_KIDS.has(kid)) throw new Error('field-crypto: unknown key id');
+  // Row arity is fixed per (table, column) by crypto-context.ts, so the
+  // escaped '|'-joined parts are unambiguous within a column.
   const row = ctx.row.map((part) => encodeURIComponent(part)).join('|');
   return [VERSION_V2, kid, ctx.table, ctx.column, row].join('|');
 }

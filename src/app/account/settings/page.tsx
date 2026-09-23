@@ -1,6 +1,7 @@
 import { requireCustomer } from '@/lib/customer-auth';
 import { decryptField } from '@/lib/field-crypto';
 import { customerEmailCtx } from '@/lib/crypto-context';
+import { logWarn } from '@/lib/log';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -51,7 +52,9 @@ export default async function AccountSettingsPage({
     try {
       // Opened under the context of the row it was read from (Program-Fix 46A).
       email = decryptField(customer.email, undefined, customerEmailCtx(customer));
-    } catch {
+    } catch (err) {
+      // Loud for ops (no value, no key — the logger scrubs), silent for the page.
+      logWarn('settings.email_decrypt', err);
       email = '';
     }
   }

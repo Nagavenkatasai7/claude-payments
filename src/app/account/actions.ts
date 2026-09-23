@@ -3,7 +3,13 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { after } from 'next/server';
-import { getCustomerAuthStore, CustomerInputError, EMAIL_MAX_LENGTH } from '@/lib/customer-auth-store';
+import {
+  getCustomerAuthStore,
+  CustomerInputError,
+  EMAIL_MAX_LENGTH,
+  PASSWORD_MAX,
+  PASSWORD_MIN,
+} from '@/lib/customer-auth-store';
 import { getOtpStore, type OtpPurpose } from '@/lib/otp-store';
 import { getPendingAuthStore } from '@/lib/pending-auth-store';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
@@ -170,9 +176,19 @@ export async function registerAction(
   if (!email || !email.includes('@') || email.length > EMAIL_MAX_LENGTH) {
     return { step: 'register', error: 'Enter a valid email address.' };
   }
+  // The store's length policy, checked here too so a refusal never spends the
+  // per-IP budget below (same message registerCustomer uses).
+  if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
+    return {
+      step: 'register',
+      error: `Password must be between ${PASSWORD_MIN} and ${PASSWORD_MAX} characters.`,
+    };
+  }
 
   // Program-Fix 46A (F70): per-IP registration cap BEFORE any write — the same
-  // `ip` the OTP send keys on. Skips an unknown IP (one shared bucket would lock
+  // `ip` the OTP send keys on. Only attempts that reach registerCustomer count:
+  // phone / email / password-length refusals above return first, so a shared
+  // network full of typos cannot trip it. Skips an unknown IP (one shared bucket would lock
   // out everyone behind a header-stripping proxy) and FAILS OPEN on any limiter
   // error, as isIpRateLimited does (ip-rate-limit.ts).
   if (ip !== 'unknown') {

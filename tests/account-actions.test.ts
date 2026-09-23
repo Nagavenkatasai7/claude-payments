@@ -641,6 +641,17 @@ describe('registerAction — email bound and per-IP cap (fix 46A)', () => {
     expect(other.step).toBe('otp');
   });
 
+  it('only attempts that reach registerCustomer count (phone/email/password-length refusals do not)', async () => {
+    clientIpHeader = '203.0.113.8';
+    for (let i = 0; i < 12; i++) {
+      await registerAction(null, form({ phone: '12', email: 'x@example.com', password: PASSWORD }));
+      await registerAction(null, form({ phone: PHONE, email: 'no-at-sign', password: PASSWORD }));
+      await registerAction(null, form({ phone: PHONE, email: 'x@example.com', password: 'short' }));
+    }
+    const st = await register();
+    expect(st.step).toBe('otp');
+  });
+
   it('an unknown client IP is never throttled (no shared bucket)', async () => {
     clientIpHeader = null;
     for (let i = 0; i < 11; i++) {

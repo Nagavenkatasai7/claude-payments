@@ -51,10 +51,10 @@ export class CustomerInputError extends Error {
 }
 
 // ── Policy constants ──
-const PASSWORD_MIN = 8;
+export const PASSWORD_MIN = 8;
 /** RFC 5321 forward-path limit; the settings action uses the same bound. */
 export const EMAIL_MAX_LENGTH = 254;
-const PASSWORD_MAX = 64;
+export const PASSWORD_MAX = 64;
 const IDLE_MS = 30 * 60 * 1000; //   30-min idle window
 const ABSOLUTE_MS = 12 * 60 * 60 * 1000; // 12-h absolute window
 const SESSION_IDLE_SECONDS = IDLE_MS / 1000; // Redis ex (defense-in-depth; code is authoritative)
