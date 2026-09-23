@@ -412,3 +412,20 @@ describe('checkCallbackAmount (pure)', () => {
     expect(checkCallbackAmount(t, cb({ destination: 16600, destination_currency: 'inr' }))).toBe('match');
   });
 });
+
+// Program-Fix 31 PR B: the compliance block is spread in by the WORKER, never by
+// buildSettlementInstruction. These are the instruction's top-level keys BEFORE
+// the change (taken in the red step); they must stay exactly this set.
+describe('buildSettlementInstruction — legacy shape pinned (Program-Fix 31)', () => {
+  it('a consumer instruction has exactly the pre-fix-31 top-level keys (no compliance key here)', () => {
+    expect(Object.keys(buildSettlementInstruction(fixture()))).toEqual([
+      'reference', 'partner_id', 'corridor', 'payout', 'recipient', 'amount',
+    ]);
+  });
+  it('a B2B ach_pull instruction adds only funding + parties', () => {
+    const t = { ...fixture(), transferType: 'b2b', fundingMethod: 'ach_pull', achTokenRef: 'tok' } as Transfer;
+    expect(Object.keys(buildSettlementInstruction(t))).toEqual([
+      'reference', 'partner_id', 'corridor', 'payout', 'recipient', 'amount', 'funding', 'parties',
+    ]);
+  });
+});
