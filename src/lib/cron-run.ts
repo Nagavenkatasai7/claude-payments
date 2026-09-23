@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { isScheduleDueToday } from './schedule';
 import { createTransfer } from './transfer-create';
 import { SendBusyError, SendCapError } from './send-limits';
@@ -83,7 +84,12 @@ export async function runDueSchedules(
     // schedule stays active and resumes automatically once they verify.
     // WL1: skipped for a 'delegated' partner (they run KYC); sanctions still run.
     if (sendGateActive(partner) && !isSendVerified(owner)) {
-      if (deps.sendScheduledSkipped) {
+      // Program-Fix 27: /api/cron runs twice a day (13:00 UTC + the 17:00 UTC
+      // catch-up), and this branch bumps no lastRunAt — so nudge at most ONCE
+      // per schedule per Eastern day. CLAIM-FIRST, before the inquiry is
+      // started: a crash after the claim under-messages (the next due day
+      // nudges again), never double-messages.
+      if (deps.sendScheduledSkipped && (await claimKycNudge(deps, schedule))) {
         const start = await deps.kycProvider.startVerification({
           customerId: schedule.phone,
           senderPhone: schedule.phone,
@@ -161,9 +167,9 @@ export async function runDueSchedules(
         senderKycStatus: owner?.kycStatus ?? 'not_started',
         requiresKyc: sendGateActive(partner), // WL1: delegated ⇒ false; sanctions still run
       });
-      // Program fix 16: a busy per-sender lock wrote nothing, and /api/cron runs
-      // ONCE a day (no same-day re-run) — so retry the mint once in-process
-      // before counting the schedule as failed.
+      // Program fix 16: a busy per-sender lock wrote nothing — retry the mint
+      // once in-process before counting the schedule as failed (the next
+      // same-day chance is the 17:00 UTC catch-up run, hours away).
       let transfer: Awaited<ReturnType<typeof mint>>;
       try {
         transfer = await mint();
@@ -183,10 +189,10 @@ export async function runDueSchedules(
       // A refused mint (Task 9: FX unavailable; or any other refusal) is LOUD:
       // a scrubbed error line, counted in the result (the /api/cron JSON), and
       // ONE deduped ops alert per schedule per Eastern day. lastRunAt is NOT
-      // advanced, so a MANUAL same-day re-run of /api/cron would fire it — the
-      // scheduled cron itself runs once a day with no next-day catch-up
-      // (isScheduleDueToday matches the day), so without the alert this
-      // cycle's send would silently disappear.
+      // advanced, so a same-day re-run fires it: the 17:00 UTC catch-up cron
+      // (Program-Fix 27) or a manual re-run of /api/cron. There is no NEXT-day
+      // catch-up (isScheduleDueToday matches the day), so without the alert a
+      // cycle refused by both runs would silently disappear.
       failed++;
       const reason =
         err instanceof RateUnavailableError ? err.reason
@@ -222,12 +228,35 @@ async function alertScheduleNotCreated(
           (dedupePrefix === 'schedule-sender-name'
             ? `No sender legal name is on file; the schedule stays active and runs on its next due day ` +
               `once the customer gives their name in chat (or re-run /api/cron today after that).`
-            : `Re-run /api/cron today once the cause clears; the daily cron does not retry it tomorrow.`),
+            : `Re-run /api/cron today once the cause clears; if this alert came from the 13:00 UTC run, the ` +
+              `17:00 UTC catch-up retries it automatically. Nothing retries it tomorrow.`),
       },
       { dedupeKey: `${dedupePrefix}:${scheduleId}:${day}` },
     );
   } catch (alertErr) {
     logError('cron.schedule-alert', alertErr, { scheduleId });
+  }
+}
+
+/**
+ * Program-Fix 27: true only for the FIRST caller of the day's KYC-nudge claim
+ * for this schedule. The key sits under the reserved 'sched:' prefix (the
+ * partner API refuses it at its edge) and binds a non-transfer marker value,
+ * so it can never be mistaken for a mint claim. A failing claim is logged and
+ * treated as "already nudged" (fail toward silence, never a second message).
+ */
+async function claimKycNudge(deps: Pick<CronDeps, 'db' | 'now'>, schedule: Schedule): Promise<boolean> {
+  const marker = `kycnudge_${randomUUID()}`;
+  try {
+    const bound = await createIdempotencyRepo(deps.db).claim(
+      schedule.partnerId,
+      `sched:${schedule.id}:${easternDay(deps.now)}:kyc-nudge`,
+      marker,
+    );
+    return bound === marker;
+  } catch (err) {
+    logError('cron.kyc-nudge-claim', err, { scheduleId: schedule.id });
+    return false;
   }
 }
 

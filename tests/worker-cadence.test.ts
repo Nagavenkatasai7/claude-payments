@@ -59,9 +59,10 @@ describe('vercel.json — the cron config (test 1)', () => {
     expect(workers).toEqual([{ path: '/api/worker', schedule: '* * * * *' }]);
   });
 
-  it('keeps the daily /api/cron entry and ignoreCommand byte-for-byte (values at 7d734cf)', () => {
+  it('keeps the daily /api/cron entry and ignoreCommand byte-for-byte (values at 7d734cf), plus the Program-Fix 27 17:00 UTC catch-up', () => {
     expect(VERCEL_JSON.crons.filter((c) => c.path === '/api/cron')).toEqual([
       { path: '/api/cron', schedule: '0 13 * * *' },
+      { path: '/api/cron', schedule: '0 17 * * *' },
     ]);
     expect(VERCEL_JSON.ignoreCommand).toBe(
       'if [ "${VERCEL_GIT_COMMIT_REF#component/}" != "$VERCEL_GIT_COMMIT_REF" ]; then exit 0; else exit 1; fi',
