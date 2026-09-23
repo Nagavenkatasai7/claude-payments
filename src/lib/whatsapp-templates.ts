@@ -228,9 +228,16 @@ export function verificationStatusFallbackText(
  * free-form text (the customer is actively paying → inside the 24-h window), so
  * it needs no AUTHENTICATION template. Pure (testable); the code is interpolated
  * by the caller and must never be logged.
+ *
+ * Program-Fix 45: ends with the "never share" line. `brand` is optional (every
+ * caller today sends the SmartRemit default); a blank brand falls back to it.
  */
-export function transactionOtpMessage(code: string): string {
-  return `Your SmartRemit confirmation code is ${code}. Enter it on the payment page to send this transfer. It expires in 10 minutes.`;
+export function transactionOtpMessage(code: string, brand?: string): string {
+  const name = brand?.trim() || 'SmartRemit';
+  return (
+    `Your ${name} confirmation code is ${code}. Enter it on the payment page to send this transfer. ` +
+    `It expires in 10 minutes. Never share this code; ${name} will never ask for it.`
+  );
 }
 
 /**

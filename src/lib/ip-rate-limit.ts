@@ -2,6 +2,7 @@ import { Redis } from '@upstash/redis';
 import { NextResponse, type NextRequest } from 'next/server';
 import { env } from './env';
 import type { RedisLike } from './store';
+import { raiseLimiterDownAlert } from './limiter-alert';
 
 // ip-rate-limit — per-IP fixed-window limiter for the PUBLIC endpoints
 // (Stage 3). Complements the per-entity throttles (per-partner API budget,
@@ -11,7 +12,24 @@ import type { RedisLike } from './store';
 // Fixed window (INCR + EXPIRE), keyed `iprl|{scope}|{ip}|{window}` — scopes
 // never share budgets, and the route-facing guard FAILS OPEN on Redis errors:
 // a rate-limiter outage must never block payments (the inner per-entity
-// throttles still hold).
+// throttles still hold). Program-Fix 45: a limiter error is no longer silent,
+// it raises a deduped `limiter-down` ops alert (fire-and-forget, never awaited).
+
+/**
+ * Fire the fail-open ops signal without awaiting it and without ever throwing:
+ * the request that noticed the outage must not wait on (or fail because of)
+ * the alert. The payload carries the scope only (limiter-alert.ts).
+ */
+function signalLimiterDown(scope: string, alert?: (scope: string) => unknown): void {
+  try {
+    const p = alert ? alert(scope) : raiseLimiterDownAlert(scope, 'fail-open');
+    if (p && typeof (p as Promise<unknown>).catch === 'function') {
+      (p as Promise<unknown>).catch(() => {});
+    }
+  } catch {
+    /* never let the signal break fail-open */
+  }
+}
 
 export interface IpRateLimitResult {
   allowed: boolean;
@@ -91,9 +109,17 @@ export async function enforceIpRateLimit(
   // Program-Fix 48: normalise once so the bucket AND the Retry-After math use the
   // same window (a raw 0 used to send `retry-after: NaN`).
   windowSec = normalizeWindowSec(windowSec);
+  // A header-parse error is not a limiter outage: fail open WITHOUT the
+  // limiter-down alert (Program-Fix 45).
+  let ip: string;
+  try {
+    ip = clientIpFrom(req.headers);
+  } catch {
+    return null;
+  }
   try {
     const now = Date.now();
-    const result = await checkIpRateLimit(limiterRedis(), scope, clientIpFrom(req.headers), {
+    const result = await checkIpRateLimit(limiterRedis(), scope, ip, {
       limit,
       windowSec,
       now,
@@ -111,6 +137,7 @@ export async function enforceIpRateLimit(
     }
     return null;
   } catch {
+    signalLimiterDown(scope);
     return null; // fail-open
   }
 }
@@ -139,6 +166,8 @@ export interface IpGuardDeps {
   now?: () => number;
   /** Deadline override (tests). Default PAY_PAGE_GUARD_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Ops-signal override (tests). Default: the fail-open `limiter-down` alert. */
+  alert?: (scope: string) => unknown;
 }
 
 // A page-guard-only client. The shared `limiterRedis()` above serves the 12
@@ -184,8 +213,15 @@ export async function isIpRateLimited(
   deps: IpGuardDeps = {},
 ): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // A header-parse error is not a limiter outage: fail open WITHOUT the
+  // limiter-down alert (Program-Fix 45).
+  let ip: string;
   try {
-    const ip = clientIpFrom(headers);
+    ip = clientIpFrom(headers);
+  } catch {
+    return false;
+  }
+  try {
     if (ip === 'unknown') return false;
     const timeoutMs = deps.timeoutMs ?? PAY_PAGE_GUARD_TIMEOUT_MS;
     // The deadline resolves "allowed": a stalled limiter must never hide a
@@ -204,6 +240,7 @@ export async function isIpRateLimited(
     ]);
     return !result.allowed;
   } catch {
+    signalLimiterDown(scope, deps.alert); // Program-Fix 45: fire-and-forget
     return false; // fail-open: availability wins on a money page
   } finally {
     if (timer !== undefined) clearTimeout(timer); // never keep the function alive

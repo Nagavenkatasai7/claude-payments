@@ -121,3 +121,48 @@ describe('POST /api/pay/[transferId] — per-transaction OTP', () => {
     expect((await store.getTransfer(TID))?.paymentProviderRef).toBe(`mock-${TID}`);
   });
 });
+
+// Program-Fix 45 (P2): past the lifetime issue cap the route still answers the
+// generic {ok:true,sent:true} (the page cannot tell a cap from a send), and no
+// code is delivered. A normal single request still sends (pinned above).
+describe('POST /api/pay/[transferId] — request_otp at the lifetime issue cap', { retry: 0 }, () => {
+  it('the 11th request (past the cooldown) answers exactly like a send and delivers nothing', async () => {
+    let nowMs = Date.now();
+    txOtp = createTransactionOtpStore(fakeRedis(), { now: () => nowMs, randomInt: () => 654321 });
+    for (let i = 0; i < 10; i++) {
+      if (i > 0) nowMs += 31_000;
+      const res = await POST(req({ action: 'request_otp' }), ctx);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, sent: true });
+    }
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
+    nowMs += 31_000;
+    const capped = await POST(req({ action: 'request_otp' }), ctx);
+    expect(capped.status).toBe(200);
+    expect(await capped.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledTimes(10);
+    expect(await status()).toBe('awaiting_payment');
+  });
+});
+
+// Program-Fix 45 (P2, review r1): the pay page draws from its OWN per-phone
+// budget (kind 'pay', scoped to the transfer's partner). Other flows reaching
+// their cap on the same phone never block the remittance code.
+describe('POST /api/pay/[transferId] — request_otp uses the pay budget of the transfer partner', { retry: 0 }, () => {
+  it('B2B and another partner at their phone caps: the pay-page code is still sent', async () => {
+    const r = fakeRedis();
+    txOtp = createTransactionOtpStore(r, { randomInt: () => 654321 });
+    for (let i = 0; i < 21; i++) await txOtp.issue(`inv_${i}`, PHONE, { kind: 'b2b', partnerId: 'default' });
+    for (let i = 0; i < 21; i++) await txOtp.issue(`o_${i}`, PHONE, { kind: 'pay', partnerId: 'other_partner' });
+    const res = await POST(req({ action: 'request_otp' }), ctx);
+    expect(await res.json()).toEqual({ ok: true, sent: true });
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', undefined);
+    expect([...r.dump.keys()].some((k) => k.startsWith('txotp:phone:pay:default:'))).toBe(true);
+  });
+
+  it('passes the transfer partner as the budget', async () => {
+    const issue = vi.spyOn(txOtp, 'issue');
+    await POST(req({ action: 'request_otp' }), ctx);
+    expect(issue).toHaveBeenCalledWith(TID, PHONE, { kind: 'pay', partnerId: 'default' });
+  });
+});

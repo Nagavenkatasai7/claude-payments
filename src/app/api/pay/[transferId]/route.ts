@@ -29,6 +29,7 @@ import { isPartnerPulled } from '@/lib/funding-method';
 import type { CountryCode, Transfer } from '@/lib/types';
 import { SUPPORTED_DESTINATIONS } from '@/lib/destination-country';
 import { draftTenant } from '@/lib/legacy-tenant';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { FX_QUOTE_EXPIRED_MESSAGE, FX_UNAVAILABLE_MESSAGE } from '@/lib/rate';
 
 // (Stage 2b: the mock's 120s sleep is an outbox row now — no long-running function.)
@@ -363,15 +364,23 @@ export async function POST(
     // (1) "request_otp": issue + deliver a code in-session (free-form). No charge.
     if (typeof body.action === 'string' && body.action === 'request_otp') {
       if (!otpPhone) return NextResponse.json({ ok: false, error: 'expired_or_used' }, { status: 404 });
-      const issued = await getTransactionOtpStore().issue(transferId, otpPhone);
+      // The owning partner scopes the per-phone code budget (Program-Fix 45) and
+      // picks the sending number (WL2). The draft carries its tenant (fix 1); a
+      // pre-deploy draft resolves by the oldest-row rule.
+      let otpPartnerId: string | undefined;
+      try {
+        otpPartnerId = otpDraft
+          ? await draftTenant(otpDraft, store.legacyTenantOf)
+          : (await store.getTransfer(transferId))?.partnerId;
+      } catch { /* budget falls back to the default partner; send to the shared env number */ }
+      const issued = await getTransactionOtpStore().issue(transferId, otpPhone, {
+        kind: 'pay',
+        partnerId: otpPartnerId ?? DEFAULT_PARTNER_ID,
+      });
       if (issued.ok) {
         // WL2: the code arrives from the number the customer is mid-payment with.
         let otpCreds: WaCreds | undefined;
         try {
-          // The draft carries its tenant (fix 1); a pre-deploy draft resolves by the oldest-row rule.
-          const otpPartnerId = otpDraft
-            ? await draftTenant(otpDraft, store.legacyTenantOf)
-            : (await store.getTransfer(transferId))?.partnerId;
           if (otpPartnerId) {
             otpCreds = waCredsFrom(await getPartnerIntegrationsStore().getIntegrations(otpPartnerId));
           }

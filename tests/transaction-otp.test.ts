@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { fakeRedis } from './helpers';
 import { createTransactionOtpStore } from '@/lib/transaction-otp';
@@ -126,7 +126,8 @@ describe('transaction-otp — atomic attempt caps (fix 19)', () => {
 
   it('keeps writing attempts:0 so the old build reads a number during the rolling release', async () => {
     await store.issue(TX, PHONE);
-    const rec = [...redis.dump.entries()].find(([k]) => k.startsWith('txotp:') && !k.startsWith('txotp:cd:'));
+    // The code record itself (fix 45 added txotp:issued:/txotp:phone: counters beside it).
+    const rec = [...redis.dump.entries()].find(([k]) => k === `txotp:${createHash('sha256').update(TX).digest('hex')}`);
     expect(JSON.parse(rec![1]).attempts).toBe(0);
   });
 
@@ -138,5 +139,166 @@ describe('transaction-otp — atomic attempt caps (fix 19)', () => {
       expect(k).not.toContain(TX);
       expect(v).not.toContain('123456');
     }
+  });
+});
+
+// Program-Fix 45 (P2): issue caps. A lifetime cap per transaction and a daily
+// cap per phone, both reserved with an atomic INCR AFTER the cooldown and the
+// daily fail-cap refusals (so a refused request never burns the budget) and
+// BEFORE a code is minted. A Redis error propagates: the send fails closed.
+describe('transaction-otp — issue caps (fix 45)', () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+  const issuedKey = (tx: string) => `txotp:issued:${sha(tx)}`;
+  const phoneKeys = () => [...redis.dump.keys()].filter((k) => k.startsWith('txotp:phone:'));
+
+  it('allows 10 codes per transaction over its lifetime; the 11th is locked, even the next day', async () => {
+    for (let i = 0; i < 10; i++) {
+      if (i > 0) nowMs += 31_000;
+      expect((await store.issue(TX, PHONE)).ok).toBe(true);
+    }
+    nowMs += 31_000;
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'locked' });
+    nowMs += DAY_MS + 1_000; // lifetime, not daily
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'locked' });
+  });
+
+  it('allows 20 codes per phone per UTC day across transactions; the 21st is locked; the day rolls', async () => {
+    for (let i = 0; i < 20; i++) {
+      expect((await store.issue(`draft_${i}`, PHONE)).ok).toBe(true);
+    }
+    expect(await store.issue('draft_20', PHONE)).toEqual({ ok: false, reason: 'locked' });
+    // A different phone is unaffected.
+    expect((await store.issue('draft_21', '15559990000')).ok).toBe(true);
+    nowMs += DAY_MS;
+    expect((await store.issue('draft_22', PHONE)).ok).toBe(true);
+  });
+
+  it('the phone cap ignores formatting: +1 555… and 1555… share one budget', async () => {
+    for (let i = 0; i < 10; i++) await store.issue(`a_${i}`, PHONE);
+    for (let i = 0; i < 10; i++) await store.issue(`b_${i}`, `+${PHONE}`);
+    expect(await store.issue('c_0', PHONE)).toEqual({ ok: false, reason: 'locked' });
+  });
+
+  it('a cooldown refusal burns neither budget', async () => {
+    await store.issue(TX, PHONE);
+    expect(redis.dump.get(issuedKey(TX))).toBe('1');
+    const phoneKey = phoneKeys()[0];
+    expect(redis.dump.get(phoneKey)).toBe('1');
+    for (let i = 0; i < 5; i++) {
+      expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'cooldown' });
+    }
+    expect(redis.dump.get(issuedKey(TX))).toBe('1');
+    expect(redis.dump.get(phoneKey)).toBe('1');
+  });
+
+  it('a daily fail-cap refusal burns neither budget', async () => {
+    const t = nowMs;
+    await redis.set(`txotp:fail:${sha(TX)}:${Math.floor(t / DAY_MS)}`, '15');
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'locked' });
+    expect(redis.dump.has(issuedKey(TX))).toBe(false);
+    expect(phoneKeys()).toEqual([]);
+  });
+
+  it('a refusal at the transaction cap does not touch the phone budget', async () => {
+    await redis.set(issuedKey(TX), '10');
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'locked' });
+    expect(phoneKeys()).toEqual([]);
+  });
+
+  it('a capped issue mints no code: the previous code stays the live one', async () => {
+    await redis.set(issuedKey(TX), '10');
+    expect((await store.issue(TX, PHONE)).ok).toBe(false);
+    expect(await store.verify(TX, PHONE, '123456')).toEqual({ ok: false, reason: 'no_code' });
+  });
+
+  it('sets TTLs on first write: 8 days for the lifetime counter, past the day for the phone bucket', async () => {
+    const expire = vi.spyOn(redis, 'expire');
+    await store.issue(TX, PHONE);
+    expect(expire).toHaveBeenCalledWith(issuedKey(TX), 8 * 24 * 60 * 60);
+    expect(expire).toHaveBeenCalledWith(phoneKeys()[0], 2 * 24 * 60 * 60);
+    expire.mockRestore();
+  });
+
+  it('keys hold only hashes: never the transaction id or the phone', async () => {
+    await store.issue(TX, PHONE);
+    for (const k of redis.dump.keys()) {
+      expect(k).not.toContain(TX);
+      expect(k).not.toContain(PHONE);
+    }
+  });
+
+  it('the per-phone budget is scoped by caller kind: B2B at its cap never blocks the pay-page code', async () => {
+    for (let i = 0; i < 20; i++) {
+      expect((await store.issue(`inv_${i}`, PHONE, { kind: 'b2b', partnerId: 'default' })).ok).toBe(true);
+    }
+    expect(await store.issue('inv_20', PHONE, { kind: 'b2b', partnerId: 'default' })).toEqual({ ok: false, reason: 'locked' });
+    expect((await store.issue('transfer_1', PHONE, { kind: 'pay', partnerId: 'default' })).ok).toBe(true);
+    expect((await store.issue('seller_1', PHONE, { kind: 'seller', partnerId: 'default' })).ok).toBe(true);
+  });
+
+  it('the per-phone budget is scoped by partner: one partner at its cap never blocks another', async () => {
+    for (let i = 0; i < 20; i++) await store.issue(`inv_${i}`, PHONE, { kind: 'b2b', partnerId: 'p_a' });
+    expect((await store.issue('inv_20', PHONE, { kind: 'b2b', partnerId: 'p_a' })).ok).toBe(false);
+    expect((await store.issue('inv_21', PHONE, { kind: 'b2b', partnerId: 'p_b' })).ok).toBe(true);
+  });
+
+  it('no budget argument means the pay budget of the default partner', async () => {
+    for (let i = 0; i < 20; i++) await store.issue(`d_${i}`, PHONE);
+    expect(await store.issue('d_20', PHONE, { kind: 'pay', partnerId: 'default' })).toEqual({ ok: false, reason: 'locked' });
+    expect(phoneKeys().every((k) => k.startsWith('txotp:phone:pay:default:'))).toBe(true);
+  });
+
+  it('a refusal at the phone cap does not burn the transaction budget', async () => {
+    for (let i = 0; i < 20; i++) await store.issue(`d_${i}`, PHONE);
+    expect(await store.issue(TX, PHONE)).toEqual({ ok: false, reason: 'locked' });
+    expect(redis.dump.has(issuedKey(TX))).toBe(false);
+  });
+
+  it('a partner id is never written raw into a key beyond a safe charset', async () => {
+    await store.issue(TX, PHONE, { kind: 'pay', partnerId: 'p a|b:c' });
+    expect(phoneKeys()[0]).toMatch(/^txotp:phone:pay:p_a_b_c:[0-9a-f]{64}:\d+$/);
+  });
+
+  it('fails closed on a Redis error: issue rejects, calls onStoreError once, and rethrows the original error', async () => {
+    const boom = new Error('redis down');
+    const onStoreError = vi.fn().mockResolvedValue(undefined);
+    const broken = { ...redis, incr: async () => { throw boom; } };
+    const s = createTransactionOtpStore(broken, { now: () => nowMs, onStoreError });
+    await expect(s.issue(TX, PHONE)).rejects.toBe(boom);
+    expect(onStoreError).toHaveBeenCalledTimes(1);
+    expect(onStoreError).toHaveBeenCalledWith('txotp-issue');
+    // No code record was written.
+    expect([...redis.dump.keys()].some((k) => k === `txotp:${sha(TX)}`)).toBe(false);
+  });
+
+  it('a throwing onStoreError never replaces the original error', async () => {
+    const boom = new Error('redis down');
+    const broken = { ...redis, get: async () => { throw boom; } };
+    const s = createTransactionOtpStore(broken, {
+      now: () => nowMs,
+      onStoreError: async () => { throw new Error('alert failed'); },
+    });
+    await expect(s.issue(TX, PHONE)).rejects.toBe(boom);
+  });
+});
+
+describe('getTransactionOtpStore — wires the fail-closed ops signal (fix 45)', () => {
+  afterEach(() => {
+    vi.doUnmock('@/lib/redis');
+    vi.doUnmock('@/lib/limiter-alert');
+    vi.resetModules();
+  });
+
+  it('a Redis error in issue raises the txotp-issue fail-closed alert and still rejects', async () => {
+    vi.resetModules();
+    const raise = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('@/lib/limiter-alert', () => ({ raiseLimiterDownAlert: raise }));
+    vi.doMock('@/lib/redis', () => ({
+      getRedis: () => ({ ...fakeRedis(), get: async () => { throw new Error('redis down'); } }),
+    }));
+    const mod = await import('@/lib/transaction-otp');
+    await expect(mod.getTransactionOtpStore().issue(TX, PHONE)).rejects.toThrow('redis down');
+    expect(raise).toHaveBeenCalledWith('txotp-issue', 'fail-closed');
   });
 });
