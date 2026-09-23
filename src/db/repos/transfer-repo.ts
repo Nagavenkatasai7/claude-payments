@@ -5,7 +5,7 @@ import { defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib
 import { last4, rowToTransfer, transferToRow, type TransferRow } from './mappers';
 import { ctx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
-import type { CountryCode, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
+import type { CountryCode, FundingProviderId, PartnerId, PayoutMethod, RefundStatus, Transfer, TransferEnvironment, TransferStatus } from '@/lib/types';
 import {
   encodeStatementCursor,
   type SettledTransfer,
@@ -64,6 +64,23 @@ function parseCursor(cursor: string | undefined): { createdAt: Date; id: string 
  */
 const LIVE_ONLY = eq(transfers.environment, 'live');
 
+/**
+ * Program-Fix 7 — THE FUNDING GATE (a predicate, like the compliance gate):
+ * a row may flip to paid / in_review only when its async debit is absent
+ * (NULL — every mock / partner-settled row, i.e. everything while the flag is
+ * OFF) or has SUCCEEDED. A pending, failed or returned debit can never reach
+ * a rail or a "payment received" message, whichever caller asks.
+ */
+const fundingGate = () =>
+  sql`(${transfers.fundingState} IS NULL OR ${transfers.fundingState} = 'succeeded')`;
+
+/**
+ * Program-Fix 7 — "never charged AND no debit possibly in flight": the void /
+ * edit predicates' unfunded test. A bound PSP intent counts as possibly
+ * charged (the sender may have confirmed an ACH debit that lands days later).
+ */
+const unfundedNoIntent = () => and(isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef));
+
 export function createTransferRepo(
   db: DbOrTx,
   provider: EncryptionKeyProvider = defaultProvider(),
@@ -94,7 +111,7 @@ export function createTransferRepo(
       eq(transfers.id, id),
       eq(transfers.partnerId, partnerId),
       eq(transfers.status, 'awaiting_payment'),
-      isNull(transfers.fundingRef),
+      unfundedNoIntent(),
       eq(transfers.transferType, 'b2c'),
       sql`NOT EXISTS (SELECT 1 FROM ${idempotencyKeys} WHERE ${idempotencyKeys.transferId} = ${transfers.id} AND NOT (${idempotencyKeys.partnerId} = ${DEFAULT_PARTNER_ID} AND ${idempotencyKeys.key} LIKE 'draft:%') AND ${idempotencyKeys.key} NOT LIKE 'sched:%')`,
       sql`NOT EXISTS (SELECT 1 FROM ${auditEvents} WHERE ${auditEvents.subjectId} = ${transfers.id} AND ${auditEvents.action} = 'transaction.create' AND ${auditEvents.actorType} = 'api_key')`,
@@ -333,7 +350,108 @@ export function createTransferRepo(
       await db
         .update(transfers)
         .set({ fundingRef: ref })
-        .where(and(eq(transfers.id, id), isNull(transfers.fundingRef)));
+        // Program-Fix 7: never on a row bound to a PSP intent — only a
+        // VERIFIED PSP event (markFundingSucceeded) may record that charge.
+        .where(and(eq(transfers.id, id), isNull(transfers.fundingRef), isNull(transfers.fundingIntentRef)));
+    },
+
+    /**
+     * Program-Fix 7: bind the PSP intent (NOT a charge) to an awaiting,
+     * uncharged row of THIS tenant, write-once; state → pending. Re-binding
+     * the SAME intent is idempotent and re-arms a failed attempt (the sender
+     * retries on the same intent); a different intent is refused. Null ⇒ a
+     * guard failed (moved, charged, other tenant, other intent).
+     */
+    async bindFundingIntent(
+      id: string,
+      partnerId: PartnerId,
+      provider: FundingProviderId,
+      intentRef: string,
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingProvider: provider, fundingIntentRef: intentRef, fundingState: 'pending' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.fundingRef),
+          or(
+            isNull(transfers.fundingIntentRef),
+            and(
+              eq(transfers.fundingIntentRef, intentRef),
+              sql`${transfers.fundingState} IN ('pending', 'failed')`,
+            ),
+          ),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Program-Fix 7: a VERIFIED `payment_intent.succeeded` for THIS tenant's
+     * bound intent — record the charge (funding_ref = the intent id,
+     * write-once) and state → succeeded, in one guarded UPDATE. No status
+     * change: settlement is still the one settleOrHold path. A replay (already
+     * succeeded) or a foreign intent/tenant is null.
+     */
+    async markFundingSucceeded(id: string, partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingRef: intentRef, fundingState: 'succeeded' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.fundingIntentRef, intentRef),
+          isNull(transfers.fundingRef),
+          sql`${transfers.fundingState} IN ('pending', 'failed')`,
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Program-Fix 7: pending → failed (a verified payment_failed / canceled). Never un-funds a success. */
+    async markFundingFailed(id: string, partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingState: 'failed' })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.fundingIntentRef, intentRef),
+          eq(transfers.fundingState, 'pending'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
+     * Program-Fix 7: a verified dispute / late ACH return for (partner,
+     * intent) — state → returned. Status is left as-is (the funding gate now
+     * blocks every later paid / hold / release claim); the caller raises the
+     * ops alert. Null ⇒ unknown intent for this tenant, or already returned.
+     */
+    async markFundingReturned(partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set({ fundingState: 'returned' })
+        .where(and(
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.fundingIntentRef, intentRef),
+          sql`${transfers.fundingState} IN ('pending', 'succeeded', 'failed')`,
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /** Program-Fix 7: (partner, intent) → transfer, tenant-scoped (masked read). */
+    async findByFundingIntent(partnerId: PartnerId, intentRef: string): Promise<Transfer | null> {
+      const rows = await db
+        .select()
+        .from(transfers)
+        .where(and(eq(transfers.partnerId, partnerId), eq(transfers.fundingIntentRef, intentRef)))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
     },
 
     /**
@@ -413,6 +531,9 @@ export function createTransferRepo(
         .where(and(
           eq(transfers.status, 'awaiting_payment'),
           sql`${transfers.fundingRef} IS NOT NULL`,
+          // Program-Fix 7: a charge later RETURNED is not a victim to resume
+          // (the claim gate would refuse it anyway); its dispute alert owns it.
+          fundingGate(),
           lt(transfers.createdAt, cutoff),
         ))
         .limit(50);
@@ -434,7 +555,7 @@ export function createTransferRepo(
         .from(transfers)
         .where(and(
           eq(transfers.status, 'awaiting_payment'),
-          isNull(transfers.fundingRef),
+          unfundedNoIntent(),
           lt(transfers.createdAt, cutoff),
           // Review S1: consumer rows only. A B2B invoice row is owned by its
           // bill: b2b-pay-finalize replays a bound-and-minted row as ok, so an
@@ -464,6 +585,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.status, 'awaiting_payment'),
           eq(transfers.complianceStatus, 'cleared'),
+          fundingGate(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -493,6 +615,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.status, 'awaiting_payment'),
           ne(transfers.complianceStatus, 'blocked'),
+          fundingGate(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -527,7 +650,9 @@ export function createTransferRepo(
           ? {
               complianceStatus: 'blocked',
               complianceReasons: reasons,
-              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
+              // Program-Fix 7: a bound PSP intent may still land a debit —
+              // keep it awaiting (the Stripe webhook raises the alert).
+              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL AND ${transfers.fundingIntentRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
             }
           : { complianceStatus: 'flagged', complianceReasons: reasons })
         .where(and(
@@ -569,6 +694,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.status, 'in_review'),
           ne(transfers.complianceStatus, 'blocked'),
+          fundingGate(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -634,7 +760,7 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.partnerId, partnerId),
           eq(transfers.status, 'awaiting_payment'),
-          isNull(transfers.fundingRef),
+          unfundedNoIntent(),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
@@ -667,7 +793,7 @@ export function createTransferRepo(
           eq(transfers.phone, ownerPhone),
           eq(transfers.status, 'awaiting_payment'),
           isNull(transfers.paidAt),
-          isNull(transfers.fundingRef),
+          unfundedNoIntent(),
           isNull(transfers.paymentProviderRef),
         ))
         .returning();

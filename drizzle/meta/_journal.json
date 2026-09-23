@@ -169,6 +169,13 @@
       "when": 1790187188168,
       "tag": "0023_sanctions_lists",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1790189144789,
+      "tag": "0024_stripe_funding_seam",
+      "breakpoints": true
     }
   ]
 }

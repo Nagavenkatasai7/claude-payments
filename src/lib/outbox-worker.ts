@@ -16,7 +16,7 @@ import {
 import { signRailHeaders } from '@/lib/providers/rail-signature';
 import { loadComplianceBlock } from '@/lib/instruction-compliance';
 import { railSecrets } from '@/lib/partner-integrations';
-import { getFundingProvider, type FundingProvider } from '@/lib/providers/funding-provider';
+import { refundProviderFor, type FundingProvider } from '@/lib/providers/funding-provider';
 import { isPartnerPulled } from '@/lib/funding-method';
 import { sendEmail as sendEmailDefault, type EmailMessage, type EmailOutcome } from '@/lib/email';
 import { parseEmailDedupeKey } from '@/lib/partner-invite-email';
@@ -90,7 +90,7 @@ export interface WorkerDeps {
   ) => Promise<string>;
   /**
    * The funds-capture seam for refunds (DI'd like the other effects; absent ⇒
-   * getFundingProvider(), so routes need no wiring while tests can inject a
+   * refundProviderFor(transfer) (Program-Fix 7: by the ledger's funding_provider), so routes need no wiring while tests can inject a
    * failing provider to exercise the retry/dead-letter machinery).
    */
   fundingProvider?: FundingProvider;
@@ -654,7 +654,10 @@ async function handle(
           /* non-JSON 2xx ack — keep the deterministic ref */
         }
       } else {
-        ({ refundRef } = await (deps.fundingProvider ?? getFundingProvider()).refund(transfer));
+        // Program-Fix 7: the provider that CHARGED this row (ledger
+        // funding_provider), never the current flag — a Stripe-funded row must
+        // never get a fake 'mockrefund-' completion.
+        ({ refundRef } = await (deps.fundingProvider ?? refundProviderFor(transfer)).refund(transfer));
       }
       await deps.db.transaction(async (tx) => {
         const updated = await createTransferRepo(tx).updateRefund(transferId, {

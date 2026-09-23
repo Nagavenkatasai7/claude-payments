@@ -70,6 +70,7 @@ const ALL_TABLES = [
   'waitlist_signups',
   'sanctions_list_entries',
   'sanctions_list_versions',
+  'funding_events',
 ].join(', ');
 
 export async function freshDb(): Promise<Db> {

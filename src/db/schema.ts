@@ -129,6 +129,17 @@ export const transfers = pgTable(
     // an old-build mint (the audit_events 'sanctions.screen' row is the other
     // record).
     screening: jsonb('screening'),
+    // Program-Fix 7 (0024): ASYNC sender funds capture through the LICENSED
+    // PARTNER's PSP account (Stripe; STRIPE_FUNDING_ENABLED, OFF by default).
+    // All NULL on every mock / partner-settled row — the old build never names
+    // them. Written only by guarded column-targeted repo updates (never by
+    // saveTransfer's conflict-update). funding_state is code-enforced
+    // ('pending' | 'succeeded' | 'failed' | 'returned'); no CHECK, so the
+    // migration never scans the table. The paid/hold ledger claims require
+    // funding_state IS NULL OR 'succeeded' (transfer-repo fundingGate).
+    fundingProvider: text('funding_provider'),
+    fundingIntentRef: text('funding_intent_ref'),
+    fundingState: text('funding_state'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp('paid_at', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
@@ -146,6 +157,11 @@ export const transfers = pgTable(
     index('transfers_phone_created').on(t.phone, t.createdAt.desc()),
     index('transfers_status_paid').on(t.status, t.paidAt), // reconciliation sweep
     index('transfers_provider_ref').on(t.paymentProviderRef),
+    // Program-Fix 7: the Stripe webhook resolves (partner, intent) → transfer
+    // (a dispute carries only payment_intent). Partial: NULL on every other row.
+    index('transfers_funding_intent')
+      .on(t.partnerId, t.fundingIntentRef)
+      .where(sql`${t.fundingIntentRef} IS NOT NULL`),
     // Refund queues (ops page + sweeps) — partial: 'none' is ~every row.
     index('transfers_refund_status').on(t.refundStatus).where(sql`${t.refundStatus} <> 'none'`),
   ],
@@ -290,6 +306,12 @@ export const partnerIntegrations = pgTable(
     waTokenEnc: text('wa_token_enc'),
     waVerifyTokenEnc: text('wa_verify_token_enc'),
     waAppSecretEnc: text('wa_app_secret_enc'),
+    // Program-Fix 7 (0024): the partner's OWN funds-capture PSP account
+    // (PartnerFundingConfig). Selector in the clear; key + endpoint secrets
+    // envelope-encrypted like every other integration secret. Read/written
+    // only by getFundingConfig / setFundingConfig (never by saveIntegrations).
+    fundingProviderType: text('funding_provider_type'),
+    fundingCredentialsEnc: text('funding_credentials_enc'),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -693,4 +715,24 @@ export const sanctionsListEntries = pgTable(
     weakNames: jsonb('weak_names').notNull().default([]), // string[]: weak AKAs (review, never block)
   },
   (t) => [primaryKey({ columns: [t.versionId, t.entryId] })],
+);
+
+// ── Program-Fix 7 (0024): processed PSP webhook events ────────────────────────
+// Idempotency BACKSTOP for the Stripe funding webhook (the guarded ledger
+// transitions are the primary guard): one row per (partner, provider, event
+// id), inserted in the SAME transaction as the state change it caused, so a
+// redelivered event is a no-op (https://docs.stripe.com/webhooks — "Handle
+// duplicate events": log processed event ids). Tenant-owned: partner_id FK.
+export const fundingEvents = pgTable(
+  'funding_events',
+  {
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    provider: text('provider').notNull(),
+    eventId: text('event_id').notNull(),
+    eventType: text('event_type').notNull(),
+    transferId: text('transfer_id'),
+    outcome: text('outcome').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.partnerId, t.provider, t.eventId] })],
 );

@@ -971,6 +971,21 @@ describe('drainOnce — funding.refund (the money-back leg)', () => {
     expect(creds).toEqual({ phoneNumberId: 'pn_acme', token: 'tok_acme' });
   });
 
+  it('Program-Fix 7: a STRIPE-funded refund is never faked — the row fails (retry → dead-letter + alert), refund stays pending, no "refunded" message', async () => {
+    await store.saveTransfer(refundFixture({ fundingRef: 'pi_wk' }));
+    await db.execute(sql`UPDATE transfers SET funding_provider = 'stripe', funding_intent_ref = 'pi_wk', funding_state = 'succeeded' WHERE id = 'wk_t1'`);
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    const t = await store.getTransfer('wk_t1');
+    expect(t?.refundStatus).toBe('pending');
+    expect(t?.refundRef).toBeUndefined();
+    const msgs = (await db.execute(
+      sql`SELECT count(*)::int AS n FROM outbox WHERE kind = 'whatsapp.text'`,
+    )) as unknown as { rows: Array<{ n: number }> };
+    expect(msgs.rows[0].n).toBe(0);
+  });
+
   it('a replay after completion is a clean no-op: provider untouched, no second message', async () => {
     const refund = vi.fn(async (t: Transfer) => ({ refundRef: `mockrefund-${t.id}` }));
     const d: WorkerDeps = {
