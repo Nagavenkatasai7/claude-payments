@@ -5,6 +5,7 @@ import { freshDb } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createWaitlistRepo } from '@/db/repos/waitlist-repo';
 import { decryptField, EnvKeyProvider } from '@/lib/field-crypto';
+import { ctx } from '@/lib/crypto-context';
 import { blindIndex, deriveBlindIndexKey } from '@/lib/blind-index';
 
 /**
@@ -44,9 +45,9 @@ describe('createWaitlistRepo.insertIfNew', () => {
     expect(await repo.insertIfNew(SIGNUP)).toBe(true);
 
     const [row] = await rawRows();
-    // Every PII column is a field-crypto v1 blob.
+    // Every PII column is a context-bound field-crypto v2 blob (Program-Fix 46B).
     for (const col of ['full_name_enc', 'email_enc', 'phone_enc', 'location_enc']) {
-      expect(row[col]).toMatch(/^v1\./);
+      expect(row[col]).toMatch(/^v2\.k0\./);
     }
     // Nothing in the raw row equals (or contains) a plaintext PII value.
     const dump = JSON.stringify(row);
@@ -68,7 +69,7 @@ describe('createWaitlistRepo.insertIfNew', () => {
     expect(row.utm_source).toBe('newsletter');
     expect(row.utm_campaign).toBeNull();
     // The ciphertext round-trips under the default provider.
-    expect(decryptField(row.full_name_enc!)).toBe('Asha Patel');
+    expect(decryptField(row.full_name_enc!, undefined, ctx.waitlist('wl_1', 'full_name_enc'))).toBe('Asha Patel');
   });
 
   it('dedupes on email: a second signup with the same normalised email is a silent no-op (returns false, one row)', async () => {
@@ -98,8 +99,8 @@ describe('createWaitlistRepo.insertIfNew', () => {
     await repo.insertIfNew(SIGNUP);
     const [row] = await rawRows();
     expect(row.email_bidx).not.toBe(blindIndex('email', 'asha.patel@example.com', deriveBlindIndexKey()));
-    expect(() => decryptField(row.email_enc!)).toThrow(); // sealed under the other key
-    expect(decryptField(row.email_enc!, other)).toBe('asha.patel@example.com');
+    expect(() => decryptField(row.email_enc!, undefined, ctx.waitlist('wl_1', 'email_enc'))).toThrow(); // sealed under the other key
+    expect(decryptField(row.email_enc!, other, ctx.waitlist('wl_1', 'email_enc'))).toBe('asha.patel@example.com');
   });
 });
 
@@ -124,7 +125,7 @@ describe('reads', () => {
       utmCampaign: undefined,
       createdAt: expect.any(String),
     });
-    expect(JSON.stringify(rows)).not.toMatch(/v1\.|Asha|asha\.patel|15551234567/);
+    expect(JSON.stringify(rows)).not.toMatch(/v[12]\.|Asha|asha\.patel|15551234567/);
   });
 
   it('countsByDestination counts each country across signups and the total', async () => {

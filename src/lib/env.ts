@@ -184,6 +184,14 @@ export const env = {
     // so a real KMS replaces this later without touching call sites.
     return process.env.FIELD_ENCRYPTION_KEY ?? '';
   },
+  get fieldCryptoRejectV1(): boolean {
+    // Program-Fix 46B: when exactly 'true', field-crypto refuses a legacy v1
+    // (context-unbound) blob read under any storage context except the
+    // permanently v1-exempt purposes (customer_ref, staff MFA). Optional,
+    // default OFF, never boot-required. Flip only after the re-encrypt backfill
+    // leaves zero v1 rows (owner checklist, fix 46 §7). Read on every call.
+    return process.env.FIELD_CRYPTO_REJECT_V1 === 'true';
+  },
   get sanctionsList(): string {
     // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER
     // screening runs (it always runs). '' / 'mock' ⇒ the mock watchlist;

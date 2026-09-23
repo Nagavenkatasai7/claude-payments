@@ -2,13 +2,15 @@
  * Program-Fix 49D — customer portal TOTP store (secret in customers.mfa_totp_enc
  * via customer-repo; enrolment-in-progress, replay guard in Redis).
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createCustomerMfaStore, customerMfaKeys, stepUp, CUSTOMER_MFA_ENROLL_MAX_CODES } from '@/lib/customer-mfa';
 import { base32Decode, totpAt } from '@/lib/totp';
-import { EnvKeyProvider, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
+import type { Db } from '@/db/client';
 import type { Customer } from '@/lib/types';
 
 const provider = new EnvKeyProvider(Buffer.alloc(32, 3));
@@ -20,6 +22,7 @@ vi.mock('@/lib/field-crypto', async () => {
 const redis = fakeRedis();
 const T0 = 1_700_000_015_000;
 let clock = T0;
+let db: Db;
 let repo: ReturnType<typeof createCustomerRepo>;
 const store = () => createCustomerMfaStore(redis, repo, { now: () => clock });
 const WHO = { partnerId: 'default', phone: '15550004321' };
@@ -49,11 +52,10 @@ async function enrol(): Promise<Buffer> {
 beforeEach(async () => {
   redis.dump.clear();
   clock = T0;
-  const db = await freshDb();
+  db = await freshDb();
   repo = createCustomerRepo(db, async () => null, provider);
   await repo.saveCustomer(customer());
 });
-afterEach(() => __setFieldCryptoWriteV2ForTests(false));
 
 describe('customer-mfa store (Program-Fix 49D)', () => {
   it('begin → confirm with one code enrols; the secret lands in the customers row, not Redis', async () => {
@@ -177,8 +179,14 @@ describe('customer-mfa store (Program-Fix 49D)', () => {
 
   it('a verify after 46B flips writes re-seals the secret as v2 (and it still verifies)', async () => {
     const secret = await enrol();
-    expect((await repo.readMfa(WHO.partnerId, WHO.phone))!.sealed.startsWith('v1.')).toBe(true);
-    __setFieldCryptoWriteV2ForTests(true);
+    // Since 46B enrolment itself seals v2; model a pre-46B enrolment by sealing
+    // the same secret v1 directly (the ctx-less legacy envelope).
+    const current = (await repo.readMfa(WHO.partnerId, WHO.phone))!;
+    expect(current.sealed.startsWith('v2.')).toBe(true);
+    const legacy = encryptField(current.secretBase32, provider);
+    expect(legacy.startsWith('v1.')).toBe(true);
+    await db.execute(sql`UPDATE customers SET mfa_totp_enc = ${legacy} WHERE partner_id = ${WHO.partnerId} AND phone = ${WHO.phone}`);
+    expect((await repo.readMfa(WHO.partnerId, WHO.phone))!.sealed).toBe(legacy);
     clock += 60_000;
     expect(await store().verifyCode(WHO, totpAt(secret, clock))).toBe(true);
     expect((await repo.readMfa(WHO.partnerId, WHO.phone))!.sealed.startsWith('v2.')).toBe(true);

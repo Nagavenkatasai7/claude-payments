@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { createCorridorRequestRepo } from '@/db/repos/aux-repos';
-import { EnvKeyProvider, decryptField, __setFieldCryptoWriteV2ForTests } from '@/lib/field-crypto';
+import { EnvKeyProvider, decryptField, encryptField } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
 import type { Customer } from '@/lib/types';
 
@@ -20,7 +20,6 @@ let db: Db;
 beforeEach(async () => {
   db = await freshDb();
 });
-afterEach(() => __setFieldCryptoWriteV2ForTests(false));
 
 async function raw(query: string): Promise<Record<string, unknown>[]> {
   const res = await db.execute(sql.raw(query));
@@ -82,7 +81,6 @@ describe('customer-repo MFA writers', () => {
   });
 
   it('v2 writes (46B) bind the row context: a blob moved to another row does not open', async () => {
-    __setFieldCryptoWriteV2ForTests(true);
     const r = repo();
     await r.saveCustomer(customer());
     await r.saveCustomer(customer({ senderPhone: '15550009999' }));
@@ -141,16 +139,26 @@ describe('customer-repo MFA writers', () => {
   it('resealMfa rewrites only when the fresh seal is a different version and the blob is unchanged', async () => {
     const r = repo();
     await r.saveCustomer(customer());
-    await r.enableMfa('default', PHONE, B32); // v1 today
+    // Since 46B the writer seals v2: a fresh v2 enrolment is never rewritten.
+    await r.enableMfa('default', PHONE, B32);
+    const current = (await r.readMfa('default', PHONE))!;
+    expect(current.sealed.startsWith('v2.')).toBe(true);
+    expect(await r.resealMfa('default', PHONE, current.sealed, B32)).toBe(false); // same version: no write
+    // A pre-46B enrolment: seal v1 directly (the ctx-less legacy envelope),
+    // never through the flipped writer.
+    const legacy = encryptField(B32, provider);
+    expect(legacy.startsWith('v1.')).toBe(true);
+    await raw(`UPDATE customers SET mfa_totp_enc = '${legacy}' WHERE phone = '${PHONE}'`);
     const before = (await r.readMfa('default', PHONE))!;
-    expect(before.sealed.startsWith('v1.')).toBe(true);
-    expect(await r.resealMfa('default', PHONE, before.sealed, B32)).toBe(false); // same version: no write
-    __setFieldCryptoWriteV2ForTests(true);
+    expect(before.sealed).toBe(legacy);
+    expect(before.secretBase32).toBe(B32);
     expect(await r.resealMfa('default', PHONE, 'v1.stale', B32)).toBe(false); // lost the race: no write
+    expect((await r.readMfa('default', PHONE))!.sealed).toBe(legacy);
     expect(await r.resealMfa('default', PHONE, before.sealed, B32)).toBe(true);
     const after = (await r.readMfa('default', PHONE))!;
     expect(after.sealed.startsWith('v2.')).toBe(true);
     expect(after.secretBase32).toBe(B32);
+    expect(decryptField(after.sealed, provider, ctx.customer('default', PHONE, 'mfa_totp_enc'))).toBe(B32);
   });
 });
 

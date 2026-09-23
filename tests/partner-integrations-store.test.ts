@@ -57,7 +57,7 @@ describe('partner-integrations store', () => {
       expect(stored).not.toContain(secret);
     }
     // and the encrypted blobs carry the field-crypto version marker
-    expect(stored).toContain('v1.');
+    expect(stored).toContain('v2.k0.'); // context-bound (Program-Fix 46B)
   });
 
   it('stores non-secret SELECTORS in the clear (providerType, phoneNumberId)', async () => {
@@ -72,7 +72,7 @@ describe('partner-integrations store', () => {
     const s = createPartnerIntegrationsStore(db, provider());
     await s.saveIntegrations('acme', { kyc: {}, payment: { providerType: 'mock' }, whatsapp: {} });
     const stored = await atRest(db, 'acme');
-    expect(stored).not.toContain('v1.'); // never touched the master key
+    expect(stored).not.toMatch(/v[12]\./); // never touched the master key
     expect(await s.getIntegrations('acme')).toEqual({ kyc: {}, payment: { providerType: 'mock' }, whatsapp: {} });
   });
 

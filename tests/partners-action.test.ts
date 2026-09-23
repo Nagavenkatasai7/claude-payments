@@ -282,12 +282,12 @@ describe('the partner-invite email never persists the raw capability token (fix 
     const raw = JSON.stringify(invite.payload);
     expect(raw).not.toMatch(/\/partners\/apply\//);
     expect(raw).not.toMatch(/[0-9a-f]{64}/);
-    expect(invite.payload.sealed?.apply_link).toMatch(/^v1\./);
+    expect(invite.payload.sealed?.apply_link).toMatch(/^v2\.k0\./); // Program-Fix 46B
   });
 
   it('the sealed link decrypts to /partners/apply/<token> whose HASH is on the lead row, and the worker delivers it rendered', async () => {
     const { lead, invite } = await submitAndGetInvite();
-    const link = decryptField(invite.payload.sealed!.apply_link);
+    const link = decryptField(invite.payload.sealed!.apply_link, undefined, outboxSealedCtx('apply_link'));
     expect(link).toMatch(/^https:\/\/smartremit\.test\/partners\/apply\/[0-9a-f]{64}$/);
     // The apply page resolves getByTokenHash(hashApplicationToken(token)).
     expect(hashApplicationToken(link.split('/partners/apply/')[1])).toBe(lead.applicationTokenHash);
