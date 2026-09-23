@@ -21,7 +21,8 @@ import type { ChatMessage, ChatTool } from '@/lib/types';
 
 export const EVAL_DEFAULT_BASE_URL = 'https://ollama.com/v1';
 export const EVAL_DEFAULT_MODEL = 'kimi-k2.6';
-const EVAL_TIMEOUT_MS = 60_000;
+/** Per call; 15 calls stay inside the nightly step's 8-minute timeout. */
+const EVAL_TIMEOUT_MS = 25_000;
 
 type Env = Record<string, string | undefined>;
 type FetchFn = typeof fetch;

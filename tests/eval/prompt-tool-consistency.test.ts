@@ -35,6 +35,13 @@ describe('prompt ↔ WhatsApp tool schemas (Program-Fix 49B)', () => {
     }
   });
 
+  it('no WhatsApp-visible tool description names a hidden tool (prompt-07)', () => {
+    const json = JSON.stringify(whatsapp);
+    for (const hidden of allToolNames.filter((n) => !whatsappNames.has(n))) {
+      expect(json, hidden).not.toContain(hidden);
+    }
+  });
+
   it('funding: the prompt says bank transfer only, so no schema offers a card', () => {
     expect(SYSTEM_PROMPT).toContain('it is ALWAYS bank transfer');
     const json = JSON.stringify(whatsapp);
