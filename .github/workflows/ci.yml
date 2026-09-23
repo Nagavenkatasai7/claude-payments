@@ -13,6 +13,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege for GITHUB_TOKEN (Program-Fix 47): every job only checks out
+# the repo and runs npm scripts; nothing here calls the GitHub API.
+permissions:
+  contents: read
+
 # Every check runs as its own job, side by side, and the test suite is split
 # into 4 shards. Wall time is the slowest job (a test shard), not the sum of
 # every step. The final `ci` job is the REQUIRED status check in branch
