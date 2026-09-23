@@ -77,10 +77,11 @@ function seenTtlSeconds(createdAtMs: number, now: number): number {
 //     controls that account's hash, so the exemption adds no reach);
 //   • any ledger READ failure falls back to the Redis record, the pre-P5
 //     behaviour, so a Neon blip never signs staff out;
-//   • restriction-carrying writes (saveStaff, deleteStaff) go to the row FIRST
-//     and throw on failure, so a change is never reported done while one store
-//     still holds the old state; login-path writes (lastLoginAt, the password
-//     mirror) are best-effort.
+//   • saveStaff writes the row FIRST and throws on failure, so a change is
+//     never reported done while one store still holds the old state;
+//     deleteStaff removes the Redis record FIRST (existence), then the row
+//     (best-effort: an orphan row is never a member); login-path writes
+//     (lastLoginAt, the password mirror) are best-effort.
 // The row's password_hash is a MIRROR that nothing reads yet. The PG-first flip
 // (and the atomic password compare-and-set it enables) is a later PR.
 
@@ -118,8 +119,8 @@ function andPermissions(a: StaffPermissions, b: StaffPermissions): StaffPermissi
  * Identity, name, password hash and timestamps come from Redis (the store both
  * builds write). Status: suspended if either says so. Role: the lower rank
  * (support < agent < admin); a support result carries no permissions.
- * Permissions: per-key AND. Partner scope: a set value wins over unset, and
- * two DIFFERENT partners fail closed (suspended). The seed admin's
+ * Permissions: per-key AND. Partner scope: Redis's; a row naming a different
+ * partner (or one where Redis says platform) fails closed (suspended). The seed admin's
  * platform-admin record is returned unchanged.
  */
 export function mergeStaffRecords(fromRedis: Staff, fromLedger: Staff | null, seedName: string): Staff {
@@ -130,9 +131,12 @@ export function mergeStaffRecords(fromRedis: Staff, fromLedger: Staff | null, se
   merged.permissions =
     role === 'support' ? { ...SUPPORT_DEFAULT_PERMISSIONS } : andPermissions(fromRedis.permissions, fromLedger.permissions);
   if (fromRedis.status === 'suspended' || fromLedger.status === 'suspended') merged.status = 'suspended';
-  const partnerId = fromRedis.partnerId ?? fromLedger.partnerId;
-  if (partnerId !== undefined) merged.partnerId = partnerId;
-  if (fromRedis.partnerId && fromLedger.partnerId && fromRedis.partnerId !== fromLedger.partnerId) {
+  // Partner scope always comes from Redis. A row that disagrees (a different
+  // partner, or a partner where Redis says platform) fails closed: suspended,
+  // never re-scoped, so a merged record can never pass as another tenant's
+  // staff (the partner-staff removal guard, the platform-admin counts). A
+  // platform row under a partner-scoped Redis record is simply narrower.
+  if (fromLedger.partnerId !== undefined && fromLedger.partnerId !== fromRedis.partnerId) {
     merged.status = 'suspended';
   }
   return merged;
@@ -233,9 +237,13 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
       return (await withLedger(all)).sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
     },
     async deleteStaff(username: string): Promise<void> {
-      if (opts.ledger) await ledger()!.remove(username);
+      // Redis FIRST: it decides existence, the row only restricts. Removing the
+      // row first would briefly lift a restriction from a member who still
+      // exists (and forever, if the Redis delete then failed). A row left
+      // behind by a failed removal is never a member (logged, not thrown).
       await redis.del(`staff:${username}`);
       await redis.srem('staff:index', username);
+      await mirror('remove', (l) => l.remove(username));
     },
     /**
      * Stamp lastLoginAt on the freshest record only. Re-reads inside the call so a

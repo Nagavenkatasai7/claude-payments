@@ -486,13 +486,27 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     });
   });
 
-  it('partner scope: a set value wins over unset; two different partners fail closed (suspended)', async () => {
+  it('partner scope: Redis-scoped + platform row keeps the Redis partner; any other disagreement fails closed (suspended)', async () => {
     const { r, repo, s } = setup();
+    // Redis says partner, row says platform: the narrower Redis scope stands.
+    await r.set('staff:priya', JSON.stringify(agent({ partnerId: 'p_acme' })));
+    await repo.upsert(agent());
+    let got = await s.getStaff('priya');
+    expect(got?.partnerId).toBe('p_acme');
+    expect(got?.status ?? 'active').toBe('active');
+    // Redis says platform, row says partner: suspended, and NOT re-scoped (a
+    // merged record must never look like another tenant's staff to the
+    // partner-staff removal guard or the platform-admin counts).
     await r.set('staff:priya', JSON.stringify(agent()));
     await repo.upsert(agent({ partnerId: 'p_acme' }));
-    expect((await s.getStaff('priya'))?.partnerId).toBe('p_acme');
+    got = await s.getStaff('priya');
+    expect(got?.status).toBe('suspended');
+    expect(got?.partnerId).toBeUndefined();
+    // Two different partners: suspended.
     await r.set('staff:priya', JSON.stringify(agent({ partnerId: 'p_other' })));
-    expect((await s.getStaff('priya'))?.status).toBe('suspended');
+    got = await s.getStaff('priya');
+    expect(got?.status).toBe('suspended');
+    expect(got?.partnerId).toBe('p_other');
   });
 
   it('password hash, name and timestamps come from Redis (the row hash is a mirror, not read)', async () => {
@@ -588,7 +602,7 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     expect(r.dump.has('staff:priya')).toBe(true);
   });
 
-  it('deleteStaff removes both; a ledger failure throws and leaves Redis untouched', async () => {
+  it('deleteStaff removes Redis FIRST, then the row; a row-removal failure is logged (the orphan row is never a member)', async () => {
     const ok = setup();
     await ok.s.saveStaff(agent());
     await ok.s.deleteStaff('priya');
@@ -597,8 +611,20 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
 
     const bad = setup(failing(['remove']));
     await bad.s.saveStaff(agent());
-    await expect(bad.s.deleteStaff('priya')).rejects.toThrow();
-    expect(bad.r.dump.has('staff:priya')).toBe(true);
+    await expect(bad.s.deleteStaff('priya')).resolves.toBeUndefined();
+    expect(bad.r.dump.has('staff:priya')).toBe(false);
+    expect(await bad.s.getStaff('priya')).toBeNull();
+  });
+
+  it('deleteStaff never lifts a row restriction while the member still exists (Redis delete fails → row kept)', async () => {
+    const { r, repo, s } = setup();
+    await s.saveStaff(agent());
+    await repo.upsert(agent({ status: 'suspended' }));
+    r.del = async () => {
+      throw new Error('redis down');
+    };
+    await expect(s.deleteStaff('priya')).rejects.toThrow();
+    expect((await repo.get('priya'))?.status).toBe('suspended');
   });
 
   it('recordLogin mirrors lastLoginAt, best-effort (a ledger failure never blocks a sign-in)', async () => {
