@@ -69,7 +69,7 @@ describe('transfer-repo: round-trip + encryption at rest', () => {
     );
     const row = (raw as unknown as { rows: Record<string, string>[] }).rows[0];
     expect(row.payout_destination_enc).not.toContain('123456789012');
-    expect(row.payout_destination_enc.startsWith('v1.')).toBe(true);
+    expect(row.payout_destination_enc.startsWith('v2.k0.')).toBe(true); // Program-Fix 46B
     expect(row.payout_destination_last4).toBe('1234');
     // default (no-decrypt) read: masked
     const t = await repo.getTransfer('tr_1');

@@ -28,7 +28,7 @@ describe('sealCustomerRef / openCustomerRef', () => {
   it('is URL-safe and never contains the phone', () => {
     const ref = sealCustomerRef('acme', PHONE);
     expect(ref).toMatch(/^[A-Za-z0-9._-]+$/);
-    expect(ref.startsWith('v1.')).toBe(true);
+    expect(ref.startsWith('v2.k0.')).toBe(true); // Program-Fix 46B
     expect(ref).not.toContain(PHONE);
   });
 

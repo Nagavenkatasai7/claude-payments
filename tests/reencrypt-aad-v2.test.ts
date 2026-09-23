@@ -43,7 +43,28 @@ const transfer = (over: Partial<Transfer> = {}): Transfer => ({
   totalChargeSource: 201.99, ...over,
 });
 
-/** One v1 row in every table the script covers (the production write path today). */
+/**
+ * Rewrite every v2 value the repos just sealed as the legacy, context-free v1
+ * blob of the same plaintext: since Program-Fix 46B the repos write v2, so this
+ * recreates the rows the pre-46B writer left in production (what the script is for).
+ */
+async function downgradeToLegacyV1(): Promise<void> {
+  for (const t of REENCRYPT_TABLES) {
+    for (const column of t.columns) {
+      const rows = await raw(
+        `SELECT ${t.key.join(', ')}, ${column} AS blob FROM ${t.table} WHERE ${column} LIKE 'v2.%'`,
+      );
+      for (const r of rows) {
+        const keyVals = t.key.map((k) => String(r[k]));
+        const legacy = encryptField(decryptField(r.blob!, provider, t.ctxFor(keyVals, column)), provider);
+        const where = sql.join(t.key.map((k, i) => sql`${sql.identifier(k)} = ${keyVals[i]}`), sql` AND `);
+        await db.execute(sql`UPDATE ${sql.identifier(t.table)} SET ${sql.identifier(column)} = ${legacy} WHERE ${where}`);
+      }
+    }
+  }
+}
+
+/** One legacy v1 row in every table the script covers (what production holds from before 46B). */
 async function seedV1Everywhere(): Promise<void> {
   await seedPartner(db, 'acme');
   await createTransferRepo(db, provider).saveTransfer(
@@ -78,6 +99,7 @@ async function seedV1Everywhere(): Promise<void> {
     id: 'wl_re1', fullName: 'Asha Patel', email: 'asha.patel@example.com', phone: '+15551234567', location: 'Fairfax, VA',
     destinations: ['IN'], consentAt: now, consentTextVersion: 'v1', utmSource: undefined, utmCampaign: undefined,
   });
+  await downgradeToLegacyV1();
 }
 
 beforeEach(async () => {

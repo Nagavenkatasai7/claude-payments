@@ -298,13 +298,13 @@ describe('createCustomerAction — creating an already-verified customer needs a
 describe('openCustomerAction (Program-Fix 37)', () => {
   beforeEach(() => vi.mocked(redirect).mockClear());
 
-  it('in scope: redirects to /admin-dashboard/customers/v1.<ref> with no phone, and the ref opens to the row', async () => {
+  it('in scope: redirects to /admin-dashboard/customers/v2.k0.<ref> with no phone, and the ref opens to the row', async () => {
     await cs.saveCustomer(makeCustomer('15551230000', 'A'));
     currentStaff = staff({ username: 'pa', partnerId: 'A' });
     await openCustomerAction(form({ phone: '15551230000', partnerId: 'A' }));
     expect(redirect).toHaveBeenCalledTimes(1);
     const target = vi.mocked(redirect).mock.calls[0][0] as string;
-    expect(target.startsWith('/admin-dashboard/customers/v1.')).toBe(true);
+    expect(target.startsWith('/admin-dashboard/customers/v2.k0.')).toBe(true); // Program-Fix 46B
     expect(target).not.toContain('15551230000');
     expect(target).not.toContain('?');
     expect(openCustomerRef(target.slice('/admin-dashboard/customers/'.length))).toEqual({ partnerId: 'A', phone: '15551230000' });

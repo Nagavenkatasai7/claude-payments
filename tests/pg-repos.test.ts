@@ -196,7 +196,7 @@ describe('customer-repo', () => {
     const raw = await db.execute(`SELECT full_name_enc, gov_id_number_enc FROM customers`);
     const row = (raw as unknown as { rows: Record<string, string>[] }).rows[0];
     expect(row.full_name_enc).not.toContain('Asha');
-    expect(row.full_name_enc.startsWith('v1.')).toBe(true);
+    expect(row.full_name_enc.startsWith('v2.k0.')).toBe(true); // Program-Fix 46B
     expect(row.gov_id_number_enc).not.toContain('P1234567');
     const back = await r.getCustomer('default', '15551230000');
     expect(back!.fullName).toBe('Asha Patel');
