@@ -2420,7 +2420,7 @@ async function requestRefundTool(
       return {
         error_code: 'cancelled',
         message:
-          "This transfer was already cancelled. If you believe you were charged for it, reply 'help' and our team will take a look.",
+          "This transfer was already cancelled. If you believe you were charged for it, say you'd like to talk to a person and I'll open a case for our team.",
       };
     case 'refundable':
       break; // the one eligible state — handled below
@@ -3338,7 +3338,7 @@ async function sendApprovePickerTool(
       return {
         blocked: true,
         reply_to_customer:
-          "This transfer can't be completed, and our team has been notified. If you have any questions, reply 'help' and we'll follow up.",
+          "This transfer can't be completed, and our team has been notified. If you have any questions, say you'd like to talk to a person and I'll open a case for our team.",
       };
     }
 

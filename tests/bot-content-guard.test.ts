@@ -157,3 +157,17 @@ describe('Bundle C: [SENDER DEFAULTS] note + new tool modules stay partner-/comp
       expect(src).not.toContain(term);
   });
 });
+
+// Program-Fix 34B (prompt-03 / bot-14 / live-14): the bot never promises a
+// person without a case. Every "a person will help" goes through
+// request_human_help, which returns a real case number.
+describe('no false promise of a person (fix 34B)', () => {
+  const botFiles = ['src/lib/prompt.ts', 'src/lib/tools.ts', 'src/lib/agent.ts', 'src/lib/agent-fallback.ts'];
+  for (const rel of botFiles) {
+    it(`${rel} has no "reply 'help'" and no "teammate will reach out"`, () => {
+      const contents = readFileSync(resolve(process.cwd(), rel), 'utf-8').toLowerCase();
+      expect(contents).not.toContain("reply 'help'");
+      expect(contents).not.toContain('teammate will reach out');
+    });
+  }
+});
