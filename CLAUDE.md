@@ -19,7 +19,7 @@ Live at **https://smartremit.ai** — the canonical production domain (the `clau
 - **Durability**: every external effect (WhatsApp sends, settlement instructions, rail callbacks, agent turns, ops alerts) is an **outbox row** written transactionally with the state change implying it. `/api/worker` drains (SKIP LOCKED, 2^n backoff, dead at 8 → deduped ops alert); a Vercel cron GETs it every minute (vercel.json), an hourly GitHub Actions heartbeat backs it up, and `pokeWorker()` is the fast path (`src/lib/worker-cadence.ts` labels the source, keeps the last-cron marker in Redis and raises the `cronquiet` / `draingap` alarms; a row reclaimed past MAX_ATTEMPTS is dead-lettered without running). The worker also runs `reconcileSweep()` (stuck paid >15m → re-instruct once + alert; stale reviews >24h → alert).
 - **Money paths are transactional**: `beginSettlement()` (src/lib/settlement.ts) commits the paid flip + stage-1 message + rail effect in ONE transaction. Minting is **claim-first**: the transfer id is bound to the idempotency key (PK `(partner_id, key)`) BEFORE the insert — crash-replays re-mint the same row; the pay-link draft is consumed AFTER the mint.
 - **Tenant isolation is app-level**: partner-facing repo queries take `partnerId` in the WHERE; `getOwnedTransfer` is 404-never-403; partner-scoped staff are PINNED to their tenant regardless of filter args (test-pinned).
-- **Encryption at rest** (`field-crypto.ts` envelope AES-256-GCM): payout destinations, recipient legal names, customer PII, integration secrets. Default ledger reads are MASKED (`****last4`); decrypted reads are explicit (`getTransferDecrypted`) and staff reveals are AUDITED (`pii.reveal` in `audit_events`).
+- **Encryption at rest** (`field-crypto.ts` envelope AES-256-GCM): payout destinations, recipient legal names, customer KYC PII, integration secrets. **Not encrypted** (crypto-06, deferred to Phase 3 fixes 45/46): sender and recipient phone numbers (lookup keys), `recipient_name`, ticket bodies, 30-day chat history in Redis. Default ledger reads are MASKED (`****last4`); decrypted reads are explicit (`getTransferDecrypted`); staff reveals are AUDITED (`pii.reveal` in `audit_events`), and every customer-identity page view writes `pii.view`.
 - **Sanctions screening always runs** — structurally untoggleable, in both KYC modes. KYC may be delegated to the partner; sanctions may not.
 - **Security pack**: instrumentation boot assert (prod refuses to start with missing secrets — the assert's contract MUST mirror the accepting code, see the FIELD_ENCRYPTION_KEY incident), security headers + **enforced CSP**, `/account` + `/admin-dashboard` middleware gates, per-IP rate limits (fail-open) on pay/rail/webhooks, PII-scrubbing logger (`src/lib/log.ts`) in money paths.
 
@@ -69,10 +69,7 @@ Plugins, hooks (`.claude/hooks/`) and skills (`.claude/skills/`) are inventoried
 
 ## Subagent model routing (usage budget)
 
-Pass `model:` explicitly on every Agent call:
-- **Fable 5.1** — money paths, settlement/outbox/reconcile, auth, crypto, compliance, migrations, and every final review.
-- **Opus 5** — multi-file features off the money path, refactors, plan authoring, PR-level review.
-- **Sonnet 5** — read-only exploration, doc lookups, test scaffolding, log triage, formatting.
+**Permanent owner rule (2026-09-22, reaffirmed 2026-09-23):** every agent — builders, reviewers, fixers, lookups, money/security paths included — runs on **Opus 5.5 at medium effort**: `subagent_type: "opus-worker"` (`~/.claude/agents/opus-worker.md`) with `model: "opus"`. **Never run an agent on Fable.** The advisor model is **Opus 5.5** (owner-set via `/advisor`). A user-level PreToolUse hook (`~/.claude/hooks/block-fable-agents.mjs`) denies any Agent launch on a Fable model. Main sessions and loops also run Opus 5.5 at medium effort. Quality comes from TDD, the independent review, CI, the post-deploy smoke and the live check — not from a bigger model.
 
 ## Branching model
 
