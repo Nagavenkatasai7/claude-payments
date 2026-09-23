@@ -47,6 +47,37 @@ const RECALL_ERROR_MSG: Record<string, string> = {
   cap: 'You already have 5 open requests. Reply on one of those, or wait for one to be resolved first.',
 };
 
+// Program-Fix 49D: the step-up refusals (customer-mfa STEP_UP_ERROR), shared
+// by the refund and recall cards. Fixed copy only; the URL never supplies text.
+const STEP_UP_ERROR_MSG: Record<string, string> = {
+  mfa_code: 'Enter the 6-digit code from your authenticator app.',
+  mfa_invalid:
+    'That code is not valid. Wait for the next code in your app (a code you just used to sign in cannot be used again) and try again.',
+  mfa_throttled: 'Too many attempts. Please try again later.',
+  mfa_required: 'Turn on two-step verification in Settings first, then try again.',
+};
+
+/** The authenticator-code field of a step-up form (only when MFA is on). */
+function StepUpCodeField({ id }: { id: string }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
+        Code from your authenticator app
+      </label>
+      <input
+        id={id}
+        name="code"
+        required
+        inputMode="numeric"
+        autoComplete="one-time-code"
+        pattern="[0-9 ]{6,7}"
+        maxLength={7}
+        className="h-9 w-40 rounded-md border border-input bg-transparent px-3 py-1 text-base tabular-nums shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 md:text-sm"
+      />
+    </div>
+  );
+}
+
 // A short, human one-liner under the status pill, by current state.
 const STATUS_SUMMARY: Record<string, string> = {
   awaiting_payment: 'Waiting for payment to clear.',
@@ -134,7 +165,11 @@ export default async function ReceiptPage({
   // CTA). refundDisposition already requires refundStatus 'none', so this never
   // collides with the refund block above.
   const canRecall = isRecallEligible(t, Date.now());
-  const recallErrorMsg = error ? RECALL_ERROR_MSG[error] : undefined;
+  const stepUpErrorMsg = error ? STEP_UP_ERROR_MSG[error] : undefined;
+  const recallErrorMsg = error ? (RECALL_ERROR_MSG[error] ?? stepUpErrorMsg) : undefined;
+  // Program-Fix 49D: with two-step verification on, both requests ask for a
+  // fresh code (the server action enforces it; this only renders the field).
+  const mfaOn = Boolean(customer.mfaEnrolledAt);
 
   const statusSummary = STATUS_SUMMARY[t.status] ?? 'In progress.';
 
@@ -286,12 +321,19 @@ export default async function ReceiptPage({
               <CardTitle>Request a refund</CardTitle>
             </CardHeader>
             <CardContent>
+              {stepUpErrorMsg ? (
+                <Alert variant="destructive" className="mb-4">
+                  <AlertTitle>We couldn&rsquo;t send that request</AlertTitle>
+                  <AlertDescription>{stepUpErrorMsg}</AlertDescription>
+                </Alert>
+              ) : null}
               <form action={requestRefundAction} className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="max-w-prose text-sm text-muted-foreground">
                   Our team reviews every refund request — refunds arrive in 3–5 business days
                   once approved.
                 </p>
                 <input type="hidden" name="transferId" value={t.id} />
+                {mfaOn ? <StepUpCodeField id="refund-code" /> : null}
                 <Button type="submit" variant="outline" className="shrink-0">
                   Request a refund
                 </Button>
@@ -338,6 +380,7 @@ export default async function ReceiptPage({
                     ))}
                   </select>
                 </div>
+                {mfaOn ? <StepUpCodeField id="recall-code" /> : null}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="max-w-prose text-sm text-muted-foreground">
                     Once money is delivered we can&rsquo;t guarantee recovery, but our team will

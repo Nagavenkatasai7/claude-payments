@@ -112,6 +112,18 @@ vi.mock('@/lib/field-crypto', async () => {
   const actual = await vi.importActual<typeof import('@/lib/field-crypto')>('@/lib/field-crypto');
   return { ...actual, defaultProvider: () => crypto };
 });
+// Program-Fix 49D: the portal TOTP store over this test's Postgres, and the
+// audit rows written to it (getDb → the fresh PGlite db).
+let testDb: Awaited<ReturnType<typeof freshDb>>;
+let mfaNowMs = Date.now();
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<object>()), getDb: () => testDb }));
+vi.mock('@/lib/customer-mfa', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/customer-mfa')>('@/lib/customer-mfa');
+  return {
+    ...actual,
+    getCustomerMfaStore: () => actual.createCustomerMfaStore(redis, customerStore, { now: () => mfaNowMs }),
+  };
+});
 
 import {
   registerAction,
@@ -121,7 +133,11 @@ import {
   logoutAction,
   requestResetAction,
   resetAction,
+  verifyMfaAction,
 } from '@/app/account/actions';
+import { getCustomerMfaStore } from '@/lib/customer-mfa';
+import { base32Decode, totpAt } from '@/lib/totp';
+import { sql } from 'drizzle-orm';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 
 const PHONE = '+1 (202) 555-0123';
@@ -150,6 +166,8 @@ beforeEach(async () => {
   afterThrows = false;
   limiterDown = false;
   const db = await freshDb();
+  testDb = db;
+  mfaNowMs = Date.now();
   customerStore = createCustomerStore(db, createStore(fakeRedis(), db));
   authStore = createCustomerAuthStore(redis, customerStore);
 });
@@ -682,3 +700,162 @@ describe('GENERIC_OTP_NOTE guidance (Program-Fix 25 PR B)', { retry: 0 }, () => 
     expect(state.notice).toContain("Didn't get it? Message us on WhatsApp first, then Resend.");
   });
 });
+
+// ── Program-Fix 49D (portal-03): opt-in TOTP at sign-in ─────────────────────
+describe('portal MFA — sign-in, recovery, token purposes (Program-Fix 49D)', () => {
+  const WHO = { partnerId: 'default', phone: NORM };
+
+  /** A registered, phone-verified account with TOTP on; returns the secret. */
+  async function enrolledAccount(): Promise<Buffer> {
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    const begun = await getCustomerMfaStore().beginEnrolment(WHO);
+    if (!begun.ok) throw new Error('enrol refused');
+    const secret = base32Decode(begun.secretBase32);
+    expect(await getCustomerMfaStore().confirmEnrolment(WHO, totpAt(secret, mfaNowMs))).toBe('ok');
+    mfaNowMs += 60_000; // the next code is a fresh step (the confirm step is spent)
+    cookieJar.clear();
+    cookieSet.mockClear();
+    sentCodes.length = 0;
+    return secret;
+  }
+
+  async function auditRows(action: string) {
+    const res = await testDb.execute(sql`SELECT actor_type, action, subject_id, partner_id FROM audit_events WHERE action = ${action}`);
+    return (res as unknown as { rows: Record<string, unknown>[] }).rows;
+  }
+
+  it('not enrolled: login is unchanged (session + redirect, no MFA step)', async () => {
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    cookieJar.clear();
+    cookieSet.mockClear();
+    await expect(loginAction(null, form({ phone: PHONE, password: PASSWORD }))).rejects.toThrow('REDIRECT:/account');
+    expect(cookieSet).toHaveBeenCalled();
+  });
+
+  it('enrolled → the password alone mints NO session; returns the mfa step with a pending token', async () => {
+    await enrolledAccount();
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    expect(s.step).toBe('mfa');
+    expect(s.pendingToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(cookieSet).not.toHaveBeenCalled();
+    expect(sentCodes).toHaveLength(0); // no WhatsApp code: the app is the factor
+  });
+
+  it('the right code consumes the token (single use) and mints the session', async () => {
+    const secret = await enrolledAccount();
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    await expect(
+      verifyMfaAction(null, form({ pendingToken: s.pendingToken!, code: totpAt(secret, mfaNowMs) })),
+    ).rejects.toThrow('REDIRECT:/account');
+    const token = cookieSet.mock.calls[0][1];
+    expect((await authStore.resolveSession(token))?.senderPhone).toBe(NORM);
+    // The token is spent: a second submit (even a fresh valid code) is refused.
+    mfaNowMs += 30_000;
+    cookieSet.mockClear();
+    const again = await verifyMfaAction(null, form({ pendingToken: s.pendingToken!, code: totpAt(secret, mfaNowMs) }));
+    expect(again.step).toBe('login');
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('a wrong code keeps the mfa step, no session', async () => {
+    await enrolledAccount();
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    const bad = await verifyMfaAction(null, form({ pendingToken: s.pendingToken!, code: '000000' }));
+    expect(bad.step).toBe('mfa');
+    expect(bad.pendingToken).toBe(s.pendingToken);
+    expect(bad.error).toBeTruthy();
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('bad codes consume the SAME reservations as passwords; a correct password never resets them', async () => {
+    const secret = await enrolledAccount();
+    clientIpHeader = '203.0.113.9';
+    // 10 per (phone, IP) per hour: login(1) + 5 codes, token dropped; login(7) + 3 codes = 10.
+    const first = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    for (let i = 0; i < 5; i++) {
+      expect((await verifyMfaAction(null, form({ pendingToken: first.pendingToken!, code: '000000' }))).step).toBe('mfa');
+    }
+    // The 6th code on that token: the token is dropped (5 codes per token).
+    expect((await verifyMfaAction(null, form({ pendingToken: first.pendingToken!, code: '000000' }))).step).toBe('login');
+    const second = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    expect(second.step).toBe('mfa');
+    for (let i = 0; i < 2; i++) {
+      await verifyMfaAction(null, form({ pendingToken: second.pendingToken!, code: '000000' }));
+    }
+    // (phone, IP) bucket is now full: even the RIGHT code is refused, no session.
+    const locked = await verifyMfaAction(null, form({ pendingToken: second.pendingToken!, code: totpAt(secret, mfaNowMs) }));
+    expect(locked.error).toBeTruthy();
+    expect(cookieSet).not.toHaveBeenCalled();
+    // …and so is the password.
+    const pw = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    expect(pw.step).toBe('login');
+  });
+
+  it('a password change inside the window voids the pending token', async () => {
+    const secret = await enrolledAccount();
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    await authStore.setPassword(NORM, 'a brand new passphrase');
+    const r = await verifyMfaAction(null, form({ pendingToken: s.pendingToken!, code: totpAt(secret, mfaNowMs) }));
+    expect(r.step).toBe('login');
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('only an mfa token works at the code step; an mfa token works nowhere else', async () => {
+    const secret = await enrolledAccount();
+    const { getPendingAuthStore } = await import('@/lib/pending-auth-store');
+    for (const purpose of ['register', 'reset', 'login'] as const) {
+      const t = await getPendingAuthStore().create(NORM, purpose);
+      const r = await verifyMfaAction(null, form({ pendingToken: t, code: totpAt(secret, mfaNowMs) }));
+      expect(r.step).toBe('login');
+    }
+    const s = await loginAction(null, form({ phone: PHONE, password: PASSWORD }));
+    // verifyOtpAction (register binding) refuses it…
+    expect((await verifyOtpAction(null, form({ pendingToken: s.pendingToken!, code: '123456' }))).step).toBe('login');
+    // …resetAction refuses it…
+    expect((await resetAction(null, form({ pendingToken: s.pendingToken!, code: '123456', password: 'x'.repeat(12) }))).step).toBe('login');
+    // …and resend never turns it into a WhatsApp code.
+    const re = await resendOtpAction(null, form({ pendingToken: s.pendingToken! }));
+    expect(re.step).toBe('login');
+    await runAfter();
+    expect(sentCodes).toHaveLength(0);
+    expect(cookieSet).not.toHaveBeenCalled();
+  });
+
+  it('recovery: a WhatsApp-OTP password reset also turns MFA off, with an audit row (keyed subject, no phone)', async () => {
+    await enrolledAccount();
+    otpNowMs += 60_000; // past the per-phone resend cooldown
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    await runAfter();
+    const code = sentCodes[sentCodes.length - 1].code;
+    const done = await resetAction(null, form({ pendingToken: req.pendingToken!, code, password: 'a brand new passphrase' }));
+    expect(done.step).toBe('login');
+    expect(await getCustomerMfaStore().isEnrolled(WHO)).toBe(false);
+    const rows = await auditRows('customer.mfa.reset');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor_type: 'system', partner_id: 'default' });
+    expect(String(rows[0].subject_id)).toMatch(/^cust:[0-9a-f]{64}$/);
+    expect(JSON.stringify(rows[0])).not.toContain(NORM);
+    // Signing in afterwards is password-only again.
+    await expect(loginAction(null, form({ phone: PHONE, password: 'a brand new passphrase' }))).rejects.toThrow('REDIRECT:/account');
+  });
+
+  it('a reset for an account without MFA writes no MFA audit row', async () => {
+    const reg = await register();
+    await expect(
+      verifyOtpAction(null, form({ pendingToken: reg.pendingToken!, code: sentCodes[0].code })),
+    ).rejects.toThrow('REDIRECT:/account');
+    otpNowMs += 60_000;
+    const req = await requestResetAction(null, form({ phone: PHONE }));
+    await runAfter();
+    const code = sentCodes[sentCodes.length - 1].code;
+    expect((await resetAction(null, form({ pendingToken: req.pendingToken!, code, password: 'a brand new passphrase' }))).step).toBe('login');
+    expect(await auditRows('customer.mfa.reset')).toHaveLength(0);
+  });
+});
+

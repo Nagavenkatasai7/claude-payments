@@ -141,6 +141,13 @@
       "when": 1790166710163,
       "tag": "0019_audit_append_only",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1790177680775,
+      "tag": "0020_customer_mfa_corridor_status",
+      "breakpoints": true
     }
   ]
 }

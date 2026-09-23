@@ -12,6 +12,7 @@ import {
   resendOtpAction,
   requestResetAction,
   resetAction,
+  verifyMfaAction,
   type AccountState,
 } from './actions';
 
@@ -145,6 +146,10 @@ export function LoginForm() {
   if (state?.step === 'otp' && state.phone) {
     return <OtpForm phone={state.phone} pendingToken={state.pendingToken} notice={state.notice} />;
   }
+  // Program-Fix 49D: two-step verification is on for this account.
+  if (state?.step === 'mfa' && state.pendingToken) {
+    return <MfaCodeForm phone={state.phone} pendingToken={state.pendingToken} />;
+  }
 
   const err = state?.error;
   return (
@@ -186,6 +191,73 @@ export function LoginForm() {
         <a href="/account/reset" className={altLinkCls}>Forgot password?</a>
       </p>
     </form>
+  );
+}
+
+// ── Authenticator-code step (Program-Fix 49D; only when two-step is on) ─────
+function MfaCodeForm({ phone, pendingToken }: { phone?: string; pendingToken: string }) {
+  const [state, action, pending] = useActionState<AccountState | null, FormData>(verifyMfaAction, null);
+  // A refusal that ends the sign-in (expired / too many codes) goes back to the
+  // password form with its message.
+  if (state?.step === 'login') {
+    return <LoginRestart error={state.error} />;
+  }
+  const err = state?.error;
+  // The server derives WHO from the token; the phone is display-only.
+  const currentToken = state?.pendingToken ?? pendingToken;
+  return (
+    <div>
+      <p className={subCls}>
+        Enter the 6-digit code from your authenticator app
+        {phone ? (
+          <>
+            {' '}for <strong className="text-foreground">{maskPhone(phone)}</strong>
+          </>
+        ) : null}
+        .
+      </p>
+      <form action={action} aria-describedby={err ? 'acct-form-error' : undefined}>
+        <FormError error={err} />
+        <input type="hidden" name="pendingToken" value={currentToken} />
+        <div className="mb-4 grid gap-1.5">
+          <Label htmlFor="mfa-code">Authenticator code</Label>
+          <Input
+            id="mfa-code"
+            name="code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9 ]{6,7}"
+            maxLength={7}
+            required
+            className={otpInputCls}
+            aria-describedby={err ? 'acct-form-error' : undefined}
+            placeholder="••••••"
+          />
+        </div>
+        <Button type="submit" disabled={pending} className="w-full">
+          {pending ? 'Verifying…' : 'Verify'}
+        </Button>
+      </form>
+      <p className="mt-4 text-xs leading-normal text-muted-foreground">
+        Lost access to your authenticator app?{' '}
+        <a href="/account/reset" className={altLinkCls}>
+          Reset your password
+        </a>{' '}
+        with a code sent to your WhatsApp. That also turns two-step verification off, so you can set it up again.
+      </p>
+    </div>
+  );
+}
+
+/** The password form again, after the code step ended (keeps its message). */
+function LoginRestart({ error }: { error?: string }) {
+  return (
+    <div>
+      <FormError error={error} />
+      <a href="/account/login" className={altLinkCls}>
+        Sign in again
+      </a>
+    </div>
   );
 }
 

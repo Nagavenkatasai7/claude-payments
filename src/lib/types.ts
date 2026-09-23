@@ -514,6 +514,10 @@ export interface Customer {
   passwordHash?: string;     // Argon2id PHC string (the hash itself; not extra-encrypted)
   passwordUpdatedAt?: string;// ISO — set on register / password change
   phoneVerifiedAt?: string;  // ISO — set when the WhatsApp OTP is verified
+  // Program-Fix 49D: set when portal TOTP is ON (customers.mfa_enrolled_at).
+  // READ-ONLY here (mapped in rowToCustomer only, never in customerToRow): the
+  // secret itself never enters this object; customer-repo's MFA methods own it.
+  mfaEnrolledAt?: string;
   // ── Customer onboarding Phase 2 — Persona KYC (data-minimized; raw ID/SSN/images never stored) ──
   kycInquiryId?: string;     // Persona inquiry id (inq_…); also mirrored to kycProviderRef
   kycReviewState?: KycReviewState;
@@ -726,7 +730,12 @@ export interface CorridorRequest {
   approxAmount?: number;
   approxCurrency?: string;
   capturedAt: string;           // ISO-8601
+  /** Program-Fix 49D (0020): the lead's review state; absent (NULL) = 'open'. */
+  status?: CorridorRequestStatus;
 }
+
+/** corridor_requests.status values (no CHECK in the DB; NULL means 'open'). */
+export type CorridorRequestStatus = 'open' | 'planned' | 'launched' | 'declined';
 
 /**
  * Stage-2 application lifecycle (partner_requests.application_status is free
