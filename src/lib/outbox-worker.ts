@@ -688,7 +688,8 @@ async function handle(
     // The row still ends done (no retry storm while SMTP is intentionally unset),
     // but it writes an `email.skipped` audit row (prefix + outbox id, never an
     // address) and, for 'skipped_unconfigured' only, ONE ops alert per UTC day.
-    // The alert is an ops.alert (WhatsApp), never email, so it cannot loop.
+    // The alert is an ops.alert, keyed per UTC day, and a skipped ops-alert
+    // email mirror (opsmail:) never raises it, so it cannot loop.
     case 'email.send': {
       const outcome: EmailOutcome | void = await (deps.sendEmail ?? sendEmailDefault)({
         to: Array.isArray(p.to) ? (p.to as unknown[]).map(str).filter(Boolean) : [],
@@ -707,7 +708,9 @@ async function handle(
           subjectId: subjectId ?? undefined,
           meta: { reason, dedupePrefix: prefix, outboxId: row.id },
         });
-        if (outcome === 'skipped_unconfigured') {
+        // Not for an ops-alert mirror row (Program-Fix 26's opsmail:): that
+        // email IS an alert copy, so alerting on its skip would ping-pong.
+        if (outcome === 'skipped_unconfigured' && !isMirrorRow(row)) {
           await createOutboxRepo(deps.db).enqueue(
             'ops.alert',
             { message: 'Email is not configured: partner lead or invite emails are being skipped. See /admin-dashboard/ops.' },

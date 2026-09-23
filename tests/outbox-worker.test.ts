@@ -407,6 +407,18 @@ describe('drainOnce — email.send reports skips honestly (Program-Fix 39)', () 
     expect(await alertKeys()).toEqual([]);
   });
 
+  it('an ops-alert EMAIL mirror (opsmail:) that skips is audited but raises NO alert (no ping-pong with fix 26)', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
+    await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 'SmartRemit ops alert', text: 't' }, { dedupeKey: 'opsmail:41' });
+    await drainOnce(d, 'w1');
+    expect(await statusOf('opsmail:41')).toBe('done');
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].subject_id).toBeNull();
+    expect(rows[0].meta).toMatchObject({ reason: 'unconfigured', dedupePrefix: null });
+    expect(await alertKeys()).toEqual([]);
+  });
+
   it('resend key → same preq subject', async () => {
     const d: WorkerDeps = { ...deps(), sendEmail: async () => 'skipped_unconfigured' };
     await outbox.enqueue('email.send', { to: ['lead@example.test'], subject: 's', text: 't' }, { dedupeKey: 'partner_app_invite:preq_ddd:r0123456789ab' });
