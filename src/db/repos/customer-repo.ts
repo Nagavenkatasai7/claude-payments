@@ -259,6 +259,23 @@ export function createCustomerRepo(
     },
 
     /**
+     * Program-Fix 28: a LOCK-ONLY read of one tenant row — `SELECT 1 … FOR
+     * UPDATE` keyed (partner_id, phone), returning whether the row exists. Run
+     * it on a TRANSACTION handle before the ordinary (decrypting) getCustomer,
+     * so a staff KYC decision serializes against a concurrent one without ever
+     * round-tripping masked or ciphertext values through the domain object.
+     */
+    async lockCustomer(partnerId: PartnerId, senderPhone: string): Promise<boolean> {
+      const rows = await db
+        .select({ one: sql<number>`1` })
+        .from(customers)
+        .where(tenantKey(partnerId, senderPhone))
+        .limit(1)
+        .for('update');
+      return rows.length > 0;
+    },
+
+    /**
      * Program fix 16b: the ONE writer of customers.send_limit_override — a
      * single-column UPDATE keyed (partner_id, phone), so a KYC / consent
      * saveCustomer (which never names the column) can't clobber a raise and a

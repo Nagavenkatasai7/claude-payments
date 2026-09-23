@@ -1,8 +1,12 @@
 import { getRedis } from './redis';
 import type { RedisLike, Store } from './store';
 import type { CustomerStore } from './customer-store';
-import { getCustomerStore } from './customer-store';
+import { createCustomerStore, getCustomerStore } from './customer-store';
 import type { Customer, PartnerId } from './types';
+import type { Db } from '@/db/client';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import { auditSubjectId } from './customer-ref';
+import { logWarn } from './log';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { KycDelta } from './kyc-state-machine';
 
@@ -12,8 +16,14 @@ import type { KycDelta } from './kyc-state-machine';
  * Owns: webhook idempotency (each Persona event id processed once), applying a
  * `KycDelta` to the Customer (Persona-driven review-state moves), the HUMAN
  * review transition (the only path that moves `kycStatus` to verified/rejected),
- * an append-only audit log, and the review queue. Durable-beyond-Redis export
- * of the audit log is a Phase-5 concern.
+ * an append-only audit log, and the review queue.
+ *
+ * Program-Fix 28 (compliance-03): a STAFF decision passed `durable` options is
+ * recorded in Postgres `audit_events` in the SAME transaction as the customer
+ * write (the durable record). The Redis hash below stays as the transitional
+ * trail: it still carries Persona events (applyDelta) and pre-fix history, and
+ * a durable decision's Redis copy is tagged `durable: true` so the page does not
+ * show it twice (the old build, during a rollout, still shows it).
  */
 
 const EVT_TTL = 30 * 24 * 60 * 60; // 30d replay-dedup window
@@ -29,6 +39,48 @@ export interface AuditMeta {
 }
 export interface AuditEntry extends AuditMeta {
   at: string;
+  /** Program-Fix 28: true when an audit_events row holds this decision (the page skips it). */
+  durable?: boolean;
+}
+
+/**
+ * Program-Fix 28: the options that make review() durable. `actor` is the
+ * staff member's stable username (the audit row's actor); the `reviewer`
+ * display string still goes to kycApprovedBy and meta.reviewerName.
+ */
+export interface DurableReviewOpts {
+  db: Db;
+  store: Store;
+  actor: string;
+  slug: string;
+  source: 'persona_review' | 'manual';
+}
+
+/** One line of the customer page's KYC audit trail. */
+export interface KycTrailLine {
+  at: string;
+  actor: string;
+  action: string;
+  reason: string | undefined;
+}
+
+/**
+ * Program-Fix 28: the page trail = the durable audit_events rows PLUS the
+ * legacy Redis entries NOT tagged `durable: true` (pre-fix history, Persona
+ * events, and anything the old build wrote during a rollout). No timestamp
+ * matching: a durable decision's Redis copy is skipped by its tag alone.
+ * Oldest first. Pure.
+ */
+export function mergeKycTrail(
+  durable: ReadonlyArray<{ actor: string; action: string; at: string; meta: Record<string, unknown> }>,
+  legacy: ReadonlyArray<AuditEntry>,
+): KycTrailLine[] {
+  const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined);
+  const lines: KycTrailLine[] = [
+    ...durable.map((r) => ({ at: r.at, actor: str(r.meta.reviewerName) ?? r.actor, action: r.action, reason: str(r.meta.reason) })),
+    ...legacy.filter((e) => e.durable !== true).map((e) => ({ at: e.at, actor: e.actor, action: e.action, reason: e.reason })),
+  ];
+  return lines.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
 
 export function createKycCaseStore(
@@ -71,11 +123,10 @@ export function createKycCaseStore(
       decision: 'approve' | 'reject',
       reviewer: string,
       reason: string,
+      durable?: DurableReviewOpts,
     ): Promise<Customer | null> {
-      const c = await customers.getCustomer(partnerId, phone);
-      if (!c) return null;
       const nowIso = new Date(now()).toISOString();
-      const updated: Customer =
+      const decide = (c: Customer): Customer =>
         decision === 'approve'
           ? {
               ...c,
@@ -95,8 +146,54 @@ export function createKycCaseStore(
               kycRejectedAt: nowIso,
               updatedAt: nowIso,
             };
-      await customers.saveCustomer(updated);
-      await appendAudit(partnerId, phone, { actor: reviewer, action: `review.${decision}`, reason, at: nowIso });
+      const redisEntry: AuditEntry = { actor: reviewer, action: `review.${decision}`, reason, at: nowIso };
+
+      if (!durable) {
+        // Legacy path (no db handle): unchanged semantics — Redis trail only.
+        const c = await customers.getCustomer(partnerId, phone);
+        if (!c) return null;
+        const updated = decide(c);
+        await customers.saveCustomer(updated);
+        await appendAudit(partnerId, phone, redisEntry);
+        return updated;
+      }
+
+      // Program-Fix 28: ONE transaction — lock the tenant row (SELECT 1 … FOR
+      // UPDATE), re-read it through the tx-bound store (decrypted PII, never a
+      // masked value), write it back, then the audit_events row. A failed audit
+      // insert rolls the decision back. Only tx-bound handles inside.
+      const updated = await durable.db.transaction(async (tx) => {
+        const txCustomers = createCustomerStore(tx, durable.store);
+        if (!(await txCustomers.lockCustomer(partnerId, phone))) return null;
+        const c = await txCustomers.getCustomer(partnerId, phone);
+        if (!c) return null;
+        const next = decide(c);
+        await txCustomers.saveCustomer(next);
+        await createAuditRepo(tx).record({
+          partnerId,
+          actor: durable.actor,
+          actorType: 'staff',
+          action: durable.slug,
+          subjectId: auditSubjectId(partnerId, phone), // keyed subject, never the raw phone
+          meta: {
+            previousStatus: c.kycStatus,
+            newStatus: next.kycStatus,
+            reason,
+            source: durable.source,
+            reviewerName: reviewer,
+          },
+        });
+        return next;
+      });
+      if (!updated) return null;
+      // Post-commit, best-effort (r2): the transitional Redis copy. A Redis
+      // failure here never surfaces as an error (the decision + its durable row
+      // are committed; a retry would only duplicate them).
+      try {
+        await appendAudit(partnerId, phone, { ...redisEntry, durable: true });
+      } catch (err) {
+        logWarn('kyc.review.redis_audit', err, { partnerId });
+      }
       return updated;
     },
 

@@ -1,10 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createCustomerStore, type CustomerStore } from '@/lib/customer-store';
 import { createKycCaseStore, type KycCaseStore } from '@/lib/kyc-case-store';
 import { createStore } from '@/lib/store';
 import type { Customer, Partner } from '@/lib/types';
+import type { Db } from '@/db/client';
+import { auditSubjectId } from '@/lib/customer-ref';
 
 // pg-backed stores rebuilt per test (freshDb truncates); the hoisted mock
 // factories must NOT construct them — the getters close over the lets lazily.
@@ -14,6 +17,7 @@ let kcs: KycCaseStore;
 // default is gate ON (requireKycBeforeSend: true) — the legacy behavior the
 // existing notify assertions pin; the gate-off test flips it per-test.
 let partner: Partner;
+let db: Db;
 const notify = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@/lib/auth', () => ({ requireAdmin: async () => ({ username: 'admin', name: 'Main Admin', role: 'admin' }), requireScope: async () => ({}) }));
@@ -26,6 +30,8 @@ vi.mock('@/lib/partner-store', () => ({
 }));
 vi.mock('@/lib/whatsapp', () => ({ sendVerificationStatus: notify }));
 vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
+// Program-Fix 28: the durable review transaction runs on the freshDb() handle.
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
 vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
 
 import { reviewKycAction } from '@/app/admin-dashboard/customers/actions';
@@ -41,7 +47,7 @@ const seed = (over: Partial<Customer> = {}) =>
   cs.saveCustomer({ senderPhone: PHONE, firstSeenAt: ISO, kycStatus: 'pending', kycReviewState: 'pending_review', senderCountry: 'US', partnerId: 'default', createdAt: ISO, updatedAt: ISO, ...over } as Customer);
 
 beforeEach(async () => {
-  const db = await freshDb();
+  db = await freshDb();
   await seedPartner(db, 'other'); // customers FK partners — needed for the out-of-scope test
   cs = createCustomerStore(db, createStore(fakeRedis(), db));
   kcs = createKycCaseStore(fakeRedis(), cs);
@@ -94,5 +100,35 @@ describe('reviewKycAction', () => {
   it('rejects an out-of-scope customer (partner boundary)', async () => {
     await seed({ partnerId: 'other' });
     await expect(reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'x' }))).rejects.toThrow(/not found/i);
+  });
+});
+
+describe('reviewKycAction — durable audit row (Program-Fix 28)', () => {
+  async function auditRows() {
+    const r = await db.execute(sql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events ORDER BY id`);
+    return (r as unknown as { rows: Array<Record<string, unknown>> }).rows;
+  }
+
+  it('approve writes ONE kyc.review.approve row with a keyed subject; actor = username, display name in meta', async () => {
+    await seed();
+    await reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'docs clean' }));
+    expect(await auditRows()).toEqual([{
+      partner_id: 'default', actor: 'admin', actor_type: 'staff', action: 'kyc.review.approve',
+      subject_id: auditSubjectId('default', PHONE),
+      meta: { previousStatus: 'pending', newStatus: 'verified', reason: 'docs clean', source: 'persona_review', reviewerName: 'Main Admin (admin)' },
+    }]);
+  });
+
+  it('reject writes kyc.review.reject', async () => {
+    await seed({ kycReviewState: 'needs_review' });
+    await reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'reject', reason: 'watchlist confirmed' }));
+    expect((await auditRows()).map((r) => r.action)).toEqual(['kyc.review.reject']);
+  });
+
+  it('an out-of-scope or reason-less call writes no audit row', async () => {
+    await seed({ partnerId: 'other' });
+    await expect(reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'x' }))).rejects.toThrow(/not found/i);
+    await expect(reviewKycAction(form({ phone: PHONE, partnerId: 'other', decision: 'approve', reason: '' }))).rejects.toThrow(/reason/i);
+    expect(await auditRows()).toEqual([]);
   });
 });

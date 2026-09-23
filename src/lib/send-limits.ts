@@ -161,11 +161,40 @@ export const SEND_LIMIT_REASON_MAX = 200;
  * characters stripped, whitespace collapsed, trimmed. (Fix 5's shared
  * boundUntrustedText is not on this branch; this is the same discipline.)
  */
-function boundReason(raw: unknown): string {
+export function boundReason(raw: unknown): string {
   return String(raw ?? '')
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Program-Fix 28: the stored cut for a staff note / decision reason. */
+export const STAFF_REASON_MAX = 500;
+/** Program-Fix 28: the minimum length of a MANDATORY decision reason (manual KYC). */
+export const STAFF_REASON_MIN = 10;
+
+/**
+ * Program-Fix 28: an OPTIONAL staff note on a money decision (release, reject,
+ * refund approve/dismiss/retry). Bounded like boundReason, cut at 500
+ * characters; blank ⇒ null (the audit row records `reason: null`).
+ */
+export function boundStaffNote(raw: unknown): string | null {
+  const s = boundReason(raw).slice(0, STAFF_REASON_MAX);
+  return s === '' ? null : s;
+}
+
+/**
+ * Program-Fix 28: a MANDATORY decision reason (the manual KYC decision, and a
+ * customer created as verified/grandfathered). Bounded first, then at least 10
+ * characters, then cut at 500. Throws before the caller reads or writes.
+ */
+export function requireStaffReason(raw: unknown): string {
+  const s = boundReason(raw);
+  if (s === '') throw new Error('A reason is required.');
+  if (s.length < STAFF_REASON_MIN) {
+    throw new Error(`The reason must be at least ${STAFF_REASON_MIN} characters.`);
+  }
+  return s.slice(0, STAFF_REASON_MAX);
 }
 
 /** Whole US dollars, > 0, <= maxUsd; '' ⇒ undefined (field not set). */
