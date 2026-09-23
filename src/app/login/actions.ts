@@ -122,10 +122,15 @@ export async function login(
   // Record an "active" signal for the Team page (re-reads fresh; won't clobber a
   // concurrent suspend/edit — see auth-store.recordLogin).
   await getAuthStore().recordLogin(username);
+  // Program-Fix 45 P1: this sign-in replaces the browser's session, so the
+  // sessions behind the cookies it presented (either name) are revoked, not
+  // left alive in Redis after their cookie is overwritten.
+  const jar = await cookies();
+  for (const { token: prior } of staffSessionTokens(jar)) await getAuthStore().deleteSession(prior);
   const token = await getAuthStore().createSession(username);
-  // Program-Fix 45 P1: the __Host- cookie (12 h, matching the session's
-  // absolute window); the legacy cookie is expired in the same response.
-  setStaffSessionCookie(await cookies(), token);
+  // The __Host- cookie (12 h, matching the session's absolute window); the
+  // legacy cookie is expired in the same response.
+  setStaffSessionCookie(jar, token);
   // Best-effort and time-bounded (staff-auth-audit never throws); the
   // redirect below stays outside any try/catch.
   await audit.record({
