@@ -82,3 +82,19 @@ describe('/api/worker Bearer gate', () => {
     expect(await redis.get(CRON_MARKER_KEY)).toBeNull();
   });
 });
+
+// Program-Fix 32 (neon-10): the worker runs the stuck-paid escalation ladder
+// beside the other sweeps and reports the count of fresh rungs.
+describe('/api/worker — stuck-paid escalation (Program-Fix 32)', () => {
+  it('a transfer paid 2 h ago gets its recon:<id>:1h alert on a poke; the body carries `escalated`', async () => {
+    const { sql } = await import('drizzle-orm');
+    const { seedLedgerSpend } = await import('./helpers-db');
+    const id = await seedLedgerSpend(db, { partnerId: 'default', phone: '15550001111', amountUsd: 50, status: 'paid' });
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '2 hours' WHERE id = ${id}`);
+    const res = await POST(req('POST', { authorization: `Bearer ${SECRET}` }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, escalated: 1 });
+    const r = await db.execute(sql`SELECT dedupe_key FROM outbox WHERE dedupe_key = ${`recon:${id}:1h`}`);
+    expect((r as unknown as { rows: unknown[] }).rows).toHaveLength(1);
+  });
+});

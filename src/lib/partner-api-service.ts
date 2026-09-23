@@ -301,9 +301,10 @@ export async function createTransaction(
   // claim under default as "NOT partner-API-minted"; a partner key there (the
   // default tenant can hold API keys — admin-dashboard/partners/actions.ts)
   // would unlock the payout of a transfer the partner supplied. Refused before
-  // any read or write.
-  if (/^(draft|b2binvoice):/.test(idempotencyKey)) {
-    return err(400, "Idempotency-Key may not begin with 'draft:' or 'b2binvoice:' (reserved).");
+  // any read or write. Program-Fix 32: 'sched:' is the recurring-schedule
+  // cron's claim (cron-run.ts) and payoutEditable exempts it the same way.
+  if (/^(draft|b2binvoice|sched):/.test(idempotencyKey)) {
+    return err(400, "Idempotency-Key may not begin with 'draft:', 'b2binvoice:' or 'sched:' (reserved).");
   }
 
   // Body validation + TENANT BINDING run BEFORE the idempotency claim (fix 1):

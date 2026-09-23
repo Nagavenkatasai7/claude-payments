@@ -9,6 +9,9 @@ process.env.CRON_SECRET = SECRET;
 
 const runDueSchedules = vi.hoisted(() => vi.fn(async () => ({ fired: 0, failed: 0 })));
 vi.mock('@/lib/cron-run', () => ({ runDueSchedules }));
+// Program-Fix 32: the daily cron also expires unpaid links after the schedules.
+const expireUnpaidLinks = vi.hoisted(() => vi.fn(async () => 2));
+vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks }));
 
 import { GET } from '@/app/api/cron/route';
 
@@ -23,12 +26,22 @@ describe('/api/cron Bearer gate', () => {
       expect(res.status, String(auth)).toBe(401);
     }
     expect(runDueSchedules).not.toHaveBeenCalled();
+    expect(expireUnpaidLinks).not.toHaveBeenCalled();
   });
 
   it('the right Bearer passes the gate and runs the schedules', async () => {
     const res = await GET(req({ authorization: `Bearer ${SECRET}` }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, fired: 0, failed: 0 });
+    expect(await res.json()).toEqual({ ok: true, fired: 0, failed: 0, expired: 2 });
     expect(runDueSchedules).toHaveBeenCalledTimes(1);
+    expect(expireUnpaidLinks).toHaveBeenCalledTimes(1);
+  });
+
+  it('Program-Fix 32: a failing expiry sweep never fails the cron — `expired` is null and the schedule result still returns', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expireUnpaidLinks.mockRejectedValueOnce(new Error('db down'));
+    const res = await GET(req({ authorization: `Bearer ${SECRET}` }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 0, failed: 0, expired: null });
   });
 });
