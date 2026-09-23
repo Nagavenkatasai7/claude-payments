@@ -243,6 +243,14 @@ describe('fix 38: hasWebAddress', () => {
     'friendly and warm, uses Hindi greetings',
     'राहुल शर्मा',
     '',
+    // ordinary bill text and typos (no space after a period) — never refused
+    'Consulting 10 hrs @ 3.5/hr',
+    'Rice 1.5/kg',
+    'Invoice no.12/2026',
+    'Design work.Pay within 7 days',
+    'Thanks.To confirm',
+    'Top quality.Live support',
+    'Great service.Shop now',
   ])('false for %j', (v) => {
     expect(hasWebAddress(v)).toBe(false);
   });

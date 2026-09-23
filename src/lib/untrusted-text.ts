@@ -124,12 +124,15 @@ export function isBoundedPrintable(v: unknown, max: number): boolean {
 // runs on the boundUntrustedText form, so fullwidth dots, bracketed dots
 // ("evil[.]com") and zero-width splits collapse into detectable text first.
 
-/** Common TLDs, plus the reserved `example` (used by the audit's fixtures). */
+/**
+ * The brief's common TLDs, plus the reserved `example` (the audit's fixtures)
+ * and a few more that are not ordinary English words — a word TLD (pay, shop,
+ * live, to, ...) would refuse "Design work.Pay within 7 days", a common typo.
+ */
 const WEB_TLDS = [
   'com', 'net', 'org', 'io', 'ai', 'app', 'co', 'me', 'ly', 'link', 'xyz', 'info', 'in', 'uk', 'us',
-  'example', 'dev', 'biz', 'site', 'online', 'store', 'shop', 'top', 'page', 'click', 'live', 'gg',
-  'to', 'ru', 'cn', 'tk', 'ca', 'au', 'nz', 'sg', 'ae', 'hk', 'mx', 'de', 'fr', 'eu', 'tv', 'cc',
-  'gov', 'edu', 'pay', 'money', 'bank', 'finance', 'tech', 'cloud', 'club',
+  'example', 'dev', 'biz', 'gg', 'ru', 'cn', 'tk', 'ca', 'au', 'nz', 'sg', 'ae', 'hk', 'mx', 'de',
+  'fr', 'eu', 'tv', 'cc', 'gov', 'edu',
 ];
 const LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{N}-]*[\\p{L}\\p{N}])?';
 const WEB_ADDRESS = new RegExp(
@@ -137,8 +140,9 @@ const WEB_ADDRESS = new RegExp(
     '://',
     '(?<![\\p{L}\\p{N}])www\\.',
     '(?<![\\p{L}\\p{N}.])\\d{1,3}(?:\\.\\d{1,3}){3}(?![\\p{L}\\p{N}])',
-    // host with a path: "evil.whatever/x"
-    `${LABEL}(?:\\.${LABEL})+/`,
+    // host with a path: "evil.whatever/x" — the last label is letters (or an
+    // IDN "xn--" label), so "3.5/hr" and "no.12/2026" are not hosts.
+    `${LABEL}(?:\\.${LABEL})*\\.(?:\\p{L}{2,}|xn--[\\p{L}\\p{N}-]+)/`,
     // host ending in a known TLD: "acme.com", "pay.evil.example"
     `${LABEL}\\.(?:${WEB_TLDS.join('|')})(?![\\p{L}\\p{N}-])`,
   ].join('|'),
