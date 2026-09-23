@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { toStaffOptions } from '@/lib/staff-options';
+import { toStaffOptions, type StaffOption } from '@/lib/staff-options';
 import type { Staff } from '@/lib/types';
 
 /**
@@ -64,5 +64,21 @@ describe('toStaffOptions (fix 20, F56)', () => {
     expect(out).toEqual([{ username: 'priya', name: 'Priya' }]);
     expect(Object.keys(out[0]).sort()).toEqual(['name', 'username']);
     expect(JSON.stringify(out)).not.toContain('argon2');
+  });
+});
+
+describe('StaffOption rejects a full Staff at compile time (fix 20, review L1)', () => {
+  it('a Staff (it carries passwordHash) is not assignable to StaffOption — tsc enforces the @ts-expect-error', () => {
+    const full = {
+      username: 'x',
+      name: 'X',
+      role: 'agent',
+      permissions: { canCancel: false, canResend: false, canAssign: false },
+      passwordHash: 'h',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    } satisfies Staff;
+    // @ts-expect-error — reverting the page to `staff={allStaff}` must not type-check.
+    const leaked: StaffOption[] = [full as Staff];
+    expect(leaked).toHaveLength(1);
   });
 });

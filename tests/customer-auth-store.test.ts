@@ -486,6 +486,18 @@ describe('customer session index holds hashes (fix 20)', () => {
     expect(expire).toHaveBeenCalledWith(`sr_sess_ix:${NORM}`, 12 * 60 * 60);
   });
 
+  it('indexes the session BEFORE writing its record (a failed index write never leaves an unrevocable session)', async () => {
+    const redis = fakeRedis();
+    const order: string[] = [];
+    const set = redis.set.bind(redis);
+    const sadd = redis.sadd.bind(redis);
+    redis.set = async (k, v, o) => { order.push(`set:${k.split(':')[0]}`); return set(k, v, o); };
+    redis.sadd = async (k, m) => { order.push(`sadd:${k.split(':')[0]}`); return sadd(k, m); };
+    const { s } = await mkAuth(redis);
+    await s.createSession(NORM, 'default');
+    expect(order).toEqual(['sadd:sr_sess_ix', 'set:sr_sess']);
+  });
+
   it('deleteSession removes the hash from the new index', async () => {
     const redis = fakeRedis();
     const { s } = await mkAuth(redis);

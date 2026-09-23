@@ -125,6 +125,17 @@ describe('auth-store sessions are stored only as hashes (fix 20)', () => {
     expect(calls[0][1]).toBe(7 * 24 * 60 * 60);
   });
 
+  it('indexes the session BEFORE writing its record (a failed index write never leaves an unrevocable session)', async () => {
+    const r = fakeRedis();
+    const order: string[] = [];
+    const set = r.set.bind(r);
+    const sadd = r.sadd.bind(r);
+    r.set = async (k, v, o) => { order.push(`set:${k.split(':')[0]}`); return set(k, v, o); };
+    r.sadd = async (k, m) => { order.push(`sadd:${k.split(':')[0]}`); return sadd(k, m); };
+    await createAuthStore(r).createSession('priya');
+    expect(order).toEqual(['sadd:staff_sess_ix', 'set:staff_sess']);
+  });
+
   it('a legacy plaintext session:<token> key is never honoured', async () => {
     const r = fakeRedis();
     const t = randomBytes(32).toString('hex');

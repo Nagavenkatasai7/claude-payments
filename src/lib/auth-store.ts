@@ -73,10 +73,12 @@ export function createAuthStore(redis: RedisLike) {
     async createSession(username: string): Promise<string> {
       const token = randomBytes(32).toString('hex');
       const h = sha256hex(token);
-      await redis.set(sessionKey(h), username, { ex: SESSION_TTL_SECONDS });
+      // Index FIRST: if a later write fails, a dangling index hash is harmless,
+      // whereas a live record missing from the index would escape revoke-all.
       await redis.sadd(sessionIndex(username), h);
-      // The index outlives no session: re-armed on every add to the session TTL.
+      // Re-armed on every add to the session TTL, so it expires after every session it lists.
       await redis.expire(sessionIndex(username), SESSION_TTL_SECONDS);
+      await redis.set(sessionKey(h), username, { ex: SESSION_TTL_SECONDS });
       return token;
     },
     async getSessionUser(token: string): Promise<string | null> {

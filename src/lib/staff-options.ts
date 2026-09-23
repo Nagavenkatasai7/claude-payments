@@ -7,7 +7,9 @@ import type { Staff } from './types';
  * transactions assign dropdown gets this projection and nothing else.
  * `tests/staff-hash-not-in-client.test.ts` pins that no client module imports `Staff`.
  */
-export type StaffOption = Pick<Staff, 'username' | 'name'>;
+// `passwordHash?: never` makes a full Staff NOT assignable (structural typing
+// would otherwise accept it), so reverting a call site to the raw list fails tsc.
+export type StaffOption = Pick<Staff, 'username' | 'name'> & { passwordHash?: never };
 
 /** Explicit field pick (never a spread), so a new `Staff` field can't leak by default. */
 export function toStaffOptions(staff: readonly Staff[]): StaffOption[] {

@@ -383,9 +383,11 @@ export function createCustomerAuthStore(
       const ts = now();
       const record: SessionRecord = { phone, partnerId, createdAtMs: ts, lastSeenMs: ts };
       const keyHash = sha256hex(token);
-      await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
+      // Index FIRST (a dangling index hash is harmless; an unindexed live record
+      // would escape revoke-all on password reset).
       await redis.sadd(sessionHashIndexKey(phone), keyHash);
       await redis.expire(sessionHashIndexKey(phone), SESSION_INDEX_TTL_SECONDS);
+      await redis.set(sessionKey(keyHash), JSON.stringify(record), { ex: SESSION_IDLE_SECONDS });
       return token;
     },
 
