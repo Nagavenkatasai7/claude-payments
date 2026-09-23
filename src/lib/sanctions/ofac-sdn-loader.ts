@@ -134,9 +134,11 @@ function allowedFinalUrl(raw: string): boolean {
     const u = new URL(raw);
     if (u.protocol !== 'https:') return false;
     const h = u.hostname;
-    // SLS itself, or an S3 endpoint: s3.amazonaws.com, <bucket>.s3.amazonaws.com,
-    // <bucket>.s3.<region>.amazonaws.com, <bucket>.s3-<region>.amazonaws.com.
-    return h === SLS_HOST || /^(?:[a-z0-9.-]+\.)?s3[.-](?:[a-z0-9-]+\.)?amazonaws\.com$/.test(h) || h === 's3.amazonaws.com';
+    // SLS itself, or its signed S3 download bucket host in us-gov-west-1
+    // (observed 2026-09-23: <bucket>.s3.us-gov-west-1.amazonaws.com). Anchored
+    // at both ends. If Treasury moves the bucket, the load fails soft (the last
+    // good version stays active, one ops alert per day) until this is updated.
+    return h === SLS_HOST || /^[a-z0-9][a-z0-9.-]*\.s3\.us-gov-west-1\.amazonaws\.com$/.test(h);
   } catch {
     return false;
   }
@@ -164,9 +166,9 @@ export async function fetchOfacSdn(
     signal: AbortSignal.timeout(opts.timeoutMs ?? OFAC_SDN_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`OFAC SDN fetch failed: HTTP ${res.status}`);
-  // Redirect pinning: SLS answers 302 to a signed S3 download (verified
-  // 2026-09-23), so the final URL may be the SLS host itself or an Amazon S3
-  // host over https — never anything else. (A stub without res.url is a test.)
+  // Redirect pinning: SLS answers 302 to a signed S3 download in
+  // us-gov-west-1, so the final URL must be https on the SLS host or that S3
+  // region — never anything else. (A stub without res.url is a test.)
   if (res.url && !allowedFinalUrl(res.url)) throw new Error('OFAC SDN fetch failed: unexpected host after redirect');
   const declared = Number(res.headers?.get?.('content-length') ?? NaN);
   if (Number.isFinite(declared) && declared > maxBytes) throw new Error('OFAC SDN fetch failed: body too large');

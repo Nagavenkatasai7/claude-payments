@@ -98,8 +98,12 @@ describe('fetchOfacSdn (never called in prod unless SANCTIONS_LIST is set; here 
     await expect(fetchOfacSdn(res('https://evil.example/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
     await expect(fetchOfacSdn(res('http://sanctionslistservice.ofac.treas.gov/x') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
     await expect(fetchOfacSdn(res(OFAC_SDN_XML_URL) as unknown as typeof fetch)).resolves.toMatchObject({ source: 'ofac-sdn' });
-    // SLS 302s to a signed S3 download (verified 2026-09-23).
-    await expect(fetchOfacSdn(res('https://some-bucket.s3.us-east-1.amazonaws.com/SDN.XML?X-Amz-Signature=x') as unknown as typeof fetch)).resolves.toMatchObject({ source: 'ofac-sdn' });
+    // SLS 302s to a signed S3 download in us-gov-west-1 (observed by review r2).
+    await expect(fetchOfacSdn(res('https://wc2h-sls-prod-public-published.s3.us-gov-west-1.amazonaws.com/SDN.XML?X-Amz-Signature=x') as unknown as typeof fetch)).resolves.toMatchObject({ source: 'ofac-sdn' });
+    // Any other region's bucket, or a lookalike suffix, is refused.
+    await expect(fetchOfacSdn(res('https://x.s3.us-east-1.amazonaws.com/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
+    await expect(fetchOfacSdn(res('https://x.s3.amazonaws.com/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
+    await expect(fetchOfacSdn(res('https://x.s3.us-gov-west-1.amazonaws.com.evil.example/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
     await expect(fetchOfacSdn(res('https://amazonaws.com.evil.example/SDN.XML') as unknown as typeof fetch)).rejects.toThrow(/unexpected host/);
   });
 
