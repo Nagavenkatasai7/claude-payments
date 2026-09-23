@@ -18,8 +18,9 @@ import {
   updateStaffAction,
   setStaffStatusAction,
   removeStaffAction,
-  resetStaffMfaAction,
 } from './actions';
+import { ResetMfaForm } from './reset-mfa-form';
+import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { ResetPasswordForm } from './reset-password-form';
 
@@ -56,7 +57,15 @@ function PartnerOptions({ partners }: { partners: Partner[] }) {
 
 function staffRow(
   s: Staff,
-  opts: { isSelf: boolean; isTest: boolean; mfaOn: boolean; partners: Partner[]; partnerName: (id?: string) => string },
+  opts: {
+    isSelf: boolean;
+    isTest: boolean;
+    mfaOn: boolean;
+    /** Only the seed admin may reset the seed admin (the action enforces it too). */
+    mayResetMfa: boolean;
+    partners: Partner[];
+    partnerName: (id?: string) => string;
+  },
 ) {
   const status = s.status === 'suspended' ? 'suspended' : 'active';
   const initial = s.name.charAt(0).toUpperCase();
@@ -144,14 +153,9 @@ function staffRow(
             <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
           </form>
           <ResetPasswordForm username={s.username} name={s.name} />
-          {opts.mfaOn ? (
+          {opts.mfaOn && opts.mayResetMfa ? (
             // Program-Fix 17b: lost authenticator → turn two-step off (audited, signs them out).
-            <form action={resetStaffMfaAction}>
-              <input type="hidden" name="username" value={s.username} />
-              <Button type="submit" size="sm" variant="outline" aria-label={`Reset two-step verification for ${s.name}`}>
-                Reset 2FA
-              </Button>
-            </form>
+            <ResetMfaForm username={s.username} name={s.name} />
           ) : null}
         </span>
       ),
@@ -180,6 +184,7 @@ export default async function TeamPage() {
   const testStaff = allStaff.filter((s) => isTestStaff(s));
   const orderedStaff = [...realStaff, ...testStaff];
   const mfaOn = await getStaffMfaStore().enrolledAmong(allStaff.map((s) => s.username));
+  const seed = seedAdminUsername();
 
   return (
     <>
@@ -227,6 +232,7 @@ export default async function TeamPage() {
                   isSelf: s.username === me.username,
                   isTest: isTestStaff(s),
                   mfaOn: mfaOn.has(s.username),
+                  mayResetMfa: s.username !== seed || me.username === seed,
                   partners,
                   partnerName,
                 }),

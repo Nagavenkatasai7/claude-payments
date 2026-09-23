@@ -1,10 +1,11 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { headers } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requireStaff } from '@/lib/auth';
 import { getAuthStore } from '@/lib/auth-store';
+import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { verifyPassword } from '@/lib/password';
 import { getStaffLoginGuard, isSeedAdminRecord } from '@/lib/staff-login-guard';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
@@ -95,7 +96,12 @@ export async function confirmMfaEnrolmentAction(_prev: MfaEnrolState, formData: 
     return { ok: false, message: UNAVAILABLE };
   }
   switch (outcome) {
-    case 'ok':
+    case 'ok': {
+      // Like a password change: every other session (possibly opened before
+      // the second factor existed) is signed out; this browser gets a fresh one.
+      const store = getAuthStore();
+      await store.deleteAllSessionsFor(me.username);
+      setStaffSessionCookie(await cookies(), await store.createSession(me.username));
       await getStaffAuthAudit().record({
         action: 'auth.mfa.enroll',
         actorType: 'staff',
@@ -105,7 +111,11 @@ export async function confirmMfaEnrolmentAction(_prev: MfaEnrolState, formData: 
         ip: clientIpFrom(await headers()),
       });
       revalidatePath('/admin-dashboard/account');
-      return { ok: true, message: 'Two-step verification is on. You will be asked for a code at every sign-in.' };
+      return {
+        ok: true,
+        message: 'Two-step verification is on. Every other session was signed out; you will be asked for a code at every sign-in.',
+      };
+    }
     case 'invalid':
       return { ok: false, message: 'That code is not valid. Check the time on your device and try again.' };
     case 'throttled':

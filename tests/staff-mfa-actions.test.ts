@@ -15,10 +15,15 @@ let actor: Staff;
 let partnerStore: import('@/lib/partner-store').PartnerStore;
 let auditStore: import('@/lib/audit-log-store').AuditLogStore;
 let clock = 1_700_000_015_000;
+const cookieJar = new Map<string, string>();
 
 vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor, requireStaff: async () => actor }));
 vi.mock('next/headers', () => ({
-  cookies: async () => ({ get: () => undefined, set: () => {}, delete: () => {} }),
+  cookies: async () => ({
+    get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n)! } : undefined),
+    set: (n: string, v: string) => cookieJar.set(n, v),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
+  }),
   headers: async () => new Headers({ 'x-forwarded-for': '198.51.100.30' }),
 }));
 vi.mock('@/lib/staff-login-guard', async () => {
@@ -62,6 +67,7 @@ import { createStaffAction, removeStaffAction, resetStaffMfaAction } from '@/app
 import { createStaffMfaStore, staffMfaKeys } from '@/lib/staff-mfa-store';
 import { base32Decode, totpAt } from '@/lib/totp';
 import { hashPassword } from '@/lib/password';
+import { SESSION_COOKIE } from '@/lib/session-cookie';
 
 const authStore = createAuthStore(redis);
 const PW = 'x'.repeat(14) + '-fixture';
@@ -93,6 +99,7 @@ async function enrolDirect(username: string) {
 
 beforeEach(async () => {
   redis.dump.clear();
+  cookieJar.clear();
   authAudited.length = 0;
   clock = 1_700_000_015_000;
   const db = await freshDb();
@@ -126,6 +133,24 @@ describe('MFA enrolment (Account page)', () => {
     expect(row).toMatchObject({ actorType: 'staff', actor: 'ops', subjectId: 'ops' });
     // The secret never lands in an audit row.
     expect(JSON.stringify(authAudited)).not.toContain(begun.secret!);
+  });
+
+  it('turning MFA on signs out every other session and re-mints this one', async () => {
+    actor = staff({ username: 'ops', name: 'Ops', role: 'agent' });
+    const other = await authStore.createSession('ops');
+    const mine = await authStore.createSession('ops');
+    cookieJar.set(SESSION_COOKIE, mine);
+    const begun = await beginMfaEnrolmentAction({ ok: false }, form({ currentPassword: PW }));
+    const done = await confirmMfaEnrolmentAction(
+      { ok: false },
+      form({ code: totpAt(base32Decode(begun.secret!), clock) }),
+    );
+    expect(done.ok).toBe(true);
+    expect(await authStore.getSessionUser(other)).toBeNull();
+    expect(await authStore.getSessionUser(mine)).toBeNull();
+    const fresh = cookieJar.get(SESSION_COOKIE)!;
+    expect(fresh).not.toBe(mine);
+    expect(await authStore.getSessionUser(fresh)).toBe('ops');
   });
 
   it('begin needs the current password: a wrong one is refused and counted on the login buckets', async () => {

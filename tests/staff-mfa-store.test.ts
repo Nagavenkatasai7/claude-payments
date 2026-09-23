@@ -121,47 +121,61 @@ describe('staff-mfa-store (Program-Fix 17b)', () => {
     expect(await store().verifyCode('ops', totpAt(secret, clock))).toBe(true);
   });
 
+  // The two re-seal tests below SEED a v1 record directly (encryptField with no
+  // ctx stays v1 before and after 46B) and switch the 46A test seam on, which
+  // makes context writes v2 before 46B and is a no-op after it (v2 is then the
+  // default). So they hold whichever of 17b / 46B merges first.
+  function seedV1(username: string, b32: string): string {
+    const blob = encryptField(b32);
+    expect(blob.startsWith('v1.')).toBe(true);
+    redis.dump.set(staffMfaKeys.secret(username), JSON.stringify({ secretEnc: blob, enrolledAt: new Date(T0).toISOString() }));
+    return blob;
+  }
+  const V1_B32 = 'MZXW6YTBOI'.padEnd(32, 'A');
+
   it('a v1 secret (enrolled before 46B) keeps verifying and is re-sealed to v2 once v2 writes are on', async () => {
-    const secret = await enrol('ops');
-    const before = JSON.parse(redis.dump.get(staffMfaKeys.secret('ops'))!).secretEnc as string;
-    expect(before.startsWith('v1.')).toBe(true);
-    // v1 → v1: no rewrite on verify
-    clock += 60_000;
-    expect(await store().verifyCode('ops', totpAt(secret, clock))).toBe(true);
-    expect(JSON.parse(redis.dump.get(staffMfaKeys.secret('ops'))!).secretEnc).toBe(before);
+    const before = seedV1('ops', V1_B32);
+    const secret = base32Decode(V1_B32);
     __setFieldCryptoWriteV2ForTests(true);
-    clock += 60_000;
     expect(await store().verifyCode('ops', totpAt(secret, clock))).toBe(true);
     const after = JSON.parse(redis.dump.get(staffMfaKeys.secret('ops'))!);
+    expect(after.secretEnc).not.toBe(before);
     expect(after.secretEnc.startsWith('v2.')).toBe(true);
-    expect(after.enrolledAt).toBeTruthy();
+    expect(after.enrolledAt).toBe(new Date(T0).toISOString());
     clock += 60_000;
     expect(await store().verifyCode('ops', totpAt(secret, clock))).toBe(true);
   });
 
-  it('a re-seal never resurrects a secret reset in between', async () => {
+  it('no rewrite on verify when a fresh seal is the same version as the stored one', async () => {
     const secret = await enrol('ops');
-    __setFieldCryptoWriteV2ForTests(true);
+    const before = redis.dump.get(staffMfaKeys.secret('ops'));
     clock += 60_000;
+    expect(await store().verifyCode('ops', totpAt(secret, clock))).toBe(true);
+    expect(redis.dump.get(staffMfaKeys.secret('ops'))).toBe(before);
+  });
+
+  it('a re-seal never resurrects a secret reset in between', async () => {
+    seedV1('ops', V1_B32);
+    const secret = base32Decode(V1_B32);
+    __setFieldCryptoWriteV2ForTests(true);
     // reset lands after the secret was read but before the re-seal write:
     // simulated by a redis whose second GET of the secret key sees it gone.
+    let secretGets = 0;
     const s = createStaffMfaStore(
       {
         ...redis,
-        get: (() => {
-          let n = 0;
-          return async (k: string) => {
-            if (k === staffMfaKeys.secret('ops') && ++n === 2) {
-              await store().reset('ops');
-              return null;
-            }
-            return redis.get(k);
-          };
-        })(),
+        get: async (k: string) => {
+          if (k === staffMfaKeys.secret('ops') && ++secretGets === 2) {
+            await store().reset('ops');
+            return null;
+          }
+          return redis.get(k);
+        },
       },
       { now: () => clock },
     );
-    await s.verifyCode('ops', totpAt(secret, clock));
+    expect(await s.verifyCode('ops', totpAt(secret, clock))).toBe(true);
+    expect(secretGets).toBe(2); // the re-seal path really ran
     expect(await store().isEnrolled('ops')).toBe(false);
   });
 
