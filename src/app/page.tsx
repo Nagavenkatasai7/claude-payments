@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { getFxRates, FALLBACK_FX_RATE } from '@/lib/rate';
-import { waLink, WA_MESSAGES, corridorMessage } from './landing/wa';
+import { waLink, WA_MESSAGES, corridorMessage, WA_PHONE, formatWaPhone } from './landing/wa';
 import WhatsAppIcon from './landing/WhatsAppIcon';
 import BrandLogo from './landing/BrandLogo';
 import SocialLinks from './landing/SocialLinks';
@@ -902,7 +902,7 @@ export default async function LandingPage({
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  WhatsApp: +1 555 629 8293
+                  {`WhatsApp: ${formatWaPhone(WA_PHONE)}`}
                 </a>
               </li>
               <li>

@@ -985,7 +985,7 @@ export interface DrainOptions {
  * dedupe key. Never recursive — a dead ops.alert row (or its mirror copy)
  * does not alert about itself. Ids, kinds, counts and a trimmed error only; never the payload.
  */
-async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Promise<void> {
+async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string, dedupeKey = `dead:${row.id}`): Promise<void> {
   if (row.kind === 'ops.alert') return;
   // Program-Fix 26: nor does a dead mirror row (email/webhook copy of an alert).
   // Each dead:<id> key is new, so a dead SMTP would otherwise loop forever:
@@ -994,9 +994,18 @@ async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string): Prom
   await outbox.enqueue(
     'ops.alert',
     { message: `⚠️ SmartRemit ops: outbox #${row.id} (${row.kind}) ${text}` },
-    { dedupeKey: `dead:${row.id}` },
+    { dedupeKey },
   );
 }
+
+/**
+ * Program-Fix 25 PR B: a PERMANENT WhatsApp death is dead at attempt 1, so one
+ * misconfiguration (a missing template, 132001; a sandbox number, 131030) would
+ * otherwise raise one alert PER ROW and flood the ops phone. Coalesce per code
+ * per hour: the FIRST death of a code in an hour alerts (never silenced), the
+ * rest of that hour stay visible on the dashboard's dead-letter list.
+ */
+const deadCodeKey = (code: number): string => `deadcode:${code}:${hourBucket()}`;
 
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
 export async function drainOnce(
@@ -1126,7 +1135,12 @@ export async function drainOnce(
               : permanentCode !== undefined
                 ? `DEAD (terminal: WhatsApp #${permanentCode})`
                 : `DEAD after ${row.attempts} attempts`
-          }: ${message.slice(0, 140)}`,
+          }: ${message.slice(0, 140)}${
+            permanentCode !== undefined
+              ? ` — further #${permanentCode} deaths this hour are coalesced into this alert; see the dead-letter list`
+              : ''
+          }`,
+          permanentCode !== undefined && !terminalDeadline ? deadCodeKey(permanentCode) : undefined,
         );
       } else {
         result.failed++;

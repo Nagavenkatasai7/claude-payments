@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -2173,7 +2173,7 @@ describe('whatsapp.* rows honour opt-out by category (Program-Fix 49A)', { retry
 // 132001 template missing, …) is dead at attempt 1 — for whatsapp.text,
 // whatsapp.template and ops.alert ONLY. mock.settle keeps its normal retry
 // (attempt 2 finishes cleanly through the idempotent stage 2).
-describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)', () => {
+describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)', { retry: 0 }, () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -2194,7 +2194,7 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
     return r.rows[0];
   }
 
-  it('a 131030 whatsapp.text row is dead at attempt 1 with exactly one dead:<id> alert naming the code', async () => {
+  it('a 131030 whatsapp.text row is dead at attempt 1 with exactly one per-code alert naming the code', async () => {
     sendText.mockRejectedValueOnce(graphErr(131030));
     await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
     const r = await drainOnce(deps(), 'w1');
@@ -2202,8 +2202,39 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
     expect(await statusOf('whatsapp.text')).toMatchObject({ status: 'dead', attempts: 1 });
     const a = await alerts();
     expect(a).toHaveLength(1);
-    expect(a[0].dedupe_key).toMatch(/^dead:\d+$/);
+    // PR B (d): coalesced per code per hour, so a template misconfig cannot flood the ops phone.
+    expect(a[0].dedupe_key).toMatch(/^deadcode:131030:\d+$/);
     expect(a[0].payload.message).toContain('DEAD (terminal: WhatsApp #131030)');
+    expect(a[0].payload.message).toMatch(/coalesced/i);
+  });
+
+  it('PR B (d): two 131030 deaths in the same hour raise ONE alert; a different code still gets its own', async () => {
+    // Pinned mid-hour (after freshDb in beforeEach; Date only) so the hour
+    // bucket can never roll over between the two deaths.
+    const hour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(hour + 30 * 60_000);
+    onTestFinished(() => { vi.useRealTimers(); });
+    sendText.mockRejectedValueOnce(graphErr(131030)).mockRejectedValueOnce(graphErr(131030));
+    sendTemplate.mockRejectedValueOnce(graphErr(132001, 'WhatsApp template send failed'));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'a', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.text', { to: '15550002222', body: 'b', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.template', { to: '15550001111', template: 't', lang: 'en', params: [], partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 3 });
+    const keys = (await alerts()).map((x) => x.dedupe_key.replace(/:\d+$/, ''));
+    expect(keys.sort()).toEqual(['deadcode:131030', 'deadcode:132001']);
+  });
+
+  it('PR B (d): a non-permanent death (retries exhausted) keeps its own dead:<id> alert', async () => {
+    sendText.mockRejectedValueOnce(graphErr(131049));
+    await outbox.enqueue('whatsapp.text', { to: '15550001111', body: 'hi', partnerId: 'acme' });
+    await db.execute(sql`UPDATE outbox SET attempts = 7 WHERE kind = 'whatsapp.text'`);
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ dead: 1 });
+    const a = await alerts();
+    expect(a).toHaveLength(1);
+    expect(a[0].dedupe_key).toMatch(/^dead:\d+$/);
   });
 
   it('a 132001 whatsapp.template row is dead at attempt 1', async () => {
@@ -2253,7 +2284,7 @@ describe('drainOnce — permanent WhatsApp errors are terminal (Program-Fix 25)'
 // Program-Fix 25 PR A (§3.10): ops alerts on a production number. UNCHANGED
 // unless WHATSAPP_OPS_ALERT_TEMPLATE is set — alertDead skips ops.alert, so
 // skipping the free-form call would silence alerts.
-describe('drainOnce — ops.alert template path (Program-Fix 25)', () => {
+describe('drainOnce — ops.alert template path (Program-Fix 25)', { retry: 0 }, () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });

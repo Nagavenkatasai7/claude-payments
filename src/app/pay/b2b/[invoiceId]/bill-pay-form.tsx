@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
 import { payOkStatus } from '@/lib/pay-outcome';
+import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { BANK_FIELDS_BY_COUNTRY, validatePayoutFields, type Field } from '@/lib/payout-format';
 
 // Cross-border B2B buyer pay form (Plan 4). The buyer authorizes a debit of THEIR
@@ -78,18 +79,27 @@ function OtpFields({
   otpError?: string;
 }) {
   const [requesting, setRequesting] = useState(false);
+  // Program-Fix 25 PR B: a refused code request says why (send failed / locked).
+  const [requestError, setRequestError] = useState('');
 
   async function requestCode() {
     setRequesting(true);
+    setRequestError('');
     try {
       const res = await fetch(`/api/pay/b2b/${invoiceId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'request_otp' }),
       });
-      if (res.ok) setSent(true);
+      if (res.ok) {
+        setSent(true);
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { reason?: unknown };
+        setRequestError(otpRequestErrorMessage(data.reason));
+      }
     } catch {
       /* leave !sent so the button stays available to retry */
+      setRequestError(otpRequestErrorMessage(undefined));
     } finally {
       setRequesting(false);
     }
@@ -97,9 +107,12 @@ function OtpFields({
 
   if (!sent) {
     return (
-      <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
-        {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
-      </button>
+      <div>
+        <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
+          {requesting ? 'Sending…' : 'Send confirmation code to WhatsApp'}
+        </button>
+        {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
+      </div>
     );
   }
   return (
@@ -122,6 +135,7 @@ function OtpFields({
       <button type="button" className={secondaryBtnClasses} onClick={requestCode} disabled={requesting}>
         {requesting ? 'Sending…' : 'Resend code'}
       </button>
+      {requestError && <span className={fieldErrorClasses} role="alert">{requestError}</span>}
     </div>
   );
 }

@@ -9,12 +9,12 @@
 import { env } from './env';
 import { logWarn } from './log';
 import { sendTemplate as realSendTemplate, sendText as realSendText, type WaCreds } from './whatsapp';
-import { isInServiceWindow, isWindowError, WhatsAppSendError } from './whatsapp-errors';
+import { isInServiceWindow, isWindowError, sendOutcomeFromError, type SendOutcome } from './whatsapp-errors';
 import type { PartnerId } from './types';
 
-export type SendOutcome =
-  | { ok: true; via: 'text' | 'template' }
-  | { ok: false; code?: number; reason: 'send_failed' | 'outside_window_no_template'; error?: unknown };
+// Program-Fix 25 PR B: the type moved to the pure whatsapp-errors.ts (whatsapp.ts
+// returns it too); re-exported so existing imports keep working.
+export type { SendOutcome } from './whatsapp-errors';
 
 export interface BusinessTemplate {
   name: string;
@@ -48,19 +48,12 @@ export function toTemplateParam(text: string): string {
   return flat.length > TEMPLATE_PARAM_MAX ? `${flat.slice(0, TEMPLATE_PARAM_MAX - 1)}…` : flat;
 }
 
-function failed(error: unknown): SendOutcome {
-  const code = error instanceof WhatsAppSendError ? error.code : undefined;
-  return code === undefined
-    ? { ok: false, reason: 'send_failed', error }
-    : { ok: false, code, reason: 'send_failed', error };
-}
-
 async function attempt(fn: () => Promise<void>, via: 'text' | 'template'): Promise<SendOutcome> {
   try {
     await fn();
     return { ok: true, via };
   } catch (err) {
-    return failed(err);
+    return sendOutcomeFromError(err);
   }
 }
 

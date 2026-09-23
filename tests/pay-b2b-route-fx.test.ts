@@ -45,8 +45,9 @@ vi.mock('@/lib/monthly-volume-store', () => ({ getMonthlyVolumeStore: () => ({})
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
 const verify = vi.hoisted(() => vi.fn());
 const issue = vi.hoisted(() => vi.fn());
+const shortenCooldown = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/transaction-otp', () => ({
-  getTransactionOtpStore: () => ({ issue, verify }),
+  getTransactionOtpStore: () => ({ issue, verify, shortenCooldown }),
 }));
 // Program-Fix 45: spy on delivery so the request_otp mapping can be pinned.
 const sendTransactionOtp = vi.hoisted(() => vi.fn());
@@ -121,12 +122,32 @@ describe('POST /api/pay/b2b/[invoiceId] — request_otp at an issue cap (fix 45)
     expect(issue).toHaveBeenCalledWith('inv_1', '15551112222', { kind: 'b2b', partnerId: 'default' });
   });
 
-  it('locked → the same 200 {ok:true,sent:true}, and no code is sent', async () => {
+  // Program-Fix 25 PR B (amendment 6): locked answers 429; a cooldown stays 200.
+  it('locked → 429 {ok:false, reason:"locked"}, and no code is sent', async () => {
     buyerPhone = '15551112222';
     issue.mockResolvedValue({ ok: false, reason: 'locked' });
+    const res = await requestOtp();
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ ok: false, reason: 'locked' });
+    expect(sendTransactionOtp).not.toHaveBeenCalled();
+  });
+
+  it('cooldown → the same 200 {ok:true,sent:true}, and no code is sent', async () => {
+    buyerPhone = '15551112222';
+    issue.mockResolvedValue({ ok: false, reason: 'cooldown' });
     const res = await requestOtp();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, sent: true });
     expect(sendTransactionOtp).not.toHaveBeenCalled();
+  });
+
+  it('a send that throws → 502 otp_send_failed and the cooldown is shortened', async () => {
+    buyerPhone = '15551112222';
+    shortenCooldown.mockReset().mockResolvedValue(undefined);
+    sendTransactionOtp.mockRejectedValueOnce(new Error('WhatsApp send failed (400): x'));
+    const res = await requestOtp();
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, reason: 'otp_send_failed' });
+    expect(shortenCooldown).toHaveBeenCalledWith('inv_1');
   });
 });

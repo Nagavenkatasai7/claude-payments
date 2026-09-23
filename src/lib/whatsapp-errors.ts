@@ -17,8 +17,15 @@ export type GraphErrorKind = 'window' | 'permanent' | 'retryable';
 
 /** 24h customer-service window closed: only a template can reach the user. */
 const WINDOW_CODES: ReadonlySet<number> = new Set([131047]);
-/** A retry of the SAME request cannot succeed. */
-const PERMANENT_CODES: ReadonlySet<number> = new Set([131030, 131026, 132000, 132001, 133010]);
+/**
+ * A retry of the SAME request cannot succeed. Program-Fix 25 PR B: 131031 (the
+ * WhatsApp Business Account is restricted/disabled for a policy violation, or a
+ * two-step PIN mismatch — resolved through Policy Enforcement / the Health Status
+ * API, per the error-codes page above) joins the set, so the ops-diagnosis
+ * Retry-disable and the worker share ONE list.
+ */
+export const PERMANENT_GRAPH_CODES: readonly number[] = [131030, 131031, 131026, 132000, 132001, 133010];
+const PERMANENT_CODES: ReadonlySet<number> = new Set(PERMANENT_GRAPH_CODES);
 
 /** Read `error.code` / `error.message` from a Graph JSON body. Garbage ⇒ {}. */
 export function parseGraphError(_status: number, body: string): { code?: number; title?: string } {
@@ -65,6 +72,42 @@ export class WhatsAppSendError extends Error {
   static fromResponse(label: string, status: number, body: string): WhatsAppSendError {
     return new WhatsAppSendError(`${label} (${status}): ${body}`, { status, code: parseGraphError(status, body).code });
   }
+}
+
+/**
+ * The permanent Graph code inside a stored `last_error` / error message, if any.
+ * Reads the `(#NNNNNN)` marker Meta puts in `error.message` (which survives the
+ * 1,000-char `last_error` truncation), else a JSON `"code":NNNNNN` field. Only a
+ * code the classifier calls PERMANENT is returned; window / retryable ⇒ undefined.
+ */
+export function permanentCodeInError(text: string | null | undefined): number | undefined {
+  if (!text) return undefined;
+  const found = [...text.matchAll(/\(#(\d{1,7})\)/g), ...text.matchAll(/"code"\s*:\s*(\d{1,7})\b/g)].map((m) =>
+    Number(m[1]),
+  );
+  return found.find((code) => classifyGraphCode(code) === 'permanent');
+}
+
+/**
+ * The honest result of a business-initiated send. `ok:false` carries the Graph
+ * code when there is one. Program-Fix 25 PR B: lives here (pure, no whatsapp.ts
+ * import) so whatsapp.ts can return it without a runtime import cycle.
+ */
+export type SendOutcome =
+  | { ok: true; via: 'text' | 'template' }
+  | { ok: false; code?: number; reason: 'send_failed' | 'outside_window_no_template'; error?: unknown };
+
+/** A caught send error → `{ok:false}`, carrying the Graph code of a WhatsAppSendError. */
+export function sendOutcomeFromError(error: unknown): SendOutcome {
+  const code = error instanceof WhatsAppSendError ? error.code : undefined;
+  return code === undefined
+    ? { ok: false, reason: 'send_failed', error }
+    : { ok: false, code, reason: 'send_failed', error };
+}
+
+/** Narrow a thunk's resolved value to a SendOutcome (the opaque-thunk rule). */
+export function isSendOutcome(value: unknown): value is SendOutcome {
+  return !!value && typeof value === 'object' && typeof (value as { ok?: unknown }).ok === 'boolean';
 }
 
 /** A 24h-window rejection: code 131047, or the legacy HTTP 470 kept alongside it. */

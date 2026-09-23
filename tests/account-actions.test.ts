@@ -670,3 +670,15 @@ describe('registerAction — email bound and per-IP cap (fix 46A)', () => {
     expect(st.step).toBe('otp');
   });
 });
+
+// Program-Fix 25 PR B (portal-01, §3.8): the ONE generic OTP note now tells the
+// customer what to do when the code never arrives. Same text on every branch,
+// so enumeration safety holds (pinned by the fix-21 tests above).
+describe('GENERIC_OTP_NOTE guidance (Program-Fix 25 PR B)', { retry: 0 }, () => {
+  it('the OTP step notice says to message us on WhatsApp first, then Resend', async () => {
+    const state = await register();
+    expect(state.step).toBe('otp');
+    expect(state.notice).toContain('We sent a 6-digit code to your WhatsApp.');
+    expect(state.notice).toContain("Didn't get it? Message us on WhatsApp first, then Resend.");
+  });
+});

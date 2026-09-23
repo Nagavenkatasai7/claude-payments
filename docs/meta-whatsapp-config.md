@@ -214,6 +214,27 @@ This touches `src/lib/prompt.ts` (drop the "ask for bank details" step + the per
 - [ ] **Localization:** add HI, then ES / AR / TL / FR / PT-BR templates per active corridor (each separately approved). 
 - [ ] Warm-up plan: ramp business-initiated volume gradually to protect quality rating. §5
 
+## 11. Owner runbook — moving off the sandbox number (Program-Fix 25)
+
+Every code path below is already built and is a **no-op until the matching env var is set**. Do the steps in order.
+
+1. **Meta Business Suite → Security Center:** start Business Verification (legal name, address, website smartremit.ai, a document).
+2. **WhatsApp Manager → Phone numbers:** add a real number you control, set the display name "SmartRemit" and wait for display-name approval. https://developers.facebook.com/documentation/business-messaging/whatsapp/business-phone-numbers/phone-numbers
+3. **Business Settings → System users:** create a system user and generate a **permanent** token with `whatsapp_business_messaging` and `whatsapp_business_management`. https://developers.facebook.com/docs/whatsapp/cloud-api/get-started/
+4. **WhatsApp Manager → Message templates** (language **English, `en`**):
+   - **AUTHENTICATION:** the OTP template → `WHATSAPP_AUTH_TEMPLATE`. It carries the portal code AND the pay-page / bill / seller confirmation code on the shared number (a partner's own number stays free-form).
+   - **UTILITY:** the §3 templates (`transfer_delivered`, `scheduled_payment_ready`, `transfer_delivered_sender`, `payment_reminder`, `transfer_in_review`, `transfer_released`, `transfer_cancelled`, `verification_reminder`).
+   - **Verification status:** the four `WHATSAPP_VERIFICATION_{NEEDED,IN_PROGRESS,VERIFIED,FAILED}_TEMPLATE`.
+   - **UTILITY `ops_alert`** (one body variable) → `WHATSAPP_OPS_ALERT_TEMPLATE`.
+5. **Meta App → WhatsApp → Configuration:** callback URL `https://smartremit.ai/api/whatsapp`, verify token = `WHATSAPP_VERIFY_TOKEN`, subscribe to `messages`. If this is a different Meta app, also set `META_APP_SECRET` to that app's secret (inbound signatures fail closed).
+6. **Vercel → Settings → Environment Variables (Production).** Use `vercel env add … --value` (a piped value stores empty).
+   - `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_TOKEN` (the permanent one) and each approved template name.
+   - After the production number is live and the templates are approved: `WHATSAPP_WINDOW_AWARE=true` (turns on the out-of-window short-circuit for business-initiated sends).
+   - `NEXT_PUBLIC_WHATSAPP_NUMBER=<digits only, e.g. country code + number>`, then **redeploy**: `NEXT_PUBLIC_*` is inlined at build time. The post-deploy smoke already accepts any number.
+7. Close PR #207 as superseded by Program-Fix 25.
+
+**What changes live without any env var** (Program-Fix 25): a permanent Graph rejection (131030, 131031, 131026, 132000, 132001, 133010) on a `whatsapp.text` / `whatsapp.template` / `ops.alert` row is dead at attempt 1, and its alert is coalesced per code per hour; a pay / bill / seller confirmation code that fails to send answers "we couldn't send the code" (Resend works again after a ~10-s floor, never hammered through the code budget); a failed "delivered" notice raises one ops alert per WhatsApp code per hour, except 131030 (the sandbox allow-list), which stays log-only.
+
 ---
 
 ## Sources

@@ -1,5 +1,6 @@
 import { chat } from '@/lib/ollama';
 import type { ChatMessage } from '@/lib/types';
+import { permanentCodeInError } from '@/lib/whatsapp-errors';
 
 // ops-diagnosis-ai — the operations copilot's one-shot diagnosis helper (U5).
 // A "Tier-1 quick win": when a transfer is stuck in 'paid' with no delivery
@@ -57,10 +58,11 @@ export type OpsBlastRadius = (typeof OPS_BLAST_RADII)[number];
 // the Diagnose panel DISABLES Retry + steers to Dismiss.
 //   131030 — recipient phone number not in the sandbox allow-list (the common one)
 //   131031 — business account restricted/locked
-const PERMANENT_SEND_ERROR_CODES = ['131030', '131031'];
+// Program-Fix 25 PR B: DERIVED from the worker's classifier (whatsapp-errors.ts
+// PERMANENT_GRAPH_CODES) so the panel and the worker can never disagree again.
+// 131047 (24h window) is NOT permanent: a Retry after the customer writes back works.
 export function isPermanentSendError(lastError: string | null | undefined): boolean {
-  if (!lastError) return false;
-  return PERMANENT_SEND_ERROR_CODES.some((code) => lastError.includes(`(#${code})`));
+  return permanentCodeInError(lastError) !== undefined;
 }
 
 export interface OpsDiagnosis {
@@ -162,12 +164,18 @@ export async function diagnoseOps(bundle: OpsDiagnosisBundle): Promise<OpsDiagno
 function bundleText(bundle: OpsDiagnosisBundle): string {
   if (bundle.subjectKind === 'dead_letter' && bundle.deadLetter) {
     const d = bundle.deadLetter;
+    // Program-Fix 25 PR B: key on the permanent code in last_error too — an
+    // old-build row (or a kind outside the terminal set) may have retried one.
+    const permanentCode = permanentCodeInError(d.lastError);
     return (
       // Program-Fix 25: a permanent WhatsApp code (or a terminal row deadline)
       // dead-letters at attempt 1 — never tell the model 8 retries happened.
       (d.attempts <= 1
         ? `Subject: a DEAD outbox effect (terminal at attempt 1: a permanent error or a terminal deadline, not retried).\n`
         : `Subject: a DEAD outbox effect (exhausted all retries).\n`) +
+      (permanentCode !== undefined
+        ? `The last error is a permanent WhatsApp rejection (#${permanentCode}): a retry cannot fix it until it is fixed in Meta.\n`
+        : '') +
       `Effect kind: ${d.kind}\n` +
       `Provider type: ${d.providerType}\n` +
       `Attempts: ${d.attempts}\n` +
