@@ -18,6 +18,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { requestRefundAction } from '../refund-actions';
 import { requestRecallAction } from '../recall-actions';
+import { getPartnerStore } from '@/lib/partner-store';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { buildReceiptDisclosure, formatRateLine } from '@/lib/remittance-disclosure';
+import { ReceiptDisclosureCard } from './disclosure-card';
 
 export const metadata = { title: 'Receipt · SmartRemit' };
 
@@ -64,9 +68,9 @@ function fmtWhen(iso?: string): string {
 /** One label/value row inside a definition-list-style Card. */
 function Row({ label, value, strong }: { label: string; value: ReactNode; strong?: boolean }) {
   return (
-    <div className="flex items-baseline justify-between gap-4 py-2 text-sm">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-4 py-2 text-sm">
       <dt className="text-muted-foreground">{label}</dt>
-      <dd className={`text-right tabular-nums ${strong ? 'font-semibold text-foreground' : 'text-foreground'}`}>
+      <dd className={`min-w-0 break-words text-right tabular-nums ${strong ? 'font-semibold text-foreground' : 'text-foreground'}`}>
         {value}
       </dd>
     </div>
@@ -134,6 +138,27 @@ export default async function ReceiptPage({
 
   const statusSummary = STATUS_SUMMARY[t.status] ?? 'In progress.';
 
+  // Program-Fix 15 PR B: the Reg E receipt disclosure (null for B2B). The
+  // provider of record is the OWNING partner (t.partnerId, ownership-checked
+  // above); the default tenant resolves to the demo note.
+  const disclosure = buildReceiptDisclosure(
+    {
+      transferType: t.transferType,
+      status: t.status,
+      amountSource: t.amountSource ?? t.amountUsd,
+      feeSource: t.feeSource ?? t.feeUsd,
+      totalChargeSource: t.totalChargeSource ?? t.totalChargeUsd,
+      sourceCurrency: srcCurrency,
+      amountInr: t.amountInr,
+      destinationCurrency: destCurrency,
+      fxRate: t.fxRate,
+      paidAt: t.paidAt,
+      deliveredAt: t.deliveredAt,
+    },
+    resolvePartnerDisclosure(await getPartnerStore().getPartner(t.partnerId)),
+    Date.now(),
+  );
+
   return (
     <AccountShell active="transfers" customer={customer}>
       <PageHeader
@@ -178,7 +203,7 @@ export default async function ReceiptPage({
                 value={money(t.totalChargeSource ?? t.totalChargeUsd, srcCurrency)}
                 strong
               />
-              <Row label="Rate" value={`1 ${srcCurrency} = ${t.fxRate} ${destCurrency}`} />
+              <Row label="Rate" value={formatRateLine(t.fxRate, srcCurrency, destCurrency)} />
               <Row
                 label="Recipient gets"
                 value={formatDestAmount(t.amountInr, destCurrency)}
@@ -251,6 +276,8 @@ export default async function ReceiptPage({
             </CardContent>
           </Card>
         )}
+
+        {disclosure && <ReceiptDisclosureCard disclosure={disclosure} />}
 
         {/* Request a refund — only on a paid transfer with no refund in flight. */}
         {canRequestRefund && (

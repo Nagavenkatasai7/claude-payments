@@ -38,6 +38,7 @@ import {
   savePaymentConfigAction,
   savePricingAction,
   saveSupportConfigAction,
+  saveDisclosureConfigAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
 } from '../actions';
@@ -46,6 +47,7 @@ import type { CountryCode, CurrencyCode, PartnerRate } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
 import { narratePartnerHealth } from '@/lib/partner-health-ai';
+import { resolvePartnerDisclosure } from '@/lib/partner-config';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -171,6 +173,10 @@ export default async function PartnerDetailPage({
   // Support tab: the absent-config default (portal ON) interpreted ONCE for
   // both the badge and the checkbox.
   const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
+  // Program-Fix 15 PR B: the stored Reg E disclosure block (form defaults) and
+  // what customers actually see (the resolver — demo on the default tenant).
+  const disclosureCfg = partner.supportConfig?.disclosure;
+  const disclosureShown = resolvePartnerDisclosure(partner);
 
   // Partner health (U4): a deterministic struggling/stalled scorer over the data
   // already loaded above — surfaces a partner before they churn. The AI
@@ -644,6 +650,90 @@ export default async function PartnerDetailPage({
                       </select>
                     </div>
                     <Button type="submit">Save support config</Button>
+                  </form>
+                </CardContent>
+              </Card>
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Remittance disclosure (draft)</CardTitle>
+                  <CardDescription>
+                    The licensed money transmitter customers see on the pay page and the receipt as the
+                    provider of their transfer (Reg E, 12 CFR 1005.31). Enter only details the licensed
+                    partner has supplied; nothing is filled in for you. The disclosure wording itself is a
+                    draft for counsel review.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className={DL_CLASS}>
+                    <dt>Customers see</dt>
+                    <dd>
+                      {disclosureShown.demo ? (
+                        <Badge variant="outline" className="text-muted-foreground">demo note (no licensed partner)</Badge>
+                      ) : disclosureShown.configured ? (
+                        <Badge variant="outline" className="border-success/50 text-success">{disclosureShown.licensedEntity}</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-muted-foreground">details pending</Badge>
+                      )}
+                    </dd>
+                  </dl>
+                  {disclosureShown.demo && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      This is the default (demo) tenant: customers always see the demonstration note here,
+                      whatever is saved below, so SmartRemit is never shown as the licensed transmitter.
+                    </p>
+                  )}
+                  <form action={saveDisclosureConfigAction} className="mt-4 space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-entity">Licensed entity (legal name)</Label>
+                      <Input id="d-entity" name="licensedEntity" maxLength={120} defaultValue={disclosureCfg?.licensedEntity ?? ''} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-licences">Licence ids (comma-separated, e.g. NMLS id)</Label>
+                      <Input id="d-licences" name="licenseIds" defaultValue={(disclosureCfg?.licenseIds ?? []).join(', ')} />
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-phone">Customer-service phone</Label>
+                        <Input id="d-phone" name="phone" type="tel" defaultValue={disclosureCfg?.phone ?? ''} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-website">Website (https://)</Label>
+                        <Input id="d-website" name="website" type="url" defaultValue={disclosureCfg?.website ?? ''} />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-reg-name">State regulator</Label>
+                      <Input id="d-reg-name" name="regulatorName" maxLength={120} defaultValue={disclosureCfg?.stateRegulator?.name ?? ''} />
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-reg-phone">Regulator phone</Label>
+                        <Input id="d-reg-phone" name="regulatorPhone" type="tel" defaultValue={disclosureCfg?.stateRegulator?.phone ?? ''} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="d-reg-website">Regulator website (https://)</Label>
+                        <Input id="d-reg-website" name="regulatorWebsite" type="url" defaultValue={disclosureCfg?.stateRegulator?.website ?? ''} />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="d-days">Delivery estimate (business days after payment, 0-10; blank = 1)</Label>
+                      <Input
+                        id="d-days"
+                        name="deliveryBusinessDays"
+                        type="number"
+                        min={0}
+                        max={10}
+                        step={1}
+                        className="w-28"
+                        defaultValue={disclosureCfg?.deliveryEstimate?.businessDays ?? ''}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Saving changes only this block (the support settings above are kept) and is recorded in
+                      the audit log. Clear every field to remove it.
+                    </p>
+                    <Button type="submit">Save disclosure details</Button>
                   </form>
                 </CardContent>
               </Card>
