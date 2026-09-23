@@ -5537,18 +5537,52 @@ describe('Program-Fix 44: bill expiry + durable open-twin check', { retry: 0 }, 
   const countInvoices = async () =>
     ((await db.execute(sql`SELECT count(*)::int AS n FROM b2b_invoices`)) as unknown as { rows: { n: number }[] }).rows[0].n;
 
-  it('create_invoice with a LIVE unpaid twin in the ledger (the 120 s claim long gone) returns that bill: no claim, no insert, no push', async () => {
-    const ctx = await buildCtx(fakeRedis()); // empty Redis ⇒ no claim held
+  type OutRow = { payload: Record<string, unknown>; dedupe_key: string };
+  const textRows = async (): Promise<OutRow[]> =>
+    ((await db.execute(sql`SELECT payload, dedupe_key FROM outbox WHERE kind = 'whatsapp.text' ORDER BY dedupe_key`)) as unknown as { rows: OutRow[] }).rows;
+
+  it('a genuine re-request (identical open bill, older than the claim window) is refused honestly and RE-SENDS the link: one seller row, no insert, no buyer push, no claim', async () => {
+    const ctx = await buildCtx(fakeRedis());
     await seedSeller(ctx);
     await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date(Date.now() - 2 * DAY).toISOString()));
     const claim = vi.spyOn(ctx.store, 'claimBillInvoiceId');
     const r = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
-    expect(r).toMatchObject({ created: true, invoice_id: 'inv_twin', amount: 250, currency: 'USD' });
+    expect(r).toMatchObject({ created: false, already_open: true, invoice_id: 'inv_twin', amount: 250, currency: 'USD' });
     expect(String(r.pay_url)).toMatch(/\/pay\/b2b\/inv_twin$/);
+    // Honest copy: never claims a NEW bill was made.
+    expect(String(r.reply_to_customer)).toMatch(/already have an open bill/);
+    expect(String(r.reply_to_customer)).toMatch(/re-sent/);
+    expect(String(r.reply_to_customer)).not.toMatch(/is ready/);
     expect(claim).not.toHaveBeenCalled();
     expect(await countInvoices()).toBe(1);
-    const pushes = (await db.execute(sql`SELECT count(*)::int AS n FROM outbox WHERE dedupe_key LIKE 'billpush:%'`)) as unknown as { rows: { n: number }[] };
-    expect(pushes.rows[0].n).toBe(0);
+    const rows = await textRows();
+    expect(rows).toHaveLength(1); // the seller's link only — no billpush
+    expect(rows[0].dedupe_key).toMatch(/^sellerbill:inv_twin:resend:/);
+    expect(rows[0].payload.to).toBe(PHONE);
+    expect(String(rows[0].payload.body)).toContain(String(r.pay_url));
+  });
+
+  it('a REPLAY of that re-request turn (at-least-once) returns the same result and adds NO row', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    await ctx.store.saveB2bInvoice(twinRow('inv_twin', new Date(Date.now() - 2 * DAY).toISOString()));
+    const a = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    const b = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(b).toEqual(a);
+    expect(await textRows()).toHaveLength(1);
+  });
+
+  it('a REPLAY of the original creation turn (bill younger than the claim window) keeps the original result and adds NO row', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    await seedSeller(ctx);
+    const a = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(a.created).toBe(true);
+    const before = await textRows(); // billpush + sellerbill
+    expect(before.map((x) => x.dedupe_key)).toEqual([`billpush:${a.invoice_id}`, `sellerbill:${a.invoice_id}`]);
+    const b = await executeTool('create_invoice', { buyer_phone: '+1 555 987 6543', amount: 250 }, ctx);
+    expect(b).toEqual(a);
+    expect(await textRows()).toHaveLength(2);
+    expect(await countInvoices()).toBe(1);
   });
 
   it('an EXPIRED unpaid twin does not block a new bill', async () => {
