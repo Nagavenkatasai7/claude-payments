@@ -50,6 +50,7 @@ import { redirect } from 'next/navigation';
 import * as customerActions from '@/app/admin-dashboard/customers/actions';
 import {
   manualKycDecisionAction,
+  reviewKycAction,
   createCustomerAction,
   openCustomerAction,
 } from '@/app/admin-dashboard/customers/actions';
@@ -159,6 +160,52 @@ describe('manualKycDecisionAction partner scope (H3 + fix 1, moved from markCust
     await expect(manualKycDecisionAction(form({ phone: '15557778888', partnerId: 'A', decision: 'reject', reason: REASON }))).rejects.toThrow(
       /not found/i,
     );
+  });
+});
+
+// Program-Fix 43 follow-up: a customer held by a Persona WATCHLIST or PEP
+// match is PLATFORM-only to decide. Partner-scoped admins are refused before
+// any mutation (generic permission copy) on both KYC decision actions; a
+// non-screening needs_review stays decidable by the partner as today.
+describe('screening customer holds (watchlist / PEP) are platform-only', () => {
+  const held = (phone: string, partnerId: string, over: Partial<Customer>): Customer => ({
+    ...makeCustomer(phone, partnerId), kycStatus: 'pending', kycReviewState: 'needs_review', ...over,
+  });
+
+  it.each([
+    ['watchlist', { watchlistHit: true }],
+    ['PEP', { pepHit: true }],
+  ] as const)('refuses a partner admin on a %s hold via reviewKycAction and manualKycDecisionAction: untouched, no audit row', async (_k, flag) => {
+    await cs.saveCustomer(held('15552220001', 'B', flag));
+    currentStaff = staff({ username: 'pb', partnerId: 'B' });
+    for (const decision of ['approve', 'reject']) {
+      await expect(reviewKycAction(form({ phone: '15552220001', partnerId: 'B', decision, reason: REASON }))).rejects.toThrow(/permission/i);
+      await expect(manualKycDecisionAction(form({ phone: '15552220001', partnerId: 'B', decision, reason: REASON }))).rejects.toThrow(/permission/i);
+    }
+    const c = await cs.getCustomer('B', '15552220001');
+    expect(c?.kycStatus).toBe('pending');
+    expect(c?.kycReviewState).toBe('needs_review');
+    expect(await auditRows()).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('a platform admin may decide a watchlist hold (reviewKycAction) and a PEP hold (manualKycDecisionAction)', async () => {
+    await cs.saveCustomer(held('15552220002', 'B', { watchlistHit: true }));
+    await cs.saveCustomer(held('15552220003', 'B', { pepHit: true }));
+    currentStaff = staff({ username: 'plat' });
+    await reviewKycAction(form({ phone: '15552220002', partnerId: 'B', decision: 'reject', reason: REASON }));
+    await manualKycDecisionAction(form({ phone: '15552220003', partnerId: 'B', decision: 'approve', reason: REASON }));
+    expect((await cs.getCustomer('B', '15552220002'))?.kycStatus).toBe('rejected');
+    expect((await cs.getCustomer('B', '15552220003'))?.kycStatus).toBe('verified');
+    expect((await auditRows()).map((r) => r.action)).toEqual(['kyc.review.reject', 'kyc.manual_override.approve']);
+  });
+
+  it('a non-screening needs_review hold stays decidable by the partner admin, as today', async () => {
+    await cs.saveCustomer(held('15552220004', 'B', {}));
+    currentStaff = staff({ username: 'pb', partnerId: 'B' });
+    await reviewKycAction(form({ phone: '15552220004', partnerId: 'B', decision: 'approve', reason: REASON }));
+    expect((await cs.getCustomer('B', '15552220004'))?.kycStatus).toBe('verified');
+    expect((await auditRows()).map((r) => r.action)).toEqual(['kyc.review.approve']);
   });
 });
 
