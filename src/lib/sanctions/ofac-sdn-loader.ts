@@ -10,7 +10,7 @@
 // 2024-05-16), so fetchOfacSdn always sends one.
 //
 // NOT wired to production: fetchOfacSdn is called only by the snapshot script
-// (scripts/sanctions/build-ofac-snapshot.mjs), and the screener reads a
+// (scripts/sanctions/build-ofac-snapshot.ts, run with tsx), and the screener reads a
 // snapshot only when SANCTIONS_LIST=ofac-sdn is set (it is unset in prod).
 
 import { createHash } from 'node:crypto';

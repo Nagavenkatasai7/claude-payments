@@ -64,11 +64,19 @@ export class MockSanctionsScreener implements SanctionsScreener {
   }
 
   async screen(input: { name: string; sourceCountry: CountryCode }): Promise<SanctionsHit> {
-    const key = tokenKey(input.name ?? '');                         // defensive ?? '' (untrusted)
-    if (key === '') return { matched: false };
+    const raw = (input.name ?? '').trim().toLowerCase();            // defensive ?? '' (untrusted)
+    if (raw === '') return { matched: false };
+    const key = tokenKey(raw);
     const list = this.baseList ?? [];
     for (let i = 0; i < list.length; i++) {
-      if (tokenKey(list[i] ?? '') === key) {
+      const entryKey = tokenKey(list[i] ?? '');
+      // An entry with no letters or digits (punctuation- or emoji-only)
+      // normalises to '' — it falls back to the pre-normalisation exact
+      // trim().toLowerCase() compare so it can never silently stop matching.
+      const hit = entryKey !== ''
+        ? key !== '' && entryKey === key
+        : (list[i] ?? '').trim().toLowerCase() === raw;
+      if (hit) {
         return {
           matched: true,
           matchedName: normalizeName(list[i] ?? ''),

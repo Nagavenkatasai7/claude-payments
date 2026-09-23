@@ -118,3 +118,15 @@ describe('getSanctionsScreener — SANCTIONS_LIST picks WHICH list, never WHETHE
     await expect(s.screen({ name: 'Mom', sourceCountry: 'US' })).rejects.toBeInstanceOf(SanctionsListUnavailableError);
   });
 });
+
+describe('MockSanctionsScreener — entries that normalise to empty keep the old exact compare', () => {
+  const s = new MockSanctionsScreener(['john doe', '!!!', '😀😀']);
+  it('a punctuation-only or emoji-only entry still matches its exact (trimmed, lowercased) form', async () => {
+    expect(await s.screen({ name: ' !!! ', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'mock:1' });
+    expect(await s.screen({ name: '😀😀', sourceCountry: 'US' })).toMatchObject({ matched: true, entryId: 'mock:2' });
+  });
+  it('but a different symbol-only name does not match, and blank never matches', async () => {
+    expect((await s.screen({ name: '???', sourceCountry: 'US' })).matched).toBe(false);
+    expect((await s.screen({ name: '   ', sourceCountry: 'US' })).matched).toBe(false);
+  });
+});
