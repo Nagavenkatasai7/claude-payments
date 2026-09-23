@@ -74,7 +74,6 @@ import { verifyPassword } from '@/lib/password';
 
 beforeEach(async () => {
   redis.dump.clear();
-  redis.sets.clear();
   cookieJar.clear();
   db = await freshDb();
   ps = createPartnerStore(db);

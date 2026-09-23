@@ -499,7 +499,7 @@ describe('createPartnerStaffAction roles', () => {
     const got = await getAuthStore().getStaff('p1sup');
     expect(got?.role).toBe('support');
     expect(got?.partnerId).toBe('p1');
-    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false });
+    expect(got?.permissions).toEqual({ canCancel: false, canResend: false, canAssign: false, canRevealPii: false });
   });
 
   it('still rejects unknown roles', async () => {

@@ -13,7 +13,7 @@ import {
 import { fakeRedis } from './helpers';
 
 // ── logout harness: a REAL cookie jar (request cookies in, Set-Cookie out) ──
-const redis = fakeRedis();
+let redis = fakeRedis();
 let requestHeaders = new Headers();
 let responseHeaders = new Headers();
 vi.mock('next/headers', () => ({
@@ -59,8 +59,7 @@ function setCookieFor(h: Headers, name: string): { value: string; attrs: string[
 const EPOCH = 'expires=thu, 01 jan 1970 00:00:00 gmt';
 
 beforeEach(() => {
-  redis.dump.clear();
-  redis.sets.clear();
+  redis = fakeRedis();
   requestHeaders = new Headers();
   responseHeaders = new Headers();
 });
