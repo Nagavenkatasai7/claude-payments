@@ -363,6 +363,25 @@ describe('POST /api/persona-webhook — report events + release on failure (Prog
     expect(alerts[0].dedupeKey).toBe('kycmatch:evt_appr_pep');
     // ids only: never the phone
     expect(JSON.stringify(alerts[0].payload)).not.toContain(PHONE);
+    expect(String((alerts[0].payload as { message: string }).message)).toContain('the flag is recorded');
+  });
+
+  it('approved + another *.matched kind: no flag exists, so the alert never claims one', async () => {
+    await seed({ kycStatus: 'verified', kycReviewState: 'approved', kycInquiryId: 'inq_1' });
+    expect((await post(reportBody('report/adverse-media.matched', 'evt_appr_other'))).status).toBe(200);
+    expect((await cs.getCustomer('default', PHONE))?.kycReviewState).toBe('approved');
+    const alerts = await kycAlerts();
+    expect(alerts).toHaveLength(1);
+    const msg = String((alerts[0].payload as { message: string }).message);
+    expect(msg).not.toContain('the flag is recorded');
+    expect(msg).toContain('sending is NOT blocked');
+  });
+
+  it('a report event with no inquiry relationship is ignored AND warned (an envelope mismatch is visible in logs)', async () => {
+    await seed({ kycReviewState: 'pending_review', kycInquiryId: 'inq_1' });
+    const body = JSON.stringify({ data: { id: 'evt_norel', type: 'event', attributes: { name: 'report/watchlist.matched', 'created-at': '2026-06-02T20:05:00Z', payload: { data: { type: 'report/watchlist', id: 'rep_1', attributes: {} } } } } });
+    expect((await (await post(body)).json()).ignored).toBe(true);
+    expect(warn).toHaveBeenCalledWith('persona.webhook.unbound', 'report/watchlist.matched', { candidates: 0, reason: 'no_inquiry' });
   });
 
   it('approved + an inquiry.completed stays a no-op (human terminal wins)', async () => {

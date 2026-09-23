@@ -147,7 +147,11 @@ async function bindCustomer(event: PersonaEvent): Promise<Customer | null> {
     const rows = await customers.findByKycInquiryId(event.inquiryId);
     if (rows.length === 1) return rows[0];
     logWarn('persona.webhook.unbound', event.name, { candidates: rows.length });
+    return null;
   }
+  // A report event with no inquiry relationship: warn, so an envelope mismatch
+  // shows in the logs instead of silently dropping every hold.
+  if (isReportEvent(event)) logWarn('persona.webhook.unbound', event.name, { candidates: 0, reason: 'no_inquiry' });
   return null;
 }
 
@@ -179,7 +183,9 @@ async function applyEvent(event: PersonaEvent, cases: KycCaseStore): Promise<App
           `🔎 SmartRemit KYC: Persona reported a ${matchKind} match (${event.name}) for customer ${subject} ` +
           `(partner ${customer.partnerId}). ` +
           (stillTerminal
-            ? `The customer's review is already ${nextState}; the flag is recorded and sending is NOT blocked. Staff decide.`
+            ? `The customer's review is already ${nextState}; ` +
+              (matchKind === 'other' ? '' : 'the flag is recorded and ') +
+              'sending is NOT blocked. Staff decide.'
             : 'The customer is held for review (needs_review). Open the KYC review queue.'),
       },
       { dedupeKey: `kycmatch:${event.eventId}` },
