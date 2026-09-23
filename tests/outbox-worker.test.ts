@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { createStore } from '@/lib/store';
 import { fakeRedis } from './helpers';
@@ -1682,5 +1682,157 @@ describe('drainOnce — rail signature v2, rotation, amount (fix 29)', () => {
     await db.execute(sql`UPDATE outbox SET status = 'done', payload = '{}'::jsonb`);
     expect(await outbox.hasDedupeKey('railamount:wk_t1')).toBe(true);
     expect(await outbox.hasDedupeKey('railamount:other')).toBe(false);
+  });
+});
+
+// ── Program-Fix 26: the ops-alert mirror (email + optional webhook) ─────────
+describe('drainOnce — ops-alert mirror (Program-Fix 26)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  type Row = { id: number; kind: string; dedupe_key: string | null; payload: Record<string, unknown>; status: string; last_error: string | null };
+  async function rows(kind: string): Promise<Row[]> {
+    const r = (await db.execute(
+      sql`SELECT id, kind, dedupe_key, payload, status, last_error FROM outbox WHERE kind = ${kind} ORDER BY id`,
+    )) as unknown as { rows: Row[] };
+    return r.rows;
+  }
+  const toBrink = (kind: string) =>
+    db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1}, next_attempt_at = now() WHERE kind = ${kind}`);
+
+  it('FIRST: a mirror row that dies does NOT enqueue another alert (no dead → alert → mail → dead loop)', async () => {
+    const d: WorkerDeps = { ...deps(), sendEmail: async () => { throw new Error('smtp down'); } };
+    await outbox.enqueue('email.send', { to: ['ops@example.test'], subject: 's', text: 't' }, { dedupeKey: 'opsmail:41' });
+    await toBrink('email.send');
+    const r = await drainOnce(d, 'w1');
+    expect(r.dead).toBe(1);
+    expect(await rows('ops.alert')).toEqual([]);
+  });
+
+  it('a dead opshook: webhook row does NOT enqueue another alert either', async () => {
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'https://hooks.example.test/T000/B000/xyz');
+    fetchFn.mockResolvedValue({ ok: false, status: 500 });
+    await outbox.enqueue('ops.webhook', { text: 't' }, { dedupeKey: 'opshook:42' });
+    await toBrink('ops.webhook');
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.dead).toBe(1);
+    expect(await rows('ops.alert')).toEqual([]);
+  });
+
+  it('env unset → no child rows (today\'s behaviour byte-for-byte)', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    await outbox.enqueue('ops.alert', { message: 'hello ops' }, { dedupeKey: 'dead:1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText.mock.calls[0]).toEqual(['15550000001', 'hello ops']);
+    expect(await rows('email.send')).toEqual([]);
+    expect(await rows('ops.webhook')).toEqual([]);
+  });
+
+  it('ops.alert retried 3× → exactly one opsmail row with the email.send payload shape', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    sendText.mockRejectedValue(new Error('graph down'));
+    const id = (await outbox.enqueue('ops.alert', { message: 'stuck money' }, { dedupeKey: 'dead:7' })) as unknown;
+    expect(id).toBeTruthy();
+    for (let i = 0; i < 3; i++) {
+      const r = await drainOnce(deps(), 'w1');
+      expect(r.failed).toBe(1);
+      await db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE kind = 'ops.alert'`);
+    }
+    const alert = (await rows('ops.alert'))[0];
+    const mails = await rows('email.send');
+    expect(mails).toHaveLength(1);
+    expect(mails[0].dedupe_key).toBe(`opsmail:${alert.id}`);
+    expect(mails[0].payload).toEqual({ to: ['ops@example.test'], subject: 'SmartRemit ops alert', text: 'stuck money' });
+  });
+
+  it('a dead-row alert whose error holds a phone number and an email → the opsmail text is SCRUBBED', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '15550000001');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    const failing: WorkerDeps = {
+      ...deps(),
+      sendEmail: async () => { throw new Error('rejected recipient 15559871234 jane.doe@example.org'); },
+    };
+    await outbox.enqueue('email.send', { to: ['x@example.test'], subject: 's', text: 't' }, { dedupeKey: 'preq:zz' });
+    await toBrink('email.send');
+    expect((await drainOnce(failing, 'w1')).dead).toBe(1);
+    // The dead:<id> alert now runs; its mirror child must be scrubbed.
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    const mail = (await rows('email.send')).find((m) => m.dedupe_key?.startsWith('opsmail:'));
+    expect(mail).toBeDefined();
+    const text = String(mail!.payload.text);
+    expect(text).toContain('…1234');
+    expect(text).toContain('<email>');
+    expect(text).not.toContain('15559871234');
+    expect(text).not.toContain('jane.doe@example.org');
+  });
+
+  it('OPS_ALERT_PHONE empty + OPS_ALERT_EMAIL set → one opsmail row, no sendText', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '');
+    vi.stubEnv('OPS_ALERT_EMAIL', 'ops@example.test');
+    await outbox.enqueue('ops.alert', { message: 'm' }, { dedupeKey: 'dead:9' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.processed).toBe(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect((await rows('email.send')).map((m) => m.dedupe_key)).toEqual([expect.stringMatching(/^opsmail:\d+$/)]);
+  });
+
+  it('OPS_ALERT_WEBHOOK_URL (https) → one opshook row holding {text} only — never the URL', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'https://hooks.example.test/T000/B000/secretpart');
+    await outbox.enqueue('ops.alert', { message: 'call 15559871234' }, { dedupeKey: 'dead:10' });
+    await drainOnce(deps(), 'w1');
+    const hooks = await rows('ops.webhook');
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0].dedupe_key).toMatch(/^opshook:\d+$/);
+    expect(hooks[0].payload).toEqual({ text: 'call …1234' });
+    expect(JSON.stringify(hooks[0].payload)).not.toContain('secretpart');
+  });
+
+  it('an OPS_ALERT_WEBHOOK_URL that is not https → no opshook row and one warning', async () => {
+    vi.stubEnv('OPS_ALERT_PHONE', '');
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'http://hooks.example.test/x');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await outbox.enqueue('ops.alert', { message: 'm' }, { dedupeKey: 'dead:11' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(await rows('ops.webhook')).toEqual([]);
+    const lines = warn.mock.calls.flat().join(' ');
+    expect(lines).toContain('ops.webhook');
+    expect(lines).not.toContain('hooks.example.test');
+    warn.mockRestore();
+  });
+
+  it('ops.webhook POSTs {text} to the env URL with a deadline; a non-2xx fails the row without leaking the URL', async () => {
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', 'https://hooks.example.test/T000/B000/secretpart');
+    fetchFn.mockResolvedValue({ ok: true, status: 200 });
+    await outbox.enqueue('ops.webhook', { text: 'hello' }, { dedupeKey: 'opshook:1' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://hooks.example.test/T000/B000/secretpart');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ text: 'hello' });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+
+    fetchFn.mockReset();
+    fetchFn.mockRejectedValue(new TypeError('fetch failed https://hooks.example.test/T000/B000/secretpart'));
+    await outbox.enqueue('ops.webhook', { text: 'again' }, { dedupeKey: 'opshook:2' });
+    expect((await drainOnce(deps(), 'w1')).failed).toBe(1);
+    const failed = (await rows('ops.webhook')).find((h) => h.dedupe_key === 'opshook:2')!;
+    expect(failed.last_error).toBeTruthy();
+    expect(failed.last_error).not.toContain('secretpart');
+    expect(failed.last_error).not.toContain('hooks.example.test');
+  });
+
+  it('ops.webhook with the URL unset at send time → done, nothing fetched', async () => {
+    vi.stubEnv('OPS_ALERT_WEBHOOK_URL', '');
+    await outbox.enqueue('ops.webhook', { text: 'x' }, { dedupeKey: 'opshook:3' });
+    expect((await drainOnce(deps(), 'w1')).processed).toBe(1);
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 });

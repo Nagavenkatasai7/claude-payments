@@ -80,6 +80,12 @@ vi.mock('@/lib/customer-store', () => ({
 }));
 vi.mock('@/lib/tier-rules', () => ({ deriveTier: () => 'T1' }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// Program-Fix 26: failed delivery statuses write one audit_events row.
+const auditRecord = vi.hoisted(() => vi.fn(async (_e: Record<string, unknown>) => {}));
+vi.mock('@/db/repos/aux-repos', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/aux-repos')>();
+  return { ...real, createAuditRepo: () => ({ record: auditRecord }) };
+});
 vi.mock('@/db/repos/outbox-repo', () => ({ createOutboxRepo: () => ({ enqueue }) }));
 vi.mock('@/lib/outbox', () => ({ pokeWorker: vi.fn() }));
 // Program-Fix 34A: the inbound throttle reads getRedis(). A fresh in-memory
@@ -92,6 +98,7 @@ import { GET, POST } from '@/app/api/whatsapp/route';
 import { OPT_OUT_REPLY, OPT_IN_REPLY, OPT_OUT_REMINDER } from '@/lib/consent';
 import { SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import { fakeRedis } from './helpers';
+import { waMessageRef } from '@/lib/wa-message-ref';
 
 const SECRET = 'meta-app-secret';
 const inboundBody = JSON.stringify({
@@ -132,6 +139,7 @@ beforeEach(() => {
   clearOptedOut.mockClear();
   setOptedIn.mockClear();
   enqueue.mockClear();
+  auditRecord.mockReset().mockResolvedValue(undefined);
   partnerForPhoneNumberId.mockClear().mockResolvedValue(null);
   getIntegrations.mockClear().mockResolvedValue({ kyc: {}, payment: {}, whatsapp: {} });
   // Reset customer lookups to the opted-IN default each test.
@@ -253,6 +261,61 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
     expect(logged).toContain('delivery_failed');
     // Stage 3: the structured warn line must NOT carry the full phone.
     expect(logged).not.toContain('15551230000');
+  });
+
+  it('a failed status → ONE audit row {code,title} under the default tenant, with no phone digit run of 7+ (Program-Fix 26)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await post(statusBody('failed', { code: 131047, title: 'Re-engagement message' }));
+    expect(res.status).toBe(200);
+    expect(auditRecord).toHaveBeenCalledTimes(1);
+    const row = auditRecord.mock.calls[0][0];
+    expect(row).toEqual({
+      partnerId: 'default',
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.delivery_failed',
+      subjectId: waMessageRef('wamid.STATUS1'),
+      meta: { code: 131047, title: 'Re-engagement message' },
+    });
+    expect(JSON.stringify(row)).not.toMatch(/\d{7,}/);
+  });
+
+  it('a Meta-style message id is NEVER stored or logged raw: audit subjectId and log fields carry only the keyed ref', async () => {
+    const id = 'wamid.HBgLMTU1NTk4NzEyMzQVAgARGBI5QzZBOEQ3RjA0QjE2NjJCMzcA';
+    const token = id.slice('wamid.'.length);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const body = (status: string) => JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { statuses: [{
+        id, recipient_id: '15559871234', status,
+        ...(status === 'failed' ? { errors: [{ code: 131026, title: 'Message undeliverable' }] } : {}),
+      }] } }] }],
+    });
+    expect((await post(body('failed'))).status).toBe(200);
+    expect((await post(body('delivered'))).status).toBe(200);
+    const row = auditRecord.mock.calls[0][0];
+    expect(row.subjectId).toBe(waMessageRef(id));
+    const logged = [...warn.mock.calls, ...debug.mock.calls].flat().map(String).join(' ');
+    expect(logged).toContain(waMessageRef(id).slice(0, 16));
+    for (const out of [JSON.stringify(row), logged]) {
+      expect(out).not.toContain(id);
+      expect(out).not.toContain(token.slice(0, 12));
+      expect(out).not.toMatch(/\d{7,}/);
+    }
+  });
+
+  it('the audit insert throws → still 200 {ok:true} (Meta never sees a non-200)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    auditRecord.mockRejectedValue(new Error('db down'));
+    const res = await post(statusBody('failed', { code: 131056, title: 'Too many messages' }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it('a non-failed status writes no audit row', async () => {
+    await post(statusBody('read'));
+    expect(auditRecord).not.toHaveBeenCalled();
   });
 
   it('a delivered status → 200, agent NOT run', async () => {
@@ -409,6 +472,23 @@ describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret
       expect.objectContaining({ phone: '15551230000', routedPartnerId: 'acme' }),
       expect.objectContaining({ dedupeKey: 'wamid:wamid.R1' }),
     );
+  });
+
+  it('a ROUTED failed status is audited under THAT partner, not the default tenant (Program-Fix 26)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
+    const body = JSON.stringify({
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: {
+        metadata: { phone_number_id: 'pn_acme' },
+        statuses: [{ id: 'wamid.RS1', recipient_id: '15551230000', status: 'failed', errors: [{ code: 131026, title: 'Message undeliverable' }] }],
+      } }] }],
+    });
+    const res = await post(body, sign(body, 'acme_secret'));
+    expect(res.status).toBe(200);
+    expect(auditRecord).toHaveBeenCalledTimes(1);
+    expect(auditRecord.mock.calls[0][0]).toMatchObject({ partnerId: 'acme', subjectId: waMessageRef('wamid.RS1'), meta: { code: 131026, title: 'Message undeliverable' } });
   });
 
   it('routed + partner has NO appSecret ⇒ 401 fail closed even when signed with the platform secret — no fallback for a routed event', async () => {
