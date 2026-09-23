@@ -56,7 +56,10 @@ export default async function NewTeammatePage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="t-password">Temporary password</Label>
-                  <Input id="t-password" name="password" type="password" required minLength={8} placeholder="At least 8 characters" autoComplete="new-password" />
+                  <Input id="t-password" name="password" type="password" required minLength={12} maxLength={128} placeholder="At least 12 characters" autoComplete="new-password" aria-describedby="t-password-hint" />
+                  <p id="t-password-hint" className="text-xs text-muted-foreground">
+                    12 to 128 characters. Passwords found in known data breaches are refused.
+                  </p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="t-role">Role</Label>

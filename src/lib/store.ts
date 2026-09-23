@@ -143,6 +143,8 @@ export interface RedisLike {
   ): Promise<unknown>;
   del(key: string): Promise<unknown>;
   incr(key: string): Promise<number>;
+  /** Program-Fix 17: the staff-login success refund (staff-login-guard.refundStaffAttempt). */
+  decr(key: string): Promise<number>;
   sadd(key: string, member: string): Promise<unknown>;
   srem(key: string, member: string): Promise<unknown>;
   smembers(key: string): Promise<string[]>;

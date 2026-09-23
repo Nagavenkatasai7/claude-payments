@@ -826,7 +826,7 @@ export default async function PartnerDetailPage({
                   <form action={createPartnerStaffAction.bind(null, partner.id)} className="mt-4 space-y-4">
                     <Input name="username" placeholder="Username" required />
                     <Input name="name" placeholder="Full name" required />
-                    <Input name="password" type="password" placeholder="Password" required />
+                    <Input name="password" type="password" placeholder="Password (12+ characters)" required minLength={12} maxLength={128} autoComplete="new-password" />
                     <select className={SELECT_CLASS} name="role" defaultValue="agent">
                       <option value="agent">Agent</option>
                       <option value="support">Support</option>
