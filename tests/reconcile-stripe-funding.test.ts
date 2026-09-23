@@ -6,7 +6,20 @@
  * PaymentIntent in the partner's Stripe dashboard. (Server-side cancel is a
  * listed follow-up that must land before the flag is turned on.)
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// Deterministic pre-settlement re-screen (never the Redis-backed default):
+// each test sets the behaviour it needs.
+const rescreenMode = vi.hoisted(() => ({ value: 'cleared' as 'cleared' | 'throw' }));
+vi.mock('@/lib/pay-rescreen', () => ({
+  rescreenBeforePay: async (_db: unknown, t: unknown) => {
+    if (rescreenMode.value === 'throw') throw new Error('screening unavailable');
+    return { kind: 'cleared', transfer: t };
+  },
+}));
+vi.mock('@/lib/store', () => ({ getStore: () => ({ getTransferDecrypted: async () => null }) }));
+vi.mock('@/lib/customer-store', () => ({ getCustomerStore: () => ({ getCustomer: async () => ({ fullName: 'Test Sender' }) }) }));
+vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner: async () => null, ensureDefaultPartner: async () => ({ id: 'default' }) }) }));
 import { sql } from 'drizzle-orm';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { freshDb, seedPartner } from './helpers-db';
@@ -34,6 +47,7 @@ const alerts = async () => {
 };
 
 beforeEach(async () => {
+  rescreenMode.value = 'cleared';
   db = await freshDb();
   repo = createTransferRepo(db);
   await seedPartner(db, 'acme');
@@ -80,11 +94,18 @@ describe('reconcile — crash-resume of Stripe-funded rows (review L-a / L-b)', 
   });
 
   it('a stripe row whose re-screen throws is left awaiting (retried next sweep), no alert', async () => {
+    rescreenMode.value = 'throw';
     await fundedRow('thr');
-    // The default re-screen reads Redis-backed stores that are not wired in this
-    // suite, so it throws — exactly the "screening unavailable" branch.
     await reconcileSweep(db);
     expect((await repo.getTransfer('thr'))?.status).toBe('awaiting_payment');
     expect((await alerts()).map((a) => a.dedupe_key).filter((k) => k.endsWith(':thr'))).toEqual([]);
+  });
+
+  it('a stripe row whose re-screen clears is settled by the sweep with ONE fundresume alert', async () => {
+    await fundedRow('clr');
+    await reconcileSweep(db);
+    await reconcileSweep(db);
+    expect((await repo.getTransfer('clr'))?.status).toBe('paid');
+    expect((await alerts()).map((a) => a.dedupe_key).filter((k) => k.endsWith(':clr'))).toEqual(['fundresume:clr']);
   });
 });
