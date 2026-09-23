@@ -20,7 +20,7 @@ vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n) } : undefined),
     set: (n: string, v: string) => cookieJar.set(n, v),
-    delete: (n: string) => cookieJar.delete(n),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
   // Program-Fix 17a: login reads the client IP (none here ⇒ 'unknown', ring skipped).
   headers: async () => new Headers(),

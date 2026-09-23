@@ -32,4 +32,12 @@ describe('hasPermission', () => {
     expect(hasPermission(agent, 'canCancel')).toBe(false);
     expect(hasPermission(agent, 'canAssign')).toBe(false);
   });
+
+  // Program-Fix 45 P1: the reveal grant is optional on stored records (older
+  // records lack it) and absent means "no".
+  it('canRevealPii: admin bypass, agent only when granted, absent is false', () => {
+    expect(hasPermission(make('admin', {}), 'canRevealPii')).toBe(true);
+    expect(hasPermission(make('agent', {}), 'canRevealPii')).toBe(false);
+    expect(hasPermission(make('agent', { canRevealPii: true }), 'canRevealPii')).toBe(true);
+  });
 });

@@ -24,7 +24,7 @@ vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n) } : undefined),
     set: (n: string, v: string) => cookieJar.set(n, v),
-    delete: (n: string) => cookieJar.delete(n),
+    delete: (a: string | { name: string }) => cookieJar.delete(typeof a === 'string' ? a : a.name),
   }),
   headers: async () => new Headers({ 'x-forwarded-for': currentIp }),
 }));
