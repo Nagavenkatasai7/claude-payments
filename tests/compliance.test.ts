@@ -143,3 +143,94 @@ describe('screenTransfer — sender screening (KYC, same SanctionsScreener seam)
     expect(r.status).toBe('blocked');
   });
 });
+
+// ── Program-Fix 14: screening evidence (compliance-07) ──────────────────────
+import { WATCHLIST } from '@/lib/compliance-config';
+import { inputHash } from '@/lib/sanctions/evidence';
+import { SanctionsListUnavailableError } from '@/lib/sanctions/list-screener';
+import type { SanctionsScreener } from '@/lib/providers/sanctions-provider';
+
+describe('screenTransfer — evidence', () => {
+  it('a cleared screen carries { listSource, listVersion, listHash, screenedAt, decision, parties }', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US', senderName: 'Clean Person' });
+    expect(r.status).toBe('cleared');
+    expect(r.evidence).toMatchObject({
+      listSource: 'mock-watchlist',
+      listVersion: 'static',
+      decision: 'clear',
+      parties: [
+        { role: 'recipient', inputHash: inputHash('Mom'), matched: false, matchScore: 0 },
+        { role: 'sender', inputHash: inputHash('Clean Person'), matched: false, matchScore: 0 },
+      ],
+    });
+    expect(r.evidence!.listHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(Number.isNaN(Date.parse(r.evidence!.screenedAt))).toBe(false);
+  });
+
+  it('a blocked screen: decision "match", parties[0] is the recipient with score 1 and a mock:<index> entry id', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'John  Doe', transfersToday: 0, sourceCountry: 'US' });
+    expect(r.status).toBe('blocked');
+    expect(r.evidence!.decision).toBe('match');
+    expect(r.evidence!.parties).toEqual([
+      { role: 'recipient', inputHash: inputHash('John  Doe'), matched: true, matchScore: 1, matchedEntryId: 'mock:0' },
+    ]);
+  });
+
+  it('a velocity/amount flag is not a sanctions decision (decision stays "clear")', async () => {
+    const r = await screenTransfer({ amountUsd: 1500, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US' });
+    expect(r.status).toBe('flagged');
+    expect(r.evidence!.decision).toBe('clear');
+  });
+
+  it('NO name anywhere in evidence: no list entry, no input name, no matchedName', async () => {
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'John Doe', transfersToday: 0, sourceCountry: 'US', senderName: 'Jane Roe' });
+    const json = JSON.stringify(r.evidence).toLowerCase();
+    for (const entry of WATCHLIST) {
+      for (const word of entry.split(' ')) expect(json).not.toContain(word);
+    }
+    expect(json).not.toContain('matchedname');
+  });
+
+  it('a possible (fuzzy) match → flagged with a generic reason and decision "possible_match"', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'test-list', version: 'v1', hash: 'h' }),
+      screen: async () => ({ matched: false, possibleMatch: true, matchScore: 0.93, entryId: 'sdn:1' }),
+    };
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US', screener });
+    expect(r.status).toBe('flagged');
+    expect(r.reasons.join(' ')).not.toMatch(/sanction|watchlist|mom/i);
+    expect(r.evidence).toMatchObject({ decision: 'possible_match', listSource: 'test-list', listVersion: 'v1' });
+    expect(r.evidence!.parties[0]).toMatchObject({ matched: false, matchScore: 0.93, matchedEntryId: 'sdn:1' });
+  });
+
+  it('an exact hit wins over a possible match (blocked)', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 't', version: 'v', hash: 'h' }),
+      screen: async ({ name }) => name === 'A'
+        ? { matched: true, matchScore: 1, entryId: 'sdn:2' }
+        : { matched: false, possibleMatch: true, matchScore: 0.95, entryId: 'sdn:3' },
+    };
+    const r = await screenTransfer({ amountUsd: 200, recipientName: 'B', senderName: 'A', transfersToday: 0, sourceCountry: 'US', screener });
+    expect(r.status).toBe('blocked');
+    expect(r.evidence!.decision).toBe('match');
+  });
+
+  it('a list that cannot load FAILS CLOSED: flagged, decision "list_unavailable" (never cleared, never a throw)', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 'ofac-sdn', version: 'unavailable', hash: '' }),
+      screen: async () => { throw new SanctionsListUnavailableError(); },
+    };
+    const r = await screenTransfer({ amountUsd: 10, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US', screener });
+    expect(r.status).toBe('flagged');
+    expect(r.evidence).toMatchObject({ decision: 'list_unavailable', listSource: 'ofac-sdn' });
+    expect(r.evidence!.parties[0]).toMatchObject({ role: 'recipient', matched: false });
+  });
+
+  it('any OTHER screener error still propagates (register_seller fails closed on it)', async () => {
+    const screener: SanctionsScreener = {
+      listInfo: () => ({ source: 't', version: 'v', hash: 'h' }),
+      screen: async () => { throw new Error('boom'); },
+    };
+    await expect(screenTransfer({ amountUsd: 10, recipientName: 'Mom', transfersToday: 0, sourceCountry: 'US', screener })).rejects.toThrow('boom');
+  });
+});

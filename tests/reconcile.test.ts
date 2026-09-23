@@ -90,6 +90,23 @@ describe('reconcileSweep — stuck paid (webhook-driven rail)', () => {
     expect((await outboxRows()).map((x) => x.dedupe_key)).toEqual(['stage1:rc_rel', 'instruct:rc_rel']);
   });
 
+  it('fix 29: a HELD row (railamount:<id>) across two sweeps → ONE recon alert that says it is held, ZERO reinstruct rows', async () => {
+    await store.saveTransfer(fixture());
+    await createOutboxRepo(db).enqueue('ops.alert', { message: 'amount mismatch' }, { dedupeKey: 'railamount:rc_t1' });
+    const first = await reconcileSweep(db);
+    const second = await reconcileSweep(db);
+    expect(first.reinstructed).toBe(0);
+    expect(second.reinstructed).toBe(0);
+    expect(second.stuckPaid).toBe(1); // stays visible until staff cancel/refund it
+    const rows = await outboxRows();
+    expect(rows.filter((r) => r.dedupe_key?.startsWith('reinstruct:'))).toEqual([]);
+    expect(rows.filter((r) => r.dedupe_key === 'recon:rc_t1')).toHaveLength(1);
+    const msg = ((await db.execute(sql`SELECT payload->>'message' AS m FROM outbox WHERE dedupe_key = 'recon:rc_t1'`)) as unknown as { rows: Array<{ m: string }> }).rows[0].m;
+    expect(msg).toContain('rail reported a different amount');
+    expect(msg).toContain('held, not re-instructed');
+    expect(msg).not.toContain('Re-instructed');
+  });
+
   it('a recently-paid transfer is NOT stuck (no effects)', async () => {
     await store.saveTransfer(fixture({ paidAt: new Date().toISOString() }));
     const r = await reconcileSweep(db);

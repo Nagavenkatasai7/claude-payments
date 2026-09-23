@@ -43,10 +43,11 @@ export function createAuditLogStore(db: DbOrTx) {
       });
     },
     async list(limit = 50): Promise<StaffAuditEntry[]> {
-      // Program-Fix 17a: filter IN the query on BOTH the team actions and
-      // actor_type 'staff'. Taking the newest N rows of every kind and filtering
-      // afterwards let high-volume rows (auth.* sign-ins, system rows) push every
-      // team change off the list.
+      // Filter IN the query on BOTH conditions: actor_type 'staff' (Program-Fix
+      // 14: one system sanctions.screen row per mint) AND the five team actions
+      // (Program-Fix 17a: auth.* sign-in rows, many of them actor_type 'staff').
+      // Taking the newest N rows and filtering afterwards let either kind push
+      // every team change off the list.
       const rows = await repo.listRecentByActions(STAFF_AUDIT_ACTIONS, limit, { actorType: 'staff' });
       return rows
         .map((r) => {

@@ -143,6 +143,13 @@ export const env = {
     // so a real KMS replaces this later without touching call sites.
     return process.env.FIELD_ENCRYPTION_KEY ?? '';
   },
+  get sanctionsList(): string {
+    // Program-Fix 14: WHICH sanctions list the screener uses — never WHETHER
+    // screening runs (it always runs). '' / 'mock' ⇒ the mock watchlist;
+    // 'ofac-sdn' ⇒ the OFAC SDN snapshot (fails closed to review if it cannot
+    // load); anything else ⇒ the mock plus a warning. Optional; unset in prod.
+    return (process.env.SANCTIONS_LIST ?? '').trim().toLowerCase();
+  },
   get passwordPepper(): string {
     // HMAC pepper applied before Argon2id. '' ⇒ no pepper (keeps existing staff
     // scrypt hashes verifying). Kept out of Redis; lives only in this secret.
@@ -203,6 +210,12 @@ export const env = {
     // Per-provider HMAC secret, e.g. PAYMENT_WEBHOOK_SECRET_UNITELLER.
     // '' ⇒ unconfigured ⇒ the webhook rejects (fail-closed; never fail-open).
     return process.env[`PAYMENT_WEBHOOK_SECRET_${provider.toUpperCase()}`] ?? '';
+  },
+  paymentWebhookSecretPrevious(provider: string): string {
+    // Program-Fix 29: OPTIONAL rotation grace secret, e.g.
+    // PAYMENT_WEBHOOK_SECRET_UNITELLER_PREVIOUS. '' when unset (no-op). Never
+    // boot-required: the current secret alone is the fail-closed gate.
+    return process.env[`PAYMENT_WEBHOOK_SECRET_${provider.toUpperCase()}_PREVIOUS`] ?? '';
   },
   fundingWebhookSecret(provider: string): string {
     // Per-provider HMAC secret for the FUNDING (sender-charge) callback, e.g.

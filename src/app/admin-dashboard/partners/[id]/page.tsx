@@ -736,7 +736,8 @@ export default async function PartnerDetailPage({
                   <CardTitle>Integration guide</CardTitle>
                   <CardDescription>
                     Everything your engineers need to connect — webhook URLs, signatures, and API examples.
-                    All signatures are HMAC-SHA256 (hex) over the exact raw request body, sent in a header.
+                    Rail signatures: x-smartremit-signature: t=&lt;unix&gt;,v1=HMAC-SHA256(secret, t + &quot;.&quot; + body), ±5 min
+                    (x-signature over the body alone is deprecated). A rotated secret stays valid for 7 days.
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -750,7 +751,7 @@ export default async function PartnerDetailPage({
 
                   <div className="mb-2 text-sm font-semibold">2 · Settlement instructions (us → your rail)</div>
                   <pre className={`${PRE_CLASS} mb-4`}>
-{`POST <your settlement endpoint>   x-signature: HMAC-SHA256(body)
+{`POST <your settlement endpoint>   x-smartremit-signature: t=<unix>,v1=HMAC-SHA256(signing secret, t + "." + body)
 { "reference": "<transfer id>", "partner_id": "${partner.id}",
   "corridor": {"source": "US", "destination": "IN"},
   "payout": {"rail": "bank", "destination": "<account>"},
@@ -763,9 +764,11 @@ export default async function PartnerDetailPage({
                   <div className="mb-2 text-sm font-semibold">3 · Status callbacks (your rail → us)</div>
                   <CopyField label="Status callback URL (POST lifecycle events here)" value={`${env.appBaseUrl}/api/payment-webhook/${integrations.payment.providerType === 'simulator' ? 'simulator' : 'http'}`} />
                   <pre className={`${PRE_CLASS} mb-4`}>
-{`POST ...   x-signature: HMAC-SHA256(body) with your INBOUND webhook secret
-{ "reference": "<transfer id>", "status": "created | funded | paid_out" }
-Delivery fires on "paid_out". Duplicates and out-of-order events are ignored.`}
+{`POST ...   x-smartremit-signature: t=<unix>,v1=HMAC-SHA256(INBOUND webhook secret, t + "." + body)
+{ "reference": "<transfer id>", "status": "created | funded | paid_out",
+  "amount": {"destination": 16600, "destination_currency": "INR"} }
+Delivery fires on "paid_out" when the amount matches the instruction; a different amount is held for ops.
+Duplicates and out-of-order events are ignored.`}
                   </pre>
 
                   <div className="mb-2 text-sm font-semibold">4 · Partner API (your systems → us)</div>

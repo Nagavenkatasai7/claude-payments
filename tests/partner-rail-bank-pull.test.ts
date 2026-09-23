@@ -19,6 +19,12 @@ vi.mock('@/db/client', async (orig) => {
 });
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
 vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {} }));
+// fix 29: the v2 replay guard's Redis — an in-memory double.
+vi.mock('@/lib/redis', async () => {
+  const { fakeRedis } = await import('./helpers');
+  const r = fakeRedis();
+  return { getRedis: () => r };
+});
 vi.mock('@/lib/partner-integrations-store', () => ({
   getPartnerIntegrationsStore: () => ({
     getIntegrations: async () => ({
@@ -92,6 +98,23 @@ describe('partner-rail — cross-border dual-leg bank_pull', () => {
     expect(cbs).toHaveLength(1);
     expect(cbs[0].dedupe_key).toBe('railcb:usdc_t1');
     expect(cbs[0].delayed).toBe(true); // same forward loop → delivered → invoice paid
+  });
+
+  it('fix 29: accepts the dual-leg instruction signed with the v2 header only', async () => {
+    const raw = JSON.stringify({
+      reference: 'xb_v2', partner_id: 'default',
+      payout: { rail: 'bank', destination: '123456789 HDFC0001234' },
+      amount: { source: 1010, currency: 'HKD', destination: 8500, destination_currency: 'INR', fx_rate: 8.42 },
+      funding: { method: 'bank_debit', token: 'bankpull_abc', amount: 1010, currency: 'HKD', country: 'HK' },
+    });
+    const t = Math.floor(Date.now() / 1000);
+    const res = await POST(new NextRequest('http://localhost/api/partner-rail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-smartremit-signature': `t=${t},v1=${createHmac('sha256', SIGNING_SECRET).update(`${t}.${raw}`).digest('hex')}` },
+      body: raw,
+    }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, providerRef: 'simrail-xb_v2', legs: 'dual' });
   });
 
   it('rejects a tampered/unsigned dual-leg instruction (fail-closed)', async () => {

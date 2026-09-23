@@ -1593,3 +1593,94 @@ describe('drainOnce — agent.turn ordering with inline cards (Program-Fix 34A r
     expect(sendText.mock.calls.map((c) => String((c as unknown[])[1]))).toEqual(['late']);
   });
 });
+
+// Program-Fix 29: the timestamped rail signature on every rail POST, key
+// rotation, the amount echo and the held-row guard.
+describe('drainOnce — rail signature v2, rotation, amount (fix 29)', () => {
+  const v2Of = (init: RequestInit) => (init.headers as Record<string, string>)['x-smartremit-signature'];
+  const parseV2 = (h: string) => {
+    const parts = h.split(',');
+    return { t: Number(parts[0].slice(2)), v1: parts.slice(1).map((p) => p.slice(3)) };
+  };
+  const FUTURE = new Date(Date.now() + 86_400_000).toISOString();
+
+  beforeEach(async () => {
+    await store.saveTransfer(transferFixture());
+    await createIntegrationsRepo(db, provider).saveIntegrations('acme', {
+      kyc: {},
+      payment: {
+        providerType: 'simulator',
+        credentials: {
+          settlementUrl: 'https://rail.example/settle', signingSecret: 'sgn',
+          previousSigningSecret: 'sgn_old', previousSigningSecretUntil: FUTURE,
+          previousWebhookSecret: 'whk_old', previousWebhookSecretUntil: FUTURE,
+        },
+        webhookSecret: 'whk',
+      },
+      whatsapp: {},
+    });
+  });
+
+  it('settlement.instruct carries BOTH headers: legacy exact with the current secret, v2 with one v1 per active secret', async () => {
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'r1' }) });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'instruct:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    const raw = String(init.body);
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'sgn').update(raw).digest('hex'));
+    const { t, v1 } = parseV2(v2Of(init));
+    expect(Math.abs(t - Date.now() / 1000)).toBeLessThan(60);
+    expect(v1).toEqual([
+      createHmac('sha256', 'sgn').update(`${t}.${raw}`).digest('hex'),
+      createHmac('sha256', 'sgn_old').update(`${t}.${raw}`).digest('hex'),
+    ]);
+  });
+
+  it('rail.callback signs v2 with the webhook secrets and echoes the amount when the row carries it', async () => {
+    fetchFn.mockResolvedValue({ ok: true });
+    await outbox.enqueue('rail.callback', {
+      reference: 'wk_t1', partner_id: 'acme', amount: { destination: 16600, destination_currency: 'INR' },
+    });
+    await drainOnce(deps(), 'w1');
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    const raw = String(init.body);
+    expect(JSON.parse(raw)).toEqual({ reference: 'wk_t1', status: 'paid_out', amount: { destination: 16600, destination_currency: 'INR' } });
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'whk').update(raw).digest('hex'));
+    const { t, v1 } = parseV2(v2Of(init));
+    expect(v1).toEqual([
+      createHmac('sha256', 'whk').update(`${t}.${raw}`).digest('hex'),
+      createHmac('sha256', 'whk_old').update(`${t}.${raw}`).digest('hex'),
+    ]);
+  });
+
+  it('reverse instruction carries both headers too', async () => {
+    await store.saveTransfer({
+      ...transferFixture(), fundingMethod: 'ach_pull', transferType: 'b2b', achTokenRef: 'ach_x', refundStatus: 'pending',
+    } as Transfer);
+    fetchFn.mockResolvedValue({ ok: true, json: async () => ({ providerRef: 'rev-1' }) });
+    await outbox.enqueue('funding.refund', { transferId: 'wk_t1' }, { dedupeKey: 'refund:wk_t1' });
+    await drainOnce(deps(), 'w1');
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['x-signature']).toBe(createHmac('sha256', 'sgn').update(String(init.body)).digest('hex'));
+    expect(v2Of(init)).toMatch(/^t=\d+,v1=[0-9a-f]{64},v1=[0-9a-f]{64}$/);
+  });
+
+  it('HELD: a transfer with a railamount:<id> marker is NEVER re-instructed (no POST, row done)', async () => {
+    await outbox.enqueue('ops.alert', { message: 'held' }, { dedupeKey: 'railamount:wk_t1' });
+    await outbox.enqueue('settlement.instruct', { transferId: 'wk_t1' }, { dedupeKey: 'reinstruct:wk_t1' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(0);
+    expect(fetchFn).not.toHaveBeenCalledWith('https://rail.example/settle', expect.anything());
+    const row = (await db.execute(sql`SELECT status FROM outbox WHERE dedupe_key = 'reinstruct:wk_t1'`)) as unknown as { rows: Array<{ status: string }> };
+    expect(row.rows[0].status).toBe('done');
+  });
+
+  it('outboxRepo.hasDedupeKey: true only for an existing key, and survives a payload scrub', async () => {
+    expect(await outbox.hasDedupeKey('railamount:wk_t1')).toBe(false);
+    await outbox.enqueue('ops.alert', { message: 'x' }, { dedupeKey: 'railamount:wk_t1' });
+    expect(await outbox.hasDedupeKey('railamount:wk_t1')).toBe(true);
+    await db.execute(sql`UPDATE outbox SET status = 'done', payload = '{}'::jsonb`);
+    expect(await outbox.hasDedupeKey('railamount:wk_t1')).toBe(true);
+    expect(await outbox.hasDedupeKey('railamount:other')).toBe(false);
+  });
+});

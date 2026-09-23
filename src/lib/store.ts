@@ -4,15 +4,15 @@ import { easternDayStart, easternMonthStart } from './dates';
 import { SendBusyError } from './send-limits';
 import { getDb, type Db } from '@/db/client';
 import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
-import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo } from '@/db/repos/aux-repos';
+import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRepo, createPartnerApplicationRepo, createB2bInvoiceRepo, createSellerRepo, createAuditRepo, type AuditEvent } from '@/db/repos/aux-repos';
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
 import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
 
 /**
- * The ONLY operations a locked mint body may perform (Program fix 16). All
- * three are bound to the lock's transaction; there is deliberately no store,
+ * The ONLY operations a locked mint body may perform (Program fix 16). All of
+ * them are bound to the lock's transaction; there is deliberately no store,
  * partner store or volume store in scope, so a root-handle call inside the
  * lock cannot compile.
  */
@@ -20,6 +20,8 @@ export interface SenderLedgerOps {
   totals(now?: Date): Promise<SenderTotals>;
   getTransfer(id: string): Promise<Transfer | null>;
   insertTransfer(t: Transfer): Promise<void>;
+  /** Program-Fix 14: the sanctions.screen evidence row, in the SAME transaction as the insert. */
+  recordAudit(e: AuditEvent): Promise<void>;
 }
 
 /** SQLSTATE 55P03 lock_not_available — from `SET LOCAL lock_timeout` — direct or wrapped. */
@@ -126,6 +128,25 @@ export function createStore(redis: RedisLike, db: Db) {
     },
     async saveTransfer(transfer: Transfer): Promise<void> {
       await transfersRepo.saveTransfer(transfer);
+    },
+    /**
+     * Program-Fix 14 (step 5): the quote-time blocked row and its
+     * sanctions.screen evidence row in ONE transaction — both land or neither
+     * does. recordBlockedAttempt uses it whenever it has evidence.
+     */
+    async recordBlockedWithEvidence(transfer: Transfer, audit: AuditEvent): Promise<void> {
+      await db.transaction(async (tx) => {
+        await createTransferRepo(tx).saveTransfer(transfer);
+        await createAuditRepo(tx).record(audit);
+      });
+    },
+    /**
+     * Program-Fix 14 (step 6): a standalone audit_events row on the root handle
+     * (register_seller's sanctions.screen evidence, written after the seller
+     * row). Callers treat it as best-effort.
+     */
+    async recordAudit(e: AuditEvent): Promise<void> {
+      await createAuditRepo(db).record(e);
     },
     /** Status-guarded staff edit (assign) — see transfer-repo.updateIfStatus. Cancel
      *  uses cancelTransferIfUnfunded; reject claims inside its own transaction. */
@@ -263,11 +284,13 @@ export function createStore(redis: RedisLike, db: Db) {
             await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
             await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${partnerId}:${phone}`}))`);
             const repo = createTransferRepo(tx);
+            const audit = createAuditRepo(tx);
             return fn({
               totals: (now: Date = new Date()) =>
                 repo.senderTotalsSince(partnerId, phone, easternDayStart(now), easternMonthStart(now)),
               getTransfer: (id) => repo.getTransfer(id),
               insertTransfer: (t) => repo.saveTransfer(t),
+              recordAudit: (e) => audit.record(e),
             });
           },
           { isolationLevel: 'read committed' },
