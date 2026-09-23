@@ -113,30 +113,33 @@ describe('parseStatementQuery', () => {
     expect(bad({ cursor: 'not-a-cursor' })).toMatch(/cursor/);
     expect(bad({ cursor: Buffer.from('2026-09-22|x').toString('base64url') })).toMatch(/cursor/);
     expect(bad({ cursor: Buffer.from("2026-09-22 10:00:00+00|x' OR 1=1").toString('base64url') })).toMatch(/cursor/);
-    expect(bad({ cursor: Buffer.from('2026-02-30 10:00:00+00|abc').toString('base64url') })).toMatch(/cursor/);
-    expect(bad({ cursor: Buffer.from('2026-09-22 10:00:00+00|').toString('base64url') })).toMatch(/cursor/);
+    expect(bad({ cursor: Buffer.from('2026-02-30 10:00:00.000000+00|abc').toString('base64url') })).toMatch(/cursor/);
+    expect(bad({ cursor: Buffer.from('2026-09-22 10:00:00.000000+00|').toString('base64url') })).toMatch(/cursor/);
     expect(bad({ cursor: 'A'.repeat(400) })).toMatch(/cursor/);
   });
 });
 
 describe('statement cursor', () => {
-  it('round-trips every Postgres timestamptz text shape', () => {
-    for (const at of [
-      '2026-09-22 10:00:00+00',
-      '2026-09-22 10:00:00.1+00',
-      '2026-09-22 10:00:00.123456+00',
-      '2026-09-22 15:30:00.5+05:30',
-      '2026-09-22 06:00:00-04',
-    ]) {
+  it('round-trips the one shape the repo emits (fixed UTC, 6 µs digits, +00)', () => {
+    for (const at of ['2026-09-22 10:00:00.000000+00', '2026-09-22 10:00:00.123456+00', '2026-12-31 23:59:59.999999+00']) {
       expect(decodeStatementCursor(encodeStatementCursor(at, 'tr_1'))).toEqual({ paidAtText: at, id: 'tr_1' });
     }
   });
 
   it('decode returns null for anything else', () => {
+    const enc = (t: string) => Buffer.from(t).toString('base64url');
     expect(decodeStatementCursor('')).toBeNull();
-    expect(decodeStatementCursor(Buffer.from('2026-09-22T10:00:00Z|a').toString('base64url'))).toBeNull();
-    expect(decodeStatementCursor(Buffer.from('2026-09-22 10:00:00.1234567+00|a').toString('base64url'))).toBeNull();
-    expect(decodeStatementCursor(Buffer.from('2026-09-22 10:00:00+00|a b').toString('base64url'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22T10:00:00Z|a'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00.1234567+00|a'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00.123456+00|a b'))).toBeNull();
+    // Only the emitted shape: fewer µs digits or any other offset is refused.
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00+00|a'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00.1+00|a'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22 15:30:00.500000+05:30|a'))).toBeNull();
+    // Out-of-range offsets Postgres would reject at the cast (a 500, not a 400).
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00.000000+99|a'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00.000000+14:99|a'))).toBeNull();
+    expect(decodeStatementCursor(enc('2026-09-22 10:00:00.000000-16|a'))).toBeNull();
   });
 });
 

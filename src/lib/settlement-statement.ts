@@ -145,9 +145,10 @@ function startOfUtcDay(now: Date): Date {
 
 // ── cursor ────────────────────────────────────────────────────────────────
 
-// Postgres timestamptz text (DateStyle ISO): `YYYY-MM-DD HH:MM:SS[.f{1,6}]±HH[:MM[:SS]]`.
-// Postgres drops trailing fractional zeros, so 0–6 digits.
-const PG_TS_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?[+-]\d{2}(?::\d{2}){0,2}$/;
+// EXACTLY the shape transfer-repo.listSettledPage emits: fixed UTC text with
+// all six µs digits and a '+00' offset. Anything else (another offset, which
+// Postgres may reject at the ::timestamptz cast) is refused here as a 400.
+const PG_TS_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.\d{6}\+00$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const CURSOR_MAX = 200; // encoded length cap, checked BEFORE decoding
 

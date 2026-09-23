@@ -8,7 +8,7 @@ import { createCustomerStore } from '@/lib/customer-store';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { EnvKeyProvider } from '@/lib/field-crypto';
 import { fakeRedis } from './helpers';
-import { freshDb, seedPartner } from './helpers-db';
+import { captureQueries, freshDb, seedPartner } from './helpers-db';
 import { listSettlements, type PartnerApiDeps } from '@/lib/partner-api-service';
 import { STATEMENT_COLUMNS } from '@/lib/settlement-statement';
 import type { Db } from '@/db/client';
@@ -176,10 +176,17 @@ describe('listSettlements', () => {
       { format: 'xml' },
       { cursor: 'garbage!!' },
       { cursor: Buffer.from("x'::timestamptz|a").toString('base64url') },
+      // Offsets Postgres rejects at the ::timestamptz cast — must be 400, never 500.
+      { cursor: Buffer.from('2026-09-22 10:00:00.000000+99|a').toString('base64url') },
+      { cursor: Buffer.from('2026-09-22 10:00:00.000000+14:99|a').toString('base64url') },
+      { cursor: Buffer.from('2026-09-22 10:00:00.000000-16|a').toString('base64url') },
     ]) {
+      const stop = captureQueries();
       const r = await listSettlements(deps, 'acme', q);
+      const issued = stop();
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.status).toBe(400);
+      expect(issued).toEqual([]); // rejected before any SQL reaches the database
     }
   });
 
