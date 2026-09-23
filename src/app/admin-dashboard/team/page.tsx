@@ -19,6 +19,7 @@ import {
   setStaffStatusAction,
   removeStaffAction,
 } from './actions';
+import { ResetPasswordForm } from './reset-password-form';
 
 const STAFF_COLUMNS: ExpandableColumn[] = [
   { label: 'Member', primary: true },
@@ -133,6 +134,7 @@ function staffRow(s: Staff, opts: { isSelf: boolean; isTest: boolean; partners: 
             <input type="hidden" name="username" value={s.username} />
             <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
           </form>
+          <ResetPasswordForm username={s.username} name={s.name} />
         </span>
       ),
     ],

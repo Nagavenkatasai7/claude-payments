@@ -1,7 +1,5 @@
-import { desc, eq } from 'drizzle-orm';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
-import { auditEvents } from '@/db/schema';
 
 // audit-log-store — CUT OVER to Postgres (Stage 2a). Staff (team) mutations now
 // land in the append-only `audit_events` table (actor_type 'staff') instead of
@@ -14,6 +12,15 @@ export type StaffAuditAction =
   | 'suspended'
   | 'reactivated'
   | 'removed';
+
+/** The five team actions the Team feed shows (Program-Fix 17a: filtered in SQL). */
+export const STAFF_AUDIT_ACTIONS: readonly StaffAuditAction[] = [
+  'created',
+  'updated',
+  'suspended',
+  'reactivated',
+  'removed',
+];
 
 export interface StaffAuditEntry {
   at: string; // ISO-8601
@@ -36,15 +43,12 @@ export function createAuditLogStore(db: DbOrTx) {
       });
     },
     async list(limit = 50): Promise<StaffAuditEntry[]> {
-      // Filter IN the query (Program-Fix 14): taking the newest N rows of every
-      // actor type and filtering afterwards let high-volume system rows (one
-      // sanctions.screen per mint) push every staff entry off the list.
-      const rows = await db
-        .select()
-        .from(auditEvents)
-        .where(eq(auditEvents.actorType, 'staff'))
-        .orderBy(desc(auditEvents.at))
-        .limit(limit);
+      // Filter IN the query on BOTH conditions: actor_type 'staff' (Program-Fix
+      // 14: one system sanctions.screen row per mint) AND the five team actions
+      // (Program-Fix 17a: auth.* sign-in rows, many of them actor_type 'staff').
+      // Taking the newest N rows and filtering afterwards let either kind push
+      // every team change off the list.
+      const rows = await repo.listRecentByActions(STAFF_AUDIT_ACTIONS, limit, { actorType: 'staff' });
       return rows
         .map((r) => {
           const e: StaffAuditEntry = {
