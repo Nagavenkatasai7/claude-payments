@@ -2,8 +2,8 @@
 //
 // next.config.ts imports this by RELATIVE path to build the enforced policy on
 // every route, so this file must stay import-free (no `@/` alias, no Node APIs).
-// The middleware builds the same policy with a per-request nonce and sends it
-// as REPORT-ONLY on the dynamic trees (PR1); PR2 enforces it there.
+// The `nonce` option is the deferred follow-up (a per-request nonce policy on
+// the dynamic trees); nothing in the app passes one yet.
 //
 // Sources, node_modules/next/dist/docs/01-app/02-guides/content-security-policy.md:
 //   :42  'unsafe-eval' is needed only in development ("Neither React nor
@@ -13,15 +13,18 @@
 export interface CspOptions {
   /** Per-request nonce. When set, script-src trusts it instead of 'unsafe-inline'. */
   nonce?: string;
-  /** `process.env.NODE_ENV === 'development'` — adds 'unsafe-eval' for React dev stacks. */
+  /** `process.env.NODE_ENV === 'development'` — adds 'unsafe-eval' to a nonce policy for React dev stacks. */
   isDev: boolean;
 }
 
 export function buildCsp({ nonce, isDev }: CspOptions): string {
+  // Without a nonce (the enforced policy on every route) 'unsafe-eval' stays
+  // for now, in every environment: dropping it in production is the tracked
+  // follow-up (Program-Fix 47 PR2). With a nonce it is dev-only (guide :42).
   const script = nonce
     ? ["'self'", `'nonce-${nonce}'`, "'strict-dynamic'"]
-    : ["'self'", "'unsafe-inline'"];
-  if (isDev) script.push("'unsafe-eval'");
+    : ["'self'", "'unsafe-inline'", "'unsafe-eval'"];
+  if (nonce && isDev) script.push("'unsafe-eval'");
   return [
     "default-src 'self'",
     `script-src ${script.join(' ')}`,

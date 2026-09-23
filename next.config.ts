@@ -15,11 +15,10 @@ const securityHeaders = [
   {
     key: 'Content-Security-Policy',
     // Built by src/lib/csp.ts (imported by relative path: next.config is loaded
-    // outside the `@/` alias). Program-Fix 47 PR1: 'unsafe-inline' remains for
-    // Next's inline runtime on the static/ISR pages, 'unsafe-eval' is dev-only,
-    // https: images for partner logos, object-src 'none'. The dynamic trees
-    // also get a REPORT-ONLY nonce policy from src/middleware.ts; PR2 enforces
-    // that one there and narrows this route's source.
+    // outside the `@/` alias). Program-Fix 47: the same policy as before plus
+    // https: images (partner logos) and object-src 'none'. 'unsafe-inline' and
+    // 'unsafe-eval' remain for now; dropping 'unsafe-eval' in production and a
+    // nonce-based script-src are the tracked follow-ups.
     value: buildCsp({ isDev: process.env.NODE_ENV === 'development' }),
   },
 ];

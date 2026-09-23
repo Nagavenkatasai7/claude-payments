@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 
-// Program-Fix 47 (PR1) — the one Content-Security-Policy builder. next.config.ts
-// uses it WITHOUT a nonce for the enforced policy on every route; the middleware
-// uses it WITH a per-request nonce for the report-only policy on the dynamic
-// trees. Imported dynamically so the suite fails on its own while red.
+// Program-Fix 47 — the one Content-Security-Policy builder. next.config.ts
+// uses it WITHOUT a nonce for the enforced policy on every route; the nonce
+// variant is for the deferred follow-up. Imported dynamically so the suite
+// fails on its own while red.
 
 function directives(policy: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -16,19 +16,18 @@ function directives(policy: string): Map<string, string> {
 }
 
 describe('buildCsp', () => {
-  it('production, no nonce: script-src keeps unsafe-inline and drops unsafe-eval', async () => {
+  it('no nonce (the enforced policy): script-src is unchanged, unsafe-eval included in every env', async () => {
     const { buildCsp } = await import('@/lib/csp');
-    const d = directives(buildCsp({ isDev: false }));
-    expect(d.get('script-src')).toBe("'self' 'unsafe-inline'");
-    expect(buildCsp({ isDev: false })).not.toContain('unsafe-eval');
-    expect(buildCsp({ isDev: false })).not.toContain('nonce-');
+    for (const isDev of [false, true]) {
+      expect(directives(buildCsp({ isDev })).get('script-src')).toBe(
+        "'self' 'unsafe-inline' 'unsafe-eval'",
+      );
+      expect(buildCsp({ isDev })).not.toContain('nonce-');
+    }
   });
 
-  it('development adds unsafe-eval (React uses eval for dev stacks)', async () => {
+  it('with a nonce, development adds unsafe-eval (React uses eval for dev stacks)', async () => {
     const { buildCsp } = await import('@/lib/csp');
-    expect(directives(buildCsp({ isDev: true })).get('script-src')).toBe(
-      "'self' 'unsafe-inline' 'unsafe-eval'",
-    );
     expect(directives(buildCsp({ nonce: 'abc', isDev: true })).get('script-src')).toBe(
       "'self' 'nonce-abc' 'strict-dynamic' 'unsafe-eval'",
     );

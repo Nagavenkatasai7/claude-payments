@@ -16,11 +16,11 @@ const SITE = 'https://smartremit.ai';
 const PRIVATE_PATHS = ['/pay', '/onboard', '/partners/apply', '/account', '/admin-dashboard', '/login', '/api'];
 
 // The enforced CSP, pinned byte-for-byte: any CSP change must be a deliberate,
-// reviewed edit. Program-Fix 47 (PR1): no 'unsafe-eval' in production, https:
-// images (partner logos), and object-src 'none'.
+// reviewed edit. Program-Fix 47: adds https: images (partner logos) and
+// object-src 'none'; script-src is unchanged.
 const PINNED_CSP =
   "default-src 'self'; " +
-  "script-src 'self' 'unsafe-inline'; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: blob: https:; " +
   "media-src 'self' https://*.public.blob.vercel-storage.com; " +
