@@ -1,4 +1,5 @@
 import type { CountryCode, Partner } from './types';
+import { AML_DEFAULTS, type AmlConfig } from './aml-rules';
 
 // Canonical screening constants — single source of truth.
 // compliance.ts re-exports these for backward compatibility.
@@ -16,6 +17,10 @@ export interface ResolvedCorridorRules {
   largeAmountUsd: number;      // USD-equivalent flag threshold
   velocityLimit: number;       // transfers/day before flagging
   kycCapHintUsd?: number;      // ADVISORY ONLY — consumed by the NEXT (KYC) batch
+  // Program-Fix 43: behavioural AML thresholds (alerts only — aml-sweep.ts) and
+  // the PR B per-partner×corridor hold switch (OFF; nothing reads it in PR A).
+  aml: AmlConfig;
+  amlHolds: boolean;
 }
 
 // Today's globals, named so the dormant path is PROVABLY equal to current
@@ -26,7 +31,36 @@ export const GLOBAL_DEFAULTS: ResolvedCorridorRules = {
   watchlistExtra: [],
   largeAmountUsd: LARGE_AMOUNT_USD,   // 1000
   velocityLimit: VELOCITY_LIMIT,      // 3
+  aml: AML_DEFAULTS,
+  amlHolds: false,
 };
+
+// corridor_compliance is untrusted jsonb: every AML field is validated and
+// falls back to the default (a bad value can never disable a rule by NaN or
+// make it fire on everything by a negative).
+function posNumber(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback;
+}
+function posInt(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 1 ? v : fallback;
+}
+function resolveAml(...layers: Array<Partial<AmlConfig> | undefined>): AmlConfig {
+  const pick = <K extends keyof AmlConfig>(k: K): unknown => {
+    for (const l of layers) {
+      const v = l && typeof l === 'object' ? (l as Record<string, unknown>)[k] : undefined;
+      if (v !== undefined) return v;
+    }
+    return undefined;
+  };
+  const band = pick('band');
+  return {
+    band: typeof band === 'number' && Number.isFinite(band) && band > 0 && band <= 1 ? band : AML_DEFAULTS.band,
+    count: posInt(pick('count'), AML_DEFAULTS.count),
+    aggUsd: posNumber(pick('aggUsd'), AML_DEFAULTS.aggUsd),
+    firstUsd: posNumber(pick('firstUsd'), AML_DEFAULTS.firstUsd),
+    senders: posInt(pick('senders'), AML_DEFAULTS.senders),
+  };
+}
 
 // Code-defined per-corridor DEFAULTS. EMPTY at ship time — every corridor
 // inherits GLOBAL_DEFAULTS. Populated later as real corridors are calibrated
@@ -60,5 +94,8 @@ export function resolveCorridorRules(
     largeAmountUsd: override.largeAmountUsd ?? corridorDefault.largeAmountUsd ?? GLOBAL_DEFAULTS.largeAmountUsd,
     velocityLimit: override.velocityLimit ?? corridorDefault.velocityLimit ?? GLOBAL_DEFAULTS.velocityLimit,
     kycCapHintUsd: override.kycCapHintUsd ?? corridorDefault.kycCapHintUsd,
+    aml: resolveAml(override.aml, corridorDefault.aml),
+    // Only a literal true switches holds on (PR B); anything else is OFF.
+    amlHolds: (override.amlHolds ?? corridorDefault.amlHolds) === true,
   };
 }

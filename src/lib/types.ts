@@ -673,6 +673,10 @@ export interface CorridorComplianceRule {
   largeAmountUsd?: number;     // USD-equivalent flag threshold; overrides LARGE_AMOUNT_USD
   velocityLimit?: number;      // transfers/day before 'High transfer velocity.'; overrides VELOCITY_LIMIT
   kycCapHintUsd?: number;      // ADVISORY ONLY — hook for the NEXT (KYC) batch; NOT read by screenTransfer in P5
+  // Program-Fix 43: behavioural AML thresholds (alerts only). Any field may be
+  // set; bad values fall back to the defaults (compliance-config.ts).
+  aml?: { band?: number; count?: number; aggUsd?: number; firstUsd?: number; senders?: number };
+  amlHolds?: boolean;          // PR B (not built yet): per partner × corridor hold switch; unset = OFF
 }
 
 // ── Destination-interest lead (non-India payout requests) ─────────────────────
