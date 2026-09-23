@@ -964,3 +964,90 @@ describe('fix 38: the bot persona is refused on a web address or rule-override p
     expect(await auditRows()).toHaveLength(1);
   });
 });
+
+// Program-Fix 29: rotating a rail secret keeps the old one verifying/signing
+// for 7 days — stored in the encrypted credentials blob (no migration), each
+// secret with its own expiry.
+describe('savePaymentConfigAction — rail secret rotation (Program-Fix 29)', () => {
+  const form = (values: Record<string, string>): FormData => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(values)) fd.set(k, v);
+    return fd;
+  };
+  const DAY = 86_400_000;
+  let integrations: ReturnType<typeof createPartnerIntegrationsStore>;
+  const base = { id: 'acme', providerType: 'http', settlementUrl: 'https://rail.acme-test.com/settle' };
+  beforeEach(async () => {
+    await seedPartner(db, 'acme');
+    integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7)));
+    await integrations.saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: { providerType: 'http', credentials: { settlementUrl: base.settlementUrl, signingSecret: 'sg_1' }, webhookSecret: 'wh_1' },
+    });
+  });
+  const payment = async () => (await integrations.getIntegrations('acme')).payment;
+
+  it('rotating keeps the old secret for 7 days', async () => {
+    const t0 = Date.now();
+    await savePaymentConfigAction(form({ ...base, webhookSecret: 'wh_2', signingSecret: 'sg_2' }));
+    const p = await payment();
+    expect(p.webhookSecret).toBe('wh_2');
+    expect(p.credentials?.signingSecret).toBe('sg_2');
+    expect(p.credentials?.previousWebhookSecret).toBe('wh_1');
+    expect(p.credentials?.previousSigningSecret).toBe('sg_1');
+    for (const k of ['previousWebhookSecretUntil', 'previousSigningSecretUntil']) {
+      const until = Date.parse(p.credentials?.[k] ?? '');
+      expect(until - t0).toBeGreaterThanOrEqual(7 * DAY - 5_000);
+      expect(until - t0).toBeLessThanOrEqual(7 * DAY + 5_000);
+    }
+  });
+
+  it('rotating ONE secret leaves the other previous pair untouched', async () => {
+    await savePaymentConfigAction(form({ ...base, webhookSecret: 'wh_2' }));
+    const first = (await payment()).credentials!;
+    await savePaymentConfigAction(form({ ...base, signingSecret: 'sg_2' }));
+    const p = await payment();
+    expect(p.credentials?.previousWebhookSecret).toBe('wh_1');
+    expect(p.credentials?.previousWebhookSecretUntil).toBe(first.previousWebhookSecretUntil);
+    expect(p.credentials?.previousSigningSecret).toBe('sg_1');
+    expect(p.webhookSecret).toBe('wh_2');
+  });
+
+  it('a blank field or the SAME value is not a rotation', async () => {
+    await savePaymentConfigAction(form({ ...base, webhookSecret: '', signingSecret: 'sg_1' }));
+    const p = await payment();
+    expect(p.webhookSecret).toBe('wh_1');
+    expect(p.credentials?.signingSecret).toBe('sg_1');
+    expect(p.credentials?.previousWebhookSecret).toBeUndefined();
+    expect(p.credentials?.previousSigningSecret).toBeUndefined();
+  });
+
+  it('an expired previous pair is dropped on the next save', async () => {
+    await integrations.saveIntegrations('acme', {
+      kyc: {}, whatsapp: {},
+      payment: {
+        providerType: 'http',
+        credentials: {
+          settlementUrl: base.settlementUrl, signingSecret: 'sg_1',
+          previousSigningSecret: 'sg_0', previousSigningSecretUntil: new Date(Date.now() - DAY).toISOString(),
+        },
+        webhookSecret: 'wh_1',
+      },
+    });
+    await savePaymentConfigAction(form({ ...base }));
+    const p = await payment();
+    expect(p.credentials?.previousSigningSecret).toBeUndefined();
+    expect(p.credentials?.previousSigningSecretUntil).toBeUndefined();
+    expect(p.credentials?.signingSecret).toBe('sg_1');
+  });
+
+  it('the simulator auto-mint on a fresh partner is not a rotation', async () => {
+    await seedPartner(db, 'fresh');
+    await savePaymentConfigAction(form({ id: 'fresh', providerType: 'simulator', settlementUrl: '' }));
+    const p = (await integrations.getIntegrations('fresh')).payment;
+    expect(p.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(p.credentials?.signingSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(p.credentials?.previousWebhookSecret).toBeUndefined();
+    expect(p.credentials?.previousSigningSecret).toBeUndefined();
+  });
+});
