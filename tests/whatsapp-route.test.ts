@@ -282,7 +282,7 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
 
   it('a Meta-style message id is NEVER stored or logged raw: audit subjectId and log fields carry only the keyed ref', async () => {
     const id = 'wamid.HBgLMTU1NTk4NzEyMzQVAgARGBI5QzZBOEQ3RjA0QjE2NjJCMzcA';
-    const b64 = id.slice('wamid.'.length);
+    const token = id.slice('wamid.'.length);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
     const body = (status: string) => JSON.stringify({
@@ -300,7 +300,7 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
     expect(logged).toContain(waMessageRef(id).slice(0, 16));
     for (const out of [JSON.stringify(row), logged]) {
       expect(out).not.toContain(id);
-      expect(out).not.toContain(b64.slice(0, 12));
+      expect(out).not.toContain(token.slice(0, 12));
       expect(out).not.toMatch(/\d{7,}/);
     }
   });

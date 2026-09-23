@@ -5,9 +5,9 @@ import { blindIndex } from '@/lib/blind-index';
 // Program-Fix 26 (review): a WhatsApp message id is never stored or logged raw;
 // audit rows and log lines carry a KEYED reference to it instead.
 
-// Meta-style id (synthetic digits): `wamid.` + base64 of an opaque blob.
+// Meta-style id (synthetic): `wamid.` + an opaque token.
 const META_STYLE_ID = 'wamid.HBgLMTU1NTk4NzEyMzQVAgARGBI5QzZBOEQ3RjA0QjE2NjJCMzcA';
-const BASE64_PART = META_STYLE_ID.slice('wamid.'.length);
+const TOKEN_PART = META_STYLE_ID.slice('wamid.'.length);
 
 describe('waMessageRef', () => {
   it('is keyed (the blind-index HMAC under its own purpose), deterministic and letters-only', () => {
@@ -19,9 +19,9 @@ describe('waMessageRef', () => {
     expect(waMessageRef('wamid.OTHER')).not.toBe(ref);
   });
 
-  it('never contains the id, its base64 body, or any digit run of 7+', () => {
+  it('never contains the raw id, any slice of its token, or any digit run of 7+', () => {
     const ref = waMessageRef(META_STYLE_ID);
-    expect(ref).not.toContain(BASE64_PART.slice(0, 8));
+    expect(ref).not.toContain(TOKEN_PART.slice(0, 8));
     expect(ref).not.toMatch(/\d{7,}/);
     expect(ref).not.toContain('wamid');
   });

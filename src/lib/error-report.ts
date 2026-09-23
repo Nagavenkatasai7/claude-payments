@@ -85,7 +85,10 @@ export function buildErrorReport(
   request: { readonly method?: unknown },
   context: { readonly routePath?: unknown; readonly routeType?: unknown },
 ): ErrorReport {
-  const message = safe(() => scrub(stripUrlQueries(rawMessage(err)).slice(0, MAX_MESSAGE))) ?? 'unreadable error';
+  // Scrub FIRST, then strip and cap: a cap before the scrub could cut a phone
+  // below the 7-digit mask or an email into a bare local part (review r1).
+  // scrub() also bounds the input the URL regexes see (SCRUB_MAX_CHARS).
+  const message = safe(() => stripUrlQueries(scrub(rawMessage(err))).slice(0, MAX_MESSAGE)) ?? 'unreadable error';
   const type = safe(() => (err instanceof Error ? scrub(err.name).slice(0, 100) : 'NonError')) ?? 'Unknown';
   const report: ErrorReport = { message, type };
   const digest = token(
@@ -102,6 +105,15 @@ export function buildErrorReport(
   const method = token(safe(() => request.method), /^[A-Z]{3,7}$/);
   if (method) report.method = method;
   return report;
+}
+
+/**
+ * The digest as it appears in log lines AND Sentry tags: digits grouped by 4
+ * with '-', so scrub()'s 7+ digit mask leaves it intact and the two can be
+ * joined. A digest is Next's opaque error hash, not PII.
+ */
+export function logDigest(digest: string): string {
+  return digest.replace(/\d{4}(?=\d)/g, '$&-');
 }
 
 export interface SentryTarget {
@@ -139,6 +151,7 @@ function envelope(report: ErrorReport, target: SentryTarget): string {
   if (report.routePath) tags.routePath = report.routePath;
   if (report.routeType) tags.routeType = report.routeType;
   if (report.method) tags.method = report.method;
+  if (report.digest) tags.digest = logDigest(report.digest);
   if (process.env.NEXT_RUNTIME) tags.runtime = process.env.NEXT_RUNTIME;
   const event = {
     event_id: eventId,

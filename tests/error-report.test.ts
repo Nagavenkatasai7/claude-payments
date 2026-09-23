@@ -4,6 +4,7 @@ import {
   parseSentryDsn,
   reportRequestError,
   stripUrlQueries,
+  logDigest,
 } from '@/lib/error-report';
 import { onRequestError } from '@/instrumentation';
 
@@ -72,6 +73,26 @@ describe('buildErrorReport', () => {
     expect(s).not.toContain('COOKIE_VALUE');
     expect(s).not.toContain('AUTH_VALUE');
     expect(r).toMatchObject({ routePath: '/app/pay/[id]/page', routeType: 'render', method: 'POST', digest: '2380467093' });
+  });
+
+  it('scrubs BEFORE the length cap: a phone straddling the cap leaves no run of 5+ digits', () => {
+    const r = buildErrorReport(new Error('x'.repeat(1994) + '15551234567'), REQUEST, CONTEXT);
+    expect(r.message).not.toMatch(/\d{5,}/);
+  });
+
+  it('scrubs BEFORE the length cap: an email straddling the cap leaves no partial local part', () => {
+    const r = buildErrorReport(new Error('x'.repeat(1985) + ' john.smith@example.com'), REQUEST, CONTEXT);
+    expect(r.message).not.toContain('john');
+    expect(r.message).not.toContain('smith');
+  });
+
+  it('the digest is carried in a form the log scrubber does not mangle (logs and Sentry join)', async () => {
+    const err = Object.assign(new Error('x'), { digest: '2380467093' });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubEnv('SENTRY_DSN', '');
+    await onRequestError(err, REQUEST, CONTEXT);
+    expect(logged.mock.calls.flat().join(' ')).toContain('2380-4670-93');
+    expect(logDigest('2380467093')).toBe('2380-4670-93');
   });
 
   it('a thrown plain object never leaks its stack or cause (only a string message is taken)', () => {

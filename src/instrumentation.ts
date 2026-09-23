@@ -27,12 +27,12 @@ export async function register(): Promise<void> {
 // section — async work is awaited. It can never throw into the request path.
 export const onRequestError: Instrumentation.onRequestError = async (err, request, context) => {
   try {
-    const { buildErrorReport, reportRequestError } = await import('@/lib/error-report');
+    const { buildErrorReport, logDigest, reportRequestError } = await import('@/lib/error-report');
     const { logError } = await import('@/lib/log');
     const report = buildErrorReport(err, request, context);
     logError('request.error', report.message, {
       type: report.type,
-      digest: report.digest,
+      digest: report.digest ? logDigest(report.digest) : undefined,
       routePath: report.routePath,
       routeType: report.routeType,
       method: report.method,

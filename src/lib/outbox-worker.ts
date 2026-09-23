@@ -654,6 +654,8 @@ async function handle(
     // ── Ops-alert webhook mirror (Program-Fix 26) ───────────────────────────
     // The URL is a bearer secret: it is read from env at SEND time and never
     // stored in the row, last_error or a log line. Unset/invalid now ⇒ drop.
+    // deps.fetchFn is safeFetch in the worker route: same-origin 307/308 only,
+    // private addresses refused at connect time.
     case 'ops.webhook': {
       const url = opsWebhookUrl(env.opsAlertWebhookUrl);
       if (!url) return;
@@ -663,7 +665,6 @@ async function handle(
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ text: str(p.text) }),
-          redirect: 'error',
           signal: AbortSignal.timeout(OPS_WEBHOOK_TIMEOUT_MS),
         });
       } catch (err) {
