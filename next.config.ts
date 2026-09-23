@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { buildCsp } from './src/lib/csp';
 
 // Security headers on EVERY response (Stage 3; CSP enforced as of Stage 5e —
 // it ran report-only through the design migration with zero violations
@@ -13,24 +14,12 @@ const securityHeaders = [
   { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=()' },
   {
     key: 'Content-Security-Policy',
-    value: [
-      "default-src 'self'",
-      // 'unsafe-inline'/'unsafe-eval' remain for Next's inline runtime + React
-      // hydration. The ENFORCED wins here are the network/framing axes:
-      // default/connect/img/font pinned to self, framing+base+form locked.
-      // Nonce-based script-src is the follow-up hardening item.
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-      "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob:",
-      // Video for the /about explainer: same-origin /public today; the Vercel Blob
-      // host is pre-allowed so a large file can move there with no CSP change.
-      "media-src 'self' https://*.public.blob.vercel-storage.com",
-      "font-src 'self' data:",
-      "connect-src 'self'",
-      "frame-ancestors 'none'",
-      "base-uri 'self'",
-      "form-action 'self'",
-    ].join('; '),
+    // Built by src/lib/csp.ts (imported by relative path: next.config is loaded
+    // outside the `@/` alias). Program-Fix 47: the same policy as before plus
+    // https: images (partner logos) and object-src 'none'. 'unsafe-inline' and
+    // 'unsafe-eval' remain for now; dropping 'unsafe-eval' in production and a
+    // nonce-based script-src are the tracked follow-ups.
+    value: buildCsp({ isDev: process.env.NODE_ENV === 'development' }),
   },
 ];
 
