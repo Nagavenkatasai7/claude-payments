@@ -8,6 +8,7 @@ import { createRecipientRepo, createCorridorRequestRepo, createPartnerRequestRep
 import { createCustomerRepo } from '@/db/repos/customer-repo';
 import { legacyKeyAllowed, legacyTenantResolver } from './legacy-tenant';
 import type { CapSubject } from './tier-rules';
+import { billExpiryCutoff } from './b2b-bill-expiry';
 import type { ChatMessage, CountryCode, KycStatus, PartnerId, SendLimitOverride, Transfer, TransferStatus } from './types';
 
 /**
@@ -432,7 +433,22 @@ export function createStore(redis: RedisLike, db: Db) {
       buyerPhone: string,
       partnerId: import('./types').PartnerId,
     ): Promise<import('./types').B2bInvoice | null> {
-      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId);
+      // Program-Fix 44: an unpaid bill past the TTL is dead — the bot never presents or disputes it.
+      return b2bInvoiceRepo.getUnpaidByBuyer(buyerPhone, partnerId, billExpiryCutoff());
+    },
+    // Program-Fix 44: the durable duplicate-bill check (see the repo's findOpenTwin).
+    async findOpenTwinInvoice(q: {
+      partnerId: import('./types').PartnerId;
+      sellerId: string;
+      buyerPhone: string;
+      invoicedAmount: number;
+      invoicedCurrency: import('./types').CurrencyCode;
+    }): Promise<import('./types').B2bInvoice | null> {
+      return b2bInvoiceRepo.findOpenTwin({ ...q, createdNotBefore: billExpiryCutoff() });
+    },
+    // Program-Fix 44: platform-only cross-tenant list (the B2B dashboard page gates on platform scope).
+    async listAllB2bInvoices(): Promise<import('./types').B2bInvoice[]> {
+      return b2bInvoiceRepo.listAllInvoices();
     },
     async getB2bInvoice(id: string): Promise<import('./types').B2bInvoice | null> {
       return b2bInvoiceRepo.getInvoice(id);

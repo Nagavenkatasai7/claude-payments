@@ -602,13 +602,22 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
      * `buyerPhone` is normalized on read too (defense-in-depth): match the
      * digits-only form we store, regardless of how the caller formatted it.
      */
-    async getUnpaidByBuyer(buyerPhone: string, partnerId: PartnerId): Promise<B2bInvoice | null> {
+    async getUnpaidByBuyer(
+      buyerPhone: string,
+      partnerId: PartnerId,
+      // Program-Fix 44: the oldest live created_at (inclusive). Omitted ⇒ no
+      // age filter (the store always passes the bill-TTL cutoff).
+      createdNotBefore?: Date,
+    ): Promise<B2bInvoice | null> {
       const phone = normalizePhone(buyerPhone);
+      const ageFilter = createdNotBefore
+        ? sql` AND ${b2bInvoices.createdAt} >= ${createdNotBefore.toISOString()}`
+        : sql``;
       const rows = await db
         .select()
         .from(b2bInvoices)
         .where(
-          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'`,
+          sql`${b2bInvoices.partnerId} = ${partnerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.status} = 'unpaid'${ageFilter}`,
         )
         // id is the deterministic tiebreak when two invoices share a created_at.
         .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
@@ -618,6 +627,41 @@ export function createB2bInvoiceRepo(db: DbOrTx) {
     async getInvoice(id: string): Promise<B2bInvoice | null> {
       const rows = await db.select().from(b2bInvoices).where(eq(b2bInvoices.id, id)).limit(1);
       return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /**
+     * Program-Fix 44 — the DURABLE duplicate-bill check: an open (unpaid, not
+     * older than `createdNotBefore`) bill from the SAME seller to the SAME buyer
+     * for the SAME obligation, tenant-scoped. create_invoice runs it before its
+     * 120 s Redis claim, so a duplicate is caught after the claim's TTL too. The
+     * amount compares as NUMERIC against the 2-dp string the write stored.
+     */
+    async findOpenTwin(q: {
+      partnerId: PartnerId;
+      sellerId: string;
+      buyerPhone: string;
+      invoicedAmount: number;
+      invoicedCurrency: CurrencyCode;
+      createdNotBefore: Date;
+    }): Promise<B2bInvoice | null> {
+      const phone = normalizePhone(q.buyerPhone);
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .where(
+          sql`${b2bInvoices.partnerId} = ${q.partnerId} AND ${b2bInvoices.sellerId} = ${q.sellerId} AND ${b2bInvoices.buyerPhone} = ${phone} AND ${b2bInvoices.invoicedAmount} = ${q.invoicedAmount.toFixed(2)}::numeric AND ${b2bInvoices.invoicedCurrency} = ${q.invoicedCurrency} AND ${b2bInvoices.status} = 'unpaid' AND ${b2bInvoices.createdAt} >= ${q.createdNotBefore.toISOString()}`,
+        )
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(1);
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+    /** Program-Fix 44 — every tenant's invoices, newest first (PLATFORM staff only; the caller gates). */
+    async listAllInvoices(limit = 500): Promise<B2bInvoice[]> {
+      const rows = await db
+        .select()
+        .from(b2bInvoices)
+        .orderBy(desc(b2bInvoices.createdAt), desc(b2bInvoices.id))
+        .limit(limit);
+      return rows.map(toDomain);
     },
     async listInvoices(partnerId: PartnerId): Promise<B2bInvoice[]> {
       const rows = await db
