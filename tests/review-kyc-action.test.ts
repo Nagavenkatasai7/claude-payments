@@ -64,7 +64,7 @@ describe('reviewKycAction', () => {
     expect(c?.kycReviewState).toBe('approved');
     expect(c?.kycApprovedBy).toBe('Main Admin (admin)'); // display name + stable username
     expect((await kcs.getAudit('default', PHONE)).at(-1)).toMatchObject({ action: 'review.approve', reason: 'docs clean' });
-    expect(notify).toHaveBeenCalledWith(PHONE, 'verified', undefined);
+    expect(notify).toHaveBeenCalledWith(PHONE, 'verified', undefined, undefined); // no BYO creds ⇒ shared number
   });
 
   it('reject → rejected + reason + customer notified', async () => {
@@ -73,7 +73,7 @@ describe('reviewKycAction', () => {
     const c = await cs.getCustomer('default', PHONE);
     expect(c?.kycStatus).toBe('rejected');
     expect(c?.kycRejectedReason).toBe('watchlist confirmed');
-    expect(notify).toHaveBeenCalledWith(PHONE, 'failed', undefined);
+    expect(notify).toHaveBeenCalledWith(PHONE, 'failed', undefined, undefined);
   });
 
   it('gate OFF ⇒ decision + audit stand but the customer is NOT messaged', async () => {
@@ -132,3 +132,13 @@ describe('reviewKycAction — durable audit row (Program-Fix 28)', () => {
     expect(await auditRows()).toEqual([]);
   });
 });
+
+describe('reviewKycAction — consent (Program-Fix 49A)', () => {
+  it('an opted-out customer: the decision + audit stand, but NO WhatsApp notice (nonessential)', async () => {
+    await seed({ optedOutAt: '2026-06-01T12:00:00.000Z' });
+    await reviewKycAction(form({ phone: PHONE, partnerId: 'default', decision: 'approve', reason: 'docs clean' }));
+    expect((await cs.getCustomer('default', PHONE))?.kycStatus).toBe('verified');
+    expect(notify).not.toHaveBeenCalled();
+  });
+});
+

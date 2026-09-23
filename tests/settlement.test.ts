@@ -206,13 +206,14 @@ async function stage1Payload(id: string): Promise<Record<string, unknown>> {
 }
 
 describe('stage-1 payloads never carry a secret (fix 11 / F49)', { retry: 0 }, () => {
-  it('beginSettlement: the stage-1 payload is exactly { to, body, partnerId } — the OWNING partner, no creds/token', async () => {
+  it('beginSettlement: the stage-1 payload is exactly { to, body, partnerId, category } — the OWNING partner, no creds/token', async () => {
     await store.saveTransfer(fixture());
     await beginSettlement(db, fixture(), SIMULATOR);
     const payload = await stage1Payload('st_t1');
     expect(payload.partnerId).toBe('acme');
     expect(payload.to).toBe('15551230000');
-    expect(Object.keys(payload).sort()).toEqual(['body', 'partnerId', 'to']);
+    expect(Object.keys(payload).sort()).toEqual(['body', 'category', 'partnerId', 'to']);
+    expect(payload.category).toBe('essential'); // Program-Fix 49A: survives STOP
     expect(JSON.stringify(payload)).not.toMatch(/creds|token/i);
   });
 
@@ -297,7 +298,8 @@ describe('beginHold — the transactional compliance hold', { retry: 0 }, () => 
     const payload = await stage1Payload('st_t1');
     expect(payload.partnerId).toBe('acme');
     expect(payload.to).toBe('15551230000');
-    expect(Object.keys(payload).sort()).toEqual(['body', 'partnerId', 'to']);
+    expect(Object.keys(payload).sort()).toEqual(['body', 'category', 'partnerId', 'to']);
+    expect(payload.category).toBe('essential'); // Program-Fix 49A: survives STOP
   });
 
   it("is idempotent: a second call returns { kind: 'already' } and enqueues nothing", async () => {

@@ -9,6 +9,8 @@ import { parsePersonaEvent } from '@/lib/providers/persona-webhook-parse';
 import { applyKycEvent } from '@/lib/kyc-state-machine';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { sendVerificationStatus } from '@/lib/whatsapp';
+import { optOutSuppresses } from '@/lib/consent-gate';
+import { partnerWaContext } from '@/lib/whatsapp-creds';
 
 /**
  * Persona webhook (Phase 2, Task 10) — the SOURCE OF TRUTH for KYC state.
@@ -80,11 +82,14 @@ export async function POST(req: NextRequest) {
   // Gated on sendGateActive: a gate-OFF partner's customers never hear about KYC.
   after(async () => {
     try {
-      if (sendGateActive(partner)) {
+      // Program-Fix 49A: a KYC nudge is nonessential (suppressed after STOP)
+      // and leaves from the owning partner's own number.
+      if (sendGateActive(partner) && !optOutSuppresses(customer, 'nonessential')) {
+        const { waCreds } = await partnerWaContext(customer.partnerId);
         if (nextState === 'inquiry_started') {
-          await sendVerificationStatus(phone, 'in_progress', customer.fullName);
+          await sendVerificationStatus(phone, 'in_progress', customer.fullName, waCreds);
         } else if (nextState === 'pending_review') {
-          await sendVerificationStatus(phone, 'received', customer.fullName);
+          await sendVerificationStatus(phone, 'received', customer.fullName, waCreds);
         }
       }
     } catch (err) {

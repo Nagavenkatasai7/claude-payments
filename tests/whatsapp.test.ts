@@ -51,10 +51,57 @@ describe('parseIncoming', () => {
     });
   });
 
-  it('returns null for a non-text message', () => {
-    const body = textWebhook();
-    body.entry[0].changes[0].value.messages[0].type = 'image';
-    expect(parseIncoming(body)).toBeNull();
+  // Program-Fix 49A (whatsapp-08): media is no longer dropped silently; it
+  // parses to 'unsupported' so the inbound pipeline can send an honest reply.
+  it.each(['image', 'audio', 'video', 'document', 'sticker', 'location', 'contacts'])(
+    '%s → { kind: "unsupported", mediaType }',
+    (type) => {
+      const body = textWebhook();
+      body.entry[0].changes[0].value.messages[0].type = type;
+      expect(parseIncoming(body)).toEqual({
+        kind: 'unsupported',
+        from: '15551234567',
+        mediaType: type,
+        messageId: 'wamid.ABC',
+      });
+    },
+  );
+
+  it('a reaction (and any unknown type) still parses to null', () => {
+    for (const type of ['reaction', 'system', 'mystery']) {
+      const body = textWebhook();
+      body.entry[0].changes[0].value.messages[0].type = type;
+      expect(parseIncoming(body)).toBeNull();
+    }
+  });
+
+  // Program-Fix 49A (whatsapp-10b): a template quick-reply ("type":"button")
+  // parses as TEXT so the STOP a marketing template offers reaches consent.
+  function quickReply(button: { payload?: string; text?: string }) {
+    return {
+      entry: [{ changes: [{ value: { messages: [
+        { type: 'button', from: '15551234567', id: 'wamid.QR', button },
+      ] } }] }],
+    };
+  }
+
+  it('quick-reply Unsubscribe parses as text', () => {
+    expect(parseIncoming(quickReply({ payload: 'Unsubscribe', text: 'Unsubscribe' }))).toEqual({
+      kind: 'text',
+      from: '15551234567',
+      text: 'Unsubscribe',
+      messageId: 'wamid.QR',
+    });
+  });
+
+  it('a quick-reply whose PAYLOAD is an opt-out keyword parses to that keyword, whatever the label says', () => {
+    const parsed = parseIncoming(quickReply({ payload: 'STOP', text: 'Stop promotions' }));
+    expect(parsed).toMatchObject({ kind: 'text', text: 'STOP' });
+  });
+
+  it('a quick-reply with only a payload uses the payload; with neither → null', () => {
+    expect(parseIncoming(quickReply({ payload: 'Yes please' }))).toMatchObject({ kind: 'text', text: 'Yes please' });
+    expect(parseIncoming(quickReply({}))).toBeNull();
   });
 
   it('returns null for an unrelated payload (e.g. status update)', () => {

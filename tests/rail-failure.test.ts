@@ -50,7 +50,7 @@ beforeEach(async () => {
 });
 
 describe('handleRailFailure — a PAID, CHARGED consumer row (the normal case)', () => {
-  it('ONE transaction: cancelled + refund pending, one refund:<id>, one railfailmsg:<id> ({to, body, partnerId} only), one railfail:<id>', async () => {
+  it('ONE transaction: cancelled + refund pending, one refund:<id>, one railfailmsg:<id> ({to, body, partnerId, category} only), one railfail:<id>', async () => {
     await store.saveTransfer(fixture());
     const r = await handleRailFailure(db, 'rf_t1', FAILED);
     expect(r).toEqual({ kind: 'failed', refundStarted: true });
@@ -67,7 +67,8 @@ describe('handleRailFailure — a PAID, CHARGED consumer row (the normal case)',
       ['ops.alert', 'railfail:rf_t1'],
     ]);
     expect(all[0].payload).toEqual({ transferId: 'rf_t1' });
-    expect(Object.keys(all[1].payload).sort()).toEqual(['body', 'partnerId', 'to']);
+    expect(Object.keys(all[1].payload).sort()).toEqual(['body', 'category', 'partnerId', 'to']);
+    expect(all[1].payload.category).toBe('essential'); // Program-Fix 49A: survives STOP
     expect(all[1].payload.to).toBe('15551230000');
     expect(all[1].payload.partnerId).toBe('acme');
     expect(String(all[1].payload.body)).toMatch(/refund/i);

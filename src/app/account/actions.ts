@@ -9,6 +9,9 @@ import { getPendingAuthStore } from '@/lib/pending-auth-store';
 import { getOnboardingTokenStore } from '@/lib/onboarding-token';
 import { isPwnedPassword } from '@/lib/pwned';
 import { sendOtpCode } from '@/lib/whatsapp';
+import { partnerWaContext, type PartnerWaContext } from '@/lib/whatsapp-creds';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import type { PartnerId } from '@/lib/types';
 import { logWarn } from '@/lib/log';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { getDb } from '@/db/client';
@@ -69,6 +72,22 @@ async function clientIp(): Promise<string> {
 }
 
 /**
+ * Program-Fix 49A: the WhatsApp identity an account OTP leaves from — the
+ * account row's owning partner (the shared number / default tenant when there
+ * is no single account row). Never throws: an OTP that arrives from the shared
+ * number beats one that never arrives.
+ */
+async function otpSendContext(phone: string): Promise<PartnerWaContext> {
+  let partnerId: PartnerId = DEFAULT_PARTNER_ID;
+  try {
+    partnerId = (await getCustomerAuthStore().getCustomer(phone))?.partnerId ?? DEFAULT_PARTNER_ID;
+  } catch {
+    // fall through to the default tenant
+  }
+  return partnerWaContext(partnerId);
+}
+
+/**
  * Issue + deliver an OTP for a (phone, purpose). Per-IP send cap blunts
  * number-rotation pumping; the OTP store owns the per-number caps + geo + daily
  * fail lock. Throttling is never a hard error (the UI advances; resend retries).
@@ -88,7 +107,10 @@ async function issueAndSend(phone: string, purpose: OtpPurpose, ip: string): Pro
     return;
   }
   try {
-    await sendOtpCode(phone, result.code);
+    // Program-Fix 49A (whatsapp-11): FROM the account's owning partner's number
+    // with its brand (fail-soft ⇒ the shared number + SmartRemit).
+    const { waCreds, brand } = await otpSendContext(phone);
+    await sendOtpCode(phone, result.code, waCreds, brand);
     await auth.recordOtpIp(ip);
   } catch (err) {
     // Delivery failure must NOT 500 the portal and the UI stays generic, but
