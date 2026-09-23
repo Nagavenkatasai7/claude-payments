@@ -44,9 +44,9 @@ describe('createWaitlistRepo.insertIfNew', () => {
     expect(await repo.insertIfNew(SIGNUP)).toBe(true);
 
     const [row] = await rawRows();
-    // Every PII column is a field-crypto v1 blob.
+    // Every PII column is a context-bound field-crypto v2 blob (Program-Fix 46B).
     for (const col of ['full_name_enc', 'email_enc', 'phone_enc', 'location_enc']) {
-      expect(row[col]).toMatch(/^v1\./);
+      expect(row[col]).toMatch(/^v2\.k0\./);
     }
     // Nothing in the raw row equals (or contains) a plaintext PII value.
     const dump = JSON.stringify(row);
@@ -124,7 +124,7 @@ describe('reads', () => {
       utmCampaign: undefined,
       createdAt: expect.any(String),
     });
-    expect(JSON.stringify(rows)).not.toMatch(/v1\.|Asha|asha\.patel|15551234567/);
+    expect(JSON.stringify(rows)).not.toMatch(/v[12]\.|Asha|asha\.patel|15551234567/);
   });
 
   it('countsByDestination counts each country across signups and the total', async () => {

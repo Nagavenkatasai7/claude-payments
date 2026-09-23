@@ -62,7 +62,7 @@ describe('registerCustomer', () => {
     // email is a ciphertext blob, not the plaintext
     expect(c.email).toBeTruthy();
     expect(c.email).not.toContain('a@example.com');
-    expect(decryptField(c.email!, crypto)).toBe('a@example.com');
+    expect(decryptField(c.email!, crypto, customerEmailCtx(c))).toBe('a@example.com');
     expect(await verifyPassword('correct horse battery', c.passwordHash!)).toBe(true);
 
     // persisted in the customer store
@@ -706,7 +706,7 @@ describe('registerCustomer email bound and storage context (fix 46A)', () => {
       { phone: PHONE, email, password: 'correct horse battery' },
       { pwnedCheck: neverPwned(), cryptoProvider: crypto },
     );
-    expect(decryptField(c.email!, crypto)).toBe(email);
+    expect(decryptField(c.email!, crypto, customerEmailCtx(c))).toBe(email);
   });
 
   it('seals the email for the row it lands in (existing tenant row) — v2 forced in-test', async () => {

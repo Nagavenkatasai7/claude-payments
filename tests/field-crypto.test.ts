@@ -9,6 +9,8 @@ import {
   __setFieldCryptoWriteV2ForTests,
   type EncryptionKeyProvider,
 } from '@/lib/field-crypto';
+import { ctx, outboxSealedCtx } from '@/lib/crypto-context';
+import { env } from '@/lib/env';
 
 // A fixed-key provider so tests never depend on env. Mirrors EnvKeyProvider's
 // AES-256-GCM wrap/unwrap but with a deterministic master key we control.
@@ -303,19 +305,26 @@ describe('field-crypto v2 (context-bound AAD)', () => {
     expect(decryptField(blob, p, { table: '', column: '', row: [] })).toBe('legacy');
   });
 
-  it('encryptField still writes v1 even when given a ctx (46A never writes v2)', () => {
-    const blob = encryptField('still v1', p, CTX);
-    expect(blob.startsWith('v1.')).toBe(true);
-    expect(blob.split('.')).toHaveLength(5);
-    expect(decryptField(blob, p, CTX)).toBe('still v1');
+  it('46B: encryptField writes v2 whenever it is given a ctx (no seam needed)', () => {
+    const blob = encryptField('now v2', p, CTX);
+    expect(blob.startsWith('v2.k0.')).toBe(true);
+    expect(blob.split('.')).toHaveLength(6);
+    expect(decryptField(blob, p, CTX)).toBe('now v2');
+    // Bound to its context: it does not open anywhere else.
+    expect(() => decryptField(blob, p, { ...CTX, column: 'date_of_birth_enc' })).toThrow();
   });
 
-  it('the test-only seam makes encryptField write v2 when a ctx is given', () => {
+  it('46B: encryptField without a ctx still writes v1 (nothing to bind; the src guard test forbids it)', () => {
+    const blob = encryptField('no ctx', p);
+    expect(blob.startsWith('v1.')).toBe(true);
+    expect(blob.split('.')).toHaveLength(5);
+  });
+
+  it('46B: the retired seam is a no-op in both directions (false never brings v1 back)', () => {
+    __setFieldCryptoWriteV2ForTests(false);
+    expect(encryptField('after false', p, CTX).startsWith('v2.k0.')).toBe(true);
     __setFieldCryptoWriteV2ForTests(true);
-    const blob = encryptField('seamed', p, CTX);
-    expect(blob.startsWith('v2.k0.')).toBe(true);
-    expect(decryptField(blob, p, CTX)).toBe('seamed');
-    // No ctx ⇒ the seam cannot bind anything, so it stays v1.
+    expect(encryptField('after true', p, CTX).startsWith('v2.k0.')).toBe(true);
     expect(encryptField('no ctx', p).startsWith('v1.')).toBe(true);
   });
 
@@ -342,5 +351,61 @@ describe('field-crypto v2 (context-bound AAD)', () => {
     ct[0] ^= 0x01;
     parts[5] = ct.toString('base64url');
     expect(() => decryptField(parts.join('.'), p, CTX)).toThrow();
+  });
+});
+
+
+// ── Program-Fix 46B: FIELD_CRYPTO_REJECT_V1 (reader switch, OFF by default) ──
+describe('field-crypto FIELD_CRYPTO_REJECT_V1', () => {
+  const p = fixedProvider(KEY_A);
+  const COLUMN = ctx.customer('acme', '15550001111', 'full_name_enc');
+  const legacy = () => encryptField('legacy', p); // no ctx ⇒ a v1 blob, as legacy rows are
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('flag unset (the default): a v1 blob opens under a column ctx and apply_link', () => {
+    vi.stubEnv('FIELD_CRYPTO_REJECT_V1', '');
+    expect(env.fieldCryptoRejectV1).toBe(false);
+    expect(decryptField(legacy(), p, COLUMN)).toBe('legacy');
+    expect(decryptField(legacy(), p, outboxSealedCtx('apply_link'))).toBe('legacy');
+  });
+
+  it('flag set to anything but "true" stays off', () => {
+    vi.stubEnv('FIELD_CRYPTO_REJECT_V1', '1');
+    expect(env.fieldCryptoRejectV1).toBe(false);
+    expect(decryptField(legacy(), p, COLUMN)).toBe('legacy');
+  });
+
+  it('flag on: v1 is refused for a column ctx and for outbox apply_link', () => {
+    vi.stubEnv('FIELD_CRYPTO_REJECT_V1', 'true');
+    expect(env.fieldCryptoRejectV1).toBe(true);
+    expect(() => decryptField(legacy(), p, COLUMN)).toThrow(/v1/);
+    expect(() => decryptField(legacy(), p, ctx.integration('acme', 'wa_app_secret_enc'))).toThrow(/v1/);
+    expect(() => decryptField(legacy(), p, outboxSealedCtx('apply_link'))).toThrow(/v1/);
+  });
+
+  it('flag on: v1 is still accepted for the permanent exemptions (staffMfa, customer_ref)', () => {
+    vi.stubEnv('FIELD_CRYPTO_REJECT_V1', 'true');
+    expect(decryptField(legacy(), p, ctx.staffMfa('seed-admin'))).toBe('legacy');
+    expect(decryptField(legacy(), p, ctx.purpose('customer_ref'))).toBe('legacy');
+  });
+
+  it('flag on: v2 blobs are unaffected', () => {
+    vi.stubEnv('FIELD_CRYPTO_REJECT_V1', 'true');
+    const blob = encryptField('fresh', p, COLUMN);
+    expect(decryptField(blob, p, COLUMN)).toBe('fresh');
+  });
+
+  it('flag on: the refusal never echoes the row key', () => {
+    vi.stubEnv('FIELD_CRYPTO_REJECT_V1', 'true');
+    let msg = '';
+    try {
+      decryptField(legacy(), p, COLUMN);
+    } catch (err) {
+      msg = String(err instanceof Error ? err.message : err);
+    }
+    expect(msg).not.toBe('');
+    expect(msg).not.toContain('1555000');
+    expect(msg).not.toContain('acme');
   });
 });

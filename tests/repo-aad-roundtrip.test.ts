@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { freshDb, seedPartner } from './helpers-db';
 import type { Db } from '@/db/client';
@@ -14,16 +14,18 @@ import {
   decryptField,
   encryptField,
   defaultProvider,
-  __setFieldCryptoWriteV2ForTests,
 } from '@/lib/field-crypto';
-import { customerEmailCtx, ctx } from '@/lib/crypto-context';
+import { customerEmailCtx, ctx, outboxSealedCtx } from '@/lib/crypto-context';
+import { renderSealedText } from '@/lib/sealed-text';
+import { openCustomerRef, sealCustomerRef } from '@/lib/customer-ref';
 import type { Customer, Schedule, Transfer } from '@/lib/types';
 
-// Program-Fix 46A — for EVERY table in the brief's §4, a repo-level
-// "write with v2 on → read back equal" round trip. v2 writes are switched on
-// ONLY here, through the test-only seam; production 46A still writes v1. Each
-// case first asserts the stored column starts with `v2.`: that is what proves
-// the write side threaded a context (a silent v1 fallback would still round-trip).
+// Program-Fix 46A/46B — for EVERY table in the brief's §4, a repo-level
+// "write → read back equal" round trip. Since 46B the production writer seals
+// v2 by DEFAULT: nothing here switches it on (the 46A test-only seam is retired
+// and never called). Each case first asserts the stored column starts with
+// `v2.`: that proves the write side threaded a context (a silent v1 fallback
+// would still round-trip).
 
 const provider = new EnvKeyProvider(Buffer.alloc(32, 7));
 const now = '2026-06-09T12:00:00.000Z';
@@ -31,9 +33,7 @@ let db: Db;
 
 beforeEach(async () => {
   db = await freshDb();
-  __setFieldCryptoWriteV2ForTests(true);
 });
-afterEach(() => __setFieldCryptoWriteV2ForTests(false));
 
 async function raw(query: string): Promise<Record<string, string | null>[]> {
   const res = await db.execute(sql.raw(query));
@@ -85,7 +85,7 @@ const customerFixture = (over: Partial<Customer> = {}): Customer => ({
   ...over,
 });
 
-describe('repo AAD v2 round trips (every table, v2 forced in-test)', { retry: 0 }, () => {
+describe('repo AAD v2 round trips (every table, v2 is the default writer)', { retry: 0 }, () => {
   it('transfers: 4 columns via transferToRow → decrypted read', async () => {
     const repo = createTransferRepo(db, provider);
     await repo.saveTransfer(
@@ -263,5 +263,30 @@ describe('repo AAD v2 round trips (every table, v2 forced in-test)', { retry: 0 
     // Sanity: the pinned context is what the acme row was sealed under.
     const [row] = await raw(`SELECT wa_app_secret_enc FROM partner_integrations WHERE partner_id = 'acme'`);
     expect(decryptField(row.wa_app_secret_enc!, provider, ctx.integration('acme', 'wa_app_secret_enc'))).toBe('secret-a');
+  });
+  it('customers: setFullNameIfUnset (#335 set-once writer) → getCustomer and resolveSenderNames', async () => {
+    await seedPartner(db, 'acme');
+    const repo = createCustomerRepo(db, async () => null, provider);
+    await repo.saveCustomer(customerFixture({ partnerId: 'acme', fullName: undefined }));
+    expect(await repo.setFullNameIfUnset('acme', '15551230000', 'Asha Patel')).toBe(true);
+    const [row] = await raw(`SELECT full_name_enc FROM customers`);
+    expect(row.full_name_enc).toMatch(/^v2\.k0\./);
+    expect((await repo.getCustomer('acme', '15551230000'))!.fullName).toBe('Asha Patel');
+    const names = await resolveSenderNames(db, [{ partnerId: 'acme', phone: '15551230000' }], { provider });
+    expect(names.get(senderNameKey('acme', '15551230000'))).toBe('Asha Patel');
+  });
+
+  it('outbox apply_link: sealed with outboxSealedCtx → renderSealedText opens it', () => {
+    const blob = encryptField('https://example.test/partners/apply/tok', undefined, outboxSealedCtx('apply_link'));
+    expect(blob).toMatch(/^v2\.k0\./);
+    expect(renderSealedText('Apply: {{apply_link}}', { apply_link: blob })).toBe(
+      'Apply: https://example.test/partners/apply/tok',
+    );
+  });
+
+  it('customer_ref: sealCustomerRef writes v2 → openCustomerRef opens it', () => {
+    const ref = sealCustomerRef('acme', '15551230000');
+    expect(ref).toMatch(/^v2\.k0\./);
+    expect(openCustomerRef(ref)).toEqual({ partnerId: 'acme', phone: '15551230000' });
   });
 });

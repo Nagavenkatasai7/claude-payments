@@ -108,7 +108,7 @@ describe('updateEmailAction', () => {
       'REDIRECT:/account/settings?err=email',
     );
     const customer = await customerStore.getCustomer('default', NORM);
-    expect(decryptField(customer!.email!, crypto)).toBe('a@example.com');
+    expect(decryptField(customer!.email!, crypto, customerEmailCtx(customer!))).toBe('a@example.com');
   });
 
   it('encrypts + saves a valid email without touching credentials', async () => {
@@ -118,7 +118,7 @@ describe('updateEmailAction', () => {
     const customer = await customerStore.getCustomer('default', NORM);
     // Stored as a field-crypto blob, never plaintext.
     expect(customer!.email).not.toContain('new@example.com');
-    expect(decryptField(customer!.email!, crypto)).toBe('new@example.com');
+    expect(decryptField(customer!.email!, crypto, customerEmailCtx(customer!))).toBe('new@example.com');
     // The password is untouched.
     expect(await authStore.verifyCustomerPassword(NORM, PASSWORD)).toBeTruthy();
   });
