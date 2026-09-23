@@ -64,7 +64,18 @@ export function applyKycEvent(
     case 'inquiry.created':
     case 'inquiry.started':
       delta.kycReviewState = 'inquiry_started';
-      if (!customer.kycSubmittedAt) delta.kycSubmittedAt = nowIso;
+      // Program-Fix 48: stamp the submission time only while the customer is at
+      // or before inquiry_started. A late started/created after pending_review
+      // has its state change dropped by the rank guard below; the timestamp
+      // must not leak through on its own.
+      if (
+        !customer.kycSubmittedAt &&
+        (!customer.kycReviewState ||
+          customer.kycReviewState === 'none' ||
+          customer.kycReviewState === 'inquiry_started')
+      ) {
+        delta.kycSubmittedAt = nowIso;
+      }
       break;
     case 'inquiry.completed':
     case 'inquiry.approved':

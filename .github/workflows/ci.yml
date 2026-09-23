@@ -92,6 +92,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Program-Fix 40: fail on a tracked iCloud duplicate ("page 3.tsx", "dir 2/").
+      - name: No tracked iCloud duplicates
+        run: node scripts/check-icloud-dups.mjs
+
   # The Vitest suite in 4 shards. `--shard=i/4` sorts the test files by a hash
   # of their path and runs slice i, so the 4 shards together run every file
   # exactly once (vitest 3.2.6, BaseSequencer.shard in

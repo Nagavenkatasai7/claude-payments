@@ -76,7 +76,7 @@ beforeEach(async () => {
   failAudit = false;
 });
 
-describe('beginSettlement — webhook-driven rail (http/simulator)', () => {
+describe('beginSettlement — webhook-driven rail (http/simulator)', { retry: 0 }, () => {
   it('ONE transaction: flips paid + enqueues the stage-1 message AND the signed instruct', async () => {
     await store.saveTransfer(fixture());
     const r = await beginSettlement(db, fixture(), SIMULATOR);
@@ -111,7 +111,7 @@ describe('beginSettlement — webhook-driven rail (http/simulator)', () => {
   });
 });
 
-describe('beginSettlement — mock rail (default partner sandbox)', () => {
+describe('beginSettlement — mock rail (default partner sandbox)', { retry: 0 }, () => {
   it('flips paid + enqueues the DELAYED mock settle + sets the deterministic providerRef', async () => {
     await store.saveTransfer(fixture());
     const r = await beginSettlement(db, fixture(), MOCK);
@@ -132,7 +132,7 @@ describe('beginSettlement — mock rail (default partner sandbox)', () => {
   });
 });
 
-describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3)', () => {
+describe('transfer-repo — hold claim + ledger-gated paid claim (Phase 1 Task 3)', { retry: 0 }, () => {
   it('markInReviewIfAwaiting: ONE guarded UPDATE flips awaiting_payment → in_review and sets paidAt', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     const held = await createTransferRepo(db).markInReviewIfAwaiting('st_t1');
@@ -205,7 +205,7 @@ async function stage1Payload(id: string): Promise<Record<string, unknown>> {
   return (r as unknown as { rows: Array<{ payload: Record<string, unknown> }> }).rows[0].payload;
 }
 
-describe('stage-1 payloads never carry a secret (fix 11 / F49)', () => {
+describe('stage-1 payloads never carry a secret (fix 11 / F49)', { retry: 0 }, () => {
   it('beginSettlement: the stage-1 payload is exactly { to, body, partnerId } — the OWNING partner, no creds/token', async () => {
     await store.saveTransfer(fixture());
     await beginSettlement(db, fixture(), SIMULATOR);
@@ -249,7 +249,7 @@ async function stage1Body(id: string): Promise<string | null> {
   return (r as unknown as { rows: Array<{ body: string }> }).rows[0]?.body ?? null;
 }
 
-describe('beginSettlement — compliance gate (only cleared money reaches a rail)', () => {
+describe('beginSettlement — compliance gate (only cleared money reaches a rail)', { retry: 0 }, () => {
   it('REFUSES a flagged transfer: status stays awaiting_payment, ZERO outbox rows (no stage1, no settlement.instruct)', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     const r = await beginSettlement(db, { ...fixture(), complianceStatus: 'flagged' }, SIMULATOR);
@@ -274,7 +274,7 @@ describe('beginSettlement — compliance gate (only cleared money reaches a rail
   });
 });
 
-describe('beginHold — the transactional compliance hold', () => {
+describe('beginHold — the transactional compliance hold', { retry: 0 }, () => {
   it('ONE transaction: flips awaiting_payment → in_review, sets paidAt, enqueues exactly one stage1:<id> row and NO rail effect', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     const r = await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });
@@ -319,7 +319,7 @@ describe('beginHold — the transactional compliance hold', () => {
   });
 });
 
-describe('settleOrHold — the ONE decision every settlement caller goes through', () => {
+describe('settleOrHold — the ONE decision every settlement caller goes through', { retry: 0 }, () => {
   it('cleared → started (settlement, rail effect enqueued)', async () => {
     await store.saveTransfer(fixture());
     expect(await settleOrHold(db, fixture(), SIMULATOR)).toEqual({ kind: 'started', webhookDriven: true });
@@ -353,7 +353,7 @@ describe('settleOrHold — the ONE decision every settlement caller goes through
   });
 });
 
-describe('releaseHold — the staff release IS a settlement (in_review → paid + the rail effect, one transaction)', () => {
+describe('releaseHold — the staff release IS a settlement (in_review → paid + the rail effect, one transaction)', { retry: 0 }, () => {
   it('webhook-driven rail: flips in_review → paid, keeps complianceStatus flagged, restarts paidAt at the release, enqueues instruct:<id> and NO second stage-1 message', async () => {
     await store.saveTransfer({ ...fixture(), complianceStatus: 'flagged' });
     await beginHold(db, { ...fixture(), complianceStatus: 'flagged' });

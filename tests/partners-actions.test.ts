@@ -514,6 +514,7 @@ describe('WhatsApp number routing is identity (fix 1, D11)', () => {
     await seedPartner(db, 'beta'); // 'gamma' is never seeded: the wizard mints its own id and must refuse BEFORE savePartner
     integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))); // same key as the mocked getPartnerIntegrationsStore
   });
+  afterEach(() => vi.unstubAllGlobals());
 
   it('a partner-scoped admin cannot store the PLATFORM phone_number_id', async () => {
     currentStaff = staff({ role: 'admin', partnerId: 'acme' });
@@ -527,9 +528,13 @@ describe('WhatsApp number routing is identity (fix 1, D11)', () => {
     currentStaff = staff({ role: 'admin', partnerId: 'beta' });
     await expect(saveWhatsappConfigAction(form({ id: 'beta', phoneNumberId: 'pn_acme' }))).rejects.toThrow('That WhatsApp number cannot be used.');
     expect((await integrations.getIntegrations('beta')).whatsapp.phoneNumberId).toBeUndefined();
-    // Re-saving your OWN number is fine (idempotent edit of the same row).
+    // Re-saving your OWN number is fine (idempotent edit of the same row) —
+    // and, unchanged pnid + no new token, it is grandfathered: no Graph call (fix 30).
+    const graph = vi.fn();
+    vi.stubGlobal('fetch', graph);
     currentStaff = staff({ role: 'admin', partnerId: 'acme' });
     await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: 'pn_acme' }))).resolves.toBeUndefined();
+    expect(graph).not.toHaveBeenCalled();
   });
 
   it('the wizard applies the same refusal', async () => {
@@ -552,15 +557,163 @@ describe('WhatsApp number routing is identity (fix 1, D11)', () => {
   it('a RACE on the same pnid leaves no orphan partner: the loser is refused with the generic message and nothing it wrote survives (review item 3)', async () => {
     currentStaff = staff({ role: 'admin' }); // platform staff
     const before = (await ps.listPartners()).length;
+    // Fix 30: both racers prove ownership (Graph stub echoes the pnid), so the
+    // unique index — not the ownership check — decides the race.
+    const PN_RACE = '1234567890123';
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ id: PN_RACE }), { status: 200 })));
     const results = await Promise.allSettled([
-      wizardCreatePartnerAction({ name: 'Racer One', countries: ['US'], whatsapp: { phoneNumberId: 'pn_race', token: 't1' } }),
-      wizardCreatePartnerAction({ name: 'Racer Two', countries: ['US'], whatsapp: { phoneNumberId: 'pn_race', token: 't2' } }),
+      wizardCreatePartnerAction({ name: 'Racer One', countries: ['US'], whatsapp: { phoneNumberId: PN_RACE, token: 't1' } }),
+      wizardCreatePartnerAction({ name: 'Racer Two', countries: ['US'], whatsapp: { phoneNumberId: PN_RACE, token: 't2' } }),
     ]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     expect(rejected).toHaveLength(1);
     expect((rejected[0].reason as Error).message).toBe('That WhatsApp number cannot be used.');
     expect((await ps.listPartners()).length).toBe(before + 1); // no orphan ACTIVE partner from the loser
+  });
+});
+
+describe('WhatsApp number ownership is proven with Meta before it is stored (fix 30, F64)', () => {
+  const PN = '1234567890123';
+  const REFUSED = 'That WhatsApp number could not be verified with this access token.';
+  const form = (values: Record<string, string>): FormData => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(values)) fd.set(k, v);
+    return fd;
+  };
+  const graphOk = (id: string) => vi.fn(async () => new Response(JSON.stringify({ id }), { status: 200 }));
+  let integrations: ReturnType<typeof createPartnerIntegrationsStore>;
+  beforeEach(async () => {
+    await seedPartner(db, 'acme');
+    integrations = createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7)));
+    currentStaff = { username: 'u', role: 'admin', partnerId: 'acme' };
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('a new pnid with a token that Meta confirms is saved (one Graph call, Bearer token)', async () => {
+    const graph = graphOk(PN);
+    vi.stubGlobal('fetch', graph);
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-good' }));
+    expect(graph).toHaveBeenCalledTimes(1);
+    const [url, init] = graph.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain(`/v21.0/${PN}?`);
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer EAA-good');
+    const got = (await integrations.getIntegrations('acme')).whatsapp;
+    expect(got.phoneNumberId).toBe(PN);
+    expect(got.token).toBe('EAA-good');
+  });
+
+  it('an id mismatch or a 401 is refused with ONE generic message and nothing is written', async () => {
+    for (const graph of [
+      graphOk('9999999999'),
+      vi.fn(async () => new Response('{"error":{}}', { status: 401 })),
+    ]) {
+      vi.stubGlobal('fetch', graph);
+      const err = await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', verifyToken: 'v' })).catch((e: Error) => e);
+      expect((err as Error).message).toBe(REFUSED);
+      expect((err as Error).message).not.toContain(PN);
+      const got = (await integrations.getIntegrations('acme')).whatsapp;
+      expect(got.phoneNumberId).toBeUndefined();
+      expect(got.token).toBeUndefined();
+      expect(got.verifyToken).toBeUndefined();
+    }
+  });
+
+  it('a refusal logs partnerId + status only — never the token, never the pnid', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-secret-tok' }))).rejects.toThrow(REFUSED);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('wa.pnid_verify_failed'));
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(lines[0]) as Record<string, unknown>;
+    expect(line.partnerId).toBe('acme');
+    expect(line.status).toBe('401');
+    expect(lines[0]).not.toContain('EAA-secret-tok');
+    expect(lines[0]).not.toContain(PN);
+    warn.mockRestore();
+  });
+
+  it('a new pnid with NO token (none submitted, none stored) is refused without calling Meta', async () => {
+    const graph = vi.fn();
+    vi.stubGlobal('fetch', graph);
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN }))).rejects.toThrow(REFUSED);
+    expect(graph).not.toHaveBeenCalled();
+    expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBeUndefined();
+  });
+
+  it('a new pnid with only a STORED token is verified with that stored token', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { token: 'EAA-stored' } });
+    const graph = graphOk(PN);
+    vi.stubGlobal('fetch', graph);
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN }));
+    const [, init] = graph.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer EAA-stored');
+    expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBe(PN);
+  });
+
+  it('an unchanged pnid with a verify-token-only edit makes no Graph call (grandfathered)', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-stored' } });
+    const graph = vi.fn();
+    vi.stubGlobal('fetch', graph);
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, verifyToken: 'new-verify' }));
+    expect(graph).not.toHaveBeenCalled();
+    expect((await integrations.getIntegrations('acme')).whatsapp.verifyToken).toBe('new-verify');
+  });
+
+  it('a NEW token on an unchanged pnid is re-verified; a failure keeps the old token', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-stored' } });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-other' }))).rejects.toThrow(REFUSED);
+    expect((await integrations.getIntegrations('acme')).whatsapp.token).toBe('EAA-stored');
+  });
+
+  it('clearing the pnid needs no verification', async () => {
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-stored' } });
+    const graph = vi.fn();
+    vi.stubGlobal('fetch', graph);
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: '' }));
+    expect(graph).not.toHaveBeenCalled();
+    expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBeUndefined();
+  });
+
+  it('an optional WABA id is checked (phone_numbers must list the pnid) and never persisted', async () => {
+    const graph = vi.fn(async (url: string) =>
+      new Response(JSON.stringify(url.includes('/phone_numbers') ? { data: [{ id: '42424242' }] } : { id: PN }), { status: 200 }));
+    vi.stubGlobal('fetch', graph);
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', wabaId: '987654321' }))).rejects.toThrow(REFUSED);
+    expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBeUndefined();
+    graph.mockImplementation(async (url: string) =>
+      new Response(JSON.stringify(url.includes('/phone_numbers') ? { data: [{ id: PN }] } : { id: PN }), { status: 200 }));
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', wabaId: '987654321' }));
+    const wa = (await integrations.getIntegrations('acme')).whatsapp as Record<string, unknown>;
+    expect(wa.phoneNumberId).toBe(PN);
+    expect(wa).not.toHaveProperty('wabaId');
+  });
+
+  it('the wizard refuses an unverifiable pnid BEFORE the transaction (no partner row)', async () => {
+    currentStaff = { username: 'admin', role: 'admin' };
+    const before = (await ps.listPartners()).length;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
+    await expect(wizardCreatePartnerAction({ name: 'Squat', countries: ['US'], whatsapp: { phoneNumberId: PN, token: 'EAA-x' } })).rejects.toThrow(REFUSED);
+    expect((await ps.listPartners()).length).toBe(before);
+  });
+
+  it('the wizard refuses a pnid with NO token (it used to store one) — no Graph call, no partner row', async () => {
+    currentStaff = { username: 'admin', role: 'admin' };
+    const before = (await ps.listPartners()).length;
+    const graph = vi.fn();
+    vi.stubGlobal('fetch', graph);
+    await expect(wizardCreatePartnerAction({ name: 'NoTok', countries: ['US'], whatsapp: { phoneNumberId: PN } })).rejects.toThrow(REFUSED);
+    expect(graph).not.toHaveBeenCalled();
+    expect((await ps.listPartners()).length).toBe(before);
+  });
+
+  it('the wizard saves a verified pnid', async () => {
+    currentStaff = { username: 'admin', role: 'admin' };
+    vi.stubGlobal('fetch', graphOk(PN));
+    const r = await wizardCreatePartnerAction({ name: 'Real', countries: ['US'], whatsapp: { phoneNumberId: PN, token: 'EAA-x', wabaId: undefined } });
+    expect(r.whatsappConfigured).toBe(true);
+    expect((await integrations.getIntegrations(r.id)).whatsapp.phoneNumberId).toBe(PN);
   });
 });
 
