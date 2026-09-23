@@ -67,6 +67,17 @@ export async function pwnedPasswordStatus(
   fetchImpl: typeof fetch = globalThis.fetch,
   timeoutMs: number = PWNED_TIMEOUT_MS,
 ): Promise<PwnedStatus> {
+  // One retry on an outage (a transient 5xx, a reset socket, a slow answer), so
+  // a single blip does not refuse a fail-closed staff create or reset.
+  const first = await pwnedStatusOnce(password, fetchImpl, timeoutMs);
+  return first === 'unavailable' ? pwnedStatusOnce(password, fetchImpl, timeoutMs) : first;
+}
+
+async function pwnedStatusOnce(
+  password: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<PwnedStatus> {
   try {
     const sha1 = createHash('sha1').update(password).digest('hex').toUpperCase();
     const prefix = sha1.slice(0, 5);

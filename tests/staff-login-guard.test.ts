@@ -80,6 +80,17 @@ describe('reserve (staff-login-guard)', () => {
     expect((await guard.reserve('admin', '9.9.9.9', { seedExempt: true })).allowed).toBe(false);
   });
 
+  it("an 'unknown' client IP never touches the shared per-IP bucket (one bucket would lock out everyone behind it)", async () => {
+    const { guard, redis } = mk();
+    for (let i = 0; i < STAFF_IP_CAP + 5; i++) {
+      expect((await guard.reserve(`user${i}`, 'unknown')).allowed).toBe(true);
+    }
+    expect(redis.dump.has(staffLoginKeys.ip('unknown', T0))).toBe(false);
+    // The per-username buckets still apply.
+    for (let i = 0; i < STAFF_UI_CAP; i++) await guard.reserve('ops', 'unknown');
+    expect((await guard.reserve('ops', 'unknown')).allowed).toBe(false);
+  });
+
   it('arms the TTL on the first write of each bucket only', async () => {
     const { guard, redis } = mk();
     const expire = vi.spyOn(redis, 'expire');

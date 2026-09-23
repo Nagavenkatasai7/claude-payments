@@ -67,6 +67,23 @@ async function audit(
   });
 }
 
+/**
+ * Program-Fix 17a: only the seed admin may act on the seed admin's username
+ * (create, edit, suspend, remove, reset). Otherwise another admin could
+ * demote the owner account out of its lockout exemption, or remove and
+ * re-create it to take the exemption over.
+ */
+function mayTargetSeed(actor: Staff, targetUsername: string): boolean {
+  const seed = seedAdminUsername();
+  return seed === '' || targetUsername !== seed || actor.username === seed;
+}
+
+function assertMayTargetSeed(actor: Staff, targetUsername: string): void {
+  if (!mayTargetSeed(actor, targetUsername)) {
+    throw new Error('Only the main admin can change the main admin account.');
+  }
+}
+
 function scopeLabel(partnerId?: string): string {
   return partnerId ? `partner ${partnerId}` : 'platform';
 }
@@ -83,6 +100,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
   if (!username || !name || !password) {
     throw new Error('Name, username, and password are all required.');
   }
+  assertMayTargetSeed(actor, username);
   if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
   // Program-Fix 17a: 12..128 characters + breach check, FAIL-CLOSED on an HIBP
   // outage (a create never lands a possibly-breached password). New passwords
@@ -130,6 +148,7 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
   const store = getAuthStore();
   const target = await store.getStaff(username);
   if (!target) throw new Error('Staff member not found.');
+  assertMayTargetSeed(actor, target.username);
 
   let partnerId: string | undefined;
   if (partnerField) {
@@ -171,6 +190,7 @@ export async function setStaffStatusAction(formData: FormData): Promise<void> {
   const store = getAuthStore();
   const target = await store.getStaff(username);
   if (!target) throw new Error('Staff member not found.');
+  assertMayTargetSeed(actor, target.username);
 
   if (status === 'suspended') {
     if (target.username === actor.username) {
@@ -199,6 +219,7 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
   const store = getAuthStore();
   const target = await store.getStaff(username);
   if (!target) return;
+  assertMayTargetSeed(actor, target.username);
 
   if (target.username === actor.username) {
     throw new Error('You cannot remove your own account.');
@@ -344,8 +365,7 @@ export async function resetStaffPasswordAction(
   if (target.username === actor.username) {
     return { ok: false, message: 'Change your own password from your Account page.' };
   }
-  const seed = seedAdminUsername();
-  if (seed !== '' && target.username === seed && actor.username !== seed) {
+  if (!mayTargetSeed(actor, target.username)) {
     return { ok: false, message: 'Only the main admin can reset the main admin password.' };
   }
   try {

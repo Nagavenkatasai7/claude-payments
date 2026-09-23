@@ -94,6 +94,19 @@ describe('pwnedPasswordStatus (tri-state, used fail-closed by staff create/reset
     });
     expect(await pwnedPasswordStatus(pw, boom as unknown as typeof fetch)).toBe('unavailable');
   });
+  it('retries ONCE on an outage: a transient 503 then a clean answer is clean', async () => {
+    const f = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('x', { status: 503 }))
+      .mockResolvedValueOnce(new Response('ABC:1'));
+    expect(await pwnedPasswordStatus(pw, f as unknown as typeof fetch)).toBe('clean');
+    expect(f).toHaveBeenCalledTimes(2);
+  });
+  it('a persistent outage is unavailable after exactly two calls', async () => {
+    const f = vi.fn(async () => new Response('x', { status: 503 }));
+    expect(await pwnedPasswordStatus(pw, f as unknown as typeof fetch)).toBe('unavailable');
+    expect(f).toHaveBeenCalledTimes(2);
+  });
   it('passes an abort signal so a hung HIBP call is bounded', async () => {
     const f = vi.fn(async (_url: string, init?: RequestInit) => {
       expect(init?.signal).toBeInstanceOf(AbortSignal);

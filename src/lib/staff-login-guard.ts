@@ -17,6 +17,7 @@ import type { Staff } from './types';
  *   ui  `staff_lf:ui:<sha(user)>:<sha(ip)>:<hour>`  10 per (username, IP) per hour
  *   u   `staff_lf:u:<sha(user)>:<day>`              30 per username per day, all IPs
  *   ip  `staff_lf:ip:<sha(ip)>:<hour>`              50 per IP per hour, all usernames
+ *                                                   (skipped for an 'unknown' IP)
  *
  * The SEED ADMIN (see isSeedAdminRecord) is reserved against `ui` ONLY: no
  * all-IP username cap and no per-IP cap can ever lock it out, so a flood from
@@ -111,10 +112,13 @@ export function createStaffLoginGuard(redis: RedisLike, opts: StaffLoginGuardOpt
         { bucket: 'ui', key: staffLoginKeys.ui(username, ip, t), cap: STAFF_UI_CAP, ttl: HOUR_BUCKET_TTL_S },
       ];
       if (!reserveOpts.seedExempt) {
-        plan.push(
-          { bucket: 'u', key: staffLoginKeys.u(username, t), cap: STAFF_U_CAP, ttl: DAY_BUCKET_TTL_S },
-          { bucket: 'ip', key: staffLoginKeys.ip(ip, t), cap: STAFF_IP_CAP, ttl: HOUR_BUCKET_TTL_S },
-        );
+        plan.push({ bucket: 'u', key: staffLoginKeys.u(username, t), cap: STAFF_U_CAP, ttl: DAY_BUCKET_TTL_S });
+        // No per-IP bucket for an unknown client IP (no forwarded header): one
+        // shared 'unknown' bucket would lock out everyone behind such a proxy.
+        // Same rule as ip-rate-limit.isIpRateLimited. The username buckets hold.
+        if (ip !== 'unknown') {
+          plan.push({ bucket: 'ip', key: staffLoginKeys.ip(ip, t), cap: STAFF_IP_CAP, ttl: HOUR_BUCKET_TTL_S });
+        }
       }
       for (const step of plan) {
         const n = await bump(step.key, step.ttl);

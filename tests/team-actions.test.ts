@@ -413,3 +413,54 @@ describe('changeOwnPasswordAction', () => {
     expect((await authStore.getStaff('mem'))!.passwordHash).toBe(racedHash);
   });
 });
+
+describe('the seed admin record is guarded like reset (Program-Fix 17a follow-up)', () => {
+  // tests/setup.ts: SEED_ADMIN_USERNAME ||= 'admin'. boss (the actor) is a
+  // second platform admin, so the last-platform-admin guards never fire here.
+  async function seedAdminRecord() {
+    await authStore.saveStaff(staff({ username: 'admin', name: 'Main', role: 'admin' }));
+  }
+
+  it('a non-seed admin cannot demote or re-scope the seed record', async () => {
+    await seedAdminRecord();
+    await expect(updateStaffAction(form({ username: 'admin', role: 'agent' }))).rejects.toThrow(/main admin/i);
+    await partnerStore.savePartner({
+      id: 'acme', name: 'Acme', countries: ['US'], status: 'active',
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+    });
+    await expect(updateStaffAction(form({ username: 'admin', role: 'admin', partnerId: 'acme' }))).rejects.toThrow(/main admin/i);
+    const got = (await authStore.getStaff('admin'))!;
+    expect(got.role).toBe('admin');
+    expect(got.partnerId).toBeUndefined();
+  });
+
+  it('a non-seed admin cannot suspend or remove the seed record', async () => {
+    await seedAdminRecord();
+    await expect(setStaffStatusAction(form({ username: 'admin', status: 'suspended' }))).rejects.toThrow(/main admin/i);
+    await expect(removeStaffAction(form({ username: 'admin' }))).rejects.toThrow(/main admin/i);
+    expect((await authStore.getStaff('admin'))?.status).not.toBe('suspended');
+  });
+
+  it('a non-seed admin cannot create an account under the seed username (remove-and-recreate)', async () => {
+    await expect(
+      createStaffAction(form({ username: 'admin', name: 'Impostor', password: 'a-long-password-1', role: 'admin' })),
+    ).rejects.toThrow(/main admin/i);
+    expect(await authStore.getStaff('admin')).toBeNull();
+  });
+
+  it('the seed admin itself may still edit its own role guardrails as before, and manage others', async () => {
+    await seedAdminRecord();
+    actor = (await authStore.getStaff('admin'))!;
+    await authStore.saveStaff(staff({ username: 'a2', role: 'agent' }));
+    await updateStaffAction(form({ username: 'a2', role: 'agent', canResend: 'on' }));
+    expect((await authStore.getStaff('a2'))?.permissions.canResend).toBe(true);
+    await removeStaffAction(form({ username: 'a2' }));
+    expect(await authStore.getStaff('a2')).toBeNull();
+  });
+
+  it('other accounts are unaffected by the guard', async () => {
+    await authStore.saveStaff(staff({ username: 'a3', role: 'agent' }));
+    await setStaffStatusAction(form({ username: 'a3', status: 'suspended' }));
+    expect((await authStore.getStaff('a3'))?.status).toBe('suspended');
+  });
+});
