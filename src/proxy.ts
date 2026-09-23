@@ -10,7 +10,7 @@ import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 /** /account sub-paths that must stay PUBLIC (they ARE the auth entry points). */
 const PUBLIC_ACCOUNT_PATHS = ['/account/login', '/account/register', '/account/reset', '/account/verify'];
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (pathname === '/account' || pathname.startsWith('/account/')) {

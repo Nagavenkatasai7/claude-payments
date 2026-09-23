@@ -23,7 +23,7 @@ import { randomBytes } from 'node:crypto';
  * cannot occur: 128 bits = 21 sextets + 2 bits, so the 22nd character is
  * always one of `A`, `Q`, `g`, `w`.
  *
- * Node.js runtime only (`node:crypto`): never import from `src/middleware.ts`.
+ * Node.js runtime only (`node:crypto`): never import from `src/proxy.ts`.
  */
 export function newTransferId(): string {
   let id: string;
