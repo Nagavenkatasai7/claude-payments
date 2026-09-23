@@ -252,8 +252,9 @@ export function createStore(redis: RedisLike, db: Db) {
       return transfersRepo.cancelIfCancellable(id, partnerId);
     },
     /** update_recipient_phone: sets ONLY recipient_phone, scoped to tenant +
-     *  owning sender (transfer-repo.updateRecipientPhone). Null ⇒ no such row
-     *  for this owner now; the caller refuses and never falls back to saveTransfer. */
+     *  owning sender, unpaid transfers only (transfer-repo.updateRecipientPhone).
+     *  Null ⇒ no editable row for this owner now; the caller refuses and never
+     *  falls back to saveTransfer. */
     async updateRecipientPhone(
       id: string,
       partnerId: PartnerId,

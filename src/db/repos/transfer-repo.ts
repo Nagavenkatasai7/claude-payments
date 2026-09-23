@@ -598,6 +598,11 @@ export function createTransferRepo(
      * the owning sender in the WHERE. Every other column stays as the ledger
      * has it at write time. Null ⇒ no such row for this owner/tenant now; the
      * caller refuses and never falls back to saveTransfer.
+     * Unpaid only: the WHERE also requires status awaiting_payment with no
+     * paid_at, no captured funding (funding_ref) and no settlement instruction
+     * acknowledged (payment_provider_ref), so the check and the write are one
+     * atomic statement. Null also covers "money already involved"; the caller
+     * re-reads to tell that apart from a missing row.
      */
     async updateRecipientPhone(
       id: string,
@@ -612,6 +617,10 @@ export function createTransferRepo(
           eq(transfers.id, id),
           eq(transfers.partnerId, partnerId),
           eq(transfers.phone, ownerPhone),
+          eq(transfers.status, 'awaiting_payment'),
+          isNull(transfers.paidAt),
+          isNull(transfers.fundingRef),
+          isNull(transfers.paymentProviderRef),
         ))
         .returning();
       return rows[0] ? toDomain(rows[0]) : null;
