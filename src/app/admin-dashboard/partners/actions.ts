@@ -29,6 +29,8 @@ import {
 import { randomBytes } from 'node:crypto';
 import { env } from '@/lib/env';
 import { checkSettlementUrl } from '@/lib/settlement-url';
+import { verifyPhoneNumberOwnership } from '@/lib/partner-integrations-verify';
+import { logWarn } from '@/lib/log';
 import type {
   Partner,
   PartnerStatus,
@@ -260,6 +262,32 @@ function rethrowPnidConflict(e: unknown): never {
   throw e;
 }
 
+/**
+ * Program-Fix 30 (F64): a pnid alone routes inbound traffic on the shared
+ * webhook, so it must be PROVEN before it is stored: the access token has to
+ * read that phone number from Meta (GET /{pnid}, plus /{waba}/phone_numbers
+ * when a WABA id is given). A pnid with no token is refused outright.
+ * Fail-closed, one generic message (never why, never who holds the number).
+ * Logs partnerId + status only — never the token, never the pnid.
+ */
+const PNID_UNVERIFIED = 'That WhatsApp number could not be verified with this access token.';
+async function assertPhoneNumberIdOwned(
+  partnerId: string,
+  pnid: string,
+  token: string | undefined,
+  wabaId: string | undefined,
+): Promise<void> {
+  if (!token) {
+    logWarn('wa.pnid_verify_failed', 'pnid registration refused: no access token', { partnerId, status: 'no_token' });
+    throw new Error(PNID_UNVERIFIED);
+  }
+  const r = await verifyPhoneNumberOwnership({ pnid, token, wabaId });
+  if (!r.ok) {
+    logWarn('wa.pnid_verify_failed', 'pnid ownership check failed', { partnerId, status: r.status ?? 'network_or_invalid' });
+    throw new Error(PNID_UNVERIFIED);
+  }
+}
+
 export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
@@ -267,6 +295,17 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
   const existing = await store.getIntegrations(id);
   const newPnid = String(formData.get('phoneNumberId') ?? '').trim();
   await assertPhoneNumberIdFree(id, newPnid || undefined);
+  // Fix 30: verify only when the pnid changes, or a NEW token arrives while a
+  // pnid is set. A save changing neither (e.g. only the verify token) is
+  // grandfathered — no Graph call. Clearing the pnid needs no proof.
+  const submittedToken = String(formData.get('token') ?? '').trim();
+  const pnidChanged = newPnid !== (existing.whatsapp.phoneNumberId ?? '');
+  const tokenChanged = submittedToken !== '' && submittedToken !== existing.whatsapp.token;
+  if (newPnid && (pnidChanged || tokenChanged)) {
+    // wabaId is read ONLY for this check; it is never persisted.
+    const wabaId = String(formData.get('wabaId') ?? '').trim() || undefined;
+    await assertPhoneNumberIdOwned(id, newPnid, submittedToken || existing.whatsapp.token, wabaId);
+  }
   try {
     await store.saveIntegrations(id, {
       ...existing,
@@ -503,7 +542,8 @@ export interface PartnerWizardInput {
   botPersona?: string;
   kycMode?: string;
   requireKycBeforeSend?: boolean;
-  whatsapp?: { phoneNumberId?: string; token?: string; verifyToken?: string; appSecret?: string };
+  /** wabaId is used only to verify pnid ownership (fix 30) and is never persisted. */
+  whatsapp?: { phoneNumberId?: string; token?: string; verifyToken?: string; appSecret?: string; wabaId?: string };
   payment?: { providerType?: string; settlementUrl?: string; signingSecret?: string; webhookSecret?: string };
 }
 
@@ -560,6 +600,13 @@ export async function wizardCreatePartnerAction(
   // D11 (fix 1): refuse a taken/platform WhatsApp number BEFORE any write, so a
   // refusal never leaves an orphan active partner behind.
   await assertPhoneNumberIdFree(id, clean((input.whatsapp ?? {}).phoneNumberId));
+  // Fix 30: the same ownership proof, also before any write. A pnid with no
+  // token is refused (the wizard used to store one — it still routes inbound).
+  {
+    const w = input.whatsapp ?? {};
+    const pnid = clean(w.phoneNumberId);
+    if (pnid) await assertPhoneNumberIdOwned(id, pnid, clean(w.token), clean(w.wabaId));
+  }
 
   // Integrations — only persisted when the wizard actually captured something.
   const wa = input.whatsapp ?? {};

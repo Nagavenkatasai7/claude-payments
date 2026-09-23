@@ -262,6 +262,12 @@ export function PartnerSetupWizard() {
                 <Input type="password" autoComplete="off" value={draft.whatsapp?.appSecret ?? ''} onChange={(e) => setWa({ appSecret: e.target.value })} />
               </Field>
             </div>
+            <Field label="WhatsApp Business Account ID (optional)" hint="Used only for the check below — not saved.">
+              <Input inputMode="numeric" autoComplete="off" value={draft.whatsapp?.wabaId ?? ''} onChange={(e) => setWa({ wabaId: e.target.value })} />
+            </Field>
+            <p className="text-xs text-muted-foreground">
+              We check this number with Meta using the access token you enter.
+            </p>
             <p className="text-xs text-muted-foreground">
               Skip freely — the callback URL appears on the done screen and the partner page.
             </p>
