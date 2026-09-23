@@ -106,7 +106,7 @@ beforeEach(async () => {
   runAgentTurn.mockResolvedValue('');
 });
 
-describe('drainOnce — settlement.instruct (the real-rail outbound leg)', () => {
+describe('drainOnce — settlement.instruct (the real-rail outbound leg)', { retry: 0 }, () => {
   beforeEach(async () => {
     await store.saveTransfer(transferFixture());
     await createIntegrationsRepo(db, provider).saveIntegrations('acme', {

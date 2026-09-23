@@ -343,6 +343,28 @@ describe('cancelWithinWindow — auto-cancel only while no rail instruction can 
     expect((await store.getTransfer(ID))?.refundStatus ?? 'none').toBe('none');
   });
 
+  it('C4 legacy: an in_review row with NO stage1 and an old paid_at is window_passed (never escalated at any age)', async () => {
+    await store.saveTransfer(fixture({ status: 'in_review', complianceStatus: 'flagged' }));
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '3 hours' WHERE id = ${ID}`);
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'window_passed' });
+    expect((await store.getTransfer(ID))?.refundStatus ?? 'none').toBe('none');
+    expect(await byKey(`regecancel:${ID}`)).toBeUndefined();
+    expect(await auditActions()).toHaveLength(0);
+  });
+
+  it('C4 legacy: an in_review row with NO stage1 and NO paid_at is window_passed', async () => {
+    await store.saveTransfer(fixture({ status: 'in_review', complianceStatus: 'flagged' }));
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'window_passed' });
+    expect(await byKey(`regecancel:${ID}`)).toBeUndefined();
+  });
+
+  it('C4 legacy: an in_review row with NO stage1 but paid_at inside the window escalates', async () => {
+    await store.saveTransfer(fixture({ status: 'in_review', complianceStatus: 'flagged' }));
+    await db.execute(sql`UPDATE transfers SET paid_at = now() - interval '5 minutes' WHERE id = ${ID}`);
+    expect(await cancelWithinWindow(db, 'acme', ID, { via: 'bot' })).toEqual({ kind: 'escalated' });
+    expect((await store.getTransfer(ID))?.status).toBe('in_review');
+  });
+
   it('a partner-funded transfer (no captured charge) is cancelled with NO refund queued and no refund promise', async () => {
     await store.saveTransfer(fixture());
     await beginSettlement(db, fixture(), SIMULATOR); // no funding_ref

@@ -148,6 +148,21 @@ export function createTransferRepo(
       return rows[0] ? toDomain(rows[0], opts.decrypt ?? false) : null;
     },
 
+    /**
+     * Program-Fix 15 PR C: how long ago paid_at was, by the DATABASE clock
+     * (ms; null when paid_at is unset or the row is missing). Only the sender
+     * cancel's fallback for a held (in_review) row with no stage1:<id> row.
+     */
+    async paidAgeMs(id: string): Promise<number | null> {
+      const rows = await db
+        .select({ ageMs: sql<string | null>`floor(extract(epoch FROM (now() - ${transfers.paidAt})) * 1000)::bigint` })
+        .from(transfers)
+        .where(eq(transfers.id, id))
+        .limit(1);
+      const v = rows[0]?.ageMs;
+      return v === null || v === undefined ? null : Number(v);
+    },
+
     /** Partner-scoped read: null for missing OR out-of-scope (404-never-403). */
     async getOwnedTransfer(partnerId: PartnerId, id: string): Promise<Transfer | null> {
       const rows = await db

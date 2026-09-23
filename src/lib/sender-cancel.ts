@@ -21,7 +21,9 @@ import type { PartnerId, Transfer } from '@/lib/types';
 // the recipient AND refund the sender. The proof is therefore the outbox
 // itself, under locks, in ONE transaction:
 //   1. `SELECT … FROM transfers … FOR UPDATE` (tenant-scoped): paid, consumer,
-//      refund none|requested. (in_review is locked the same way and escalates.)
+//      refund none|requested. (in_review is locked the same way and escalates
+//      inside the window — its charge time falls back to paid_at for a legacy
+//      held row with no stage1 row; none at all ⇒ window_passed.)
 //   2. The charge time: the `stage1:<id>` row's age by the DATABASE clock.
 //      Missing ⇒ fail closed (escalate). ≥ 30 min ⇒ window_passed.
 //   3. `SELECT … FROM outbox WHERE dedupe_key IN (instruct:, reinstruct:,
@@ -76,10 +78,22 @@ export async function cancelPaidBySenderLocked(tx: DbOrTx, partnerId: PartnerId,
   if (t.status !== 'paid' && t.status !== 'in_review') return { kind: 'ineligible' };
   if (refund !== 'none' && refund !== 'requested') return { kind: 'ineligible' };
 
+  if (t.status === 'in_review') {
+    // C4: a held transfer never auto-cancels; inside the window it escalates.
+    // beginHold writes stage1:<id>; a legacy held row without one falls back to
+    // paid_at (beginHold sets it; only a release resets it, and a released row
+    // is `paid`). No charge time at all ⇒ window_passed: an old hold must never
+    // raise a Reg E escalation at any age.
+    const heldAge = (await outbox.chargeAgeMs(id)) ?? (await repo.paidAgeMs(id));
+    if (heldAge === null || heldAge >= CANCEL_WINDOW_MS) return { kind: 'window_passed' };
+    return { kind: 'escalate', transfer: t, reason: 'in_review', msSinceCharge: heldAge };
+  }
+
   const age = await outbox.chargeAgeMs(id);
+  // A paid row with no stage1:<id> (the rail `funded` callback path): the
+  // charge time is unknown, so FAIL CLOSED — escalate, never auto-cancel.
   if (age === null) return { kind: 'escalate', transfer: t, reason: 'no_charge_time', msSinceCharge: null };
   if (age >= CANCEL_WINDOW_MS) return { kind: 'window_passed' };
-  if (t.status === 'in_review') return { kind: 'escalate', transfer: t, reason: 'in_review', msSinceCharge: age };
 
   const rail = await outbox.lockRailRowsForTransfer(id);
   if (rail.length === 0) return { kind: 'escalate', transfer: t, reason: 'no_rail_row', msSinceCharge: age };

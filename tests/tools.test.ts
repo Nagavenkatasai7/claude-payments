@@ -2335,7 +2335,7 @@ describe('best-rate routing (B2) — quote → draft → mint', () => {
   });
 });
 
-describe('request_refund (customer-facing refund request — suggest-only, ops approves)', () => {
+describe('request_refund (customer-facing refund request — suggest-only, ops approves)', { retry: 0 }, () => {
   type Ctx = Awaited<ReturnType<typeof buildCtx>>;
 
   // Mint an awaiting_payment transfer owned by ctx.phone via the real tool path.
@@ -2565,6 +2565,18 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
   });
 
+  it('in_review legacy row (no stage1, forced status): the established "under review" wording, nothing flagged or alerted', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    await forceStatus(ctx, id, 'in_review');
+    const r = await executeTool('request_refund', { transfer_id: id }, ctx);
+    expect(r.error_code).toBe('under_review');
+    expect(String(r.message).toLowerCase()).toContain('under review');
+    expectCustomerSafe(r);
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
+  });
+
   // ── Program-Fix 15 PR C: the 30-minute sender cancel (12 CFR 1005.34) ──
 
   it('cancellable + no rail instruction out: CANCELS, queues the full refund, confirms', async () => {
@@ -2735,7 +2747,7 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
   });
 });
 
-describe('open_recall_dispute (delivered-within-24h recall/dispute case)', () => {
+describe('open_recall_dispute (delivered-within-24h recall/dispute case)', { retry: 0 }, () => {
   type Ctx = Awaited<ReturnType<typeof buildCtx>>;
 
   async function mintDelivered(ctx: Ctx): Promise<string> {
@@ -6025,7 +6037,7 @@ describe('update_recipient_phone — unpaid transfers only', { retry: 0 }, () =>
 
 // Program-Fix 49D review r1: the portal chat (/api/account/chat, channel 'web')
 // must not skip the receipt page's MFA step-up for refund / recall.
-describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D)', () => {
+describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D)', { retry: 0 }, () => {
   type Ctx = Awaited<ReturnType<typeof buildCtx>>;
   const B32 = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
