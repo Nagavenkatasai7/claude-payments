@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from 'react';
 import type { CountryCode } from '@/lib/types';
-import { payOkStatus } from '@/lib/pay-outcome';
+import { payErrorMessage, payOkStatus } from '@/lib/pay-outcome';
 import { otpRequestErrorMessage } from '@/lib/otp-send-copy';
 import { ACKNOWLEDGEMENT_LABEL } from '@/lib/legal/disclosure-drafts';
 import {
@@ -246,12 +246,14 @@ function SimplePayForm({
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const [otpError, setOtpError] = useState('');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (ackMissing) return; // the button is disabled too; this covers implicit (Enter) submission
     setStatus('paying');
     setOtpError('');
+    setErrorMessage(null);
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
@@ -265,6 +267,7 @@ function SimplePayForm({
       }
       try {
         const data = (await res.json()) as { reason?: string };
+        setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') setOtpError('That code is incorrect or expired — resend and try again.');
       } catch {
         /* generic */
@@ -326,7 +329,7 @@ function SimplePayForm({
         </button>
       )}
       {status === 'error' && !otpError && (
-        <p className={formErrorClasses}>Something went wrong. Please try again.</p>
+        <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
       )}
     </form>
   );
@@ -358,6 +361,7 @@ function BankDetailsPayForm({
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const [otpError, setOtpError] = useState('');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [acked, setAcked] = useState(false);
   const ackMissing = disclosureVersion !== null && !acked;
 
@@ -386,6 +390,7 @@ function BankDetailsPayForm({
     if (ackMissing) return;
     setStatus('paying');
     setOtpError('');
+    setErrorMessage(null);
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
@@ -401,6 +406,7 @@ function BankDetailsPayForm({
       // a bank-field error bounces back to Step 1 so the sender can fix it.
       try {
         const data = (await res.json()) as { fieldErrors?: Record<string, string>; reason?: string };
+        setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') {
           setOtpError('That code is incorrect or expired — resend and try again.');
         } else if (data.fieldErrors) {
@@ -486,7 +492,7 @@ function BankDetailsPayForm({
           Edit bank details
         </button>
         {status === 'error' && !otpError && (
-          <p className={formErrorClasses}>Something went wrong. Please try again.</p>
+          <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
         )}
       </div>
     );
@@ -547,6 +553,7 @@ function AchDebitPayForm({
   const [code, setCode] = useState('');
   const [sent, setSent] = useState(false);
   const [otpError, setOtpError] = useState('');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Mirror the server's checks (the route re-validates authoritatively).
   function clientErrors(): Record<string, string> {
@@ -566,6 +573,7 @@ function AchDebitPayForm({
     setErrors({});
     setStatus('paying');
     setOtpError('');
+    setErrorMessage(null);
     try {
       const res = await fetch(`/api/pay/${transferId}`, {
         method: 'POST',
@@ -579,6 +587,7 @@ function AchDebitPayForm({
       }
       try {
         const data = (await res.json()) as { fieldErrors?: Record<string, string>; reason?: string };
+        setErrorMessage(payErrorMessage(data));
         if (data.reason === 'otp') {
           setOtpError('That code is incorrect or expired — resend and try again.');
         } else if (data.fieldErrors) {
@@ -682,7 +691,7 @@ function AchDebitPayForm({
         {status === 'paying' ? 'Processing…' : 'Authorize & pay'}
       </button>
       {status === 'error' && !otpError && (
-        <p className={formErrorClasses}>Something went wrong. Please try again.</p>
+        <p className={formErrorClasses}>{errorMessage ?? 'Something went wrong. Please try again.'}</p>
       )}
     </form>
   );

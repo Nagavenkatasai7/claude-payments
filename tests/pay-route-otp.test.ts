@@ -74,7 +74,7 @@ const transfer: Transfer = {
 } as Transfer;
 // Postgres customer rows need real timestamps (new Date('') is invalid).
 const T0 = '2026-05-01T00:00:00.000Z';
-const customer: Customer = { senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', senderCountry: 'US', partnerId: 'default', createdAt: T0, updatedAt: T0 } as Customer;
+const customer: Customer = { senderPhone: PHONE, firstSeenAt: T0, kycStatus: 'verified', fullName: 'Test Sender', senderCountry: 'US', partnerId: 'default', createdAt: T0, updatedAt: T0 } as Customer;
 
 const req = (b: object) => new NextRequest('http://x/api/pay/' + TID, { method: 'POST', body: JSON.stringify(b), headers: { 'content-type': 'application/json' } });
 const ctx = { params: Promise.resolve({ transferId: TID }) };

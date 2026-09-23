@@ -451,6 +451,48 @@ export function createTransferRepo(
     },
 
     /**
+     * Program-Fix 14 follow-up: record a pay-time RE-SCREEN verdict on a row
+     * that is still this tenant's awaiting_payment transfer. ONE guarded,
+     * column-targeted UPDATE (compliance_status, compliance_reasons and, for a
+     * block, status) — never a whole-row re-save.
+     *  • 'blocked' always wins. An UNCHARGED row becomes status 'blocked' (the
+     *    same shape a mint-time hit lands in). A CHARGED row (funding_ref set:
+     *    a crash between capture and settlement) keeps status awaiting_payment
+     *    so the funding-resume sweep still reaches settleOrHold → refused and
+     *    raises its fundblocked:<id> alert for a refund.
+     *  • 'flagged' never downgrades a blocked row.
+     * `reasons` is the caller's merged list (existing + new, de-duplicated).
+     * Null ⇒ a guard failed (moved, cancelled, blocked, another tenant); the
+     * caller re-reads and reports current truth.
+     * Drizzle 0.45.2: update().set().where().returning() —
+     * node_modules/drizzle-orm/pg-core/query-builders/update.d.ts:43,143,166.
+     */
+    async applyRescreenIfAwaiting(
+      id: string,
+      partnerId: PartnerId,
+      verdict: 'blocked' | 'flagged',
+      reasons: string[],
+    ): Promise<Transfer | null> {
+      const rows = await db
+        .update(transfers)
+        .set(verdict === 'blocked'
+          ? {
+              complianceStatus: 'blocked',
+              complianceReasons: reasons,
+              status: sql`CASE WHEN ${transfers.fundingRef} IS NULL THEN 'blocked' ELSE ${transfers.status} END`,
+            }
+          : { complianceStatus: 'flagged', complianceReasons: reasons })
+        .where(and(
+          eq(transfers.id, id),
+          eq(transfers.partnerId, partnerId),
+          eq(transfers.status, 'awaiting_payment'),
+          ne(transfers.complianceStatus, 'blocked'),
+        ))
+        .returning();
+      return rows[0] ? toDomain(rows[0]) : null;
+    },
+
+    /**
      * Atomically claim the in_review → paid transition — the STAFF RELEASE.
      * Deliberately NO 'cleared' predicate: a released transfer keeps
      * compliance_status = 'flagged' forever (the evidence is never rewritten),
