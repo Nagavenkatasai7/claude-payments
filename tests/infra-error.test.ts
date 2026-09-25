@@ -50,6 +50,27 @@ describe('isInfraError — infrastructure errors (⇒ 500, Meta retries)', () =>
     expect(isInfraError(wrapped(new Error(message)))).toBe(true);
   });
 
+  // Sourced from the installed drivers: @neondatabase/serverless 1.1.0 index.js
+  // ("Client was closed and is not queryable", "Query read timeout", "There was
+  // an error establishing an SSL connection") and ws lib/websocket.js:305/:495/:933.
+  it.each([
+    'Client was closed and is not queryable',
+    'Query read timeout',
+    'There was an error establishing an SSL connection',
+    'WebSocket was closed before the connection was established',
+    'Unexpected server response: 502',
+    'WebSocket is not open: readyState 0 (CONNECTING)',
+  ])('driver message: %s', (message) => {
+    expect(isInfraError(new Error(message))).toBe(true);
+  });
+
+  it('a ws ErrorEvent (neon re-emits the socket event): the real error sits on `.error`, not `.cause`', () => {
+    // ws lib/event-target.js:118-133 — ErrorEvent { error, message } with no `name`/`code` of its own.
+    const errorEvent = { type: 'error', message: '', error: Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }) };
+    expect(isInfraError(errorEvent)).toBe(true);
+    expect(isInfraError(wrapped(errorEvent as unknown as Error))).toBe(true);
+  });
+
   it('a TimeoutError / AbortError (AbortSignal.timeout)', () => {
     expect(isInfraError(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }))).toBe(true);
     expect(isInfraError(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }))).toBe(true);
@@ -86,6 +107,11 @@ describe('isInfraError — everything else (⇒ acknowledged + audited)', () => 
     expect(isInfraError(null)).toBe(false);
     expect(isInfraError('db down')).toBe(false);
     expect(isInfraError({ code: 'not-a-code' })).toBe(false);
+  });
+
+  it('a throwing getter never escapes', () => {
+    const hostile = Object.defineProperty({}, 'code', { get() { throw new Error('boom'); } });
+    expect(isInfraError(hostile)).toBe(false);
   });
 
   it('a self-referencing cause chain terminates', () => {

@@ -39,8 +39,25 @@ const NETWORK_CODES: ReadonlySet<string> = new Set([
   'UND_ERR_SOCKET',
 ]);
 
-const INFRA_MESSAGE =
-  /timeout exceeded when trying to connect|connection terminated|encountered a connection error|exhausted all retries|exceeded the [\w\s-]*quota|socket hang up/i;
+// Neon pool / pg client strings (@neondatabase/serverless 1.1.0 index.js) and
+// ws handshake strings (ws lib/websocket.js:305, :369, :495, :933).
+const INFRA_MESSAGE = new RegExp(
+  [
+    'timeout exceeded when trying to connect',
+    'connection terminated',
+    'encountered a connection error',
+    'client was closed and is not queryable',
+    'query read timeout',
+    'error establishing an SSL connection',
+    'websocket was closed before the connection was established',
+    'websocket is not open',
+    'unexpected server response',
+    'exhausted all retries',
+    'exceeded the [\\w\\s-]*quota',
+    'socket hang up',
+  ].join('|'),
+  'i',
+);
 
 /** An Upstash JSON error that is the service's capacity, not our command. */
 const UPSTASH_INFRA_MESSAGE = /limit exceeded|timed? ?out|unavailable|try again/i;
@@ -62,18 +79,33 @@ function isInfraLink(e: Record<string, unknown>): boolean {
 }
 
 /**
- * True when `err` (or anything on its `.cause` chain) is an infrastructure
- * failure: a DB / pool / connection error, or a Redis timeout / connection
- * error. Pure; never throws.
+ * True when `err` (or anything it wraps) is an infrastructure failure: a DB /
+ * pool / connection error, or a Redis timeout / connection error. Follows
+ * `.cause` (drizzle, fetch) AND `.error` — neon re-emits the ws ErrorEvent,
+ * whose underlying Error sits on `.error` (ws lib/event-target.js:118-133).
+ * Pure; never throws.
  */
 export function isInfraError(err: unknown): boolean {
+  try {
+    return walk(err);
+  } catch {
+    return false; // a hostile getter: not provably infrastructure
+  }
+}
+
+function walk(err: unknown): boolean {
   const seen = new Set<unknown>();
-  let cur: unknown = err;
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH; depth++) {
-    if (cur === null || typeof cur !== 'object' || seen.has(cur)) return false;
-    seen.add(cur);
-    if (isInfraLink(cur as Record<string, unknown>)) return true;
-    cur = (cur as { cause?: unknown }).cause;
+  let frontier: unknown[] = [err];
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && frontier.length > 0; depth++) {
+    const next: unknown[] = [];
+    for (const cur of frontier) {
+      if (cur === null || typeof cur !== 'object' || seen.has(cur)) continue;
+      seen.add(cur);
+      const link = cur as Record<string, unknown>;
+      if (isInfraLink(link)) return true;
+      next.push(link.cause, link.error);
+    }
+    frontier = next;
   }
   return false;
 }
