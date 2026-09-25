@@ -672,6 +672,8 @@ describe('R6b: replyAllowHosts', () => {
     expect(replyAllowHosts('https://smartremit.ai', 'Acme Pay')).toEqual(['smartremit.ai']);
     expect(replyAllowHosts('https://smartremit.ai', 'Acme.co')).toEqual(['smartremit.ai', 'acme.co']);
     expect(replyAllowHosts('https://smartremit.ai', 'www.Acme.co')).toEqual(['smartremit.ai', 'acme.co']);
+    // R6b fix round 1: a brand on an open-ended TLD is a host too.
+    expect(replyAllowHosts('https://smartremit.ai', 'Acme.Shop')).toEqual(['smartremit.ai', 'acme.shop']);
   });
   it('never throws on a bad base URL, and ignores a brand that is not a clean host', () => {
     expect(replyAllowHosts('not a url')).toEqual([]);
@@ -756,7 +758,8 @@ describe('createAgent — TurnContext', () => {
           },
         ],
       },
-      { role: 'assistant', content: 'Transfer created!' },
+      // The scripted model text is irrelevant to the outcome: the tool was refused.
+      { role: 'assistant', content: 'SCRIPTED MODEL TEXT (not an outcome)' },
     ];
     let i = 0;
     const agent = createAgent({
@@ -771,9 +774,9 @@ describe('createAgent — TurnContext', () => {
       isNewConversation: false,
       buttonTap: { kind: 'approve', draftId },
     });
-    // The model's text still comes back, but the tool ran nothing: the WhatsApp
+    // The scripted text is relayed as-is, but the tool ran nothing: the WhatsApp
     // mint is the secure pay page, which consumes the draft there.
-    expect(reply).toContain('Transfer created');
+    expect(reply).toBe('SCRIPTED MODEL TEXT (not an outcome)');
     expect(await draftStore.getDraft(draftId)).not.toBeNull();
     expect(await store.listTransfers()).toHaveLength(0);
     const saved = await store.getConversation('default', '15551234567');

@@ -195,39 +195,57 @@ export function hasOverridePhrase(v: unknown): boolean {
   return s !== '' && OVERRIDE_PHRASE.test(s);
 }
 
+// R6b fix round 1: MODEL output (not outsider text) gets a broader detector,
+// since the model can write any TLD: a dotted chain whose last label is 2+
+// letters in any script ("pay.online", "пример.рф") or a punycode label. Marks
+// (\p{M}) count as letters so Devanagari labels are whole. A two-label chain
+// whose first label is a common abbreviation ("Mr.Sharma", "no.12") is not a
+// host. hasWebAddress, used on outsider text, is deliberately unchanged.
+const MODEL_LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}-]*[\\p{L}\\p{M}\\p{N}])?';
+const MODEL_HOST = new RegExp(
+  `(?<![\\p{L}\\p{M}\\p{N}-])(${MODEL_LABEL}(?:\\.${MODEL_LABEL})*)\\.(?:\\p{L}[\\p{L}\\p{M}]+|xn--[\\p{L}\\p{N}-]+)(?![\\p{L}\\p{M}\\p{N}-])`,
+  'gu',
+);
+const MODEL_ABBREVIATIONS: ReadonlySet<string> = new Set([
+  ...PATH_RULE_ABBREVIATIONS,
+  'mr', 'mrs', 'ms', 'dr', 'st', 'sr', 'jr', 'rs', 'no', 'vs', 'etc', 'ie', 'eg', 'ph', 'ref', 'ver', 'fig',
+]);
+
 /**
- * The host a web-address token names, for an allow-list check: lower-cased,
- * with any markdown "[text](" wrapper, scheme, "user@" and "www." removed, cut
- * at the first path, query, port or bracket character, and with trailing
- * punctuation dropped. Anything odd left in it simply fails the exact match.
+ * Whether MODEL-written text names a host on any TLD (see MODEL_HOST). Broader
+ * than hasWebAddress on purpose; use it only on model output. Pure.
  */
-function tokenHost(token: string): string {
-  let h = token.toLowerCase();
-  const paren = h.lastIndexOf('](');
-  if (paren !== -1) h = h.slice(paren + 2);
-  h = h.replace(/^[(<["'“‘]+/u, '');
-  h = h.replace(/^[a-z][a-z0-9+.-]*:\/\//u, '');
-  const at = h.lastIndexOf('@');
-  if (at !== -1) h = h.slice(at + 1);
-  h = h.split(/[/?#:)\]>]/u)[0];
-  h = h.replace(/[.,!?;'"”’…]+$/u, '');
-  return h.replace(/^www\./u, '');
+export function hasModelHost(v: unknown): boolean {
+  const s = detectForm(v);
+  for (const m of s.matchAll(MODEL_HOST)) {
+    const labels = m[1].split('.');
+    if (labels.length === 1 && MODEL_ABBREVIATIONS.has(labels[0])) continue;
+    return true;
+  }
+  return false;
 }
+
+/** Wrapping characters trimmed before the exact allow-list match: brackets, quotes and WhatsApp *bold* _italic_ ~strike~ marks at the start; the same plus sentence punctuation at the end. */
+const EDGE_START = /^[(<[{"'“‘*_~]+/u;
+const EDGE_END = /[.,!?;:'"”’…)\]}>*_~]+$/u;
 
 /**
  * R6b (A7L-2): remove every whitespace-separated token of MODEL-written text
- * that carries a web address (hasWebAddress) unless its host is exactly one of
- * `allowHosts` (a leading "www." is ignored on both sides). Every whitespace
- * run, newlines included, is kept as it was, so a multi-line reply keeps its
- * lines. Fail-closed: a token whose host cannot be matched cleanly is removed.
- * Known cost: a missing space before a TLD-like word ("sent.In") is removed too.
- * Pure.
+ * that names a host (hasWebAddress or hasModelHost), unless the WHOLE token,
+ * once its wrapping brackets, quotes, formatting marks and trailing
+ * punctuation are trimmed, is exactly one allowed host (a leading "www." is
+ * ignored). So a path, a query, a "user@", a markdown link or a second host
+ * glued on strips the whole token (fail-closed): code-made links are appended
+ * after this strip and never pass through it. Every whitespace run, newlines
+ * included, is kept. Known cost: a missing space before a word ("sent.In")
+ * is removed too. Pure.
  */
 export function stripModelHosts(text: string, allowHosts: readonly string[]): string {
   const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/^www\./u, '')).filter((h) => h !== ''));
   return text.replace(/\S+/gu, (token) => {
-    if (!hasWebAddress(token)) return token;
-    return allow.has(tokenHost(token)) ? token : '';
+    if (!hasWebAddress(token) && !hasModelHost(token)) return token;
+    const core = detectForm(token).replace(EDGE_START, '').replace(EDGE_END, '').replace(/^www\./u, '');
+    return allow.has(core) ? token : '';
   });
 }
 

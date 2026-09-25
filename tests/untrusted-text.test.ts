@@ -11,6 +11,7 @@ import {
   hasOverridePhrase,
   safeDisplayText,
   stripModelHosts,
+  hasModelHost,
 } from '@/lib/untrusted-text';
 
 // fix 5 (F43/F63): text written by an outsider (a partner-API caller, a partner
@@ -396,7 +397,69 @@ describe('R6b: stripModelHosts', () => {
 
   it('keeps an allowed host (exact, www. and trailing punctuation), case-insensitively', () => {
     expect(stripModelHosts('Visit smartremit.ai.', ALLOW)).toBe('Visit smartremit.ai.');
-    expect(stripModelHosts('Visit www.SmartRemit.ai/help', ALLOW)).toBe('Visit www.SmartRemit.ai/help');
+    expect(stripModelHosts('Visit www.SmartRemit.ai, thanks', ALLOW)).toBe('Visit www.SmartRemit.ai, thanks');
+    expect(stripModelHosts('Visit (smartremit.ai)!', ALLOW)).toBe('Visit (smartremit.ai)!');
+  });
+
+  // R6b fix round 1, item 3: the model may name the bare host, never a path.
+  it.each(['smartremit.ai/anything', 'www.SmartRemit.ai/help', 'smartremit.ai/pay/abc123', 'smartremit.ai?x=1', 'smartremit.ai#top'])(
+    'strips a model-written path or query on an allowed host: %s',
+    (tok) => {
+      expect(stripModelHosts(`Go ${tok} now`, ALLOW)).toBe('Go  now');
+    },
+  );
+
+  // R6b fix round 1, item 1: a second host smuggled into a token with an
+  // allowed one strips the whole token (fail-closed), for the brand host too.
+  it.each([
+    '[evil.example](smartremit.ai)',
+    'evil.example](smartremit.ai)',
+    'smartremit.ai)evil.example',
+    'smartremit.ai>evil.example',
+    'smartremit.ai]evil.example',
+    'smartremit.ai:evil.example',
+    'evil.example@smartremit.ai',
+    'smartremit.ai,evil.example',
+    'acme.co)evil.example',
+    'evil.example@acme.co',
+  ])('strips a token that smuggles a second host: %s', (tok) => {
+    expect(stripModelHosts(`Pay ${tok} now`, [...ALLOW, 'acme.co'])).toBe('Pay  now');
+  });
+
+  // R6b fix round 1, item 2: model output gets a broader detector than the
+  // closed TLD list (hasWebAddress stays as it is for outsider text).
+  it.each([
+    'pay.online', 'pay-now.shop', 'win.top', 'my.site', 'fast.pro', 'vip.club', 'cheap.store',
+    'secure.bank', 'go.click', 'mom.live', 'пример.рф', 'पेमेंट.भारत', 'Pay-Now.Online.',
+  ])('strips a host on an open-ended TLD: %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} today`, ALLOW)).toBe('Pay at  today');
+  });
+
+  it.each([
+    'Mr.Sharma has been paid',
+    'Dr. Rao and St. John',
+    'Paid at 10.30am, ref no.12',
+    'Version 2.0 is live',
+    'i.e. the rate is 1.5x',
+  ])('the broader detector still keeps ordinary text: %s', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  it('hasWebAddress (outsider text) is unchanged: an open-ended TLD alone is not flagged there', () => {
+    expect(hasWebAddress('pay.online')).toBe(false);
+    expect(hasModelHost('pay.online')).toBe(true);
+    expect(hasModelHost('Rs.500 fee, e.g. U.S.')).toBe(false);
+  });
+
+  // R6b fix round 1, item 4: WhatsApp formatting around an allowed host.
+  it.each(['*smartremit.ai*', '_smartremit.ai_', '~smartremit.ai~', '*_smartremit.ai_*.'])(
+    'keeps an allowed host wrapped in WhatsApp formatting: %s',
+    (tok) => {
+      expect(stripModelHosts(`Visit ${tok}`, ALLOW)).toBe(`Visit ${tok}`);
+    },
+  );
+  it('formatting does not rescue a foreign host', () => {
+    expect(stripModelHosts('Visit *evil.example*', ALLOW)).toBe('Visit ');
   });
 
   it('preserves every newline and the surrounding whitespace', () => {

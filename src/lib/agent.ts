@@ -21,7 +21,7 @@ import { selectSettlementRoute } from './partner-rates'; // best-rate routing
 import { getPartnerIntegrationsStore } from './partner-integrations-store';
 import { getDb } from '@/db/client';
 import { env } from './env';
-import { BRAND_MAX, boundUntrustedText, hasWebAddress, stripModelHosts } from './untrusted-text';
+import { BRAND_MAX, boundUntrustedText, hasModelHost, hasWebAddress, stripModelHosts } from './untrusted-text';
 
 const MAX_TOOL_ROUNDS = 6;
 // fix 5: the id of the synthetic round-0 get_customer_context call. It lives in
@@ -75,7 +75,7 @@ export function replyAllowHosts(appBaseUrl: string, brand?: string): string[] {
     // no parseable base URL: no app host is allowed
   }
   const b = boundUntrustedText(brand ?? '', BRAND_MAX).toLowerCase().replace(/^www\./u, '');
-  if (/^[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+$/u.test(b) && hasWebAddress(b)) hosts.push(b);
+  if (/^[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+$/u.test(b) && (hasWebAddress(b) || hasModelHost(b))) hosts.push(b);
   return hosts;
 }
 
