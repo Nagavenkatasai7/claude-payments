@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { domainToASCII } from 'node:url';
 import { sanitizeReply } from '@/lib/agent';
 import { IANA_TLDS } from '@/lib/iana-tlds';
-import { canonicalModelToken, hasModelHost } from '@/lib/untrusted-text';
+import { canonicalModelToken, hasModelHost, stripModelHosts } from '@/lib/untrusted-text';
 
 // R6b final round: a POSTCONDITION on the text we actually send, checked by an
 // oracle that shares no code with the stripper. The oracle deletes invisible
@@ -70,6 +70,13 @@ const COMPAT_HOSTS = [
   'PAY.ONLINE', 'ｐａｙ．ｏｎｌｉｎｅ', 'pay.ſhop', 'pay.\u212aim', 'pay.𝐨𝐧𝐥𝐢𝐧𝐞', 'pay.ⓞⓝⓛⓘⓝⓔ', 'pay⒈online', 'Pay.Online',
 ];
 const SUFFIXES = ['', '/path', '?q=1', '#f', ':8080', '.', ',', '!', ')', '-x', '_x', '/x?y#z'];
+// MEDIUM-8: symbols, emoji and marks glued after the TLD (dim 4b).
+const GLUED = [
+  String.fromCodePoint(0x1f600), String.fromCodePoint(0x1f449), String.fromCodePoint(0x2705), String.fromCodePoint(0x1f4b0),
+  String.fromCodePoint(0xa9), String.fromCodePoint(0xfe0f), String.fromCodePoint(0x1f3fd), String.fromCodePoint(0x2764, 0xfe0f),
+  String.fromCodePoint(0x301), '$', '^', String.fromCodePoint(0x1f44d, 0x1f3fd), String.fromCodePoint(0x31, 0xfe0f, 0x20e3),
+  String.fromCodePoint(0x20b9), String.fromCodePoint(0x2122),
+];
 const PREFIXES = ['', 'user@', 'https://', 'hxxp://', 'www.', '123', 'x', 'mr.', '.', 'a_'];
 const WRAPS: Array<(h: string) => string> = [
   (h) => h, (h) => `_${h}_`, (h) => `*${h}*`, (h) => `~${h}~`, (h) => `\`${h}\``, (h) => `\`\`\`${h}\`\`\``,
@@ -95,6 +102,18 @@ describe('R6b final: postcondition — nothing we send names a real-TLD host exc
       }
     }
     expect(offenders.slice(0, 20)).toEqual([]);
+  });
+
+  it('dim 4b: emoji, symbols and marks glued after (or into) the TLD', () => {
+    const offenders: string[] = [];
+    for (const tld of TLDS) {
+      for (const g of GLUED) {
+        for (const host of [`pay.${tld}${g}`, `pay.${tld}${g}/x`, `Visit pay.${tld}${g}`, `pay.${g}${tld}`, `${g}pay.${tld}`]) {
+          offenders.push(...oracleOffenders(send(host)).map((t) => JSON.stringify(t)));
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   it('dim 2: case and compatibility forms', () => {
@@ -180,4 +199,20 @@ describe('R6b final: dot lookalikes are complete over all of Unicode', () => {
     }
     expect(misses).toEqual([]);
   }, 60_000);
+});
+
+describe('R6b MEDIUM-8: exhaustive sweep of one code point glued to a host', () => {
+  it('for every code point c, no shape pay.online<c> / pay.<c>online / pay<c>.online / <c>pay.online leaves an oracle offender', () => {
+    const misses: string[] = [];
+    for (let cp = 0; cp < 0x110000; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const c = String.fromCodePoint(cp);
+      for (const tok of [`pay.online${c}`, `pay.${c}online`, `pay${c}.online`, `${c}pay.online`]) {
+        const out = stripModelHosts(`Hi ${tok} there`, [ALLOWED]);
+        if (out.includes('.') && oracleOffenders(out).length > 0) misses.push(`U+${cp.toString(16)} ${JSON.stringify(tok)}`);
+      }
+      if (misses.length > 20) break;
+    }
+    expect(misses).toEqual([]);
+  }, 300_000);
 });

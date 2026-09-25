@@ -212,8 +212,9 @@ export function hasOverridePhrase(v: unknown): boolean {
 //    dotted span of its NFKC, lower-cased, de-bracketed form ("[.]", "(.)",
 //    "{.}" are dots) has a label after its first that is a real IANA TLD, read
 //    from the node:url domainToASCII (UTS46) form and, fail-closed, also from
-//    the span as written. A label's head before a "-" counts too (punycode
-//    keeps its "xn--"), and a leading-dot span counts (".net").
+//    the span as written. A label's prefix up to any non-letter/non-digit
+//    counts too ("online-x", "online😀"; punycode keeps its "xn--"), and a
+//    leading-dot span counts (".net").
 // 4. The only exception: the RAW token, lower-cased, stripped of wrapping
 //    brackets, quotes, *_~` marks and trailing punctuation, with one optional
 //    "www.", equals an allowed bare host. Anything else in it strips it.
@@ -227,12 +228,23 @@ const DEFANGED_DOT = /[[({]\.[\])}]/gu;
 const MODEL_SPAN = /[\p{L}\p{M}\p{N}\p{So}-]*(?:\.[\p{L}\p{M}\p{N}\p{So}-]+)+/gu;
 const TLDS: ReadonlySet<string> = new Set(IANA_TLDS.map((t) => t.normalize('NFKC').toLowerCase()));
 
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * Whether a label is a real TLD, or starts with one at a word boundary: every
+ * prefix that ends where the next character is not a letter or digit is
+ * tested ("online😀", "online-x", "online\u0301" → "online"; punycode keeps
+ * its "xn--": "xn--p1ai-x" → "xn--p1ai"). A letter-glued word has no inner
+ * boundary, so "your" or "thanks" stay words. MEDIUM-8: this is the same
+ * boundary the postcondition oracle uses.
+ */
 function labelIsTld(label: string): boolean {
   if (TLDS.has(label)) return true;
-  // The label's head before a "-" ("online-x" → "online"); for a punycode
-  // label the "xn--" prefix stays on ("xn--p1ai-x" → "xn--p1ai").
-  const head = label.startsWith('xn--') ? `xn--${label.slice(4).split('-')[0]}` : label.split('-')[0];
-  return head !== '' && head !== 'xn--' && TLDS.has(head);
+  const chars = Array.from(label);
+  for (let k = 1; k < chars.length; k++) {
+    if (!WORD_CHAR.test(chars[k]) && TLDS.has(chars.slice(0, k).join(''))) return true;
+  }
+  return false;
 }
 
 /**
