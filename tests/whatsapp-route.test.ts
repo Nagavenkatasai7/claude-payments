@@ -935,3 +935,58 @@ describe('shared webhook: per-change tenant rule (R1, cross-tenant regression)',
     expect(setOptedOut).not.toHaveBeenCalled();
   });
 });
+
+describe('shared webhook — signature health (R2b)', () => {
+  const ACME_WITH_SECRET = { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't', appSecret: 'acme_secret' } };
+  const ACME_NO_SECRET = { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't' } };
+  type Dump = { dump: Map<string, string> };
+  const keys = () => [...(throttleRedis.current as Dump).dump.keys()].filter((k) => k.startsWith('wasig')).sort();
+  beforeEach(() => { process.env.META_APP_SECRET = SECRET; });
+
+  it('routed + bad signature ⇒ 401 and ONE Redis mark per hour for THAT partner; no DB row, no outbox row', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
+    const body = textBody('hi', 'wamid.SF1', '15551230000', { phoneNumberId: 'pn_acme' });
+    for (let i = 0; i < 5; i++) expect((await post(body, sign(body, 'wrong'))).status).toBe(401);
+    const k = keys();
+    expect(k.filter((x) => x.startsWith('wasigfail:acme:'))).toHaveLength(1);
+    expect(k).toContain('wasigfaillast:acme');
+    expect(auditRecord).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('routed partner with NO app secret, and the unrouted shared number ⇒ 401 and no Redis mark', async () => {
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_NO_SECRET);
+    const routed = textBody('hi', 'wamid.SF2', '15551230000', { phoneNumberId: 'pn_acme' });
+    expect((await post(routed, sign(routed, 'wrong'))).status).toBe(401);
+    partnerForPhoneNumberId.mockResolvedValue(null);
+    const shared = textBody('hi', 'wamid.SF3');
+    expect((await post(shared, sign(shared, 'wrong'))).status).toBe(401);
+    expect(keys()).toEqual([]);
+  });
+
+  it('a Redis outage on a bad signature still answers exactly 401', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
+    throttleRedis.current = { set: async () => { throw new Error('down'); }, get: async () => { throw new Error('down'); } };
+    const body = textBody('hi', 'wamid.SF4', '15551230000', { phoneNumberId: 'pn_acme' });
+    const res = await post(body, sign(body, 'wrong'));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
+  it('routed + valid signature ⇒ lastSignedOkAt for THAT partner; unrouted valid ⇒ no mark', async () => {
+    partnerForPhoneNumberId.mockResolvedValue('acme');
+    getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
+    const body = textBody('hi', 'wamid.SF5', '15551230000', { phoneNumberId: 'pn_acme' });
+    expect((await post(body, sign(body, 'acme_secret'))).status).toBe(200);
+    expect(keys()).toEqual(['wasigok:acme']);
+    partnerForPhoneNumberId.mockResolvedValue(null);
+    const shared = textBody('hi', 'wamid.SF6');
+    expect((await post(shared, sign(shared, SECRET))).status).toBe(200);
+    expect(keys()).toEqual(['wasigok:acme']);
+  });
+});

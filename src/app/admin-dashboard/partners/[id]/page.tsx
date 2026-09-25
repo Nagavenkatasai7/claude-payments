@@ -58,6 +58,7 @@ import {
   summarizeChannelHealth,
 } from '@/lib/channel-health';
 import { ChannelHealthBanner } from '../../channel-health-banner';
+import { readSignatureHealth, type SignatureHealth } from '@/lib/webhook-signature-health';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -180,7 +181,7 @@ export default async function PartnerDetailPage({
   // partner.id is scope-checked above; the reads are best-effort (a Redis or
   // audit hiccup renders "no signals", never a broken page).
   const channel = resolveWaChannel(partner.id, integrations);
-  const [channelHealth, channelTest] = await Promise.all([
+  const [channelHealth, channelTest, signature] = await Promise.all([
     partner.id === 'default'
       ? Promise.resolve(null)
       : getChannelHealth(partner.id, { store: getStore(), db: getDb(), includeChannel: false }).catch((err: unknown) => {
@@ -188,8 +189,10 @@ export default async function PartnerDetailPage({
           return null;
         }),
     getStore().readChannelTest(partner.id).then(parseChannelTest).catch(() => null),
+    // R2b: inbound signature marks (Redis only; a read error ⇒ none).
+    partner.id === 'default' ? Promise.resolve<SignatureHealth>({}) : readSignatureHealth(partner.id),
   ]);
-  const channelSummary = summarizeChannelHealth({ channel, marks: channelHealth?.marks ?? {}, now: new Date(nowMs) });
+  const channelSummary = summarizeChannelHealth({ channel, marks: channelHealth?.marks ?? {}, now: new Date(nowMs), signature });
   // Partner staff already get the marks from the dashboard-layout banner; the
   // header adds only the config items (incomplete / missing fields) for them,
   // so the same signal is never shown twice.
@@ -497,6 +500,16 @@ export default async function PartnerDetailPage({
                     <dt>Access token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.token))}</dd>
                     <dt>Verify token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.verifyToken))}</dd>
                     <dt>App secret</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.appSecret))}</dd>
+                    {integrations.whatsapp.appSecret && (
+                      <>
+                        <dt>Signed webhooks</dt>
+                        <dd className="text-sm text-muted-foreground">
+                          {signature.lastOkAt
+                            ? `Last signed webhook · ${signature.lastOkAt.slice(0, 16).replace('T', ' ')} UTC`
+                            : 'Awaiting first signed webhook'}
+                        </dd>
+                      </>
+                    )}
                   </dl>
                   <form action={saveWhatsappConfigAction} className="mt-4 space-y-4">
                     <input type="hidden" name="id" value={partner.id} />
