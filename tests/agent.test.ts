@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAgent, sanitizeReply, FALLBACK_REPLY } from '@/lib/agent';
+import { createAgent, sanitizeReply, replyAllowHosts, FALLBACK_REPLY } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -417,6 +417,8 @@ describe('createAgent', () => {
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
+      // R6b: generate_payment_link dispatches (and its link is appended) on web only.
+      channel: 'web',
     });
 
     const reply = await agent.runAgentTurn(PHONE, 'pay now');
@@ -640,6 +642,44 @@ describe('sanitizeReply', () => {
     const result = sanitizeReply('Done.', [first, last]);
     expect(result).toContain(last);
   });
+
+  // R6b (A7L-2): bare domains the model writes are stripped too.
+  it('R6b: strips a model-written bare domain and still appends the pay link intact', () => {
+    const link = 'https://smartremit.ai/pay/abc123';
+    const result = sanitizeReply('Pay at pay-now.example or www.x.example now.', [link], ['smartremit.ai']);
+    expect(result).not.toMatch(/pay-now\.example|x\.example/);
+    expect(result).toBe(`Pay at or now.\n\n${link}`);
+  });
+
+  it('R6b: keeps an allowed host and the reply lines', () => {
+    const result = sanitizeReply('Line one: smartremit.ai\nLine two evil.example/pay\nLine three', [], ['smartremit.ai']);
+    expect(result).toBe('Line one: smartremit.ai\nLine two\nLine three');
+  });
+
+  it('R6b: the default allow list is the app host, so a bare foreign domain goes', () => {
+    expect(sanitizeReply('Visit pay-now.example today.', [])).toBe('Visit today.');
+  });
+
+  it('R6b: http(s) URLs are still stripped even on an allowed host (links come from code only)', () => {
+    const result = sanitizeReply('Go to https://smartremit.ai/pay/forged now', [], ['smartremit.ai']);
+    expect(result).toBe('Go to now');
+  });
+});
+
+describe('R6b: replyAllowHosts', () => {
+  it('is the app host, plus the brand when the brand parses as a host', () => {
+    expect(replyAllowHosts('https://smartremit.ai')).toEqual(['smartremit.ai']);
+    expect(replyAllowHosts('https://smartremit.ai', 'Acme Pay')).toEqual(['smartremit.ai']);
+    expect(replyAllowHosts('https://smartremit.ai', 'Acme.co')).toEqual(['smartremit.ai', 'acme.co']);
+    expect(replyAllowHosts('https://smartremit.ai', 'www.Acme.co')).toEqual(['smartremit.ai', 'acme.co']);
+    // R6b fix round 1: a brand on an open-ended TLD is a host too.
+    expect(replyAllowHosts('https://smartremit.ai', 'Acme.Shop')).toEqual(['smartremit.ai', 'acme.shop']);
+  });
+  it('never throws on a bad base URL, and ignores a brand that is not a clean host', () => {
+    expect(replyAllowHosts('not a url')).toEqual([]);
+    expect(replyAllowHosts('not a url', 'Acme.co/pay')).toEqual([]);
+    expect(replyAllowHosts('not a url', 'Pay at evil.example')).toEqual([]);
+  });
 });
 
 describe('createAgent — TurnContext', () => {
@@ -682,7 +722,7 @@ describe('createAgent — TurnContext', () => {
     expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(false);
   });
 
-  it('passes turn.buttonTap through to executeTool (approve path)', async () => {
+  it('R6b: an approve-tap create_transfer on WhatsApp is refused at dispatch; the draft survives, nothing is minted', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
@@ -718,7 +758,8 @@ describe('createAgent — TurnContext', () => {
           },
         ],
       },
-      { role: 'assistant', content: 'Transfer created!' },
+      // The scripted model text is irrelevant to the outcome: the tool was refused.
+      { role: 'assistant', content: 'SCRIPTED MODEL TEXT (not an outcome)' },
     ];
     let i = 0;
     const agent = createAgent({
@@ -733,9 +774,14 @@ describe('createAgent — TurnContext', () => {
       isNewConversation: false,
       buttonTap: { kind: 'approve', draftId },
     });
-    expect(reply).toContain('Transfer created');
-    // Draft must have been consumed.
-    expect(await draftStore.getDraft(draftId)).toBeNull();
+    // The scripted text is relayed as-is, but the tool ran nothing: the WhatsApp
+    // mint is the secure pay page, which consumes the draft there.
+    expect(reply).toBe('SCRIPTED MODEL TEXT (not an outcome)');
+    expect(await draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await store.listTransfers()).toHaveLength(0);
+    const saved = await store.getConversation('default', '15551234567');
+    const toolMsg = saved.find((m) => m.role === 'tool');
+    expect(JSON.parse(String(toolMsg?.content))).toEqual({ error: 'not available here' });
   });
 });
 
@@ -1533,15 +1579,17 @@ describe('row deadline (fix 7)', () => {
     const ctrl = new AbortController();
     const chat = vi.fn(async (_messages: ChatMessage[], _tools: unknown, opts?: { signal?: AbortSignal }): Promise<ChatMessage> => {
       if (chat.mock.calls.length === 1) {
-        // Round 0: the model mints with FULL legacy explicit args (no buttonTap ⇒
-        // the explicit-args path; an empty payload would refuse and mint nothing).
+        // Round 0: the model runs a side-effecting tool (a schedule write). R6b:
+        // create_transfer is no longer dispatched on WhatsApp, so the write that
+        // must happen EXACTLY once is create_schedule's row, not a chat mint.
         return {
           role: 'assistant', content: '',
           tool_calls: [{ id: 'c1', type: 'function', function: {
-            name: 'create_transfer',
+            name: 'create_schedule',
             arguments: JSON.stringify({
               recipient_name: 'Mom', recipient_phone: '919876543210', amount_usd: 50,
               payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+              frequency: 'monthly', day_of_month: 10,
             }),
           } }],
         };
@@ -1560,7 +1608,9 @@ describe('row deadline (fix 7)', () => {
     const reply = await agent.runAgentTurn(PHONE, 'send $50 to Mom', { isNewConversation: false }, { signal: ctrl.signal });
 
     expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?"); // FALLBACK_REPLY (agent.ts:25-26)
-    expect(await store.listTransfers()).toHaveLength(1); // round 0 minted EXACTLY once and is never re-run
+    const scheduleStore = freshScheduleStore(redis);
+    expect(await scheduleStore.listSchedules()).toHaveLength(1); // round 0 wrote EXACTLY once and is never re-run
+    expect(await store.listTransfers()).toHaveLength(0); // no chat mint on WhatsApp (R6b)
     expect(chat).toHaveBeenCalledTimes(2); // no chatWithRetry second call after the abort
     const saved = await store.getConversation('default', PHONE); // history preserved by runAgentTurn's catch
     expect(saved.some((m) => m.role === 'user' && m.content === 'send $50 to Mom')).toBe(true);
@@ -1767,6 +1817,43 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
     expect(typeof result.draft_id).toBe('string');
     expect(String(result.reply_hint)).toMatch(/already above/);
     expect(reply).toBe('The payment card is above — tap Approve & Pay.');
+  });
+
+  it('R6b: a bare domain in a WhatsApp reply is stripped; a dotted brand on the allow list survives', async () => {
+    const { agent } = build(async () => ({ role: 'assistant', content: 'Pay at pay-now.example — thanks from Acme.co!' }));
+    const reply = await agent.runAgentTurn(PHONE, 'where do I pay?');
+    expect(reply).not.toContain('pay-now.example');
+    // The default tenant's brand is SmartRemit (not a host), so Acme.co goes too.
+    expect(reply).not.toContain('Acme.co');
+  });
+
+  it('R6b: a tenant whose brand is a host keeps that brand in the reply', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    const nowIso = new Date().toISOString();
+    await deps.partnerStore.savePartner({
+      id: 'acme', name: 'Acme', displayName: 'Acme.co', countries: ['US'], status: 'active',
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps,
+      partnerId: 'acme',
+      chat: async () => ({ role: 'assistant', content: 'Thanks from Acme.co! Not pay-now.example though.' }),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'hi');
+    expect(reply).toContain('Acme.co!');
+    expect(reply).not.toContain('pay-now.example');
+  });
+
+  it('R6b: a generate_payment_link call on WhatsApp is refused and appends no link', async () => {
+    let n = 0;
+    const { agent } = build(async () => (n++ === 0
+      ? { role: 'assistant', content: '', tool_calls: [{ id: 'g1', type: 'function', function: { name: 'generate_payment_link', arguments: JSON.stringify({ transfer_id: 'abc123' }) } }] }
+      : { role: 'assistant', content: 'Here you go.' }));
+    const reply = await agent.runAgentTurn(PHONE, 'link please');
+    expect(reply).toBe('Here you go.');
+    expect(reply).not.toContain('/pay/');
   });
 
   it('a reply that sanitizeReply empties (URL-only) becomes FALLBACK_REPLY, never an empty string', async () => {

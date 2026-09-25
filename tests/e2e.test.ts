@@ -9,6 +9,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
+import { finalizeDraftPayment } from '@/lib/pay-finalize';
 import { evaluateCap } from '@/lib/tier-rules';
 import { PLATFORM_SEND_LIMITS } from '@/lib/send-limits';
 import { fakeRedis } from './helpers';
@@ -52,6 +53,15 @@ async function seedVerifiedCustomer(
   });
 }
 
+// R6b (A7L-1): no chat channel dispatches create_transfer, so every flow mints
+// the way production does: the approve card's draft is finalized by the secure
+// pay page (finalizeDraftPayment), with the bank details the sender enters there.
+function draftIdIn(redis: ReturnType<typeof fakeRedis>): string {
+  const draftKey = [...redis.dump.keys()].find((k) => k.startsWith('recipient_draft:'));
+  expect(draftKey).toBeDefined();
+  return draftKey!.replace('recipient_draft:', '');
+}
+
 // Partner store is pg-backed (Stage 2a cutover): freshDb() truncates the shared
 // PGlite and reseeds the 'default' partner, so it MUST run per-test.
 let db: Db;
@@ -73,7 +83,7 @@ afterEach(() => {
 });
 
 describe('end-to-end happy path', () => {
-  it('quotes, creates a transfer, sends a link, and delivers', async () => {
+  it('quotes, sends the approve card, mints on the pay page, and delivers', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
@@ -81,7 +91,8 @@ describe('end-to-end happy path', () => {
     const draftStore = createDraftStore(redis);
     await seedVerifiedCustomer(customerStore, PHONE); // Phase 3: verified sender so the gate passes
 
-    // Scripted Kimi: quote -> create -> link -> final reply.
+    // Scripted Kimi: quote -> approve card (a draft). A stale create_transfer /
+    // generate_payment_link pair (e.g. from old history) is refused at dispatch.
     const script: ChatMessage[] = [
       toolCall('c1', 'get_quote', {
         amount_usd: 500,
@@ -95,18 +106,25 @@ describe('end-to-end happy path', () => {
         payout_destination: 'mom@upi',
         funding_method: 'bank_transfer',
       }),
-      toolCall('c3', 'generate_payment_link', {
-        transfer_id: 'PLACEHOLDER',
+      toolCall('c3', 'generate_payment_link', { transfer_id: 'anything' }),
+      toolCall('c4', 'send_approve_picker', {
+        amount_usd: 500,
+        funding_method: 'bank_transfer',
+        recipient_name: 'Mom',
+        recipient_phone: '919876543210',
+        payout_method: 'upi',
+        payout_destination: 'mom@upi',
       }),
       {
         role: 'assistant',
-        content: 'Tap the link to pay securely and your mom gets the money.',
+        content: 'Tap Approve & Pay to pay securely and your mom gets the money.',
       },
     ];
     let turn = 0;
     const dailyVolumeStore = createDailyVolumeStore(store);
     const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+    const partnerStore = createPartnerStore(db); // pg-backed (Stage 2a cutover)
     const agent = createAgent({
       store,
       scheduleStore,
@@ -115,26 +133,29 @@ describe('end-to-end happy path', () => {
       dailyVolumeStore,
       monthlyVolumeStore,
       kycProvider,
-      partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
+      partnerStore,
       async chat() {
-        const msg = script[turn++];
-        // Patch the real transfer id into the link tool call.
-        if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
-          // Transfers live in Postgres now — find it via the store API.
-          const id = (await store.listTransfers())[0]!.id;
-          msg.tool_calls[0].function.arguments = JSON.stringify({
-            transfer_id: id,
-          });
-        }
-        return msg;
+        return script[turn++];
       },
     });
 
-    const reply = await agent.runAgentTurn(
+    await agent.runAgentTurn(
       PHONE,
       'send $500 to my mom on UPI mom@upi',
     );
-    expect(reply).toContain('pay');
+    // The chat minted nothing: both hidden tools were refused at dispatch.
+    expect(await store.listTransfers()).toHaveLength(0);
+    const history = await store.getConversation('default', PHONE);
+    const refused = history.filter((m) => m.role === 'tool' && m.content === JSON.stringify({ error: 'not available here' }));
+    expect(refused).toHaveLength(2);
+
+    // The pay page mints from the approve card's draft.
+    const paid = await finalizeDraftPayment(
+      { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db },
+      draftIdIn(redis),
+      { payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+    );
+    expect(paid.ok).toBe(true);
 
     // A transfer was created; the count is now DERIVED from non-blocked rows.
     const transfers = await store.listTransfers();
@@ -157,7 +178,7 @@ describe('end-to-end happy path', () => {
 });
 
 describe('end-to-end returning customer', () => {
-  it('seeded recipient → picker → tap Mom → amount → quote → tap Approve → delivered', async () => {
+  it('seeded recipient → picker → tap Mom → amount → approve card → pay page mints', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
@@ -201,14 +222,9 @@ describe('end-to-end returning customer', () => {
       }),
       { role: 'assistant', content: 'Quote ready — tap Approve to send.' },
     ];
-    // Turn 4: user taps Approve → bot calls create_transfer (no args) → generate_payment_link.
-    const turn4Script: ChatMessage[] = [
-      toolCall('c4', 'create_transfer', {}),
-      toolCall('c5', 'generate_payment_link', { transfer_id: 'PLACEHOLDER' }),
-      { role: 'assistant', content: 'Tap to pay securely.' },
-    ];
-
-    const allScripts = [turn1Script, turn2Script, turn3Script, turn4Script];
+    // Turn 4 (R6b): the Approve & Pay card opens the secure pay page, which
+    // mints from the draft. No chat turn and no chat tool mints.
+    const allScripts = [turn1Script, turn2Script, turn3Script];
     let activeScript: ChatMessage[] = [];
     let scriptIdx = 0;
 
@@ -225,6 +241,7 @@ describe('end-to-end returning customer', () => {
     const dailyVolumeStore = createDailyVolumeStore(store);
     const monthlyVolumeStore = createMonthlyVolumeStore(store);
     const kycProvider = new MockKycProvider(customerStore, 'https://example.com');
+    const partnerStore = createPartnerStore(db); // pg-backed (Stage 2a cutover)
     const agent = createAgent({
       store,
       scheduleStore,
@@ -233,16 +250,9 @@ describe('end-to-end returning customer', () => {
       dailyVolumeStore,
       monthlyVolumeStore,
       kycProvider,
-      partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
+      partnerStore,
       async chat() {
-        const msg = activeScript.shift()!;
-        if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
-          // Transfers live in Postgres now — find it via the store API.
-          msg.tool_calls[0].function.arguments = JSON.stringify({
-            transfer_id: (await store.listTransfers())[0]!.id,
-          });
-        }
-        return msg;
+        return activeScript.shift()!;
       },
     });
 
@@ -272,16 +282,14 @@ describe('end-to-end returning customer', () => {
     expect(draftKey).toBeDefined();
     const draftId = draftKey!.replace('recipient_draft:', '');
 
-    // --- Turn 4: user taps Approve.
-    activeScript = [...allScripts[scriptIdx++]];
-    await agent.runAgentTurn(
-      PHONE,
-      '[Tapped: Approve & pay]',
-      {
-        isNewConversation: false,
-        buttonTap: { kind: 'approve', draftId },
-      },
+    // --- Turn 4: user taps Approve & Pay → the secure pay page mints.
+    expect(await store.listTransfers()).toHaveLength(0);
+    const paid = await finalizeDraftPayment(
+      { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db },
+      draftId,
+      { payoutMethod: 'upi', payoutDestination: 'mom@upi' },
     );
+    expect(paid.ok).toBe(true);
 
     // A transfer must have been created (Postgres ledger).
     expect(await store.listTransfers()).toHaveLength(1);
@@ -297,7 +305,7 @@ describe('end-to-end returning customer', () => {
 });
 
 describe('end-to-end new customer with cap', () => {
-  it('greeted → over-cap → under-cap → approve creates transfer + increments daily volume', async () => {
+  it('greeted → over-cap → under-cap → pay page mints + increments daily volume', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const customerStore = createCustomerStore(db, store);
@@ -332,14 +340,9 @@ describe('end-to-end new customer with cap', () => {
       }),
       { role: 'assistant', content: 'Tap Approve to send.' },
     ];
-    // Turn 4: user taps Approve → bot calls create_transfer (no args, from ctx) → generate_payment_link
-    const turn4: ChatMessage[] = [
-      toolCall('c5', 'create_transfer', {}),
-      toolCall('c6', 'generate_payment_link', { transfer_id: 'PLACEHOLDER' }),
-      { role: 'assistant', content: 'Tap to pay.' },
-    ];
-
-    const scripts = [turn1, turn2, turn3, turn4];
+    // Turn 4 (R6b): the Approve & Pay card opens the secure pay page, which
+    // mints from the draft (finalizeDraftPayment below). No chat tool mints.
+    const scripts = [turn1, turn2, turn3];
     let active: ChatMessage[] = [];
     let idx = 0;
 
@@ -347,18 +350,12 @@ describe('end-to-end new customer with cap', () => {
       ok: true, json: async () => ({ rates: { INR: 85.2 } }), text: async () => '',
     }));
 
+    const partnerStore = createPartnerStore(db); // pg-backed (Stage 2a cutover)
     const agent = createAgent({
       store, scheduleStore, draftStore, customerStore, dailyVolumeStore, monthlyVolumeStore, kycProvider,
-      partnerStore: createPartnerStore(db), // pg-backed (Stage 2a cutover)
+      partnerStore,
       async chat() {
-        const msg = active.shift()!;
-        if (msg.tool_calls?.[0].function.name === 'generate_payment_link') {
-          // Transfers live in Postgres now — find it via the store API.
-          msg.tool_calls[0].function.arguments = JSON.stringify({
-            transfer_id: (await store.listTransfers())[0]!.id,
-          });
-        }
-        return msg;
+        return active.shift()!;
       },
     });
 
@@ -381,12 +378,14 @@ describe('end-to-end new customer with cap', () => {
     expect(draftKey).toBeDefined();
     const draftId = draftKey!.replace('recipient_draft:', '');
 
-    // Turn 4: approve tap
-    active = [...scripts[idx++]];
-    await agent.runAgentTurn(PHONE, '[Tapped: Approve & pay]', {
-      isNewConversation: false,
-      buttonTap: { kind: 'approve', draftId },
-    });
+    // Turn 4: Approve & Pay → the secure pay page mints from the draft.
+    expect(await store.listTransfers()).toHaveLength(0);
+    const paid = await finalizeDraftPayment(
+      { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db },
+      draftId,
+      { payoutMethod: 'upi', payoutDestination: 'mom@upi' },
+    );
+    expect(paid.ok).toBe(true);
 
     // Transfer must exist (Postgres ledger)
     expect(await store.listTransfers()).toHaveLength(1);
