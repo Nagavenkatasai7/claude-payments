@@ -311,6 +311,24 @@ describe('store', () => {
     expect(await store.markMessageSeen('wamid.1')).toBe(false);
   });
 
+  it('R1: markMessageQueued writes the msgq: fast-skip mark AND the legacy msg: mark (write-only, for old builds)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    expect(await store.isMessageQueued('wamid.Q')).toBe(false);
+    await store.markMessageQueued('wamid.Q');
+    expect(await store.isMessageQueued('wamid.Q')).toBe(true);
+    expect(redis.dump.get('msgq:wamid.Q')).toBe('1');
+    // An old build's SET NX msg: now sees "seen" and skips the durable message.
+    expect(await store.markMessageSeen('wamid.Q')).toBe(false);
+  });
+
+  it('R1: isMessageQueued never reads the legacy msg: key (an old build may have set it and then thrown)', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    await store.markMessageSeen('wamid.OLD');
+    expect(await store.isMessageQueued('wamid.OLD')).toBe(false);
+  });
+
   it('trims conversation history to the last 40 messages', async () => {
     const store = createStore(fakeRedis(), db);
     const many = Array.from({ length: 60 }, (_, i) => ({

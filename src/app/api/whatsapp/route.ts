@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { env } from '@/lib/env';
 import { verifyMetaSignature } from '@/lib/providers/meta-signature-verify';
 import { parsePhoneNumberId } from '@/lib/whatsapp';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { getPartnerIntegrationsStore, partnerForPhoneNumberId } from '@/lib/partner-integrations-store';
 import { processInboundWebhook } from '@/lib/whatsapp-inbound';
+import { respondToInboundFailure } from '@/lib/whatsapp-inbound-response';
+import type { PartnerId } from '@/lib/types';
 
 // The SHARED Meta webhook. The default/SmartRemit number lives here; partner-
 // owned numbers may also land here (their Meta app pointed at the shared URL) —
@@ -46,8 +47,8 @@ export async function POST(req: NextRequest) {
     ? await getPartnerIntegrationsStore().getIntegrations(routedPartnerId)
     : null;
 
-  // Signature gate, ABOVE markMessageSeen, so a forged body can't touch the
-  // dedup set or any downstream processing.
+  // Signature gate, ABOVE any side effect, so a forged body can't touch the
+  // dedup marks or any downstream processing.
   //   routed (a partner's BYO number)  ⇒ THAT partner's app secret, and ONLY
   //     that — no platform fallback. A routed partner with no app secret is
   //     401: after fix 1 routing IS tenant identity, so an event that cannot be
@@ -70,9 +71,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
   }
 
-  const result = await processInboundWebhook(body, {
-    routedPartnerId,
-    waCreds: waCredsFrom(integrations),
-  });
-  return NextResponse.json(result);
+  // R1 per-change tenant rule: the signature proved entry[0]'s tenant only.
+  // A change whose receiving number resolves to a DIFFERENT partner (or, for
+  // the shared number, to any partner) is skipped — it never runs under this
+  // tenant. Resolutions are memoized for the request.
+  const resolved = new Map<string, Promise<PartnerId | null>>();
+  const acceptPnid = async (changePnid: string | null): Promise<boolean> => {
+    if (changePnid === null) return routedPartnerId === null;
+    let owner = resolved.get(changePnid);
+    if (!owner) {
+      owner = partnerForPhoneNumberId(changePnid);
+      resolved.set(changePnid, owner);
+    }
+    return (await owner) === routedPartnerId;
+  };
+
+  try {
+    const result = await processInboundWebhook(body, { routedPartnerId, acceptPnid });
+    return NextResponse.json(result);
+  } catch (err) {
+    return respondToInboundFailure(err, routedPartnerId);
+  }
 }

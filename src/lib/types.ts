@@ -451,12 +451,20 @@ export interface TurnContext {
   tierReminderDayOfWindow?: 1 | 2 | 3;  // T0 + new conversation + not new-customer → which day of the 3-day window
 }
 
-export type IncomingMessage =
+export type IncomingMessage = (
   | { kind: 'text'; from: string; text: string; messageId: string }
   | { kind: 'button'; from: string; buttonId: string; messageId: string }
   // Program-Fix 49A (whatsapp-08): a message the bot cannot read (image, voice,
   // document, …). Never downloaded; the inbound pipeline answers it honestly.
-  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string };
+  | { kind: 'unsupported'; from: string; mediaType: UnsupportedMediaType; messageId: string }
+) & {
+  // R1: Meta business-scoped user id / username when the webhook carries them.
+  // In memory only: never logged, never written to an outbox payload.
+  bsuid?: string;
+  username?: string;
+  /** R1: when the customer sent it (Meta messages[].timestamp, epoch ms). Orders consent changes. */
+  sentAtMs?: number;
+};
 
 /** Inbound Meta message types the bot answers with the "typed messages only" reply. */
 export type UnsupportedMediaType =
