@@ -195,6 +195,42 @@ export function hasOverridePhrase(v: unknown): boolean {
   return s !== '' && OVERRIDE_PHRASE.test(s);
 }
 
+/**
+ * The host a web-address token names, for an allow-list check: lower-cased,
+ * with any markdown "[text](" wrapper, scheme, "user@" and "www." removed, cut
+ * at the first path, query, port or bracket character, and with trailing
+ * punctuation dropped. Anything odd left in it simply fails the exact match.
+ */
+function tokenHost(token: string): string {
+  let h = token.toLowerCase();
+  const paren = h.lastIndexOf('](');
+  if (paren !== -1) h = h.slice(paren + 2);
+  h = h.replace(/^[(<["'“‘]+/u, '');
+  h = h.replace(/^[a-z][a-z0-9+.-]*:\/\//u, '');
+  const at = h.lastIndexOf('@');
+  if (at !== -1) h = h.slice(at + 1);
+  h = h.split(/[/?#:)\]>]/u)[0];
+  h = h.replace(/[.,!?;'"”’…]+$/u, '');
+  return h.replace(/^www\./u, '');
+}
+
+/**
+ * R6b (A7L-2): remove every whitespace-separated token of MODEL-written text
+ * that carries a web address (hasWebAddress) unless its host is exactly one of
+ * `allowHosts` (a leading "www." is ignored on both sides). Every whitespace
+ * run, newlines included, is kept as it was, so a multi-line reply keeps its
+ * lines. Fail-closed: a token whose host cannot be matched cleanly is removed.
+ * Known cost: a missing space before a TLD-like word ("sent.In") is removed too.
+ * Pure.
+ */
+export function stripModelHosts(text: string, allowHosts: readonly string[]): string {
+  const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/^www\./u, '')).filter((h) => h !== ''));
+  return text.replace(/\S+/gu, (token) => {
+    if (!hasWebAddress(token)) return token;
+    return allow.has(tokenHost(token)) ? token : '';
+  });
+}
+
 function stripWebAddressTokens(s: string): string {
   return s
     .split(' ')

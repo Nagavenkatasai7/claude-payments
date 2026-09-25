@@ -10,6 +10,7 @@ import {
   hasWebAddress,
   hasOverridePhrase,
   safeDisplayText,
+  stripModelHosts,
 } from '@/lib/untrusted-text';
 
 // fix 5 (F43/F63): text written by an outsider (a partner-API caller, a partner
@@ -356,5 +357,65 @@ describe('fix 38 review: the host+path rule, abuse TLDs, IDN endings and the det
       safeDisplayText(v, PERSONA_MAX);
       expect(performance.now() - t).toBeLessThan(300);
     }
+  });
+});
+
+// R6b (A7L-2): the model's reply is untrusted output (OWASP LLM05). A bare
+// domain it writes is removed token by token; whitespace and newlines survive.
+describe('R6b: stripModelHosts', () => {
+  const ALLOW = ['smartremit.ai'];
+
+  it.each([
+    'pay-now.example',
+    'www.x.example',
+    'evil.example/pay',
+    'x@y.example',
+    '[t](a.example)',
+    'pay.xn--p1ai',
+    'pay.evil.example.',
+    'Www.Pay-Now.Example,',
+    'smartremit.ai.evil.example',
+    'smartremit.ai@evil.example',
+    'evil.example?next=smartremit.ai',
+  ])('strips %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} today`, ALLOW)).toBe('Pay at  today');
+  });
+
+  it.each([
+    '1 USD = 83.25 INR',
+    '₹4,750.00 reaches Mom',
+    'Rs.500 fee',
+    'the U.S. and e.g. India',
+    'Transfer TX-8F3K2 is paid; case #CASE-19 is open',
+    'माँ को ₹4,750 भेज दिए गए हैं।',
+    'Aapka paisa kal tak pahunch jayega, bhai.',
+    'Mom gets $50.00. Done!',
+  ])('keeps ordinary text: %s', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  it('keeps an allowed host (exact, www. and trailing punctuation), case-insensitively', () => {
+    expect(stripModelHosts('Visit smartremit.ai.', ALLOW)).toBe('Visit smartremit.ai.');
+    expect(stripModelHosts('Visit www.SmartRemit.ai/help', ALLOW)).toBe('Visit www.SmartRemit.ai/help');
+  });
+
+  it('preserves every newline and the surrounding whitespace', () => {
+    const text = 'Line one pay-now.example\n\n  Line two\tstays\nevil.example/x';
+    expect(stripModelHosts(text, ALLOW)).toBe('Line one \n\n  Line two\tstays\n');
+  });
+
+  it('accepted false positives (owner default B): a missing space before a TLD word is stripped', () => {
+    expect(stripModelHosts('Money sent.In a day', ALLOW)).toBe('Money  a day');
+    expect(stripModelHosts('All done.co', ALLOW)).toBe('All ');
+  });
+
+  it('a dotted brand survives only when it is on the allow list', () => {
+    expect(stripModelHosts('Thanks for using Acme.co!', ALLOW)).toBe('Thanks for using ');
+    expect(stripModelHosts('Thanks for using Acme.co!', [...ALLOW, 'acme.co'])).toBe('Thanks for using Acme.co!');
+  });
+
+  it('an empty allow list strips every host; empty text stays empty', () => {
+    expect(stripModelHosts('see smartremit.ai', [])).toBe('see ');
+    expect(stripModelHosts('', ALLOW)).toBe('');
   });
 });
