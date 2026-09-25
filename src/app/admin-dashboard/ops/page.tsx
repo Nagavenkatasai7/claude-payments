@@ -10,6 +10,8 @@ import { emailConfigured } from '@/lib/email';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getCadenceSnapshot, cadenceRedis, DRAIN_SLA_MINUTES, CRON_QUIET_MINUTES } from '@/lib/worker-cadence';
 import { WORKER_BACKSTOP_PERIOD_MIN } from '@/lib/worker-gate';
+import { measureDatabaseBytes, bytesToMb, storageAlarmLevel, STORAGE_ALARMS_MB } from '@/lib/storage-watch';
+import { logError } from '@/lib/log';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -63,6 +65,14 @@ export default async function OpsPage() {
   // trio only (never a value), plus how many sends were skipped this week.
   const mailConfigured = emailConfigured();
   const emailSkipped7d = await createAuditRepo(getDb()).countByAction('email.skipped', 7);
+  // partner-demo R3a (owner decision C1): database MB used against the Neon Free
+  // cap. Read-only (the alarm itself lives in the daily cron); a failed read
+  // shows "unavailable" instead of failing the page.
+  const dbBytes = await measureDatabaseBytes(getDb()).catch((err: unknown) => {
+    logError('ops.storage-read', err);
+    return null;
+  });
+  const dbLevel = dbBytes === null ? 0 : storageAlarmLevel(dbBytes);
   const senderNames = await resolveSenderNames(
     getDb(),
     [
@@ -176,6 +186,21 @@ export default async function OpsPage() {
             {emailSkipped7d} email{emailSkipped7d === 1 ? '' : 's'} skipped in the last 7 days
             (<code>email.skipped</code> audit rows). Partner lead alerts and application invites
             are skipped while SMTP_HOST / SMTP_USER / SMTP_PASS are unset.
+          </CardContent>
+        </Card>
+
+        {/* partner-demo R3a (owner decision C1): the storage cap-watch. */}
+        <Card className={`mb-6 ${dbLevel >= 400 ? 'border-destructive/50' : dbLevel >= 300 || dbBytes === null ? 'border-warning/50' : ''}`}>
+          <CardHeader className="pb-2">
+            <CardDescription>Database storage</CardDescription>
+            <CardTitle className="text-xl tabular-nums">
+              {dbBytes === null ? 'unavailable' : `${bytesToMb(dbBytes)} MB used`}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-xs text-muted-foreground">
+            Neon Free caps storage at 0.5 GB. The daily cron raises an ops alert at{' '}
+            {STORAGE_ALARMS_MB.join(' MB and ')} MB (decimal MB); the Neon Launch upgrade is
+            pre-approved at {STORAGE_ALARMS_MB[STORAGE_ALARMS_MB.length - 1]} MB.
           </CardContent>
         </Card>
 

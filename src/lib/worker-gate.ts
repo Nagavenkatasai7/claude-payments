@@ -26,7 +26,13 @@ import type { InvocationSource } from '@/lib/worker-cadence';
 //   2. the heartbeat (GitHub, :17 hourly) runs full whenever the cron marker
 //      is stale, so a dead Vercel cron still drains hourly;
 //   3. FAIL-OPEN: any Redis error on the read path counts as "due" (full run);
-//      a write error only loses a marker, which (1) covers.
+//      a write error only loses a marker, which (1) and (4) cover;
+//   4. the TIME-BASED backstop (R4 follow-up): `worker:lastFullAt` is written
+//      at the end of every completed full run; a cron tick or heartbeat runs
+//      full whenever it is missing, unreadable or older than 30 min — so a
+//      skipped/late :17/:47 delivery cannot stretch the gap past ~31 min.
+//      Rolling release: an old build never writes it, so the new build sees it
+//      missing and runs full until its own first full run writes it.
 // Dead-lettering counts genuine runs only (outbox-repo markFailed), so a
 // skipped invocation can never make a row die sooner.
 
@@ -36,11 +42,24 @@ export const WORKER_BACKSTOP_PERIOD_MIN = 30;
 const BACKSTOP_OFFSET_MIN = 17;
 /** The sorted set key. */
 export const DUE_KEY = 'outbox:due';
+/** The last completed full run (ISO instant), shared by every instance. */
+export const LAST_FULL_KEY = 'worker:lastFullAt';
+/** A lastFullAt older than this forces a full run. */
+export const LAST_FULL_MAX_AGE_MS = WORKER_BACKSTOP_PERIOD_MIN * 60_000;
+/** The marker outlives the window by a wide margin; its expiry just means "run full". */
+const LAST_FULL_TTL_SEC = 24 * 60 * 60;
 /** Upper bound on any single gate read/write: a slow Redis may only shorten a drain. */
 const GATE_REDIS_TIMEOUT_MS = 2_000;
 
-/** The four Upstash sorted-set calls the gate uses (@upstash/redis 1.38.1 error-8y4qG0W2.d.ts:4800-4864). */
+/**
+ * The Upstash calls the gate uses: four sorted-set commands
+ * (@upstash/redis 1.38.1 error-8y4qG0W2.d.ts:4800-4864) plus GET / SET for
+ * the lastFullAt marker (same file, 4313 and 4636; automaticDeserialization is
+ * off, so GET returns the raw string).
+ */
 export interface GateRedis {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, opts?: { ex: number }): Promise<unknown>;
   zadd(key: string, scoreMember: { score: number; member: string }): Promise<number | null>;
   zcount(key: string, min: number | string, max: number | string): Promise<number>;
   zrem(key: string, ...members: string[]): Promise<number>;
@@ -102,6 +121,31 @@ export async function isWorkDue(redis: GateRedis, nowMs: number): Promise<boolea
   }
 }
 
+/** Records that a full run started at `atMs` completed. Never throws. */
+export async function recordFullRun(redis: GateRedis, atMs: number): Promise<void> {
+  try {
+    await redis.set(LAST_FULL_KEY, new Date(atMs).toISOString(), { ex: LAST_FULL_TTL_SEC });
+  } catch (err) {
+    warn('lastFullAt write', err);
+  }
+}
+
+/**
+ * Did a full run complete within the last LAST_FULL_MAX_AGE_MS? Missing,
+ * unparseable or a Redis error all answer FALSE (run full: fail-open).
+ */
+export async function isLastFullFresh(redis: GateRedis, nowMs: number): Promise<boolean> {
+  try {
+    const raw = await redis.get(LAST_FULL_KEY);
+    if (typeof raw !== 'string') return false;
+    const ms = Date.parse(raw);
+    return !Number.isNaN(ms) && nowMs - ms <= LAST_FULL_MAX_AGE_MS;
+  } catch (err) {
+    warn('lastFullAt read', err);
+    return false;
+  }
+}
+
 /** The unconditional full-run minutes: :17 and :47 UTC. */
 export function isBackstopMinute(now: Date): boolean {
   return now.getUTCMinutes() % WORKER_BACKSTOP_PERIOD_MIN === BACKSTOP_OFFSET_MIN % WORKER_BACKSTOP_PERIOD_MIN;
@@ -115,6 +159,8 @@ export interface GateInput {
   due: boolean;
   /** The last-cron marker exists and is ≤ CRON_QUIET_MINUTES old. */
   cronFresh: boolean;
+  /** isLastFullFresh (false when missing, unreadable, stale or on a Redis error). */
+  lastFullFresh: boolean;
 }
 
 /**
@@ -122,9 +168,11 @@ export interface GateInput {
  * runs full. A cron tick is gated off the backstop minute when nothing is
  * due. The heartbeat is gated only while the cron is alive (fresh marker) and
  * nothing is due — so it runs full exactly when the Vercel cron is dead.
+ * Either one runs full when no full run completed in the last 30 minutes.
  */
 export function gateDecision(input: GateInput): 'gated' | 'full' {
   if (input.due) return 'full';
+  if (!input.lastFullFresh) return 'full';
   if (input.source === 'cron') return input.backstop ? 'full' : 'gated';
   if (input.source === 'heartbeat') return input.cronFresh ? 'gated' : 'full';
   return 'full';

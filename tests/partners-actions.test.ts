@@ -624,7 +624,8 @@ describe('WhatsApp number ownership is proven with Meta before it is stored (fix
       vi.fn(async () => new Response('{"error":{}}', { status: 401 })),
     ]) {
       vi.stubGlobal('fetch', graph);
-      const err = await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', verifyToken: 'v' })).catch((e: Error) => e);
+      // R3a: a COMPLETE form (app secret included) — completeness now runs before the probe.
+      const err = await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', verifyToken: 'v', appSecret: 'sec' })).catch((e: Error) => e);
       expect((err as Error).message).toBe(REFUSED);
       expect((err as Error).message).not.toContain(PN);
       const got = (await integrations.getIntegrations('acme')).whatsapp;
@@ -637,7 +638,7 @@ describe('WhatsApp number ownership is proven with Meta before it is stored (fix
   it('a refusal logs partnerId + status only — never the token, never the pnid', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
-    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-secret-tok' }))).rejects.toThrow(REFUSED);
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-secret-tok', appSecret: 'sec' }))).rejects.toThrow(REFUSED);
     const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('wa.pnid_verify_failed'));
     expect(lines).toHaveLength(1);
     const line = JSON.parse(lines[0]) as Record<string, unknown>;
@@ -648,10 +649,13 @@ describe('WhatsApp number ownership is proven with Meta before it is stored (fix
     warn.mockRestore();
   });
 
+  // R3a: the merged-state completeness check now runs BEFORE the Graph probe,
+  // so from the WhatsApp tab a token-less pnid is refused as INCOMPLETE (the
+  // no-token PNID_UNVERIFIED branch is reachable only from the wizard, below).
   it('a new pnid with NO token (none submitted, none stored) is refused without calling Meta', async () => {
     const graph = vi.fn();
     vi.stubGlobal('fetch', graph);
-    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN }))).rejects.toThrow(REFUSED);
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, appSecret: 'sec' }))).rejects.toThrow(/incomplete[\s\S]*Access token/i);
     expect(graph).not.toHaveBeenCalled();
     expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBeUndefined();
   });
@@ -676,7 +680,7 @@ describe('WhatsApp number ownership is proven with Meta before it is stored (fix
   });
 
   it('a NEW token on an unchanged pnid is re-verified; a failure keeps the old token', async () => {
-    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-stored' } });
+    await integrations.saveIntegrations('acme', { kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-stored', appSecret: 'sec' } });
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })));
     await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-other' }))).rejects.toThrow(REFUSED);
     expect((await integrations.getIntegrations('acme')).whatsapp.token).toBe('EAA-stored');
@@ -737,7 +741,7 @@ describe('WhatsApp number ownership is proven with Meta before it is stored (fix
     const graph = vi.fn(async (url: string) =>
       new Response(JSON.stringify(url.includes('/phone_numbers') ? { data: [{ id: '42424242' }] } : { id: PN }), { status: 200 }));
     vi.stubGlobal('fetch', graph);
-    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', wabaId: '987654321' }))).rejects.toThrow(REFUSED);
+    await expect(saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-x', appSecret: 'sec', wabaId: '987654321' }))).rejects.toThrow(REFUSED);
     expect((await integrations.getIntegrations('acme')).whatsapp.phoneNumberId).toBeUndefined();
     graph.mockImplementation(async (url: string) =>
       new Response(JSON.stringify(url.includes('/phone_numbers') ? { data: [{ id: PN }] } : { id: PN }), { status: 200 }));
@@ -941,8 +945,10 @@ describe('settlement URL is validated at save time (Program-Fix 22, acceptance t
 
 describe('fix 38: the bot persona is refused on a web address or rule-override phrase, and every change is audited', () => {
   const REFUSAL = 'Bot voice can describe tone only — no web addresses or instructions about rules.';
+  // R3a: the wizard now also audits its WhatsApp creds + first key, so these
+  // persona assertions read the persona rows only.
   async function auditRows() {
-    const r = await db.execute(rawSql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events ORDER BY id`);
+    const r = await db.execute(rawSql`SELECT partner_id, actor, actor_type, action, subject_id, meta FROM audit_events WHERE action = 'partner.persona.update' ORDER BY id`);
     return r.rows as Array<{ partner_id: string; actor: string; actor_type: string; action: string; subject_id: string; meta: Record<string, unknown> }>;
   }
   const personaForm = (id: string, botPersona: string) => {

@@ -10,6 +10,7 @@ import { runDueSchedules } from '@/lib/cron-run';
 import { expireUnpaidLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
+import { checkStorageCap } from '@/lib/storage-watch';
 import { logError } from '@/lib/log';
 import { pokeWorker } from '@/lib/outbox';
 import { getDb } from '@/db/client';
@@ -147,6 +148,17 @@ export async function GET(req: NextRequest) {
     logError('cron.audit', err);
   }
 
+  // partner-demo R3a (owner decision C1): the Neon Free storage cap-watch —
+  // one sum(pg_database_size) read per daily run (never in the per-minute
+  // worker), and a deduped ops.alert at 300 MB / 400 MB (src/lib/storage-watch.ts).
+  // Fail-soft; the response and the cron.run row are unchanged. Before the
+  // sanctions loader, which runs last because a timeout can kill it.
+  try {
+    await checkStorageCap(getDb(), new Date());
+  } catch (err) {
+    logError('cron.storage-watch', err);
+  }
+
   // Program-Fix 14 PR C: the daily OFAC SDN list load, ONLY when
   // SANCTIONS_LOADER_ENABLED is set (OFF by default). It runs LAST, after the
   // cron.run row, so a timeout/OOM kill during the ~30 MB download cannot
@@ -163,8 +175,8 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // partner-demo R4: schedules, link expiry and the sanctions-list loader
-  // commit outbox rows above — poke so the gated worker cron drains them now
+  // partner-demo R4: schedules, link expiry, the sanctions-list loader and the
+  // storage cap-watch commit outbox rows above — poke so the gated worker cron drains them now
   // rather than at the next :17/:47 backstop.
   pokeWorker();
   return NextResponse.json({

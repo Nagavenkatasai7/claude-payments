@@ -2,8 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { fakeGateRedis } from './helpers-gate-redis';
 import {
   DUE_KEY,
+  LAST_FULL_KEY,
+  LAST_FULL_MAX_AGE_MS,
   WORKER_BACKSTOP_PERIOD_MIN,
   clearLease,
+  isLastFullFresh,
+  recordFullRun,
   gateDecision,
   isBackstopMinute,
   isWorkDue,
@@ -97,8 +101,42 @@ describe('isBackstopMinute', () => {
   });
 });
 
+describe('worker:lastFullAt — the time-based backstop (R4 follow-up)', () => {
+  it('the key and the 30-minute window', () => {
+    expect(LAST_FULL_KEY).toBe('worker:lastFullAt');
+    expect(LAST_FULL_MAX_AGE_MS).toBe(30 * 60_000);
+  });
+
+  it('missing ⇒ not fresh (run full)', async () => {
+    expect(await isLastFullFresh(fakeGateRedis(), T)).toBe(false);
+  });
+
+  it('recorded ⇒ fresh up to 30 min, stale after', async () => {
+    const r = fakeGateRedis();
+    await recordFullRun(r, T);
+    expect(r.strings.get(LAST_FULL_KEY)).toBe(new Date(T).toISOString());
+    expect(await isLastFullFresh(r, T)).toBe(true);
+    expect(await isLastFullFresh(r, T + LAST_FULL_MAX_AGE_MS)).toBe(true);
+    expect(await isLastFullFresh(r, T + LAST_FULL_MAX_AGE_MS + 1)).toBe(false);
+  });
+
+  it('an unparseable value ⇒ not fresh', async () => {
+    const r = fakeGateRedis();
+    r.strings.set(LAST_FULL_KEY, 'garbage');
+    expect(await isLastFullFresh(r, T)).toBe(false);
+  });
+
+  it('a Redis error ⇒ not fresh (fail-open), and the write never throws', async () => {
+    const r = fakeGateRedis();
+    await recordFullRun(r, T);
+    r.failing = true;
+    expect(await isLastFullFresh(r, T)).toBe(false);
+    await expect(recordFullRun(r, T)).resolves.toBeUndefined();
+  });
+});
+
 describe('gateDecision', () => {
-  const base = { backstop: false, due: false, cronFresh: true };
+  const base = { backstop: false, due: false, cronFresh: true, lastFullFresh: true };
 
   it('a poke always runs full', () => {
     expect(gateDecision({ ...base, source: 'poke' })).toBe('full');
@@ -114,5 +152,10 @@ describe('gateDecision', () => {
     expect(gateDecision({ ...base, source: 'heartbeat' })).toBe('gated');
     expect(gateDecision({ ...base, source: 'heartbeat', cronFresh: false })).toBe('full');
     expect(gateDecision({ ...base, source: 'heartbeat', due: true })).toBe('full');
+  });
+
+  it('a missing / unreadable / stale lastFullAt forces a full run for cron and heartbeat', () => {
+    expect(gateDecision({ ...base, source: 'cron', lastFullFresh: false })).toBe('full');
+    expect(gateDecision({ ...base, source: 'heartbeat', lastFullFresh: false })).toBe('full');
   });
 });

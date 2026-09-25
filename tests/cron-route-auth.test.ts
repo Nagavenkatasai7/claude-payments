@@ -16,6 +16,9 @@ vi.mock('@/lib/stale-money', () => ({ expireUnpaidLinks }));
 const scrubOldOutboxPayloads = vi.hoisted(() => vi.fn(async () => 3));
 vi.mock('@/lib/outbox-retention', () => ({ scrubOldOutboxPayloads }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+// partner-demo R3a: the daily storage cap-watch (tests/storage-watch.test.ts covers it on PGlite).
+const checkStorageCap = vi.hoisted(() => vi.fn(async () => ({ bytes: 0, mb: 0, level: 0, alerted: false })));
+vi.mock('@/lib/storage-watch', () => ({ checkStorageCap }));
 // Program-Fix 27: every authorized run writes one cron.run audit row
 // (tests/cron-route-audit.test.ts covers the row on a real ledger).
 const auditRecord = vi.hoisted(() => vi.fn(async () => {}));
@@ -39,6 +42,7 @@ describe('/api/cron Bearer gate', () => {
     expect(runDueSchedules).not.toHaveBeenCalled();
     expect(expireUnpaidLinks).not.toHaveBeenCalled();
     expect(auditRecord).not.toHaveBeenCalled(); // an unauthenticated caller cannot grow audit_events
+    expect(checkStorageCap).not.toHaveBeenCalled();
   });
 
   it('the right Bearer passes the gate and runs the schedules', async () => {
@@ -71,6 +75,19 @@ describe('/api/cron Bearer gate', () => {
     const res = await GET(req({ authorization: `Bearer ${SECRET}` }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, fired: 0, failed: 0, expired: 2, scrubbed: null });
+    err.mockRestore();
+  });
+
+  it('R3a: an authorized run checks the storage cap once; a throw is fail-soft (response unchanged)', async () => {
+    checkStorageCap.mockClear();
+    await GET(req({ authorization: `Bearer ${SECRET}` }));
+    expect(checkStorageCap).toHaveBeenCalledTimes(1);
+    expect((checkStorageCap.mock.calls[0] as unknown[])[1]).toBeInstanceOf(Date);
+    checkStorageCap.mockRejectedValueOnce(new Error('permission denied'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await GET(req({ authorization: `Bearer ${SECRET}` }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, fired: 0, failed: 0, expired: 2, scrubbed: 3 });
     err.mockRestore();
   });
 

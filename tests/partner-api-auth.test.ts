@@ -49,7 +49,7 @@ describe('authenticatePartner', () => {
   it('401 after the key is revoked', async () => {
     const store = keyStore(db);
     const issued = await store.issue('acme');
-    await store.revoke(issued.keyId);
+    await store.revoke(issued.keyId, 'acme');
     expect(await authenticatePartner(reqWith({ authorization: `Bearer ${issued.plaintext}` }), store)).toMatchObject({ ok: false, status: 401 });
   });
 });
