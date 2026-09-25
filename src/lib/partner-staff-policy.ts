@@ -31,20 +31,38 @@ export function resolveStaffTenant(actor: Staff, selector: string): PartnerId | 
   return wanted === scope.partnerId ? scope.partnerId : null;
 }
 
+export type RemoveDecision = 'ok' | 'noop' | 'suspended';
+
 /**
- * May `actor` remove `target` through the partner-staff endpoint? Only a
- * tenant member (never a platform account), only one the actor can see, never
- * the actor themself, and only by an admin.
+ * May `actor` remove `target` through the partner-staff endpoint?
+ *   - 'noop': not an admin, a platform account, yourself, or a tenant the
+ *     actor cannot see. The caller returns the same silent no-op as for a
+ *     missing name (404-never-403).
+ *   - 'suspended' (fix round 1): a PARTNER admin and a member of their own
+ *     tenant that SmartRemit suspended. Suspension is platform governance:
+ *     removing the member would let the tenant re-create the name active with
+ *     a new password. Only reachable inside the actor's own tenant, so it
+ *     reveals nothing about other tenants.
+ *   - 'ok': otherwise. A platform admin may remove a suspended member.
  */
-export function mayRemove(actor: Staff, target: Staff): boolean {
-  if (actor.role !== 'admin') return false;
-  if (!target.partnerId) return false;
-  if (target.username === actor.username) return false;
+export function removeDecision(actor: Staff, target: Staff): RemoveDecision {
+  if (actor.role !== 'admin') return 'noop';
+  if (!target.partnerId) return 'noop';
+  if (target.username === actor.username) return 'noop';
+  let scope: Scope;
   try {
-    return canSee(scopeOf(actor), target.partnerId);
+    scope = scopeOf(actor);
   } catch {
-    return false;
+    return 'noop';
   }
+  if (!canSee(scope, target.partnerId)) return 'noop';
+  if (scope.kind === 'partner' && target.status === 'suspended') return 'suspended';
+  return 'ok';
+}
+
+/** True only when removeDecision is 'ok'. */
+export function mayRemove(actor: Staff, target: Staff): boolean {
+  return removeDecision(actor, target) === 'ok';
 }
 
 function isActiveTenantAdmin(s: Staff, partnerId: PartnerId): boolean {

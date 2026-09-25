@@ -622,6 +622,34 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     expect(r.dump.has('staff:priya')).toBe(true);
   });
 
+  it('partner-demo R5: createStaff is create-if-absent (Redis SET NX): two concurrent creates of one name → exactly one wins, never a clobber', async () => {
+    const { r, repo, s } = setup();
+    const [a, b] = await Promise.all([
+      s.createStaff(agent({ name: 'FIRST', passwordHash: 'h1' })),
+      s.createStaff(agent({ name: 'SECOND', passwordHash: 'h2' })),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    const winner = a ? 'FIRST' : 'SECOND';
+    expect(JSON.parse(r.dump.get('staff:priya')!).name).toBe(winner);
+    expect((await repo.get('priya'))?.name).toBe(winner);
+    expect(await r.smembers('staff:index')).toEqual(['priya']);
+    // an existing member is never overwritten
+    expect(await s.createStaff(agent({ name: 'THIRD' }))).toBe(false);
+    expect(JSON.parse(r.dump.get('staff:priya')!).name).toBe(winner);
+  });
+
+  it('partner-demo R5: createStaff replaces an orphan row (a fresh member), and a ledger failure releases the Redis claim', async () => {
+    const { repo } = setup();
+    await repo.upsert(agent({ status: 'suspended', name: 'ORPHAN' }));
+    const { s } = setup();
+    expect(await s.createStaff(agent())).toBe(true);
+    expect((await s.getStaff('priya'))?.status).toBeUndefined();
+    const f = setup(failing(['upsert']));
+    await expect(f.s.createStaff(agent({ username: 'kiran' }))).rejects.toThrow('staff ledger write failed');
+    expect(f.r.dump.has('staff:kiran')).toBe(false);
+    expect(await f.r.smembers('staff:index')).toEqual([]);
+  });
+
   it('deleteStaff removes Redis FIRST, then the row; a row-removal failure is logged (the orphan row is never a member)', async () => {
     const ok = setup();
     await ok.s.saveStaff(agent());

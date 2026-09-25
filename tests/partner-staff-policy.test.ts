@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveStaffTenant,
   mayRemove,
+  removeDecision,
   isLastTenantAdmin,
   newStaffRecord,
   listTenantStaff,
@@ -77,6 +78,26 @@ describe('mayRemove', () => {
   });
   it('a non-admin actor may remove nobody', () => {
     expect(mayRemove(staff({ username: 'a2', role: 'agent', partnerId: 'acme' }), acmeAgent)).toBe(false);
+  });
+});
+
+describe('removeDecision (fix round 1: a SmartRemit suspension is platform governance)', () => {
+  const suspended = staff({ username: 'acme-sus', role: 'agent', partnerId: 'acme', status: 'suspended' });
+  it('a partner admin may not remove a suspended member of their own tenant (they could re-create it active)', () => {
+    expect(removeDecision(acmeAdmin, suspended)).toBe('suspended');
+    expect(mayRemove(acmeAdmin, suspended)).toBe(false);
+  });
+  it('another tenant\'s suspended member is still just a no-op (never a suspension oracle)', () => {
+    expect(removeDecision(betaAdmin, suspended)).toBe('noop');
+  });
+  it('a platform admin may remove a suspended member', () => {
+    expect(removeDecision(platform, suspended)).toBe('ok');
+    expect(mayRemove(platform, suspended)).toBe(true);
+  });
+  it('ok / noop for the ordinary cases', () => {
+    expect(removeDecision(acmeAdmin, staff({ username: 'g', role: 'agent', partnerId: 'acme' }))).toBe('ok');
+    expect(removeDecision(acmeAdmin, acmeAdmin)).toBe('noop');
+    expect(removeDecision(acmeAdmin, platform)).toBe('noop');
   });
 });
 

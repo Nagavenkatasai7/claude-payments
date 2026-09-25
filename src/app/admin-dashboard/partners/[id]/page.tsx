@@ -948,7 +948,8 @@ export default async function PartnerDetailPage({
                       </Badge>,
                       new Date(s.createdAt).toLocaleDateString(),
                       // partner-demo R5: no Remove on your own row (the action refuses it too).
-                      isAdmin && s.username !== staff.username ? (
+                      // Fix round 1: a SmartRemit suspension is not the tenant's to undo.
+                      isAdmin && s.username !== staff.username && (isPlatformAdmin || s.status !== 'suspended') ? (
                         <form key="actions" action={removePartnerStaffAction}>
                           <input type="hidden" name="username" value={s.username} />
                           <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
@@ -959,7 +960,7 @@ export default async function PartnerDetailPage({
                 />
                 {isAdmin && (
                   <form action={createPartnerStaffAction.bind(null, partner.id)} className="mt-4 space-y-4">
-                    <Input name="username" placeholder="Username" required />
+                    <Input name="username" placeholder="Username (3–64: a-z 0-9 . _ -)" required minLength={3} maxLength={64} pattern="[a-z0-9._\-]{3,64}" autoComplete="off" />
                     <Input name="name" placeholder="Full name" required />
                     <Input name="password" type="password" placeholder="Password (12+ characters)" required minLength={12} maxLength={128} autoComplete="new-password" />
                     <select className={SELECT_CLASS} name="role" defaultValue="agent">

@@ -21,6 +21,7 @@ import { hashPassword } from '@/lib/password';
 import { assertStaffPasswordPolicy } from '@/lib/staff-password';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
+import { assertNewStaffUsername } from '@/lib/staff-username';
 import { seedAdminUsername } from '@/lib/staff-login-guard';
 import { getAuditLogStore } from '@/lib/audit-log-store';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
@@ -28,8 +29,8 @@ import { getRedis } from '@/lib/redis';
 import {
   isLastTenantAdmin,
   isReservedStaffUsername,
-  mayRemove,
   newStaffRecord,
+  removeDecision,
   resolveStaffTenant,
 } from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
@@ -256,6 +257,7 @@ export async function createPartnerStaffAction(
   const role = String(formData.get('role') ?? 'agent') as StaffRole;
   if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
   if (!username || !name || !password) throw new Error('username, name, and password are required.');
+  assertNewStaffUsername(username); // fix round 1: create-only format rule
 
   const limit = await checkIpRateLimit(getRedis(), 'partner_staff_create', actor.username, {
     limit: STAFF_CREATE_LIMIT,
@@ -274,7 +276,9 @@ export async function createPartnerStaffAction(
 
   await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
   await getStaffMfaStore().reset(username); // Program-Fix 17b: no stale enrolment on a re-used name
-  await authStore.saveStaff(
+  // Create-if-absent (SET NX): a concurrent create of the same name loses
+  // here instead of clobbering the winner.
+  const created = await authStore.createStaff(
     newStaffRecord(tenant, {
       username,
       name,
@@ -283,6 +287,7 @@ export async function createPartnerStaffAction(
       createdAt: new Date().toISOString(),
     }),
   );
+  if (!created) throw new Error(USERNAME_UNAVAILABLE);
   // Save, then audit (as the Team actions): the record is Redis + a ledger
   // row, not one transaction. Never a password or hash in the row.
   await getAuditLogStore().record({
@@ -311,10 +316,18 @@ export async function removePartnerStaffAction(formData: FormData): Promise<void
   if (target && !target.partnerId && isPlatformActor) {
     throw new Error('Use the Team page to manage platform staff.');
   }
-  if (!target || !mayRemove(actor, target)) return;
-  // Only reachable inside the actor's own tenant: never orphan a tenant.
+  if (!target) return;
+  const decision = removeDecision(actor, target);
+  if (decision === 'noop') return;
+  // Fix round 1: only reachable inside the actor's own tenant. A SmartRemit
+  // suspension is not the tenant's to undo (remove + re-create active).
+  if (decision === 'suspended') {
+    throw new Error('This member was suspended by SmartRemit. Contact SmartRemit to change or remove them.');
+  }
+  // Never orphan a tenant. Partner admins cannot reach this (no self-removal),
+  // so the message points the platform admin at the Team page.
   if (isLastTenantAdmin(target, await authStore.listStaff())) {
-    throw new Error('Cannot remove the only admin for this partner. Add another admin first.');
+    throw new Error('Cannot remove the only admin for this partner here. Add another admin first, or use the Team page to offboard.');
   }
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);

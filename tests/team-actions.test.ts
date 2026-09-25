@@ -142,17 +142,17 @@ describe('createStaffAction', () => {
       createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
     });
     await createStaffAction(
-      form({ username: 'pa', name: 'PA', password: 'a-long-password-1', role: 'admin', partnerId: 'acme' }),
+      form({ username: 'pa-1', name: 'PA', password: 'a-long-password-1', role: 'admin', partnerId: 'acme' }),
     );
-    expect((await authStore.getStaff('pa'))?.partnerId).toBe('acme');
+    expect((await authStore.getStaff('pa-1'))?.partnerId).toBe('acme');
     // partner-demo R5: the audit row carries the member's tenant (partner feed)
     const feed = await auditStore.listForPartner('acme');
-    expect(feed[0]).toMatchObject({ actor: 'boss', action: 'created', target: 'pa', partnerId: 'acme', actorScope: 'platform' });
+    expect(feed[0]).toMatchObject({ actor: 'boss', action: 'created', target: 'pa-1', partnerId: 'acme', actorScope: 'platform' });
   });
 
   it('rejects an unknown partner scope', async () => {
     await expect(
-      createStaffAction(form({ username: 'x', name: 'X', password: 'a-long-password-1', role: 'agent', partnerId: 'ghost' })),
+      createStaffAction(form({ username: 'xxx', name: 'X', password: 'a-long-password-1', role: 'agent', partnerId: 'ghost' })),
     ).rejects.toThrow(/partner not found/i);
   });
 
@@ -163,27 +163,47 @@ describe('createStaffAction', () => {
     ).rejects.toThrow(/already exists/i);
   });
 
+  it('partner-demo R5 fix round 1: the username format is enforced on create (reserved `index`, bad characters, too short)', async () => {
+    for (const bad of ['index', 'Bad Name', 'ab', 'a:b', 'smartremit']) {
+      await expect(
+        createStaffAction(form({ username: bad, name: 'N', password: 'a-long-password-1', role: 'agent' })),
+      ).rejects.toThrow(/3.64 characters/);
+    }
+    expect(await authStore.getStaff('index')).toBeNull();
+  });
+
+  it('partner-demo R5 fix round 1: two concurrent creates of one name never clobber (create-if-absent)', async () => {
+    const results = await Promise.allSettled([
+      createStaffAction(form({ username: 'race', name: 'First', password: 'a-long-password-1', role: 'agent' })),
+      createStaffAction(form({ username: 'race', name: 'Second', password: 'a-long-password-2', role: 'admin' })),
+    ]);
+    const refused = results.filter((r) => r.status === 'rejected' && /already exists/i.test(String((r.reason as Error).message)));
+    expect(refused).toHaveLength(1);
+    const got = await authStore.getStaff('race');
+    expect(['First', 'Second']).toContain(got?.name);
+  });
+
   it('rejects a short password', async () => {
     await expect(
-      createStaffAction(form({ username: 'y', name: 'Y', password: 'short-pw-11', role: 'agent' })),
+      createStaffAction(form({ username: 'yyy', name: 'Y', password: 'short-pw-11', role: 'agent' })),
     ).rejects.toThrow(/12 characters/i);
-    expect(await authStore.getStaff('y')).toBeNull();
+    expect(await authStore.getStaff('yyy')).toBeNull();
   });
 
   it('Program-Fix 17a: rejects a breached password', async () => {
     pwnedStatus.mockImplementation(async () => 'pwned');
     await expect(
-      createStaffAction(form({ username: 'y', name: 'Y', password: 'a-long-password-1', role: 'agent' })),
+      createStaffAction(form({ username: 'yyy', name: 'Y', password: 'a-long-password-1', role: 'agent' })),
     ).rejects.toThrow(/data breach/i);
-    expect(await authStore.getStaff('y')).toBeNull();
+    expect(await authStore.getStaff('yyy')).toBeNull();
   });
 
   it('Program-Fix 17a: a breach-check outage refuses the create (fail-closed)', async () => {
     pwnedStatus.mockImplementation(async () => 'unavailable');
     await expect(
-      createStaffAction(form({ username: 'y', name: 'Y', password: 'a-long-password-1', role: 'agent' })),
+      createStaffAction(form({ username: 'yyy', name: 'Y', password: 'a-long-password-1', role: 'agent' })),
     ).rejects.toThrow(/unavailable/i);
-    expect(await authStore.getStaff('y')).toBeNull();
+    expect(await authStore.getStaff('yyy')).toBeNull();
   });
 
   it('writes an audit entry', async () => {
@@ -230,13 +250,13 @@ describe('updateStaffAction session rotation (Program-Fix 45 P1)', () => {
 
   it('createStaffAction reads canRevealPii; support never gets it', async () => {
     await createStaffAction(
-      form({ username: 'ag', name: 'Ag', password: 'a-long-password-1', role: 'agent', canRevealPii: 'on' }),
+      form({ username: 'ag1', name: 'Ag', password: 'a-long-password-1', role: 'agent', canRevealPii: 'on' }),
     );
-    expect((await authStore.getStaff('ag'))?.permissions.canRevealPii).toBe(true);
+    expect((await authStore.getStaff('ag1'))?.permissions.canRevealPii).toBe(true);
     await createStaffAction(
-      form({ username: 'sp', name: 'Sp', password: 'a-long-password-1', role: 'support', canRevealPii: 'on' }),
+      form({ username: 'sp1', name: 'Sp', password: 'a-long-password-1', role: 'support', canRevealPii: 'on' }),
     );
-    expect((await authStore.getStaff('sp'))?.permissions.canRevealPii).toBe(false);
+    expect((await authStore.getStaff('sp1'))?.permissions.canRevealPii).toBe(false);
   });
 
   it('a permission change revokes the member’s sessions', async () => {

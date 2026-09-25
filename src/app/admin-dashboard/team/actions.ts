@@ -14,6 +14,7 @@ import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { getStaffLoginGuard, isSeedAdminRecord, seedAdminUsername } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { assertNewStaffUsername } from '@/lib/staff-username';
 import {
   assertStaffPasswordPolicy,
   PASSWORD_CHANGED_CONCURRENTLY,
@@ -121,6 +122,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
     throw new Error('Name, username, and password are all required.');
   }
   assertMayTargetSeed(actor, username);
+  assertNewStaffUsername(username); // partner-demo R5 fix round 1: create-only format rule
   if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
   // Program-Fix 17a: 12..128 characters + breach check, FAIL-CLOSED on an HIBP
   // outage (a create never lands a possibly-breached password). New passwords
@@ -154,7 +156,9 @@ export async function createStaffAction(formData: FormData): Promise<void> {
   // Program-Fix 17b: a re-used username never inherits a stale MFA enrolment
   // (e.g. one left behind by a removal on the previous build).
   await getStaffMfaStore().reset(username);
-  await store.saveStaff(staff);
+  // partner-demo R5 fix round 1: create-if-absent (SET NX), so a concurrent
+  // create of the same name loses instead of clobbering the winner.
+  if (!(await store.createStaff(staff))) throw new Error('That username already exists.');
   await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`, partnerId);
   revalidatePath('/admin-dashboard/team');
   redirect('/admin-dashboard/team');

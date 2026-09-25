@@ -144,41 +144,41 @@ describe('createPartnerStaffAction — platform admin (unchanged behaviour)', ()
   beforeEach(() => signInAs(PLATFORM));
 
   it('creates a staff record scoped to the bound partner, and audits it with the tenant', async () => {
-    await createPartnerStaffAction('acme', form({ username: 'p1', name: 'Partner One', password: PW, role: 'admin' }));
-    const got = await store().getStaff('p1');
+    await createPartnerStaffAction('acme', form({ username: 'pp1', name: 'Partner One', password: PW, role: 'admin' }));
+    const got = await store().getStaff('pp1');
     expect(got?.partnerId).toBe('acme');
     expect(got?.role).toBe('admin');
     expect(got?.passwordHash).toMatch(/^\$pv=p0\$\$argon2id\$/); // Program-Fix 45 P4
     const rows = await auditRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'ops', actor_type: 'staff', action: 'created', subject_id: 'p1' });
+    expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'ops', actor_type: 'staff', action: 'created', subject_id: 'pp1' });
     expect(rows[0].meta).toMatchObject({ actorScope: 'platform' });
     expect(JSON.stringify(rows[0].meta)).not.toContain(PW);
     expect(JSON.stringify(rows[0].meta)).not.toContain('argon2');
   });
 
   it('ignores a partnerId in the form (the bound selector decides)', async () => {
-    await createPartnerStaffAction('acme', form({ username: 'p2', name: 'P Two', password: PW, role: 'agent', partnerId: 'beta' }));
-    expect((await store().getStaff('p2'))?.partnerId).toBe('acme');
+    await createPartnerStaffAction('acme', form({ username: 'pp2', name: 'P Two', password: PW, role: 'agent', partnerId: 'beta' }));
+    expect((await store().getStaff('pp2'))?.partnerId).toBe('acme');
   });
 
   it('Program-Fix 17a: refuses a short or breached password, and an HIBP outage (fail-closed), without writing', async () => {
-    await expect(createPartnerStaffAction('acme', form({ username: 'p3', name: 'P3', password: 'hunter2', role: 'agent' }))).rejects.toThrow(/12 characters/);
+    await expect(createPartnerStaffAction('acme', form({ username: 'pp3', name: 'P3', password: 'hunter2', role: 'agent' }))).rejects.toThrow(/12 characters/);
     pwnedStatus.mockImplementationOnce(async () => 'pwned');
-    await expect(createPartnerStaffAction('acme', form({ username: 'p3', name: 'P3', password: PW, role: 'agent' }))).rejects.toThrow(/breach/);
+    await expect(createPartnerStaffAction('acme', form({ username: 'pp3', name: 'P3', password: PW, role: 'agent' }))).rejects.toThrow(/breach/);
     pwnedStatus.mockImplementationOnce(async () => 'unavailable');
-    await expect(createPartnerStaffAction('acme', form({ username: 'p3', name: 'P3', password: PW, role: 'agent' }))).rejects.toThrow(/unavailable/i);
-    expect(await store().getStaff('p3')).toBeNull();
+    await expect(createPartnerStaffAction('acme', form({ username: 'pp3', name: 'P3', password: PW, role: 'agent' }))).rejects.toThrow(/unavailable/i);
+    expect(await store().getStaff('pp3')).toBeNull();
     expect(await auditRows()).toEqual([]);
   });
 
   it('throws on an invalid role and on missing fields', async () => {
-    await expect(createPartnerStaffAction('acme', form({ username: 'x', name: 'x', password: PW, role: 'root' }))).rejects.toThrow(/role/i);
+    await expect(createPartnerStaffAction('acme', form({ username: 'xxx', name: 'x', password: PW, role: 'root' }))).rejects.toThrow(/role/i);
     await expect(createPartnerStaffAction('acme', form({ username: '', name: 'x', password: PW, role: 'agent' }))).rejects.toThrow();
   });
 
   it('throws when the partner does not exist', async () => {
-    await expect(createPartnerStaffAction('ghost', form({ username: 'p1', name: 'P', password: PW, role: 'agent' }))).rejects.toThrow(NOT_FOUND);
+    await expect(createPartnerStaffAction('ghost', form({ username: 'pp1', name: 'P', password: PW, role: 'agent' }))).rejects.toThrow(NOT_FOUND);
   });
 
   it('refuses to clobber an existing record with a generic message (no silent rebind)', async () => {
@@ -188,6 +188,14 @@ describe('createPartnerStaffAction — platform admin (unchanged behaviour)', ()
     const orig = await store().getStaff('root');
     expect(orig?.partnerId).toBeUndefined();
     expect(orig?.passwordHash).toBe('pre:existing');
+  });
+
+  it('fix round 1: the username format is enforced on create (reserved `index`, bad characters, too short)', async () => {
+    for (const bad of ['index', 'Bad Name', 'ab', 'a:b']) {
+      expect(await errorOf(createPartnerStaffAction('acme', form({ username: bad, name: 'N', password: PW, role: 'agent' })))).toMatch(/3.64 characters/);
+    }
+    expect(await store().getStaff('index')).toBeNull();
+    expect(await auditRows()).toEqual([]);
   });
 
   it('the seed admin name is never available here, even when that record is absent', async () => {
@@ -200,9 +208,9 @@ describe('createPartnerStaffAction — platform admin (unchanged behaviour)', ()
   it('MFA trap (fix 17b): with STAFF_MFA_REQUIRED on, an unenrolled platform admin is still sent to enrol, and nothing is written', async () => {
     process.env.STAFF_MFA_REQUIRED = 'true';
     await store().saveStaff(member({ username: 'acme-agent', partnerId: 'acme' }));
-    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'p9', name: 'P', password: PW, role: 'agent' })))).toBe(ENROL);
+    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'pp9', name: 'P', password: PW, role: 'agent' })))).toBe(ENROL);
     expect(await errorOf(removePartnerStaffAction(form({ username: 'acme-agent' })))).toBe(ENROL);
-    expect(await store().getStaff('p9')).toBeNull();
+    expect(await store().getStaff('pp9')).toBeNull();
     expect(await store().getStaff('acme-agent')).not.toBeNull();
     expect(await auditRows()).toEqual([]);
   });
@@ -240,30 +248,30 @@ describe('createPartnerStaffAction — partner admin (R5)', () => {
   });
 
   it('cross-tenant replay: another tenant\'s id is refused exactly like a missing partner, before any validation, and writes nothing', async () => {
-    const other = await errorOf(createPartnerStaffAction('beta', form({ username: 'x1', name: 'X', password: PW, role: 'agent' })));
-    const missing = await errorOf(createPartnerStaffAction('nope', form({ username: 'x1', name: 'X', password: PW, role: 'agent' })));
+    const other = await errorOf(createPartnerStaffAction('beta', form({ username: 'xx1', name: 'X', password: PW, role: 'agent' })));
+    const missing = await errorOf(createPartnerStaffAction('nope', form({ username: 'xx1', name: 'X', password: PW, role: 'agent' })));
     const otherInvalid = await errorOf(createPartnerStaffAction('beta', form({ username: '', name: '', password: '', role: 'root' })));
     expect(other).toMatch(NOT_FOUND);
     expect(missing).toBe(other);
     expect(otherInvalid).toBe(other);
     // a platform-style empty selector is refused the same way
-    expect(await errorOf(createPartnerStaffAction('', form({ username: 'x1', name: 'X', password: PW, role: 'admin' })))).toBe(other);
-    expect(await store().getStaff('x1')).toBeNull();
+    expect(await errorOf(createPartnerStaffAction('', form({ username: 'xx1', name: 'X', password: PW, role: 'admin' })))).toBe(other);
+    expect(await store().getStaff('xx1')).toBeNull();
     expect(await auditRows()).toEqual([]);
   });
 
   it('with STAFF_MFA_REQUIRED on, an unenrolled partner admin is sent to enrol (same policy as platform), then passes once enrolled', async () => {
     process.env.STAFF_MFA_REQUIRED = 'true';
-    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'g1', name: 'G', password: PW, role: 'agent' })))).toBe(ENROL);
-    expect(await store().getStaff('g1')).toBeNull();
+    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'gg1', name: 'G', password: PW, role: 'agent' })))).toBe(ENROL);
+    expect(await store().getStaff('gg1')).toBeNull();
     await enrol('acme-admin');
-    await createPartnerStaffAction('acme', form({ username: 'g1', name: 'G', password: PW, role: 'agent' }));
-    expect((await store().getStaff('g1'))?.partnerId).toBe('acme');
+    await createPartnerStaffAction('acme', form({ username: 'gg1', name: 'G', password: PW, role: 'agent' }));
+    expect((await store().getStaff('gg1'))?.partnerId).toBe('acme');
   });
 
   it('flag off (default): no MFA requirement for the partner admin', async () => {
-    await createPartnerStaffAction('acme', form({ username: 'g2', name: 'G', password: PW, role: 'agent' }));
-    expect(await store().getStaff('g2')).not.toBeNull();
+    await createPartnerStaffAction('acme', form({ username: 'gg2', name: 'G', password: PW, role: 'agent' }));
+    expect(await store().getStaff('gg2')).not.toBeNull();
   });
 
   it('a new member starts with no MFA enrolment left over from a re-used name', async () => {
@@ -285,13 +293,13 @@ describe('createPartnerStaffAction — partner admin (R5)', () => {
 describe('createPartnerStaffAction — non-admin actors', () => {
   it.each(['agent', 'support'] as const)('a partner %s is redirected and writes nothing', async (role) => {
     await signInAs(member({ username: `acme-${role}`, role, partnerId: 'acme' }));
-    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'z', name: 'Z', password: PW, role: 'agent' })))).toBe('REDIRECT:/admin-dashboard');
-    expect(await store().getStaff('z')).toBeNull();
+    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'zzz', name: 'Z', password: PW, role: 'agent' })))).toBe('REDIRECT:/admin-dashboard');
+    expect(await store().getStaff('zzz')).toBeNull();
     expect(await auditRows()).toEqual([]);
   });
 
   it('no session → sent to login', async () => {
-    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'z', name: 'Z', password: PW, role: 'agent' })))).toBe('REDIRECT:/login');
+    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'zzz', name: 'Z', password: PW, role: 'agent' })))).toBe('REDIRECT:/login');
   });
 });
 
@@ -322,7 +330,9 @@ describe('removePartnerStaffAction', () => {
   it('platform admin: the tenant\'s last active admin cannot be removed', async () => {
     await signInAs(PLATFORM);
     await store().saveStaff(member({ username: 'acme-only', role: 'admin', partnerId: 'acme' }));
-    await expect(removePartnerStaffAction(form({ username: 'acme-only' }))).rejects.toThrow(/only admin/i);
+    const msg = await errorOf(removePartnerStaffAction(form({ username: 'acme-only' })));
+    expect(msg).toMatch(/only admin/i);
+    expect(msg).toMatch(/Team page/); // fix round 1: offboarding goes through the Team page
     expect(await store().getStaff('acme-only')).not.toBeNull();
     expect(await auditRows()).toEqual([]);
   });
@@ -336,6 +346,31 @@ describe('removePartnerStaffAction', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ partner_id: 'acme', actor: 'acme-admin', action: 'removed', subject_id: 'acme-agent' });
     expect(rows[0].meta).toMatchObject({ actorScope: 'partner' });
+  });
+
+  it('fix round 1: a partner admin cannot remove a member SmartRemit suspended (nothing deleted, no audit row)', async () => {
+    await signInAs(ACME_ADMIN);
+    await store().saveStaff(member({ username: 'acme-sus', partnerId: 'acme', status: 'suspended', passwordHash: 'keep:me' }));
+    await expect(removePartnerStaffAction(form({ username: 'acme-sus' }))).rejects.toThrow(/suspended by SmartRemit/);
+    expect((await store().getStaff('acme-sus'))?.status).toBe('suspended');
+    // and the name cannot be re-created active with a new password
+    expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'acme-sus', name: 'S', password: PW, role: 'agent' })))).toMatch(/choose another username/i);
+    expect((await store().getStaff('acme-sus'))?.passwordHash).toBe('keep:me');
+    expect(await auditRows()).toEqual([]);
+  });
+
+  it('fix round 1: another tenant\'s suspended member is the same silent no-op', async () => {
+    await store().saveStaff(member({ username: 'acme-sus', partnerId: 'acme', status: 'suspended' }));
+    await signInAs(BETA_ADMIN);
+    expect(await errorOf(removePartnerStaffAction(form({ username: 'acme-sus' })))).toBe('OK');
+    expect(await store().getStaff('acme-sus')).not.toBeNull();
+  });
+
+  it('fix round 1: a platform admin can still remove a suspended partner member', async () => {
+    await signInAs(PLATFORM);
+    await store().saveStaff(member({ username: 'acme-sus', partnerId: 'acme', status: 'suspended' }));
+    await removePartnerStaffAction(form({ username: 'acme-sus' }));
+    expect(await store().getStaff('acme-sus')).toBeNull();
   });
 
   it('partner admin: may remove a peer admin while another admin remains', async () => {
