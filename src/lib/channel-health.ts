@@ -26,13 +26,14 @@ import { logWarn } from './log';
 import { DEFAULT_PARTNER_ID } from './defaults';
 import { getStore, type Store } from './store';
 import { resolveWaChannel, type WaChannel, type WaConfigField } from './whatsapp-creds';
+import { signatureAlarm, type SignatureHealth } from './webhook-signature-health';
 import type { PartnerId } from './types';
 
 export const CHANNEL_HEALTH_KINDS = [
   'auth_error', // Graph 190 / 0 on a send — the partner's access token must be replaced
   'dead_send', // a whatsapp.text/template row dead-lettered
   'incomplete_config', // a send refused: the channel is partially configured
-  'sig_fail', // inbound signature failures (R2b)
+  'sig_fail', // inbound signature failures (R2b: shown from webhook-signature-health, never a mark)
   'no_phone', // an inbound message without a phone number (R1)
   'delivery_failed', // Meta reported a failed delivery (R2b)
 ] as const;
@@ -147,11 +148,16 @@ export interface ChannelHealthSummary {
   items: ChannelHealthItem[];
 }
 
-/** The banner model: the channel kind plus every mark from the last 7 days. */
+/**
+ * The banner model: the channel kind plus every mark from the last 7 days.
+ * R2b: the signature item comes ONLY from `signature` (webhook-signature-health)
+ * and only while signatureAlarm holds — a `sig_fail` Redis mark is ignored.
+ */
 export function summarizeChannelHealth(input: {
   channel?: WaChannel;
   marks: ChannelHealthMarks;
   now: Date;
+  signature?: SignatureHealth;
 }): ChannelHealthSummary {
   const items: ChannelHealthItem[] = [];
   const { channel } = input;
@@ -170,6 +176,7 @@ export function summarizeChannelHealth(input: {
   }
   const cutoff = input.now.getTime() - CHANNEL_HEALTH_WINDOW_MS;
   for (const kind of CHANNEL_HEALTH_KINDS) {
+    if (kind === 'sig_fail') continue;
     const m = input.marks[kind];
     if (!m) continue;
     const t = Date.parse(m.at);
@@ -183,6 +190,9 @@ export function summarizeChannelHealth(input: {
       count: m.count,
       ...(m.code !== undefined ? { code: m.code } : {}),
     });
+  }
+  if (input.signature && signatureAlarm(input.signature, input.now)) {
+    items.push({ kind: 'sig_fail', level: 'error', message: KIND_MESSAGE.sig_fail, ...(input.signature.lastFailAt ? { at: input.signature.lastFailAt } : {}) });
   }
   const level = items.some((i) => i.level === 'error') ? 'error' : items.length > 0 ? 'warn' : 'ok';
   const channelLabel =
@@ -241,6 +251,8 @@ export interface ChannelHealthDeps {
 
 /**
  * Record one channel-health event for a tenant. Best-effort — NEVER throws.
+ * Returns true only when it queued a NEW alert email, so a caller outside the
+ * worker knows to poke it (R2b).
  * The default tenant (the shared number) is skipped: it is the platform's own
  * channel and ops already sees its failures.
  * `audit: false` — the call site already wrote its own audit row (R1 no-phone):
@@ -251,15 +263,15 @@ export async function recordChannelHealth(
   kind: ChannelHealthKind,
   opts: { code?: number; audit?: boolean } = {},
   deps?: ChannelHealthDeps,
-): Promise<void> {
-  if (!partnerId || partnerId === DEFAULT_PARTNER_ID) return;
+): Promise<boolean> {
+  if (!partnerId || partnerId === DEFAULT_PARTNER_ID) return false;
   try {
     const d: ChannelHealthDeps = deps ?? { store: getStore(), db: getDb() };
     const now = (d.now ?? (() => new Date()))();
     const marks = parseHealthMarks(await d.store.readChannelHealth(partnerId));
     await d.store.writeChannelHealth(partnerId, JSON.stringify(applyHealthMark(marks, kind, opts.code, now.toISOString())));
     // One ledger row (and at most one email attempt) per (partner, kind, hour).
-    if (!(await d.store.claimChannelHealthLog(partnerId, kind, healthHourBucket(now)))) return;
+    if (!(await d.store.claimChannelHealthLog(partnerId, kind, healthHourBucket(now)))) return false;
     if (opts.audit !== false) {
       await createAuditRepo(d.db).record({
         partnerId,
@@ -274,11 +286,13 @@ export async function recordChannelHealth(
       const to = partner?.supportConfig?.alertEmail;
       if (to && normalizeAlertEmail(to)) {
         const { subject, text } = buildHealthEmail(partnerId, kind);
-        await createOutboxRepo(d.db).enqueue('email.send', { to: [to], subject, text }, { dedupeKey: healthEmailDedupeKey(partnerId, kind, now) });
+        return await createOutboxRepo(d.db).enqueue('email.send', { to: [to], subject, text }, { dedupeKey: healthEmailDedupeKey(partnerId, kind, now) });
       }
     }
+    return false;
   } catch (err) {
     logWarn('channel-health', 'health event not recorded', { partnerId, kind, error: err instanceof Error ? err.name : 'error' });
+    return false;
   }
 }
 

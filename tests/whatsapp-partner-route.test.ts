@@ -106,3 +106,52 @@ describe('POST /api/whatsapp/[partnerId] — failure handling (R1)', () => {
     expect(auditRecord).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /api/whatsapp/[partnerId] — signature health (R2b)', () => {
+  type Dump = { dump: Map<string, string> };
+  const keys = () => [...(redisHolder.current as Dump).dump.keys()].sort();
+
+  it('a bad signature for a known partner with a secret ⇒ 401 and ONE Redis mark per hour, no DB row', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (let i = 0; i < 5; i++) expect((await post(body, sign(body, 'wrong'))).status).toBe(401);
+    const k = keys();
+    expect(k.filter((x) => x.startsWith('wasigfail:acme:'))).toHaveLength(1);
+    expect(k).toContain('wasigfaillast:acme');
+    expect(k.some((x) => x.startsWith('wasigok:'))).toBe(false);
+    expect(auditRecord).not.toHaveBeenCalled();
+    expect(processInboundWebhook).not.toHaveBeenCalled();
+  });
+
+  it('unknown, suspended or secret-less partners ⇒ 401 and NO Redis key at all', async () => {
+    getPartner.mockResolvedValueOnce(null);
+    expect((await post(body, sign(body, 'wrong'), 'ghost')).status).toBe(401);
+    getPartner.mockResolvedValueOnce({ id: 'acme', status: 'suspended' });
+    expect((await post(body, sign(body, 'wrong'))).status).toBe(401);
+    getIntegrations.mockResolvedValueOnce({ kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't' } });
+    expect((await post(body, sign(body, 'wrong'))).status).toBe(401);
+    expect(keys()).toEqual([]);
+    expect(auditRecord).not.toHaveBeenCalled();
+  });
+
+  it('a Redis outage still answers exactly 401', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    redisHolder.current = { set: async () => { throw new Error('redis down'); }, get: async () => { throw new Error('redis down'); } };
+    const res = await post(body, sign(body, 'wrong'));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
+  it('a valid signature records lastSignedOkAt and the response is unchanged', async () => {
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(keys()).toEqual(['wasigok:acme']);
+  });
+
+  it('a Redis outage on a valid signature still processes the webhook (200)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    redisHolder.current = { set: async () => { throw new Error('redis down'); }, get: async () => null };
+    expect((await post()).status).toBe(200);
+    expect(processInboundWebhook).toHaveBeenCalledTimes(1);
+  });
+});

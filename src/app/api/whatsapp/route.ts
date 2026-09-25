@@ -5,6 +5,7 @@ import { parsePhoneNumberId } from '@/lib/whatsapp';
 import { getPartnerIntegrationsStore, partnerForPhoneNumberId } from '@/lib/partner-integrations-store';
 import { processInboundWebhook } from '@/lib/whatsapp-inbound';
 import { respondToInboundFailure } from '@/lib/whatsapp-inbound-response';
+import { noteSignatureFailure, noteSignedOk } from '@/lib/webhook-signature-health';
 import type { PartnerId } from '@/lib/types';
 
 // The SHARED Meta webhook. The default/SmartRemit number lives here; partner-
@@ -62,9 +63,16 @@ export async function POST(req: NextRequest) {
   const signature = req.headers.get('x-hub-signature-256') ?? '';
   if (routedPartnerId) {
     const partnerSecret = integrations?.whatsapp.appSecret ?? '';
-    if (!partnerSecret || !verifyMetaSignature(raw, signature, partnerSecret)) {
+    if (!partnerSecret) {
       return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
     }
+    if (!verifyMetaSignature(raw, signature, partnerSecret)) {
+      // R2b: a partner resolved from our own index, with a secret — a bounded
+      // Redis mark only (never a DB row). Best-effort: 401 either way.
+      await noteSignatureFailure(routedPartnerId);
+      return NextResponse.json({ ok: false }, { status: 401 }); // fail-closed
+    }
+    await noteSignedOk(routedPartnerId); // R2b: best-effort; never changes the answer
   } else if (env.metaAppSecret === '') {
     console.warn('META_APP_SECRET unset — skipping X-Hub-Signature-256 verification');
   } else if (!verifyMetaSignature(raw, signature, env.metaAppSecret)) {

@@ -163,7 +163,15 @@ describe('recordChannelHealth (Redis + deduped audit + daily email)', { retry: 0
 
   it('is best-effort: a Redis failure never throws', async () => {
     const broken = { ...store, readChannelHealth: async () => { throw new Error('redis down'); } } as typeof store;
-    await expect(recordChannelHealth('acme', 'dead_send', {}, { store: broken, db, now: () => NOW })).resolves.toBeUndefined();
+    await expect(recordChannelHealth('acme', 'dead_send', {}, { store: broken, db, now: () => NOW })).resolves.toBe(false);
+  });
+
+  it('returns true only when it queued a NEW alert email (so the caller can poke the worker)', async () => {
+    expect(await recordChannelHealth('acme', 'auth_error', { code: 190 }, deps())).toBe(false); // no alert address
+    await createPartnerRepo(db).updateSupportConfig('beta', (prev) => ({ ...prev, alertEmail: 'ops@beta.example' }));
+    expect(await recordChannelHealth('beta', 'auth_error', { code: 190 }, deps())).toBe(true);
+    expect(await recordChannelHealth('beta', 'auth_error', { code: 190 }, deps())).toBe(false); // same hour: deduped
+    expect(await recordChannelHealth('beta', 'delivery_failed', { code: 131026 }, deps())).toBe(false); // not alertable
   });
 
   it('cross-tenant: A’s events never appear in B’s health read', async () => {
