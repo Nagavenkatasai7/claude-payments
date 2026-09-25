@@ -526,3 +526,21 @@ describe('R6b round 2: IANA TLDs, amounts, raw allow-list match', () => {
     expect(stripModelHosts('Pay at evil.shop.Thanks', ALLOW)).toBe('Pay at ');
   });
 });
+
+// R6b fix round 3 (MEDIUM-4): one all-digit label before a TLD is a host
+// ("4750.online"); only a chain of 2+ all-digit labels is an amount.
+describe('R6b round 3: single digit label + TLD is a host', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['4750.online', '123.bank', '8293.shop', '١٢٣.online'])('strips %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
+  });
+  it.each(['4,750.00.Total', 'Mom gets ₹4,750.00.Thanks!', 'rate 83.25.Fee $2.99.Total', '$50.00.Done'])(
+    'keeps the amount chain %s',
+    (text) => {
+      expect(stripModelHosts(text, ALLOW)).toBe(text);
+    },
+  );
+  it('accepted loss: a single-label amount glued to a real-TLD word is stripped', () => {
+    expect(stripModelHosts('Sent $200.Now done', ALLOW)).toBe('Sent  done');
+  });
+});

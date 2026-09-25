@@ -201,8 +201,9 @@ export function hasOverridePhrase(v: unknown): boolean {
 // model can write any TLD. A dotted chain names a host when a label after the
 // first is a real TLD from the checked-in IANA snapshot (iana-tlds.ts, ASCII
 // and Unicode forms), so "pay.online" and "пример.рф" are hosts while
-// "Priya.Your" or "hai.Aapka" are not. The labels before that TLD must not all
-// be digits ("4,750.00.Total" is an amount), and a two-label chain whose first
+// "Priya.Your" or "hai.Aapka" are not. Two or more all-digit labels before
+// that TLD are an amount ("4,750.00.Total"), but a single all-digit label is a
+// host ("4750.online"); and a two-label chain whose first
 // label is a common abbreviation ("Mr.Sharma", "no.12") is not a host. Marks
 // (\p{M}) count as letters so Devanagari labels are whole. hasWebAddress,
 // used on outsider text, is deliberately unchanged.
@@ -230,7 +231,9 @@ export function hasModelHost(v: unknown): boolean {
     for (let i = 1; i < labels.length; i++) {
       if (!TLDS.has(labels[i])) continue;
       const before = labels.slice(0, i);
-      if (before.every((l) => ALL_DIGITS.test(l))) continue;
+      // 2+ all-digit labels is an amount chain ("750.00.total"); ONE all-digit
+      // label before a TLD is a host ("4750.online"). R6b round 3.
+      if (before.length >= 2 && before.every((l) => ALL_DIGITS.test(l))) continue;
       if (before.length === 1 && MODEL_ABBREVIATIONS.has(before[0])) continue;
       return true;
     }
