@@ -366,6 +366,12 @@ export interface PartnerSupportConfig {
   // resolvePartnerDisclosure. Absent ⇒ "partner licensing details pending".
   // Written ONLY by saveDisclosureConfigAction (validated + audited).
   disclosure?: PartnerDisclosureConfig;
+  // R2a: where partner-actionable WhatsApp channel alerts (expired token, dead
+  // sends, incomplete config) are emailed — one per kind per day. Staff-set,
+  // validated (one plain address) and audited by saveAlertEmailAction. Absent ⇒
+  // the dashboard banner only. Optional jsonb key: an older build ignores it and
+  // its support save spreads `prev`, so it survives a rolling-release overlap.
+  alertEmail?: string;
 }
 
 /** Program-Fix 15 PR B — staff-entered, never invented. Every field optional in storage. */

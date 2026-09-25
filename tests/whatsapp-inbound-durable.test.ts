@@ -284,6 +284,9 @@ describe('a message without a phone (BSUID-only) is recorded, not silently lost'
     expect(everything).not.toContain('SECRETBSUID');
     expect(everything).not.toContain('secretname');
     expect(await outboxRows()).toHaveLength(0);
+    // R2a: the partner-visible channel-health mark (Redis only; the audit row above is the ledger record).
+    expect(JSON.parse(redis.dump.get('wahealth:acme') ?? '{}').no_phone).toMatchObject({ count: 3 });
+    expect(JSON.parse(redis.dump.get('wahealth:beta') ?? '{}').no_phone).toMatchObject({ count: 1 });
   });
 });
 

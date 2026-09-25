@@ -695,9 +695,9 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
     expect(sendTemplate).toHaveBeenCalledWith('919876543210', 'transfer_delivered', 'en', ['a'], undefined);
   });
 
-  it('a partner with no integrations row, a half-configured channel, or no partner row degrades to the shared number — never dead-letters', async () => {
+  it('a partner with no integrations row, NO WhatsApp field set, or no partner row keeps the shared number — never dead-letters', async () => {
     await seedPartner(db, 'ghostp'); // partner row, no integrations row
-    await byoWhatsApp('acme', { phoneNumberId: 'pn_only' }); // no token ⇒ waCredsFrom ⇒ undefined
+    await byoWhatsApp('acme', {}); // integrations row, no WhatsApp field (an API-only partner, B5)
     await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'a', partnerId: 'ghostp' });
     await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'b', partnerId: 'acme' });
     await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'c', partnerId: 'never_seeded' });
@@ -705,6 +705,67 @@ describe('drainOnce — plain sends resolve WhatsApp creds at DRAIN time (fix 11
     expect(r).toMatchObject({ processed: 3, failed: 0, dead: 0 });
     expect(sendText).toHaveBeenCalledTimes(3);
     for (const call of sendText.mock.calls) expect((call as unknown[])[2]).toBeUndefined();
+  });
+
+  // R2a (R7-binding): a PARTIALLY configured channel fails closed in the
+  // whatsapp.text/template send ONLY — never on the shared number. Terminal
+  // (dead at attempt 1), ONE ops alert per (partner, hour), and a channel-health
+  // event the partner sees. Before R2a this row went out from the shared number.
+  it('a half-configured channel (R2a) fails closed: no send on ANY number, dead at attempt 1, one alert per partner-hour, a health row', async () => {
+    await byoWhatsApp('acme', { phoneNumberId: 'pn_only' }); // no token ⇒ incomplete
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'b1', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.template', { to: '919876543210', template: 'transfer_delivered', lang: 'en', params: ['a'], partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'shared', partnerId: 'default' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, dead: 2, failed: 0 });
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledTimes(1); // only the default-tenant row
+    expect((sendText.mock.calls[0] as unknown[])[1]).toBe('shared');
+    const dead = (await db.execute(sql`SELECT attempts, last_error FROM outbox WHERE status = 'dead' ORDER BY id`)).rows as Array<{ attempts: number; last_error: string }>;
+    expect(dead).toHaveLength(2);
+    for (const d of dead) {
+      expect(d.attempts).toBe(1);
+      expect(d.last_error).toBe('wa_channel_incomplete');
+    }
+    const alerts = (await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'ops.alert'`)).rows as Array<{ dedupe_key: string; payload: { message: string } }>;
+    expect(alerts).toHaveLength(1); // coalesced per (partner, hour) — never one per row
+    expect(alerts[0].dedupe_key).toMatch(/^waincomplete:acme:\d+$/);
+    expect(alerts[0].payload.message).toContain('incomplete');
+    const health = (await createAuditRepo(db).listByPartner('acme')).filter((a) => a.action === 'whatsapp.channel_health');
+    expect(health.map((h) => (h.meta as { kind: string }).kind).sort()).toEqual(['incomplete_config']);
+  });
+
+  it('an incomplete partner still runs mock.settle (money path) on the shared number — fail-closed is send-only', async () => {
+    await byoWhatsApp('acme', { appSecret: 'sec_only' });
+    await store.saveTransfer({ ...transferFixture(), status: 'paid' });
+    await outbox.enqueue('mock.settle', { transferId: 'wk_t1', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ processed: 1, dead: 0 });
+  });
+
+  it('a Graph 190 on a partner send (R2a) records auth_error + ONE alert email; the row stays retryable', async () => {
+    await byoWhatsApp('acme', ACME_WA);
+    await createPartnerRepo(db).updateSupportConfig('acme', (prev) => ({ ...prev, alertEmail: 'ops@acme.example' }));
+    sendText.mockRejectedValue(new WhatsAppSendError('WhatsApp send failed (401): {"error":{"code":190}}', { status: 401, code: 190 }));
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'x', partnerId: 'acme' });
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'y', partnerId: 'acme' });
+    const r = await drainOnce(deps(), 'w1');
+    expect(r).toMatchObject({ failed: 2, dead: 0 });
+    const health = (await createAuditRepo(db).listByPartner('acme')).filter((a) => a.action === 'whatsapp.channel_health');
+    expect(health).toHaveLength(1);
+    expect(health[0].meta).toEqual({ kind: 'auth_error', code: 190 });
+    const emails = (await db.execute(sql`SELECT dedupe_key, payload FROM outbox WHERE kind = 'email.send'`)).rows as Array<{ dedupe_key: string; payload: { to: string[] } }>;
+    expect(emails).toHaveLength(1);
+    expect(emails[0].dedupe_key).toMatch(/^partnerhealth:acme:auth_error:\d{4}-\d{2}-\d{2}$/);
+    expect(emails[0].payload.to).toEqual(['ops@acme.example']);
+  });
+
+  it('a 190 on a DEFAULT-tenant send records no partner health', async () => {
+    sendText.mockRejectedValue(new WhatsAppSendError('WhatsApp send failed (401): x', { status: 401, code: 190 }));
+    await outbox.enqueue('whatsapp.text', { to: '15551230000', body: 'x' });
+    await drainOnce(deps(), 'w1');
+    const health = (await db.execute(sql`SELECT count(*)::int AS n FROM audit_events WHERE action = 'whatsapp.channel_health'`)).rows as Array<{ n: number }>;
+    expect(health[0].n).toBe(0);
   });
 
   it('a token ROTATED after enqueue is used at drain time with no re-enqueue — and the row never held either token', async () => {

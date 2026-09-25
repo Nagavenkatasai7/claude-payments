@@ -20,6 +20,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { waMessageRef } from '@/lib/wa-message-ref';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { getRedis } from '@/lib/redis';
+import { recordChannelHealth } from '@/lib/channel-health';
 import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -146,6 +147,10 @@ async function recordStatus(ev: WebhookStatusEvent, tenantId: PartnerId): Promis
  */
 async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<void> {
   logWarn('whatsapp.inbound_no_phone', 'message without a phone number — not processed', { tenant: tenantId });
+  // R2a: the partner-visible mark on EVERY such message (Redis only — the
+  // hourly audit row below is the ledger record). recordChannelHealth never
+  // throws; the default tenant is skipped inside.
+  await recordChannelHealth(tenantId, 'no_phone', { audit: false });
   const hour = Math.floor(Date.now() / (NO_PHONE_AUDIT_WINDOW_SEC * 1000));
   const claimKey = `wanophone:${tenantId}:${hour}`;
   let claimed = false;
@@ -161,7 +166,6 @@ async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<vo
       ...(d.messageId ? { subjectId: waMessageRef(d.messageId) } : {}),
       meta: { hasBsuid: d.hasBsuid, hasUsername: d.hasUsername },
     });
-    // R2 hook: recordChannelHealth(partnerId, 'no_phone')
   } catch (err) {
     logWarn('whatsapp.inbound_no_phone', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
     // Release the hourly claim so the next no-phone message can record the row.
