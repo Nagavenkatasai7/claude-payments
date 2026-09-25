@@ -187,10 +187,11 @@ describe('R6b final: postcondition — nothing we send names a real-TLD host exc
 });
 
 describe('R6b final: dot lookalikes are complete over all of Unicode', () => {
-  it('every code point whose NFKC form contains "." makes its token dotted (canonicalized) and a host before a TLD', () => {
+  it('every code point whose NFKC form contains "." makes its token dotted (canonicalized) and a host before a TLD', async () => {
     const zwsp = String.fromCharCode(0x200b);
     const misses: string[] = [];
     for (let cp = 0x80; cp < 0x110000; cp++) {
+      if ((cp & 0xfff) === 0) await new Promise((r) => setImmediate(r)); // keep the worker responsive
       if (cp >= 0xd800 && cp <= 0xdfff) continue;
       const ch = String.fromCodePoint(cp);
       if (!ch.normalize('NFKC').includes('.')) continue;
@@ -202,16 +203,22 @@ describe('R6b final: dot lookalikes are complete over all of Unicode', () => {
 });
 
 describe('R6b MEDIUM-8: exhaustive sweep of one code point glued to a host', () => {
-  it('for every code point c, no shape pay.online<c> / pay.<c>online / pay<c>.online / <c>pay.online leaves an oracle offender', () => {
+  // One test per shape, and the loop yields to the event loop every 4096 code
+  // points so the vitest worker can still answer its RPC heartbeats in CI.
+  const SHAPES: Array<[string, (c: string) => string]> = [
+    ['pay.online<c>', (c) => `pay.online${c}`],
+    ['pay.<c>online', (c) => `pay.${c}online`],
+    ['pay<c>.online', (c) => `pay${c}.online`],
+    ['<c>pay.online', (c) => `${c}pay.online`],
+  ];
+  it.each(SHAPES)('every code point c in %s leaves no oracle offender', async (_name, shape) => {
     const misses: string[] = [];
-    for (let cp = 0; cp < 0x110000; cp++) {
+    for (let cp = 0; cp < 0x110000 && misses.length <= 20; cp++) {
+      if ((cp & 0xfff) === 0) await new Promise((r) => setImmediate(r));
       if (cp >= 0xd800 && cp <= 0xdfff) continue;
-      const c = String.fromCodePoint(cp);
-      for (const tok of [`pay.online${c}`, `pay.${c}online`, `pay${c}.online`, `${c}pay.online`]) {
-        const out = stripModelHosts(`Hi ${tok} there`, [ALLOWED]);
-        if (out.includes('.') && oracleOffenders(out).length > 0) misses.push(`U+${cp.toString(16)} ${JSON.stringify(tok)}`);
-      }
-      if (misses.length > 20) break;
+      const tok = shape(String.fromCodePoint(cp));
+      const out = stripModelHosts(`Hi ${tok} there`, [ALLOWED]);
+      if (out.includes('.') && oracleOffenders(out).length > 0) misses.push(`U+${cp.toString(16)} ${JSON.stringify(tok)}`);
     }
     expect(misses).toEqual([]);
   }, 300_000);
