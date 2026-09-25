@@ -1,3 +1,5 @@
+import { IANA_TLDS } from './iana-tlds';
+
 // untrusted-text — the ONE sanitizer for text an outsider wrote that later
 // reaches the agent (fix 5 / F43, F63): recipient and sender names from the
 // external API, a business's brand text and bot persona, a seller's business
@@ -195,32 +197,43 @@ export function hasOverridePhrase(v: unknown): boolean {
   return s !== '' && OVERRIDE_PHRASE.test(s);
 }
 
-// R6b fix round 1: MODEL output (not outsider text) gets a broader detector,
-// since the model can write any TLD: a dotted chain whose last label is 2+
-// letters in any script ("pay.online", "пример.рф") or a punycode label. Marks
-// (\p{M}) count as letters so Devanagari labels are whole. A two-label chain
-// whose first label is a common abbreviation ("Mr.Sharma", "no.12") is not a
-// host. hasWebAddress, used on outsider text, is deliberately unchanged.
+// R6b: MODEL output (not outsider text) gets a broader detector, since the
+// model can write any TLD. A dotted chain names a host when a label after the
+// first is a real TLD from the checked-in IANA snapshot (iana-tlds.ts, ASCII
+// and Unicode forms), so "pay.online" and "пример.рф" are hosts while
+// "Priya.Your" or "hai.Aapka" are not. The labels before that TLD must not all
+// be digits ("4,750.00.Total" is an amount), and a two-label chain whose first
+// label is a common abbreviation ("Mr.Sharma", "no.12") is not a host. Marks
+// (\p{M}) count as letters so Devanagari labels are whole. hasWebAddress,
+// used on outsider text, is deliberately unchanged.
 const MODEL_LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}-]*[\\p{L}\\p{M}\\p{N}])?';
-const MODEL_HOST = new RegExp(
-  `(?<![\\p{L}\\p{M}\\p{N}-])(${MODEL_LABEL}(?:\\.${MODEL_LABEL})*)\\.(?:\\p{L}[\\p{L}\\p{M}]+|xn--[\\p{L}\\p{N}-]+)(?![\\p{L}\\p{M}\\p{N}-])`,
+const MODEL_CHAIN = new RegExp(
+  `(?<![\\p{L}\\p{M}\\p{N}-])${MODEL_LABEL}(?:\\.${MODEL_LABEL})+(?![\\p{L}\\p{M}\\p{N}-])`,
   'gu',
 );
+const TLDS: ReadonlySet<string> = new Set(IANA_TLDS.map((t) => t.normalize('NFKC').toLowerCase()));
 const MODEL_ABBREVIATIONS: ReadonlySet<string> = new Set([
   ...PATH_RULE_ABBREVIATIONS,
   'mr', 'mrs', 'ms', 'dr', 'st', 'sr', 'jr', 'rs', 'no', 'vs', 'etc', 'ie', 'eg', 'ph', 'ref', 'ver', 'fig',
 ]);
+const ALL_DIGITS = /^\p{N}+$/u;
 
 /**
- * Whether MODEL-written text names a host on any TLD (see MODEL_HOST). Broader
- * than hasWebAddress on purpose; use it only on model output. Pure.
+ * Whether MODEL-written text names a host on any real TLD (see the note
+ * above). Broader than hasWebAddress on purpose; use it only on model output.
+ * Pure.
  */
 export function hasModelHost(v: unknown): boolean {
   const s = detectForm(v);
-  for (const m of s.matchAll(MODEL_HOST)) {
-    const labels = m[1].split('.');
-    if (labels.length === 1 && MODEL_ABBREVIATIONS.has(labels[0])) continue;
-    return true;
+  for (const m of s.matchAll(MODEL_CHAIN)) {
+    const labels = m[0].split('.');
+    for (let i = 1; i < labels.length; i++) {
+      if (!TLDS.has(labels[i])) continue;
+      const before = labels.slice(0, i);
+      if (before.every((l) => ALL_DIGITS.test(l))) continue;
+      if (before.length === 1 && MODEL_ABBREVIATIONS.has(before[0])) continue;
+      return true;
+    }
   }
   return false;
 }
@@ -231,7 +244,7 @@ const EDGE_END = /[.,!?;:'"”’…)\]}>*_~]+$/u;
 
 /**
  * R6b (A7L-2): remove every whitespace-separated token of MODEL-written text
- * that names a host (hasWebAddress or hasModelHost), unless the WHOLE token,
+ * that names a host (hasWebAddress or hasModelHost), unless the WHOLE raw token,
  * once its wrapping brackets, quotes, formatting marks and trailing
  * punctuation are trimmed, is exactly one allowed host (a leading "www." is
  * ignored). So a path, a query, a "user@", a markdown link or a second host
@@ -244,7 +257,9 @@ export function stripModelHosts(text: string, allowHosts: readonly string[]): st
   const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/^www\./u, '')).filter((h) => h !== ''));
   return text.replace(/\S+/gu, (token) => {
     if (!hasWebAddress(token) && !hasModelHost(token)) return token;
-    const core = detectForm(token).replace(EDGE_START, '').replace(EDGE_END, '').replace(/^www\./u, '');
+    // The RAW token (only lower-cased and edge-trimmed), not the detector's
+    // folded form, so a zero-width, soft-hyphen or bracket split never matches.
+    const core = token.toLowerCase().replace(EDGE_START, '').replace(EDGE_END, '').replace(/^www\./u, '');
     return allow.has(core) ? token : '';
   });
 }

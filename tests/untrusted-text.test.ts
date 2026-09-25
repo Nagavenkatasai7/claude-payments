@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   boundUntrustedText,
   isBoundedPrintable,
@@ -13,6 +15,7 @@ import {
   stripModelHosts,
   hasModelHost,
 } from '@/lib/untrusted-text';
+import { IANA_TLDS } from '@/lib/iana-tlds';
 
 // fix 5 (F43/F63): text written by an outsider (a partner-API caller, a partner
 // admin, a seller) is DATA. The write side refuses it when dirty; the read side
@@ -480,5 +483,46 @@ describe('R6b: stripModelHosts', () => {
   it('an empty allow list strips every host; empty text stays empty', () => {
     expect(stripModelHosts('see smartremit.ai', [])).toBe('see ');
     expect(stripModelHosts('', ALLOW)).toBe('');
+  });
+});
+
+// R6b fix round 2: the model-host detector matches a checked-in IANA snapshot
+// (not "any 2+ letter label"), skips all-digit chains (amounts), and the allow
+// list compares the RAW token so an invisible or bracket character can't pass.
+describe('R6b round 2: IANA TLDs, amounts, raw allow-list match', () => {
+  const ALLOW = ['smartremit.ai', 'acme.co'];
+
+  it('the snapshot carries real TLDs (ASCII and Unicode) and no ordinary words', () => {
+    const tlds = new Set(IANA_TLDS);
+    for (const t of ['com', 'shop', 'online', 'bank', 'live', 'xn--p1ai', 'рф', 'भारत']) expect(tlds.has(t)).toBe(true);
+    for (const w of ['thanks', 'your', 'bye', 'kal', 'tak', 'aapka', 'done', 'status', 'paid']) expect(tlds.has(w)).toBe(false);
+    expect(readFileSync(resolve(process.cwd(), 'src/lib/iana-tlds.ts'), 'utf-8')).toContain('Source: https://data.iana.org/TLD/tlds-alpha-by-domain.txt');
+  });
+
+  it.each([
+    'Mom gets ₹4,750.00.Thanks!',
+    'rate 83.25.Fee $2.99.Total',
+    '$50.00.Done',
+    '1 USD = 83.25 INR.Your',
+    'Hi Priya.Your',
+    'done.Thanks',
+    'ok.bye',
+    'Paisa pahunch gaya hai.Aapka',
+    'ठीक.है',
+    'TX-8F3K2.Status',
+    'tx_01HZX.Paid',
+  ])('keeps a missing-space join that is not a host: %s', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  it.each(['smartre<mit.ai', 'smartre[mit.ai', 'smartre\u200bmit.ai', 'smartre\u00admit.ai', 'smartremit<>.ai', 'ac<me.co'])(
+    'strips a disguised allowed host (raw-token match): %j',
+    (tok) => {
+      expect(stripModelHosts(`Visit ${tok} now`, ALLOW)).toBe('Visit  now');
+    },
+  );
+
+  it('a host glued before a sentence word is still caught', () => {
+    expect(stripModelHosts('Pay at evil.shop.Thanks', ALLOW)).toBe('Pay at ');
   });
 });
