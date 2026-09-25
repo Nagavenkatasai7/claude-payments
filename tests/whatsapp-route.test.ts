@@ -42,7 +42,7 @@ const {
   getIntegrations,
 } = vi.hoisted(() => ({
   sendText: vi.fn(async () => {}),
-  setOptedOut: vi.fn(async (_tenant: string, _phone: string) => {}),
+  setOptedOut: vi.fn(async (_tenant: string, _phone: string, _at?: Date) => {}),
   clearOptedOut: vi.fn(async (_tenant: string, _phone: string) => {}),
   setOptedIn: vi.fn(async (_tenant: string, _phone: string) => {}),
   // Default: an opted-IN customer (optInAt set, no optedOutAt). Tests override.
@@ -367,7 +367,7 @@ describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', (
   it('inbound "STOP" → setOptedOut, ONE essential confirmation row, agent NOT run', async () => {
     const res = await post(textBody('STOP', 'wamid.STOP1'));
     expect(res.status).toBe(200);
-    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000', expect.any(Date));
     expectReply('15551230000', OPT_OUT_REPLY, 'wamid.STOP1');
     expect(enqueue).toHaveBeenCalledTimes(1);
     // The opt-out lands BEFORE the confirmation row exists.
@@ -460,7 +460,7 @@ describe('POST /api/whatsapp — optInAt backfill on normal inbound (Fix 5)', ()
 
   it('STOP / START consent writes are tenant-scoped too', async () => {
     await post(textBody('STOP', 'wamid.STOPT'));
-    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000', expect.any(Date));
     await post(textBody('START', 'wamid.STARTT'));
     expect(clearOptedOut).toHaveBeenCalledWith('default', '15551230000');
   });
@@ -589,7 +589,7 @@ describe('POST /api/whatsapp — per-sender inbound throttle (Program-Fix 34A: 2
     vi.spyOn(Date, 'now').mockReturnValue(T0);
     for (let i = 1; i <= 21; i++) await post(textBody(`m${i}`, `wamid.S${i}`));
     await post(textBody('STOP', 'wamid.STOPX'));
-    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000', expect.any(Date));
     expectReply('15551230000', OPT_OUT_REPLY, 'wamid.STOPX');
   });
 });
@@ -679,7 +679,7 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
     getCustomer.mockResolvedValue(null);
     await post(textBody('STOP', 'wamid.STOPNEW', '15557770000'));
     expect(ensureCustomer).toHaveBeenCalledWith('default', '15557770000');
-    expect(setOptedOut).toHaveBeenCalledWith('default', '15557770000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15557770000', expect.any(Date));
     expect(ensureCustomer.mock.invocationCallOrder[0]).toBeLessThan(setOptedOut.mock.invocationCallOrder[0]);
     expect(upsertOnFirstInbound).not.toHaveBeenCalled(); // never stamps opt-in on a STOP
     expectReply('15557770000', OPT_OUT_REPLY, 'wamid.STOPNEW');
@@ -688,14 +688,14 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
 
   it('a template quick-reply "Unsubscribe" opts out', async () => {
     await post(quickReplyBody('Unsubscribe', 'Unsubscribe', 'wamid.QR1'));
-    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000', expect.any(Date));
     expectReply('15551230000', OPT_OUT_REPLY, 'wamid.QR1');
     expect(agentTurnRows()).toHaveLength(0);
   });
 
   it('a template quick-reply whose payload is STOP opts out even with a different label', async () => {
     await post(quickReplyBody('STOP', 'Stop promotions', 'wamid.QR2'));
-    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
+    expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000', expect.any(Date));
   });
 });
 
@@ -803,13 +803,43 @@ describe('POST /api/whatsapp — failure handling (R1)', () => {
     expect(markMessageQueued).not.toHaveBeenCalled();
   });
 
-  it('a STOP whose opt-out write fails with a NON-infrastructure error → 500 (a STOP is never silently acknowledged)', async () => {
+  it('a STOP whose opt-out write fails with a NON-infrastructure error → 200 + consent_failed audit + ops alert (R7: 500 only for infra)', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     setOptedOut.mockRejectedValueOnce(new TypeError('unexpected'));
     const res = await post(textBody('STOP', 'wamid.STOPNI'));
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
     expect(replyRows()).toHaveLength(0);
+    expect(auditRecord).toHaveBeenCalledWith({
+      partnerId: 'default',
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.consent_failed',
+      subjectId: waMessageRef('wamid.STOPNI'),
+      meta: { kind: 'stop', error: 'TypeError' },
+    });
+    expect(enqueue).toHaveBeenCalledWith('ops.alert', expect.objectContaining({ message: expect.any(String) }), expect.objectContaining({ dedupeKey: expect.stringMatching(/^waconsentfail:default:\d+$/) }));
+  });
+
+  it('a STOP whose opt-out write fails with an INFRASTRUCTURE error → 500', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setOptedOut.mockRejectedValueOnce(Object.assign(new Error('x'), { code: '08006' }));
+    expect((await post(textBody('STOP', 'wamid.STOPIN'))).status).toBe(500);
     expect(auditRecord).not.toHaveBeenCalled();
+  });
+
+  it('webhook_error rows are deduped per (tenant, hour)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    partnerForPhoneNumberId.mockImplementation(async (pnid: string) => {
+      if (pnid === 'pn_x') throw new TypeError('lookup bug');
+      return null;
+    });
+    const body = (id: string) => JSON.stringify({ entry: [
+      { changes: [{ value: { messages: [{ from: '15551230000', id, type: 'text', text: { body: 'hi' } }] } }] },
+      { changes: [{ value: { metadata: { phone_number_id: 'pn_x' }, messages: [] } }] },
+    ] });
+    expect((await post(body('wamid.H1'))).status).toBe(200);
+    expect((await post(body('wamid.H2'))).status).toBe(200);
+    expect(auditRecord.mock.calls.filter((c) => (c[0].meta as { reason?: string })?.reason === 'webhook_error')).toHaveLength(1);
   });
 
   it('an error OUTSIDE per-message processing on the 200 path → one whatsapp.inbound_dropped row (reason webhook_error) under the routed tenant', async () => {

@@ -350,16 +350,19 @@ describe('consent ordering: a replayed START never undoes a later STOP (review f
   });
 });
 
-describe('a failed consent write is never silently acknowledged (review fix 4)', () => {
+// R7 binding rule: 500 ONLY for infrastructure errors — consent included.
+describe('consent-branch failures (round 2: infra ⇒ 500, anything else ⇒ 200 + audit + ops alert)', () => {
+  const opsAlerts = async () => (await outboxRows()).filter((r) => r.kind === 'ops.alert');
+
   it.each([
-    ['STOP', 'setOptedOut'],
-    ['STOP', 'ensureCustomer'],
-    ['START', 'clearOptedOut'],
-  ])('%s whose %s throws a NON-infrastructure error ⇒ rejects (500); the retry applies it once', async (word, method) => {
+    ['STOP', 'setOptedOut', 'stop'],
+    ['STOP', 'ensureCustomer', 'stop'],
+    ['START', 'clearOptedOut', 'start'],
+  ])('%s whose %s throws an INFRASTRUCTURE error ⇒ rejects (500); the retry applies it once', async (word, method) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     if (word === 'START') await processInboundWebhook(webhook([text('STOP', 'wamid.PRE')]), { routedPartnerId: null });
     customerFault.method = method;
-    customerFault.error = new TypeError('unexpected');
+    customerFault.error = infraError();
     const body = webhook([text(word, `wamid.CF_${method}`)]);
     await expect(processInboundWebhook(body, { routedPartnerId: null })).rejects.toThrow();
     expect(redis.dump.has(`msgq:wamid.CF_${method}`)).toBe(false);
@@ -368,13 +371,77 @@ describe('a failed consent write is never silently acknowledged (review fix 4)',
     if (word === 'STOP') expect(c!.optedOutAt).toBeDefined();
     else expect(c!.optedOutAt).toBeUndefined();
     expect((await outboxRows()).filter((r) => r.dedupe_key === `wamid:wamid.CF_${method}`)).toHaveLength(1);
+    expect(await auditRows('whatsapp.consent_failed')).toHaveLength(0);
+    expect(await opsAlerts()).toHaveLength(0);
   });
 
-  it('a STOP whose confirmation insert fails with a NON-infrastructure error ⇒ rejects too', async () => {
+  it.each([
+    ['STOP', 'setOptedOut', 'stop'],
+    ['START', 'clearOptedOut', 'start'],
+  ])('%s whose %s throws a NON-infrastructure error ⇒ ok (200), one consent_failed audit row (kind + error name only), one ops alert', async (word, method, kind) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    if (word === 'START') await processInboundWebhook(webhook([text('STOP', 'wamid.PRE2')]), { routedPartnerId: 'acme' });
+    customerFault.method = method;
+    customerFault.error = new TypeError('unexpected 15551230000');
+    const res = await processInboundWebhook(webhook([text(word, `wamid.NI_${method}`)]), { routedPartnerId: 'acme' });
+    expect(res).toEqual({ ok: true });
+    const audit = await auditRows('whatsapp.consent_failed');
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ partner_id: 'acme', subject_id: waMessageRef(`wamid.NI_${method}`), meta: { kind, error: 'TypeError' } });
+    expect(await auditRows('whatsapp.inbound_dropped')).toHaveLength(0);
+    const alerts = await opsAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(JSON.stringify([audit, alerts])).not.toMatch(/\d{7,}/);
+    expect(JSON.stringify(alerts)).not.toContain('unexpected');
+  });
+
+  it('the ops alert is deduped per (tenant, hour); the audit row is per message', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const id of ['wamid.D1', 'wamid.D2']) {
+      customerFault.method = 'setOptedOut';
+      customerFault.error = new TypeError('x');
+      await processInboundWebhook(webhook([text('STOP', id)]), { routedPartnerId: 'acme' });
+    }
+    customerFault.method = 'setOptedOut';
+    customerFault.error = new TypeError('x');
+    await processInboundWebhook(webhook([text('STOP', 'wamid.D3')]), { routedPartnerId: 'beta' });
+    expect(await auditRows('whatsapp.consent_failed')).toHaveLength(3);
+    expect(await opsAlerts()).toHaveLength(2);
+  });
+
+  it('a STOP whose confirmation insert fails with a NON-infrastructure error ⇒ ok, consent_failed (the opt-out itself landed)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     enqueueFault.error = poisonError();
     enqueueFault.times = 1;
-    await expect(processInboundWebhook(webhook([text('STOP', 'wamid.CF_ENQ')]), { routedPartnerId: null })).rejects.toThrow();
-    expect(await rows(`SELECT 1 FROM audit_events WHERE action = 'whatsapp.inbound_dropped'`)).toHaveLength(0);
+    expect(await processInboundWebhook(webhook([text('STOP', 'wamid.CF_ENQ')]), { routedPartnerId: null })).toEqual({ ok: true });
+    expect((await customer())!.optedOutAt).toBeDefined();
+    expect(await auditRows('whatsapp.consent_failed')).toHaveLength(1);
+  });
+
+  it('the audit and alert are best-effort: their failure still acknowledges', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    customerFault.method = 'setOptedOut';
+    customerFault.error = new TypeError('x');
+    auditFault.times = 1;
+    expect(await processInboundWebhook(webhook([text('STOP', 'wamid.BE')]), { routedPartnerId: null })).toEqual({ ok: true });
+  });
+});
+
+describe('opted_out_at is the STOP\'s send time (round 2)', () => {
+  it('a STOP sent at t=10 but processed later stores t=10; a START sent at t=12 is NOT stale', async () => {
+    const t10 = nowSec() - 50;
+    await processInboundWebhook(webhook([at(text('STOP', 'wamid.ST10'), t10)]), { routedPartnerId: null });
+    expect(Date.parse((await customer())!.optedOutAt!)).toBe(t10 * 1000);
+    await processInboundWebhook(webhook([at(text('START', 'wamid.ST12'), t10 + 2)]), { routedPartnerId: null });
+    expect((await customer())!.optedOutAt).toBeUndefined();
+  });
+
+  it('a START sent before the STOP\'s send time is stale', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const t10 = nowSec() - 50;
+    await processInboundWebhook(webhook([at(text('STOP', 'wamid.SS10'), t10)]), { routedPartnerId: null });
+    await processInboundWebhook(webhook([at(text('START', 'wamid.SS09'), t10 - 1)]), { routedPartnerId: null });
+    expect((await customer())!.optedOutAt).toBeDefined();
   });
 });
 

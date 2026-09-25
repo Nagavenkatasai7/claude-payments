@@ -13,7 +13,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { RetryableInboundError, isRetryableInboundFailure } from '@/lib/whatsapp-inbound-response';
+import { isInfraError } from '@/lib/infra-error';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn, scrub } from '@/lib/log';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -243,6 +243,51 @@ function enqueueReply(deps: MessageDeps, incoming: IncomingMessage, body: string
   );
 }
 
+/** R1: at most one consent-failure ops alert per (tenant, hour). */
+export const CONSENT_ALERT_WINDOW_SEC = 60 * 60;
+
+/**
+ * R1: a STOP / START that failed for a non-infrastructure reason. The webhook
+ * acknowledges it (R7), so it is recorded — best effort, never a throw — as
+ * one `whatsapp.consent_failed` audit row (keyed message ref, kind, error
+ * NAME; never text or phone) plus an `ops.alert` outbox row deduped per
+ * (tenant, hour).
+ */
+async function recordConsentFailed(
+  deps: MessageDeps,
+  messageId: string,
+  kind: 'start' | 'stop',
+  err: unknown,
+): Promise<void> {
+  const { tenantId } = deps;
+  const error = err instanceof Error ? err.name : 'error';
+  logWarn('whatsapp.consent_failed', `${kind} not applied — acknowledged`, { tenant: tenantId, error });
+  try {
+    await createAuditRepo(getDb()).record({
+      partnerId: tenantId,
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.consent_failed',
+      subjectId: waMessageRef(messageId),
+      meta: { kind, error },
+    });
+  } catch (auditErr) {
+    logWarn('whatsapp.consent_failed', 'audit insert failed', { error: auditErr instanceof Error ? auditErr.name : 'error' });
+  }
+  try {
+    const hour = Math.floor(Date.now() / (CONSENT_ALERT_WINDOW_SEC * 1000));
+    await deps.outbox.enqueue(
+      'ops.alert',
+      {
+        message: `⚠️ SmartRemit ops: a WhatsApp ${kind === 'stop' ? 'STOP' : 'START'} for partner ${tenantId} could not be applied (${error}). See audit whatsapp.consent_failed.`,
+      },
+      { dedupeKey: `waconsentfail:${tenantId}:${hour}` },
+    );
+  } catch (alertErr) {
+    logWarn('whatsapp.consent_failed', 'ops alert enqueue failed', { error: alertErr instanceof Error ? alertErr.name : 'error' });
+  }
+}
+
 /**
  * STOP / START. Returns true when the confirmation row now exists; false for
  * a stale START (see below), which changes nothing and queues nothing.
@@ -277,7 +322,13 @@ async function applyConsent(
   // upsertOnFirstInbound, which would stamp consent on a STOP), then the
   // opt-out lands on it. An existing row is untouched by ensureCustomer.
   await customerStore.ensureCustomer(tenantId, incoming.from);
-  await customerStore.setOptedOut(tenantId, incoming.from);
+  // opted_out_at is the STOP's SEND time (else now), so the stale-START check
+  // compares send time with send time.
+  await customerStore.setOptedOut(
+    tenantId,
+    incoming.from,
+    incoming.sentAtMs !== undefined ? new Date(incoming.sentAtMs) : new Date(),
+  );
   await enqueueReply(deps, incoming, OPT_OUT_REPLY);
   return true;
 }
@@ -307,13 +358,17 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   // a button tap or a photo from an opted-out customer never reaches the
   // agent (Program-Fix 49A, whatsapp-10a).
   if (incoming.kind === 'text' && (isResumeKeyword(incoming.text) || isOptOutKeyword(incoming.text))) {
-    // A consent change is never silently acknowledged: ANY failure here
-    // (classified or not) is retryable — Meta redelivers and the branch
-    // re-applies idempotently.
+    const kind = isResumeKeyword(incoming.text) ? 'start' : 'stop';
     try {
-      return await applyConsent(deps, customerStore, incoming, isResumeKeyword(incoming.text) ? 'start' : 'stop');
+      return await applyConsent(deps, customerStore, incoming, kind);
     } catch (err) {
-      throw new RetryableInboundError(err);
+      // R7: 500 ONLY for infrastructure — Meta redelivers and the branch
+      // re-applies idempotently. Anything else is deterministic: acknowledge,
+      // but never silently — an audit row plus an ops alert, so a consent
+      // change that did not land is seen by a human.
+      if (isInfraError(err)) throw err;
+      await recordConsentFailed(deps, incoming.messageId, kind, err);
+      return false;
     }
   }
   const existing = await customerStore.getCustomer(tenantId, incoming.from);
@@ -411,9 +466,8 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
 /**
  * Process a whole signed webhook POST. Returns `{ ok: true }` once every
  * message has a durable row (inserted or already present) or was deliberately
- * dropped. THROWS the first retryable failure — an infrastructure error (DB /
- * Redis unavailable — see isInfraError) or a STOP / START that did not land
- * (RetryableInboundError) — so the route answers 500 and Meta redelivers; the redelivery
+ * dropped. THROWS the first infrastructure error (DB / Redis unavailable — see
+ * isInfraError) so the route answers 500 and Meta redelivers; the redelivery
  * is exactly-once against the `wamid:{id}` unique key. Any other per-message
  * failure is acknowledged and audited (`whatsapp.inbound_dropped`).
  */
@@ -459,7 +513,7 @@ export async function processInboundWebhook(
         try {
           durable = await processMessage(deps, incoming);
         } catch (err) {
-          if (isRetryableInboundFailure(err)) throw err; // → 500; Meta redelivers; the retry is idempotent
+          if (isInfraError(err)) throw err; // → 500; Meta redelivers; the retry is idempotent
           await recordDropped(incoming.messageId, tenantId, err);
           continue;
         }

@@ -18,10 +18,13 @@ vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) 
 vi.mock('@/lib/partner-integrations-store', () => ({ getPartnerIntegrationsStore: () => ({ getIntegrations }) }));
 vi.mock('@/lib/whatsapp-inbound', () => ({ processInboundWebhook }));
 vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+const redisHolder = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock('@/lib/redis', () => ({ getRedis: () => redisHolder.current }));
 const auditRecord = vi.hoisted(() => vi.fn(async (_e: Record<string, unknown>) => {}));
 vi.mock('@/db/repos/aux-repos', () => ({ createAuditRepo: () => ({ record: auditRecord }) }));
 
 import { POST } from '@/app/api/whatsapp/[partnerId]/route';
+import { fakeRedis } from './helpers';
 
 const body = JSON.stringify({ entry: [{ changes: [{ value: { metadata: { phone_number_id: 'pn_acme' }, messages: [] } }] }] });
 const sign = (raw: string, secret = 'acme_secret') => 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex');
@@ -38,6 +41,7 @@ const lastCtx = () => processInboundWebhook.mock.calls.at(-1)![1];
 beforeEach(() => {
   processInboundWebhook.mockReset().mockResolvedValue({ ok: true });
   auditRecord.mockReset().mockResolvedValue(undefined);
+  redisHolder.current = fakeRedis();
   getIntegrations.mockResolvedValue({ kyc: {}, payment: {}, whatsapp: { appSecret: 'acme_secret', phoneNumberId: 'pn_acme', token: 't' } });
 });
 afterEach(() => vi.restoreAllMocks());
