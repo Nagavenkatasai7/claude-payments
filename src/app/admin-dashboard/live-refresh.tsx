@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { LIVE_IDLE_PAUSE_MS, liveTickAction } from '@/lib/live-refresh-policy';
+import { liveTickAction } from '@/lib/live-refresh-policy';
 
 /** Any of these counts as the viewer being present (resets the idle clock). */
 const INPUT_EVENTS = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'scroll', 'touchstart'] as const;
@@ -38,10 +38,10 @@ export function LiveRefresh({ intervalMs = 5000 }: { intervalMs?: number }) {
 
     const onVisibility = () => {
       if (document.visibilityState !== 'visible') return;
-      if (Date.now() - lastInputAt >= LIVE_IDLE_PAUSE_MS) {
-        setPaused(true);
-        return;
-      }
+      // Coming back to the tab IS activity (a presenter returning from another
+      // window must not land on "Paused"); idle pause still catches a visible,
+      // untouched tab.
+      lastInputAt = Date.now();
       last = null; // re-baseline the stamp after the catch-up render
       router.refresh(); // one catch-up render for everything missed while hidden
     };
