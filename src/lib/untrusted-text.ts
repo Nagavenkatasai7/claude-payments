@@ -1,3 +1,4 @@
+import { domainToASCII } from 'node:url';
 import { IANA_TLDS } from './iana-tlds';
 
 // untrusted-text — the ONE sanitizer for text an outsider wrote that later
@@ -197,57 +198,72 @@ export function hasOverridePhrase(v: unknown): boolean {
   return s !== '' && OVERRIDE_PHRASE.test(s);
 }
 
-// R6b: MODEL output (not outsider text) gets its own, fail-closed detector,
-// since the model can write any TLD. The whole rule (R6b round 5): a dot that
-// follows ANY non-whitespace character and is followed by a label that is a
-// real TLD from the checked-in IANA snapshot (iana-tlds.ts: ASCII, punycode
-// and Unicode forms) names a host. No exemptions: what comes before the dot
-// (digits, abbreviations, punctuation, another dot) does not matter
-// ("1.20.online", "mr.shop", "x/.online" are hosts). A dot followed by a word
-// that is no TLD ("Priya.Your", "Mr.Sharma", "no.12") is not. A label is a
-// run of letters, marks, digits, "_" or "-". hasWebAddress, used on outsider
-// text, is deliberately unchanged.
-const MODEL_DOT_LABEL = /(?<=\S)\.([\p{L}\p{M}\p{N}_-]+)/gu;
+// ── R6b: model-output host stripping (final structural round) ────────────────
+// Used ONLY on text the model wrote (sanitizeReply). hasWebAddress, used on
+// outsider text, is deliberately unchanged and is only an extra trigger here.
+//
+// 1. Tokens split on VISIBLE whitespace only (U+FEFF is not a separator).
+// 2. A token containing a dot or any character whose NFKC form contains a dot
+//    ("dotted token") is SENT in canonical form: default-ignorable, control and
+//    format characters are deleted and the single-dot lookalikes are folded to
+//    ".". Tokens without a dot are sent untouched, so emoji keep their variation
+//    selectors and joiners (a dotted token like "❤\ufe0f." loses its U+FE0F).
+// 3. One detector: a token is a host when hasWebAddress(token), or when any
+//    dotted span of its NFKC, lower-cased, de-bracketed form ("[.]", "(.)",
+//    "{.}" are dots) has a label after its first that is a real IANA TLD, read
+//    from the node:url domainToASCII (UTS46) form and, fail-closed, also from
+//    the span as written. A label's head before a "-" counts too (punycode
+//    keeps its "xn--"), and a leading-dot span counts (".net").
+// 4. The only exception: the RAW token, lower-cased, stripped of wrapping
+//    brackets, quotes, *_~` marks and trailing punctuation, with one optional
+//    "www.", equals an allowed bare host. Anything else in it strips it.
+
+/** Every code point whose NFKC form contains "." (checked by a test over all of Unicode). */
+const DOT_LIKE = /[.。｡․-…⒈-⒛㏂㏇㏘︙︰﹒．\u{1f100}]/u;
+/** Single-dot lookalikes folded to "." in the SENT text of a dotted token. */
+const SENT_DOT_FOLD = /[。｡．․﹒]/gu;
+const INVISIBLE_ALL = /[\p{Default_Ignorable_Code_Point}\p{Cc}\p{Cf}]/gu;
+const DEFANGED_DOT = /[[({]\.[\])}]/gu;
+const MODEL_SPAN = /[\p{L}\p{M}\p{N}\p{So}-]*(?:\.[\p{L}\p{M}\p{N}\p{So}-]+)+/gu;
 const TLDS: ReadonlySet<string> = new Set(IANA_TLDS.map((t) => t.normalize('NFKC').toLowerCase()));
 
+function labelIsTld(label: string): boolean {
+  if (TLDS.has(label)) return true;
+  // The label's head before a "-" ("online-x" → "online"); for a punycode
+  // label the "xn--" prefix stays on ("xn--p1ai-x" → "xn--p1ai").
+  const head = label.startsWith('xn--') ? `xn--${label.slice(4).split('-')[0]}` : label.split('-')[0];
+  return head !== '' && head !== 'xn--' && TLDS.has(head);
+}
+
 /**
- * Whether MODEL-written text names a host on any real TLD (see the note
- * above). Broader than hasWebAddress on purpose; use it only on model output.
- * Pure.
+ * The form a model-written token is SENT in (see note 2): unchanged unless it
+ * is a dotted token. Pure.
+ */
+export function canonicalModelToken(token: string): string {
+  if (!DOT_LIKE.test(token)) return token;
+  return toWellFormed(token).replace(INVISIBLE_ALL, '').replace(SENT_DOT_FOLD, '.');
+}
+
+/**
+ * Whether one model-written TOKEN names a host on a real TLD (see note 3).
+ * Broader than hasWebAddress on purpose; use it only on model output. Pure.
  */
 export function hasModelHost(v: unknown): boolean {
   if (typeof v !== 'string') return false;
-  // Model-only fold, fail-closed: no length cap, and control, format and
-  // bracket characters are DELETED (never turned into a space), so nothing
-  // invisible can split a label from its TLD.
-  const s = toWellFormed(v)
-    .normalize('NFKC')
-    .replace(BREAKING_ALL, '')
-    .replace(FORMAT_ALL, '')
-    .replace(MARKERS_ALL, '')
-    .replace(IDEOGRAPHIC_DOTS, '.')
-    .toLowerCase();
-  for (const m of s.matchAll(MODEL_DOT_LABEL)) {
-    if (TLDS.has(m[1])) return true;
+  const d = toWellFormed(v).replace(INVISIBLE_ALL, '').normalize('NFKC').replace(SENT_DOT_FOLD, '.').toLowerCase().replace(DEFANGED_DOT, '.');
+  for (const m of d.matchAll(MODEL_SPAN)) {
+    const ascii = domainToASCII(m[0]);
+    for (const form of ascii ? [ascii, m[0]] : [m[0]]) {
+      if (form.split('.').slice(1).some(labelIsTld)) return true;
+    }
   }
   return false;
 }
 
-/** Wrapping characters trimmed before the exact allow-list match: brackets, quotes and WhatsApp *bold* _italic_ ~strike~ marks at the start; the same plus sentence punctuation at the end. */
-const EDGE_START = /^[(<[{"'“‘*_~]+/u;
-const EDGE_END = /[.,!?;:'"”’…)\]}>*_~]+$/u;
+/** Wrapping characters trimmed before the exact allow-list match. */
+const EDGE_START = /^[(<[{"'“‘*_~`]+/u;
+const EDGE_END = /[.,!?;:'"”’…)\]}>*_~`]+$/u;
 
-/**
- * R6b (A7L-2): remove every whitespace-separated token of MODEL-written text
- * that names a host (hasWebAddress or hasModelHost), unless the WHOLE raw token,
- * once its wrapping brackets, quotes, formatting marks and trailing
- * punctuation are trimmed, is exactly one allowed host (a leading "www." is
- * ignored). So a path, a query, a "user@", a markdown link or a second host
- * glued on strips the whole token (fail-closed): code-made links are appended
- * after this strip and never pass through it. Every whitespace run, newlines
- * included, is kept. Known cost: a missing space before a word ("sent.In")
- * is removed too. Pure.
- */
 /**
  * A token is a run of anything but VISIBLE whitespace. Unlike \s, this leaves
  * out U+FEFF (an invisible zero-width no-break space), so it cannot split a
@@ -255,12 +271,19 @@ const EDGE_END = /[.,!?;:'"”’…)\]}>*_~]+$/u;
  */
 const MODEL_TOKEN = /[^\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/gu;
 
+/**
+ * R6b (A7L-2): the model-output host strip (see the note above). Every token
+ * that names a host is removed unless it is exactly an allowed bare host;
+ * every other dotted token is sent in canonical form; whitespace, newlines
+ * included, is kept. Code-made links are appended after this and never pass
+ * through it. Pure.
+ */
 export function stripModelHosts(text: string, allowHosts: readonly string[]): string {
   const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/^www\./u, '')).filter((h) => h !== ''));
   return text.replace(MODEL_TOKEN, (token) => {
-    if (!hasWebAddress(token) && !hasModelHost(token)) return token;
-    // The RAW token (only lower-cased and edge-trimmed), not the detector's
-    // folded form, so a zero-width, soft-hyphen or bracket split never matches.
+    if (!hasWebAddress(token) && !hasModelHost(token)) return canonicalModelToken(token);
+    // The RAW token, not a folded form: any invisible or bracket character in
+    // an allowed host makes it not match, so it strips.
     const core = token.toLowerCase().replace(EDGE_START, '').replace(EDGE_END, '').replace(/^www\./u, '');
     return allow.has(core) ? token : '';
   });
