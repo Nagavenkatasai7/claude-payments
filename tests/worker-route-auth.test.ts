@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { fakeRedis } from './helpers';
+import { fakeGateRedis } from './helpers-gate-redis';
 import { freshDb } from './helpers-db';
 import { CRON_MARKER_KEY } from '@/lib/worker-cadence';
 import type { Db } from '@/db/client';
@@ -22,6 +23,13 @@ vi.mock('@/db/client', async (orig) => {
 vi.mock('@/lib/worker-cadence', async (orig) => {
   const real = await orig<typeof import('@/lib/worker-cadence')>();
   return { ...real, cadenceRedis: () => box.redis };
+});
+// partner-demo R4: the Neon gate's due set → an in-memory stand-in (an
+// unmocked client would only pass by failing open against the stubbed fetch).
+const gateBox = vi.hoisted(() => ({ gate: null as unknown }));
+vi.mock('@/lib/worker-gate', async (orig) => {
+  const real = await orig<typeof import('@/lib/worker-gate')>();
+  return { ...real, gateRedis: () => gateBox.gate };
 });
 
 // Program-Fix 43: the AML sweep's own Upstash client → an in-memory stand-in.
@@ -54,6 +62,7 @@ beforeEach(async () => {
   redis = fakeRedis();
   box.db = db;
   box.redis = redis;
+  gateBox.gate = fakeGateRedis();
   // No outbound network: the FX probe (cron on a :x0 minute) and any Graph send are stubbed out.
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network disabled in test')));
 });
@@ -83,13 +92,22 @@ describe('/api/worker Bearer gate', () => {
   });
 
   it('the right Bearer + x-vercel-cron-schedule is `cron` and writes the marker', async () => {
-    const res = await GET(req('GET', { authorization: `Bearer ${SECRET}`, 'x-vercel-cron-schedule': '* * * * *' }));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; source: string; cronQuiet: unknown };
-    expect(body).toMatchObject({ ok: true, source: 'cron', cronQuiet: null });
-    const marker = await redis.get(CRON_MARKER_KEY);
-    expect(marker).not.toBeNull();
-    expect(Math.abs(Date.parse(marker!) - Date.now())).toBeLessThan(60_000);
+    // Pinned to the :17 backstop minute so the cron tick runs full (R4 gate).
+    const at = new Date();
+    at.setUTCMinutes(17, 5, 0);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(at);
+    try {
+      const res = await GET(req('GET', { authorization: `Bearer ${SECRET}`, 'x-vercel-cron-schedule': '* * * * *' }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; source: string; cronQuiet: unknown };
+      expect(body).toMatchObject({ ok: true, source: 'cron', gated: false, cronQuiet: null });
+      const marker = await redis.get(CRON_MARKER_KEY);
+      expect(marker).not.toBeNull();
+      expect(Math.abs(Date.parse(marker!) - Date.now())).toBeLessThan(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('the right Bearer on a POST is a `poke` and does not write the marker', async () => {

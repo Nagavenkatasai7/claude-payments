@@ -18,7 +18,7 @@ vi.mock('@/db/client', async (orig) => {
   return { ...real, getDb: () => db };
 });
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {} }));
+vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {}, pokeWorkerDelayed: () => {} }));
 // fix 29: the v2 replay guard's Redis — an in-memory double.
 vi.mock('@/lib/redis', async () => {
   const { fakeRedis } = await import('./helpers');

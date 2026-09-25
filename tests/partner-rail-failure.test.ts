@@ -19,7 +19,15 @@ vi.mock('@/db/client', async (orig) => {
   return { ...real, getDb: () => db };
 });
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {} }));
+const pokes = vi.hoisted(() => ({ now: 0, delayed: [] as number[] }));
+vi.mock('@/lib/outbox', () => ({
+  pokeWorker: () => {
+    pokes.now++;
+  },
+  pokeWorkerDelayed: (ms: number) => {
+    pokes.delayed.push(ms);
+  },
+}));
 vi.mock('@/lib/partner-integrations-store', () => ({
   getPartnerIntegrationsStore: () => ({
     getIntegrations: async () => ({
@@ -75,7 +83,30 @@ const settle = (reference: string, destination: string, rail = 'bank') => ({
 const composed = validatePayoutFields('IN', { accountNumber: '000000000000', ifsc: 'HDFC0001234' });
 const ZERO_DEST = composed.ok ? composed.payoutDestination : '';
 
-beforeEach(async () => { db = await freshDb(); railRedis.r = fakeRedis(); });
+beforeEach(async () => {
+  db = await freshDb();
+  railRedis.r = fakeRedis();
+  pokes.now = 0;
+  pokes.delayed = [];
+});
+
+// partner-demo R4: the callback row is due in SETTLE_DELAY_MS (12 s), but the
+// immediate poke drains only READY rows. With the worker gate, an unmarked
+// delayed row would wait for the :17/:47 backstop — and the stuck-paid sweep
+// (15 min) would re-instruct it and raise a false alert. The rail therefore
+// schedules a DELAYED poke (12 s + 5 s), which also marks the row due.
+describe('partner-rail — delayed poke for the settle callback (partner-demo R4)', () => {
+  it('a settle schedules an immediate poke AND a delayed poke at SETTLE_DELAY_MS + 5 s', async () => {
+    expect((await postInstruction(settle('dp_t1', 'HDFC0001234 123456789012'))).status).toBe(200);
+    expect(pokes.now).toBe(1);
+    expect(pokes.delayed).toEqual([17_000]);
+  });
+
+  it('a reverse instruction queues no callback and schedules no delayed poke', async () => {
+    await postInstruction({ reference: 'reverse-dp_t1', partner_id: 'default', action: 'reverse', payout: { rail: 'bank', destination: 'x' } });
+    expect(pokes.delayed).toEqual([]);
+  });
+});
 
 describe('partner-rail — the all-zero-account failure mode (fix 8)', () => {
   it('the IN validator accepts the sentinel and composes the account LAST', () => {

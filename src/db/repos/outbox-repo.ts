@@ -559,6 +559,25 @@ export function createOutboxRepo(db: DbOrTx) {
         oldestDueAt: r.oldest_due_at ? new Date(String(r.oldest_due_at)) : null,
       };
     },
+
+    /**
+     * partner-demo R4: when the NEXT pending/failed row becomes claimable (past
+     * or future), or null when none is waiting. The worker marks this instant
+     * in the Redis due set after every full run so the gated cron wakes Neon
+     * exactly then. 'processing' rows are deliberately excluded: a live lease
+     * is covered by the invocation's own `lease:<workerId>` member, and
+     * marking lease_until here would schedule a full run ~5 min after every
+     * drain. One indexed aggregate (outbox_drain on (status, next_attempt_at)).
+     */
+    async nextDueAt(): Promise<Date | null> {
+      const rows = await db.execute(sql`
+        SELECT min(next_attempt_at) AS next_due_at
+        FROM outbox
+        WHERE status IN ('pending','failed')
+      `);
+      const r = (rows as unknown as { rows: Array<Record<string, unknown>> }).rows[0] ?? {};
+      return r.next_due_at ? new Date(String(r.next_due_at)) : null;
+    },
   };
 }
 

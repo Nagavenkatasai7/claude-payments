@@ -3,6 +3,7 @@ import type { Db, DbOrTx } from '@/db/client';
 import { fundingEvents } from '@/db/schema';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { settleFundedTransfer, type FundedSettleDeps } from '@/lib/stripe-funded-settle';
 import { toMinorUnits } from '@/lib/funding-amount';
 import { logError } from '@/lib/log';
@@ -230,5 +231,8 @@ export async function processStripeFundingEvent(
       logError('stripe-funding.settle', err, { transferId: result.settle.id });
     }
   }
+  // partner-demo R4: the event's transaction has committed (and any settle
+  // with it) — poke so its alert / settlement rows never wait for the backstop.
+  pokeWorker();
   return { outcome: result.outcome, ...(result.transferId ? { transferId: result.transferId } : {}) };
 }
