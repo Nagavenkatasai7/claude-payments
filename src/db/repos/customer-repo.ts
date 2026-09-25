@@ -377,10 +377,15 @@ export function createCustomerRepo(
       return rows.length > 0;
     },
 
-    async setOptedOut(partnerId: PartnerId, senderPhone: string): Promise<void> {
+    /**
+     * `at` is WHEN the customer opted out — the inbound STOP passes the STOP's
+     * send time, so a later consent change is ordered by send time, not by
+     * when we happened to process it. Default: now.
+     */
+    async setOptedOut(partnerId: PartnerId, senderPhone: string, at: Date = new Date()): Promise<void> {
       await db
         .update(customers)
-        .set({ optedOutAt: new Date(), updatedAt: new Date() })
+        .set({ optedOutAt: at, updatedAt: new Date() })
         .where(tenantKey(partnerId, senderPhone));
     },
 
