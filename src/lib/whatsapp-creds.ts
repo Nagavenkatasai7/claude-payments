@@ -9,8 +9,11 @@ import { DEFAULT_PARTNER_ID } from './defaults';
 
 // whatsapp-creds — derive the outbound WhatsApp credentials for a partner from
 // their integrations row. A partner counts as BYO-WhatsApp ONLY when both the
-// phoneNumberId and the token are configured — a half-configured channel falls
-// back to the shared env number (undefined) rather than failing sends.
+// phoneNumberId and the token are configured; otherwise waCredsFrom returns
+// undefined (the shared env number). R2a: the outbox worker's
+// whatsapp.text/template send does NOT take that fallback for a
+// half-configured channel — it asks resolveWaChannel and fails closed on
+// `incomplete`. The direct senders (pay OTP, partnerWaContext) keep it.
 export function waCredsFrom(
   integrations: PartnerIntegrations | null | undefined,
 ): WaCreds | undefined {

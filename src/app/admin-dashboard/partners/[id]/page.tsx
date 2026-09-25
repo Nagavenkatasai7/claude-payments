@@ -190,7 +190,14 @@ export default async function PartnerDetailPage({
     getStore().readChannelTest(partner.id).then(parseChannelTest).catch(() => null),
   ]);
   const channelSummary = summarizeChannelHealth({ channel, marks: channelHealth?.marks ?? {}, now: new Date(nowMs) });
-  const channelBanner = partner.id === 'default' ? null : channelBannerModel(channelSummary, partner.id);
+  // Partner staff already get the marks from the dashboard-layout banner; the
+  // header adds only the config items (incomplete / missing fields) for them,
+  // so the same signal is never shown twice.
+  const headerSummary =
+    scopeOf(staff).kind === 'partner'
+      ? summarizeChannelHealth({ channel, marks: {}, now: new Date(nowMs) })
+      : channelSummary;
+  const channelBanner = partner.id === 'default' ? null : channelBannerModel(headerSummary, partner.id);
   // SenderCell (U7): batch-resolve the decrypted sender names for the recents
   // in ONE query, so each row shows name + phone (linked to the profile)
   // instead of a bare phone — phones with no captured name fall back to phone.

@@ -342,7 +342,8 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
   const submittedToken = String(formData.get('token') ?? '').trim();
   const pnidChanged = newPnid !== (existing.whatsapp.phoneNumberId ?? '');
   const tokenChanged = submittedToken !== '' && submittedToken !== existing.whatsapp.token;
-  if (newPnid && (pnidChanged || tokenChanged)) {
+  const probed = Boolean(newPnid && (pnidChanged || tokenChanged));
+  if (probed) {
     // wabaId is read ONLY for this check; it is never persisted.
     const wabaId = String(formData.get('wabaId') ?? '').trim() || undefined;
     await assertPhoneNumberIdOwned(id, newPnid, submittedToken || existing.whatsapp.token, wabaId);
@@ -359,8 +360,10 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
   } catch (e) {
     rethrowPnidConflict(e);
   }
-  // A saved (complete) config resolves the config/auth signals the banner shows.
-  await clearChannelHealthMarks(id, ['auth_error', 'incomplete_config']);
+  // A saved (complete) config resolves the incomplete signal. auth_error is
+  // resolved ONLY when this save's token just passed the Graph probe — a
+  // blank-field or verify-token-only save still holds the rejected token.
+  await clearChannelHealthMarks(id, probed ? ['auth_error', 'incomplete_config'] : ['incomplete_config']);
   // No separate reverse index to maintain anymore — inbound routing resolves
   // the partner straight off the integrations row (partnerForPhoneNumberId).
   revalidatePath(`/admin-dashboard/partners/${id}`);

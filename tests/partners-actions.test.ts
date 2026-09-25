@@ -1249,3 +1249,41 @@ describe('saveAlertEmailAction / testWhatsappConnectionAction (R2a)', () => {
     expect(JSON.parse(sharedRedis.dump.get('watest:acme')!)).toMatchObject({ ok: false, reason: 'not_configured' });
   });
 });
+
+describe('R2a: a save clears auth_error ONLY with a new, verified token', () => {
+  const PN = '1234567890123';
+  const form = (values: Record<string, string>): FormData => {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(values)) fd.set(k, v);
+    return fd;
+  };
+  const seedAuthError = () =>
+    sharedRedis.dump.set('wahealth:acme', JSON.stringify({
+      auth_error: { at: new Date().toISOString(), count: 1, code: 190 },
+      incomplete_config: { at: new Date().toISOString(), count: 1 },
+    }));
+  beforeEach(async () => {
+    await seedPartner(db, 'acme');
+    await createPartnerIntegrationsStore(db, new EnvKeyProvider(Buffer.alloc(32, 7))).saveIntegrations('acme', {
+      kyc: {}, payment: {}, whatsapp: { phoneNumberId: PN, token: 'EAA-old', appSecret: 's' },
+    });
+    currentStaff = { username: 'u', role: 'admin', partnerId: 'acme' };
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('a verify-token-only edit keeps the auth_error mark (the token is still the rejected one)', async () => {
+    seedAuthError();
+    vi.stubGlobal('fetch', vi.fn());
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, verifyToken: 'v2' }));
+    const marks = JSON.parse(sharedRedis.dump.get('wahealth:acme')!);
+    expect(marks.auth_error).toBeDefined();
+    expect(marks.incomplete_config).toBeUndefined();
+  });
+
+  it('a NEW token that passes the Graph probe clears auth_error', async () => {
+    seedAuthError();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ id: PN }), { status: 200 })));
+    await saveWhatsappConfigAction(form({ id: 'acme', phoneNumberId: PN, token: 'EAA-new' }));
+    expect(JSON.parse(sharedRedis.dump.get('wahealth:acme')!)).toEqual({});
+  });
+});

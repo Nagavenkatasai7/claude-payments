@@ -16,9 +16,9 @@ import { ChannelHealthBanner } from './channel-health-banner';
  * ONE Redis read — no DB, no decrypt — and best-effort: a Redis error ⇒ no banner.
  */
 async function partnerChannelBanner(staff: Awaited<ReturnType<typeof requireStaff>>): Promise<ChannelBannerModel | null> {
-  const scope = scopeOf(staff);
-  if (scope.kind !== 'partner') return null;
   try {
+    const scope = scopeOf(staff);
+    if (scope.kind !== 'partner') return null;
     const marks = parseHealthMarks(await getStore().readChannelHealth(scope.partnerId));
     return channelBannerModel(summarizeChannelHealth({ marks, now: new Date() }), scope.partnerId);
   } catch {
