@@ -190,6 +190,29 @@ export function summarizeChannelHealth(input: {
   return { level, ...(channelLabel ? { channelLabel } : {}), items };
 }
 
+export interface ChannelBannerModel {
+  variant: 'default' | 'destructive';
+  title: string;
+  lines: string[];
+  href: string;
+}
+
+/** Pure: what a page's banner shows for a summary (null ⇒ render nothing). */
+export function channelBannerModel(summary: ChannelHealthSummary, partnerId: PartnerId): ChannelBannerModel | null {
+  if (summary.level === 'ok') return null;
+  return {
+    variant: summary.level === 'error' ? 'destructive' : 'default',
+    title: summary.level === 'error' ? 'WhatsApp channel needs attention' : 'WhatsApp channel notice',
+    lines: summary.items.map((i) => {
+      const extra = [i.count && i.count > 1 ? `×${i.count}` : '', i.code !== undefined ? `code ${i.code}` : '', i.at ? `last ${i.at.slice(0, 16).replace('T', ' ')} UTC` : '']
+        .filter(Boolean)
+        .join(' · ');
+      return extra ? `${i.message} (${extra})` : i.message;
+    }),
+    href: `/admin-dashboard/partners/${encodeURIComponent(partnerId)}`,
+  };
+}
+
 const EMAIL_SUBJECT: Record<ChannelHealthKind, string> = {
   auth_error: 'Action needed: your WhatsApp access token was rejected',
   dead_send: 'Action needed: WhatsApp messages could not be delivered',
