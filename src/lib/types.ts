@@ -462,6 +462,8 @@ export type IncomingMessage = (
   // In memory only: never logged, never written to an outbox payload.
   bsuid?: string;
   username?: string;
+  /** R1: when the customer sent it (Meta messages[].timestamp, epoch ms). Orders consent changes. */
+  sentAtMs?: number;
 };
 
 /** Inbound Meta message types the bot answers with the "typed messages only" reply. */

@@ -82,6 +82,17 @@ describe('parseWebhook', () => {
     expect(plain).toEqual({ kind: 'text', from: '1555', text: 'hi', messageId: 'w3' });
   });
 
+  it('messages[].timestamp (unix seconds) becomes sentAtMs; absent or garbage ⇒ no field', () => {
+    const [c] = parseWebhook(env(change({ messages: [
+      { ...text('1555', 'w1', 'a'), timestamp: '1700000000' },
+      { ...text('1555', 'w2', 'b'), timestamp: 'soon' },
+      text('1555', 'w3', 'c'),
+    ] })));
+    expect(c.messages[0].sentAtMs).toBe(1_700_000_000_000);
+    expect(c.messages[1]).not.toHaveProperty('sentAtMs');
+    expect(c.messages[2]).not.toHaveProperty('sentAtMs');
+  });
+
   it('value.errors are surfaced (code/title/message only)', () => {
     const [c] = parseWebhook(env(change({ errors: [{ code: 131051, title: 'Unsupported message type', message: 'm', extra: 1 }] })));
     expect(c.errors).toEqual([{ code: 131051, title: 'Unsupported message type', message: 'm' }]);

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { isInfraError } from '@/lib/infra-error';
+import { DrizzleQueryError } from 'drizzle-orm/errors';
 
 // R1: the inbound webhook returns 500 (Meta retries) ONLY for infrastructure
 // errors. Everything else is acknowledged, so one bad payload can never make
@@ -118,5 +119,72 @@ describe('isInfraError — everything else (⇒ acknowledged + audited)', () => 
     const e = new Error('loop') as Error & { cause?: unknown };
     e.cause = e;
     expect(isInfraError(e)).toBe(false);
+  });
+});
+
+// ── Review fixes: a link message can carry customer text ────────────────────
+// drizzle's DrizzleQueryError message is `Failed query: ${query}\nparams: ${params}`
+// (node_modules/drizzle-orm/errors.js:10-13): the params include the outbox
+// payload, i.e. the customer's own words. Classification must never read them.
+describe('isInfraError — customer text never decides (review fix)', () => {
+  const TRIGGERS = [
+    'socket hang up',
+    'Connection terminated',
+    'timeout exceeded when trying to connect',
+    'Exhausted all retries',
+    "Couldn't connect to compute node",
+    'query_wait_timeout',
+    'you have exceeded the compute time quota',
+  ];
+  const payload = (t: string) => ['agent.turn', JSON.stringify({ messageText: `hi\u0000 ${t}` })];
+
+  it.each(TRIGGERS)('a real DrizzleQueryError whose params contain "%s" and whose cause is 22P05 ⇒ false', (t) => {
+    const cause = Object.assign(new Error('unsupported Unicode escape sequence'), { code: '22P05' });
+    const err = new DrizzleQueryError('insert into "outbox" ...', payload(t), cause);
+    expect(err.message).toContain(t); // the trap is real
+    expect(isInfraError(err)).toBe(false);
+  });
+
+  it.each(TRIGGERS)('a real DrizzleQueryError with params containing "%s" and NO cause ⇒ false', (t) => {
+    expect(isInfraError(new DrizzleQueryError('insert into "outbox" ...', payload(t)))).toBe(false);
+  });
+
+  it('a real DrizzleQueryError wrapping a connection error is still infra', () => {
+    const cause = Object.assign(new Error('x'), { code: '08006' });
+    expect(isInfraError(new DrizzleQueryError('select 1', [], cause))).toBe(true);
+    expect(isInfraError(new DrizzleQueryError('select 1', ['socket hang up'], new Error('Connection terminated')))).toBe(true);
+  });
+
+  it('a non-infra SQLSTATE is decisive even when its message looks like infra', () => {
+    expect(isInfraError(Object.assign(new Error('Connection terminated socket hang up'), { code: '23505' }))).toBe(false);
+    // …and even when something deeper on the chain would have matched.
+    const deeper = Object.assign(new Error('x'), { code: '22021', cause: new Error('socket hang up') });
+    expect(isInfraError(deeper)).toBe(false);
+  });
+
+  it('XX000 (internal / proxy error) falls through to the message on THAT link only', () => {
+    expect(isInfraError(Object.assign(new Error("Couldn't connect to compute node"), { code: 'XX000' }))).toBe(true);
+    expect(isInfraError(Object.assign(new Error('some internal bug'), { code: 'XX000' }))).toBe(false);
+  });
+
+  it('UpstashError: only the part before ", command was:" is read (the command echoes values)', () => {
+    const cmd = (m: string) => Object.assign(new Error(`${m}, command was: ["set","conv:x","socket hang up limit exceeded timed out"]`), { name: 'UpstashError' });
+    expect(isInfraError(cmd('WRONGTYPE Operation against a key holding the wrong kind of value'))).toBe(false);
+    expect(isInfraError(cmd('ERR max requests limit exceeded. Limit: 10000'))).toBe(true);
+  });
+});
+
+// Neon's documented wake / capacity failures — https://neon.com/docs/connect/connection-errors
+describe('isInfraError — Neon documented connection errors', () => {
+  it.each([
+    "Couldn't connect to compute node",
+    "Error: P1001: Can't reach database server at `ep-x.us-east-2.aws.neon.tech`:`5432`",
+    'active endpoints limit exceeded',
+    'You have exceeded the limit of concurrently active endpoints',
+    'query_wait_timeout SSL connection has been closed unexpectedly',
+    'Remaining connection slots are reserved for roles with the SUPERUSER attribute',
+  ])('%s', (message) => {
+    expect(isInfraError(new Error(message))).toBe(true);
+    expect(isInfraError(Object.assign(new Error(message), { code: 'XX000' }))).toBe(true);
   });
 });

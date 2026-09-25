@@ -17,6 +17,9 @@ const { getPartner, getIntegrations, processInboundWebhook } = vi.hoisted(() => 
 vi.mock('@/lib/partner-store', () => ({ getPartnerStore: () => ({ getPartner }) }));
 vi.mock('@/lib/partner-integrations-store', () => ({ getPartnerIntegrationsStore: () => ({ getIntegrations }) }));
 vi.mock('@/lib/whatsapp-inbound', () => ({ processInboundWebhook }));
+vi.mock('@/db/client', () => ({ getDb: () => ({}) }));
+const auditRecord = vi.hoisted(() => vi.fn(async (_e: Record<string, unknown>) => {}));
+vi.mock('@/db/repos/aux-repos', () => ({ createAuditRepo: () => ({ record: auditRecord }) }));
 
 import { POST } from '@/app/api/whatsapp/[partnerId]/route';
 
@@ -34,6 +37,7 @@ const lastCtx = () => processInboundWebhook.mock.calls.at(-1)![1];
 
 beforeEach(() => {
   processInboundWebhook.mockReset().mockResolvedValue({ ok: true });
+  auditRecord.mockReset().mockResolvedValue(undefined);
   getIntegrations.mockResolvedValue({ kyc: {}, payment: {}, whatsapp: { appSecret: 'acme_secret', phoneNumberId: 'pn_acme', token: 't' } });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -79,5 +83,22 @@ describe('POST /api/whatsapp/[partnerId] — failure handling (R1)', () => {
     expect(logged).toContain('whatsapp.inbound_failed');
     expect(logged).toContain('TypeError');
     expect(logged).not.toContain('secret-ish');
+    // Review fix 6: one best-effort audit row under the routed tenant, name only.
+    expect(auditRecord).toHaveBeenCalledTimes(1);
+    expect(auditRecord).toHaveBeenCalledWith({
+      partnerId: 'acme',
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.inbound_dropped',
+      meta: { reason: 'webhook_error', error: 'TypeError' },
+    });
+    expect(JSON.stringify(auditRecord.mock.calls)).not.toContain('secret-ish');
+  });
+
+  it('an infrastructure error writes no webhook_error row (Meta redelivers)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    processInboundWebhook.mockRejectedValue(Object.assign(new Error('x'), { code: '08006' }));
+    expect((await post()).status).toBe(500);
+    expect(auditRecord).not.toHaveBeenCalled();
   });
 });

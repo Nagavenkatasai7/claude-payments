@@ -13,7 +13,7 @@ import { getCustomerStore } from '@/lib/customer-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { isInfraError } from '@/lib/infra-error';
+import { RetryableInboundError, isRetryableInboundFailure } from '@/lib/whatsapp-inbound-response';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn, scrub } from '@/lib/log';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -146,10 +146,13 @@ async function recordStatus(ev: WebhookStatusEvent, tenantId: PartnerId): Promis
  */
 async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<void> {
   logWarn('whatsapp.inbound_no_phone', 'message without a phone number — not processed', { tenant: tenantId });
+  const hour = Math.floor(Date.now() / (NO_PHONE_AUDIT_WINDOW_SEC * 1000));
+  const claimKey = `wanophone:${tenantId}:${hour}`;
+  let claimed = false;
   try {
-    const hour = Math.floor(Date.now() / (NO_PHONE_AUDIT_WINDOW_SEC * 1000));
-    const first = await getRedis().set(`wanophone:${tenantId}:${hour}`, '1', { ex: NO_PHONE_AUDIT_WINDOW_SEC, nx: true });
+    const first = await getRedis().set(claimKey, '1', { ex: NO_PHONE_AUDIT_WINDOW_SEC, nx: true });
     if (first === null) return;
+    claimed = true;
     await createAuditRepo(getDb()).record({
       partnerId: tenantId,
       actor: 'whatsapp',
@@ -161,6 +164,14 @@ async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<vo
     // R2 hook: recordChannelHealth(partnerId, 'no_phone')
   } catch (err) {
     logWarn('whatsapp.inbound_no_phone', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
+    // Release the hourly claim so the next no-phone message can record the row.
+    if (claimed) {
+      try {
+        await getRedis().del(claimKey);
+      } catch {
+        /* the claim expires on its own within the hour */
+      }
+    }
   }
 }
 
@@ -196,6 +207,15 @@ async function afterInsert(what: string, fn: () => Promise<unknown>, tenantId: P
   }
 }
 
+/**
+ * R1: Postgres jsonb (and text) reject U+0000, so a NUL in customer text
+ * would make the insert fail deterministically. Strip it from every string
+ * that goes into an outbox payload.
+ */
+export function stripNul(value: string): string {
+  return value.includes('\u0000') ? value.replace(/\u0000/g, '') : value;
+}
+
 interface MessageDeps {
   store: Store;
   outbox: ReturnType<typeof createOutboxRepo>;
@@ -215,12 +235,51 @@ function enqueueReply(deps: MessageDeps, incoming: IncomingMessage, body: string
     'whatsapp.text',
     {
       to: incoming.from,
-      body,
+      body: stripNul(body),
       category: 'essential',
       ...(deps.routedPartnerId ? { partnerId: deps.routedPartnerId } : {}),
     },
     { dedupeKey: `wamid:${incoming.messageId}` },
   );
+}
+
+/**
+ * STOP / START. Returns true when the confirmation row now exists; false for
+ * a stale START (see below), which changes nothing and queues nothing.
+ */
+async function applyConsent(
+  deps: MessageDeps,
+  customerStore: ReturnType<typeof getCustomerStore>,
+  incoming: IncomingMessage,
+  kind: 'start' | 'stop',
+): Promise<boolean> {
+  const { tenantId } = deps;
+  if (kind === 'start') {
+    // Ordering: a START the customer SENT before their stored opt-out (a
+    // redelivery, or a retry that lost the race with a later STOP) must not
+    // undo it. Meta's timestamp is whole seconds, so compare at that grain —
+    // a START in the same second as the opt-out still resumes. No timestamp
+    // ⇒ today's behaviour.
+    if (incoming.sentAtMs !== undefined) {
+      const current = await customerStore.getCustomer(tenantId, incoming.from);
+      const optedOutMs = current?.optedOutAt ? Date.parse(current.optedOutAt) : NaN;
+      if (Number.isFinite(optedOutMs) && incoming.sentAtMs < Math.floor(optedOutMs / 1000) * 1000) {
+        logWarn('whatsapp.consent_stale', 'START older than the stored opt-out — ignored', { tenant: tenantId });
+        return false;
+      }
+    }
+    await customerStore.clearOptedOut(tenantId, incoming.from);
+    await enqueueReply(deps, incoming, OPT_IN_REPLY);
+    return true;
+  }
+  // Program-Fix 49A (whatsapp-10c): a STOP from a phone with no row must not
+  // be lost. ensureCustomer creates the row WITHOUT opt-in (never
+  // upsertOnFirstInbound, which would stamp consent on a STOP), then the
+  // opt-out lands on it. An existing row is untouched by ensureCustomer.
+  await customerStore.ensureCustomer(tenantId, incoming.from);
+  await customerStore.setOptedOut(tenantId, incoming.from);
+  await enqueueReply(deps, incoming, OPT_OUT_REPLY);
+  return true;
 }
 
 /**
@@ -247,21 +306,14 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   // "Unsubscribe" lands here too); the opted-out STATE applies to EVERY kind —
   // a button tap or a photo from an opted-out customer never reaches the
   // agent (Program-Fix 49A, whatsapp-10a).
-  if (incoming.kind === 'text') {
-    if (isResumeKeyword(incoming.text)) {
-      await customerStore.clearOptedOut(tenantId, incoming.from);
-      await enqueueReply(deps, incoming, OPT_IN_REPLY);
-      return true;
-    }
-    if (isOptOutKeyword(incoming.text)) {
-      // Program-Fix 49A (whatsapp-10c): a STOP from a phone with no row must
-      // not be lost. ensureCustomer creates the row WITHOUT opt-in (never
-      // upsertOnFirstInbound, which would stamp consent on a STOP), then the
-      // opt-out lands on it. An existing row is untouched by ensureCustomer.
-      await customerStore.ensureCustomer(tenantId, incoming.from);
-      await customerStore.setOptedOut(tenantId, incoming.from);
-      await enqueueReply(deps, incoming, OPT_OUT_REPLY);
-      return true;
+  if (incoming.kind === 'text' && (isResumeKeyword(incoming.text) || isOptOutKeyword(incoming.text))) {
+    // A consent change is never silently acknowledged: ANY failure here
+    // (classified or not) is retryable — Meta redelivers and the branch
+    // re-applies idempotently.
+    try {
+      return await applyConsent(deps, customerStore, incoming, isResumeKeyword(incoming.text) ? 'start' : 'stop');
+    } catch (err) {
+      throw new RetryableInboundError(err);
     }
   }
   const existing = await customerStore.getCustomer(tenantId, incoming.from);
@@ -349,7 +401,7 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
   // BSUID / username: those stay in memory.
   await outbox.enqueue(
     'agent.turn',
-    { phone: incoming.from, messageText, turn, routedPartnerId },
+    { phone: incoming.from, messageText: stripNul(messageText), turn, routedPartnerId },
     { dedupeKey: `wamid:${incoming.messageId}` },
   );
   await afterInsert('lastmsg', () => store.recordInboundNow(tenantId, incoming.from), tenantId);
@@ -359,8 +411,9 @@ async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Pro
 /**
  * Process a whole signed webhook POST. Returns `{ ok: true }` once every
  * message has a durable row (inserted or already present) or was deliberately
- * dropped. THROWS the first infrastructure error (DB / Redis unavailable — see
- * isInfraError) so the route answers 500 and Meta redelivers; the redelivery
+ * dropped. THROWS the first retryable failure — an infrastructure error (DB /
+ * Redis unavailable — see isInfraError) or a STOP / START that did not land
+ * (RetryableInboundError) — so the route answers 500 and Meta redelivers; the redelivery
  * is exactly-once against the `wamid:{id}` unique key. Any other per-message
  * failure is acknowledged and audited (`whatsapp.inbound_dropped`).
  */
@@ -382,40 +435,44 @@ export async function processInboundWebhook(
   };
   let queued = false;
 
-  for (const change of changes) {
-    // R1 per-change tenant rule: a change for another tenant's number never
-    // runs under this route's tenant (its signature proved THIS tenant only).
-    if (acceptPnid && !(await acceptPnid(change.pnid))) {
-      logWarn('whatsapp.pnid_mismatch', 'change for another receiving number skipped', { tenant: tenantId });
-      continue;
-    }
-
-    // Message-STATUS callbacks (sent/delivered/read/failed). We don't map
-    // wamid → transfer yet, so the deliverable is structured logging.
-    for (const ev of change.statuses) await recordStatus(ev, tenantId);
-
-    for (const e of change.errors) {
-      logWarn('whatsapp.webhook_error', `code=${e.code ?? 'n/a'} (${e.title ? scrub(e.title).slice(0, 200) : ''})`, { tenant: tenantId });
-    }
-
-    for (const d of change.dropped) await recordNoPhone(d, tenantId);
-
-    for (const incoming of change.messages) {
-      let durable: boolean;
-      try {
-        durable = await processMessage(deps, incoming);
-      } catch (err) {
-        if (isInfraError(err)) throw err; // → 500; Meta redelivers; the retry is idempotent
-        await recordDropped(incoming.messageId, tenantId, err);
+  try {
+    for (const change of changes) {
+      // R1 per-change tenant rule: a change for another tenant's number never
+      // runs under this route's tenant (its signature proved THIS tenant only).
+      if (acceptPnid && !(await acceptPnid(change.pnid))) {
+        logWarn('whatsapp.pnid_mismatch', 'change for another receiving number skipped', { tenant: tenantId });
         continue;
       }
-      if (durable) {
-        queued = true;
-        await afterInsert('queued mark', () => deps.store.markMessageQueued(incoming.messageId), tenantId);
+
+      // Message-STATUS callbacks (sent/delivered/read/failed). We don't map
+      // wamid → transfer yet, so the deliverable is structured logging.
+      for (const ev of change.statuses) await recordStatus(ev, tenantId);
+
+      for (const e of change.errors) {
+        logWarn('whatsapp.webhook_error', `code=${e.code ?? 'n/a'} (${e.title ? scrub(e.title).slice(0, 200) : ''})`, { tenant: tenantId });
+      }
+
+      for (const d of change.dropped) await recordNoPhone(d, tenantId);
+
+      for (const incoming of change.messages) {
+        let durable: boolean;
+        try {
+          durable = await processMessage(deps, incoming);
+        } catch (err) {
+          if (isRetryableInboundFailure(err)) throw err; // → 500; Meta redelivers; the retry is idempotent
+          await recordDropped(incoming.messageId, tenantId, err);
+          continue;
+        }
+        if (durable) {
+          queued = true;
+          await afterInsert('queued mark', () => deps.store.markMessageQueued(incoming.messageId), tenantId);
+        }
       }
     }
+  } finally {
+    // Fast path — the per-minute cron drains it regardless. In a finally so
+    // rows queued before a later throw are not left for the cron.
+    if (queued) pokeWorker();
   }
-
-  if (queued) pokeWorker(); // fast path — the per-minute cron drains it regardless
   return { ok: true };
 }

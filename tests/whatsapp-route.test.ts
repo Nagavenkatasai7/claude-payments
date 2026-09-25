@@ -803,6 +803,57 @@ describe('POST /api/whatsapp — failure handling (R1)', () => {
     expect(markMessageQueued).not.toHaveBeenCalled();
   });
 
+  it('a STOP whose opt-out write fails with a NON-infrastructure error → 500 (a STOP is never silently acknowledged)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setOptedOut.mockRejectedValueOnce(new TypeError('unexpected'));
+    const res = await post(textBody('STOP', 'wamid.STOPNI'));
+    expect(res.status).toBe(500);
+    expect(replyRows()).toHaveLength(0);
+    expect(auditRecord).not.toHaveBeenCalled();
+  });
+
+  it('an error OUTSIDE per-message processing on the 200 path → one whatsapp.inbound_dropped row (reason webhook_error) under the routed tenant', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env.META_APP_SECRET = SECRET;
+    // entry[0] routes to acme; resolving the SECOND change's number blows up (a non-infra bug).
+    partnerForPhoneNumberId.mockImplementation(async (pnid: string) => {
+      if (pnid === 'pn_acme') return 'acme';
+      throw new TypeError('lookup bug');
+    });
+    getIntegrations.mockResolvedValue({ kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't', appSecret: 'acme_secret' } });
+    const body = JSON.stringify({ entry: [
+      { changes: [{ value: { metadata: { phone_number_id: 'pn_acme' }, messages: [{ from: '15551230000', id: 'wamid.W1', type: 'text', text: { body: 'hi' } }] } }] },
+      { changes: [{ value: { metadata: { phone_number_id: 'pn_other' }, messages: [{ from: '15551230000', id: 'wamid.W2', type: 'text', text: { body: 'hi' } }] } }] },
+    ] });
+    const res = await post(body, sign(body, 'acme_secret'));
+    expect(res.status).toBe(200);
+    expect(auditRecord).toHaveBeenCalledTimes(1);
+    expect(auditRecord).toHaveBeenCalledWith({
+      partnerId: 'acme',
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.inbound_dropped',
+      meta: { reason: 'webhook_error', error: 'TypeError' },
+    });
+  });
+
+  it('the webhook_error audit is best-effort: its own failure still answers 200', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    auditRecord.mockRejectedValue(new Error('db down'));
+    partnerForPhoneNumberId.mockImplementation(async (pnid: string) => {
+      if (pnid === 'pn_x') throw new TypeError('lookup bug');
+      return null;
+    });
+    // Unrouted entry[0] (no metadata); the second change's number lookup fails.
+    const body = JSON.stringify({ entry: [
+      { changes: [{ value: { messages: [{ from: '15551230000', id: 'wamid.BE1', type: 'text', text: { body: 'hi' } }] } }] },
+      { changes: [{ value: { metadata: { phone_number_id: 'pn_x' }, messages: [] } }] },
+    ] });
+    const res = await post(body);
+    expect(res.status).toBe(200);
+    expect(auditRecord).toHaveBeenCalledWith(expect.objectContaining({ partnerId: 'default', meta: { reason: 'webhook_error', error: 'TypeError' } }));
+  });
+
   it('two messages in one POST → both processed', async () => {
     const body = JSON.stringify({ entry: [{ changes: [{ value: { messages: [
       { from: '15551230000', id: 'wamid.B1', type: 'text', text: { body: 'one' } },

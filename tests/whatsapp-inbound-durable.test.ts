@@ -21,8 +21,53 @@ const { pokeWorker, sendText, enqueueFault } = vi.hoisted(() => ({
   pokeWorker: vi.fn(),
   sendText: vi.fn(async () => {}),
   // The next N enqueue calls throw this error instead of inserting.
-  enqueueFault: { error: null as Error | null, times: 0 },
+  enqueueFault: { error: null as Error | null, times: 0, skip: 0 },
 }));
+// The next N audit inserts throw (review fix 7).
+const auditFault = vi.hoisted(() => ({ times: 0 }));
+vi.mock('@/db/repos/aux-repos', async (orig) => {
+  const real = await orig<typeof import('@/db/repos/aux-repos')>();
+  return {
+    ...real,
+    createAuditRepo: (d: Parameters<typeof real.createAuditRepo>[0]) => {
+      const repo = real.createAuditRepo(d);
+      return {
+        ...repo,
+        record: async (...args: Parameters<typeof repo.record>) => {
+          if (auditFault.times > 0) {
+            auditFault.times--;
+            throw Object.assign(new Error('audit down'), { code: '08006' });
+          }
+          return repo.record(...args);
+        },
+      };
+    },
+  };
+});
+// Consent-write fault injection (review fix 4): the named method throws once.
+const customerFault = vi.hoisted(() => ({ method: '' as string, error: null as Error | null }));
+vi.mock('@/lib/customer-store', async (orig) => {
+  const real = await orig<typeof import('@/lib/customer-store')>();
+  const wrap = <T extends object>(cs: T): T =>
+    new Proxy(cs, {
+      get(target, prop, recv) {
+        const v = Reflect.get(target, prop, recv);
+        if (typeof v !== 'function') return v;
+        return (...args: unknown[]) => {
+          if (prop === customerFault.method && customerFault.error) {
+            const e = customerFault.error;
+            customerFault.error = null;
+            return Promise.reject(e);
+          }
+          return (v as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
+  return {
+    ...real,
+    getCustomerStore: (...args: Parameters<typeof real.getCustomerStore>) => wrap(real.getCustomerStore(...args)),
+  };
+});
 vi.mock('@/lib/outbox', () => ({ pokeWorker, pokeWorkerDelayed: vi.fn() }));
 vi.mock('@/lib/whatsapp', async (orig) => ({
   ...(await orig<typeof import('@/lib/whatsapp')>()),
@@ -37,6 +82,10 @@ vi.mock('@/db/repos/outbox-repo', async (orig) => {
       return {
         ...repo,
         enqueue: async (...args: Parameters<typeof repo.enqueue>) => {
+          if (enqueueFault.skip > 0) {
+            enqueueFault.skip--;
+            return repo.enqueue(...args);
+          }
           if (enqueueFault.times > 0 && enqueueFault.error) {
             enqueueFault.times--;
             throw enqueueFault.error;
@@ -76,6 +125,10 @@ beforeEach(async () => {
   sendText.mockClear();
   enqueueFault.error = null;
   enqueueFault.times = 0;
+  enqueueFault.skip = 0;
+  auditFault.times = 0;
+  customerFault.method = '';
+  customerFault.error = null;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -259,7 +312,103 @@ describe('per-change tenant rule (acceptPnid) and cross-tenant regression', () =
     const cs = createCustomerStore(db, createStore(redis, db));
     expect(await cs.getCustomer('acme', PHONE)).not.toBeNull();
     // Any B-side writes land under B only.
-    const partners = (await rows(`SELECT partner_id FROM customers ORDER BY partner_id`)).map((r) => r.partner_id);
-    expect(partners.every((p) => p === 'acme' || p === 'beta')).toBe(true);
+    // Exactly: A's row, plus B's own row from B's pipeline (the phone is B's customer too). No row moved.
+    expect(await rows(`SELECT partner_id, phone FROM customers ORDER BY partner_id`)).toEqual([
+      { partner_id: 'acme', phone: PHONE },
+      { partner_id: 'beta', phone: PHONE },
+    ]);
+  });
+});
+
+// ── Review fixes ─────────────────────────────────────────────────────────────
+const nowSec = () => Math.floor(Date.now() / 1000);
+const at = (m: Msg, sec: number): Msg => ({ ...m, timestamp: String(sec) });
+const customer = async (tenant = 'default') => createCustomerStore(db, createStore(redis, db)).getCustomer(tenant, PHONE);
+
+describe('consent ordering: a replayed START never undoes a later STOP (review fix 3)', () => {
+  it('a START sent BEFORE the stored opt-out ⇒ still opted out, no confirmation row, acknowledged', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await processInboundWebhook(webhook([at(text('STOP', 'wamid.STOP_T'), nowSec())]), { routedPartnerId: null });
+    const optedOutAt = (await customer())!.optedOutAt!;
+    const res = await processInboundWebhook(webhook([at(text('START', 'wamid.START_OLD'), nowSec() - 120)]), { routedPartnerId: null });
+    expect(res).toEqual({ ok: true });
+    expect((await customer())!.optedOutAt).toBe(optedOutAt);
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['wamid:wamid.STOP_T']);
+  });
+
+  it('a START sent in the same second as, or after, the opt-out ⇒ resumes and confirms', async () => {
+    await processInboundWebhook(webhook([at(text('STOP', 'wamid.STOP_S'), nowSec())]), { routedPartnerId: null });
+    await processInboundWebhook(webhook([at(text('START', 'wamid.START_S'), nowSec())]), { routedPartnerId: null });
+    expect((await customer())!.optedOutAt).toBeUndefined();
+    expect((await outboxRows()).map((r) => (r.payload as { body: string }).body)).toEqual([OPT_OUT_REPLY, OPT_IN_REPLY]);
+  });
+
+  it('a START without a timestamp keeps today\'s behaviour (resumes)', async () => {
+    await processInboundWebhook(webhook([text('STOP', 'wamid.STOP_N')]), { routedPartnerId: null });
+    await processInboundWebhook(webhook([text('START', 'wamid.START_N')]), { routedPartnerId: null });
+    expect((await customer())!.optedOutAt).toBeUndefined();
+  });
+});
+
+describe('a failed consent write is never silently acknowledged (review fix 4)', () => {
+  it.each([
+    ['STOP', 'setOptedOut'],
+    ['STOP', 'ensureCustomer'],
+    ['START', 'clearOptedOut'],
+  ])('%s whose %s throws a NON-infrastructure error ⇒ rejects (500); the retry applies it once', async (word, method) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    if (word === 'START') await processInboundWebhook(webhook([text('STOP', 'wamid.PRE')]), { routedPartnerId: null });
+    customerFault.method = method;
+    customerFault.error = new TypeError('unexpected');
+    const body = webhook([text(word, `wamid.CF_${method}`)]);
+    await expect(processInboundWebhook(body, { routedPartnerId: null })).rejects.toThrow();
+    expect(redis.dump.has(`msgq:wamid.CF_${method}`)).toBe(false);
+    expect(await processInboundWebhook(body, { routedPartnerId: null })).toEqual({ ok: true });
+    const c = await customer();
+    if (word === 'STOP') expect(c!.optedOutAt).toBeDefined();
+    else expect(c!.optedOutAt).toBeUndefined();
+    expect((await outboxRows()).filter((r) => r.dedupe_key === `wamid:wamid.CF_${method}`)).toHaveLength(1);
+  });
+
+  it('a STOP whose confirmation insert fails with a NON-infrastructure error ⇒ rejects too', async () => {
+    enqueueFault.error = poisonError();
+    enqueueFault.times = 1;
+    await expect(processInboundWebhook(webhook([text('STOP', 'wamid.CF_ENQ')]), { routedPartnerId: null })).rejects.toThrow();
+    expect(await rows(`SELECT 1 FROM audit_events WHERE action = 'whatsapp.inbound_dropped'`)).toHaveLength(0);
+  });
+});
+
+describe('NUL bytes never reach a jsonb payload (review fix 5)', () => {
+  it('messageText with \\u0000 is stored without it (the real insert would reject it otherwise)', async () => {
+    await processInboundWebhook(webhook([text('hi\u0000there\u0000', 'wamid.NUL')]), { routedPartnerId: null });
+    const out = await outboxRows();
+    expect(out).toHaveLength(1);
+    expect((out[0].payload as { messageText: string }).messageText).toBe('hithere');
+    expect(await rows(`SELECT 1 FROM audit_events`)).toHaveLength(0);
+  });
+});
+
+describe('no-phone hourly claim is released when the audit insert fails (review fix 7)', () => {
+  it('a failed insert DELs the claim, so the next no-phone message in the hour is recorded', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const noPhone = (id: string): Msg => ({ from_user_id: 'US.X', id, type: 'text', text: { body: 'hi' } });
+    auditFault.times = 1;
+    await processInboundWebhook(webhook([noPhone('wamid.NP1')]), { routedPartnerId: 'acme' });
+    expect(await auditRows('whatsapp.inbound_no_phone')).toHaveLength(0);
+    expect([...redis.dump.keys()].some((k) => k.startsWith('wanophone:'))).toBe(false);
+    await processInboundWebhook(webhook([noPhone('wamid.NP2')]), { routedPartnerId: 'acme' });
+    expect(await auditRows('whatsapp.inbound_no_phone')).toHaveLength(1);
+  });
+});
+
+describe('the worker is poked even when a later message throws (review fix 8)', () => {
+  it('first message queued, second hits an infra error ⇒ rejects AND pokes', async () => {
+    const body = webhook([text('one', 'wamid.PK1'), text('two', 'wamid.PK2')]);
+    enqueueFault.skip = 1;
+    enqueueFault.error = infraError();
+    enqueueFault.times = 1;
+    await expect(processInboundWebhook(body, { routedPartnerId: null })).rejects.toThrow();
+    expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['wamid:wamid.PK1']);
+    expect(pokeWorker).toHaveBeenCalled();
   });
 });

@@ -42,6 +42,8 @@ interface RawMessage {
   // "subject to change"). Read to flag a no-phone message; never stored raw.
   from_user_id?: string;
   from_parent_user_id?: string;
+  /** Unix seconds, as a string (Meta messages[].timestamp). */
+  timestamp?: string;
   text?: { body?: string };
   // Template quick-reply tap (Meta webhook `type:"button"`).
   button?: { payload?: string; text?: string };
@@ -169,12 +171,27 @@ function contactFor(message: RawMessage, contacts: RawContact[] | undefined): Ra
   return match ?? (contacts.length === 1 ? contacts[0] ?? undefined : undefined);
 }
 
-/** R1: the optional BSUID / username of a message (in memory only — never stored raw). */
-function identityOf(message: RawMessage, contacts: RawContact[] | undefined): { bsuid?: string; username?: string } {
+/** R1: Meta's send time (unix seconds string) → epoch ms; absent or malformed ⇒ undefined. */
+function sentAtMsOf(message: RawMessage): number | undefined {
+  const t = message.timestamp;
+  if (typeof t !== 'string' || !/^\d{1,12}$/.test(t)) return undefined;
+  return Number(t) * 1000;
+}
+
+/** R1: the optional BSUID / username / send time of a message (identity in memory only — never stored raw). */
+function identityOf(
+  message: RawMessage,
+  contacts: RawContact[] | undefined,
+): { bsuid?: string; username?: string; sentAtMs?: number } {
+  const sentAtMs = sentAtMsOf(message);
   const contact = contactFor(message, contacts);
   const bsuid = message.from_user_id || contact?.user_id || undefined;
   const username = contact?.profile?.username || undefined;
-  return { ...(bsuid ? { bsuid } : {}), ...(username ? { username } : {}) };
+  return {
+    ...(bsuid ? { bsuid } : {}),
+    ...(username ? { username } : {}),
+    ...(sentAtMs !== undefined ? { sentAtMs } : {}),
+  };
 }
 
 /** One raw `messages[]` item → IncomingMessage, or null (no from/id, or an ignored type). */
