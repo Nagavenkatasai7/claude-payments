@@ -1,6 +1,7 @@
 import type { Db, DbOrTx } from '@/db/client';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { CANCEL_WINDOW_MS } from '@/lib/refund-policy';
 import { buildSenderCancelMessage } from '@/lib/legal/cancel-drafts';
@@ -146,7 +147,7 @@ export async function cancelWithinWindow(
   transferId: string,
   opts: { via: SenderCancelVia },
 ): Promise<SenderCancelResult> {
-  return db.transaction(async (tx): Promise<SenderCancelResult> => {
+  const res = await db.transaction(async (tx): Promise<SenderCancelResult> => {
     const claim = await cancelPaidBySenderLocked(tx, partnerId, transferId);
     const outbox = createOutboxRepo(tx);
     const audit = createAuditRepo(tx);
@@ -218,4 +219,8 @@ export async function cancelWithinWindow(
       }
     }
   });
+  // partner-demo R4: committed rows (customer notice, refund, ops alert) —
+  // poke so the gated cron never leaves them for the 30-min backstop.
+  if (res.kind === 'cancelled' || res.kind === 'escalated') pokeWorker();
+  return res;
 }

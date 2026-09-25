@@ -1067,6 +1067,13 @@ export interface DrainOptions {
    * deadline) still start; stopAfter bounds them.
    */
   hardStopAt?: number;
+  /**
+   * partner-demo R4: awaited once per call, right after a claim that returned
+   * rows and BEFORE any of them runs (the route marks its `lease:<workerId>`
+   * in the Redis due set here, so a killed invocation wakes a reclaim run).
+   * Best effort: a throw is logged and never blocks the drain.
+   */
+  onClaim?: () => Promise<void>;
 }
 
 /**
@@ -1139,6 +1146,13 @@ export async function drainOnce(
   // Review S1: run in id order — UPDATE … RETURNING order is not guaranteed,
   // and agent.turn ordering (plus the FIFO gate) assumes oldest first.
   const rows = (await outbox.claimBatch(batchSize, workerId)).sort((a, b) => a.id - b.id);
+  if (rows.length > 0 && opts.onClaim) {
+    try {
+      await opts.onClaim();
+    } catch (err) {
+      logWarn('worker.gate', 'onClaim failed (fail-open)', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
   const partner = memoizedPartnerContext(deps); // one drain-time creds resolver per BATCH (fix 11)
   const rowDeadlineMs = opts.rowDeadlineMs ?? ROW_DEADLINE_MS;
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };

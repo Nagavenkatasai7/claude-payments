@@ -12,6 +12,7 @@ import { optOutSuppresses } from '@/lib/consent-gate';
 import { partnerWaContext } from '@/lib/whatsapp-creds';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { auditSubjectId } from '@/lib/customer-ref';
 import { logError, logWarn } from '@/lib/log';
 import type { PersonaEvent } from '@/lib/providers/persona-webhook-parse';
@@ -193,6 +194,7 @@ async function applyEvent(event: PersonaEvent, cases: KycCaseStore): Promise<App
         },
         { dedupeKey: `kycunbound:${event.eventId}` },
       );
+      pokeWorker(); // partner-demo R4: post-response, so the gated cron never leaves it for the backstop
     }
     return null;
   }

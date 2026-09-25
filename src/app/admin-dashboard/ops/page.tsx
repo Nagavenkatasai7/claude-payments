@@ -9,6 +9,7 @@ import { isEscalated } from '@/lib/stale-money';
 import { emailConfigured } from '@/lib/email';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getCadenceSnapshot, cadenceRedis, DRAIN_SLA_MINUTES, CRON_QUIET_MINUTES } from '@/lib/worker-cadence';
+import { WORKER_BACKSTOP_PERIOD_MIN } from '@/lib/worker-gate';
 import { Sidebar } from '../sidebar';
 import { money } from '../format';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -129,7 +130,7 @@ export default async function OpsPage() {
               <CardTitle className="text-3xl tabular-nums">{cadence.dueNow}</CardTitle>
             </CardHeader>
             <CardContent className="text-xs text-muted-foreground">
-              claimable now · oldest {oldestWaitMin}m (SLA {DRAIN_SLA_MINUTES}m)
+              claimable now · oldest {oldestWaitMin}m (SLA {DRAIN_SLA_MINUTES}m; unmarked work waits ≤{WORKER_BACKSTOP_PERIOD_MIN}m backstop)
             </CardContent>
           </Card>
           <Card className={cronQuiet ? 'border-destructive/50' : ''}>
@@ -140,7 +141,7 @@ export default async function OpsPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="text-xs text-muted-foreground">
-              {lastCronMin === null ? 'no marker' : 'ago'} · Vercel per-minute cron (quiet &gt;{CRON_QUIET_MINUTES}m)
+              {lastCronMin === null ? 'no marker' : 'ago'} · Vercel per-minute cron, DB only when work is due or at :17/:47 (quiet &gt;{CRON_QUIET_MINUTES}m)
             </CardContent>
           </Card>
           <Card className={snap.stuckPaid.length ? 'border-destructive/50' : ''}>

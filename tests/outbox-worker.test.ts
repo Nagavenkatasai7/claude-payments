@@ -2574,3 +2574,41 @@ describe('drainOnce — sandbox transfers never reach a rail or a real phone (Pr
     expect((await rowsOf('whatsapp.text'))[0].status).toBe('done');
   });
 });
+
+// partner-demo R4: the worker gate marks `lease:<workerId>` in Redis at the
+// first claim, so a KILLED invocation wakes a reclaim run on time. drainOnce
+// exposes the claim instant through an optional hook, awaited BEFORE any row
+// runs, and fired only when the claim returned rows.
+describe('drainOnce — onClaim hook (partner-demo R4)', () => {
+  it('awaits onClaim once, before the first handler runs, when rows were claimed', async () => {
+    const order: string[] = [];
+    sendText.mockImplementation(async () => {
+      order.push('handler');
+    });
+    await outbox.enqueue('ops.alert', { message: 'one' }, { dedupeKey: 'r4:a' });
+    await outbox.enqueue('ops.alert', { message: 'two' }, { dedupeKey: 'r4:b' });
+    const onClaim = vi.fn(async () => {
+      order.push('onClaim');
+    });
+    const r = await drainOnce(deps(), 'w1', 10, { onClaim });
+    expect(r.processed).toBe(2);
+    expect(onClaim).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe('onClaim');
+  });
+
+  it('is not called when nothing was claimed', async () => {
+    const onClaim = vi.fn(async () => {});
+    await drainOnce(deps(), 'w1', 10, { onClaim });
+    expect(onClaim).not.toHaveBeenCalled();
+  });
+
+  it('a throwing onClaim never blocks the drain', async () => {
+    await outbox.enqueue('ops.alert', { message: 'x' }, { dedupeKey: 'r4:c' });
+    const r = await drainOnce(deps(), 'w1', 10, {
+      onClaim: async () => {
+        throw new Error('redis down');
+      },
+    });
+    expect(r.processed).toBe(1);
+  });
+});
