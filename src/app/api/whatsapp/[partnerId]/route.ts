@@ -4,6 +4,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { processInboundWebhook } from '@/lib/whatsapp-inbound';
 import { respondToInboundFailure } from '@/lib/whatsapp-inbound-response';
+import { noteSignatureFailure, noteSignedOk } from '@/lib/webhook-signature-health';
 
 // WL2: a partner's DEDICATED Meta webhook — the URL they paste into their own
 // Meta app's webhook configuration. Solves the GET-verification problem (Meta's
@@ -58,8 +59,12 @@ export async function POST(
   }
   const signature = req.headers.get('x-hub-signature-256') ?? '';
   if (!verifyMetaSignature(raw, signature, appSecret)) {
+    // R2b: a known, active partner with a secret — a bounded Redis mark only
+    // (never a DB row). Best-effort: the answer is 401 either way.
+    await noteSignatureFailure(partnerId);
     return NextResponse.json({ ok: false }, { status: 401 });
   }
+  await noteSignedOk(partnerId); // R2b: best-effort; never changes the answer
 
   let body: unknown = null;
   try {
