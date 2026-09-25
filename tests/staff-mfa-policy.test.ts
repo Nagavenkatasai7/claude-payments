@@ -71,4 +71,19 @@ describe('mfaEnrolmentRequired', () => {
     expect(mfaEnrolmentRequired({ ...base, partnerId: 'p1' as Staff['partnerId'] })).toBe(false);
     expect(mfaEnrolmentRequired({ ...base, role: 'agent' })).toBe(false);
   });
+
+  it('partner-demo R5: { partnerAdmins: true } also covers PARTNER admins, same flag and exemptions', () => {
+    const partnerAdmin: Staff = { ...base, username: 'acme-admin', partnerId: 'acme' as Staff['partnerId'] };
+    // flag off → never required, with or without the option
+    expect(mfaEnrolmentRequired(partnerAdmin, { partnerAdmins: true })).toBe(false);
+    process.env.STAFF_MFA_REQUIRED = 'true';
+    expect(mfaEnrolmentRequired(partnerAdmin, { partnerAdmins: true })).toBe(true);
+    expect(mfaEnrolmentRequired(partnerAdmin)).toBe(false); // default call unchanged
+    expect(mfaEnrolmentRequired(base, { partnerAdmins: true })).toBe(true); // platform unchanged
+    expect(mfaEnrolmentRequired({ ...partnerAdmin, role: 'agent' }, { partnerAdmins: true })).toBe(false);
+    // a partner account named like the seed admin does not inherit the seed exemption
+    expect(mfaEnrolmentRequired({ ...partnerAdmin, username: 'admin' }, { partnerAdmins: true })).toBe(true);
+    process.env.STAFF_MFA_EXEMPT = 'acme-admin';
+    expect(mfaEnrolmentRequired(partnerAdmin, { partnerAdmins: true })).toBe(false);
+  });
 });

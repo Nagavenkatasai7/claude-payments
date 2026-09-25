@@ -14,7 +14,9 @@ import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
 
 // Program-Fix 17b: two-step verification (TOTP) is opt-in for everyone here.
 // `?enroll=1` is where requirePlatformAdmin sends an unenrolled platform admin
-// when STAFF_MFA_REQUIRED is on; this page itself never requires it (no loop).
+// when STAFF_MFA_REQUIRED is on (and, partner-demo R5, where the partner-staff
+// actions send an unenrolled partner admin); this page itself never requires
+// it (no loop).
 
 export default async function AccountPage({
   searchParams,
@@ -23,7 +25,7 @@ export default async function AccountPage({
 }) {
   const me = await requireStaff();
   const enrolled = await getStaffMfaStore().isEnrolled(me.username);
-  const mustEnrol = !enrolled && (await searchParams).enroll === '1' && mfaEnrolmentRequired(me);
+  const mustEnrol = !enrolled && (await searchParams).enroll === '1' && mfaEnrolmentRequired(me, { partnerAdmins: true });
   return (
     <>
       <Sidebar />

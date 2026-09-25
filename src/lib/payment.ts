@@ -2,6 +2,7 @@ import { isPartnerPulled } from './funding-method';
 import type { Store } from './store';
 import type { CurrencyCode, Transfer } from './types';
 import { NAME_MAX, safeDisplayText } from './untrusted-text';
+import { maskPhoneLast4 } from './mask';
 
 export interface StageResult {
   transfer: Transfer;
@@ -260,7 +261,9 @@ export async function completePaymentStage2(
 export function recipientTemplateParams(transfer: Transfer): string[] {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
-  const sender = `+${transfer.phone}`;
+  // Partner-demo R6a: {{3}}'s VALUE is the sender phone masked to its last 4
+  // (the recipient never sees the full number); count and order are unchanged.
+  const sender = maskPhoneLast4(transfer.phone);
   return [recipientDisplayName(transfer), destAmount, sender, 'bank account'];
 }
 
@@ -273,7 +276,7 @@ export function recipientTemplateParams(transfer: Transfer): string[] {
 export function recipientDeliveredFallbackText(transfer: Transfer, brand = 'SmartRemit'): string {
   const destCurrency = transfer.destinationCurrency ?? 'INR';
   const destAmount = formatDestAmount(transfer.amountInr, destCurrency);
-  const sender = `+${transfer.phone}`;
+  const sender = maskPhoneLast4(transfer.phone); // R6a: masked, as in the template
   return (
     `💰 ${recipientDisplayName(transfer)}, you've received ${destAmount} from ${sender} via ${brand}. ` +
     `It's on the way to your bank account.`

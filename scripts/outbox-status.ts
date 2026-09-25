@@ -11,6 +11,7 @@ import { sql } from 'drizzle-orm';
 import { STUCK_PAID_MINUTES, STALE_REVIEW_HOURS, STUCK_REFUND_MINUTES, STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import { LEASE_MS, createOutboxRepo } from '@/db/repos/outbox-repo';
 import { cadenceRedis, readLastCronAt, CRON_QUIET_MINUTES, DRAIN_SLA_MINUTES } from '@/lib/worker-cadence';
+import { WORKER_BACKSTOP_PERIOD_MIN } from '@/lib/worker-gate';
 import { scrub } from '@/lib/log';
 
 type Row = Record<string, unknown>;
@@ -47,7 +48,7 @@ async function main() {
     : null;
   const drainBehind = oldestWaitMin !== null && oldestWaitMin > DRAIN_SLA_MINUTES;
   section(
-    `DUE backlog (claimable by the next drain, incl. expired leases — SLA ${DRAIN_SLA_MINUTES}m${drainBehind ? ' — BEHIND' : ''})`,
+    `DUE backlog (claimable by the next drain, incl. expired leases — SLA ${DRAIN_SLA_MINUTES}m; work the gate was not told about waits ≤${WORKER_BACKSTOP_PERIOD_MIN}m for the backstop${drainBehind ? ' — BEHIND' : ''})`,
     dueSummary.dueNow === 0
       ? []
       : [{ due_now: dueSummary.dueNow, oldest_due: dueSummary.oldestDueAt?.toISOString(), oldest_wait_min: oldestWaitMin }],
@@ -66,7 +67,7 @@ async function main() {
   }
   const lastCronMin = lastCronAt ? Math.round((Date.now() - lastCronAt.getTime()) / 60_000) : null;
   const cronQuiet = lastCronMin === null || lastCronMin > CRON_QUIET_MINUTES;
-  console.log(`\nLAST CRON RUN (Vercel /api/worker every minute; quiet >${CRON_QUIET_MINUTES}m)`);
+  console.log(`\nLAST CRON RUN (Vercel /api/worker every minute — touches the DB only when work is marked due or on the :17/:47 backstop; quiet >${CRON_QUIET_MINUTES}m)`);
   console.log(
     lastCronAt
       ? `  ${lastCronAt.toISOString()} — ${lastCronMin}m ago${cronQuiet ? ' — QUIET' : ''}`

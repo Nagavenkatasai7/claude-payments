@@ -6,6 +6,7 @@ import { getDb, type Db, type Tx } from '@/db/client';
 import { partnerIntegrations } from '@/db/schema';
 import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from './outbox';
 import { logError } from './log';
 import { amlHoldRailEligible } from './aml-hold';
 import type { SenderAmlStats } from './aml-rules';
@@ -110,6 +111,9 @@ async function readAmlHoldInputs(
     ),
   );
   if (!alerted.ok) logError('aml.hold_check_alert', alerted.error, { partnerId });
+  // partner-demo R4: after() runs post-response — after the mint transaction
+  // commits (a rolled-back mint makes it a harmless empty poke).
+  else pokeWorker();
   return null;
 }
 
@@ -511,6 +515,28 @@ export function createStore(redis: RedisLike, db: Db) {
     },
     async recordInboundNow(partnerId: PartnerId, senderPhone: string): Promise<void> {
       await redis.set(`lastmsg:${partnerId}:${senderPhone}`, new Date().toISOString(), { ex: 86400 });
+    },
+
+    // ── R2a: WhatsApp channel health (hot, 7-day TTL; see channel-health.ts) ──
+    // ONE JSON string per partner (never a hash: no hgetall flat-array
+    // ambiguity). Kinds, last-at, counts and Meta codes only — never a token,
+    // phone or payload. The read-modify-write count is approximate by design.
+    async readChannelHealth(partnerId: PartnerId): Promise<string | null> {
+      return redis.get(`wahealth:${partnerId}`);
+    },
+    async writeChannelHealth(partnerId: PartnerId, json: string): Promise<void> {
+      await redis.set(`wahealth:${partnerId}`, json, { ex: 7 * 86400 });
+    },
+    /** The last "Test connection" result ({ok, status?, reason?, at}; never a token), 7-day TTL. */
+    async readChannelTest(partnerId: PartnerId): Promise<string | null> {
+      return redis.get(`watest:${partnerId}`);
+    },
+    async writeChannelTest(partnerId: PartnerId, json: string): Promise<void> {
+      await redis.set(`watest:${partnerId}`, json, { ex: 7 * 86400 });
+    },
+    /** SET NX: true for the FIRST caller of this (partner, kind, bucket) — the audit-row dedupe. */
+    async claimChannelHealthLog(partnerId: PartnerId, kind: string, bucket: number): Promise<boolean> {
+      return (await redis.set(`wahealthlog:${partnerId}:${kind}:${bucket}`, '1', { ex: 3600, nx: true })) !== null;
     },
 
     // ── Saved recipients (Postgres, encrypted, per (tenant, sender)) ─────

@@ -13,6 +13,7 @@ import type { KycDelta } from './kyc-state-machine';
 import { applyKycEvent } from './kyc-state-machine';
 import type { PersonaEvent } from './providers/persona-webhook-parse';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 
 /**
  * kyc-case-store (Phase 2, Task 9) — the KYC review case layer.
@@ -205,6 +206,9 @@ export function createKycCaseStore(
         }
         return { before, after, changed };
       });
+      // partner-demo R4: the kycmatch alert committed with the apply — poke
+      // (after() runs post-response, i.e. after this commit).
+      if (result && event.matchKind !== undefined && opts.alertMessage) pokeWorker();
       if (result?.changed) {
         try {
           await appendAudit(partnerId, phone, { actor: 'persona', action: event.name, at: nowIso });

@@ -10,7 +10,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 //     transfers sat 'paid' ~12 days on one alert. This re-alerts on a ladder:
 //     1 h, 6 h, 24 h, then daily, ONE deduped ops alert per rung
 //     (`recon:<id>:<rung>`) and one audit row per fresh rung. reconcileSweep is
-//     not touched. Runs from /api/worker (every minute).
+//     not touched. Runs from every FULL /api/worker run (≤ 30 min apart when idle, R4).
 //   • expireUnpaidLinks (neon-09): an UNFUNDED awaiting_payment link older than
 //     UNPAID_LINK_EXPIRY_DAYS is cancelled through fix 9's guarded
 //     cancelIfCancellable (status + funding predicates IN the UPDATE), with a

@@ -7,6 +7,11 @@
 # GitHub really honoured at that rate could exhaust the quota that the
 # required `ci / ci` check and smoke.yml depend on. Overlap-safe: the worker
 # claims rows with FOR UPDATE SKIP LOCKED.
+# partner-demo R4 (Neon compute): while the Vercel cron marker is fresh and no
+# outbox work is marked due, this GET is GATED — it returns without touching
+# the database (the :17 cron tick is the backstop full run anyway). It runs a
+# FULL drain exactly when the cron has been quiet >10 min or work is due, so a
+# dead Vercel cron still drains hourly and still raises `cronquiet`.
 name: worker-heartbeat
 on:
   schedule:

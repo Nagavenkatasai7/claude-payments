@@ -36,7 +36,9 @@ import { suppressForOptOut } from '@/lib/consent-gate';
 import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
 import type { WaCreds } from '@/lib/whatsapp';
-import { WhatsAppSendError } from '@/lib/whatsapp-errors';
+import { WhatsAppSendError, isAuthErrorCode } from '@/lib/whatsapp-errors';
+import { resolveWaChannel, WaChannelIncompleteError, type WaChannel } from '@/lib/whatsapp-creds';
+import { recordChannelHealth } from '@/lib/channel-health';
 import { sendBusinessInitiated, toTemplateParam } from '@/lib/whatsapp-business-initiated';
 import type { PartnerId, Staff, TurnContext } from '@/lib/types';
 
@@ -267,23 +269,30 @@ export interface PartnerCtx {
   brand: string;
   waCreds: WaCreds | undefined;
   integrations: PartnerIntegrations;
+  /** R2a: own / shared / incomplete — only the whatsapp.text/template send acts on it (resolveSendCreds). */
+  channel: WaChannel;
 }
 
 /** The drain-time resolver every handler uses for a partner's brand + WhatsApp creds + rail config. */
 export type PartnerResolver = (partnerId: string) => Promise<PartnerCtx>;
 
 async function partnerContext(deps: WorkerDeps, partnerId: string): Promise<PartnerCtx> {
-  // Pure reads, repeatable on every attempt. No row / a half-configured channel
-  // ⇒ waCreds undefined ⇒ the shared env number — never a throw, so a customer
-  // message cannot dead-letter on a tenant-config gap. A transient DB error
-  // throws and rides the ordinary backoff (no token is in the error: the token
-  // is never in scope until getIntegrations returns).
+  // Pure reads, repeatable on every attempt. Still never a throw on a config
+  // gap: no row / no WhatsApp field ⇒ waCreds undefined ⇒ the shared env
+  // number, so mock.settle, the agent turn and the other handlers run as
+  // before. R2a (R7-binding): a PARTIALLY configured channel is reported in
+  // `channel` and fails closed ONLY in the whatsapp.text/template send
+  // (resolveSendCreds) — a reply from the shared number would be the wrong
+  // sender. A transient DB error throws and rides the ordinary backoff (no
+  // token is in the error: the token is never in scope until getIntegrations
+  // returns).
   const partner = await createPartnerRepo(deps.db).getPartner(partnerId);
   const integrations = await createIntegrationsRepo(deps.db).getIntegrations(partnerId);
   return {
     brand: resolvePartnerBranding(partner).brand,
     waCreds: waCredsFrom(integrations),
     integrations,
+    channel: resolveWaChannel(partnerId, integrations),
   };
 }
 
@@ -332,7 +341,13 @@ export function memoizedPartnerContext(deps: WorkerDeps): PartnerResolver {
  */
 async function resolveSendCreds(p: Payload, partner: PartnerResolver): Promise<WaCreds | undefined> {
   const partnerId = str(p.partnerId);
-  if (partnerId) return (await partner(partnerId)).waCreds;
+  if (partnerId) {
+    // R2a: an incomplete channel FAILS CLOSED here (terminal in drainOnce, one
+    // ops alert per partner-hour, a channel-health event) — never the shared number.
+    const ctx = await partner(partnerId);
+    if (ctx.channel.kind === 'incomplete') throw new WaChannelIncompleteError();
+    return ctx.waCreds;
+  }
   if (p.creds != null) throw new Error('legacy_creds_payload');
   return undefined;
 }
@@ -1052,6 +1067,13 @@ export interface DrainOptions {
    * deadline) still start; stopAfter bounds them.
    */
   hardStopAt?: number;
+  /**
+   * partner-demo R4: awaited once per call, right after a claim that returned
+   * rows and BEFORE any of them runs (the route marks its `lease:<workerId>`
+   * in the Redis due set here, so a killed invocation wakes a reclaim run).
+   * Best effort: a throw is logged and never blocks the drain.
+   */
+  onClaim?: () => Promise<void>;
 }
 
 /**
@@ -1082,6 +1104,37 @@ async function alertDead(outbox: OutboxRepo, row: OutboxRow, text: string, dedup
  */
 const deadCodeKey = (code: number): string => `deadcode:${code}:${hourBucket()}`;
 
+/** R2a: an incomplete channel refuses EVERY row of that partner — coalesce its dead alerts per (partner, hour). */
+const incompleteKey = (partnerId: string): string => `waincomplete:${partnerId}:${hourBucket()}`;
+
+/** R2a: the tenant a whatsapp.text/template row sends for ('' ⇒ none / the shared number). */
+function sendTenant(row: OutboxRow): string {
+  if (row.kind !== 'whatsapp.text' && row.kind !== 'whatsapp.template') return '';
+  const p = row.payload as Payload;
+  return str(p.partnerId) || str(p.routedPartnerId);
+}
+
+/**
+ * R2a: partner-visible channel-health events for a failed send row. Best-effort
+ * (recordChannelHealth never throws), so it can never abort the batch. The
+ * default tenant is skipped inside recordChannelHealth.
+ */
+async function noteSendHealth(deps: WorkerDeps, row: OutboxRow, err: unknown, dead: boolean): Promise<void> {
+  const tenant = sendTenant(row);
+  if (!tenant) return;
+  const h = { store: deps.store, db: deps.db };
+  if (err instanceof WaChannelIncompleteError) {
+    await recordChannelHealth(tenant, 'incomplete_config', {}, h);
+  } else if (err instanceof WhatsAppSendError && isAuthErrorCode(err.code)) {
+    await recordChannelHealth(tenant, 'auth_error', { code: err.code }, h);
+  }
+  // An incomplete channel's dead row is already the incomplete_config event (one signal, not two emails).
+  if (dead && !(err instanceof WaChannelIncompleteError)) {
+    const code = err instanceof WhatsAppSendError ? err.code : undefined;
+    await recordChannelHealth(tenant, 'dead_send', code !== undefined ? { code } : {}, h);
+  }
+}
+
 /** One drain pass: claim → execute → settle. Time-boxed by the caller. */
 export async function drainOnce(
   deps: WorkerDeps,
@@ -1093,6 +1146,13 @@ export async function drainOnce(
   // Review S1: run in id order — UPDATE … RETURNING order is not guaranteed,
   // and agent.turn ordering (plus the FIFO gate) assumes oldest first.
   const rows = (await outbox.claimBatch(batchSize, workerId)).sort((a, b) => a.id - b.id);
+  if (rows.length > 0 && opts.onClaim) {
+    try {
+      await opts.onClaim();
+    } catch (err) {
+      logWarn('worker.gate', 'onClaim failed (fail-open)', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
   const partner = memoizedPartnerContext(deps); // one drain-time creds resolver per BATCH (fix 11)
   const rowDeadlineMs = opts.rowDeadlineMs ?? ROW_DEADLINE_MS;
   const result: DrainResult = { processed: 0, failed: 0, dead: 0, released: 0 };
@@ -1182,7 +1242,9 @@ export async function drainOnce(
         err instanceof WhatsAppSendError && err.kind === 'permanent' && PERMANENT_DEAD_KINDS.has(row.kind)
           ? err.code
           : undefined;
-      const terminal = terminalDeadline || permanentCode !== undefined;
+      // R2a: an incomplete channel is terminal too (a retry cannot fix config).
+      const incomplete = err instanceof WaChannelIncompleteError;
+      const terminal = terminalDeadline || permanentCode !== undefined || incomplete;
       // A RETRYABLE deadline: the abandoned handler may still be running in this
       // invocation (withRowDeadline cannot cancel it). Park the row for a full
       // LEASE_MS — past maxDuration — so no other worker runs it concurrently
@@ -1198,6 +1260,7 @@ export async function drainOnce(
         logWarn('worker.lease', 'markFailed refused: lease no longer ours', { id: row.id, kind: row.kind });
         continue;
       }
+      await noteSendHealth(deps, row, err, status === 'dead');
       if (status === 'dead') {
         result.dead++;
         // A terminal row (deadline / permanent WhatsApp code) is dead at attempt 1 — say so, or ops goes looking for 8 attempts.
@@ -1207,6 +1270,8 @@ export async function drainOnce(
           `${
             terminalDeadline
               ? 'DEAD (terminal: row deadline exceeded)'
+              : incomplete
+                ? 'DEAD (terminal: the partner WhatsApp channel is incomplete — not sent from any number; further rows for this partner this hour are coalesced into this alert; fix or disconnect the channel, then retry)'
               : permanentCode !== undefined
                 ? `DEAD (terminal: WhatsApp #${permanentCode})`
                 : `DEAD after ${row.attempts} attempts`
@@ -1215,7 +1280,11 @@ export async function drainOnce(
               ? ` — further #${permanentCode} deaths this hour are coalesced into this alert; see the dead-letter list`
               : ''
           }`,
-          permanentCode !== undefined && !terminalDeadline ? deadCodeKey(permanentCode) : undefined,
+          incomplete
+            ? incompleteKey(sendTenant(row))
+            : permanentCode !== undefined && !terminalDeadline
+              ? deadCodeKey(permanentCode)
+              : undefined,
         );
       } else {
         result.failed++;

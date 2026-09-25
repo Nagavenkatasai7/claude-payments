@@ -284,6 +284,64 @@ describe('a message without a phone (BSUID-only) is recorded, not silently lost'
     expect(everything).not.toContain('SECRETBSUID');
     expect(everything).not.toContain('secretname');
     expect(await outboxRows()).toHaveLength(0);
+    // R2a: the partner-visible channel-health mark (Redis only; the audit row above is the ledger record).
+    expect(JSON.parse(redis.dump.get('wahealth:acme') ?? '{}').no_phone).toMatchObject({ count: 3 });
+    expect(JSON.parse(redis.dump.get('wahealth:beta') ?? '{}').no_phone).toMatchObject({ count: 1 });
+  });
+});
+
+describe('R2b: Meta-reported errors on a SIGNED webhook feed the tenant\'s channel health', () => {
+  const failedStatus = (code: number, id = 'wamid.FS1') => ({
+    statuses: [{ id, recipient_id: PHONE, status: 'failed', errors: [{ code, title: 'x' }] }],
+  });
+  const marks = (p: string) => JSON.parse(redis.dump.get(`wahealth:${p}`) ?? '{}');
+  const emailRows = async () => (await outboxRows()).filter((r) => r.kind === 'email.send');
+
+  it('a failed status with an auth code (190) ⇒ auth_error mark + hourly health row + ONE alert email + a poke', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateSupportConfig('acme', (prev) => ({ ...prev, alertEmail: 'ops@acme.example' }));
+    await processInboundWebhook(webhook([], failedStatus(190, 'wamid.FS1')), { routedPartnerId: 'acme' });
+    await processInboundWebhook(webhook([], failedStatus(190, 'wamid.FS2')), { routedPartnerId: 'acme' });
+    expect(marks('acme').auth_error).toMatchObject({ count: 2, code: 190 });
+    expect(await auditRows('whatsapp.channel_health')).toHaveLength(1);
+    const emails = await emailRows();
+    expect(emails).toHaveLength(1);
+    expect(emails[0].dedupe_key).toMatch(/^partnerhealth:acme:auth_error:/);
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed status with a delivery code ⇒ delivery_failed mark only (its own audit row already exists), no email, no poke', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateSupportConfig('acme', (prev) => ({ ...prev, alertEmail: 'ops@acme.example' }));
+    await processInboundWebhook(webhook([], failedStatus(131026)), { routedPartnerId: 'acme' });
+    expect(marks('acme').delivery_failed).toMatchObject({ count: 1, code: 131026 });
+    expect(await auditRows('whatsapp.channel_health')).toHaveLength(0);
+    expect(await auditRows('whatsapp.delivery_failed')).toHaveLength(1);
+    expect(await emailRows()).toHaveLength(0);
+    expect(pokeWorker).not.toHaveBeenCalled();
+  });
+
+  it('value.errors ⇒ auth_error for an auth code, delivery_failed otherwise (hourly health row, code only)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await processInboundWebhook(webhook([], { errors: [{ code: 190, title: 'token 15551230000' }] }), { routedPartnerId: 'acme' });
+    await processInboundWebhook(webhook([], { errors: [{ code: 131000, title: 'Something' }] }), { routedPartnerId: 'beta' });
+    expect(marks('acme').auth_error).toMatchObject({ count: 1, code: 190 });
+    expect(marks('beta').delivery_failed).toMatchObject({ count: 1, code: 131000 });
+    const rows = await auditRows('whatsapp.channel_health');
+    expect(rows.map((r) => [r.partner_id, r.meta])).toEqual([
+      ['acme', { kind: 'auth_error', code: 190 }],
+      ['beta', { kind: 'delivery_failed', code: 131000 }],
+    ]);
+    expect(JSON.stringify([rows, [...redis.dump.entries()]])).not.toContain('15551230000');
+  });
+
+  it('the default tenant (the shared number) gets no channel-health mark', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await processInboundWebhook(webhook([], { ...failedStatus(190), errors: [{ code: 190 }] }), { routedPartnerId: null });
+    expect(redis.dump.has('wahealth:default')).toBe(false);
+    expect(await auditRows('whatsapp.channel_health')).toHaveLength(0);
   });
 });
 
@@ -477,5 +535,61 @@ describe('the worker is poked even when a later message throws (review fix 8)', 
     await expect(processInboundWebhook(body, { routedPartnerId: null })).rejects.toThrow();
     expect((await outboxRows()).map((r) => r.dedupe_key)).toEqual(['wamid:wamid.PK1']);
     expect(pokeWorker).toHaveBeenCalled();
+  });
+});
+
+// partner-demo R4 follow-up: a poke forces a FULL /api/worker run (Neon wake),
+// so only a message that actually queued a NEW outbox row — or whose insert
+// threw, and so may have committed — pokes. A deduped redelivery or a replay
+// of a signed webhook must not wake Neon (R1: a new row always pokes).
+describe('the poke follows a NEW outbox row, never a deduped replay (R4 follow-up)', () => {
+  it('first delivery pokes; the redelivery (msgq: fast skip) does NOT', async () => {
+    const body = webhook([text('hi', 'wamid.RP1')]);
+    await processInboundWebhook(body, { routedPartnerId: null });
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
+    pokeWorker.mockClear();
+    await processInboundWebhook(body, { routedPartnerId: null });
+    expect(pokeWorker).not.toHaveBeenCalled();
+    expect(await outboxRows()).toHaveLength(1);
+  });
+
+  it('a replay after the msgq: mark expired reaches the DB, conflicts, and does NOT poke', async () => {
+    const body = webhook([text('hi', 'wamid.RP2')]);
+    await processInboundWebhook(body, { routedPartnerId: null });
+    redis.dump.delete('msgq:wamid.RP2');
+    redis.dump.delete('msg:wamid.RP2');
+    pokeWorker.mockClear();
+    await processInboundWebhook(body, { routedPartnerId: null });
+    expect(pokeWorker).not.toHaveBeenCalled();
+    expect(await outboxRows()).toHaveLength(1);
+  });
+
+  it('a mixed POST (one replayed, one new message) pokes', async () => {
+    await processInboundWebhook(webhook([text('one', 'wamid.RP3')]), { routedPartnerId: null });
+    pokeWorker.mockClear();
+    await processInboundWebhook(webhook([text('one', 'wamid.RP3'), text('two', 'wamid.RP4')]), { routedPartnerId: null });
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('the consent-failed ops alert (a new row on a non-durable path) pokes', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    customerFault.method = 'setOptedOut';
+    customerFault.error = new TypeError('x');
+    await processInboundWebhook(webhook([text('STOP', 'wamid.RP5')]), { routedPartnerId: 'acme' });
+    expect((await outboxRows()).filter((r) => r.kind === 'ops.alert')).toHaveLength(1);
+    expect(pokeWorker).toHaveBeenCalled();
+  });
+
+  it('an insert that THROWS still pokes (it may have committed before the error)', async () => {
+    enqueueFault.error = infraError();
+    enqueueFault.times = 1;
+    await expect(processInboundWebhook(webhook([text('hi', 'wamid.RP6')]), { routedPartnerId: null })).rejects.toThrow();
+    expect(pokeWorker).toHaveBeenCalled();
+  });
+
+  it('a status-only POST does not poke', async () => {
+    const body = { entry: [{ changes: [{ value: { statuses: [{ id: 'wamid.ST', recipient_id: PHONE, status: 'read' }] } }] }] };
+    await processInboundWebhook(body, { routedPartnerId: null });
+    expect(pokeWorker).not.toHaveBeenCalled();
   });
 });

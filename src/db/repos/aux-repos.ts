@@ -382,6 +382,22 @@ export function createAuditRepo(db: DbOrTx) {
         .limit(limit);
     },
 
+    /**
+     * R2a: ONE tenant's WhatsApp channel-health rows since `since`, newest
+     * first. TENANT-SCOPED by construction — `partner_id = $1` is always in the
+     * WHERE (the audit_partner_at index), so a caller can never read another
+     * partner's rows. `actions` is the fixed allow-list the caller passes.
+     */
+    async listHealthByPartner(partnerId: PartnerId, since: Date, actions: readonly string[], limit = 50) {
+      if (actions.length === 0) return [];
+      return db
+        .select({ action: auditEvents.action, meta: auditEvents.meta, at: auditEvents.at })
+        .from(auditEvents)
+        .where(and(eq(auditEvents.partnerId, partnerId), gte(auditEvents.at, since), inArray(auditEvents.action, [...actions])))
+        .orderBy(desc(auditEvents.at), desc(auditEvents.id))
+        .limit(limit);
+    },
+
     async listRecent(limit = 50) {
       return db.select().from(auditEvents).orderBy(desc(auditEvents.at)).limit(limit);
     },
@@ -396,14 +412,19 @@ export function createAuditRepo(db: DbOrTx) {
     async listRecentByActions(
       actions: readonly string[],
       limit = 50,
-      opts: { actorType?: AuditEvent['actorType'] } = {},
+      opts: { actorType?: AuditEvent['actorType']; partnerId?: PartnerId } = {},
     ) {
       if (actions.length === 0) return [];
-      const byAction = inArray(auditEvents.action, [...actions]);
+      // partner-demo R5: `partnerId` narrows to ONE tenant in SQL (the tenant
+      // staff feed). An empty string is refused, never read as "all tenants".
+      if (opts.partnerId === '') return [];
+      const conds = [inArray(auditEvents.action, [...actions])];
+      if (opts.actorType) conds.push(eq(auditEvents.actorType, opts.actorType));
+      if (opts.partnerId !== undefined) conds.push(eq(auditEvents.partnerId, opts.partnerId));
       return db
         .select()
         .from(auditEvents)
-        .where(opts.actorType ? and(byAction, eq(auditEvents.actorType, opts.actorType)) : byAction)
+        .where(and(...conds))
         .orderBy(desc(auditEvents.at), desc(auditEvents.id))
         .limit(limit);
     },

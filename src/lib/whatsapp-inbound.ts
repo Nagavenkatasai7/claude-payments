@@ -20,6 +20,8 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { waMessageRef } from '@/lib/wa-message-ref';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { getRedis } from '@/lib/redis';
+import { recordChannelHealth } from '@/lib/channel-health';
+import { isAuthErrorCode } from '@/lib/whatsapp-errors';
 import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -134,6 +136,25 @@ async function recordStatus(ev: WebhookStatusEvent, tenantId: PartnerId): Promis
   } catch (err) {
     logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
   }
+  await recordMetaError(tenantId, ev.errorCode, 'status');
+}
+
+/**
+ * R2b: a Meta-reported error on a SIGNED webhook (a failed status, or the
+ * change's `errors`) → the tenant's channel-health mark. An auth code (190 / 0)
+ * is `auth_error` (alertable: an email may be queued, so the worker is poked
+ * here — the email row is not one of the pipeline's own inserts); anything else
+ * is `delivery_failed`. A failed status already wrote its own audit row, so its
+ * delivery_failed mark is Redis only. Code only; never a title, phone or body.
+ * recordChannelHealth never throws and skips the default tenant.
+ */
+async function recordMetaError(tenantId: PartnerId, code: number | undefined, source: 'status' | 'change'): Promise<void> {
+  const auth = isAuthErrorCode(code);
+  const queuedEmail = await recordChannelHealth(tenantId, auth ? 'auth_error' : 'delivery_failed', {
+    ...(code !== undefined ? { code } : {}),
+    ...(source === 'status' && !auth ? { audit: false } : {}),
+  });
+  if (queuedEmail) pokeWorker();
 }
 
 /**
@@ -146,6 +167,10 @@ async function recordStatus(ev: WebhookStatusEvent, tenantId: PartnerId): Promis
  */
 async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<void> {
   logWarn('whatsapp.inbound_no_phone', 'message without a phone number — not processed', { tenant: tenantId });
+  // R2a: the partner-visible mark on EVERY such message (Redis only — the
+  // hourly audit row below is the ledger record). recordChannelHealth never
+  // throws; the default tenant is skipped inside.
+  await recordChannelHealth(tenantId, 'no_phone', { audit: false });
   const hour = Math.floor(Date.now() / (NO_PHONE_AUDIT_WINDOW_SEC * 1000));
   const claimKey = `wanophone:${tenantId}:${hour}`;
   let claimed = false;
@@ -161,7 +186,6 @@ async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<vo
       ...(d.messageId ? { subjectId: waMessageRef(d.messageId) } : {}),
       meta: { hasBsuid: d.hasBsuid, hasUsername: d.hasUsername },
     });
-    // R2 hook: recordChannelHealth(partnerId, 'no_phone')
   } catch (err) {
     logWarn('whatsapp.inbound_no_phone', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
     // Release the hourly claim so the next no-phone message can record the row.
@@ -481,13 +505,39 @@ export async function processInboundWebhook(
   const changes: WebhookChange[] = parseWebhook(body);
   if (changes.length === 0) return { ok: true };
 
+  // partner-demo R4 (+ follow-up): a poke forces a FULL /api/worker run, i.e.
+  // a Neon wake, so it follows exactly the inserts that can leave work behind.
+  // EVERY outbox write below goes through this one repo, and `inserted` flips
+  // when an enqueue created a NEW row (returned true — incl. the consent-failed
+  // ops alert, which never returns `durable`) or THREW (the insert may have
+  // committed before the error; Meta's redelivery would then conflict and not
+  // poke). A deduped redelivery or a replayed signed webhook — the msgq: fast
+  // skip, or the `wamid:` unique-index conflict (enqueue ⇒ false) — creates no
+  // row and does not poke. R1 holds: a newly queued row always pokes.
+  // (The pass-through calls a bound reference, not `.enqueue(`: the fix-11
+  // static payload scan keeps checking the real call sites in this file.)
+  const repo = createOutboxRepo(getDb());
+  const insertRow = repo.enqueue.bind(repo);
+  let inserted = false;
+  const outbox: MessageDeps['outbox'] = {
+    ...repo,
+    enqueue: async (...args: Parameters<typeof insertRow>) => {
+      try {
+        const created = await insertRow(...args);
+        if (created) inserted = true;
+        return created;
+      } catch (err) {
+        inserted = true;
+        throw err;
+      }
+    },
+  };
   const deps: MessageDeps = {
     store: getStore(),
-    outbox: createOutboxRepo(getDb()),
+    outbox,
     routedPartnerId,
     tenantId,
   };
-  let queued = false;
 
   try {
     for (const change of changes) {
@@ -504,6 +554,7 @@ export async function processInboundWebhook(
 
       for (const e of change.errors) {
         logWarn('whatsapp.webhook_error', `code=${e.code ?? 'n/a'} (${e.title ? scrub(e.title).slice(0, 200) : ''})`, { tenant: tenantId });
+        await recordMetaError(tenantId, e.code, 'change');
       }
 
       for (const d of change.dropped) await recordNoPhone(d, tenantId);
@@ -518,15 +569,14 @@ export async function processInboundWebhook(
           continue;
         }
         if (durable) {
-          queued = true;
           await afterInsert('queued mark', () => deps.store.markMessageQueued(incoming.messageId), tenantId);
         }
       }
     }
   } finally {
-    // Fast path — the per-minute cron drains it regardless. In a finally so
-    // rows queued before a later throw are not left for the cron.
-    if (queued) pokeWorker();
+    // Fast path — the gated cron only drains what is marked due (or at its
+    // backstop). In a finally so rows queued before a later throw still poke.
+    if (inserted) pokeWorker();
   }
   return { ok: true };
 }

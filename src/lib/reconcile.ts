@@ -10,9 +10,11 @@ import { FIRST_RESPONSE_DUE_HOURS, slaDigestKey } from '@/lib/ticket-sla';
 import { logWarn } from '@/lib/log';
 import type { Transfer } from '@/lib/types';
 
-// reconcile — the safety-net sweep (Stage 2d). Runs in every /api/worker
-// invocation (per-minute Vercel cron, hourly GitHub heartbeat, poke), BEFORE the
-// outbox drain so its effects drain in the same call. It catches the
+// reconcile — the safety-net sweep (Stage 2d). Runs in every FULL /api/worker
+// invocation (a poke; a cron tick with work marked due or on the :17/:47
+// backstop; a heartbeat while the cron is quiet — partner-demo R4 gates the
+// rest before they touch Neon), BEFORE the outbox drain so its effects drain
+// in the same call. Worst case between sweeps on an idle system: 30 min. It catches the
 // states the happy path can't lose silently anymore but an external party can
 // still strand:
 //   • a webhook-driven transfer stuck in 'paid' too long (the partner's rail
@@ -25,8 +27,8 @@ import type { Transfer } from '@/lib/types';
 //   • a refund in flight for over an hour → alert (ops decides; no auto-retry),
 //   • a 'processing' lease expired >15m and still unreclaimed (the drain is down) → alert,
 //   • customer tickets past their first-response target (fix 49C) → ONE digest a day.
-// Every enqueue is dedupe-keyed per transfer, so the sweep firing every minute
-// can never spam: one re-instruction and one alert per stuck transfer, ever.
+// Every enqueue is dedupe-keyed per transfer, so the sweep firing on every
+// full run can never spam: one re-instruction and one alert per stuck transfer, ever.
 
 export const STUCK_PAID_MINUTES = 15;
 export const STALE_REVIEW_HOURS = 24;

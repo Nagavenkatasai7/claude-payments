@@ -10,6 +10,8 @@ import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getAuthStore } from '@/lib/auth-store';
+import { getAuditLogStore } from '@/lib/audit-log-store';
+import { feedActorLabel, listTenantStaff } from '@/lib/partner-staff-policy';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { env } from '@/lib/env';
@@ -39,6 +41,8 @@ import {
   savePricingAction,
   saveSupportConfigAction,
   saveDisclosureConfigAction,
+  saveAlertEmailAction,
+  testWhatsappConnectionAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
 } from '../actions';
@@ -48,6 +52,15 @@ import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
 import { narratePartnerHealth } from '@/lib/partner-health-ai';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { resolveWaChannel } from '@/lib/whatsapp-creds';
+import {
+  channelBannerModel,
+  getChannelHealth,
+  parseChannelTest,
+  summarizeChannelHealth,
+} from '@/lib/channel-health';
+import { ChannelHealthBanner } from '../../channel-health-banner';
+import { readSignatureHealth, type SignatureHealth } from '@/lib/webhook-signature-health';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -149,7 +162,7 @@ export default async function PartnerDetailPage({
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).
-  const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange] = await Promise.all([
+  const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange, staffFeed] = await Promise.all([
     getStore().transfersSummary(partner.id), // partner.id is scope-checked above
     scoped.transfersPage({ limit: 50, partnerFilter: partner.id }),
     getAuthStore().listStaff(),
@@ -162,14 +175,48 @@ export default async function PartnerDetailPage({
       logWarn('admin.send_limits.last_change', err, { scope: 'partner', partnerId: partner.id });
       return null;
     }),
+    // partner-demo R5: this tenant's staff created/removed rows (filtered in
+    // SQL; partner.id is scope-checked above, never a form value). Admins only.
+    isAdmin
+      ? getAuditLogStore().listForPartner(partner.id, 20).catch((err: unknown) => {
+          logWarn('admin.partner_staff_feed', err, { partnerId: partner.id });
+          return [];
+        })
+      : Promise.resolve([]),
   ]);
   const nowMs = Date.now();
   const recents = recentPage.items;
+  // R2a: the WhatsApp channel (own / shared / incomplete, from the integrations
+  // row already read above) + its health marks and the last "Test connection".
+  // partner.id is scope-checked above; the reads are best-effort (a Redis or
+  // audit hiccup renders "no signals", never a broken page).
+  const channel = resolveWaChannel(partner.id, integrations);
+  const [channelHealth, channelTest, signature] = await Promise.all([
+    partner.id === 'default'
+      ? Promise.resolve(null)
+      : getChannelHealth(partner.id, { store: getStore(), db: getDb(), includeChannel: false }).catch((err: unknown) => {
+          logWarn('admin.channel_health', err, { partnerId: partner.id });
+          return null;
+        }),
+    getStore().readChannelTest(partner.id).then(parseChannelTest).catch(() => null),
+    // R2b: inbound signature marks (Redis only; a read error ⇒ none).
+    partner.id === 'default' ? Promise.resolve<SignatureHealth>({}) : readSignatureHealth(partner.id),
+  ]);
+  const channelSummary = summarizeChannelHealth({ channel, marks: channelHealth?.marks ?? {}, now: new Date(nowMs), signature });
+  // Partner staff already get the marks from the dashboard-layout banner; the
+  // header adds only the config items (incomplete / missing fields) for them,
+  // so the same signal is never shown twice.
+  const headerSummary =
+    scopeOf(staff).kind === 'partner'
+      ? summarizeChannelHealth({ channel, marks: {}, now: new Date(nowMs) })
+      : channelSummary;
+  const channelBanner = partner.id === 'default' ? null : channelBannerModel(headerSummary, partner.id);
   // SenderCell (U7): batch-resolve the decrypted sender names for the recents
   // in ONE query, so each row shows name + phone (linked to the profile)
   // instead of a bare phone — phones with no captured name fall back to phone.
   const senderNames = await resolveSenderNames(getDb(), recents);
-  const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
+  // partner-demo R5: the scope-checked tenant list ([] for another tenant).
+  const partnerStaff = listTenantStaff(scopeOf(staff), partner.id, allStaff);
   // Support tab: the absent-config default (portal ON) interpreted ONCE for
   // both the badge and the checkbox.
   const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
@@ -228,13 +275,16 @@ export default async function PartnerDetailPage({
           )}
         </div>
 
+        <ChannelHealthBanner model={channelBanner} />
+
         <Tabs defaultValue="overview">
           <TabsList className="mb-4 flex-wrap">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             {isAdmin && <TabsTrigger value="settings">Settings</TabsTrigger>}
             {isAdmin && <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>}
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
-            {isAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
+            {/* partner-demo R5 (A1-4): send limits are SmartRemit governance, platform admins only. */}
+            {isPlatformAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
@@ -449,9 +499,29 @@ export default async function PartnerDetailPage({
                 </CardHeader>
                 <CardContent>
                   <dl className={DL_CLASS}>
+                    <dt>Channel</dt>
+                    <dd>
+                      {channel.kind === 'own' ? (
+                        <Badge variant="outline" className="border-success/50 text-success">own number</Badge>
+                      ) : channel.kind === 'incomplete' ? (
+                        <Badge variant="destructive">incomplete — messages are not sent</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-muted-foreground">shared SmartRemit number</Badge>
+                      )}
+                    </dd>
                     <dt>Access token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.token))}</dd>
                     <dt>Verify token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.verifyToken))}</dd>
                     <dt>App secret</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.appSecret))}</dd>
+                    {integrations.whatsapp.appSecret && (
+                      <>
+                        <dt>Signed webhooks</dt>
+                        <dd className="text-sm text-muted-foreground">
+                          {signature.lastOkAt
+                            ? `Last signed webhook · ${signature.lastOkAt.slice(0, 16).replace('T', ' ')} UTC`
+                            : 'Awaiting first signed webhook'}
+                        </dd>
+                      </>
+                    )}
                   </dl>
                   <form action={saveWhatsappConfigAction} className="mt-4 space-y-4">
                     <input type="hidden" name="id" value={partner.id} />
@@ -460,9 +530,46 @@ export default async function PartnerDetailPage({
                     <Input name="verifyToken" type="password" autoComplete="off" placeholder="Webhook verify token (leave blank to keep)" />
                     <Input name="appSecret" type="password" autoComplete="off" placeholder="App secret (leave blank to keep)" />
                     <Input name="wabaId" inputMode="numeric" autoComplete="off" placeholder="WhatsApp Business Account ID (optional — used only for the check, not saved)" />
-                    <p className="text-xs text-muted-foreground">We check this number with Meta using the access token you enter.</p>
+                    <p className="text-xs text-muted-foreground">
+                      We check this number with Meta using the access token you enter. An own number needs the phone
+                      number ID, access token and app secret together.
+                    </p>
+                    <label className="flex items-center gap-1.5 text-sm">
+                      <input type="checkbox" name="disconnect" /> Disconnect WhatsApp (clear all four fields and use the
+                      shared SmartRemit number)
+                    </label>
                     <Button type="submit">Save WhatsApp config</Button>
                   </form>
+                  <form action={testWhatsappConnectionAction} className="mt-4 flex flex-wrap items-center gap-3">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <Button type="submit" variant="outline">Test connection</Button>
+                    <span className="text-sm text-muted-foreground">
+                      {channelTest
+                        ? channelTest.ok
+                          ? `Last test passed · ${channelTest.at.slice(0, 16).replace('T', ' ')} UTC`
+                          : channelTest.reason === 'not_configured'
+                            ? 'No own number to test.'
+                            : `Last test failed${channelTest.status ? ` (HTTP ${channelTest.status})` : ''} · ${channelTest.at.slice(0, 16).replace('T', ' ')} UTC`
+                        : 'Not tested yet.'}
+                    </span>
+                  </form>
+                  {channelHealth && channelHealth.events.length > 0 && (
+                    <div className="mt-4">
+                      <div className="mb-1 text-sm font-semibold">Channel events (last 7 days)</div>
+                      <ul className="space-y-0.5 text-xs text-muted-foreground">
+                        {channelHealth.events.map((e, i) => {
+                          const meta = (e.meta ?? {}) as { kind?: unknown; code?: unknown };
+                          const kind = e.action === 'whatsapp.inbound_no_phone' ? 'no_phone' : String(meta.kind ?? '');
+                          return (
+                            <li key={i}>
+                              {e.at.toISOString().slice(0, 16).replace('T', ' ')} UTC · {kind}
+                              {typeof meta.code === 'number' ? ` · code ${meta.code}` : ''}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
                   <div className="mt-4">
                     <CopyField label="Webhook callback URL (paste into Meta → WhatsApp → Configuration)" value={`${env.appBaseUrl}/api/whatsapp/${partner.id}`} />
                   </div>
@@ -510,7 +617,7 @@ export default async function PartnerDetailPage({
           )}
 
           {/* ── Send limits (Program fix 16b): the partner default + its audited raise ── */}
-          {isAdmin && (
+          {isPlatformAdmin && (
             <TabsContent value="send-limits">
               <SendLimitsCard
                 scope="partner"
@@ -650,6 +757,33 @@ export default async function PartnerDetailPage({
                       </select>
                     </div>
                     <Button type="submit">Save support config</Button>
+                  </form>
+                </CardContent>
+              </Card>
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Channel alert email</CardTitle>
+                  <CardDescription>
+                    Where we email this partner when its WhatsApp channel needs action (a rejected access token,
+                    undelivered messages, an incomplete setup). At most one email per issue per day. Leave blank
+                    to rely on the dashboard banner only.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <form action={saveAlertEmailAction} className="space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="p-alert-email">Alert email</Label>
+                      <Input
+                        id="p-alert-email"
+                        name="alertEmail"
+                        type="email"
+                        autoComplete="off"
+                        defaultValue={partner.supportConfig?.alertEmail ?? ''}
+                        placeholder="ops@partner.example"
+                      />
+                    </div>
+                    <Button type="submit">Save alert email</Button>
                   </form>
                 </CardContent>
               </Card>
@@ -813,7 +947,9 @@ export default async function PartnerDetailPage({
                         {s.role}
                       </Badge>,
                       new Date(s.createdAt).toLocaleDateString(),
-                      isAdmin ? (
+                      // partner-demo R5: no Remove on your own row (the action refuses it too).
+                      // Fix round 1: a SmartRemit suspension is not the tenant's to undo.
+                      isAdmin && s.username !== staff.username && (isPlatformAdmin || s.status !== 'suspended') ? (
                         <form key="actions" action={removePartnerStaffAction}>
                           <input type="hidden" name="username" value={s.username} />
                           <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
@@ -824,7 +960,7 @@ export default async function PartnerDetailPage({
                 />
                 {isAdmin && (
                   <form action={createPartnerStaffAction.bind(null, partner.id)} className="mt-4 space-y-4">
-                    <Input name="username" placeholder="Username" required />
+                    <Input name="username" placeholder="Username (3–64: a-z 0-9 . _ -)" required minLength={3} maxLength={64} pattern="[a-z0-9._\-]{3,64}" autoComplete="off" />
                     <Input name="name" placeholder="Full name" required />
                     <Input name="password" type="password" placeholder="Password (12+ characters)" required minLength={12} maxLength={128} autoComplete="new-password" />
                     <select className={SELECT_CLASS} name="role" defaultValue="agent">
@@ -837,6 +973,28 @@ export default async function PartnerDetailPage({
                 )}
               </CardContent>
             </Card>
+            {isAdmin && (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Recent staff changes</CardTitle>
+                  <CardDescription>Members added to or removed from this partner, newest first.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {staffFeed.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No staff changes yet.</p>
+                  ) : (
+                    <ul className="space-y-1 text-sm">
+                      {staffFeed.map((e, i) => (
+                        <li key={`${e.at}-${i}`}>
+                          <span className="text-muted-foreground">{new Date(e.at).toLocaleString()}</span>{' '}
+                          {feedActorLabel(e)} {e.action === 'created' ? 'added' : 'removed'} <strong>{e.target}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           {/* ── Integration guide ────────────────────────────────────────── */}

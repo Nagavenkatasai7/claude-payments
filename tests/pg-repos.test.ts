@@ -99,13 +99,28 @@ describe('api-key-repo', () => {
     expect(JSON.stringify((raw as unknown as { rows: unknown[] }).rows)).not.toContain(issued.plaintext);
     expect(await r.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', keyId: issued.keyId, mode: 'live' });
     expect(await r.authenticate('sr_live_nope')).toBeNull();
-    expect(await r.revoke(issued.keyId)).toBe(true);
+    expect(await r.revoke(issued.keyId, 'acme')).toBe(true);
     expect(await r.authenticate(issued.plaintext)).toBeNull();
-    expect(await r.revoke(issued.keyId)).toBe(true); // idempotent
-    expect(await r.revoke('pk_ghost')).toBe(false);
+    expect(await r.revoke(issued.keyId, 'acme')).toBe(true); // idempotent
+    expect(await r.revoke('pk_ghost', 'acme')).toBe(false);
     const list = await r.list('acme');
     expect(list).toHaveLength(1);
     expect(list[0].revokedAt).toBeTruthy();
+  });
+
+  // partner-demo R3a (M4): tenant isolation lives in the repo, not only in the
+  // action's pre-list — partner_id is in BOTH the UPDATE and the fallback read.
+  it("revoke(keyId, partnerId) never touches another tenant's key (false, key still works)", async () => {
+    await seedPartner(db, 'acme');
+    await seedPartner(db, 'beta');
+    const r = repo();
+    const issued = await r.issue('acme');
+    expect(await r.revoke(issued.keyId, 'beta')).toBe(false);
+    expect(await r.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', keyId: issued.keyId });
+    expect((await r.list('acme'))[0].revokedAt).toBeUndefined();
+    // Already revoked by its owner: a foreign partner still gets false.
+    expect(await r.revoke(issued.keyId, 'acme')).toBe(true);
+    expect(await r.revoke(issued.keyId, 'beta')).toBe(false);
   });
 
   // Program-Fix 44 P1: last_used_at is written by authenticate — AWAITED (an
@@ -151,7 +166,7 @@ describe('api-key-repo', () => {
     const n = { v: 0 };
     const r = createApiKeyRepo(db, { pepper: 'p', genSecret: () => `S${n.v++}`, genKeyId: () => `pk_${n.v}`, redis: fakeRedis() });
     const issued = await r.issue('acme');
-    await r.revoke(issued.keyId);
+    await r.revoke(issued.keyId, 'acme');
     expect(await r.authenticate(issued.plaintext)).toBeNull();
     expect(await lastUsed()).toBeNull();
   });
@@ -529,6 +544,39 @@ describe('outbox-repo (durability backbone)', () => {
     const ageMin = (Date.now() - s.oldestDueAt!.getTime()) / 60_000;
     expect(ageMin).toBeGreaterThan(19);
     expect(ageMin).toBeLessThan(21);
+  });
+
+  // ── nextDueAt (partner-demo R4): the worker gate's post-drain mark ────────────
+  it('nextDueAt is the earliest next_attempt_at over pending/failed rows ONLY (future rows included; processing/done/dead ignored)', async () => {
+    const r = createOutboxRepo(db);
+    expect(await r.nextDueAt()).toBeNull();
+
+    await r.enqueue('whatsapp.text', { to: 'future' }, { delayMs: 60 * 60_000 }); // pending, due in 1 h
+    const in1h = await r.nextDueAt();
+    expect(in1h).not.toBeNull();
+    expect((in1h!.getTime() - Date.now()) / 60_000).toBeGreaterThan(59);
+
+    await r.enqueue('rail.callback', { reference: 'soon' }, { delayMs: 12_000 }); // pending, due in 12 s
+    const soon = await r.nextDueAt();
+    expect((soon!.getTime() - Date.now()) / 1000).toBeGreaterThan(5);
+    expect((soon!.getTime() - Date.now()) / 1000).toBeLessThan(13);
+
+    // A processing row (even one with an old next_attempt_at) is NOT a due mark:
+    // live leases are covered by the per-invocation lease member instead.
+    await r.enqueue('mock.settle', { transferId: 'x' });
+    const [claimed] = await r.claimBatch(1, 'w1');
+    expect(claimed.kind).toBe('mock.settle');
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() - interval '1 hour' WHERE id = ${claimed.id}`);
+    // A dead row with an old next_attempt_at is never due either.
+    await r.enqueue('ops.alert', { message: 'dead' });
+    await db.execute(sql`UPDATE outbox SET status = 'dead', next_attempt_at = now() - interval '2 hours' WHERE kind = 'ops.alert'`);
+    const still = await r.nextDueAt();
+    expect(still!.getTime()).toBe(soon!.getTime());
+
+    // A failed row due in the past wins.
+    await db.execute(sql`UPDATE outbox SET status = 'failed', next_attempt_at = now() - interval '3 minutes' WHERE kind = 'whatsapp.text'`);
+    const past = await r.nextDueAt();
+    expect((Date.now() - past!.getTime()) / 60_000).toBeGreaterThan(2);
   });
 });
 

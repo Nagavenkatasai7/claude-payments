@@ -271,6 +271,31 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
       await redis.set(`staff:${staff.username}`, JSON.stringify(staff));
       await redis.sadd('staff:index', staff.username);
     },
+    /**
+     * partner-demo R5 fix round 1: CREATE-IF-ABSENT, for the create actions.
+     * Claims `staff:<username>` with SET NX first (Redis decides existence),
+     * so two concurrent creates of one name can never clobber each other:
+     * exactly one returns true. Then the row is written with upsert (a fresh
+     * member replaces any orphan row a failed removal left behind); a ledger
+     * failure releases the claim and throws the bare error, so a create is
+     * never reported done while one store lacks it. Returns false, writing
+     * nothing, when the name is taken.
+     */
+    async createStaff(staff: Staff): Promise<boolean> {
+      const claimed = await redis.set(`staff:${staff.username}`, JSON.stringify(staff), { nx: true });
+      if (claimed === null || claimed === undefined) return false;
+      if (opts.ledger) {
+        try {
+          await ledger()!.upsert(staff);
+        } catch (e) {
+          logWarn('staff_ledger.write_failed', 'staff ledger write failed', { error: errName(e) });
+          await redis.del(`staff:${staff.username}`);
+          throw new Error('staff ledger write failed');
+        }
+      }
+      await redis.sadd('staff:index', staff.username);
+      return true;
+    },
     async listStaff(): Promise<Staff[]> {
       // The Redis index decides who exists (a row alone is never a member).
       const usernames = await redis.smembers('staff:index');
