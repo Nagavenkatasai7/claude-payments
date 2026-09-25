@@ -650,6 +650,22 @@ describe('auth-store staff ledger dual-write (Program-Fix 45 P5)', () => {
     expect(await f.r.smembers('staff:index')).toEqual([]);
   });
 
+  it('partner-demo R5 follow-up: a failed claim release is logged (no PII) and the ledger error still surfaces', async () => {
+    const f = setup(failing(['upsert']));
+    f.r.del = async () => {
+      throw new Error('redis down');
+    };
+    const spyWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spyLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await expect(f.s.createStaff(agent({ username: 'kiran-release', name: 'Kiran Name' }))).rejects.toThrow('staff ledger write failed');
+    const logged = JSON.stringify([spyWarn.mock.calls, spyLog.mock.calls]);
+    expect(logged).toContain('staff_ledger.claim_release_failed');
+    expect(logged).not.toContain('kiran-release');
+    expect(logged).not.toContain('Kiran Name');
+    spyWarn.mockRestore();
+    spyLog.mockRestore();
+  });
+
   it('deleteStaff removes Redis FIRST, then the row; a row-removal failure is logged (the orphan row is never a member)', async () => {
     const ok = setup();
     await ok.s.saveStaff(agent());

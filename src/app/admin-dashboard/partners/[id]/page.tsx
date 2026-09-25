@@ -60,7 +60,7 @@ import {
   summarizeChannelHealth,
 } from '@/lib/channel-health';
 import { ChannelHealthBanner } from '../../channel-health-banner';
-import { readSignatureHealth, type SignatureHealth } from '@/lib/webhook-signature-health';
+import { readSignatureHealth, signedWebhookLabel, type SignatureHealth } from '@/lib/webhook-signature-health';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -516,9 +516,7 @@ export default async function PartnerDetailPage({
                       <>
                         <dt>Signed webhooks</dt>
                         <dd className="text-sm text-muted-foreground">
-                          {signature.lastOkAt
-                            ? `Last signed webhook · ${signature.lastOkAt.slice(0, 16).replace('T', ' ')} UTC`
-                            : 'Awaiting first signed webhook'}
+                          {signedWebhookLabel(signature)}
                         </dd>
                       </>
                     )}
