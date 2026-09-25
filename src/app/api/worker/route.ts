@@ -239,13 +239,15 @@ async function run(req: NextRequest): Promise<NextResponse> {
     logError('worker.drain-gap', err);
   }
 
-  // Platform FX health (Task 9): one deduped ops alert per degraded/refusing
-  // currency per hour. shouldProbeFx (src/lib/worker-cadence.ts): the hourly
-  // heartbeat GET always, the per-minute cron only on a :x0 minute, never a
-  // POST poke (src/lib/outbox.ts) — during an outage every poke (or every
-  // cron tick, 1,440 a day) would otherwise re-dial Frankfurter for 9
-  // currencies. The probes run in parallel, each bounded by
-  // FX_FETCH_TIMEOUT_MS; a throw never blocks the drain.
+  // Platform FX health (Task 9, R9): at most one combined ops alert per
+  // severity (UNAVAILABLE / DEGRADED ≥ 15 min) per hour. shouldProbeFx
+  // (src/lib/worker-cadence.ts): the hourly heartbeat GET always, the
+  // per-minute cron only on a :x0 minute, never a POST poke
+  // (src/lib/outbox.ts) — during an outage every poke (or every cron tick,
+  // 1,440 a day) would otherwise re-dial Frankfurter for 9 currencies. Probe
+  // starts are staggered 250 ms and each gets one 7 s retry after its 5 s
+  // attempt: worst case ~14 s, absorbed by stopAfter below (hardStopAt-based);
+  // a throw never blocks the drain.
   let fxHealth = 0;
   if (shouldProbeFx(source, now)) {
     try {

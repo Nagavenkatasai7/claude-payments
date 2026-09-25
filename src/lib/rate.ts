@@ -216,11 +216,12 @@ function serveCacheOrRefuse(
 async function fetchFromProvider(
   source: CurrencyCode,
   now: number,
+  timeoutMs: number = FX_FETCH_TIMEOUT_MS,
 ): Promise<StampedFxRates | FxUnavailableReason> {
   try {
     const to = source === 'USD' ? 'INR' : 'USD,INR';
     const res = await fetch(`${FRANKFURTER_BASE_URL}/latest?from=${source}&to=${to}`, {
-      signal: AbortSignal.timeout(FX_FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return `http_${res.status}`;
     const data = (await res.json()) as { date?: unknown; rates?: { USD?: unknown; INR?: unknown } };
@@ -243,7 +244,20 @@ async function fetchFromProvider(
   }
 }
 
-export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
+/**
+ * Opt-in knobs for the ops health probe (rate-staleness.ts) ONLY. The quote
+ * path never passes options, so it keeps today's contract exactly: one
+ * upstream attempt at FX_FETCH_TIMEOUT_MS, FAILURE_BACKOFF_MS, FX_MAX_AGE_MS.
+ */
+export interface FxFetchOptions {
+  /** When set, a failed first attempt is retried ONCE with this timeout before
+   *  the fetch counts as failed. The first failure is still recorded in the
+   *  backoff map before the retry (so concurrent quotes back off as today), and
+   *  a failed retry falls through to the same serve-cache-or-refuse ceiling. */
+  retryTimeoutMs?: number;
+}
+
+export async function getFxRates(source: CurrencyCode, opts: FxFetchOptions = {}): Promise<FxRates> {
   // Only the typed corridor table is ever dialed (Task 9 security review): a
   // code from an unvalidated caller never reaches the provider URL, the
   // per-instance maps or the fleet L2 — under fail-closed FX, an upstream rate
@@ -252,7 +266,7 @@ export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
     throw new RateUnavailableError('unsupported_currency', source);
   }
   if (source === 'AED') {
-    const usd = await getFxRates('USD');
+    const usd = await getFxRates('USD', opts);
     // Derived, never fresher than its USD leg (same fetchedAt / source / asOf).
     return { ...usd, toUsd: 1 / AED_PER_USD, toInr: usd.toInr / AED_PER_USD };
   }
@@ -275,7 +289,11 @@ export async function getFxRates(source: CurrencyCode): Promise<FxRates> {
     return serveCacheOrRefuse(source, best, now, recent.reason);
   }
 
-  const fetched = await fetchFromProvider(source, now);
+  let fetched = await fetchFromProvider(source, now);
+  if (typeof fetched === 'string' && opts.retryTimeoutMs !== undefined) {
+    lastFailure.set(source, { at: now, reason: fetched });
+    fetched = await fetchFromProvider(source, now, opts.retryTimeoutMs);
+  }
   if (typeof fetched !== 'string') {
     cache.set(source, fetched);
     lastFailure.delete(source);

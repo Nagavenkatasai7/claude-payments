@@ -33,32 +33,60 @@ export interface WaCreds {
   token: string;
 }
 
+/** One raw `messages[]` item as Meta sends it (only the fields we read). */
+interface RawMessage {
+  type?: string;
+  from?: string;
+  id?: string;
+  // BSUID fields (Meta business-scoped user ids; present since April 2026,
+  // "subject to change"). Read to flag a no-phone message; never stored raw.
+  from_user_id?: string;
+  from_parent_user_id?: string;
+  /** Unix seconds, as a string (Meta messages[].timestamp). */
+  timestamp?: string;
+  text?: { body?: string };
+  // Template quick-reply tap (Meta webhook `type:"button"`).
+  button?: { payload?: string; text?: string };
+  interactive?: {
+    type?: string;
+    button_reply?: { id?: string; title?: string };
+    list_reply?: { id?: string; title?: string };
+  };
+}
+
+interface RawContact {
+  wa_id?: string;
+  user_id?: string;
+  parent_user_id?: string;
+  profile?: { name?: string; username?: string };
+}
+
+interface RawStatus {
+  id?: string;
+  recipient_id?: string;
+  status?: string;
+  timestamp?: string;
+  errors?: { code?: number; title?: string; message?: string }[];
+}
+
+interface RawError {
+  code?: number;
+  title?: string;
+  message?: string;
+}
+
+interface RawValue {
+  metadata?: { phone_number_id?: string };
+  contacts?: RawContact[];
+  messages?: RawMessage[];
+  statuses?: RawStatus[];
+  errors?: RawError[];
+}
+
 interface WebhookShape {
   entry?: {
     changes?: {
-      value?: {
-        metadata?: { phone_number_id?: string };
-        messages?: {
-          type?: string;
-          from?: string;
-          id?: string;
-          text?: { body?: string };
-          // Template quick-reply tap (Meta webhook `type:"button"`).
-          button?: { payload?: string; text?: string };
-          interactive?: {
-            type?: string;
-            button_reply?: { id?: string; title?: string };
-            list_reply?: { id?: string; title?: string };
-          };
-        }[];
-        statuses?: {
-          id?: string;
-          recipient_id?: string;
-          status?: string;
-          timestamp?: string;
-          errors?: { code?: number; title?: string; message?: string }[];
-        }[];
-      };
+      value?: RawValue;
     }[];
   }[];
 }
@@ -77,35 +105,38 @@ export interface WebhookStatusEvent {
   errorTitle?: string; // first errors[].title
 }
 
+/** Normalize one change's `statuses[]`. Malformed items (missing id or status) are skipped. */
+function parseStatusItems(statuses: RawStatus[] | undefined): WebhookStatusEvent[] {
+  if (!Array.isArray(statuses)) return [];
+  const events: WebhookStatusEvent[] = [];
+  for (const s of statuses) {
+    if (!s || !s.id || !s.status) continue; // defensive: skip malformed
+    const event: WebhookStatusEvent = {
+      wamid: s.id,
+      recipientId: s.recipient_id ?? '',
+      status: s.status,
+    };
+    if (s.timestamp) event.timestamp = s.timestamp;
+    const firstError = s.errors?.[0];
+    if (firstError) {
+      if (typeof firstError.code === 'number') event.errorCode = firstError.code;
+      if (firstError.title) event.errorTitle = firstError.title;
+    }
+    events.push(event);
+  }
+  return events;
+}
+
 /**
  * Parse a Meta `statuses` webhook into normalized status events. Returns null
  * for anything that is not a statuses event (mirrors parseIncoming → null for
  * non-message payloads). Malformed entries (missing id or status) are skipped.
+ * Reads entry[0].changes[0] only — parseWebhook walks every change.
  */
 export function parseStatusEvent(body: unknown): WebhookStatusEvent[] | null {
   try {
-    const statuses = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value
-      ?.statuses;
-    if (!statuses || statuses.length === 0) return null;
-
-    const events: WebhookStatusEvent[] = [];
-    for (const s of statuses) {
-      if (!s.id || !s.status) continue; // defensive: skip malformed
-      const event: WebhookStatusEvent = {
-        wamid: s.id,
-        recipientId: s.recipient_id ?? '',
-        status: s.status,
-      };
-      if (s.timestamp) event.timestamp = s.timestamp;
-      const firstError = s.errors?.[0];
-      if (firstError) {
-        if (typeof firstError.code === 'number') event.errorCode = firstError.code;
-        if (firstError.title) event.errorTitle = firstError.title;
-      }
-      events.push(event);
-    }
-    if (events.length === 0) return null;
-    return events;
+    const events = parseStatusItems((body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value?.statuses);
+    return events.length === 0 ? null : events;
   } catch {
     return null;
   }
@@ -115,82 +146,200 @@ export function parseStatusEvent(body: unknown): WebhookStatusEvent[] | null {
  * WL2: the receiving number's phone_number_id, present on EVERY Meta webhook
  * event (messages and statuses) at entry[].changes[].value.metadata. The route
  * uses it to resolve the owning partner BEFORE signature verification, so the
- * right partner's app secret is checked. Null when absent/malformed.
+ * right partner's app secret is checked. Null when absent/malformed. Reads
+ * entry[0] only — per-change pnids come from parseWebhook.
  */
 export function parsePhoneNumberId(body: unknown): string | null {
   try {
-    const pnid = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value
-      ?.metadata?.phone_number_id;
-    return typeof pnid === 'string' && pnid !== '' ? pnid : null;
+    return pnidOf((body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value);
   } catch {
     return null;
   }
 }
 
+function pnidOf(value: RawValue | undefined): string | null {
+  const pnid = value?.metadata?.phone_number_id;
+  return typeof pnid === 'string' && pnid !== '' ? pnid : null;
+}
+
+/** The contact entry describing `message` (matched by wa_id / user_id; a lone contact is the sender). */
+function contactFor(message: RawMessage, contacts: RawContact[] | undefined): RawContact | undefined {
+  if (!Array.isArray(contacts) || contacts.length === 0) return undefined;
+  const match = contacts.find(
+    (c) => !!c && ((!!c.wa_id && c.wa_id === message.from) || (!!c.user_id && c.user_id === message.from_user_id)),
+  );
+  return match ?? (contacts.length === 1 ? contacts[0] ?? undefined : undefined);
+}
+
+/** R1: Meta's send time (unix seconds string) → epoch ms; absent or malformed ⇒ undefined. */
+function sentAtMsOf(message: RawMessage): number | undefined {
+  const t = message.timestamp;
+  if (typeof t !== 'string' || !/^\d{1,12}$/.test(t)) return undefined;
+  return Number(t) * 1000;
+}
+
+/** R1: the optional BSUID / username / send time of a message (identity in memory only — never stored raw). */
+function identityOf(
+  message: RawMessage,
+  contacts: RawContact[] | undefined,
+): { bsuid?: string; username?: string; sentAtMs?: number } {
+  const sentAtMs = sentAtMsOf(message);
+  const contact = contactFor(message, contacts);
+  const bsuid = message.from_user_id || contact?.user_id || undefined;
+  const username = contact?.profile?.username || undefined;
+  return {
+    ...(bsuid ? { bsuid } : {}),
+    ...(username ? { username } : {}),
+    ...(sentAtMs !== undefined ? { sentAtMs } : {}),
+  };
+}
+
+/** One raw `messages[]` item → IncomingMessage, or null (no from/id, or an ignored type). */
+function parseMessageItem(message: RawMessage | undefined, contacts?: RawContact[]): IncomingMessage | null {
+  if (!message || !message.from || !message.id) return null;
+  const ident = identityOf(message, contacts);
+
+  if (message.type === 'text' && message.text?.body) {
+    return { kind: 'text', from: message.from, text: message.text.body, messageId: message.id, ...ident };
+  }
+  if (
+    message.type === 'interactive' &&
+    message.interactive?.type === 'button_reply' &&
+    message.interactive.button_reply?.id
+  ) {
+    return { kind: 'button', from: message.from, buttonId: message.interactive.button_reply.id, messageId: message.id, ...ident };
+  }
+  if (
+    message.type === 'interactive' &&
+    message.interactive?.type === 'list_reply' &&
+    message.interactive.list_reply?.id
+  ) {
+    return {
+      kind: 'button', // collapse to the existing button shape — route + parseButtonId reused unchanged
+      from: message.from,
+      buttonId: message.interactive.list_reply.id,
+      messageId: message.id,
+      ...ident,
+    };
+  }
+  // Program-Fix 49A (whatsapp-10b): a template QUICK-REPLY tap. Meta sends
+  // `"type":"button","button":{"payload":"Unsubscribe","text":"Unsubscribe"}`
+  // (webhooks reference, messages/button). It becomes TEXT so the consent
+  // block sees it: a payload that IS a consent keyword wins over a localized
+  // label ("Stop promotions"), otherwise the visible label, else the payload.
+  if (message.type === 'button' && message.button) {
+    const { payload, text } = message.button;
+    const keywordPayload =
+      payload && (isOptOutKeyword(payload) || isResumeKeyword(payload)) ? payload : undefined;
+    const chosen = keywordPayload ?? (text || payload);
+    if (!chosen) return null;
+    return { kind: 'text', from: message.from, text: chosen, messageId: message.id, ...ident };
+  }
+  // Program-Fix 49A (whatsapp-08): media the bot cannot read. Never downloaded.
+  if (message.type && UNSUPPORTED_TYPES.has(message.type)) {
+    return {
+      kind: 'unsupported',
+      from: message.from,
+      mediaType: message.type as UnsupportedMediaType,
+      messageId: message.id,
+      ...ident,
+    };
+  }
+  // reaction, system, unknown ⇒ ignored (no reply).
+  return null;
+}
+
+/** The first message of entry[0].changes[0] (legacy shape — parseWebhook reads them all). */
 export function parseIncoming(body: unknown): IncomingMessage | null {
   try {
-    const message = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value
-      ?.messages?.[0];
-    if (!message || !message.from || !message.id) return null;
-
-    if (message.type === 'text' && message.text?.body) {
-      return {
-        kind: 'text',
-        from: message.from,
-        text: message.text.body,
-        messageId: message.id,
-      };
-    }
-    if (
-      message.type === 'interactive' &&
-      message.interactive?.type === 'button_reply' &&
-      message.interactive.button_reply?.id
-    ) {
-      return {
-        kind: 'button',
-        from: message.from,
-        buttonId: message.interactive.button_reply.id,
-        messageId: message.id,
-      };
-    }
-    if (
-      message.type === 'interactive' &&
-      message.interactive?.type === 'list_reply' &&
-      message.interactive.list_reply?.id
-    ) {
-      return {
-        kind: 'button', // collapse to the existing button shape — route + parseButtonId reused unchanged
-        from: message.from,
-        buttonId: message.interactive.list_reply.id,
-        messageId: message.id,
-      };
-    }
-    // Program-Fix 49A (whatsapp-10b): a template QUICK-REPLY tap. Meta sends
-    // `"type":"button","button":{"payload":"Unsubscribe","text":"Unsubscribe"}`
-    // (webhooks reference, messages/button). It becomes TEXT so the consent
-    // block sees it: a payload that IS a consent keyword wins over a localized
-    // label ("Stop promotions"), otherwise the visible label, else the payload.
-    if (message.type === 'button' && message.button) {
-      const { payload, text } = message.button;
-      const keywordPayload =
-        payload && (isOptOutKeyword(payload) || isResumeKeyword(payload)) ? payload : undefined;
-      const chosen = keywordPayload ?? (text || payload);
-      if (!chosen) return null;
-      return { kind: 'text', from: message.from, text: chosen, messageId: message.id };
-    }
-    // Program-Fix 49A (whatsapp-08): media the bot cannot read. Never downloaded.
-    if (message.type && UNSUPPORTED_TYPES.has(message.type)) {
-      return {
-        kind: 'unsupported',
-        from: message.from,
-        mediaType: message.type as UnsupportedMediaType,
-        messageId: message.id,
-      };
-    }
-    // reaction, system, unknown ⇒ ignored (no reply).
-    return null;
+    const value = (body as WebhookShape)?.entry?.[0]?.changes?.[0]?.value;
+    return parseMessageItem(value?.messages?.[0], value?.contacts);
   } catch {
     return null;
+  }
+}
+
+/** R1: a message the pipeline cannot act on, reported instead of silently lost. */
+export interface DroppedMessage {
+  reason: 'no_phone';
+  messageId: string | null;
+  /** Booleans only — the raw BSUID / username never leave the parser. */
+  hasBsuid: boolean;
+  hasUsername: boolean;
+}
+
+/** R1: one `entry[].changes[]` item, fully parsed. */
+export interface WebhookChange {
+  /** metadata.phone_number_id of the receiving number (null when absent). */
+  pnid: string | null;
+  messages: IncomingMessage[];
+  statuses: WebhookStatusEvent[];
+  errors: { code?: number; title?: string; message?: string }[];
+  dropped: DroppedMessage[];
+}
+
+function parseErrors(errors: RawError[] | undefined): WebhookChange['errors'] {
+  if (!Array.isArray(errors)) return [];
+  return errors
+    .filter((e): e is RawError => !!e && typeof e === 'object')
+    .map((e) => ({
+      ...(typeof e.code === 'number' ? { code: e.code } : {}),
+      ...(typeof e.title === 'string' ? { title: e.title } : {}),
+      ...(typeof e.message === 'string' ? { message: e.message } : {}),
+    }));
+}
+
+function parseChange(value: RawValue): WebhookChange {
+  const messages: IncomingMessage[] = [];
+  const dropped: DroppedMessage[] = [];
+  for (const raw of Array.isArray(value.messages) ? value.messages : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (!raw.from) {
+      // No phone: every identity key (customer row, conversation, sends) is
+      // the phone, so this message cannot be served yet. Reported, not lost.
+      const ident = identityOf(raw, value.contacts);
+      dropped.push({
+        reason: 'no_phone',
+        messageId: typeof raw.id === 'string' && raw.id !== '' ? raw.id : null,
+        hasBsuid: !!(ident.bsuid || raw.from_parent_user_id),
+        hasUsername: !!ident.username,
+      });
+      continue;
+    }
+    const parsed = parseMessageItem(raw, value.contacts);
+    if (parsed) messages.push(parsed);
+  }
+  return {
+    pnid: pnidOf(value),
+    messages,
+    statuses: parseStatusItems(value.statuses),
+    errors: parseErrors(value.errors),
+    dropped,
+  };
+}
+
+/**
+ * R1: parse a whole Meta webhook POST — EVERY entry[], changes[] and
+ * messages[]. Pure; never throws (garbage ⇒ []). A change with no value is
+ * skipped; ignored message types (reactions, system) appear nowhere.
+ */
+export function parseWebhook(body: unknown): WebhookChange[] {
+  try {
+    const entries = (body as WebhookShape)?.entry;
+    if (!Array.isArray(entries)) return [];
+    const out: WebhookChange[] = [];
+    for (const entry of entries) {
+      const changes = entry && typeof entry === 'object' ? entry.changes : undefined;
+      if (!Array.isArray(changes)) continue;
+      for (const change of changes) {
+        const value = change && typeof change === 'object' ? change.value : undefined;
+        if (!value || typeof value !== 'object') continue;
+        out.push(parseChange(value));
+      }
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 
