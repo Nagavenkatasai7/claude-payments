@@ -9,6 +9,7 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { completePaymentStage1, completePaymentStage2 } from '@/lib/payment';
+import { finalizeDraftPayment } from '@/lib/pay-finalize';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
@@ -61,8 +62,11 @@ function buildHarness(redis: FakeRedis, partnerId = 'default') {
     },
   });
 
+  // R6b: the pay page's stores, so a flow mints the way production does.
+  const payStores = { store, customerStore, draftStore, partnerStore, monthlyVolumeStore, dailyVolumeStore, db };
+
   return {
-    store, customerStore, partnerStore, draftStore,
+    store, customerStore, partnerStore, draftStore, payStores,
     systemSnapshots,
     setScript: (s: ChatMessage[]) => { active = [...s]; },
     agent,
@@ -119,11 +123,11 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
     expect(draftKey).toBeDefined();
     const draftId = draftKey!.replace('recipient_draft:', '');
 
-    // Turn 2: tap Approve → the transfer mints despite the sender being unverified.
-    h.setScript([toolCall('c2', 'create_transfer', {}), { role: 'assistant', content: 'Paying now.' }]);
-    await h.agent.runAgentTurn(PHONE, '[Tapped: Approve & pay]', {
-      isNewConversation: false, buttonTap: { kind: 'approve', draftId },
-    });
+    // Turn 2: Approve & Pay opens the secure pay page (R6b: the only WhatsApp
+    // mint), and the transfer mints despite the sender being unverified.
+    expect(await h.store.listTransfers()).toHaveLength(0);
+    const paid = await finalizeDraftPayment(h.payStores, draftId, { payoutMethod: 'bank', payoutDestination: '1234567890' });
+    expect(paid.ok).toBe(true);
 
     // Transfers live in Postgres now — find the minted row via the store API.
     const mintedAll = await h.store.listTransfers();
@@ -148,9 +152,11 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
       senderCountry: 'US', partnerId: 'acme', fullName: 'Alex Rivera', createdAt: now, updatedAt: now,
     });
 
-    // Legacy explicit-args create_transfer (no draft) with a WATCHLISTED recipient.
+    // R6b: the live WhatsApp path is the approve card (send_approve_picker), which
+    // screens at quote time. A WATCHLISTED recipient is blocked there: a blocked
+    // row is recorded and no draft (so no pay link) is ever made.
     h.setScript([
-      toolCall('c1', 'create_transfer', {
+      toolCall('c1', 'send_approve_picker', {
         amount_usd: 100, recipient_name: 'John Doe', recipient_phone: '919876543210',
         payout_method: 'bank', payout_destination: '1234567890',
         funding_method: 'bank_transfer', destination_country: 'IN',
@@ -165,6 +171,7 @@ describe('WL1 branded + KYC-delegated partner (mock rail)', () => {
     // Delegated lifted OUR KYC gate, but sanctions screening still blocked the send.
     expect(t!.complianceStatus).toBe('blocked');
     expect(t!.status).toBe('blocked');
+    expect([...redis.dump.keys()].some((k) => k.startsWith('recipient_draft:'))).toBe(false);
   });
 });
 

@@ -103,9 +103,11 @@ export const WEB_ONLY_TOOLS: ReadonlySet<string> = new Set<string>([]);
  * WhatsApp flow is send_approve_picker → the secure pay page (the mint happens
  * there, pay-finalize.ts), so a model-called create_transfer only leaves a stray
  * unconfirmed row and generate_payment_link a second link the prompt forbids.
- * Schema filter ONLY: executeTool still dispatches both, so an in-flight
- * conversation (or an old build during a rolling release) that names one still
- * works, and the web channel keeps generate_payment_link (WEB_TOOL_ALLOWLIST).
+ * R6b (A7L-1): the set is ALSO a dispatch gate. executeTool refuses both off the
+ * web channel (fail-closed: an absent channel counts as WhatsApp), so a stale
+ * tool call from 30-day history or an injected one gets a flat error and runs
+ * nothing. The web channel keeps generate_payment_link (WEB_TOOL_ALLOWLIST);
+ * create_transfer is on neither channel, so no chat can mint directly.
  */
 export const WHATSAPP_HIDDEN_TOOLS: ReadonlySet<string> = new Set(['create_transfer', 'generate_payment_link']);
 
@@ -1336,11 +1338,19 @@ export async function executeTool(
     });
     return { error: 'not available here' };
   }
+  // R6b (A7L-1): the tools WhatsApp's model is not shown are refused here too.
+  // The WhatsApp mint is the secure pay page (pay-finalize.ts), never this chat.
+  if (!isWebChannel(ctx) && WHATSAPP_HIDDEN_TOOLS.has(name)) {
+    logWarn('whatsapp.tool-blocked', `blocked hidden tool on WhatsApp: ${name}`, {
+      phone: ctx.phone,
+    });
+    return { error: 'not available here' };
+  }
   switch (name) {
     case 'get_quote':
       return getQuoteTool(args, ctx);
-    case 'create_transfer':
-      return createTransferTool(args, ctx);
+    // create_transfer has no arm: it is on neither channel's dispatch (web's
+    // allowlist omits it, WhatsApp's hidden-tool gate above refuses it).
     case 'present_bill':
       return presentBillTool(args, ctx);
     case 'register_seller':
@@ -1554,6 +1564,20 @@ async function getQuoteTool(
     }
     throw err;
   }
+}
+
+/**
+ * @internal Test-only seam over the legacy chat mint (R6b, A7L-1). No chat
+ * channel dispatches create_transfer any more; the pay page is the mint. The
+ * seam keeps the mint's own tests (caps, screening, drafts) running until the
+ * legacy path is deleted after the partner demo. Never re-export it, never
+ * call it from src/, and never add it to executeTool (a test pins all three).
+ */
+export async function runLegacyCreateTransferForTests(
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  return createTransferTool(args, ctx);
 }
 
 async function createTransferTool(

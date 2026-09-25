@@ -417,6 +417,8 @@ describe('createAgent', () => {
       draftStore: createDraftStore(fakeRedis()),
       ...extraDeps(fakeRedis(), store),
       chat: async () => responses[call++],
+      // R6b: generate_payment_link dispatches (and its link is appended) on web only.
+      channel: 'web',
     });
 
     const reply = await agent.runAgentTurn(PHONE, 'pay now');
@@ -682,7 +684,7 @@ describe('createAgent — TurnContext', () => {
     expect(sys.some((s) => typeof s === 'string' && s.includes('first message in over 24 hours'))).toBe(false);
   });
 
-  it('passes turn.buttonTap through to executeTool (approve path)', async () => {
+  it('R6b: an approve-tap create_transfer on WhatsApp is refused at dispatch; the draft survives, nothing is minted', async () => {
     const redis = fakeRedis();
     const store = createStore(redis, db);
     const draftStore = createDraftStore(redis);
@@ -733,9 +735,14 @@ describe('createAgent — TurnContext', () => {
       isNewConversation: false,
       buttonTap: { kind: 'approve', draftId },
     });
+    // The model's text still comes back, but the tool ran nothing: the WhatsApp
+    // mint is the secure pay page, which consumes the draft there.
     expect(reply).toContain('Transfer created');
-    // Draft must have been consumed.
-    expect(await draftStore.getDraft(draftId)).toBeNull();
+    expect(await draftStore.getDraft(draftId)).not.toBeNull();
+    expect(await store.listTransfers()).toHaveLength(0);
+    const saved = await store.getConversation('default', '15551234567');
+    const toolMsg = saved.find((m) => m.role === 'tool');
+    expect(JSON.parse(String(toolMsg?.content))).toEqual({ error: 'not available here' });
   });
 });
 
@@ -1533,15 +1540,17 @@ describe('row deadline (fix 7)', () => {
     const ctrl = new AbortController();
     const chat = vi.fn(async (_messages: ChatMessage[], _tools: unknown, opts?: { signal?: AbortSignal }): Promise<ChatMessage> => {
       if (chat.mock.calls.length === 1) {
-        // Round 0: the model mints with FULL legacy explicit args (no buttonTap ⇒
-        // the explicit-args path; an empty payload would refuse and mint nothing).
+        // Round 0: the model runs a side-effecting tool (a schedule write). R6b:
+        // create_transfer is no longer dispatched on WhatsApp, so the write that
+        // must happen EXACTLY once is create_schedule's row, not a chat mint.
         return {
           role: 'assistant', content: '',
           tool_calls: [{ id: 'c1', type: 'function', function: {
-            name: 'create_transfer',
+            name: 'create_schedule',
             arguments: JSON.stringify({
               recipient_name: 'Mom', recipient_phone: '919876543210', amount_usd: 50,
               payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+              frequency: 'monthly', day_of_month: 10,
             }),
           } }],
         };
@@ -1560,7 +1569,9 @@ describe('row deadline (fix 7)', () => {
     const reply = await agent.runAgentTurn(PHONE, 'send $50 to Mom', { isNewConversation: false }, { signal: ctrl.signal });
 
     expect(reply).toBe("Sorry, I'm having trouble right now. Could you send that again?"); // FALLBACK_REPLY (agent.ts:25-26)
-    expect(await store.listTransfers()).toHaveLength(1); // round 0 minted EXACTLY once and is never re-run
+    const scheduleStore = freshScheduleStore(redis);
+    expect(await scheduleStore.listSchedules()).toHaveLength(1); // round 0 wrote EXACTLY once and is never re-run
+    expect(await store.listTransfers()).toHaveLength(0); // no chat mint on WhatsApp (R6b)
     expect(chat).toHaveBeenCalledTimes(2); // no chatWithRetry second call after the abort
     const saved = await store.getConversation('default', PHONE); // history preserved by runAgentTurn's catch
     expect(saved.some((m) => m.role === 'user' && m.content === 'send $50 to Mom')).toBe(true);
