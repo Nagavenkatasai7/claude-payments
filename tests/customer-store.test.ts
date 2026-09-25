@@ -291,6 +291,14 @@ describe('customer-store Item 4: consent (optInAt / optedOutAt)', () => {
     expect((await cs.getCustomer('default', PHONE))?.optedOutAt).toBeDefined();
   });
 
+  it('setOptedOut stores the given time (the STOP\'s send time), defaulting to now', async () => {
+    const { cs } = mkStores();
+    await cs.upsertOnFirstInbound('default', PHONE);
+    const at = new Date('2026-09-01T10:00:00.000Z');
+    await cs.setOptedOut('default', PHONE, at);
+    expect((await cs.getCustomer('default', PHONE))?.optedOutAt).toBe(at.toISOString());
+  });
+
   it('clearOptedOut removes optedOutAt (undefined)', async () => {
     const { cs } = mkStores();
     await cs.upsertOnFirstInbound('default', PHONE);
