@@ -26,9 +26,11 @@ import {
   gateDecision,
   gateRedis,
   isBackstopMinute,
+  isLastFullFresh,
   isWorkDue,
   markDue,
   markLease,
+  recordFullRun,
   trimDue,
   type GateRedis,
 } from '@/lib/worker-gate';
@@ -67,6 +69,8 @@ export const maxDuration = 60;
 // Redis due set (src/lib/worker-gate.ts), off the :17/:47 backstop minute,
 // returns BEFORE getDb()/getStore() — Neon is not woken. The heartbeat is
 // gated the same way while the cron marker is fresh. A poke always runs full.
+// Either one also runs full when `worker:lastFullAt` (written after every
+// completed full run) is missing, unreadable or older than 30 min.
 // The gate only skips INVOCATIONS, never rows, and fails open.
 // Claiming uses FOR UPDATE SKIP LOCKED and a 5-minute LEASE, so overlapping
 // invocations are safe and a killed invocation's rows are reclaimed. Auth
@@ -133,9 +137,12 @@ async function run(req: NextRequest): Promise<NextResponse> {
     let gated = false;
     try {
       const due = await isWorkDue(gate, now.getTime());
+      const lastFullFresh = !due && (await isLastFullFresh(gate, now.getTime()));
       const cronFresh =
-        source === 'heartbeat' && !due ? cronMarkerFresh(await readLastCronAt(cadenceRedis()), now) : false;
-      gated = gateDecision({ source, backstop: isBackstopMinute(now), due, cronFresh }) === 'gated';
+        source === 'heartbeat' && !due && lastFullFresh
+          ? cronMarkerFresh(await readLastCronAt(cadenceRedis()), now)
+          : false;
+      gated = gateDecision({ source, backstop: isBackstopMinute(now), due, cronFresh, lastFullFresh }) === 'gated';
     } catch (err) {
       logError('worker.gate', err);
     }
@@ -306,7 +313,13 @@ async function run(req: NextRequest): Promise<NextResponse> {
     // partner-demo R4 — tell the gate when to wake Neon next. Runs even when
     // the drain threw (then the work stays marked due NOW and the next cron
     // tick retries, rather than waiting for the backstop).
-    if (gate) await markAfterDrain(gate, deps, { invocationStart, workerId, completed, leftover, released });
+    if (gate) {
+      await markAfterDrain(gate, deps, { invocationStart, workerId, completed, leftover, released });
+      // R4 follow-up: the time-based backstop's clock. Only a COMPLETED run,
+      // only after its marks, and stamped with its START (conservative: work
+      // committed during the run is covered by the marks, not by this).
+      if (completed) await recordFullRun(gate, invocationStart);
+    }
   }
 
   // Nothing parses this body (the heartbeat curls to /dev/null; the poke ignores
@@ -320,13 +333,16 @@ async function run(req: NextRequest): Promise<NextResponse> {
  * partner-demo R4: the post-drain marks, in this order —
  *   1. read the earliest pending/failed next_attempt_at (a DB read error ⇒
  *      mark now: fail-open);
- *   2. trim marks older than invocationStart − TRIM_LAG_MS (anything committed
- *      before then was visible to this drain's claims, or is still covered by a
- *      future-dated or lease mark);
- *   3. mark max(nextDue, now) — clamped to now so a concurrent invocation's
+ *   2. mark max(nextDue, now) — clamped to now so a concurrent invocation's
  *      trim can never remove a mark for a row that is still waiting;
- *   4. mark now when the drain threw, stopped at the cutoff with work left, or
+ *   3. mark now when the drain threw, stopped at the cutoff with work left, or
  *      released rows;
+ *   4. trim marks older than invocationStart − TRIM_LAG_MS (anything committed
+ *      before then was visible to this drain's claims, or is still covered by a
+ *      future-dated or lease mark). AFTER the marks (R4 follow-up): a crash
+ *      between the two then leaves extra marks (a spare full run), never a
+ *      trimmed set with the next due instant missing. Every mark above is ≥
+ *      markNow > the cutoff, so this trim cannot remove them;
  *   5. on normal completion only, remove this invocation's lease member.
  * Every Redis call is fail-open (worker-gate never throws).
  */
@@ -346,9 +362,9 @@ async function markAfterDrain(
     }
   }
   const markNow = Date.now();
-  await trimDue(gate, run.invocationStart - TRIM_LAG_MS);
   if (nextDue) await markDue(gate, Math.max(nextDue.getTime(), markNow));
   if (!run.completed || readFailed || run.leftover || run.released > 0) await markDue(gate, markNow);
+  await trimDue(gate, run.invocationStart - TRIM_LAG_MS);
   if (run.completed) await clearLease(gate, run.workerId);
 }
 
