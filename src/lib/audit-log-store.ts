@@ -28,18 +28,43 @@ export interface StaffAuditEntry {
   action: StaffAuditAction;
   target: string; // affected username
   detail?: string; // human-readable summary
+  /** partner-demo R5: the target's tenant (audit_events.partner_id); absent = a platform account. */
+  partnerId?: string;
+  /** partner-demo R5: whether the ACTOR was a platform or a partner-scoped admin. */
+  actorScope?: 'platform' | 'partner';
+}
+
+/** The two actions a tenant's own staff feed shows (partner-demo R5). */
+export const TENANT_STAFF_FEED_ACTIONS: readonly StaffAuditAction[] = ['created', 'removed'];
+
+function toEntry(r: { at: Date; actor: string; action: string; subjectId: string | null; partnerId: string | null; meta: unknown }): StaffAuditEntry {
+  const e: StaffAuditEntry = {
+    at: r.at.toISOString(),
+    actor: r.actor,
+    action: r.action as StaffAuditAction,
+    target: r.subjectId ?? '',
+  };
+  const meta = r.meta as { detail?: string; actorScope?: string } | null;
+  if (meta?.detail) e.detail = meta.detail;
+  if (meta?.actorScope === 'platform' || meta?.actorScope === 'partner') e.actorScope = meta.actorScope;
+  if (r.partnerId) e.partnerId = r.partnerId;
+  return e;
 }
 
 export function createAuditLogStore(db: DbOrTx) {
   const repo = createAuditRepo(db);
   return {
     async record(entry: StaffAuditEntry): Promise<void> {
+      const meta: Record<string, unknown> = {};
+      if (entry.detail) meta.detail = entry.detail;
+      if (entry.actorScope) meta.actorScope = entry.actorScope;
       await repo.record({
+        partnerId: entry.partnerId || undefined,
         actor: entry.actor,
         actorType: 'staff',
         action: entry.action,
         subjectId: entry.target,
-        meta: entry.detail ? { detail: entry.detail } : undefined,
+        meta: Object.keys(meta).length > 0 ? meta : undefined,
       });
     },
     async list(limit = 50): Promise<StaffAuditEntry[]> {
@@ -49,18 +74,18 @@ export function createAuditLogStore(db: DbOrTx) {
       // Taking the newest N rows and filtering afterwards let either kind push
       // every team change off the list.
       const rows = await repo.listRecentByActions(STAFF_AUDIT_ACTIONS, limit, { actorType: 'staff' });
-      return rows
-        .map((r) => {
-          const e: StaffAuditEntry = {
-            at: r.at.toISOString(),
-            actor: r.actor,
-            action: r.action as StaffAuditAction,
-            target: r.subjectId ?? '',
-          };
-          const detail = (r.meta as { detail?: string } | null)?.detail;
-          if (detail) e.detail = detail;
-          return e;
-        });
+      return rows.map(toEntry);
+    },
+    /**
+     * partner-demo R5: ONE tenant's staff created/removed rows, newest first,
+     * filtered IN SQL on partner_id + actor_type 'staff' + the two actions (a
+     * raw listByPartner would also return pii.view / KYC rows). The caller
+     * passes the tenant from the session scope, never from a form.
+     */
+    async listForPartner(partnerId: string, limit = 20): Promise<StaffAuditEntry[]> {
+      if (!partnerId) return [];
+      const rows = await repo.listRecentByActions(TENANT_STAFF_FEED_ACTIONS, limit, { actorType: 'staff', partnerId });
+      return rows.map(toEntry);
     },
   };
 }

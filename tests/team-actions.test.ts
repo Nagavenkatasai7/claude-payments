@@ -145,6 +145,9 @@ describe('createStaffAction', () => {
       form({ username: 'pa', name: 'PA', password: 'a-long-password-1', role: 'admin', partnerId: 'acme' }),
     );
     expect((await authStore.getStaff('pa'))?.partnerId).toBe('acme');
+    // partner-demo R5: the audit row carries the member's tenant (partner feed)
+    const feed = await auditStore.listForPartner('acme');
+    expect(feed[0]).toMatchObject({ actor: 'boss', action: 'created', target: 'pa', partnerId: 'acme', actorScope: 'platform' });
   });
 
   it('rejects an unknown partner scope', async () => {

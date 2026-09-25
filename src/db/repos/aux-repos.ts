@@ -412,14 +412,19 @@ export function createAuditRepo(db: DbOrTx) {
     async listRecentByActions(
       actions: readonly string[],
       limit = 50,
-      opts: { actorType?: AuditEvent['actorType'] } = {},
+      opts: { actorType?: AuditEvent['actorType']; partnerId?: PartnerId } = {},
     ) {
       if (actions.length === 0) return [];
-      const byAction = inArray(auditEvents.action, [...actions]);
+      // partner-demo R5: `partnerId` narrows to ONE tenant in SQL (the tenant
+      // staff feed). An empty string is refused, never read as "all tenants".
+      if (opts.partnerId === '') return [];
+      const conds = [inArray(auditEvents.action, [...actions])];
+      if (opts.actorType) conds.push(eq(auditEvents.actorType, opts.actorType));
+      if (opts.partnerId !== undefined) conds.push(eq(auditEvents.partnerId, opts.partnerId));
       return db
         .select()
         .from(auditEvents)
-        .where(opts.actorType ? and(byAction, eq(auditEvents.actorType, opts.actorType)) : byAction)
+        .where(and(...conds))
         .orderBy(desc(auditEvents.at), desc(auditEvents.id))
         .limit(limit);
     },

@@ -14,9 +14,20 @@ import type { Staff } from './types';
  * Enforcement only. Someone who HAS enrolled always gets the code step at
  * sign-in, whatever this says.
  */
-export function mfaEnrolmentRequired(staff: Staff): boolean {
+export interface MfaEnrolmentScope {
+  /**
+   * partner-demo R5: also cover PARTNER admins (role admin, partner-scoped).
+   * Only the partner-staff management actions pass it, so the platform
+   * surfaces keep their behaviour. Same flag, same exemptions; the seed
+   * exemption never extends to a partner account (isSeedAdminRecord).
+   */
+  partnerAdmins?: boolean;
+}
+
+export function mfaEnrolmentRequired(staff: Staff, scope: MfaEnrolmentScope = {}): boolean {
   if (!env.staffMfaRequired) return false;
-  if (staff.role !== 'admin' || staff.partnerId !== undefined) return false;
+  if (staff.role !== 'admin') return false;
+  if (staff.partnerId !== undefined && !scope.partnerAdmins) return false;
   if (isSeedAdminRecord(staff)) return false;
   return !env.staffMfaExempt.includes(staff.username);
 }

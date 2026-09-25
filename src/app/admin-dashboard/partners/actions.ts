@@ -20,6 +20,18 @@ import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
 import { assertStaffPasswordPolicy } from '@/lib/staff-password';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { mfaEnrolmentRequired } from '@/lib/staff-mfa-policy';
+import { seedAdminUsername } from '@/lib/staff-login-guard';
+import { getAuditLogStore } from '@/lib/audit-log-store';
+import { checkIpRateLimit } from '@/lib/ip-rate-limit';
+import { getRedis } from '@/lib/redis';
+import {
+  isLastTenantAdmin,
+  isReservedStaffUsername,
+  mayRemove,
+  newStaffRecord,
+  resolveStaffTenant,
+} from '@/lib/partner-staff-policy';
 import { newTransferId } from '@/lib/id';
 import { sanitizeLogoValue } from '@/lib/logo';
 import {
@@ -45,11 +57,12 @@ import type {
   PartnerId,
   PartnerSupportConfig,
   PartnerDisclosureConfig,
+  Staff,
   StaffRole,
   KycMode,
   CurrencyCode,
 } from '@/lib/types';
-import { DEFAULT_CURRENCY_FOR_COUNTRY, SUPPORT_DEFAULT_PERMISSIONS } from '@/lib/types';
+import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
 // unchanged" (secrets are never rendered back, so blank ≠ delete).
@@ -179,11 +192,64 @@ export async function setPartnerStatusAction(formData: FormData): Promise<void> 
   revalidatePath(`/admin-dashboard/partners/${id}`);
 }
 
+// ── partner-demo R5: partner-managed staff ──────────────────────────────────
+// A partner ADMIN adds/removes staff in their OWN tenant; a platform admin in
+// any tenant. The tenant always comes from the session (resolveStaffTenant):
+// the bound partnerId is a selector only. Suspend, password/MFA reset,
+// permissions and role edits stay platform-only (the Team page).
+
+const STAFF_NOT_FOUND = 'Partner not found.';
+const USERNAME_UNAVAILABLE = 'That username is not available. Choose another username.';
+/** Per-actor create budget (fixed window). */
+const STAFF_CREATE_LIMIT = 20;
+const STAFF_CREATE_WINDOW_SEC = 60 * 60;
+
+/**
+ * Who may manage partner staff. R7: the actor kind is decided BEFORE
+ * requirePlatformAdmin(), which would redirect a partner admin.
+ *   - platform scope → requirePlatformAdmin() (keeps the fix-17b step-up);
+ *   - partner scope  → the same STAFF_MFA_REQUIRED step-up (partnerAdmins
+ *     option, default off), same exemptions.
+ * requireAdmin() first redirects agents, support and signed-out callers.
+ */
+async function requireStaffManager(): Promise<Staff> {
+  const staff = await requireAdmin();
+  if (scopeOf(staff).kind === 'platform') return requirePlatformAdmin();
+  if (
+    mfaEnrolmentRequired(staff, { partnerAdmins: true }) &&
+    !(await getStaffMfaStore().isEnrolled(staff.username))
+  ) {
+    redirect('/admin-dashboard/account?enroll=1');
+  }
+  return staff;
+}
+
+/**
+ * The staff gate for a create: the actor + the tenant they may act on. A
+ * missing partner and another tenant's partner throw the SAME message, before
+ * any form validation, so the response is no existence oracle.
+ */
+async function gatePartnerStaff(selector: string): Promise<{ actor: Staff; tenant: PartnerId }> {
+  const actor = await requireStaffManager();
+  const tenant = resolveStaffTenant(actor, String(selector ?? ''));
+  if (!tenant) throw new Error(STAFF_NOT_FOUND);
+  const partner = await getPartnerStore().getPartner(tenant);
+  if (!partner) throw new Error(STAFF_NOT_FOUND);
+  return { actor, tenant };
+}
+
+function actorScopeOf(actor: Staff): 'platform' | 'partner' {
+  return scopeOf(actor).kind;
+}
+
 export async function createPartnerStaffAction(
   partnerId: PartnerId,
   formData: FormData,
 ): Promise<void> {
-  await requirePlatformAdmin();
+  // Server actions are public POST endpoints callable with any bound
+  // partnerId: the gate resolves the tenant from the session first.
+  const { actor, tenant } = await gatePartnerStaff(partnerId);
+
   const username = String(formData.get('username') ?? '').trim();
   const name = String(formData.get('name') ?? '').trim();
   const password = String(formData.get('password') ?? '');
@@ -191,57 +257,78 @@ export async function createPartnerStaffAction(
   if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
   if (!username || !name || !password) throw new Error('username, name, and password are required.');
 
-  // Validate partner exists — server actions are POST endpoints callable with
-  // any bound partnerId, so the JSX `bind(null, partner.id)` is not a
-  // sufficient guard against direct invocation.
-  const partner = await getPartnerStore().getPartner(partnerId);
-  if (!partner) throw new Error('Partner not found.');
+  const limit = await checkIpRateLimit(getRedis(), 'partner_staff_create', actor.username, {
+    limit: STAFF_CREATE_LIMIT,
+    windowSec: STAFF_CREATE_WINDOW_SEC,
+  });
+  if (!limit.allowed) throw new Error('Too many new staff accounts in a short time. Try again later.');
 
-  // Reject username collision. saveStaff would silently overwrite — and the
-  // existing reverse-index of sessions for the clobbered username would then
-  // resolve to a record now bound to a different partner. addStaffAction in
-  // /admin-dashboard/team/actions.ts has the same guard for the same reason.
+  // Reject username collision (saveStaff is an unconditional SET: a clobber
+  // would rebind the name's live sessions to this tenant) and the seed admin's
+  // name (only the seed admin may hold it; see team/actions.ts mayTargetSeed).
+  // One generic collision message for both.
   const authStore = getAuthStore();
-  if (await authStore.getStaff(username)) {
-    throw new Error('That username already exists.');
+  if (isReservedStaffUsername(username, seedAdminUsername()) || (await authStore.getStaff(username))) {
+    throw new Error(USERNAME_UNAVAILABLE);
   }
 
   await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
   await getStaffMfaStore().reset(username); // Program-Fix 17b: no stale enrolment on a re-used name
-  await authStore.saveStaff({
-    username,
-    name,
-    role,
-    // Partner staff start with no money permissions in ANY role; support staff
-    // structurally never get them (mirrors team/actions.ts).
-    permissions:
-      role === 'support'
-        ? { ...SUPPORT_DEFAULT_PERMISSIONS }
-        : { canCancel: false, canResend: false, canAssign: false, canRevealPii: false },
-    passwordHash: await hashPassword(password),
-    createdAt: new Date().toISOString(),
-    partnerId,                  // taken from URL, not form
+  await authStore.saveStaff(
+    newStaffRecord(tenant, {
+      username,
+      name,
+      role,
+      passwordHash: await hashPassword(password),
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  // Save, then audit (as the Team actions): the record is Redis + a ledger
+  // row, not one transaction. Never a password or hash in the row.
+  await getAuditLogStore().record({
+    at: new Date().toISOString(),
+    actor: actor.username,
+    action: 'created',
+    target: username,
+    detail: `${role}, partner staff`,
+    partnerId: tenant,
+    actorScope: actorScopeOf(actor),
   });
-  revalidatePath(`/admin-dashboard/partners/${partnerId}`);
+  revalidatePath(`/admin-dashboard/partners/${tenant}`);
 }
 
 export async function removePartnerStaffAction(formData: FormData): Promise<void> {
-  await requirePlatformAdmin();
+  const actor = await requireStaffManager();
   const username = String(formData.get('username') ?? '').trim();
   if (!username) throw new Error('username is required.');
   const authStore = getAuthStore();
-  const staff = await authStore.getStaff(username);
-  if (!staff) return;
-  // M3: this is the PARTNER-staff endpoint. Refuse to delete a platform account
-  // here — the dedicated team/actions guard protects platform admins, and this
-  // twin must not be a bypass. Platform staff are managed from the Team page.
-  if (!staff.partnerId) {
+  const target = await authStore.getStaff(username);
+  const isPlatformActor = actorScopeOf(actor) === 'platform';
+  // M3: this is the PARTNER-staff endpoint; platform staff are managed from
+  // the Team page. A platform admin is told so; a partner admin gets the same
+  // silent no-op as for a missing name or another tenant's member
+  // (404-never-403: nothing written, nothing distinguishable).
+  if (target && !target.partnerId && isPlatformActor) {
     throw new Error('Use the Team page to manage platform staff.');
+  }
+  if (!target || !mayRemove(actor, target)) return;
+  // Only reachable inside the actor's own tenant: never orphan a tenant.
+  if (isLastTenantAdmin(target, await authStore.listStaff())) {
+    throw new Error('Cannot remove the only admin for this partner. Add another admin first.');
   }
   await authStore.deleteStaff(username);
   await authStore.deleteAllSessionsFor(username);
   await getStaffMfaStore().reset(username); // Program-Fix 17b
-  revalidatePath(`/admin-dashboard/partners/${staff.partnerId}`);
+  await getAuditLogStore().record({
+    at: new Date().toISOString(),
+    actor: actor.username,
+    action: 'removed',
+    target: username,
+    detail: `was ${target.role}, partner staff`,
+    partnerId: target.partnerId,
+    actorScope: actorScopeOf(actor),
+  });
+  revalidatePath(`/admin-dashboard/partners/${target.partnerId}`);
 }
 
 // ── WL self-service: WhatsApp / settlement / API-key configuration ──────────

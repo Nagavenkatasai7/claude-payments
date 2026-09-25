@@ -71,6 +71,7 @@ async function audit(
   action: StaffAuditAction,
   target: string,
   detail?: string,
+  partnerId?: string,
 ): Promise<void> {
   await getAuditLogStore().record({
     at: new Date().toISOString(),
@@ -78,6 +79,11 @@ async function audit(
     action,
     target,
     detail,
+    // partner-demo R5: the target's tenant (audit_events.partner_id), so a
+    // partner's own staff feed shows platform changes to its members too
+    // (as "SmartRemit": the actor here is always a platform admin).
+    partnerId,
+    actorScope: 'platform',
   });
 }
 
@@ -149,7 +155,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
   // (e.g. one left behind by a removal on the previous build).
   await getStaffMfaStore().reset(username);
   await store.saveStaff(staff);
-  await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`);
+  await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`, partnerId);
   revalidatePath('/admin-dashboard/team');
   redirect('/admin-dashboard/team');
 }
@@ -195,7 +201,7 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
   // member out everywhere (after the save), so no session keeps acting on the
   // old access. A save that changes nothing leaves their sessions alone.
   if (accessChanged(target, updated)) await store.deleteAllSessionsFor(username);
-  await audit(actor.username, 'updated', username, `role ${role}, ${scopeLabel(partnerId)}`);
+  await audit(actor.username, 'updated', username, `role ${role}, ${scopeLabel(partnerId)}`, partnerId ?? target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
 
@@ -229,7 +235,7 @@ export async function setStaffStatusAction(formData: FormData): Promise<void> {
   if (status === 'suspended') {
     await store.deleteAllSessionsFor(username); // immediate lockout
   }
-  await audit(actor.username, status === 'suspended' ? 'suspended' : 'reactivated', username);
+  await audit(actor.username, status === 'suspended' ? 'suspended' : 'reactivated', username, undefined, target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
 
@@ -255,7 +261,7 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
   await store.deleteStaff(username);
   await store.deleteAllSessionsFor(username);
   await getStaffMfaStore().reset(username); // Program-Fix 17b
-  await audit(actor.username, 'removed', username, `was ${target.role}, ${scopeLabel(target.partnerId)}`);
+  await audit(actor.username, 'removed', username, `was ${target.role}, ${scopeLabel(target.partnerId)}`, target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
 
