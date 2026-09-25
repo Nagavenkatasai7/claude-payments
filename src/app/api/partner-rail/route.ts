@@ -4,7 +4,7 @@ import { railSecrets } from '@/lib/partner-integrations';
 import { railNonceSeen, markRailNonce } from '@/lib/rail-replay';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
-import { pokeWorker } from '@/lib/outbox';
+import { pokeWorker, pokeWorkerDelayed } from '@/lib/outbox';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { enforceIpRateLimit } from '@/lib/ip-rate-limit';
 
@@ -158,6 +158,11 @@ async function handleVerifiedInstruction(
     { delayMs: SETTLE_DELAY_MS, dedupeKey: `railcb:${reference}` },
   );
   pokeWorker();
+  // partner-demo R4: the immediate poke drains only READY rows, and the cron is
+  // gated when nothing is marked due — so nudge (and mark) the worker for the
+  // moment the callback row becomes due. Without it the row could wait for the
+  // :17/:47 backstop and the 15-min stuck-paid sweep would re-instruct it.
+  pokeWorkerDelayed(SETTLE_DELAY_MS + 5_000);
 
   // `legs:'dual'` confirms the rail accepted the cross-border buyer-debit +
   // seller-payout instruction (both settled atomically before the callback).

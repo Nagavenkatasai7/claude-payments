@@ -16,7 +16,10 @@ import {
   checkCronQuiet,
   sweepDrainGap,
   getCadenceSnapshot,
+  cronMarkerFresh,
 } from '@/lib/worker-cadence';
+import { WORKER_BACKSTOP_PERIOD_MIN } from '@/lib/worker-gate';
+import { STALE_LOCK_MINUTES } from '@/lib/reconcile';
 import type { Db } from '@/db/client';
 import type { RedisLike } from '@/lib/store';
 
@@ -77,6 +80,20 @@ describe('alarm thresholds follow the schedule (test 2)', () => {
     expect(DRAIN_SLA_MINUTES).toBeGreaterThanOrEqual(period + 5);
     expect(CRON_QUIET_MINUTES).toBeGreaterThanOrEqual(2 * period + 5);
   });
+
+  it('partner-demo R4: the unconditional backstop is every 30 min and lies on the cron grid', () => {
+    const period = periodMinutes(VERCEL_JSON.crons.find((c) => c.path === '/api/worker')!.schedule);
+    expect(WORKER_BACKSTOP_PERIOD_MIN).toBe(30);
+    expect(WORKER_BACKSTOP_PERIOD_MIN % period).toBe(0);
+    // The drain-gap SLA and quiet-cron alarm stay tuned to the per-minute
+    // cron (the marker is written every minute; due work is marked), not to
+    // the backstop — so they still page on a saturated drain or a lost marker.
+    expect(DRAIN_SLA_MINUTES).toBe(10);
+    expect(CRON_QUIET_MINUTES).toBe(10);
+    // Kept at 15 (brief option B default): killed leases are marked due, so a
+    // stale lock still means the drain is genuinely not running.
+    expect(STALE_LOCK_MINUTES).toBe(15);
+  });
 });
 
 describe('invocationSource (test 3)', () => {
@@ -90,12 +107,29 @@ describe('invocationSource (test 3)', () => {
 });
 
 describe('shouldProbeFx (test 4)', () => {
-  it('heartbeat always; cron only on a :x0 minute; poke never', () => {
+  // partner-demo R4: the cron probes only on the gate's BACKSTOP minute
+  // (:17 / :47) — the one cron tick guaranteed to run full — so an idle
+  // system never wakes Neon just to record FX health.
+  it('heartbeat always; cron only on the :17/:47 backstop minute; poke never', () => {
     expect(shouldProbeFx('heartbeat', new Date('2026-09-22T10:11:00Z'))).toBe(true);
-    expect(shouldProbeFx('cron', new Date('2026-09-22T10:10:00Z'))).toBe(true);
+    expect(shouldProbeFx('cron', new Date('2026-09-22T10:17:00Z'))).toBe(true);
+    expect(shouldProbeFx('cron', new Date('2026-09-22T10:47:00Z'))).toBe(true);
+    expect(shouldProbeFx('cron', new Date('2026-09-22T10:10:00Z'))).toBe(false);
     expect(shouldProbeFx('cron', new Date('2026-09-22T10:11:00Z'))).toBe(false);
-    expect(shouldProbeFx('poke', new Date('2026-09-22T10:10:00Z'))).toBe(false);
+    expect(shouldProbeFx('poke', new Date('2026-09-22T10:17:00Z'))).toBe(false);
     expect(shouldProbeFx('poke', new Date('2026-09-22T10:11:00Z'))).toBe(false);
+  });
+});
+
+describe('cronMarkerFresh (partner-demo R4 heartbeat gate)', () => {
+  const now = new Date('2026-09-22T10:17:00Z');
+  it('fresh exactly when checkCronQuiet would NOT breach: present and ≤ CRON_QUIET_MINUTES old', () => {
+    expect(cronMarkerFresh(new Date(now.getTime() - 60_000), now)).toBe(true);
+    expect(cronMarkerFresh(new Date(now.getTime() - CRON_QUIET_MINUTES * 60_000), now)).toBe(true);
+    expect(cronMarkerFresh(new Date(now.getTime() - (CRON_QUIET_MINUTES + 1) * 60_000), now)).toBe(false);
+  });
+  it('an absent marker is NOT fresh (the heartbeat runs full: fail-open)', () => {
+    expect(cronMarkerFresh(null, now)).toBe(false);
   });
 });
 

@@ -35,7 +35,7 @@ vi.mock('@/lib/partner-store', async (orig) => {
   return { ...real, getPartnerStore: () => real.createPartnerStore(db) };
 });
 vi.mock('@/lib/ip-rate-limit', () => ({ enforceIpRateLimit: async () => null }));
-vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {} }));
+vi.mock('@/lib/outbox', () => ({ pokeWorker: () => {}, pokeWorkerDelayed: () => {} }));
 const afterPending: Promise<void>[] = [];
 vi.mock('next/server', async (orig) => {
   const real = await orig<typeof import('next/server')>();
