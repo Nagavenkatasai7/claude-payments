@@ -52,6 +52,7 @@ async function initOnce() {
 
 const ALL_TABLES = [
   'outbox',
+  'conversation_messages',
   'idempotency_keys',
   'audit_events',
   'partner_rates',
