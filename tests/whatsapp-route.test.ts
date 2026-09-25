@@ -9,13 +9,18 @@ vi.mock('next/server', async (orig) => {
   return { ...real, after: (cb: () => Promise<void> | void) => { void cb(); } };
 });
 
-// markMessageSeen is the first side-effect after the signature gate; asserting on
-// it tells us whether a request got PAST the gate or was rejected before it.
+// R1: the msgq: fast-skip read is the first side-effect after the signature
+// gate; asserting on it tells us whether a request got PAST the gate or was
+// rejected before it. The legacy markMessageSeen (msg: SET NX) must never be
+// called by the new pipeline — redelivery is deduped by the outbox's unique
+// `wamid:{id}` key (ON CONFLICT), not by Redis.
 const markMessageSeen = vi.fn(async (_id: string) => true);
+const isMessageQueued = vi.fn(async (_id: string) => false);
+const markMessageQueued = vi.fn(async (_id: string) => {});
 const getLastInboundAt = vi.fn(async (_tenant: string, _from: string) => null);
 const recordInboundNow = vi.fn(async (_tenant: string, _from: string) => {});
 vi.mock('@/lib/store', () => ({
-  getStore: () => ({ markMessageSeen, getLastInboundAt, recordInboundNow }),
+  getStore: () => ({ markMessageSeen, isMessageQueued, markMessageQueued, getLastInboundAt, recordInboundNow }),
 }));
 
 // Keep the downstream turn-building dependencies inert so the POST handler can
@@ -58,7 +63,7 @@ const {
   ensureCustomer: vi.fn(async (_tenant: string, _phone: string) => ({ senderPhone: '15551230000' })),
   // Program-Fix 49A: the opted-out reminder names the tenant's brand.
   getPartner: vi.fn(async (_id: string): Promise<Record<string, unknown> | null> => null),
-  enqueue: vi.fn(async () => true),
+  enqueue: vi.fn(async (_kind: string, _payload: Record<string, unknown>, _opts?: { dedupeKey?: string }) => true),
   // Fix 1 D11 routing doubles. Default: UNROUTED (null) ⇒ every pre-existing test is untouched.
   partnerForPhoneNumberId: vi.fn(async (_pnid: string): Promise<string | null> => null),
   getIntegrations: vi.fn(async (_partnerId: string) => ({
@@ -140,13 +145,15 @@ function post(raw: string, signature?: string) {
 beforeEach(() => {
   throttleRedis.current = fakeRedis();
   markMessageSeen.mockClear().mockResolvedValue(true);
+  isMessageQueued.mockClear().mockResolvedValue(false);
+  markMessageQueued.mockClear().mockResolvedValue(undefined);
   getLastInboundAt.mockClear();
   recordInboundNow.mockClear();
   sendText.mockClear();
   setOptedOut.mockClear();
   clearOptedOut.mockClear();
   setOptedIn.mockClear();
-  enqueue.mockClear();
+  enqueue.mockReset().mockResolvedValue(true);
   ensureCustomer.mockClear();
   getPartner.mockClear().mockResolvedValue(null);
   auditRecord.mockReset().mockResolvedValue(undefined);
@@ -200,9 +207,27 @@ function statusBody(status: string, opts: { code?: number; title?: string } = {}
 }
 
 afterEach(() => {
+  // R1: no Graph call remains inside the webhook request, and the legacy
+  // msg: SET NX is never used as the gate.
+  expect(sendText).not.toHaveBeenCalled();
+  expect(markMessageSeen).not.toHaveBeenCalled();
   delete process.env.META_APP_SECRET;
   vi.restoreAllMocks();
 });
+
+/** R1: the whatsapp.text reply rows the webhook enqueued (to, body, payload). */
+const replyRows = () =>
+  (enqueue.mock.calls as unknown as [string, Record<string, unknown>, { dedupeKey?: string }][])
+    .filter((c) => c[0] === 'whatsapp.text');
+const repliesWith = (body: string) => replyRows().filter((c) => c[1].body === body);
+/** Exactly the essential reply row for `wamid`, sent to `to`, optionally from a routed partner. */
+function expectReply(to: string, body: string, wamid: string, partnerId?: string) {
+  expect(enqueue).toHaveBeenCalledWith(
+    'whatsapp.text',
+    { to, body, category: 'essential', ...(partnerId ? { partnerId } : {}) },
+    { dedupeKey: `wamid:${wamid}` },
+  );
+}
 
 describe('GET /api/whatsapp', () => {
   it('echoes the challenge when the verify token matches', async () => {
@@ -224,12 +249,15 @@ describe('GET /api/whatsapp', () => {
 });
 
 describe('POST /api/whatsapp — signature verification', () => {
-  it('secret set + valid signature → request is processed (200, reaches markMessageSeen)', async () => {
+  it('secret set + valid signature → request is processed (200, reaches the msgq: fast-skip read, then the durable row, then the mark)', async () => {
     process.env.META_APP_SECRET = SECRET;
     const res = await post(inboundBody, sign(inboundBody));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(markMessageSeen).toHaveBeenCalledWith('wamid.TEST1');
+    expect(isMessageQueued).toHaveBeenCalledWith('wamid.TEST1');
+    expect(markMessageQueued).toHaveBeenCalledWith('wamid.TEST1');
+    // R1: the mark is written only AFTER the outbox insert returned.
+    expect(enqueue.mock.invocationCallOrder[0]).toBeLessThan(markMessageQueued.mock.invocationCallOrder[0]);
   });
 
   it('secret set + tampered signature → 401 and NO processing', async () => {
@@ -237,14 +265,14 @@ describe('POST /api/whatsapp — signature verification', () => {
     const res = await post(inboundBody, sign(inboundBody) + '00');
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ ok: false });
-    expect(markMessageSeen).not.toHaveBeenCalled();
+    expect(isMessageQueued).not.toHaveBeenCalled();
   });
 
   it('secret set + missing signature header → 401 and NO processing', async () => {
     process.env.META_APP_SECRET = SECRET;
     const res = await post(inboundBody); // no x-hub-signature-256 header
     expect(res.status).toBe(401);
-    expect(markMessageSeen).not.toHaveBeenCalled();
+    expect(isMessageQueued).not.toHaveBeenCalled();
   });
 
   it('secret UNSET → request proceeds (back-compat) and warns', async () => {
@@ -252,7 +280,7 @@ describe('POST /api/whatsapp — signature verification', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await post(inboundBody); // no/garbage signature is irrelevant when unset
     expect(res.status).toBe(200);
-    expect(markMessageSeen).toHaveBeenCalledWith('wamid.TEST1');
+    expect(isMessageQueued).toHaveBeenCalledWith('wamid.TEST1');
     expect(warn).toHaveBeenCalled();
     expect(warn.mock.calls.flat().join(' ')).toContain('META_APP_SECRET');
   });
@@ -264,7 +292,7 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
     const res = await post(statusBody('failed', { code: 131056, title: 'Too many messages' }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(markMessageSeen).not.toHaveBeenCalled(); // status path never reaches dedup
+    expect(isMessageQueued).not.toHaveBeenCalled(); // status path never reaches dedup
     expect(enqueue).not.toHaveBeenCalled();
     const logged = warn.mock.calls.flat().join(' ');
     expect(logged).toContain('131056');
@@ -336,20 +364,22 @@ describe('POST /api/whatsapp — message-status callbacks (Item 4)', () => {
 });
 
 describe('POST /api/whatsapp — STOP / START consent short-circuit (Item 4)', () => {
-  it('inbound "STOP" → setOptedOut, confirmation sent, agent NOT run', async () => {
+  it('inbound "STOP" → setOptedOut, ONE essential confirmation row, agent NOT run', async () => {
     const res = await post(textBody('STOP', 'wamid.STOP1'));
     expect(res.status).toBe(200);
     expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
-    expect(enqueue).not.toHaveBeenCalled();
+    expectReply('15551230000', OPT_OUT_REPLY, 'wamid.STOP1');
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    // The opt-out lands BEFORE the confirmation row exists.
+    expect(setOptedOut.mock.invocationCallOrder[0]).toBeLessThan(enqueue.mock.invocationCallOrder[0]);
   });
 
-  it('inbound "START" → clearOptedOut, confirmation sent, agent NOT run', async () => {
+  it('inbound "START" → clearOptedOut, ONE essential confirmation row, agent NOT run', async () => {
     const res = await post(textBody('start', 'wamid.START1'));
     expect(res.status).toBe(200);
     expect(clearOptedOut).toHaveBeenCalledWith('default', '15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
-    expect(enqueue).not.toHaveBeenCalled();
+    expectReply('15551230000', OPT_IN_REPLY, 'wamid.START1');
+    expect(enqueue).toHaveBeenCalledTimes(1);
   });
 
   it('a normal "hi" still runs the agent (regression — STOP detection is exact-only)', async () => {
@@ -378,11 +408,11 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     });
     const res = await post(textBody('send $20', 'wamid.OPTEDOUT1'));
     expect(res.status).toBe(200);
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER, undefined);
-    expect(enqueue).not.toHaveBeenCalled();
+    expectReply('15551230000', OPT_OUT_REMINDER, 'wamid.OPTEDOUT1');
+    expect(enqueue).toHaveBeenCalledTimes(1); // the reminder only — no agent.turn
     // Not a fresh STOP — no setOptedOut, no fresh OPT_OUT_REPLY confirmation.
     expect(setOptedOut).not.toHaveBeenCalled();
-    expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY);
+    expect(repliesWith(OPT_OUT_REPLY)).toHaveLength(0);
   });
 
   it('an opted-out customer can still resume with START (clears opt-out, agent NOT run)', async () => {
@@ -394,10 +424,10 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     const res = await post(textBody('START', 'wamid.RESUME1'));
     expect(res.status).toBe(200);
     expect(clearOptedOut).toHaveBeenCalledWith('default', '15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_IN_REPLY, undefined);
-    expect(enqueue).not.toHaveBeenCalled();
+    expectReply('15551230000', OPT_IN_REPLY, 'wamid.RESUME1');
+    expect(enqueue).toHaveBeenCalledTimes(1);
     // The state-skip reminder must NOT fire for a resume keyword.
-    expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
+    expect(repliesWith(OPT_OUT_REMINDER)).toHaveLength(0);
   });
 
   it('an opted-IN customer sending a normal message → agent IS run, NO reminder', async () => {
@@ -408,8 +438,8 @@ describe('POST /api/whatsapp — opt-out STATE suppression (Fix 1)', () => {
     });
     const res = await post(textBody('send $20', 'wamid.OPTEDIN1'));
     expect(res.status).toBe(200);
-    expect(enqueue).toHaveBeenCalled();
-    expect(sendText).not.toHaveBeenCalledWith('15551230000', OPT_OUT_REMINDER);
+    expect(enqueue).toHaveBeenCalledWith('agent.turn', expect.anything(), { dedupeKey: 'wamid:wamid.OPTEDIN1' });
+    expect(repliesWith(OPT_OUT_REMINDER)).toHaveLength(0);
   });
 });
 
@@ -472,11 +502,11 @@ describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret
     getIntegrations.mockResolvedValue(ACME_WITH_SECRET);
     const body = textBody('hi', 'wamid.R1', '15551230000', { phoneNumberId: 'pn_acme' });
     expect((await post(body, sign(body, SECRET))).status).toBe(401); // platform-signed ⇒ never the partner's event
-    expect(markMessageSeen).not.toHaveBeenCalled();
+    expect(isMessageQueued).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
     const res = await post(body, sign(body, 'acme_secret'));
     expect(res.status).toBe(200);
-    expect(markMessageSeen).toHaveBeenCalledWith('wamid.R1');
+    expect(isMessageQueued).toHaveBeenCalledWith('wamid.R1');
     expect(enqueue).toHaveBeenCalledWith(
       'agent.turn',
       expect.objectContaining({ phone: '15551230000', routedPartnerId: 'acme' }),
@@ -507,7 +537,7 @@ describe('shared webhook: a ROUTED event is verified with THAT partner\'s secret
     const body = textBody('hi', 'wamid.R2', '15551230000', { phoneNumberId: 'pn_acme' });
     expect((await post(body, sign(body, SECRET))).status).toBe(401);
     expect((await post(body, sign(body, 'acme_secret'))).status).toBe(401);
-    expect(markMessageSeen).not.toHaveBeenCalled();
+    expect(isMessageQueued).not.toHaveBeenCalled();
     expect(enqueue).not.toHaveBeenCalled();
   });
 
@@ -525,7 +555,7 @@ describe('POST /api/whatsapp — per-sender inbound throttle (Program-Fix 34A: 2
   // Pin the clock to the START of a minute (and of a UTC day) so the burst never straddles a window.
   const T0 = Date.UTC(2026, 8, 22, 0, 0, 0);
   const agentTurns = () => (enqueue.mock.calls as unknown[][]).filter((c) => c[0] === 'agent.turn');
-  const slowNotes = () => (sendText.mock.calls as unknown[][]).filter((c) => c[1] === SLOW_DOWN_REPLY);
+  const slowNotes = () => repliesWith(SLOW_DOWN_REPLY).map((c) => [c[1].to, c[1].body]);
 
   it('the 21st text in a minute enqueues NO agent.turn and sends ONE slow-down note; the 22nd sends none', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(T0);
@@ -560,7 +590,7 @@ describe('POST /api/whatsapp — per-sender inbound throttle (Program-Fix 34A: 2
     for (let i = 1; i <= 21; i++) await post(textBody(`m${i}`, `wamid.S${i}`));
     await post(textBody('STOP', 'wamid.STOPX'));
     expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
+    expectReply('15551230000', OPT_OUT_REPLY, 'wamid.STOPX');
   });
 });
 
@@ -589,7 +619,7 @@ function mediaBody(type: string, id: string, from = '15551230000', opts: { phone
   });
 }
 const OPTED_OUT = { senderPhone: '15551230000', optInAt: '2026-01-01T00:00:00Z', optedOutAt: '2026-05-01T00:00:00Z' };
-const reminders = () => (sendText.mock.calls as unknown[][]).filter((c) => c[1] === OPT_OUT_REMINDER);
+const reminders = () => repliesWith(OPT_OUT_REMINDER);
 const agentTurnRows = () => (enqueue.mock.calls as unknown[][]).filter((c) => c[0] === 'agent.turn');
 
 describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-Fix 49A)', () => {
@@ -605,7 +635,7 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
     getCustomer.mockResolvedValue(OPTED_OUT);
     await post(mediaBody('image', 'wamid.IMGOUT'));
     expect(reminders()).toHaveLength(1);
-    expect(sendText).not.toHaveBeenCalledWith('15551230000', MEDIA_REPLY, undefined);
+    expect(repliesWith(MEDIA_REPLY)).toHaveLength(0);
     expect(agentTurnRows()).toHaveLength(0);
   });
 
@@ -640,11 +670,9 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
     const body = textBody('hi', 'wamid.BRAND1', '15551230000', { phoneNumberId: 'pn_acme' });
     await post(body, sign(body, 'acme_secret'));
     expect(getPartner).toHaveBeenCalledWith('acme');
-    expect(sendText).toHaveBeenCalledWith(
-      '15551230000',
-      "You're unsubscribed from Acme Remit. Reply START to resume.",
-      { phoneNumberId: 'pn_acme', token: 't' },
-    );
+    // The row names the routed tenant; the worker resolves ITS creds at drain
+    // time, so the reminder leaves from acme's own number.
+    expectReply('15551230000', "You're unsubscribed from Acme Remit. Reply START to resume.", 'wamid.BRAND1', 'acme');
   });
 
   it('STOP from unknown phone → row created without opt-in, then optedOutAt set', async () => {
@@ -654,14 +682,14 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
     expect(setOptedOut).toHaveBeenCalledWith('default', '15557770000');
     expect(ensureCustomer.mock.invocationCallOrder[0]).toBeLessThan(setOptedOut.mock.invocationCallOrder[0]);
     expect(upsertOnFirstInbound).not.toHaveBeenCalled(); // never stamps opt-in on a STOP
-    expect(sendText).toHaveBeenCalledWith('15557770000', OPT_OUT_REPLY, undefined);
+    expectReply('15557770000', OPT_OUT_REPLY, 'wamid.STOPNEW');
     expect(agentTurnRows()).toHaveLength(0);
   });
 
   it('a template quick-reply "Unsubscribe" opts out', async () => {
     await post(quickReplyBody('Unsubscribe', 'Unsubscribe', 'wamid.QR1'));
     expect(setOptedOut).toHaveBeenCalledWith('default', '15551230000');
-    expect(sendText).toHaveBeenCalledWith('15551230000', OPT_OUT_REPLY, undefined);
+    expectReply('15551230000', OPT_OUT_REPLY, 'wamid.QR1');
     expect(agentTurnRows()).toHaveLength(0);
   });
 
@@ -672,23 +700,32 @@ describe('POST /api/whatsapp — opt-out applies to EVERY inbound kind (Program-
 });
 
 describe('POST /api/whatsapp — media gets an honest reply (Program-Fix 49A, whatsapp-08)', () => {
-  it('image → one reply, no turn, deduped by wamid', async () => {
+  it('image → one reply row, no turn, deduped by wamid', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await post(mediaBody('image', 'wamid.IMG1'));
-    expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith('15551230000', MEDIA_REPLY, undefined);
+    expect(replyRows()).toHaveLength(1);
+    expectReply('15551230000', MEDIA_REPLY, 'wamid.IMG1');
     expect(agentTurnRows()).toHaveLength(0);
     expect(warn.mock.calls.flat().join(' ')).toContain('whatsapp.unsupported_type');
-    // Meta redelivers the same wamid → markMessageSeen says "seen" → nothing more.
-    markMessageSeen.mockResolvedValue(false);
+    // Meta redelivers the same wamid → the msgq: mark says "queued" → nothing more.
+    isMessageQueued.mockResolvedValue(true);
     await post(mediaBody('image', 'wamid.IMG1'));
-    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(replyRows()).toHaveLength(1);
+  });
+
+  it('a redelivery that misses the fast skip re-attempts the SAME wamid key (the unique index makes it a no-op) — 200', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await post(mediaBody('image', 'wamid.IMG2'));
+    enqueue.mockResolvedValue(false); // ON CONFLICT DO NOTHING
+    const res = await post(mediaBody('image', 'wamid.IMG2'));
+    expect(res.status).toBe(200);
+    expect(replyRows().map((c) => c[2].dedupeKey)).toEqual(['wamid:wamid.IMG2', 'wamid:wamid.IMG2']);
   });
 
   it.each(['audio', 'document', 'video', 'sticker', 'location', 'contacts'])('%s → the media reply, no turn', async (type) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     await post(mediaBody(type, `wamid.M_${type}`));
-    expect(sendText).toHaveBeenCalledWith('15551230000', MEDIA_REPLY, undefined);
+    expectReply('15551230000', MEDIA_REPLY, `wamid.M_${type}`);
     expect(agentTurnRows()).toHaveLength(0);
   });
 
@@ -699,14 +736,14 @@ describe('POST /api/whatsapp — media gets an honest reply (Program-Fix 49A, wh
     getIntegrations.mockResolvedValue({ kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't', appSecret: 'acme_secret' } });
     const body = mediaBody('image', 'wamid.IMGR', '15551230000', { phoneNumberId: 'pn_acme' });
     await post(body, sign(body, 'acme_secret'));
-    expect(sendText).toHaveBeenCalledWith('15551230000', MEDIA_REPLY, { phoneNumberId: 'pn_acme', token: 't' });
+    expectReply('15551230000', MEDIA_REPLY, 'wamid.IMGR', 'acme');
   });
 
   it('a reaction gets no reply and no turn', async () => {
     await post(JSON.stringify({ entry: [{ changes: [{ value: { messages: [
       { from: '15551230000', id: 'wamid.REACT', type: 'reaction', reaction: { message_id: 'x', emoji: '👍' } },
     ] } }] }] }));
-    expect(sendText).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
     expect(agentTurnRows()).toHaveLength(0);
   });
 
@@ -714,9 +751,106 @@ describe('POST /api/whatsapp — media gets an honest reply (Program-Fix 49A, wh
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 8, 22, 0, 0, 0));
     for (let i = 1; i <= 20; i++) await post(textBody(`m${i}`, `wamid.MT${i}`));
-    sendText.mockClear();
     await post(mediaBody('image', 'wamid.MT21'));
-    expect(sendText).not.toHaveBeenCalledWith('15551230000', MEDIA_REPLY, undefined);
+    expect(repliesWith(MEDIA_REPLY)).toHaveLength(0);
   });
 });
 
+
+// ── R1: every message is durable; the 500 path is an infrastructure allowlist ──
+describe('POST /api/whatsapp — failure handling (R1)', () => {
+  const infra = () => Object.assign(new Error('timeout exceeded when trying to connect'), { name: 'Error' });
+
+  it('an infrastructure error on the durable insert → 500 {ok:false}, logs whatsapp.inbound_failed (error name only), no mark', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    enqueue.mockRejectedValueOnce(infra());
+    const res = await post(textBody('hi', 'wamid.INFRA1'));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false });
+    expect(markMessageQueued).not.toHaveBeenCalled();
+    const logged = warn.mock.calls.flat().join(' ');
+    expect(logged).toContain('whatsapp.inbound_failed');
+    expect(logged).not.toContain('timeout exceeded'); // the name, never the message
+    expect(logged).not.toContain('15551230000');
+    // Meta's retry: exactly one agent.turn attempt with the same key, 200.
+    const retry = await post(textBody('hi', 'wamid.INFRA1'));
+    expect(retry.status).toBe(200);
+    expect(agentTurnRows().map((c) => (c[2] as { dedupeKey: string }).dedupeKey)).toEqual(['wamid:wamid.INFRA1', 'wamid:wamid.INFRA1']);
+    expect(markMessageQueued).toHaveBeenCalledWith('wamid.INFRA1');
+  });
+
+  it('an infrastructure error on a STOP confirmation → 500 (the retry confirms)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    enqueue.mockRejectedValueOnce(infra());
+    expect((await post(textBody('STOP', 'wamid.STOPI'))).status).toBe(500);
+    expect((await post(textBody('STOP', 'wamid.STOPI'))).status).toBe(200);
+    expect(repliesWith(OPT_OUT_REPLY).map((c) => c[2].dedupeKey)).toEqual(['wamid:wamid.STOPI', 'wamid:wamid.STOPI']);
+  });
+
+  it('a NON-infrastructure failure (poison body) → 200, one whatsapp.inbound_dropped audit row (keyed ref + error name only)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    enqueue.mockRejectedValueOnce(Object.assign(new Error('unsupported Unicode escape sequence'), { code: '22P05' }));
+    const res = await post(textBody('bad body', 'wamid.POISON'));
+    expect(res.status).toBe(200);
+    expect(auditRecord).toHaveBeenCalledWith({
+      partnerId: 'default',
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.inbound_dropped',
+      subjectId: waMessageRef('wamid.POISON'),
+      meta: { reason: 'processing_error', error: 'Error' },
+    });
+    expect(markMessageQueued).not.toHaveBeenCalled();
+  });
+
+  it('two messages in one POST → both processed', async () => {
+    const body = JSON.stringify({ entry: [{ changes: [{ value: { messages: [
+      { from: '15551230000', id: 'wamid.B1', type: 'text', text: { body: 'one' } },
+      { from: '15551230000', id: 'wamid.B2', type: 'text', text: { body: 'two' } },
+    ] } }] }] });
+    expect((await post(body)).status).toBe(200);
+    expect(agentTurnRows().map((c) => (c[2] as { dedupeKey: string }).dedupeKey)).toEqual(['wamid:wamid.B1', 'wamid:wamid.B2']);
+  });
+});
+
+describe('shared webhook: per-change tenant rule (R1, cross-tenant regression)', () => {
+  const ACME = { kyc: {}, payment: {}, whatsapp: { phoneNumberId: 'pn_acme', token: 't', appSecret: 'acme_secret' } };
+  const twoNumbers = (first: string, second: string) => JSON.stringify({ entry: [
+    { changes: [{ value: { metadata: { phone_number_id: first }, messages: [{ from: '15551230000', id: 'wamid.E1', type: 'text', text: { body: 'hi' } }] } }] },
+    { changes: [{ value: { metadata: { phone_number_id: second },
+      messages: [{ from: '15559990000', id: 'wamid.E2', type: 'text', text: { body: 'STOP' } }],
+      statuses: [{ id: 'wamid.ES', recipient_id: '15559990000', status: 'failed', errors: [{ code: 1, title: 't' }] }] } }] },
+  ] });
+  beforeEach(() => {
+    process.env.META_APP_SECRET = SECRET;
+    partnerForPhoneNumberId.mockImplementation(async (pnid: string) => (pnid === 'pn_acme' ? 'acme' : pnid === 'pn_beta' ? 'beta' : null));
+    getIntegrations.mockResolvedValue(ACME);
+  });
+
+  it('signed by A with a change for B\'s number → B\'s change is skipped: no B customer write, turn, reply or audit row', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const body = twoNumbers('pn_acme', 'pn_beta');
+    const res = await post(body, sign(body, 'acme_secret'));
+    expect(res.status).toBe(200);
+    expect(agentTurnRows()).toHaveLength(1);
+    expect(agentTurnRows()[0][1]).toMatchObject({ phone: '15551230000', routedPartnerId: 'acme' });
+    expect(replyRows()).toHaveLength(0);
+    expect(setOptedOut).not.toHaveBeenCalled();
+    expect(ensureCustomer).not.toHaveBeenCalled();
+    for (const fn of [getCustomer, upsertOnFirstInbound]) {
+      expect(fn.mock.calls.every((c) => c[0] === 'acme' && c[1] === '15551230000')).toBe(true);
+    }
+    expect(auditRecord).not.toHaveBeenCalled();
+    expect(warn.mock.calls.flat().join(' ')).toContain('whatsapp.pnid_mismatch');
+  });
+
+  it('the shared (unrouted) number never runs a change addressed to a partner\'s number', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const body = twoNumbers('pn_shared', 'pn_acme');
+    const res = await post(body, sign(body, SECRET));
+    expect(res.status).toBe(200);
+    expect(agentTurnRows()).toHaveLength(1);
+    expect(agentTurnRows()[0][1]).toMatchObject({ phone: '15551230000', routedPartnerId: null });
+    expect(setOptedOut).not.toHaveBeenCalled();
+  });
+});

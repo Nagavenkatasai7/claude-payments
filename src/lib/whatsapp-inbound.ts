@@ -1,4 +1,4 @@
-import { parseIncoming, parseStatusEvent, sendText, type WaCreds } from '@/lib/whatsapp';
+import { parseWebhook, type IncomingMessage, type WebhookChange, type WebhookStatusEvent, type DroppedMessage } from '@/lib/whatsapp';
 import {
   isOptOutKeyword,
   isResumeKeyword,
@@ -8,11 +8,12 @@ import {
   MEDIA_REPLY,
 } from '@/lib/consent';
 import { parseButtonId } from '@/lib/whatsapp-buttons';
-import { getStore } from '@/lib/store';
+import { getStore, type Store } from '@/lib/store';
 import { getCustomerStore } from '@/lib/customer-store';
 import { deriveTier } from '@/lib/tier-rules';
 import { getDb } from '@/db/client';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { isInfraError } from '@/lib/infra-error';
 import { pokeWorker } from '@/lib/outbox';
 import { logWarn, scrub } from '@/lib/log';
 import { createAuditRepo } from '@/db/repos/aux-repos';
@@ -27,19 +28,34 @@ import type { ButtonTap, PartnerId, TurnContext } from '@/lib/types';
 
 // whatsapp-inbound — the shared post-signature inbound pipeline (WL2). Both the
 // legacy shared webhook (/api/whatsapp) and the per-partner webhook
-// (/api/whatsapp/[partnerId]) run THIS after their own signature gate:
-//   status events → parse → dedup → consent → customer resolve/create UNDER THE
-//   ROUTED TENANT → agent turn ENQUEUED (durable outbox).
+// (/api/whatsapp/[partnerId]) run THIS after their own signature gate, for
+// EVERY change and EVERY message in the POST (R1):
+//   status events → fast skip (msgq:) → consent → customer resolve/create UNDER
+//   THE ROUTED TENANT → exactly ONE durable outbox row per message, keyed
+//   `wamid:{id}` (an agent.turn, or a whatsapp.text reply) → the Redis marks.
+// R1 durability rule: the `outbox_dedupe` unique index IS the dedup. The Redis
+// marks are written only AFTER the insert returned, so a failure anywhere
+// before it leaves nothing that would make a retry skip the message. No reply
+// is sent from inside the request: replies are outbox rows the worker sends.
+// Every write before the insert is convergent (upserts / SETs), so a retry
+// repeats them harmlessly.
 // A tenant-signed webhook proves the TENANT, not the sender (fix 1 / F44): every
 // customer read/write below is keyed (tenant, phone), where tenant is the partner
 // that OWNS the receiving number and the shared/default number IS the default
 // tenant. An existing row under another partner is never touched or moved.
 // `waCreds` are that partner's outbound credentials so every reply leaves FROM
-// the number the customer messaged.
+// the number the customer messaged — replies resolve those creds at drain time
+// from the row's partnerId (never a token in the payload).
 
 export interface InboundContext {
   routedPartnerId: PartnerId | null;
-  waCreds?: WaCreds;
+  /**
+   * R1 per-change tenant rule, supplied by the route: may a change addressed to
+   * this receiving number (metadata.phone_number_id; null when absent) run
+   * under `routedPartnerId`? A rejected change is skipped entirely (logged as
+   * `whatsapp.pnid_mismatch`). Absent ⇒ every change is accepted.
+   */
+  acceptPnid?: (pnid: string | null) => Promise<boolean>;
 }
 
 function synthesizeButtonText(tap: ButtonTap): string {
@@ -82,64 +98,149 @@ async function tenantBrand(tenantId: PartnerId): Promise<string> {
   }
 }
 
-/** Returns the JSON-able response body; the route wraps it in NextResponse. */
-export async function processInboundWebhook(
-  body: unknown,
-  ctx: InboundContext,
-): Promise<{ ok: boolean }> {
-  const { routedPartnerId, waCreds } = ctx;
+/** R1: one `whatsapp.inbound_no_phone` audit row per (partner, hour) at most. */
+export const NO_PHONE_AUDIT_WINDOW_SEC = 60 * 60;
 
-  // Message-STATUS callbacks (sent/delivered/read/failed). Meta delivers these as
-  // a `statuses` event with no `messages`. We don't map wamid → transfer yet, so
-  // the deliverable is structured logging. Runs AFTER the signature gate.
-  const statusEvents = parseStatusEvent(body);
-  if (statusEvents) {
-    for (const ev of statusEvents) {
-      // Program-Fix 26: the message id is never logged or stored raw — only its
-      // keyed reference (src/lib/wa-message-ref.ts).
-      const msgRef = waMessageRef(ev.wamid);
-      if (ev.status === 'failed') {
-        // Stage 3: structured + PII-scrubbed (recipientId is a phone number).
-        logWarn('whatsapp.delivery_failed', `code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`, {
-          recipient: ev.recipientId,
-          msgRef: msgRef.slice(0, 16),
-        });
-        // Program-Fix 26: persist the failure (no wamid→transfer map yet). Meta's
-        // code + title only — NEVER the recipient number, not even masked; the
-        // subject is the keyed message reference, never the raw id. A DB
-        // error must not turn this webhook into a non-200 (Meta would redeliver).
-        try {
-          await createAuditRepo(getDb()).record({
-            partnerId: routedPartnerId ?? DEFAULT_PARTNER_ID,
-            actor: 'whatsapp',
-            actorType: 'system',
-            action: 'whatsapp.delivery_failed',
-            subjectId: msgRef,
-            meta: {
-              code: ev.errorCode ?? null,
-              title: ev.errorTitle ? scrub(ev.errorTitle).slice(0, 200) : null,
-            },
-          });
-        } catch (err) {
-          logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
-        }
-      } else {
-        console.debug(`WhatsApp status ${ev.status} — msgRef=${msgRef.slice(0, 16)}`);
-      }
-    }
-    return { ok: true };
+/** A failed-delivery status: a scrubbed log line + one audit row (Program-Fix 26). */
+async function recordStatus(ev: WebhookStatusEvent, tenantId: PartnerId): Promise<void> {
+  // Program-Fix 26: the message id is never logged or stored raw — only its
+  // keyed reference (src/lib/wa-message-ref.ts).
+  const msgRef = waMessageRef(ev.wamid);
+  if (ev.status !== 'failed') {
+    console.debug(`WhatsApp status ${ev.status} — msgRef=${msgRef.slice(0, 16)}`);
+    return;
+  }
+  // Stage 3: structured + PII-scrubbed (recipientId is a phone number).
+  logWarn('whatsapp.delivery_failed', `code=${ev.errorCode ?? 'n/a'} (${ev.errorTitle ?? ''})`, {
+    recipient: ev.recipientId,
+    msgRef: msgRef.slice(0, 16),
+  });
+  // Program-Fix 26: persist the failure (no wamid→transfer map yet). Meta's
+  // code + title only — NEVER the recipient number, not even masked; the
+  // subject is the keyed message reference, never the raw id. A DB error must
+  // not turn this webhook into a non-200 (Meta would redeliver).
+  try {
+    await createAuditRepo(getDb()).record({
+      partnerId: tenantId,
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.delivery_failed',
+      subjectId: msgRef,
+      meta: {
+        code: ev.errorCode ?? null,
+        title: ev.errorTitle ? scrub(ev.errorTitle).slice(0, 200) : null,
+      },
+    });
+  } catch (err) {
+    logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
+  }
+}
+
+/**
+ * R1: a message with no phone (`from` omitted — a BSUID-only sender) cannot be
+ * served yet: every identity key is the phone, and the send-to-BSUID shape is
+ * unverified. It is recorded, never silently lost: one audit row per (tenant,
+ * hour) — SET NX dedupe keeps a flood out of the DB — with booleans only,
+ * never the raw BSUID or username. Best effort: a failure is logged, never
+ * turned into a non-200 (a retry could not serve the message either).
+ */
+async function recordNoPhone(d: DroppedMessage, tenantId: PartnerId): Promise<void> {
+  logWarn('whatsapp.inbound_no_phone', 'message without a phone number — not processed', { tenant: tenantId });
+  try {
+    const hour = Math.floor(Date.now() / (NO_PHONE_AUDIT_WINDOW_SEC * 1000));
+    const first = await getRedis().set(`wanophone:${tenantId}:${hour}`, '1', { ex: NO_PHONE_AUDIT_WINDOW_SEC, nx: true });
+    if (first === null) return;
+    await createAuditRepo(getDb()).record({
+      partnerId: tenantId,
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.inbound_no_phone',
+      ...(d.messageId ? { subjectId: waMessageRef(d.messageId) } : {}),
+      meta: { hasBsuid: d.hasBsuid, hasUsername: d.hasUsername },
+    });
+    // R2 hook: recordChannelHealth(partnerId, 'no_phone')
+  } catch (err) {
+    logWarn('whatsapp.inbound_no_phone', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
+  }
+}
+
+/**
+ * R1: a message whose processing failed for a reason retrying cannot fix (a
+ * poison body, a validation error). The webhook acknowledges it (200) so Meta
+ * does not redeliver it for days, and records it here: the keyed message
+ * reference and the error NAME only — never text, phone or error message.
+ */
+async function recordDropped(messageId: string, tenantId: PartnerId, err: unknown): Promise<void> {
+  const error = err instanceof Error ? err.name : 'error';
+  logWarn('whatsapp.inbound_dropped', 'message not processed — acknowledged', { tenant: tenantId, error });
+  try {
+    await createAuditRepo(getDb()).record({
+      partnerId: tenantId,
+      actor: 'whatsapp',
+      actorType: 'system',
+      action: 'whatsapp.inbound_dropped',
+      subjectId: waMessageRef(messageId),
+      meta: { reason: 'processing_error', error },
+    });
+  } catch (auditErr) {
+    logWarn('whatsapp.inbound_dropped', 'audit insert failed', { error: auditErr instanceof Error ? auditErr.name : 'error' });
+  }
+}
+
+/** Swallowing wrapper for a Redis write that happens AFTER the durable insert. */
+async function afterInsert(what: string, fn: () => Promise<unknown>, tenantId: PartnerId): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    logWarn('whatsapp.inbound', `${what} failed after the durable write`, { tenant: tenantId, error: err instanceof Error ? err.name : 'error' });
+  }
+}
+
+interface MessageDeps {
+  store: Store;
+  outbox: ReturnType<typeof createOutboxRepo>;
+  routedPartnerId: PartnerId | null;
+  tenantId: PartnerId;
+}
+
+/**
+ * The ONE durable effect of a reply-only branch: an essential whatsapp.text
+ * row keyed by the inbound wamid (`essential` so the worker's opt-out gate
+ * can never suppress a STOP confirmation). A routed tenant's row carries its
+ * partnerId, exactly as the worker stamps agent-turn replies, so the reply
+ * leaves from the number the customer messaged; creds resolve at drain time.
+ */
+function enqueueReply(deps: MessageDeps, incoming: IncomingMessage, body: string): Promise<boolean> {
+  return deps.outbox.enqueue(
+    'whatsapp.text',
+    {
+      to: incoming.from,
+      body,
+      category: 'essential',
+      ...(deps.routedPartnerId ? { partnerId: deps.routedPartnerId } : {}),
+    },
+    { dedupeKey: `wamid:${incoming.messageId}` },
+  );
+}
+
+/**
+ * Process ONE inbound message. Returns true when a durable row now exists for
+ * it (inserted here or already present); false for an intentional no-row
+ * outcome (fast skip, throttled without a note, reminder not due). Throws on
+ * any failure — the caller classifies it.
+ */
+async function processMessage(deps: MessageDeps, incoming: IncomingMessage): Promise<boolean> {
+  const { store, outbox, routedPartnerId, tenantId } = deps;
+
+  // Fast skip: `msgq:` exists only once the durable row does. A Redis error
+  // here is not a reason to fail — the unique index still dedups.
+  try {
+    if (await store.isMessageQueued(incoming.messageId)) return false;
+  } catch {
+    /* fall through to the DB, which is the real dedup */
   }
 
-  const incoming = parseIncoming(body);
-  if (!incoming) return { ok: true };
-
-  const store = getStore();
-  const isNew = await store.markMessageSeen(incoming.messageId);
-  if (!isNew) return { ok: true };
-
   const customerStore = getCustomerStore(store);
-  // The shared number (routedPartnerId null) is the default tenant's channel.
-  const tenantId: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
 
   // STOP / START consent short-circuit (order intentional — see consent.ts).
   // Keywords are TEXT only (a template quick-reply parses to text, so its
@@ -149,8 +250,8 @@ export async function processInboundWebhook(
   if (incoming.kind === 'text') {
     if (isResumeKeyword(incoming.text)) {
       await customerStore.clearOptedOut(tenantId, incoming.from);
-      await sendText(incoming.from, OPT_IN_REPLY, waCreds);
-      return { ok: true };
+      await enqueueReply(deps, incoming, OPT_IN_REPLY);
+      return true;
     }
     if (isOptOutKeyword(incoming.text)) {
       // Program-Fix 49A (whatsapp-10c): a STOP from a phone with no row must
@@ -159,8 +260,8 @@ export async function processInboundWebhook(
       // opt-out lands on it. An existing row is untouched by ensureCustomer.
       await customerStore.ensureCustomer(tenantId, incoming.from);
       await customerStore.setOptedOut(tenantId, incoming.from);
-      await sendText(incoming.from, OPT_OUT_REPLY, waCreds);
-      return { ok: true };
+      await enqueueReply(deps, incoming, OPT_OUT_REPLY);
+      return true;
     }
   }
   const existing = await customerStore.getCustomer(tenantId, incoming.from);
@@ -168,48 +269,41 @@ export async function processInboundWebhook(
     // The rate check runs BEFORE the brand read, so a burst of taps costs one
     // Redis INCR each and nothing else.
     if (await reminderAllowed(tenantId, incoming.from)) {
-      await sendText(incoming.from, optOutReminder(await tenantBrand(tenantId)), waCreds);
+      await enqueueReply(deps, incoming, optOutReminder(await tenantBrand(tenantId)));
+      return true;
     }
-    return { ok: true };
+    return false;
   }
 
   // Program-Fix 34A: per-(tenant, phone) inbound throttle — 20 a minute, 300 a
-  // day. AFTER consent (STOP/START always work) and BEFORE any enqueue: over
-  // the limit nothing is queued, and one short note goes out per window. The
-  // throttle never throws (fails open); the note send has its own catch so a
-  // Meta error can never turn a refused message back into a queued turn.
+  // day. AFTER consent (STOP/START always work) and BEFORE any agent turn:
+  // over the limit no turn is queued, and one short note is queued per
+  // window. The throttle never throws (fails open).
   const throttle = await checkInboundThrottle(getRedis(), tenantId, incoming.from);
   if (!throttle.allowed) {
     logWarn('whatsapp.throttled', `inbound over the ${throttle.window} limit — not enqueued`, { tenant: tenantId });
     if (throttle.notify) {
-      try {
-        await sendText(incoming.from, SLOW_DOWN_REPLY, waCreds);
-      } catch {
-        logWarn('whatsapp.throttled', 'slow-down note failed to send', { tenant: tenantId });
-      }
+      await enqueueReply(deps, incoming, SLOW_DOWN_REPLY);
+      return true;
     }
-    return { ok: true };
+    return false;
   }
 
   // Program-Fix 49A (whatsapp-08): media the bot cannot read gets ONE honest
-  // reply (the wamid dedup above makes a redelivery silent) and no agent turn.
-  // Never downloaded. A direct send like the other consent replies; a Meta
-  // error is logged, never thrown (Meta would redeliver a non-200).
+  // reply (the wamid dedupe key makes a redelivery silent) and no agent turn.
+  // Never downloaded.
   if (incoming.kind === 'unsupported') {
     logWarn('whatsapp.unsupported_type', incoming.mediaType, { tenant: tenantId });
-    try {
-      await sendText(incoming.from, MEDIA_REPLY, waCreds);
-    } catch {
-      logWarn('whatsapp.unsupported_type', 'media reply failed to send', { tenant: tenantId });
-    }
-    return { ok: true };
+    await enqueueReply(deps, incoming, MEDIA_REPLY);
+    return true;
   }
 
   // D12: the "is this a new conversation" marker is per (tenant, phone) too —
-  // a customer of another tenant messaging THIS number starts fresh here.
+  // a customer of another tenant messaging THIS number starts fresh here. The
+  // marker is written AFTER the insert (below), so a retried message still
+  // sees the conversation as new.
   const lastInboundAt = await store.getLastInboundAt(tenantId, incoming.from);
   const isNewConversation = lastInboundAt === null;
-  await store.recordInboundNow(tenantId, incoming.from);
 
   // Resolve/create the customer under the ROUTED tenant only — never re-home.
   const { customer, wasCreated } = await customerStore.upsertOnFirstInbound(tenantId, incoming.from);
@@ -249,17 +343,79 @@ export async function processInboundWebhook(
     tierReminderDayOfWindow,
   };
 
-  // Stage 2c: the agent turn is a DURABLE outbox row (wamid-deduped), not a
-  // best-effort after() — a killed function or an Ollama blip can no longer eat
-  // a customer message; the worker retries with backoff. The payload carries
-  // routedPartnerId (NOT the creds themselves) so the worker re-resolves the
-  // partner's WhatsApp credentials at run time — no token copied to rest.
-  await createOutboxRepo(getDb()).enqueue(
+  // Stage 2c: the agent turn is a DURABLE outbox row (wamid-deduped). The
+  // payload carries routedPartnerId (NOT the creds themselves) so the worker
+  // re-resolves the partner's WhatsApp credentials at run time. Never the
+  // BSUID / username: those stay in memory.
+  await outbox.enqueue(
     'agent.turn',
     { phone: incoming.from, messageText, turn, routedPartnerId },
     { dedupeKey: `wamid:${incoming.messageId}` },
   );
-  pokeWorker(); // fast path — the per-minute cron drains it regardless
+  await afterInsert('lastmsg', () => store.recordInboundNow(tenantId, incoming.from), tenantId);
+  return true;
+}
 
+/**
+ * Process a whole signed webhook POST. Returns `{ ok: true }` once every
+ * message has a durable row (inserted or already present) or was deliberately
+ * dropped. THROWS the first infrastructure error (DB / Redis unavailable — see
+ * isInfraError) so the route answers 500 and Meta redelivers; the redelivery
+ * is exactly-once against the `wamid:{id}` unique key. Any other per-message
+ * failure is acknowledged and audited (`whatsapp.inbound_dropped`).
+ */
+export async function processInboundWebhook(
+  body: unknown,
+  ctx: InboundContext,
+): Promise<{ ok: boolean }> {
+  const { routedPartnerId, acceptPnid } = ctx;
+  // The shared number (routedPartnerId null) is the default tenant's channel.
+  const tenantId: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
+  const changes: WebhookChange[] = parseWebhook(body);
+  if (changes.length === 0) return { ok: true };
+
+  const deps: MessageDeps = {
+    store: getStore(),
+    outbox: createOutboxRepo(getDb()),
+    routedPartnerId,
+    tenantId,
+  };
+  let queued = false;
+
+  for (const change of changes) {
+    // R1 per-change tenant rule: a change for another tenant's number never
+    // runs under this route's tenant (its signature proved THIS tenant only).
+    if (acceptPnid && !(await acceptPnid(change.pnid))) {
+      logWarn('whatsapp.pnid_mismatch', 'change for another receiving number skipped', { tenant: tenantId });
+      continue;
+    }
+
+    // Message-STATUS callbacks (sent/delivered/read/failed). We don't map
+    // wamid → transfer yet, so the deliverable is structured logging.
+    for (const ev of change.statuses) await recordStatus(ev, tenantId);
+
+    for (const e of change.errors) {
+      logWarn('whatsapp.webhook_error', `code=${e.code ?? 'n/a'} (${e.title ? scrub(e.title).slice(0, 200) : ''})`, { tenant: tenantId });
+    }
+
+    for (const d of change.dropped) await recordNoPhone(d, tenantId);
+
+    for (const incoming of change.messages) {
+      let durable: boolean;
+      try {
+        durable = await processMessage(deps, incoming);
+      } catch (err) {
+        if (isInfraError(err)) throw err; // → 500; Meta redelivers; the retry is idempotent
+        await recordDropped(incoming.messageId, tenantId, err);
+        continue;
+      }
+      if (durable) {
+        queued = true;
+        await afterInsert('queued mark', () => deps.store.markMessageQueued(incoming.messageId), tenantId);
+      }
+    }
+  }
+
+  if (queued) pokeWorker(); // fast path — the per-minute cron drains it regardless
   return { ok: true };
 }

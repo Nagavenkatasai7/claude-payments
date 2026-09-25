@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyMetaSignature } from '@/lib/providers/meta-signature-verify';
-import { waCredsFrom } from '@/lib/whatsapp-creds';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { processInboundWebhook } from '@/lib/whatsapp-inbound';
+import { respondToInboundFailure } from '@/lib/whatsapp-inbound-response';
 
 // WL2: a partner's DEDICATED Meta webhook — the URL they paste into their own
 // Meta app's webhook configuration. Solves the GET-verification problem (Meta's
@@ -68,9 +68,17 @@ export async function POST(
     body = null;
   }
 
-  const result = await processInboundWebhook(body, {
-    routedPartnerId: partnerId,
-    waCreds: waCredsFrom(loaded.integrations),
-  });
-  return NextResponse.json(result);
+  // R1 per-change tenant rule (A2-13): when this partner has a number
+  // configured, a change addressed to any OTHER receiving number is skipped.
+  const configuredPnid = loaded.integrations.whatsapp.phoneNumberId || null;
+  const acceptPnid = configuredPnid
+    ? async (changePnid: string | null) => changePnid === configuredPnid
+    : undefined;
+
+  try {
+    const result = await processInboundWebhook(body, { routedPartnerId: partnerId, acceptPnid });
+    return NextResponse.json(result);
+  } catch (err) {
+    return respondToInboundFailure(err, partnerId);
+  }
 }

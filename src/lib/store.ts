@@ -417,6 +417,20 @@ export function createStore(redis: RedisLike, db: Db) {
       const result = await redis.set(`msg:${wamid}`, '1', { ex: 600, nx: true });
       return result !== null;
     },
+    // R1: the inbound fast-skip. `msgq:` is set ONLY after the message's
+    // durable outbox row exists, so a hit means "already queued" — never "seen
+    // but maybe lost". The legacy `msg:` key is deliberately NOT read here: an
+    // old build sets it BEFORE its durable write, so its presence proves nothing.
+    async isMessageQueued(wamid: string): Promise<boolean> {
+      return (await redis.get(`msgq:${wamid}`)) !== null;
+    },
+    // Called after the outbox insert returned (inserted or conflict). Also
+    // WRITES `msg:` so an old build overlapping a rolling release skips a
+    // message that is already durable instead of answering it a second time.
+    async markMessageQueued(wamid: string): Promise<void> {
+      await redis.set(`msgq:${wamid}`, '1', { ex: 600 });
+      await redis.set(`msg:${wamid}`, '1', { ex: 600 });
+    },
     // Idempotency for the inline "Approve & Pay" card. The agent.turn outbox row
     // is at-least-once, and the model can call send_approve_picker twice in one
     // turn — both would emit a SECOND card + a NEW pay link. Returns true the
