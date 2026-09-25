@@ -11,6 +11,7 @@ import { expireUnpaidLinks } from '@/lib/stale-money';
 import { scrubOldOutboxPayloads } from '@/lib/outbox-retention';
 import { runOfacSdnLoad } from '@/lib/sanctions/list-loader';
 import { logError } from '@/lib/log';
+import { pokeWorker } from '@/lib/outbox';
 import { getDb } from '@/db/client';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
@@ -162,6 +163,10 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // partner-demo R4: schedules, link expiry and the sanctions-list loader
+  // commit outbox rows above — poke so the gated worker cron drains them now
+  // rather than at the next :17/:47 backstop.
+  pokeWorker();
   return NextResponse.json({
     ok: true,
     fired: result.fired,

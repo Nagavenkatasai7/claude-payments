@@ -53,12 +53,17 @@ export function __limiterAlertMemoSize(): number {
 }
 
 const defaultEnqueue: Enqueue = async (kind, payload, opts) => {
-  const [{ getDb }, { createOutboxRepo }] = await Promise.all([
+  const [{ getDb }, { createOutboxRepo }, { pokeWorker }] = await Promise.all([
     import('@/db/client'),
     import('@/db/repos/outbox-repo'),
+    import('@/lib/outbox'),
   ]);
   // Inline literal payload: tests/outbox-payload-secrets.test.ts checks every enqueue site.
-  return createOutboxRepo(getDb()).enqueue(kind, { message: payload.message }, opts);
+  const fresh = await createOutboxRepo(getDb()).enqueue(kind, { message: payload.message }, opts);
+  // partner-demo R4: the POST poke runs a full drain even though Redis (and so
+  // the gate's due mark) is exactly what is down here.
+  pokeWorker();
+  return fresh;
 };
 
 function messageFor(scope: string, mode: LimiterMode): string {
