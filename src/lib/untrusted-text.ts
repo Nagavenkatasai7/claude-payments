@@ -197,26 +197,18 @@ export function hasOverridePhrase(v: unknown): boolean {
   return s !== '' && OVERRIDE_PHRASE.test(s);
 }
 
-// R6b: MODEL output (not outsider text) gets a broader detector, since the
-// model can write any TLD. A dotted chain names a host when a label after the
-// first is a real TLD from the checked-in IANA snapshot (iana-tlds.ts, ASCII
-// and Unicode forms), so "pay.online" and "пример.рф" are hosts while
-// "Priya.Your" or "hai.Aapka" are not. Fail-closed (R6b round 4): digits
-// before the TLD are no exemption, so "1.20.online" is a host and an amount
-// glued to a TLD word ("4,750.00.Total") is lost. A two-label chain whose first
-// label is a common abbreviation ("Mr.Sharma", "no.12") is not a host. Marks
-// (\p{M}) count as letters so Devanagari labels are whole. hasWebAddress,
-// used on outsider text, is deliberately unchanged.
-const MODEL_LABEL = '[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}-]*[\\p{L}\\p{M}\\p{N}])?';
-const MODEL_CHAIN = new RegExp(
-  `(?<![\\p{L}\\p{M}\\p{N}-])${MODEL_LABEL}(?:\\.${MODEL_LABEL})+(?![\\p{L}\\p{M}\\p{N}-])`,
-  'gu',
-);
+// R6b: MODEL output (not outsider text) gets its own, fail-closed detector,
+// since the model can write any TLD. The whole rule (R6b round 5): a dot that
+// follows ANY non-whitespace character and is followed by a label that is a
+// real TLD from the checked-in IANA snapshot (iana-tlds.ts: ASCII, punycode
+// and Unicode forms) names a host. No exemptions: what comes before the dot
+// (digits, abbreviations, punctuation, another dot) does not matter
+// ("1.20.online", "mr.shop", "x/.online" are hosts). A dot followed by a word
+// that is no TLD ("Priya.Your", "Mr.Sharma", "no.12") is not. A label is a
+// run of letters, marks, digits, "_" or "-". hasWebAddress, used on outsider
+// text, is deliberately unchanged.
+const MODEL_DOT_LABEL = /(?<=\S)\.([\p{L}\p{M}\p{N}_-]+)/gu;
 const TLDS: ReadonlySet<string> = new Set(IANA_TLDS.map((t) => t.normalize('NFKC').toLowerCase()));
-const MODEL_ABBREVIATIONS: ReadonlySet<string> = new Set([
-  ...PATH_RULE_ABBREVIATIONS,
-  'mr', 'mrs', 'ms', 'dr', 'st', 'sr', 'jr', 'rs', 'no', 'vs', 'etc', 'ie', 'eg', 'ph', 'ref', 'ver', 'fig',
-]);
 
 /**
  * Whether MODEL-written text names a host on any real TLD (see the note
@@ -224,15 +216,19 @@ const MODEL_ABBREVIATIONS: ReadonlySet<string> = new Set([
  * Pure.
  */
 export function hasModelHost(v: unknown): boolean {
-  const s = detectForm(v);
-  for (const m of s.matchAll(MODEL_CHAIN)) {
-    const labels = m[0].split('.');
-    for (let i = 1; i < labels.length; i++) {
-      if (!TLDS.has(labels[i])) continue;
-      const before = labels.slice(0, i);
-      if (before.length === 1 && MODEL_ABBREVIATIONS.has(before[0])) continue;
-      return true;
-    }
+  if (typeof v !== 'string') return false;
+  // Model-only fold, fail-closed: no length cap, and control, format and
+  // bracket characters are DELETED (never turned into a space), so nothing
+  // invisible can split a label from its TLD.
+  const s = toWellFormed(v)
+    .normalize('NFKC')
+    .replace(BREAKING_ALL, '')
+    .replace(FORMAT_ALL, '')
+    .replace(MARKERS_ALL, '')
+    .replace(IDEOGRAPHIC_DOTS, '.')
+    .toLowerCase();
+  for (const m of s.matchAll(MODEL_DOT_LABEL)) {
+    if (TLDS.has(m[1])) return true;
   }
   return false;
 }
@@ -252,9 +248,16 @@ const EDGE_END = /[.,!?;:'"”’…)\]}>*_~]+$/u;
  * included, is kept. Known cost: a missing space before a word ("sent.In")
  * is removed too. Pure.
  */
+/**
+ * A token is a run of anything but VISIBLE whitespace. Unlike \s, this leaves
+ * out U+FEFF (an invisible zero-width no-break space), so it cannot split a
+ * host into two harmless-looking tokens.
+ */
+const MODEL_TOKEN = /[^\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/gu;
+
 export function stripModelHosts(text: string, allowHosts: readonly string[]): string {
   const allow = new Set(allowHosts.map((h) => h.toLowerCase().replace(/^www\./u, '')).filter((h) => h !== ''));
-  return text.replace(/\S+/gu, (token) => {
+  return text.replace(MODEL_TOKEN, (token) => {
     if (!hasWebAddress(token) && !hasModelHost(token)) return token;
     // The RAW token (only lower-cased and edge-trimmed), not the detector's
     // folded form, so a zero-width, soft-hyphen or bracket split never matches.

@@ -562,3 +562,62 @@ describe('R6b round 4: fail-closed, no amount skip', () => {
     expect(stripModelHosts('rate 83.25.Fee $2.99.Total', ALLOW)).toBe('rate 83.25.Fee ');
   });
 });
+
+// R6b fix round 5 (MEDIUM-6): no abbreviation exemption. The rule is now just:
+// any dotted chain whose LATER label is a real IANA TLD (or its punycode) is a
+// host, except the exact allowed bare host.
+describe('R6b round 5: no exemptions', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['max.online', 'Max.Online', 'unit.online', 'ref.bank', 'max.рф', 'max.online/x', 'mr.shop', 'no.bank', 'st.online'])(
+    'strips %s',
+    (tok) => {
+      expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
+    },
+  );
+  it.each(['Mr.Sharma is paid', 'Dr.Rao', 'St.Louis', 'Mon.Fri', 'no.12', 'Sep.25'])('keeps %s (its later label is no TLD)', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  // Property-style: EVERY TLD in the snapshot, in lower and upper case, after
+  // first labels of every shape (letters, digits, amounts, abbreviations,
+  // Unicode, hyphens) is stripped, bare and with a path.
+  const FIRST_LABELS = ['max', 'a', '1', '4,750.00', '0.01', 'mr', 'no', 'ref', 'unit', 'пример', 'पेमेंट', '١٢٣', 'pay-now', 'x1', 'www.pay', 'smartremit.ai', 'evil-', '_x'];
+  it('strips <first>.<tld> for every IANA TLD and every first-label shape', () => {
+    const kept: string[] = [];
+    for (const tld of IANA_TLDS) {
+      for (const first of FIRST_LABELS) {
+        for (const tok of [`${first}.${tld}`, `${first}.${tld.toUpperCase()}`, `${first}.${tld}/x`]) {
+          if (stripModelHosts(`a ${tok} b`, ALLOW) !== 'a  b') kept.push(tok);
+        }
+      }
+    }
+    expect(kept).toEqual([]);
+  });
+  it('the only survivor is the exact allowed bare host', () => {
+    expect(stripModelHosts('a smartremit.ai b', ALLOW)).toBe('a smartremit.ai b');
+    expect(stripModelHosts('a smartremit.ai/x b', ALLOW)).toBe('a  b');
+  });
+});
+
+describe('R6b round 5: nothing invisible or long can hide a host', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['pay\u0001.online', 'pay\u200b.online', 'pay<.online', 'pay\u00ad.online', 'pay。online', 'ｐａｙ．ｏｎｌｉｎｅ'])(
+    'strips %j',
+    (tok) => {
+      expect(stripModelHosts(`a ${tok} b`, ALLOW)).toBe('a  b');
+    },
+  );
+  it('a host at the end of a very long token is still found (no detector cap)', () => {
+    expect(stripModelHosts(`a ${'x'.repeat(5000)}.online b`, ALLOW)).toBe('a  b');
+  });
+});
+
+describe('R6b round 5: any non-space before the dot, and only visible whitespace splits', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(["evil'.online", 'pay+.online', 'x/.online', 'pay%.online', 'pay\ufeff.online', 'pay..online'])('strips %j', (tok) => {
+    expect(stripModelHosts(`a ${tok} b`, ALLOW)).toBe('a  b');
+  });
+  it('a real space before the dot is a sentence break, not a host', () => {
+    expect(stripModelHosts('Sent to Mom . Online banking is fine', ALLOW)).toBe('Sent to Mom . Online banking is fine');
+  });
+});
