@@ -9,6 +9,7 @@ import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createPartnerRepo } from '@/db/repos/partner-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
+import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { drainOnce, ROW_DEADLINE_MS, type WorkerDeps } from '@/lib/outbox-worker';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { EnvKeyProvider, encryptField } from '@/lib/field-crypto';
@@ -2610,5 +2611,148 @@ describe('drainOnce — onClaim hook (partner-demo R4)', () => {
       },
     });
     expect(r.processed).toBe(1);
+  });
+});
+
+describe('drainOnce — agent.turn writes the sealed conversation log + prunes messageText (Partner-Demo R3b)', { retry: 0 }, () => {
+  const P = '15551230000';
+  const outboxRows = async (kind: string) =>
+    ((await db.execute(sql`SELECT id, status, attempts, dedupe_key, payload FROM outbox WHERE kind = ${kind} ORDER BY id`)) as unknown as {
+      rows: Array<{ id: number; status: string; attempts: number; dedupe_key: string | null; payload: Record<string, unknown> }>;
+    }).rows;
+  const logCount = async () =>
+    Number(((await db.execute(sql`SELECT count(*)::int AS n FROM conversation_messages`)) as unknown as { rows: Array<{ n: number }> }).rows[0].n);
+  const makeDue = () => db.execute(sql`UPDATE outbox SET next_attempt_at = now() WHERE status IN ('pending','failed')`);
+  const thread = (partnerId: string) => createConversationLogRepo(db).listThread(partnerId, P);
+
+  it("a routed turn logs ONE inbound + ONE reply under the routed tenant's thread (the customer page's key), and the done row has no messageText", async () => {
+    runAgentTurn.mockResolvedValue('Here is your quote!');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'send $200 to mom', turn: {}, routedPartnerId: 'acme' }, { dedupeKey: 'wamid:r3b1' });
+    const [turn] = await outboxRows('agent.turn');
+    await drainOnce(deps(), 'w1');
+    const t = await thread('acme');
+    expect(t.map((m) => [m.channel, m.direction, m.text])).toEqual([
+      ['wa', 'in', 'send $200 to mom'],
+      ['wa', 'out', 'Here is your quote!'],
+    ]);
+    expect(t.map((m) => m.id)).toEqual([conversationMessageId('in', turn.id), conversationMessageId('out', turn.id)]);
+    expect(await thread('default')).toEqual([]); // never under another tenant
+    const [done] = await outboxRows('agent.turn');
+    expect(done.status).toBe('done');
+    expect(done.payload).not.toHaveProperty('messageText');
+    expect(done.payload).toMatchObject({ phone: P, routedPartnerId: 'acme' }); // the rest of the payload is kept
+  });
+
+  it('a shared-number turn logs under the default tenant', async () => {
+    runAgentTurn.mockResolvedValue('hello');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'hi', turn: {}, routedPartnerId: null });
+    await drainOnce(deps(), 'w1');
+    expect((await thread('default')).map((m) => m.text)).toEqual(['hi', 'hello']);
+  });
+
+  it('a re-run of the same turn (reclaimed row) still leaves exactly 1 in + 1 out and one reply row', async () => {
+    runAgentTurn.mockResolvedValue('hi back');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'hi', turn: {} });
+    await drainOnce(deps(), 'w1');
+    // Simulate a crash-replay: the turn row runs again with its original payload.
+    await db.execute(sql`UPDATE outbox SET status = 'pending', payload = payload || '{"messageText":"hi"}'::jsonb, next_attempt_at = now() WHERE kind = 'agent.turn'`);
+    await drainOnce(deps(), 'w1');
+    expect(runAgentTurn).toHaveBeenCalledTimes(2);
+    expect(await logCount()).toBe(2);
+    expect(await outboxRows('whatsapp.text')).toHaveLength(1);
+  });
+
+  it('an agent failure keeps messageText on the failed row, logs the inbound once, and the retry completes the pair', async () => {
+    runAgentTurn.mockRejectedValueOnce(new Error('model blip')).mockResolvedValueOnce('ok!');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'try me', turn: {} });
+    let r = await drainOnce(deps(), 'w1');
+    expect(r.failed).toBe(1);
+    const [failed] = await outboxRows('agent.turn');
+    expect(failed.status).toBe('failed');
+    expect(failed.payload.messageText).toBe('try me');
+    expect((await thread('default')).map((m) => m.direction)).toEqual(['in']);
+    await makeDue();
+    r = await drainOnce(deps(), 'w1');
+    expect((await thread('default')).map((m) => [m.direction, m.text])).toEqual([['in', 'try me'], ['out', 'ok!']]);
+    expect((await outboxRows('agent.turn'))[0].payload).not.toHaveProperty('messageText');
+  });
+
+  it('a DEAD agent.turn keeps its messageText (ops Retry)', async () => {
+    runAgentTurn.mockRejectedValue(new Error('model down'));
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'keep me', turn: {} });
+    await db.execute(sql`UPDATE outbox SET attempts = ${MAX_ATTEMPTS - 1} WHERE kind = 'agent.turn'`);
+    await drainOnce(deps(), 'w1');
+    const [dead] = await outboxRows('agent.turn');
+    expect(dead.status).toBe('dead');
+    expect(dead.payload.messageText).toBe('keep me');
+  });
+
+  it('the reply-log insert and the reply enqueue are ONE transaction: a failed log write leaves no reply row, and the retry sends exactly one', async () => {
+    runAgentTurn.mockResolvedValue('atomic reply');
+    await db.execute(sql`ALTER TABLE conversation_messages ADD CONSTRAINT r3b_no_out CHECK (direction <> 2)`);
+    try {
+      await outbox.enqueue('agent.turn', { phone: P, messageText: 'q', turn: {} });
+      const r = await drainOnce(deps(), 'w1');
+      expect(r.failed).toBe(1);
+      expect(await outboxRows('whatsapp.text')).toHaveLength(0); // rolled back with the log insert
+      expect(sendText).not.toHaveBeenCalled();
+    } finally {
+      await db.execute(sql`ALTER TABLE conversation_messages DROP CONSTRAINT r3b_no_out`);
+    }
+    await makeDue();
+    await drainOnce(deps(), 'w1');
+    expect((await thread('default')).map((m) => m.text)).toEqual(['q', 'atomic reply']);
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("a card-only turn ('') logs the [card] marker as the reply and enqueues no text", async () => {
+    runAgentTurn.mockResolvedValue('');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'show my recipients', turn: {} });
+    await drainOnce(deps(), 'w1');
+    expect((await thread('default')).map((m) => [m.direction, m.text])).toEqual([['in', 'show my recipients'], ['out', CARD_MARKER]]);
+    expect(await outboxRows('whatsapp.text')).toHaveLength(0);
+  });
+
+  it('a blocked turn (deferred) logs its inbound once; the past-bound fallback reply is logged with it', async () => {
+    await store.tryTurnLock('default', P, 'holder');
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'waiting', turn: {} });
+    await drainOnce(deps(), 'w1'); // deferred (busy), uncharged
+    await makeDue();
+    await drainOnce(deps(), 'w1'); // deferred again
+    expect((await thread('default')).map((m) => m.direction)).toEqual(['in']);
+    await db.execute(sql`UPDATE outbox SET created_at = now() - interval '11 minutes', next_attempt_at = now() WHERE kind = 'agent.turn'`);
+    await drainOnce(deps(), 'w1');
+    expect(runAgentTurn).not.toHaveBeenCalled();
+    expect((await thread('default')).map((m) => [m.direction, m.text])).toEqual([['in', 'waiting'], ['out', FALLBACK_REPLY]]);
+    expect((await outboxRows('agent.turn'))[0].payload).not.toHaveProperty('messageText');
+  });
+
+  it('a turn for an unknown routed partner logs nothing (the tenant check runs first)', async () => {
+    await outbox.enqueue('agent.turn', { phone: P, messageText: 'hi', turn: {}, routedPartnerId: 'ghost_partner' });
+    await drainOnce(deps(), 'w1');
+    expect(await logCount()).toBe(0);
+  });
+
+  it('other kinds are never pruned: a done whatsapp.text keeps its whole payload', async () => {
+    await outbox.enqueue('whatsapp.text', { to: P, body: 'hello there', messageText: 'not an agent turn' });
+    await drainOnce(deps(), 'w1');
+    const [row] = await outboxRows('whatsapp.text');
+    expect(row.status).toBe('done');
+    expect(row.payload).toMatchObject({ body: 'hello there', messageText: 'not an agent turn' });
+  });
+});
+
+describe('outbox repo — markDone dropPayloadKey (Partner-Demo R3b prune)', { retry: 0 }, () => {
+  it('drops the key in the SAME compare-and-set; a lost lease changes nothing', async () => {
+    await outbox.enqueue('agent.turn', { phone: '1', messageText: 'secret', turn: {} });
+    const [row] = await outbox.claimBatch(1, 'w1');
+    expect(await outbox.markDone(row.id, 'someone-else', { dropPayloadKey: 'messageText' })).toBe(false);
+    let [r] = ((await db.execute(sql`SELECT status, payload FROM outbox WHERE id = ${row.id}`)) as unknown as { rows: Array<{ status: string; payload: Record<string, unknown> }> }).rows;
+    expect(r.status).toBe('processing');
+    expect(r.payload.messageText).toBe('secret');
+    expect(await outbox.markDone(row.id, 'w1', { dropPayloadKey: 'messageText' })).toBe(true);
+    [r] = ((await db.execute(sql`SELECT status, payload FROM outbox WHERE id = ${row.id}`)) as unknown as { rows: Array<{ status: string; payload: Record<string, unknown> }> }).rows;
+    expect(r.status).toBe('done');
+    expect(r.payload).toEqual({ phone: '1', turn: {} });
   });
 });

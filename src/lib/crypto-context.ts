@@ -86,6 +86,21 @@ export const ctx = {
    * P4 writer seals new bodies under it. Pinned by tests/ticket-repo.test.ts.
    */
   ticketMessage: (id: number | string): CryptoContext => make('ticket_messages', 'body', [id]),
+  /**
+   * Partner-Demo R3b: `conversation_messages.body_enc`. The row parts bind the
+   * tenant, the row id, the thread (lowercase hex of the 32-byte thread_key),
+   * the channel (1 wa, 2 web) and the direction (1 in, 2 out), so a body moved
+   * to another row, thread, tenant, channel or direction does not open. Built
+   * through conversationRowCtx on both the write and the read side. Pinned by
+   * tests/crypto-context.test.ts.
+   */
+  conversationMessage: (
+    partnerId: PartnerId,
+    id: string,
+    threadKeyHex: string,
+    channel: number,
+    direction: number,
+  ): CryptoContext => make('conversation_messages', 'body_enc', [partnerId, id, threadKeyHex, channel, direction]),
   /** For fix 17b (staff MFA secrets in Redis). Permanently v1-exempt. */
   staffMfa: (username: string): CryptoContext => make('staff_mfa', 'secret', [username], true),
   purpose: (purpose: CryptoPurpose): CryptoContext =>
@@ -117,6 +132,27 @@ export const recipientRowCtx = (row: {
 
 export const sellerRowCtx = (row: { partnerId: PartnerId; phone: string }): CryptoContext =>
   ctx.seller(row?.partnerId, row?.phone);
+
+/**
+ * Partner-Demo R3b: the conversation_messages context from the row's own key
+ * columns — the values AS WRITTEN on insert, the FETCHED row on read. The
+ * bytea thread_key arrives as a Buffer (neon) or a plain Uint8Array (PGlite);
+ * both hex-encode identically.
+ */
+export const conversationRowCtx = (row: {
+  partnerId: PartnerId;
+  id: string;
+  threadKey: Uint8Array;
+  channel: number;
+  direction: number;
+}): CryptoContext =>
+  ctx.conversationMessage(
+    row?.partnerId,
+    row?.id,
+    row?.threadKey ? Buffer.from(row.threadKey).toString('hex') : '',
+    row?.channel,
+    row?.direction,
+  );
 
 /**
  * The ONE mapping from an outbox `sealed` placeholder key to its purpose

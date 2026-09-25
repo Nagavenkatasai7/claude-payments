@@ -32,6 +32,7 @@ import { isSandbox } from '@/lib/settlement';
 import { FALLBACK_REPLY } from '@/lib/agent-fallback';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { pokeWorker } from '@/lib/outbox';
+import { CARD_MARKER, conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { suppressForOptOut } from '@/lib/consent-gate';
 import { createCustomerStore } from '@/lib/customer-store';
 import type { Store } from '@/lib/store';
@@ -898,11 +899,25 @@ async function handle(
         }
         routedPartnerId = requested;
       }
+      const tenant: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
+      // ── Partner-Demo R3b: the customer's text goes to the sealed, permanent
+      // conversation log under (tenant, phone) — the same key the inbound
+      // webhook created the customer under — BEFORE the gate, so a deferred or
+      // fallback-answered turn is logged too. Deterministic id + ON CONFLICT DO
+      // NOTHING: a deferred / retried / reclaimed turn never logs it twice. A DB
+      // error here fails the row, which retries like any other turn failure.
+      await createConversationLogRepo(deps.db).append({
+        id: conversationMessageId('in', row.id),
+        partnerId: tenant,
+        phone,
+        channel: 'wa',
+        direction: 'in',
+        text: str(p.messageText),
+      });
       // ── Program-Fix 34A: one turn at a time per (tenant, phone), in order ──
       // Order of checks: the bound (computed with the FIFO check in ONE query),
       // then the FIFO guard, then the per-phone lock. Blocked ⇒ defer uncharged
       // (TurnBusyError), or — past the bound — the fallback line, never silence.
-      const tenant: PartnerId = routedPartnerId ?? DEFAULT_PARTNER_ID;
       const outbox = createOutboxRepo(deps.db);
       // FIFO compares the RAW payload tenant ('' for the shared number's null).
       const gate = await outbox.agentTurnGate(row.id, requested, phone, TURN_BUSY_MAX_WAIT_MS / 1000);
@@ -923,12 +938,18 @@ async function handle(
         // Waited past the bound: answer with the fallback line (deduped on this
         // row id) and raise ONE hourly alert per (tenant, phone) — counts only,
         // no message content — then finish the row. Never dead-lettered.
-        await outbox.enqueue(
-          'whatsapp.text',
-          // Program-Fix 49A: essential — a reply to the customer's own message.
-          { to: phone, body: FALLBACK_REPLY, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
-          { dedupeKey: `reply:${row.id}` },
-        );
+        // R3b: the reply row and its log row commit together.
+        await deps.db.transaction(async (tx) => {
+          await createOutboxRepo(tx).enqueue(
+            'whatsapp.text',
+            // Program-Fix 49A: essential — a reply to the customer's own message.
+            { to: phone, body: FALLBACK_REPLY, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+            { dedupeKey: `reply:${row.id}` },
+          );
+          await createConversationLogRepo(tx).append({
+            id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: 'wa', direction: 'out', text: FALLBACK_REPLY,
+          });
+        });
         await outbox.enqueue(
           'ops.alert',
           { message: `⚠️ SmartRemit ops: an agent.turn (outbox #${row.id}) waited over ${TURN_BUSY_MAX_WAIT_MS / 60_000} minutes behind the same customer's other turns and was answered with the fallback line. Check the outbox for a stuck or failing agent.turn.` },
@@ -955,12 +976,23 @@ async function handle(
         // can never answer twice. partnerId (never creds) picks the sending
         // number at drain time; none ⇒ the shared number. '' ⇒ a card was the
         // reply (the agent never returns '' otherwise).
+        // Partner-Demo R3b: the customer-visible reply is logged (sealed) in ONE
+        // transaction with its reply row, under the deterministic out-id. If the
+        // log insert fails, the reply row rolls back and the whole turn retries
+        // (model + any card sends), exactly as a failed reply enqueue does today.
+        // A card-only turn ('') logs the CARD_MARKER instead of a text.
+        const outLog = { id: conversationMessageId('out', row.id), partnerId: tenant, phone, channel: 'wa', direction: 'out' } as const;
         if (reply.trim()) {
-          await outbox.enqueue(
-            'whatsapp.text',
-            { to: phone, body: reply, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
-            { dedupeKey: `reply:${row.id}` },
-          );
+          await deps.db.transaction(async (tx) => {
+            await createOutboxRepo(tx).enqueue(
+              'whatsapp.text',
+              { to: phone, body: reply, category: 'essential', ...(routedPartnerId ? { partnerId: routedPartnerId } : {}) },
+              { dedupeKey: `reply:${row.id}` },
+            );
+            await createConversationLogRepo(tx).append({ ...outLog, text: reply });
+          });
+        } else {
+          await createConversationLogRepo(deps.db).append({ ...outLog, text: CARD_MARKER });
         }
         if (reply === FALLBACK_REPLY) {
           await outbox.enqueue(
@@ -1204,7 +1236,10 @@ export async function drainOnce(
     const signal = newRowSignal(rowDeadlineMs);
     try {
       await withRowDeadline(handle(deps, row, signal, partner), rowDeadlineMs, signal);
-      if (await outbox.markDone(row.id, workerId)) {
+      // Partner-Demo R3b: a finished agent.turn drops its plaintext messageText
+      // in the SAME compare-and-set (the text now lives sealed in the log).
+      // Failed / dead rows keep it (retry, ops Retry).
+      if (await outbox.markDone(row.id, workerId, row.kind === 'agent.turn' ? { dropPayloadKey: 'messageText' } : {})) {
         result.processed++;
         // Review S2: a finished turn's reply row is sent NEXT, not after every
         // other customer's turn in this batch. It is claimed like any row (lease,

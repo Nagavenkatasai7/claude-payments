@@ -190,11 +190,23 @@ export function createOutboxRepo(db: DbOrTx) {
      * Terminal success. With `owner`, compare-and-set on lease_owner: a worker
      * whose lease was reclaimed gets `false` and must NOT treat the row as its
      * own. Without `owner` (staff dismiss of a dead row) it is unconditional.
+     *
+     * Partner-Demo R3b: `dropPayloadKey` removes one top-level payload key IN
+     * THE SAME compare-and-set (`payload = payload - key`): one statement, no
+     * extra dead tuple, no window. The worker passes 'messageText' for a
+     * finished agent.turn, whose text now lives sealed in conversation_messages.
+     * Only done rows are touched; failed / dead rows keep their payload.
      */
-    async markDone(id: number, owner?: string): Promise<boolean> {
+    async markDone(id: number, owner?: string, opts: { dropPayloadKey?: string } = {}): Promise<boolean> {
+      const drop = opts.dropPayloadKey;
       const rows = await db
         .update(outbox)
-        .set({ status: 'done', leaseUntil: null, leaseOwner: null })
+        .set({
+          status: 'done',
+          leaseUntil: null,
+          leaseOwner: null,
+          ...(drop ? { payload: sql`${outbox.payload} - ${drop}::text` } : {}),
+        })
         .where(owner === undefined ? eq(outbox.id, id) : and(eq(outbox.id, id), eq(outbox.leaseOwner, owner)))
         .returning({ id: outbox.id });
       return rows.length > 0;

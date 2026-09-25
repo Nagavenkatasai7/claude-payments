@@ -4,6 +4,7 @@ import {
   ctx,
   customerRowCtx,
   customerEmailCtx,
+  conversationRowCtx,
   outboxSealedCtx,
   recipientRowCtx,
   sellerRowCtx,
@@ -35,9 +36,28 @@ describe('crypto-context pins the exact AAD strings', () => {
     ['staff mfa', ctx.staffMfa('admin'), 'v2|k0|staff_mfa|secret|admin'],
     ['customer_ref', ctx.purpose('customer_ref'), 'v2|k0|purpose|customer_ref|'],
     ['apply_link', ctx.purpose('outbox.apply_link'), 'v2|k0|purpose|outbox.apply_link|'],
+    // Partner-Demo R3b: the sealed conversation log. The row parts bind the
+    // tenant, the row id, the thread (hex of the 32-byte thread_key), the
+    // channel and the direction, so a body re-attributed to another thread,
+    // channel or direction does not open.
+    [
+      'conversation message',
+      ctx.conversationMessage('acme', '0b7c2f7e-1a2b-4c3d-8e9f-001122334455', 'ab'.repeat(32), 1, 2),
+      `v2|k0|conversation_messages|body_enc|acme|0b7c2f7e-1a2b-4c3d-8e9f-001122334455|${'ab'.repeat(32)}|1|2`,
+    ],
   ];
   it.each(cases)('%s', (_name, c, expected) => {
     expect(aadFor(c)).toBe(expected);
+  });
+
+  it('conversationRowCtx builds the same context from a fetched row (bytea as Buffer or Uint8Array)', () => {
+    const id = '0b7c2f7e-1a2b-4c3d-8e9f-001122334455';
+    const tk = Buffer.alloc(32, 0xab);
+    const expected = aadFor(ctx.conversationMessage('acme', id, 'ab'.repeat(32), 2, 1));
+    expect(aadFor(conversationRowCtx({ partnerId: 'acme', id, threadKey: tk, channel: 2, direction: 1 }))).toBe(expected);
+    expect(
+      aadFor(conversationRowCtx({ partnerId: 'acme', id, threadKey: new Uint8Array(tk), channel: 2, direction: 1 })),
+    ).toBe(expected);
   });
 
   it('escapes a key part that contains the separator', () => {

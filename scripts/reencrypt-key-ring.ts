@@ -34,12 +34,10 @@ import {
   type EncryptionKeyProvider,
 } from '@/lib/field-crypto';
 import { ctx } from '@/lib/crypto-context';
-import { REENCRYPT_TABLES, type ReencryptTable } from './reencrypt-aad-v2';
+import { REENCRYPT_TABLES, type KeyColumnType, type ReencryptTable } from './reencrypt-aad-v2';
 
-export interface KeyRingTable extends ReencryptTable {
-  /** SQL type of each key column for the keyset cursor (default text). */
-  keyTypes?: readonly ('text' | 'bigint')[];
-}
+/** keyTypes (SQL type of each key column for the keyset cursor, default text) lives on ReencryptTable. */
+export type KeyRingTable = ReencryptTable;
 
 /** Every fix-46 column (the SAME registry and contexts) plus ticket_messages.body. */
 export const KEY_RING_TABLES: readonly KeyRingTable[] = [
@@ -77,8 +75,14 @@ export interface KeyRingOptions {
 type Row = Record<string, unknown>;
 const rowsOf = (res: unknown): Row[] => (res as { rows: Row[] }).rows;
 const id = (name: string): SQL => sql`${sql.identifier(name)}`;
-const castTo = (v: string, type: 'text' | 'bigint'): SQL => (type === 'bigint' ? sql`${v}::bigint` : sql`${v}::text`);
-const keyTypesOf = (t: KeyRingTable): ('text' | 'bigint')[] => t.key.map((_, i) => t.keyTypes?.[i] ?? 'text');
+// Every key value travels as TEXT (it was read back `::text`) and is cast in
+// SQL through the type's input function (`'\x…'::text::bytea` parses the hex),
+// so no driver has to serialise a typed parameter (PGlite rejects a string
+// bound straight to a bytea parameter). The type names are a closed union
+// (never input), so sql.raw is safe.
+const castTo = (v: string, type: KeyColumnType): SQL =>
+  type === 'text' ? sql`${v}::text` : sql`${v}::text::${sql.raw(type)}`;
+const keyTypesOf = (t: KeyRingTable): KeyColumnType[] => t.key.map((_, i) => t.keyTypes?.[i] ?? 'text');
 /** `k = $v` with the value cast to the column type, so the PK index is used. */
 const keyMatch = (t: KeyRingTable, vals: readonly string[]): SQL => {
   const types = keyTypesOf(t);

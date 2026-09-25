@@ -78,9 +78,21 @@ function defaultKey(): Buffer {
   return cachedKey;
 }
 
+/**
+ * Partner-Demo R3b: the raw 32-byte HMAC behind auditSubjectId — the
+ * `conversation_messages.thread_key` of one (tenant, phone). Invariant:
+ * `'cust:' + threadKeyFor(p, x).toString('hex') === auditSubjectId(p, x)`, so a
+ * conversation thread joins to its pii.view / conversation.view audit rows.
+ * Keyed by an HKDF of FIELD_ENCRYPTION_KEY (k0), which is set-once: retiring k0
+ * would orphan every thread join.
+ */
+export function threadKeyFor(partnerId: PartnerId, phone: string, key: Buffer = defaultKey()): Buffer {
+  return createHmac('sha256', key).update(`${partnerId}|${phone}`).digest();
+}
+
 /** `cust:<64 hex>`: the stable, keyed audit subject for one (tenant, phone). */
 export function auditSubjectId(partnerId: PartnerId, phone: string, key: Buffer = defaultKey()): string {
-  return `cust:${createHmac('sha256', key).update(`${partnerId}|${phone}`).digest('hex')}`;
+  return `cust:${threadKeyFor(partnerId, phone, key).toString('hex')}`;
 }
 
 // The decrypted identity fields the customer detail page renders. The audit

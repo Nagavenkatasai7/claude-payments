@@ -9,10 +9,11 @@ import { createMonthlyVolumeStore } from '@/lib/monthly-volume-store';
 import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { createPartnerStore } from '@/lib/partner-store';
 import { fakeRedis } from './helpers';
-import { freshDb } from './helpers-db';
+import { freshDb, seedPartner } from './helpers-db';
 import { resetRateCacheForTests } from '@/lib/rate';
 import type { ChatMessage, Customer } from '@/lib/types';
 import type { Db } from '@/db/client';
+import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 
 // web-chat (B5) — the dashboard chat thread is keyed conv:web:<phone>, fully
 // separate from the WhatsApp thread at conv:<phone>; the agent runs with the
@@ -214,6 +215,42 @@ describe('createWebChat', () => {
     await webChat.runTurn(customerFixture(), 'hello');
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content).join('\n');
     expect(sys).toContain('[WEB CHAT]');
+  });
+});
+
+describe('createWebChat — sealed conversation log (Partner-Demo R3b)', () => {
+  it('logs the customer text BEFORE the agent runs and the reply after it, on the web channel of the same thread', async () => {
+    const deps = buildDeps();
+    const log = createConversationLogRepo(db);
+    let loggedBeforeModel: string[] = [];
+    const webChat = createWebChat({
+      ...deps,
+      conversationLog: log,
+      chat: async () => {
+        loggedBeforeModel = (await log.listThread('default', PHONE)).map((m) => m.text);
+        return { role: 'assistant', content: 'Hello from the dashboard!' };
+      },
+    });
+    await webChat.runTurn(customerFixture(), 'hi there');
+    expect(loggedBeforeModel).toEqual(['hi there']);
+    const thread = await log.listThread('default', PHONE);
+    expect(thread.map((m) => [m.channel, m.direction, m.text])).toEqual([
+      ['web', 'in', 'hi there'],
+      ['web', 'out', 'Hello from the dashboard!'],
+    ]);
+    expect(await log.listThread('default', PHONE, { channel: 'wa' })).toEqual([]);
+    // Another tenant's customer with the same phone sees nothing.
+    expect(await log.listThread('acme', PHONE)).toEqual([]);
+  });
+
+  it("logs under the PORTAL customer's own tenant", async () => {
+    const deps = buildDeps();
+    await seedPartner(db, 'acme');
+    const log = createConversationLogRepo(db);
+    const webChat = createWebChat({ ...deps, conversationLog: log, chat: async () => ({ role: 'assistant', content: 'ok' }) });
+    await webChat.runTurn({ ...customerFixture(), partnerId: 'acme' }, 'acme web');
+    expect((await log.listThread('acme', PHONE)).map((m) => m.text)).toEqual(['acme web', 'ok']);
+    expect(await log.listThread('default', PHONE)).toEqual([]);
   });
 });
 
