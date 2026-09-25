@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   getFxRate, getFxRates, getDestinationRates, resetRateCacheForTests, setFxL2ForTests,
   FALLBACK_FX_RATE, FALLBACK_FX_RATES, FX_MAX_AGE_MS, AED_PER_USD,
-  FRANKFURTER_BASE_URL, FX_UNAVAILABLE_MESSAGE, RateUnavailableError,
+  FRANKFURTER_BASE_URL, FX_UNAVAILABLE_MESSAGE, RateUnavailableError, FX_FETCH_TIMEOUT_MS,
 } from '@/lib/rate';
 import type { CurrencyCode } from '@/lib/types';
 
@@ -287,5 +287,79 @@ describe('getFxRates — a future-dated L2 row is not "fresh" (Task 9 review)', 
     mockFetchFailure();
     expect(await getFxRates('USD')).toMatchObject({ toInr: 95.5, source: 'live' });
     expect(vi.mocked(global.fetch)).not.toHaveBeenCalled();
+  });
+});
+
+// R9 (FX alert noise): the ops sweep may ask for ONE retry with a longer
+// timeout. The QUOTE path passes no options and must behave exactly as before.
+function timeoutError(): Error {
+  const e = new Error('The operation was aborted due to timeout');
+  e.name = 'TimeoutError';
+  return e;
+}
+
+describe('getFxRates — quote path is unchanged by the probe retry (R9)', () => {
+  it('without options: exactly ONE upstream attempt, bounded by FX_FETCH_TIMEOUT_MS (5 s)', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(timeoutError()));
+    await expect(getFxRates('USD')).rejects.toMatchObject({ name: 'RateUnavailableError', reason: 'timeout' });
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1);
+    expect(FX_FETCH_TIMEOUT_MS).toBe(5_000);
+    expect(timeoutSpy.mock.calls).toEqual([[FX_FETCH_TIMEOUT_MS]]);
+  });
+
+  it('refusal at the 60-min ceiling is unchanged: served at exactly 60 min, refused once past it (after the 30 s backoff)', async () => {
+    vi.useFakeTimers();
+    mockFetch(88);
+    await getFxRate();
+    vi.advanceTimersByTime(FX_MAX_AGE_MS);
+    mockFetchFailure();
+    expect(await getFxRates('USD')).toMatchObject({ toInr: 88, source: 'cache' });
+    vi.advanceTimersByTime(30_001); // past the failure backoff ⇒ a real re-dial
+    await expect(getFxRates('USD')).rejects.toMatchObject({ name: 'RateUnavailableError', currency: 'USD' });
+    expect(FX_MAX_AGE_MS).toBe(3_600_000);
+  });
+
+  it('the refusal ceiling also binds the probe retry path (a retry never extends a stale cache)', async () => {
+    vi.useFakeTimers();
+    mockFetch(88);
+    await getFxRate();
+    vi.advanceTimersByTime(FX_MAX_AGE_MS + 1);
+    mockFetchFailure();
+    await expect(getFxRates('USD', { retryTimeoutMs: 7_000 })).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('getFxRates — the opt-in probe retry (R9)', () => {
+  it('a slow first response is retried once with the longer timeout; success is served live and cached', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockRejectedValueOnce(timeoutError())
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ date: '2026-09-21', rates: { INR: 95.5 } }) }),
+    );
+    const r = await getFxRates('USD', { retryTimeoutMs: 7_000 });
+    expect(r).toMatchObject({ toInr: 95.5, source: 'live' });
+    expect(timeoutSpy.mock.calls).toEqual([[FX_FETCH_TIMEOUT_MS], [7_000]]);
+    // Cached like any live fetch, and the failure backoff is cleared.
+    expect((await getFxRates('USD')).toInr).toBe(95.5);
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it('when both attempts fail, the failure backoff still applies to the quote path (no re-dial for 30 s)', async () => {
+    mockFetchFailure();
+    await expect(getFxRates('USD', { retryTimeoutMs: 7_000 })).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(2);
+    await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it('inside an active failure backoff, even a probe does not dial (serves cache / refuses as today)', async () => {
+    mockFetchFailure();
+    await expect(getFxRates('USD')).rejects.toBeInstanceOf(RateUnavailableError);
+    await expect(getFxRates('USD', { retryTimeoutMs: 7_000 })).rejects.toBeInstanceOf(RateUnavailableError);
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1);
   });
 });
