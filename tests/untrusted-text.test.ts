@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   boundUntrustedText,
   isBoundedPrintable,
@@ -10,7 +12,10 @@ import {
   hasWebAddress,
   hasOverridePhrase,
   safeDisplayText,
+  stripModelHosts,
+  hasModelHost,
 } from '@/lib/untrusted-text';
+import { IANA_TLDS } from '@/lib/iana-tlds';
 
 // fix 5 (F43/F63): text written by an outsider (a partner-API caller, a partner
 // admin, a seller) is DATA. The write side refuses it when dirty; the read side
@@ -356,5 +361,263 @@ describe('fix 38 review: the host+path rule, abuse TLDs, IDN endings and the det
       safeDisplayText(v, PERSONA_MAX);
       expect(performance.now() - t).toBeLessThan(300);
     }
+  });
+});
+
+// R6b (A7L-2): the model's reply is untrusted output (OWASP LLM05). A bare
+// domain it writes is removed token by token; whitespace and newlines survive.
+describe('R6b: stripModelHosts', () => {
+  const ALLOW = ['smartremit.ai'];
+
+  it.each([
+    'pay-now.example',
+    'www.x.example',
+    'evil.example/pay',
+    'x@y.example',
+    '[t](a.example)',
+    'pay.xn--p1ai',
+    'pay.evil.example.',
+    'Www.Pay-Now.Example,',
+    'smartremit.ai.evil.example',
+    'smartremit.ai@evil.example',
+    'evil.example?next=smartremit.ai',
+  ])('strips %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} today`, ALLOW)).toBe('Pay at  today');
+  });
+
+  it.each([
+    '1 USD = 83.25 INR',
+    '₹4,750.00 reaches Mom',
+    'Rs.500 fee',
+    'the U.S. and e.g. India',
+    'Transfer TX-8F3K2 is paid; case #CASE-19 is open',
+    'माँ को ₹4,750 भेज दिए गए हैं।',
+    'Aapka paisa kal tak pahunch jayega, bhai.',
+    'Mom gets $50.00. Done!',
+  ])('keeps ordinary text: %s', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  it('keeps an allowed host (exact, www. and trailing punctuation), case-insensitively', () => {
+    expect(stripModelHosts('Visit smartremit.ai.', ALLOW)).toBe('Visit smartremit.ai.');
+    expect(stripModelHosts('Visit www.SmartRemit.ai, thanks', ALLOW)).toBe('Visit www.SmartRemit.ai, thanks');
+    expect(stripModelHosts('Visit (smartremit.ai)!', ALLOW)).toBe('Visit (smartremit.ai)!');
+  });
+
+  // R6b fix round 1, item 3: the model may name the bare host, never a path.
+  it.each(['smartremit.ai/anything', 'www.SmartRemit.ai/help', 'smartremit.ai/pay/abc123', 'smartremit.ai?x=1', 'smartremit.ai#top'])(
+    'strips a model-written path or query on an allowed host: %s',
+    (tok) => {
+      expect(stripModelHosts(`Go ${tok} now`, ALLOW)).toBe('Go  now');
+    },
+  );
+
+  // R6b fix round 1, item 1: a second host smuggled into a token with an
+  // allowed one strips the whole token (fail-closed), for the brand host too.
+  it.each([
+    '[evil.example](smartremit.ai)',
+    'evil.example](smartremit.ai)',
+    'smartremit.ai)evil.example',
+    'smartremit.ai>evil.example',
+    'smartremit.ai]evil.example',
+    'smartremit.ai:evil.example',
+    'evil.example@smartremit.ai',
+    'smartremit.ai,evil.example',
+    'acme.co)evil.example',
+    'evil.example@acme.co',
+  ])('strips a token that smuggles a second host: %s', (tok) => {
+    expect(stripModelHosts(`Pay ${tok} now`, [...ALLOW, 'acme.co'])).toBe('Pay  now');
+  });
+
+  // R6b fix round 1, item 2: model output gets a broader detector than the
+  // closed TLD list (hasWebAddress stays as it is for outsider text).
+  it.each([
+    'pay.online', 'pay-now.shop', 'win.top', 'my.site', 'fast.pro', 'vip.club', 'cheap.store',
+    'secure.bank', 'go.click', 'mom.live', 'пример.рф', 'पेमेंट.भारत', 'Pay-Now.Online.',
+  ])('strips a host on an open-ended TLD: %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} today`, ALLOW)).toBe('Pay at  today');
+  });
+
+  it.each([
+    'Mr.Sharma has been paid',
+    'Dr. Rao and St. John',
+    'Paid at 10.30am, ref no.12',
+    'Version 2.0 is live',
+    'i.e. the rate is 1.5x',
+  ])('the broader detector still keeps ordinary text: %s', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  it('hasWebAddress (outsider text) is unchanged: an open-ended TLD alone is not flagged there', () => {
+    expect(hasWebAddress('pay.online')).toBe(false);
+    expect(hasModelHost('pay.online')).toBe(true);
+    expect(hasModelHost('Rs.500 fee, e.g. U.S.')).toBe(false);
+  });
+
+  // R6b fix round 1, item 4: WhatsApp formatting around an allowed host.
+  it.each(['*smartremit.ai*', '_smartremit.ai_', '~smartremit.ai~', '*_smartremit.ai_*.'])(
+    'keeps an allowed host wrapped in WhatsApp formatting: %s',
+    (tok) => {
+      expect(stripModelHosts(`Visit ${tok}`, ALLOW)).toBe(`Visit ${tok}`);
+    },
+  );
+  it('formatting does not rescue a foreign host', () => {
+    expect(stripModelHosts('Visit *evil.example*', ALLOW)).toBe('Visit ');
+  });
+
+  it('preserves every newline and the surrounding whitespace', () => {
+    const text = 'Line one pay-now.example\n\n  Line two\tstays\nevil.example/x';
+    expect(stripModelHosts(text, ALLOW)).toBe('Line one \n\n  Line two\tstays\n');
+  });
+
+  it('accepted false positives (owner default B): a missing space before a TLD word is stripped', () => {
+    expect(stripModelHosts('Money sent.In a day', ALLOW)).toBe('Money  a day');
+    expect(stripModelHosts('All done.co', ALLOW)).toBe('All ');
+  });
+
+  it('a dotted brand survives only when it is on the allow list', () => {
+    expect(stripModelHosts('Thanks for using Acme.co!', ALLOW)).toBe('Thanks for using ');
+    expect(stripModelHosts('Thanks for using Acme.co!', [...ALLOW, 'acme.co'])).toBe('Thanks for using Acme.co!');
+  });
+
+  it('an empty allow list strips every host; empty text stays empty', () => {
+    expect(stripModelHosts('see smartremit.ai', [])).toBe('see ');
+    expect(stripModelHosts('', ALLOW)).toBe('');
+  });
+});
+
+// R6b fix round 2: the model-host detector matches a checked-in IANA snapshot
+// (not "any 2+ letter label"), skips all-digit chains (amounts), and the allow
+// list compares the RAW token so an invisible or bracket character can't pass.
+describe('R6b round 2: IANA TLDs, amounts, raw allow-list match', () => {
+  const ALLOW = ['smartremit.ai', 'acme.co'];
+
+  it('the snapshot carries real TLDs (ASCII and Unicode) and no ordinary words', () => {
+    const tlds = new Set(IANA_TLDS);
+    for (const t of ['com', 'shop', 'online', 'bank', 'live', 'xn--p1ai', 'рф', 'भारत']) expect(tlds.has(t)).toBe(true);
+    for (const w of ['thanks', 'your', 'bye', 'kal', 'tak', 'aapka', 'done', 'status', 'paid']) expect(tlds.has(w)).toBe(false);
+    expect(readFileSync(resolve(process.cwd(), 'src/lib/iana-tlds.ts'), 'utf-8')).toContain('Source: https://data.iana.org/TLD/tlds-alpha-by-domain.txt');
+  });
+
+  it.each([
+    'Mom gets ₹4,750.00.Thanks!',
+    '$50.00.Done',
+    '1 USD = 83.25 INR.Your',
+    'Hi Priya.Your',
+    'done.Thanks',
+    'ok.bye',
+    'Paisa pahunch gaya hai.Aapka',
+    'ठीक.है',
+    'TX-8F3K2.Status',
+    'tx_01HZX.Paid',
+  ])('keeps a missing-space join that is not a host: %s', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  it.each(['smartre<mit.ai', 'smartre[mit.ai', 'smartre\u200bmit.ai', 'smartre\u00admit.ai', 'smartremit<>.ai', 'ac<me.co'])(
+    'strips a disguised allowed host (raw-token match): %j',
+    (tok) => {
+      expect(stripModelHosts(`Visit ${tok} now`, ALLOW)).toBe('Visit  now');
+    },
+  );
+
+  it('a host glued before a sentence word is still caught', () => {
+    expect(stripModelHosts('Pay at evil.shop.Thanks', ALLOW)).toBe('Pay at ');
+  });
+});
+
+// R6b fix round 3 (MEDIUM-4): one all-digit label before a TLD is a host
+// ("4750.online"); only a chain of 2+ all-digit labels is an amount.
+describe('R6b round 3: a digit label + TLD is a host', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['4750.online', '123.bank', '8293.shop', '١٢٣.online'])('strips %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
+  });
+  it.each(['Mom gets ₹4,750.00.Thanks!', '$50.00.Done'])(
+    'keeps the amount chain %s',
+    (text) => {
+      expect(stripModelHosts(text, ALLOW)).toBe(text);
+    },
+  );
+  it('accepted loss: a single-label amount glued to a real-TLD word is stripped', () => {
+    expect(stripModelHosts('Sent $200.Now done', ALLOW)).toBe('Sent  done');
+  });
+});
+
+// R6b fix round 4 (MEDIUM-5): fail-closed. No all-digit skip at all: any
+// dotted chain whose later label is a real IANA TLD is a host.
+describe('R6b round 4: fail-closed, no amount skip', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['1.20.online', '10.20.bank', '1.2.3.shop', '4,750.00.online', '0.01.online/x', '1.20.рф'])('strips %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
+  });
+  it.each(['Mom gets ₹4,750.00.Thanks!', '1 USD = 83.25 INR', '₹4,750.00', 'Rs.500', 'hai.Aapka', 'Hi Priya.Your', '$50.00.Done'])(
+    'still keeps %s',
+    (text) => {
+      expect(stripModelHosts(text, ALLOW)).toBe(text);
+    },
+  );
+  it('accepted false positives: an amount glued to a real-TLD word is stripped', () => {
+    expect(stripModelHosts('Total 4,750.00.Total', ALLOW)).toBe('Total ');
+    expect(stripModelHosts('rate 83.25.Fee $2.99.Total', ALLOW)).toBe('rate 83.25.Fee ');
+  });
+});
+
+// R6b fix round 5 (MEDIUM-6): no abbreviation exemption. The rule is now just:
+// any dotted chain whose LATER label is a real IANA TLD (or its punycode) is a
+// host, except the exact allowed bare host.
+describe('R6b round 5: no exemptions', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['max.online', 'Max.Online', 'unit.online', 'ref.bank', 'max.рф', 'max.online/x', 'mr.shop', 'no.bank', 'st.online'])(
+    'strips %s',
+    (tok) => {
+      expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
+    },
+  );
+  it.each(['Mr.Sharma is paid', 'Dr.Rao', 'St.Louis', 'Mon.Fri', 'no.12', 'Sep.25'])('keeps %s (its later label is no TLD)', (text) => {
+    expect(stripModelHosts(text, ALLOW)).toBe(text);
+  });
+
+  // Property-style: EVERY TLD in the snapshot, in lower and upper case, after
+  // first labels of every shape (letters, digits, amounts, abbreviations,
+  // Unicode, hyphens) is stripped, bare and with a path.
+  const FIRST_LABELS = ['max', 'a', '1', '4,750.00', '0.01', 'mr', 'no', 'ref', 'unit', 'пример', 'पेमेंट', '١٢٣', 'pay-now', 'x1', 'www.pay', 'smartremit.ai', 'evil-', '_x'];
+  it('strips <first>.<tld> for every IANA TLD and every first-label shape', () => {
+    const kept: string[] = [];
+    for (const tld of IANA_TLDS) {
+      for (const first of FIRST_LABELS) {
+        for (const tok of [`${first}.${tld}`, `${first}.${tld.toUpperCase()}`, `${first}.${tld}/x`]) {
+          if (stripModelHosts(`a ${tok} b`, ALLOW) !== 'a  b') kept.push(tok);
+        }
+      }
+    }
+    expect(kept).toEqual([]);
+  });
+  it('the only survivor is the exact allowed bare host', () => {
+    expect(stripModelHosts('a smartremit.ai b', ALLOW)).toBe('a smartremit.ai b');
+    expect(stripModelHosts('a smartremit.ai/x b', ALLOW)).toBe('a  b');
+  });
+});
+
+describe('R6b round 5: nothing invisible or long can hide a host', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['pay\u0001.online', 'pay\u200b.online', 'pay<.online', 'pay\u00ad.online', 'pay。online', 'ｐａｙ．ｏｎｌｉｎｅ'])(
+    'strips %j',
+    (tok) => {
+      expect(stripModelHosts(`a ${tok} b`, ALLOW)).toBe('a  b');
+    },
+  );
+  it('a host at the end of a very long token is still found (no detector cap)', () => {
+    expect(stripModelHosts(`a ${'x'.repeat(5000)}.online b`, ALLOW)).toBe('a  b');
+  });
+});
+
+describe('R6b round 5: any non-space before the dot, and only visible whitespace splits', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(["evil'.online", 'pay+.online', 'x/.online', 'pay%.online', 'pay\ufeff.online', 'pay..online'])('strips %j', (tok) => {
+    expect(stripModelHosts(`a ${tok} b`, ALLOW)).toBe('a  b');
+  });
+  it('a real space before the dot is a sentence break, not a host', () => {
+    expect(stripModelHosts('Sent to Mom . Online banking is fine', ALLOW)).toBe('Sent to Mom . Online banking is fine');
   });
 });
