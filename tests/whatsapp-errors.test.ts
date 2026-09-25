@@ -144,3 +144,18 @@ describe('sendOutcomeFromError — PR B', () => {
     expect(sendOutcomeFromError(err)).toEqual({ ok: false, reason: 'send_failed', error: err });
   });
 });
+
+// R2a: the partner-action (token) codes. Meta error-codes page: 190 = access
+// token expired (also used for a revoked token); 0 = unable to authenticate the
+// app user. They stay RETRYABLE (a re-saved token rescues rows still backing
+// off); this only decides when the partner is told.
+describe('isAuthErrorCode (R2a)', () => {
+  it('190 and 0 are auth errors; others and undefined are not', async () => {
+    const { isAuthErrorCode, classifyGraphCode } = await import('@/lib/whatsapp-errors');
+    expect(isAuthErrorCode(190)).toBe(true);
+    expect(isAuthErrorCode(0)).toBe(true);
+    expect(isAuthErrorCode(131047)).toBe(false);
+    expect(isAuthErrorCode(undefined)).toBe(false);
+    expect(classifyGraphCode(190)).toBe('retryable');
+  });
+});
