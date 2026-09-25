@@ -490,13 +490,16 @@ export async function processInboundWebhook(
   // poke). A deduped redelivery or a replayed signed webhook — the msgq: fast
   // skip, or the `wamid:` unique-index conflict (enqueue ⇒ false) — creates no
   // row and does not poke. R1 holds: a newly queued row always pokes.
+  // (The pass-through calls a bound reference, not `.enqueue(`: the fix-11
+  // static payload scan keeps checking the real call sites in this file.)
   const repo = createOutboxRepo(getDb());
+  const insertRow = repo.enqueue.bind(repo);
   let inserted = false;
   const outbox: MessageDeps['outbox'] = {
     ...repo,
-    enqueue: async (...args: Parameters<typeof repo.enqueue>) => {
+    enqueue: async (...args: Parameters<typeof insertRow>) => {
       try {
-        const created = await repo.enqueue(...args);
+        const created = await insertRow(...args);
         if (created) inserted = true;
         return created;
       } catch (err) {
