@@ -101,7 +101,7 @@ describe('MockPaymentProvider.initiateTransfer (stage 1 + durable stage 2)', () 
     const tmCall = sendTemplate.mock.calls[0] as unknown[];
     expect(tmCall[0]).toBe('919876543210');
     expect(tmCall[1]).toBe('transfer_delivered');
-    expect(tmCall[3]).toEqual(['Mom', '₹16,600', '+15551230000', 'bank account']);
+    expect(tmCall[3]).toEqual(['Mom', '₹16,600', '••••0000', 'bank account']);
     // Draining again is a no-op (row done; stage 2 idempotent regardless).
     expect((await drainOnce(workerDeps(), 'w1')).processed).toBe(0);
   });
