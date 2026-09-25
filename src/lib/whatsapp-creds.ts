@@ -63,6 +63,18 @@ export function resolveWaChannel(
   return { kind: 'incomplete', missing };
 }
 
+/**
+ * R2a: thrown by the outbox worker's whatsapp.text/template send when the
+ * tenant's channel is `incomplete`. The message is the FIXED reason code (it
+ * lands in outbox.last_error and the ops alert) — never a field value.
+ */
+export class WaChannelIncompleteError extends Error {
+  constructor() {
+    super('wa_channel_incomplete');
+    this.name = 'WaChannelIncompleteError';
+  }
+}
+
 export type WaConfigCheck = { ok: true; warnings: WaConfigField[] } | { ok: false; missing: WaConfigField[] };
 
 /**

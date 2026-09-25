@@ -123,7 +123,7 @@ const FIELD_LABEL: Record<WaConfigField, string> = {
 const KIND_MESSAGE: Record<ChannelHealthKind, string> = {
   auth_error: 'WhatsApp rejected the access token (expired or revoked). Save a new access token on the WhatsApp tab.',
   dead_send: 'Some WhatsApp messages could not be delivered after retries.',
-  incomplete_config: 'Messages are held because the WhatsApp channel is only partially configured.',
+  incomplete_config: 'WhatsApp messages are NOT being sent because the WhatsApp channel is only partially configured.',
   sig_fail: 'Inbound WhatsApp webhooks are failing signature checks. Check the app secret.',
   no_phone: 'Some inbound messages arrived without a phone number and could not be answered.',
   delivery_failed: 'WhatsApp reported failed deliveries.',
@@ -159,7 +159,7 @@ export function summarizeChannelHealth(input: {
     items.push({
       kind: 'incomplete_config',
       level: 'error',
-      message: `WhatsApp channel is incomplete — missing: ${channel.missing.map((f) => FIELD_LABEL[f]).join(', ')}. Replies are held until it is completed or disconnected.`,
+      message: `WhatsApp channel is incomplete — missing: ${channel.missing.map((f) => FIELD_LABEL[f]).join(', ')}. Messages are not sent until it is completed or disconnected.`,
     });
   } else if (channel?.kind === 'own' && channel.warnings.length > 0) {
     items.push({
