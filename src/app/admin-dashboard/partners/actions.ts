@@ -275,7 +275,6 @@ export async function createPartnerStaffAction(
   }
 
   await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
-  await getStaffMfaStore().reset(username); // Program-Fix 17b: no stale enrolment on a re-used name
   // Create-if-absent (SET NX): a concurrent create of the same name loses
   // here instead of clobbering the winner.
   const created = await authStore.createStaff(
@@ -299,6 +298,11 @@ export async function createPartnerStaffAction(
     partnerId: tenant,
     actorScope: actorScopeOf(actor),
   });
+  // Program-Fix 17b: no stale enrolment on a re-used name. Only AFTER our claim
+  // won (a create that lost the race must never reset the winner's MFA) and
+  // after the audit row (a failed reset leaves an audited account whose stale
+  // enrolment fails closed).
+  await getStaffMfaStore().reset(username);
   revalidatePath(`/admin-dashboard/partners/${tenant}`);
 }
 

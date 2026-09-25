@@ -289,7 +289,13 @@ export function createAuthStore(redis: RedisLike, opts: AuthStoreOptions = {}) {
           await ledger()!.upsert(staff);
         } catch (e) {
           logWarn('staff_ledger.write_failed', 'staff ledger write failed', { error: errName(e) });
-          await redis.del(`staff:${staff.username}`);
+          // Release the claim so the name is not left half-created. A failed
+          // release is logged (never the username) and the ledger error wins.
+          try {
+            await redis.del(`staff:${staff.username}`);
+          } catch (delErr) {
+            logWarn('staff_ledger.claim_release_failed', 'staff claim release failed', { error: errName(delErr) });
+          }
           throw new Error('staff ledger write failed');
         }
       }

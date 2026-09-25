@@ -33,15 +33,18 @@ export const CHANNEL_HEALTH_KINDS = [
   'auth_error', // Graph 190 / 0 on a send — the partner's access token must be replaced
   'dead_send', // a whatsapp.text/template row dead-lettered
   'incomplete_config', // a send refused: the channel is partially configured
-  'sig_fail', // inbound signature failures (R2b: shown from webhook-signature-health, never a mark)
+  'sig_fail', // inbound signature failures (R2b: shown from webhook-signature-health, never a mark; never emailed)
   'no_phone', // an inbound message without a phone number (R1)
   'delivery_failed', // Meta reported a failed delivery (R2b)
 ] as const;
 export type ChannelHealthKind = (typeof CHANNEL_HEALTH_KINDS)[number];
 const KIND_SET: ReadonlySet<string> = new Set(CHANNEL_HEALTH_KINDS);
 
-/** Kinds the partner must act on: these get the (daily) alert email. */
-const ALERTABLE: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config', 'sig_fail']);
+/**
+ * Kinds the partner must act on: these get the (daily) alert email. Never
+ * `sig_fail`: a signature failure is unauthenticated traffic (banner hint only).
+ */
+const ALERTABLE: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config']);
 
 export const CHANNEL_HEALTH_ACTION = 'whatsapp.channel_health';
 /** The audit actions the partner-page banner reads (the R1 no-phone row included). */
@@ -125,12 +128,12 @@ const KIND_MESSAGE: Record<ChannelHealthKind, string> = {
   auth_error: 'WhatsApp rejected the access token (expired or revoked). Save a new access token on the WhatsApp tab.',
   dead_send: 'Some WhatsApp messages could not be delivered after retries.',
   incomplete_config: 'WhatsApp messages are NOT being sent because the WhatsApp channel is only partially configured.',
-  sig_fail: 'Inbound WhatsApp webhooks are failing signature checks. Check the app secret.',
+  sig_fail: "Some inbound webhook calls failed signature checks. If your bot isn't receiving messages, check the app secret.",
   no_phone: 'Some inbound messages arrived without a phone number and could not be answered.',
   delivery_failed: 'WhatsApp reported failed deliveries.',
 };
 
-const ERROR_KINDS: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config', 'sig_fail']);
+const ERROR_KINDS: ReadonlySet<ChannelHealthKind> = new Set(['auth_error', 'dead_send', 'incomplete_config']);
 
 export interface ChannelHealthItem {
   kind: ChannelHealthKind | 'config_warning';
@@ -151,7 +154,9 @@ export interface ChannelHealthSummary {
 /**
  * The banner model: the channel kind plus every mark from the last 7 days.
  * R2b: the signature item comes ONLY from `signature` (webhook-signature-health)
- * and only while signatureAlarm holds — a `sig_fail` Redis mark is ignored.
+ * and only while signatureAlarm holds — a `sig_fail` Redis mark is ignored. It
+ * is a WARN: failures alone can be produced by anyone, so they never raise the
+ * error-level banner.
  */
 export function summarizeChannelHealth(input: {
   channel?: WaChannel;
@@ -192,7 +197,7 @@ export function summarizeChannelHealth(input: {
     });
   }
   if (input.signature && signatureAlarm(input.signature, input.now)) {
-    items.push({ kind: 'sig_fail', level: 'error', message: KIND_MESSAGE.sig_fail, ...(input.signature.lastFailAt ? { at: input.signature.lastFailAt } : {}) });
+    items.push({ kind: 'sig_fail', level: 'warn', message: KIND_MESSAGE.sig_fail, ...(input.signature.lastFailAt ? { at: input.signature.lastFailAt } : {}) });
   }
   const level = items.some((i) => i.level === 'error') ? 'error' : items.length > 0 ? 'warn' : 'ok';
   const channelLabel =

@@ -49,10 +49,21 @@ describe('partner-repo', () => {
 });
 
 describe('integrations-repo', () => {
+  // Long, distinctive plaintext markers: a short fixture (e.g. 'sgn') can occur
+  // by chance inside random base64 ciphertext and flake the at-rest check.
+  const SECRETS = {
+    kycApiKey: 'FIXTURE-PLAINTEXT-kyc-api-key-7f3a9c',
+    kycWebhook: 'FIXTURE-PLAINTEXT-kyc-webhook-2b8d41',
+    paySigning: 'FIXTURE-PLAINTEXT-pay-signing-5e0c77',
+    payWebhook: 'FIXTURE-PLAINTEXT-pay-webhook-9a14f2',
+    waToken: 'FIXTURE-PLAINTEXT-wa-token-3c6be8',
+    waVerify: 'FIXTURE-PLAINTEXT-wa-verify-8d27a0',
+    waAppSecret: 'FIXTURE-PLAINTEXT-wa-app-secret-41f5d9',
+  };
   const FULL = {
-    kyc: { providerType: 'persona' as const, apiKey: 'persona_secret', webhookSecret: 'whk_kyc' },
-    payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail', signingSecret: 'sgn' }, webhookSecret: 'whk_pay' },
-    whatsapp: { phoneNumberId: '111222', token: 'EAAtok', verifyToken: 'vrfy', appSecret: 'meta_sec' },
+    kyc: { providerType: 'persona' as const, apiKey: SECRETS.kycApiKey, webhookSecret: SECRETS.kycWebhook },
+    payment: { providerType: 'simulator', credentials: { settlementUrl: 'https://rail', signingSecret: SECRETS.paySigning }, webhookSecret: SECRETS.payWebhook },
+    whatsapp: { phoneNumberId: '111222', token: SECRETS.waToken, verifyToken: SECRETS.waVerify, appSecret: SECRETS.waAppSecret },
   };
 
   it('no row ⇒ EMPTY (today’s behavior); full config round-trips', async () => {
@@ -69,9 +80,11 @@ describe('integrations-repo', () => {
     await repo.saveIntegrations('acme', FULL);
     const raw = await db.execute(`SELECT * FROM partner_integrations WHERE partner_id = 'acme'`);
     const row = (raw as unknown as { rows: Record<string, string>[] }).rows[0];
-    for (const secret of ['persona_secret', 'whk_kyc', 'sgn', 'whk_pay', 'EAAtok', 'vrfy', 'meta_sec']) {
-      expect(JSON.stringify(row)).not.toContain(secret);
+    const atRest = JSON.stringify(row);
+    for (const secret of Object.values(SECRETS)) {
+      expect(atRest).not.toContain(secret);
     }
+    expect(atRest).not.toContain('FIXTURE-PLAINTEXT');
     expect(row.wa_phone_number_id).toBe('111222');
     expect(row.payment_provider_type).toBe('simulator');
     expect(await repo.partnerForPhoneNumberId('111222')).toBe('acme');

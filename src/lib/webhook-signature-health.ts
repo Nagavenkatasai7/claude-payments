@@ -7,9 +7,11 @@
 // a partner they already resolved from their own data (a known partner that has
 // an app secret) — never for a raw, unknown id, so the key space stays bounded.
 // A valid signature records `lastSignedOkAt`. The banner shows a signature
-// problem only when failures are recent AND no valid delivery arrived in the
-// last 24h (signatureAlarm): a failure can be produced by anyone, a success
-// cannot, so ongoing valid deliveries always win.
+// hint (a WARN, never an error) only when failures are recent AND the partner
+// HAS had a valid delivery, but none in the last 24h (signatureAlarm): a
+// failure can be produced by anyone, a success cannot, so ongoing valid
+// deliveries always win, and a partner with no valid delivery on record sees
+// the partner page's "No signed webhook recorded" row instead.
 // Best-effort everywhere: a Redis error never changes a route's response.
 
 import { getRedis } from './redis';
@@ -88,10 +90,22 @@ export async function readSignatureHealth(partnerId: PartnerId, deps?: { redis?:
   }
 }
 
-/** Pure: failures within 24h AND no valid delivery within 24h (or ever). */
+/**
+ * Pure: failures within 24h AND a valid delivery on record (the mark lives 30
+ * days) but none within 24h. No valid delivery on record ⇒ false: the partner
+ * page's signed-webhook row already says so.
+ */
 export function signatureAlarm(sig: SignatureHealth, now: Date): boolean {
   const fail = sig.lastFailAt ? Date.parse(sig.lastFailAt) : NaN;
   if (!Number.isFinite(fail) || now.getTime() - fail > SIGNATURE_ALARM_WINDOW_MS) return false;
   const ok = sig.lastOkAt ? Date.parse(sig.lastOkAt) : NaN;
-  return !Number.isFinite(ok) || now.getTime() - ok > SIGNATURE_ALARM_WINDOW_MS;
+  if (!Number.isFinite(ok)) return false;
+  return now.getTime() - ok > SIGNATURE_ALARM_WINDOW_MS;
+}
+
+/** Pure: the partner page's "Signed webhooks" row. The ok mark lives 30 days. */
+export function signedWebhookLabel(sig: SignatureHealth): string {
+  return sig.lastOkAt
+    ? `Last signed webhook · ${sig.lastOkAt.slice(0, 16).replace('T', ' ')} UTC`
+    : 'No signed webhook recorded in the last 30 days';
 }

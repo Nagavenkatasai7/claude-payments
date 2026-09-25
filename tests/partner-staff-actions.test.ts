@@ -280,6 +280,29 @@ describe('createPartnerStaffAction — partner admin (R5)', () => {
     expect(await createStaffMfaStore(redis).isEnrolled('reuse')).toBe(false);
   });
 
+  it('a create that loses the SET NX race never resets the WINNER\'s MFA enrolment', async () => {
+    // The winner landed between our existence check and our claim: simulate
+    // by hiding its record from the pre-check read only.
+    await store().saveStaff(member({ username: 'racer', partnerId: 'acme' }));
+    await enrol('racer');
+    const realGet = redis.get.bind(redis);
+    let hidden = false;
+    redis.get = (async (k: string) => {
+      if (k === 'staff:racer' && !hidden) {
+        hidden = true;
+        return null;
+      }
+      return realGet(k);
+    }) as typeof redis.get;
+    try {
+      expect(await errorOf(createPartnerStaffAction('acme', form({ username: 'racer', name: 'R2', password: PW, role: 'agent' })))).not.toBe('OK');
+    } finally {
+      redis.get = realGet;
+    }
+    expect(hidden).toBe(true);
+    expect(await createStaffMfaStore(redis).isEnrolled('racer')).toBe(true);
+  });
+
   it('creates are rate-limited per actor', async () => {
     let refused = '';
     for (let i = 0; i < 25 && !refused; i++) {

@@ -219,4 +219,27 @@ describe('MFA keys follow the member', () => {
     expect(await authStore.getStaff('newbie')).not.toBeNull();
     expect(await mfa().isEnrolled('newbie')).toBe(false);
   });
+
+  it('createStaffAction that loses the SET NX race never resets the WINNER\'s MFA enrolment', async () => {
+    await authStore.saveStaff(staff({ username: 'racer', role: 'agent' }));
+    await enrolDirect('racer');
+    const realGet = redis.get.bind(redis);
+    let hidden = false;
+    redis.get = (async (k: string) => {
+      if (k === 'staff:racer' && !hidden) {
+        hidden = true;
+        return null;
+      }
+      return realGet(k);
+    }) as typeof redis.get;
+    try {
+      await expect(
+        createStaffAction(form({ username: 'racer', name: 'R2', role: 'agent', password: 'a-long-enough-passphrase-9' })),
+      ).rejects.toThrow(/already exists/);
+    } finally {
+      redis.get = realGet;
+    }
+    expect(hidden).toBe(true);
+    expect(await mfa().isEnrolled('racer')).toBe(true);
+  });
 });

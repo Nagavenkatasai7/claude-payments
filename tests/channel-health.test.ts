@@ -174,6 +174,12 @@ describe('recordChannelHealth (Redis + deduped audit + daily email)', { retry: 0
     expect(await recordChannelHealth('beta', 'delivery_failed', { code: 131026 }, deps())).toBe(false); // not alertable
   });
 
+  it('sig_fail is never alertable (signature failures are unauthenticated: banner only, never an email)', async () => {
+    await createPartnerRepo(db).updateSupportConfig('beta', (prev) => ({ ...prev, alertEmail: 'ops@beta.example' }));
+    expect(await recordChannelHealth('beta', 'sig_fail', {}, deps())).toBe(false);
+    expect(await emailRows()).toHaveLength(0);
+  });
+
   it('cross-tenant: A’s events never appear in B’s health read', async () => {
     await recordChannelHealth('acme', 'auth_error', { code: 190 }, deps());
     const b = await getChannelHealth('beta', { store, db, now: () => NOW, includeChannel: false });
