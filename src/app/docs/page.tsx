@@ -181,7 +181,7 @@ export default function DocsPage() {
                 </table>
               </div>
               <p className="text-muted-foreground">
-                A key can be narrowed to fewer scopes than its mode allows, never widened. A request
+                A key is issued with every scope its mode allows, as in the table. A request
                 outside the key&apos;s scopes gets <code>403</code>{' '}
                 <code>{`{ "error": "This key cannot perform this action." }`}</code>. A key whose
                 partner is not active gets <code>403</code>{' '}
@@ -250,7 +250,7 @@ curl -X POST $BASE/transactions \\
   }'`}</Code>
           <p className="text-sm text-muted-foreground">
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
-            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code> (a later request with the same Idempotency-Key returns that blocked transaction with 200 — see <a href="#idempotency" className="underline">Idempotency</a>). (In today&apos;s demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.) A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code>, <code>sched:</code> or <code>test:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
+            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. (In today&apos;s demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.) A later request with the same Idempotency-Key returns that blocked transaction with 200 — see <a href="#idempotency" className="underline">Idempotency</a>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code>, <code>sched:</code> or <code>test:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
           </p>
           <p className="text-sm text-muted-foreground">
             Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
@@ -274,8 +274,8 @@ curl -X POST $BASE/transactions \\
                 </li>
                 <li>
                   Use a fresh random UUID per transaction and put no personal data in it. We recommend
-                  at most 255 characters. Keys are kept indefinitely, per partner and per environment
-                  (a test key&apos;s keys never collide with a live key&apos;s).
+                  at most 255 characters. Keys are kept indefinitely, per partner and per environment:
+                  the same key sent with a test key and with a live key makes two separate transactions.
                 </li>
                 <li>
                   <strong className="text-foreground">Once a transaction exists under a key, every request
@@ -296,13 +296,13 @@ curl -X POST $BASE/transactions \\
                   body, not only the HTTP code.
                 </li>
                 <li>
-                  If a request failed (any <code>4xx</code> or <code>503</code>) and no transaction was
+                  If a request failed with any error other than <code>409</code> and no transaction was
                   created, a retry with the same key is validated again from scratch using the body you
                   send then, and creates the transaction if it now succeeds.
                 </li>
                 <li>
-                  <code>409</code> <code>Idempotency-Key conflict. Retry with a new key.</code> means
-                  exactly that: for example, the key was already used in the other environment.
+                  <code>409</code> <code>Idempotency-Key conflict. Retry with a new key.</code> is rare and
+                  means exactly that: the key can no longer be used, so retry with a new one.
                 </li>
                 <li>
                   Reserved prefixes, refused with <code>400</code>: <code>draft:</code>,{' '}
