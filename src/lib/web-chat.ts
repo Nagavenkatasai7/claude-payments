@@ -43,10 +43,11 @@ export function webThreadStore(base: Store): Store {
 
 export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId'> & {
   /**
-   * Partner-Demo R3b: the sealed, permanent conversation log. Production wires
-   * the Neon repo (runWebChatTurn); a test that omits it logs nothing.
+   * Partner-Demo R3b: the sealed, permanent conversation log. REQUIRED, so a
+   * caller cannot silently skip logging; production wires the Neon repo
+   * (runWebChatTurn).
    */
-  conversationLog?: Pick<ConversationLogRepo, 'append'>;
+  conversationLog: Pick<ConversationLogRepo, 'append'>;
 };
 
 /**
@@ -68,10 +69,10 @@ export function createWebChat(deps: WebChatDeps) {
       // Inbound BEFORE the agent runs, the reply after it (random ids: the web
       // route does not retry a turn). A DB error fails the turn, never silently.
       const entry = { partnerId: customer.partnerId, phone, channel: 'web' } as const;
-      await conversationLog?.append({ ...entry, direction: 'in', text });
+      await conversationLog.append({ ...entry, direction: 'in', text });
       const isNewConversation = (await store.getConversation(customer.partnerId, phone)).length === 0;
       const reply = await agent.runAgentTurn(phone, text, { isNewConversation });
-      await conversationLog?.append({ ...entry, direction: 'out', text: reply.trim() ? reply : CARD_MARKER });
+      await conversationLog.append({ ...entry, direction: 'out', text: reply.trim() ? reply : CARD_MARKER });
       return reply;
     },
   };

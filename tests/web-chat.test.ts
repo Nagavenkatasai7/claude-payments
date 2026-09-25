@@ -49,6 +49,7 @@ function buildDeps(redis = fakeRedis()) {
     monthlyVolumeStore: createMonthlyVolumeStore(store),
     kycProvider: new MockKycProvider(customerStore, 'https://example.com'),
     partnerStore: createPartnerStore(db),
+    conversationLog: createConversationLogRepo(db),
   };
 }
 
