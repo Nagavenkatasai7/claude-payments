@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createAgent, sanitizeReply, FALLBACK_REPLY } from '@/lib/agent';
+import { createAgent, sanitizeReply, replyAllowHosts, FALLBACK_REPLY } from '@/lib/agent';
 import { createStore } from '@/lib/store';
 import { createScheduleStore } from '@/lib/schedule-store';
 import { createDraftStore } from '@/lib/draft-store';
@@ -641,6 +641,42 @@ describe('sanitizeReply', () => {
     const last = 'https://smartremit.ai/pay/last';
     const result = sanitizeReply('Done.', [first, last]);
     expect(result).toContain(last);
+  });
+
+  // R6b (A7L-2): bare domains the model writes are stripped too.
+  it('R6b: strips a model-written bare domain and still appends the pay link intact', () => {
+    const link = 'https://smartremit.ai/pay/abc123';
+    const result = sanitizeReply('Pay at pay-now.example or www.x.example now.', [link], ['smartremit.ai']);
+    expect(result).not.toMatch(/pay-now\.example|x\.example/);
+    expect(result).toBe(`Pay at or now.\n\n${link}`);
+  });
+
+  it('R6b: keeps an allowed host and the reply lines', () => {
+    const result = sanitizeReply('Line one: smartremit.ai\nLine two evil.example/pay\nLine three', [], ['smartremit.ai']);
+    expect(result).toBe('Line one: smartremit.ai\nLine two\nLine three');
+  });
+
+  it('R6b: the default allow list is the app host, so a bare foreign domain goes', () => {
+    expect(sanitizeReply('Visit pay-now.example today.', [])).toBe('Visit today.');
+  });
+
+  it('R6b: http(s) URLs are still stripped even on an allowed host (links come from code only)', () => {
+    const result = sanitizeReply('Go to https://smartremit.ai/pay/forged now', [], ['smartremit.ai']);
+    expect(result).toBe('Go to now');
+  });
+});
+
+describe('R6b: replyAllowHosts', () => {
+  it('is the app host, plus the brand when the brand parses as a host', () => {
+    expect(replyAllowHosts('https://smartremit.ai')).toEqual(['smartremit.ai']);
+    expect(replyAllowHosts('https://smartremit.ai', 'Acme Pay')).toEqual(['smartremit.ai']);
+    expect(replyAllowHosts('https://smartremit.ai', 'Acme.co')).toEqual(['smartremit.ai', 'acme.co']);
+    expect(replyAllowHosts('https://smartremit.ai', 'www.Acme.co')).toEqual(['smartremit.ai', 'acme.co']);
+  });
+  it('never throws on a bad base URL, and ignores a brand that is not a clean host', () => {
+    expect(replyAllowHosts('not a url')).toEqual([]);
+    expect(replyAllowHosts('not a url', 'Acme.co/pay')).toEqual([]);
+    expect(replyAllowHosts('not a url', 'Pay at evil.example')).toEqual([]);
   });
 });
 
@@ -1778,6 +1814,43 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
     expect(typeof result.draft_id).toBe('string');
     expect(String(result.reply_hint)).toMatch(/already above/);
     expect(reply).toBe('The payment card is above — tap Approve & Pay.');
+  });
+
+  it('R6b: a bare domain in a WhatsApp reply is stripped; a dotted brand on the allow list survives', async () => {
+    const { agent } = build(async () => ({ role: 'assistant', content: 'Pay at pay-now.example — thanks from Acme.co!' }));
+    const reply = await agent.runAgentTurn(PHONE, 'where do I pay?');
+    expect(reply).not.toContain('pay-now.example');
+    // The default tenant's brand is SmartRemit (not a host), so Acme.co goes too.
+    expect(reply).not.toContain('Acme.co');
+  });
+
+  it('R6b: a tenant whose brand is a host keeps that brand in the reply', async () => {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    const nowIso = new Date().toISOString();
+    await deps.partnerStore.savePartner({
+      id: 'acme', name: 'Acme', displayName: 'Acme.co', countries: ['US'], status: 'active',
+      createdAt: nowIso, updatedAt: nowIso,
+    });
+    const agent = createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps,
+      partnerId: 'acme',
+      chat: async () => ({ role: 'assistant', content: 'Thanks from Acme.co! Not pay-now.example though.' }),
+    });
+    const reply = await agent.runAgentTurn(PHONE, 'hi');
+    expect(reply).toContain('Acme.co!');
+    expect(reply).not.toContain('pay-now.example');
+  });
+
+  it('R6b: a generate_payment_link call on WhatsApp is refused and appends no link', async () => {
+    let n = 0;
+    const { agent } = build(async () => (n++ === 0
+      ? { role: 'assistant', content: '', tool_calls: [{ id: 'g1', type: 'function', function: { name: 'generate_payment_link', arguments: JSON.stringify({ transfer_id: 'abc123' }) } }] }
+      : { role: 'assistant', content: 'Here you go.' }));
+    const reply = await agent.runAgentTurn(PHONE, 'link please');
+    expect(reply).toBe('Here you go.');
+    expect(reply).not.toContain('/pay/');
   });
 
   it('a reply that sanitizeReply empties (URL-only) becomes FALLBACK_REPLY, never an empty string', async () => {
