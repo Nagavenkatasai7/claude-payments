@@ -530,6 +530,39 @@ describe('outbox-repo (durability backbone)', () => {
     expect(ageMin).toBeGreaterThan(19);
     expect(ageMin).toBeLessThan(21);
   });
+
+  // ── nextDueAt (partner-demo R4): the worker gate's post-drain mark ────────────
+  it('nextDueAt is the earliest next_attempt_at over pending/failed rows ONLY (future rows included; processing/done/dead ignored)', async () => {
+    const r = createOutboxRepo(db);
+    expect(await r.nextDueAt()).toBeNull();
+
+    await r.enqueue('whatsapp.text', { to: 'future' }, { delayMs: 60 * 60_000 }); // pending, due in 1 h
+    const in1h = await r.nextDueAt();
+    expect(in1h).not.toBeNull();
+    expect((in1h!.getTime() - Date.now()) / 60_000).toBeGreaterThan(59);
+
+    await r.enqueue('rail.callback', { reference: 'soon' }, { delayMs: 12_000 }); // pending, due in 12 s
+    const soon = await r.nextDueAt();
+    expect((soon!.getTime() - Date.now()) / 1000).toBeGreaterThan(5);
+    expect((soon!.getTime() - Date.now()) / 1000).toBeLessThan(13);
+
+    // A processing row (even one with an old next_attempt_at) is NOT a due mark:
+    // live leases are covered by the per-invocation lease member instead.
+    await r.enqueue('mock.settle', { transferId: 'x' });
+    const [claimed] = await r.claimBatch(1, 'w1');
+    expect(claimed.kind).toBe('mock.settle');
+    await db.execute(sql`UPDATE outbox SET next_attempt_at = now() - interval '1 hour' WHERE id = ${claimed.id}`);
+    // A dead row with an old next_attempt_at is never due either.
+    await r.enqueue('ops.alert', { message: 'dead' });
+    await db.execute(sql`UPDATE outbox SET status = 'dead', next_attempt_at = now() - interval '2 hours' WHERE kind = 'ops.alert'`);
+    const still = await r.nextDueAt();
+    expect(still!.getTime()).toBe(soon!.getTime());
+
+    // A failed row due in the past wins.
+    await db.execute(sql`UPDATE outbox SET status = 'failed', next_attempt_at = now() - interval '3 minutes' WHERE kind = 'whatsapp.text'`);
+    const past = await r.nextDueAt();
+    expect((Date.now() - past!.getTime()) / 60_000).toBeGreaterThan(2);
+  });
 });
 
 // Program-Fix 32 (neon-09): the expiry sweep's read — unfunded awaiting_payment

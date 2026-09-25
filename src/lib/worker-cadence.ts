@@ -4,11 +4,14 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { env } from '@/lib/env';
 import { logWarn } from '@/lib/log';
 import type { RedisLike } from '@/lib/store';
+import { isBackstopMinute } from '@/lib/worker-gate';
 
 // worker-cadence — the worker's CLOCK and its two alarms (Program-Fix 12 /
 // Task 8). A Vercel cron (vercel.json, `* * * * *`) GETs /api/worker every
 // minute; the hourly GitHub Actions heartbeat backs it up; the after() poke is
-// the fast path. The outbox stays the system of record and the cron is only a
+// the fast path. Since partner-demo R4 a cron tick with no outbox work due is
+// GATED (src/lib/worker-gate.ts): it writes the last-cron marker and returns
+// without touching Neon; :17 and :47 always run full (the backstop). The outbox stays the system of record and the cron is only a
 // clock: claims are FOR UPDATE SKIP LOCKED, so cron, heartbeat and poke may
 // overlap, and Vercel may deliver a run twice or skip one (manage-cron-jobs,
 // "Cron job delivery and idempotency") — the handlers are idempotent.
@@ -53,13 +56,15 @@ export function invocationSource(method: string, headers: Headers): InvocationSo
 
 /**
  * Whether this invocation dials Frankfurter for the FX health probe. The
- * heartbeat always does; the per-minute cron only on a :x0 minute (six probes
- * an hour, not 60); a poke never does (during an outage every poke would
+ * heartbeat always does (when it runs full); the per-minute cron only on the
+ * worker gate's backstop minute, :17 and :47 (partner-demo R4: the one cron
+ * tick guaranteed to run full, so an idle system never wakes Neon just to
+ * record FX health); a poke never does (during an outage every poke would
  * otherwise re-dial 9 currencies).
  */
 export function shouldProbeFx(source: InvocationSource, now: Date): boolean {
   if (source === 'heartbeat') return true;
-  if (source === 'cron') return now.getUTCMinutes() % 10 === 0;
+  if (source === 'cron') return isBackstopMinute(now);
   return false;
 }
 
@@ -93,6 +98,15 @@ function hourBucket(now: Date): number {
 
 function minutesBetween(earlier: Date, later: Date): number {
   return Math.max(0, Math.round((later.getTime() - earlier.getTime()) / 60_000));
+}
+
+/**
+ * partner-demo R4: the heartbeat may skip the database only while the cron is
+ * alive. The exact complement of checkCronQuiet's breach test, except that an
+ * ABSENT marker is not fresh either — the heartbeat then runs full (fail-open).
+ */
+export function cronMarkerFresh(lastCronAt: Date | null, now: Date): boolean {
+  return lastCronAt !== null && minutesBetween(lastCronAt, now) <= CRON_QUIET_MINUTES;
 }
 
 export interface CronQuietResult {

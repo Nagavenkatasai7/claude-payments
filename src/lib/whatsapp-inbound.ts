@@ -488,6 +488,11 @@ export async function processInboundWebhook(
     tenantId,
   };
   let queued = false;
+  // partner-demo R4: a message can commit an outbox row without returning
+  // `durable` (the consent-failed ops alert, a reply on a non-durable path),
+  // and the gated cron would leave those for the 30-min backstop — so any
+  // processed message pokes.
+  let attempted = false;
 
   try {
     for (const change of changes) {
@@ -510,6 +515,7 @@ export async function processInboundWebhook(
 
       for (const incoming of change.messages) {
         let durable: boolean;
+        attempted = true;
         try {
           durable = await processMessage(deps, incoming);
         } catch (err) {
@@ -526,7 +532,7 @@ export async function processInboundWebhook(
   } finally {
     // Fast path — the per-minute cron drains it regardless. In a finally so
     // rows queued before a later throw are not left for the cron.
-    if (queued) pokeWorker();
+    if (queued || attempted) pokeWorker();
   }
   return { ok: true };
 }

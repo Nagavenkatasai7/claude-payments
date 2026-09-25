@@ -10,6 +10,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getDb } from '@/db/client';
 import { createOutboxRepo, type OutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from '@/lib/outbox';
 import { resolvePartnerBranding } from '@/lib/partner-config';
 import { logWarn } from '@/lib/log';
 import { handleRailFailure, alertRefusedDelivery, alertCallbackOnHold } from '@/lib/rail-failure';
@@ -116,6 +117,10 @@ async function handleVerified(
   if (!result) {
     return NextResponse.json({ ok: true, ignored: true });  // unparseable/irrelevant → 200, no mutation
   }
+  // partner-demo R4: every branch below may commit outbox rows (rail-failure
+  // refund + notice + alert, amount hold, refused-delivery / on-hold alerts).
+  // after() runs post-response, i.e. after they committed.
+  pokeWorker();
 
   // fix 8 (money-02 / rail-02): a signed `failed` / `returned` is acted on —
   // cancel + refund + customer notice + ops alert in ONE transaction (or an
@@ -261,6 +266,7 @@ async function alertNotifyFailed(transferId: string, code: number | undefined): 
       },
       { dedupeKey: `notifyfail:${code ?? 'none'}:${hourBucket}` },
     );
+    pokeWorker(); // runs inside after(); nested after() is supported (next/dist/docs/.../after.md:56)
   } catch (err) {
     logError('payment-webhook.notify-alert', err, { transferId });
   }

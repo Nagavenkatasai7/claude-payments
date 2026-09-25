@@ -6,6 +6,7 @@ import { getDb, type Db, type Tx } from '@/db/client';
 import { partnerIntegrations } from '@/db/schema';
 import { createTransferRepo, type SenderTotals } from '@/db/repos/transfer-repo';
 import { createOutboxRepo } from '@/db/repos/outbox-repo';
+import { pokeWorker } from './outbox';
 import { logError } from './log';
 import { amlHoldRailEligible } from './aml-hold';
 import type { SenderAmlStats } from './aml-rules';
@@ -110,6 +111,9 @@ async function readAmlHoldInputs(
     ),
   );
   if (!alerted.ok) logError('aml.hold_check_alert', alerted.error, { partnerId });
+  // partner-demo R4: after() runs post-response — after the mint transaction
+  // commits (a rolled-back mint makes it a harmless empty poke).
+  else pokeWorker();
   return null;
 }
 
