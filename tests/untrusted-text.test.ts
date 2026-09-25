@@ -501,7 +501,6 @@ describe('R6b round 2: IANA TLDs, amounts, raw allow-list match', () => {
 
   it.each([
     'Mom gets ₹4,750.00.Thanks!',
-    'rate 83.25.Fee $2.99.Total',
     '$50.00.Done',
     '1 USD = 83.25 INR.Your',
     'Hi Priya.Your',
@@ -529,12 +528,12 @@ describe('R6b round 2: IANA TLDs, amounts, raw allow-list match', () => {
 
 // R6b fix round 3 (MEDIUM-4): one all-digit label before a TLD is a host
 // ("4750.online"); only a chain of 2+ all-digit labels is an amount.
-describe('R6b round 3: single digit label + TLD is a host', () => {
+describe('R6b round 3: a digit label + TLD is a host', () => {
   const ALLOW = ['smartremit.ai'];
   it.each(['4750.online', '123.bank', '8293.shop', '١٢٣.online'])('strips %s', (tok) => {
     expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
   });
-  it.each(['4,750.00.Total', 'Mom gets ₹4,750.00.Thanks!', 'rate 83.25.Fee $2.99.Total', '$50.00.Done'])(
+  it.each(['Mom gets ₹4,750.00.Thanks!', '$50.00.Done'])(
     'keeps the amount chain %s',
     (text) => {
       expect(stripModelHosts(text, ALLOW)).toBe(text);
@@ -542,5 +541,24 @@ describe('R6b round 3: single digit label + TLD is a host', () => {
   );
   it('accepted loss: a single-label amount glued to a real-TLD word is stripped', () => {
     expect(stripModelHosts('Sent $200.Now done', ALLOW)).toBe('Sent  done');
+  });
+});
+
+// R6b fix round 4 (MEDIUM-5): fail-closed. No all-digit skip at all: any
+// dotted chain whose later label is a real IANA TLD is a host.
+describe('R6b round 4: fail-closed, no amount skip', () => {
+  const ALLOW = ['smartremit.ai'];
+  it.each(['1.20.online', '10.20.bank', '1.2.3.shop', '4,750.00.online', '0.01.online/x', '1.20.рф'])('strips %s', (tok) => {
+    expect(stripModelHosts(`Pay at ${tok} now`, ALLOW)).toBe('Pay at  now');
+  });
+  it.each(['Mom gets ₹4,750.00.Thanks!', '1 USD = 83.25 INR', '₹4,750.00', 'Rs.500', 'hai.Aapka', 'Hi Priya.Your', '$50.00.Done'])(
+    'still keeps %s',
+    (text) => {
+      expect(stripModelHosts(text, ALLOW)).toBe(text);
+    },
+  );
+  it('accepted false positives: an amount glued to a real-TLD word is stripped', () => {
+    expect(stripModelHosts('Total 4,750.00.Total', ALLOW)).toBe('Total ');
+    expect(stripModelHosts('rate 83.25.Fee $2.99.Total', ALLOW)).toBe('rate 83.25.Fee ');
   });
 });
