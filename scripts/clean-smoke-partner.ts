@@ -6,7 +6,8 @@
  *   set -a; source .env.local; set +a; node_modules/.bin/tsx scripts/clean-smoke-partner.ts
  *
  * SAFE: only deletes partners named exactly 'E2E Smoke Partner' that have ZERO
- * transfers and ZERO customers (a real partner is never touched). FK-ordered,
+ * transfers, ZERO customers and ZERO conversation_messages rows (a real partner
+ * is never touched; the sealed conversation log is never deleted). FK-ordered,
  * and ONE transaction (Program-Fix 45 P5): a refusal part-way commits nothing.
  * Program-Fix 45 P5: the partner's rows in the Postgres staff ledger (0022,
  * FK to partners) are deleted first. The partner-scoped staff
@@ -25,10 +26,13 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
     const targets = ((await tx.execute(sql`
       SELECT p.id, p.name,
         (SELECT count(*) FROM transfers t WHERE t.partner_id = p.id)::int AS transfers,
-        (SELECT count(*) FROM customers c WHERE c.partner_id = p.id)::int AS customers
+        (SELECT count(*) FROM customers c WHERE c.partner_id = p.id)::int AS customers,
+        (SELECT count(*) FROM conversation_messages m WHERE m.partner_id = p.id)::int AS conversations
       FROM partners p
       WHERE p.name = ${SMOKE_PARTNER_NAME}
-    `)) as unknown as { rows: Array<{ id: string; name: string; transfers: number; customers: number }> }).rows;
+    `)) as unknown as {
+      rows: Array<{ id: string; name: string; transfers: number; customers: number; conversations: number }>;
+    }).rows;
 
     if (targets.length === 0) {
       log('No "E2E Smoke Partner" found — nothing to clean.');
@@ -36,8 +40,12 @@ export async function cleanSmokePartners(db: DbOrTx, log: (line: string) => void
     }
 
     for (const t of targets) {
-      if (t.transfers > 0 || t.customers > 0) {
-        log(`  ⚠ skip ${t.id} — has ${t.transfers} transfers / ${t.customers} customers (NOT a disposable smoke row)`);
+      // Partner-Demo R3b: conversation_messages is a permanent, sealed audit
+      // log — a partner with any row is never deleted (and the rows never are).
+      if (t.transfers > 0 || t.customers > 0 || t.conversations > 0) {
+        log(
+          `  ⚠ skip ${t.id} — has ${t.transfers} transfers / ${t.customers} customers / ${t.conversations} conversation messages (NOT a disposable smoke row)`,
+        );
         continue;
       }
       // FK-ordered: children first, then the partner row.

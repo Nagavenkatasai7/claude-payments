@@ -769,21 +769,36 @@ export const fundingEvents = pgTable(
 
 // ── Partner-Demo R3b (0025): the sealed, permanent conversation log ──────────
 // One row per customer-visible chat message (customer text in, the reply out).
-// MIGRATION-ONLY for now: nothing reads or writes this table until the R3b
-// writer PR, which lands only after this migration is applied on prod.
+// Written by the R3b writer (src/db/repos/conversation-log-repo.ts): the
+// worker's agent.turn branch (WhatsApp) and web-chat's runTurn (web).
 //   • No plaintext phone. thread_key is the raw 32-byte auditSubjectId HMAC
 //     (customer-ref.ts), so a thread joins to its pii.view audit rows. That HMAC
 //     is keyed by an HKDF of FIELD_ENCRYPTION_KEY (k0): it is stable only
 //     because that key is set-once. Retiring k0 would orphan every thread join.
-//   • body_enc is a field-crypto envelope (AES-256-GCM), sealed before INSERT.
+//   • body_enc is a v2 context-bound field-crypto envelope (AES-256-GCM),
+//     sealed before INSERT under ctx.conversationMessage (crypto-context.ts):
+//     the AAD binds (partner_id, id, hex(thread_key), channel, direction).
+//     Metadata (created_at, channel, direction, ciphertext length) is plain.
 //   • channel: 1 = WhatsApp, 2 = web. direction: 1 = inbound, 2 = outbound.
 //   • id has NO default: the writer supplies it (deterministic for WhatsApp, so
 //     worker retries dedupe with INSERT … ON CONFLICT DO NOTHING).
 //   • Tenant-owned: partner_id NOT NULL + FK (schema convention above).
 // The Redis 30-day chat history is still plaintext; this does not close crypto-06.
-const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
+// neon-serverless (node-postgres types) returns bytea as a Buffer, PGlite as a
+// plain Uint8Array; a text-mode driver would hand back '\\x<hex>'. Normalise
+// both directions to a Buffer so equality params and hex encoding are identical.
+const bytea = customType<{ data: Uint8Array; driverData: Uint8Array | string }>({
   dataType() {
     return 'bytea';
+  },
+  toDriver(value) {
+    return Buffer.from(value);
+  },
+  fromDriver(value) {
+    if (typeof value === 'string') {
+      return value.startsWith('\\x') ? Buffer.from(value.slice(2), 'hex') : Buffer.from(value, 'binary');
+    }
+    return Buffer.from(value);
   },
 });
 

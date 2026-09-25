@@ -34,10 +34,15 @@ import {
   type WaitlistEncColumn,
 } from '@/lib/crypto-context';
 
+/** SQL type of a key column, for typed keyset cursors / key matches (default text). */
+export type KeyColumnType = 'text' | 'bigint' | 'uuid' | 'bytea' | 'smallint';
+
 export interface ReencryptTable {
   table: string;
   /** SQL key columns, in the order the context helper takes them. */
   key: readonly string[];
+  /** SQL type of each key column (default text); the key-ring script casts to it. */
+  keyTypes?: readonly KeyColumnType[];
   columns: readonly string[];
   ctxFor(key: readonly string[], column: string): CryptoContext;
 }
@@ -96,6 +101,19 @@ export const REENCRYPT_TABLES: readonly ReencryptTable[] = [
     key: ['id'],
     columns: ['full_name_enc', 'email_enc', 'phone_enc', 'location_enc'],
     ctxFor: ([id], column) => ctx.waitlist(id, column as WaitlistEncColumn),
+  },
+  {
+    // Partner-Demo R3b: the sealed conversation log. Born v2 (never v1, so the
+    // v1→v2 pass always counts 0 here); registered so the key-ring rotation
+    // (reencrypt-key-ring.ts, KEY_RING_TABLES) covers it. id leads the key, so
+    // the keyset order is by the unique id. thread_key reads back as `\x<hex>`
+    // (bytea::text); the context wants the bare lowercase hex the writer bound.
+    table: 'conversation_messages',
+    key: ['id', 'partner_id', 'thread_key', 'channel', 'direction'],
+    keyTypes: ['uuid', 'text', 'bytea', 'smallint', 'smallint'],
+    columns: ['body_enc'],
+    ctxFor: ([id, partnerId, threadKey, channel, direction]) =>
+      ctx.conversationMessage(partnerId, id, threadKey.replace(/^\\x/, '').toLowerCase(), Number(channel), Number(direction)),
   },
 ];
 

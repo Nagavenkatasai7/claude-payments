@@ -5,6 +5,7 @@ import { cleanSmokePartners, SMOKE_PARTNER_NAME } from '../scripts/clean-smoke-p
 import { createStaffRepo } from '@/db/repos/staff-repo';
 import type { Db } from '@/db/client';
 import type { Staff } from '@/lib/types';
+import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 
 // Program-Fix 45 P5: the staff ledger's partner_id FK means the smoke
 // partner's staff row (copied in on read) must go before the partner, and the
@@ -51,6 +52,16 @@ describe('clean-smoke-partner', () => {
     await expect(cleanSmokePartners(db, () => {})).rejects.toThrow();
     expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
     expect(await count(`SELECT count(*)::int AS n FROM staff WHERE partner_id = 'p_smoke'`)).toBe(1);
+  });
+
+  it('SKIPS a smoke partner that has conversation log rows (a permanent audit log is never deleted)', async () => {
+    await seedPartner(db, 'p_smoke', SMOKE_PARTNER_NAME);
+    await createConversationLogRepo(db).append({ partnerId: 'p_smoke', phone: '15551230000', channel: 'wa', direction: 'in', text: 'hi' });
+    const lines: string[] = [];
+    await cleanSmokePartners(db, (l) => lines.push(l));
+    expect(await count(`SELECT count(*)::int AS n FROM partners WHERE id = 'p_smoke'`)).toBe(1);
+    expect(await count(`SELECT count(*)::int AS n FROM conversation_messages WHERE partner_id = 'p_smoke'`)).toBe(1);
+    expect(lines.join('\n')).toMatch(/skip p_smoke .*1 conversation messages/);
   });
 
   it('never touches a partner with a different name', async () => {

@@ -7,6 +7,7 @@ import { EnvKeyRing, defaultProvider } from '@/lib/field-crypto';
 import { createTransferRepo } from '@/db/repos/transfer-repo';
 import { createIntegrationsRepo } from '@/db/repos/integrations-repo';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { conversationMessageId, createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 import { REENCRYPT_TABLES } from '../scripts/reencrypt-aad-v2';
 import {
   KEY_RING_TABLES,
@@ -49,6 +50,10 @@ async function seedK0(): Promise<string> {
     kyc: { providerType: 'persona', apiKey: 'persona_x', webhookSecret: 'whk_x' },
     payment: {},
     whatsapp: {},
+  });
+  // Partner-Demo R3b: a sealed conversation row (uuid / bytea / smallint key columns).
+  await createConversationLogRepo(db, ring).append({
+    id: conversationMessageId('in', 1), partnerId: 'acme', phone: '15551230000', channel: 'wa', direction: 'in', text: 'hello bot',
   });
   const t = await createTicketRepo(db, { cryptoProvider: ring }).createTicket({
     id: 'tk_kr1', partnerId: 'acme', kind: 'customer', customerPhone: '15551230000', subject: 's', body: 'where is it',
@@ -95,6 +100,7 @@ describe('scripts/reencrypt-key-ring (fix 45 P4)', { retry: 0 }, () => {
     expect(r('transfers', 'payout_destination_enc')).toMatchObject({ stale: 1, resealed: 0 });
     expect(r('transfers', 'recipient_legal_name_enc')).toMatchObject({ stale: 1, resealed: 0 });
     expect(r('ticket_messages', 'body')).toMatchObject({ stale: 1, resealed: 0 });
+    expect(r('conversation_messages', 'body_enc')).toMatchObject({ stale: 1, resealed: 0 });
     expect(await raw(`SELECT payout_destination_enc FROM transfers`)).toEqual(before);
   });
 
@@ -118,6 +124,12 @@ describe('scripts/reencrypt-key-ring (fix 45 P4)', { retry: 0 }, () => {
     expect(msgs[0].body).toBe('where is it');
     const integ = await createIntegrationsRepo(db, defaultProvider()).getIntegrations('acme');
     expect(integ.kyc.apiKey).toBe('persona_x');
+    // R3b: the conversation row was re-sealed under k1 in its own (uuid, bytea, smallint) row context.
+    const [cm] = await raw(`SELECT body_enc FROM conversation_messages`);
+    expect(cm.body_enc?.startsWith('v2.k1.')).toBe(true);
+    expect(report.find((x) => x.table === 'conversation_messages')).toMatchObject({ stale: 1, resealed: 1, failed: 0 });
+    const thread = await createConversationLogRepo(db, defaultProvider()).listThread('acme', '15551230000');
+    expect(thread).toEqual([expect.objectContaining({ text: 'hello bot', unreadable: false })]);
 
     // A second run has nothing left.
     const again = await reencryptKeyRing(db, { apply: true });

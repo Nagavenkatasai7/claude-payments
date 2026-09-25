@@ -10,6 +10,8 @@ import { getMonthlyVolumeStore } from './monthly-volume-store';
 import { getKycProvider } from './providers/kyc-provider';
 import { getPartnerStore } from './partner-store';
 import type { Customer } from './types';
+import { getDb } from '@/db/client';
+import { CARD_MARKER, createConversationLogRepo, type ConversationLogRepo } from '@/db/repos/conversation-log-repo';
 
 // web-chat (B5) — the WhatsApp agent brain re-channeled into the customer web
 // dashboard. The web thread is keyed `conv:<partnerId>:web:<phone>` — deliberately SEPARATE
@@ -39,7 +41,14 @@ export function webThreadStore(base: Store): Store {
   };
 }
 
-export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId'>;
+export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId'> & {
+  /**
+   * Partner-Demo R3b: the sealed, permanent conversation log. REQUIRED, so a
+   * caller cannot silently skip logging; production wires the Neon repo
+   * (runWebChatTurn).
+   */
+  conversationLog: Pick<ConversationLogRepo, 'append'>;
+};
 
 /**
  * Build the web-channel chat over injected deps (tests bind PGlite/fakeRedis;
@@ -50,13 +59,21 @@ export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId'>;
  * ledger, recipients and counters the tools may read.
  */
 export function createWebChat(deps: WebChatDeps) {
-  const store = webThreadStore(deps.store);
+  const { conversationLog, ...agentDeps } = deps;
+  const store = webThreadStore(agentDeps.store);
   return {
     async runTurn(customer: Customer, text: string): Promise<string> {
-      const agent = createAgent({ ...deps, store, channel: 'web', partnerId: customer.partnerId });
+      const agent = createAgent({ ...agentDeps, store, channel: 'web', partnerId: customer.partnerId });
       const phone = customer.senderPhone;
+      // R3b: the portal customer's own (tenant, phone) thread, web channel.
+      // Inbound BEFORE the agent runs, the reply after it (random ids: the web
+      // route does not retry a turn). A DB error fails the turn, never silently.
+      const entry = { partnerId: customer.partnerId, phone, channel: 'web' } as const;
+      await conversationLog.append({ ...entry, direction: 'in', text });
       const isNewConversation = (await store.getConversation(customer.partnerId, phone)).length === 0;
-      return agent.runAgentTurn(phone, text, { isNewConversation });
+      const reply = await agent.runAgentTurn(phone, text, { isNewConversation });
+      await conversationLog.append({ ...entry, direction: 'out', text: reply.trim() ? reply : CARD_MARKER });
+      return reply;
     },
   };
 }
@@ -75,6 +92,7 @@ export async function runWebChatTurn(customer: Customer, text: string): Promise<
     monthlyVolumeStore: getMonthlyVolumeStore(),
     kycProvider: getKycProvider(customerStore, env.appBaseUrl),
     partnerStore: getPartnerStore(),
+    conversationLog: createConversationLogRepo(getDb()),
   });
   return webChat.runTurn(customer, text);
 }

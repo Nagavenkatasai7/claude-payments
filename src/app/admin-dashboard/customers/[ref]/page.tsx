@@ -25,6 +25,7 @@ import { canDecideCustomerKyc } from '@/lib/compliance-config';
 import { CustomerLink } from '../../customer-link';
 import { openCustomerRef, auditIdentityView, auditSubjectId } from '@/lib/customer-ref';
 import { SendLimitsCard } from '../../send-limits-card';
+import { viewConversation, CONVERSATION_PANEL_LIMIT } from '@/lib/conversation-view';
 
 const TRANSFER_COLUMNS: ExpandableColumn[] = [
   { label: 'ID' },
@@ -61,6 +62,10 @@ export default async function CustomerDetailPage({
   // view writes one pii.view audit row (field names only, keyed subject).
   // Awaited and not caught: no audit row, no identity on screen.
   await auditIdentityView(getDb(), staff, customer);
+  // Partner-Demo R3b: the sealed conversation log for THIS resolved (tenant,
+  // phone). Admins only (null otherwise); any shown text is preceded by ONE
+  // conversation.view audit row, awaited and not caught: no row, no text.
+  const conversation = await viewConversation(getDb(), staff, customer);
   const siblingTenants = (await scoped.customerTenants(phone)).filter((id) => id !== customer.partnerId);
 
   const [mine, todayUsedCents, partner, legacyKycAudit, durableKycAudit, lastLimitChange] = await Promise.all([
@@ -268,6 +273,39 @@ export default async function CustomerDetailPage({
           action={setCustomerSendLimitAction}
           hidden={{ phone: customer.senderPhone, partnerId: customer.partnerId }}
         />
+
+        {conversation !== null && (
+          <Card className="mb-6">
+            <CardHeader>
+              <CardTitle>Conversation</CardTitle>
+              <CardDescription>
+                {conversation.length === 0
+                  ? 'No logged messages yet.'
+                  : `Last ${conversation.length} of up to ${CONVERSATION_PANEL_LIMIT} messages (WhatsApp and web chat). This view is recorded in the audit log.`}
+              </CardDescription>
+            </CardHeader>
+            {conversation.length > 0 && (
+              <CardContent>
+                <ul className="space-y-2 text-sm">
+                  {conversation.map((m) => (
+                    <li
+                      key={m.id}
+                      className={`max-w-[85%] rounded-lg border px-3 py-2 ${m.direction === 'out' ? 'ml-auto bg-muted' : ''}`}
+                    >
+                      <div className="mb-1 text-xs text-muted-foreground tabular-nums">
+                        {m.direction === 'in' ? 'Customer' : 'Bot'} · {m.channel === 'web' ? 'web' : 'WhatsApp'} ·{' '}
+                        {new Date(m.createdAt).toLocaleString()}
+                      </div>
+                      <div className={`whitespace-pre-wrap break-words ${m.unreadable ? 'italic text-muted-foreground' : ''}`}>
+                        {m.text}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            )}
+          </Card>
+        )}
 
         <Card className="mb-6">
           <CardHeader>

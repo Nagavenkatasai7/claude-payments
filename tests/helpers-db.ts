@@ -73,6 +73,7 @@ const ALL_TABLES = [
   'sanctions_list_versions',
   'staff',
   'funding_events',
+  'conversation_messages', // Partner-Demo R3b (also reached by CASCADE via partners; explicit for clarity)
 ].join(', ');
 
 export async function freshDb(): Promise<Db> {
