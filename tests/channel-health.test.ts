@@ -176,3 +176,33 @@ describe('recordChannelHealth (Redis + deduped audit + daily email)', { retry: 0
     expect(a.marks.auth_error?.count).toBe(1);
   });
 });
+
+describe('clearHealthMarks / clearChannelHealthMarks', () => {
+  it('drops only the given kinds', async () => {
+    const { clearHealthMarks } = await import('@/lib/channel-health');
+    const m = applyHealthMark(applyHealthMark({}, 'auth_error', 190, NOW.toISOString()), 'no_phone', undefined, NOW.toISOString());
+    expect(Object.keys(clearHealthMarks(m, ['auth_error', 'incomplete_config']))).toEqual(['no_phone']);
+  });
+
+  it('clearChannelHealthMarks rewrites the Redis marks; a store failure never throws', async () => {
+    const { clearChannelHealthMarks } = await import('@/lib/channel-health');
+    let saved = JSON.stringify(applyHealthMark({}, 'auth_error', 190, NOW.toISOString()));
+    const store = { readChannelHealth: async () => saved, writeChannelHealth: async (_p: string, j: string) => { saved = j; } };
+    await clearChannelHealthMarks('acme', ['auth_error'], { store });
+    expect(JSON.parse(saved)).toEqual({});
+    const broken = { readChannelHealth: async () => { throw new Error('down'); }, writeChannelHealth: async () => {} };
+    await expect(clearChannelHealthMarks('acme', ['auth_error'], { store: broken })).resolves.toBeUndefined();
+  });
+});
+
+describe('parseChannelTest', () => {
+  it('keeps ok/at/status/reason; drops junk', async () => {
+    const { parseChannelTest } = await import('@/lib/channel-health');
+    expect(parseChannelTest(null)).toBeNull();
+    expect(parseChannelTest('x')).toBeNull();
+    expect(parseChannelTest(JSON.stringify({ ok: 'yes', at: 'a' }))).toBeNull();
+    expect(parseChannelTest(JSON.stringify({ ok: false, at: 'a', status: 401, reason: 'probe_failed', token: 'EAA' }))).toEqual({
+      ok: false, at: 'a', status: 401, reason: 'probe_failed',
+    });
+  });
+});

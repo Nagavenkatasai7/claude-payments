@@ -523,6 +523,13 @@ export function createStore(redis: RedisLike, db: Db) {
     async writeChannelHealth(partnerId: PartnerId, json: string): Promise<void> {
       await redis.set(`wahealth:${partnerId}`, json, { ex: 7 * 86400 });
     },
+    /** The last "Test connection" result ({ok, status?, reason?, at}; never a token), 7-day TTL. */
+    async readChannelTest(partnerId: PartnerId): Promise<string | null> {
+      return redis.get(`watest:${partnerId}`);
+    },
+    async writeChannelTest(partnerId: PartnerId, json: string): Promise<void> {
+      await redis.set(`watest:${partnerId}`, json, { ex: 7 * 86400 });
+    },
     /** SET NX: true for the FIRST caller of this (partner, kind, bucket) — the audit-row dedupe. */
     async claimChannelHealthLog(partnerId: PartnerId, kind: string, bucket: number): Promise<boolean> {
       return (await redis.set(`wahealthlog:${partnerId}:${kind}:${bucket}`, '1', { ex: 3600, nx: true })) !== null;

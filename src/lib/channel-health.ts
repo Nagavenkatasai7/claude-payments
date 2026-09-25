@@ -259,6 +259,55 @@ export async function recordChannelHealth(
   }
 }
 
+/** Pure: drop the given kinds (a fixed config / a passing connection test resolves them). */
+export function clearHealthMarks(marks: ChannelHealthMarks, kinds: readonly ChannelHealthKind[]): ChannelHealthMarks {
+  const out: ChannelHealthMarks = { ...marks };
+  for (const k of kinds) delete out[k];
+  return out;
+}
+
+/**
+ * Clear resolved kinds from the partner's Redis marks (after a complete save, a
+ * disconnect, or a passing "Test connection"). Best-effort — never throws; the
+ * ledger's audit rows are append-only and stay as history.
+ */
+export async function clearChannelHealthMarks(
+  partnerId: PartnerId,
+  kinds: readonly ChannelHealthKind[],
+  deps?: { store: Pick<Store, 'readChannelHealth' | 'writeChannelHealth'> },
+): Promise<void> {
+  try {
+    const store = deps?.store ?? getStore();
+    const raw = await store.readChannelHealth(partnerId);
+    if (!raw) return;
+    await store.writeChannelHealth(partnerId, JSON.stringify(clearHealthMarks(parseHealthMarks(raw), kinds)));
+  } catch (err) {
+    logWarn('channel-health', 'health marks not cleared', { partnerId, error: err instanceof Error ? err.name : 'error' });
+  }
+}
+
+/** The last "Test connection" result, as stored (status code only — never a token or body). */
+export interface ChannelTestResult {
+  ok: boolean;
+  at: string;
+  status?: number;
+  reason?: 'not_configured' | 'probe_failed';
+}
+
+export function parseChannelTest(raw: string | null | undefined): ChannelTestResult | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Record<string, unknown>;
+    if (!v || typeof v !== 'object' || typeof v.ok !== 'boolean' || typeof v.at !== 'string') return null;
+    const out: ChannelTestResult = { ok: v.ok, at: v.at };
+    if (typeof v.status === 'number' && Number.isInteger(v.status)) out.status = v.status;
+    if (v.reason === 'not_configured' || v.reason === 'probe_failed') out.reason = v.reason;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export interface ChannelHealthView {
   marks: ChannelHealthMarks;
   events: Array<{ action: string; meta: unknown; at: Date }>;
