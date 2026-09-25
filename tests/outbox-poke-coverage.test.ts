@@ -34,6 +34,9 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
   'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold'],
+  // R2a: the partner alert email.send — called from drainOnce (the worker) and
+  // the inbound webhook path (whatsapp-inbound.ts, which pokes).
+  'src/lib/channel-health.ts': ['recordChannelHealth'],
 };
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';
