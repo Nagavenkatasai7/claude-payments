@@ -15,7 +15,7 @@ import {
   getPartnerIntegrationsStore,
   partnerForPhoneNumberId,
 } from '@/lib/partner-integrations-store';
-import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
+import { createPartnerApiKeyStore, getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import type { ApiKeyMode } from '@/lib/partner-api-scopes';
 import { hashPassword } from '@/lib/password';
 import { assertStaffPasswordPolicy } from '@/lib/staff-password';
@@ -321,21 +321,55 @@ function assertWhatsappConfigComplete(w: PartnerWhatsappConfig): void {
   }
 }
 
+/**
+ * partner-demo R3a (M4): which WhatsApp fields a save changed — BOOLEANS ONLY.
+ * Never a value, a last4 of a token, or a hash (the audit row must not help
+ * anyone guess or confirm a secret).
+ */
+function whatsappAuditMeta(before: PartnerWhatsappConfig, after: PartnerWhatsappConfig) {
+  return {
+    pnidChanged: (after.phoneNumberId ?? '') !== (before.phoneNumberId ?? ''),
+    tokenChanged: (after.token ?? '') !== (before.token ?? ''),
+    verifyTokenChanged: (after.verifyToken ?? '') !== (before.verifyToken ?? ''),
+    appSecretChanged: (after.appSecret ?? '') !== (before.appSecret ?? ''),
+    pnidCleared: !after.phoneNumberId && Boolean(before.phoneNumberId),
+  };
+}
+
 export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
   const id = String(formData.get('id') ?? '').trim();
-  await gatePartnerConfig(id);
+  const staff = await gatePartnerConfig(id);
   const store = getPartnerIntegrationsStore();
   const existing = await store.getIntegrations(id);
   // R2a: an explicit disconnect wipes all four fields (blank fields otherwise
   // KEEP stored secrets, so without this a config could never be cleared).
+  // R3a: audited in the same transaction — actor + partnerId only.
   if (formData.get('disconnect') === 'on') {
-    await store.saveIntegrations(id, { ...existing, whatsapp: {} });
+    await getDb().transaction(async (tx) => {
+      await createPartnerIntegrationsStore(tx).saveIntegrations(id, { ...existing, whatsapp: {} });
+      await createAuditRepo(tx).record({
+        partnerId: id,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'partner.whatsapp.disconnect',
+        subjectId: id,
+      });
+    });
     await clearChannelHealthMarks(id, ['auth_error', 'incomplete_config']);
     revalidatePath(`/admin-dashboard/partners/${id}`);
     return;
   }
   const newPnid = String(formData.get('phoneNumberId') ?? '').trim();
   await assertPhoneNumberIdFree(id, newPnid || undefined);
+  const whatsapp: PartnerWhatsappConfig = {
+    phoneNumberId: newPnid || undefined,
+    token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
+    verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
+    appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
+  };
+  // R2a rule on the MERGED state; R3a moved it BEFORE the Graph probe, so an
+  // incomplete form never costs a network call.
+  assertWhatsappConfigComplete(whatsapp);
   // Fix 30: verify only when the pnid changes, or a NEW token arrives while a
   // pnid is set. A save changing neither (e.g. only the verify token) is
   // grandfathered — no Graph call. Clearing the pnid needs no proof.
@@ -346,17 +380,23 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
   if (probed) {
     // wabaId is read ONLY for this check; it is never persisted.
     const wabaId = String(formData.get('wabaId') ?? '').trim() || undefined;
+    // R3a (R7 review): the Graph call stays BEFORE the transaction — never
+    // network I/O while holding a database transaction open.
     await assertPhoneNumberIdOwned(id, newPnid, submittedToken || existing.whatsapp.token, wabaId);
   }
-  const whatsapp: PartnerWhatsappConfig = {
-    phoneNumberId: newPnid || undefined,
-    token: keepOrUpdate(String(formData.get('token') ?? ''), existing.whatsapp.token),
-    verifyToken: keepOrUpdate(String(formData.get('verifyToken') ?? ''), existing.whatsapp.verifyToken),
-    appSecret: keepOrUpdate(String(formData.get('appSecret') ?? ''), existing.whatsapp.appSecret),
-  };
-  assertWhatsappConfigComplete(whatsapp); // R2a: the MERGED state, after the (network) probe, before the write
   try {
-    await store.saveIntegrations(id, { ...existing, whatsapp });
+    // R3a (M4): the write and its audit row commit together, or neither does.
+    await getDb().transaction(async (tx) => {
+      await createPartnerIntegrationsStore(tx).saveIntegrations(id, { ...existing, whatsapp });
+      await createAuditRepo(tx).record({
+        partnerId: id,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'partner.whatsapp_config',
+        subjectId: id,
+        meta: whatsappAuditMeta(existing.whatsapp, whatsapp),
+      });
+    });
   } catch (e) {
     rethrowPnidConflict(e);
   }
@@ -724,22 +764,53 @@ export async function issueApiKeyAction(
   partnerId: PartnerId,
   mode?: ApiKeyMode,
 ): Promise<{ plaintext: string; keyId: string; last4: string }> {
-  await gatePartnerConfig(partnerId);
+  const staff = await gatePartnerConfig(partnerId);
   const m: unknown = mode ?? 'live';
   if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
-  const issued = await getPartnerApiKeyStore().issue(partnerId, m);
+  // R3a (M4): the key and its audit row commit together. Meta: keyId, mode,
+  // last4 — never the plaintext.
+  const issued = await getDb().transaction(async (tx) => {
+    const k = await createPartnerApiKeyStore(tx).issue(partnerId, m);
+    await createAuditRepo(tx).record(apiKeyIssueAuditEvent(partnerId, staff.username, k.keyId, m, k.last4));
+    return k;
+  });
   revalidatePath(`/admin-dashboard/partners/${partnerId}`);
   return { plaintext: issued.plaintext, keyId: issued.keyId, last4: issued.last4 };
 }
 
+function apiKeyIssueAuditEvent(partnerId: string, actor: string, keyId: string, mode: ApiKeyMode, last4: string) {
+  return {
+    partnerId,
+    actor,
+    actorType: 'staff' as const,
+    action: 'api_key.issue',
+    subjectId: keyId,
+    meta: { keyId, mode, last4 },
+  };
+}
+
 export async function revokeApiKeyAction(partnerId: PartnerId, formData: FormData): Promise<void> {
-  await gatePartnerConfig(partnerId);
+  const staff = await gatePartnerConfig(partnerId);
   const keyId = String(formData.get('keyId') ?? '').trim();
   if (!keyId) throw new Error('keyId is required.');
-  // Cross-tenant guard: the key must belong to THIS partner before we revoke it.
-  const keys = await getPartnerApiKeyStore().list(partnerId);
-  if (!keys.some((k) => k.keyId === keyId)) throw new Error('Key not found.');
-  await getPartnerApiKeyStore().revoke(keyId);
+  // Cross-tenant guard: the key must belong to THIS partner (the listing is
+  // tenant-scoped, and since R3a the revoke's own WHERE carries partner_id too).
+  const key = (await getPartnerApiKeyStore().list(partnerId)).find((k) => k.keyId === keyId);
+  if (!key) throw new Error('Key not found.');
+  if (key.revokedAt) return; // already revoked: an idempotent no-op, no second audit row
+  // R3a (M4): the revoke and its audit row commit together. Meta: keyId + last4.
+  await getDb().transaction(async (tx) => {
+    const done = await createPartnerApiKeyStore(tx).revoke(keyId, partnerId);
+    if (!done) throw new Error('Key not found.'); // raced a delete ⇒ nothing written
+    await createAuditRepo(tx).record({
+      partnerId,
+      actor: staff.username,
+      actorType: 'staff',
+      action: 'api_key.revoke',
+      subjectId: keyId,
+      meta: { keyId, last4: key.last4 },
+    });
+  });
   revalidatePath(`/admin-dashboard/partners/${partnerId}`);
 }
 
@@ -859,6 +930,12 @@ export async function wizardCreatePartnerAction(
   // pnid gate above), so a refusal never leaves an orphan partner behind.
   assertSettlementUrlAllowed(credentials.settlementUrl, providerType);
   const whatsappConfigured = Boolean(clean(wa.phoneNumberId) && clean(wa.token));
+  const wizardWhatsapp: PartnerWhatsappConfig = {
+    phoneNumberId: clean(wa.phoneNumberId),
+    token: clean(wa.token),
+    verifyToken: clean(wa.verifyToken),
+    appSecret: clean(wa.appSecret),
+  };
   const settlementConfigured = providerType === 'simulator' || Boolean(credentials.settlementUrl);
   // The partner row and its integrations commit in ONE transaction (fix 1
   // review): if the pnid unique index loses a race (23505), the partner insert
@@ -869,24 +946,35 @@ export async function wizardCreatePartnerAction(
       if (botPersona) await createAuditRepo(tx).record(personaAuditEvent(id, staff.username, undefined, botPersona));
       await createPartnerIntegrationsStore(tx).saveIntegrations(id, {
         kyc: {},
-        whatsapp: {
-          phoneNumberId: clean(wa.phoneNumberId),
-          token: clean(wa.token),
-          verifyToken: clean(wa.verifyToken),
-          appSecret: clean(wa.appSecret),
-        },
+        whatsapp: wizardWhatsapp,
         payment: {
           providerType,
           credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
           webhookSecret,
         },
       });
+      // R3a (M4): the creds save is audited like the WhatsApp tab (booleans only).
+      await createAuditRepo(tx).record({
+        partnerId: id,
+        actor: staff.username,
+        actorType: 'staff',
+        action: 'partner.whatsapp_config',
+        subjectId: id,
+        meta: { created: true, ...whatsappAuditMeta({}, wizardWhatsapp) },
+      });
     });
   } catch (e) {
     rethrowPnidConflict(e);
   }
 
-  const issued = await getPartnerApiKeyStore().issue(id);
+  // The first key + its audit row: a SEPARATE transaction after the partner
+  // commit (as before R3a), so a key-insert error is never reported as a pnid
+  // conflict by rethrowPnidConflict above.
+  const issued = await getDb().transaction(async (tx) => {
+    const k = await createPartnerApiKeyStore(tx).issue(id);
+    await createAuditRepo(tx).record(apiKeyIssueAuditEvent(id, staff.username, k.keyId, 'live', k.last4));
+    return k;
+  });
 
   revalidatePath('/admin-dashboard/partners');
   return {

@@ -31,6 +31,8 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/stale-money.ts': ['escalateStuckPaid', 'expireUnpaidLinks'],
   'src/lib/cron-run.ts': ['runDueSchedules'],
   'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad'],
+  // partner-demo R3a: the storage cap-watch — called only from the cron route.
+  'src/lib/storage-watch.ts': ['checkStorageCap'],
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
   'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold'],
