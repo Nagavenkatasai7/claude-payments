@@ -279,15 +279,16 @@ curl -X POST $BASE/transactions \\
                 </li>
                 <li>
                   <strong className="text-foreground">Once a transaction exists under a key, every request
-                  with that key returns that same transaction</strong>: <code>200</code> with the same{' '}
+                  with that key and a valid body returns that same transaction</strong>: <code>200</code> with the same{' '}
                   <code>id</code> and its <em>current</em> state (not a copy of the first response). A
                   concurrent duplicate can also get <code>201</code> for the same <code>id</code>, or a
                   retryable <code>503</code>.
                 </li>
                 <li>
-                  <strong className="text-foreground">The body is not compared.</strong> Reusing a key with
-                  a different body returns the original transaction; the new body is not validated or
-                  applied. Never reuse a key for a different transfer.
+                  <strong className="text-foreground">The body is validated but not compared.</strong> A
+                  different body that passes validation returns the original transaction and is not
+                  applied; one that fails validation is refused as usual (<code>400</code>/<code>404</code>/
+                  <code>422</code>). Never reuse a key for a different transfer.
                 </li>
                 <li>
                   This includes a transaction blocked by sanctions screening: the first request gets{' '}
@@ -818,16 +819,17 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Recipient delivery template</CardTitle>
               <CardDescription>
-                The message a recipient gets when their money is delivered, sent from your number.
+                The message a recipient gets when their money is delivered.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <p className="text-muted-foreground">
-                A recipient usually has no open conversation with your number, so this notice is a
-                WhatsApp message template. Create it in your own WhatsApp Business account with{' '}
-                <strong className="text-foreground">exactly</strong> this name and language, or every
-                send falls back to a plain text, which only reaches a recipient who messaged your
-                number in the last 24 hours:
+                A recipient usually has no open conversation with the sending number, so this notice
+                is a WhatsApp message template. If you use your own WhatsApp number, create it in your
+                own WhatsApp Business account with <strong className="text-foreground">exactly</strong>{' '}
+                this name and language, or every send falls back to a plain text, which only reaches a
+                recipient who messaged your number in the last 24 hours. (On SmartRemit&apos;s shared
+                number, SmartRemit&apos;s own template is used and there is nothing to submit.)
               </p>
               <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
                 <li>Name <code>transfer_delivered</code> · category Utility · language English (<code>en</code>)</li>
@@ -837,12 +839,12 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
 
 {{1}} recipient name       sample: Priya
 {{2}} amount delivered     sample: ₹4,750
-{{3}} sender phone, masked sample: ****4567
+{{3}} sender phone, masked sample: ••••4567
 {{4}} payout label         sample: bank account`}</Code>
               <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
                 <li>
                   The sender&apos;s phone number is always masked to its last 4 digits (for example{' '}
-                  <code>****4567</code>); the recipient never sees the full number.
+                  <code>••••4567</code>); the recipient never sees the full number.
                 </li>
                 <li>
                   <code>{'{{4}}'}</code> is always <code>bank account</code> today, whatever the payout method.

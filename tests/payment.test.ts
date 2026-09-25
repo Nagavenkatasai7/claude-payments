@@ -450,7 +450,7 @@ describe('recipientTemplateParams', () => {
     expect(params[1]).toContain('₹');
     expect(params[1]).toContain('42,600');
     // Partner-demo R6a: the sender phone reaches the RECIPIENT masked to last 4.
-    expect(params[2]).toBe('****4567');
+    expect(params[2]).toBe('••••4567');
     expect(params.join(' ')).not.toContain('5551234567');
     expect(params[3]).toBe('bank account'); // always "bank account"
   });
@@ -471,7 +471,7 @@ describe('recipientTemplateParams', () => {
     expect(params[0]).toBe('Ali');
     expect(params[1]).toContain('AED');
     expect(params[1]).toContain('1,101');
-    expect(params[2]).toBe('****4321');
+    expect(params[2]).toBe('••••4321');
     expect(params[3]).toBe('bank account');
   });
 
@@ -493,7 +493,7 @@ describe('recipientDeliveredFallbackText', () => {
     expect(text).toContain('Mom');            // recipient name
     expect(text).toContain('₹');              // dest amount in INR
     expect(text).toContain('42,600');
-    expect(text).toContain('****4567');       // sender phone, masked (R6a)
+    expect(text).toContain('••••4567');       // sender phone, masked (R6a)
     expect(text).not.toContain('5551234567');
     expect(text).toContain('Acme Remit');     // brand
   });
