@@ -12,6 +12,9 @@ import {
   uniqueIndex,
   primaryKey,
   check,
+  uuid,
+  smallint,
+  customType,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -762,4 +765,38 @@ export const fundingEvents = pgTable(
     receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.partnerId, t.provider, t.eventId] })],
+);
+
+// ── Partner-Demo R3b (0025): the sealed, permanent conversation log ──────────
+// One row per customer-visible chat message (customer text in, the reply out).
+// MIGRATION-ONLY for now: nothing reads or writes this table until the R3b
+// writer PR, which lands only after this migration is applied on prod.
+//   • No plaintext phone. thread_key is the raw 32-byte auditSubjectId HMAC
+//     (customer-ref.ts), so a thread joins to its pii.view audit rows. That HMAC
+//     is keyed by an HKDF of FIELD_ENCRYPTION_KEY (k0): it is stable only
+//     because that key is set-once. Retiring k0 would orphan every thread join.
+//   • body_enc is a field-crypto envelope (AES-256-GCM), sealed before INSERT.
+//   • channel: 1 = WhatsApp, 2 = web. direction: 1 = inbound, 2 = outbound.
+//   • id has NO default: the writer supplies it (deterministic for WhatsApp, so
+//     worker retries dedupe with INSERT … ON CONFLICT DO NOTHING).
+//   • Tenant-owned: partner_id NOT NULL + FK (schema convention above).
+// The Redis 30-day chat history is still plaintext; this does not close crypto-06.
+const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
+  dataType() {
+    return 'bytea';
+  },
+});
+
+export const conversationMessages = pgTable(
+  'conversation_messages',
+  {
+    id: uuid('id').primaryKey(),
+    partnerId: text('partner_id').notNull().references(() => partners.id),
+    threadKey: bytea('thread_key').notNull(),
+    channel: smallint('channel').notNull(),
+    direction: smallint('direction').notNull(),
+    bodyEnc: text('body_enc').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('conversation_messages_thread').on(t.partnerId, t.threadKey, t.createdAt)],
 );

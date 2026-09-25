@@ -44,6 +44,20 @@ function Endpoint({ method, path, desc }: { method: string; path: string; desc: 
   );
 }
 
+// The scope each Partner API route requires, and whether a test key holds it
+// (TEST_SCOPES in src/lib/partner-api-scopes.ts). Live keys hold all nine.
+const SCOPE_ROWS: ReadonlyArray<readonly [route: string, scope: string, test: boolean]> = [
+  ['GET /corridors', 'corridors:read', true],
+  ['POST /quote', 'quote', true],
+  ['POST /beneficiaries/validate', 'beneficiaries:validate', true],
+  ['POST /beneficiaries', 'beneficiaries:write', false],
+  ['GET /transactions · GET /transactions/:id', 'transactions:read', true],
+  ['POST /transactions · POST /transactions/:id/confirm', 'transactions:write', true],
+  ['GET /rates', 'rates:read', false],
+  ['PUT /rates', 'rates:write', false],
+  ['GET /settlements', 'settlements:read', false],
+];
+
 export default function DocsPage() {
   return (
     <div className="min-h-screen bg-background font-sans text-foreground antialiased">
@@ -108,11 +122,105 @@ export default function DocsPage() {
           </p>
           <Code>{`Authorization: Bearer <your-api-key>`}</Code>
           <p className="text-sm text-muted-foreground">
-            Rate limit: 120 requests/minute per partner (429 + <code>Retry-After</code> beyond it).
             Errors are JSON: <code>{`{ "error": "…" }`}</code>. <code>503</code> means live FX
-            is temporarily unavailable and nothing was minted — retry later (a{' '}
-            <code>POST /transactions</code> retry may reuse the same Idempotency-Key).
+            is temporarily unavailable (or another transfer for the same sender is in progress)
+            and nothing was minted — retry later (a <code>POST /transactions</code> retry may reuse
+            the same Idempotency-Key; see <a href="#idempotency" className="underline">Idempotency</a>).
           </p>
+
+          {/* keep in sync with src/lib/partner-api-scopes.ts, guardPartner in src/lib/partner-api.ts
+              and the guardPartner(req, scope) call in each partner/v1 route.ts (R6a) */}
+          <Card id="keys">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Keys, environments and scopes</CardTitle>
+              <CardDescription>
+                Every key is either live or test, and each route needs one scope.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
+                <li>
+                  A live key starts <code>sr_live_</code>; a test (sandbox) key starts{' '}
+                  <code>sr_test_</code>. The mode comes from the key itself: the whole key, prefix
+                  included, is what we verify, so editing the prefix only makes the key invalid (401).
+                </li>
+                <li>
+                  A test key only ever creates and sees <strong className="text-foreground">sandbox</strong>{' '}
+                  transactions. They settle on the mock rail, never message a customer or recipient,
+                  and can never be paid on the hosted pay page. Sanctions screening still runs on every
+                  sandbox transaction. A live key never sees sandbox transactions, and a test key never
+                  sees live ones (<code>404</code>).
+                </li>
+                <li>
+                  A key is a long-lived bearer secret: it does not expire, and it is shown once, when it
+                  is issued on your partner page in the dashboard. Keep it server-side. To rotate, issue a
+                  new key, move your traffic to it, then revoke the old one there. A revoked or unknown
+                  key gets <code>401</code> <code>Invalid or revoked API key.</code>
+                </li>
+              </ul>
+              <div className="-mx-1 overflow-x-auto px-1">
+                <table className="w-full min-w-[520px] text-left">
+                  <thead>
+                    <tr className="border-b border-border text-muted-foreground">
+                      <th className="py-1.5 pr-4 font-medium">Route</th>
+                      <th className="py-1.5 pr-4 font-medium">Scope</th>
+                      <th className="py-1.5 pr-4 font-medium">Live key</th>
+                      <th className="py-1.5 font-medium">Test key</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {SCOPE_ROWS.map(([route, scope, test]) => (
+                      <tr key={scope}>
+                        <td className="py-1.5 pr-4"><code>{route}</code></td>
+                        <td className="py-1.5 pr-4"><code>{scope}</code></td>
+                        <td className="py-1.5 pr-4">Yes</td>
+                        <td className="py-1.5">{test ? 'Yes (sandbox only)' : 'No'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-muted-foreground">
+                A key is issued with every scope its mode allows, as in the table. A request
+                outside the key&apos;s scopes gets <code>403</code>{' '}
+                <code>{`{ "error": "This key cannot perform this action." }`}</code>. A key whose
+                partner is not active gets <code>403</code>{' '}
+                <code>{`{ "error": "Partner not active." }`}</code>.
+              </p>
+            </CardContent>
+          </Card>
+
+          {/* keep in sync with src/lib/partner-rate-limit.ts + guardPartner in src/lib/partner-api.ts (R6a) */}
+          <Card id="rate-limits">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Rate limits</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
+                <li>
+                  <strong className="text-foreground">120 requests per minute per partner</strong>,
+                  shared by all of your keys, live and test together. Each key is also capped at 120
+                  per minute on its own.
+                </li>
+                <li>
+                  The window is a fixed calendar minute (UTC), not a rolling 60 seconds: the count
+                  resets at the start of each minute.
+                </li>
+                <li>
+                  Every request with a valid key counts, including ones answered <code>403</code> or{' '}
+                  <code>429</code>. A request refused <code>401</code> (missing, unknown or revoked key)
+                  is not counted.
+                </li>
+                <li>
+                  Over the limit you get <code>429</code> with body{' '}
+                  <code>{`{ "error": "Rate limit exceeded." }`}</code> and the header{' '}
+                  <code>Retry-After: 60</code> (always 60 seconds, whatever is left of the minute).
+                  Back off before retrying, and add random jitter so your workers don&apos;t all retry
+                  at the same moment.
+                </li>
+              </ul>
+            </CardContent>
+          </Card>
           <Card>
             <CardContent className="divide-y divide-border pt-4">
               <Endpoint method="GET" path="/corridors" desc="Your enabled send corridors + brand" />
@@ -131,7 +239,7 @@ export default function DocsPage() {
           <Code>{`# Mint a transfer (idempotent — safe to retry with the same key)
 curl -X POST $BASE/transactions \\
   -H "Authorization: Bearer $KEY" \\
-  -H "Idempotency-Key: order-8841" \\
+  -H "Idempotency-Key: 5f0c8a3e-2b7d-4e61-9a4f-0d3b8c1e7a52" \\
   -H "Content-Type: application/json" \\
   -d '{
     "amount_source": 200,
@@ -142,12 +250,68 @@ curl -X POST $BASE/transactions \\
   }'`}</Code>
           <p className="text-sm text-muted-foreground">
             Compliance screening (sanctions) runs on <em>every</em> mint regardless of KYC mode — a
-            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. (In today&apos;s demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.) A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code> or <code>sched:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
+            watchlist hit returns 422 and the attempt is recorded as <code>blocked</code>. (In today&apos;s demonstration it runs against a built-in reference rule set, not yet a live commercial AML feed.) A later request with the same Idempotency-Key returns that blocked transaction with 200 — see <a href="#idempotency" className="underline">Idempotency</a>. A <code>payout_destination</code> that is a masked display value (for example <code>****1234</code> or <code>account on file</code>) is refused with 422 before the Idempotency-Key is bound. Idempotency-Key values beginning <code>draft:</code>, <code>b2binvoice:</code>, <code>sched:</code> or <code>test:</code> are reserved and refused with 400. A payer can never change the beneficiary account of a transaction created through this API: every transaction is bound to its Idempotency-Key before it is created, and that binding locks the account. A transaction still <code>awaiting_payment</code> and unpaid 7 days after it was created expires: its status becomes <code>cancelled</code> and it can no longer be paid.
           </p>
           <p className="text-sm text-muted-foreground">
             Names — <code>beneficiary.name</code>, <code>sender.name</code> and the <code>name</code> of a stored beneficiary — must be 1–80 characters with no brackets (<code>{'[ ] { } < >'}</code>) and no control or line-break characters. <code>payout_method</code> must be one of <code>bank</code>, <code>upi</code> or <code>usdc</code> (default <code>bank</code>), and an inline <code>payout_destination</code> is at most 64 printable characters. <code>destination_country</code> is optional and defaults to <code>IN</code>; when present it must be one of {destinationListText()} — any other value is refused with 400 (it is never coerced to India). Each is refused with 400 before the Idempotency-Key is bound, so a corrected retry with the same key succeeds. Transactions created through this API are never added to the customer&apos;s saved recipients in chat.
             <code>sender.name</code> is optional today but strongly recommended: a transaction created without it is held for manual review (it is created with <code>compliance_status</code> <code>flagged</code>, and confirming it returns <code>in_review</code> until compliance staff release it). <code>sender.name</code> will become required in a future version.
           </p>
+
+          {/* keep in sync with createTransaction in src/lib/partner-api-service.ts (R6a) */}
+          <Card id="idempotency">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Idempotency</CardTitle>
+              <CardDescription>
+                How the <code>Idempotency-Key</code> header on <code>POST /transactions</code> behaves.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
+                <li>
+                  The header is required on <code>POST /transactions</code> only (missing: <code>400</code>).
+                  No other route is idempotent: in particular, retrying <code>POST /beneficiaries</code>{' '}
+                  stores a second beneficiary.
+                </li>
+                <li>
+                  Use a fresh random UUID per transaction and put no personal data in it. We recommend
+                  at most 255 characters. Keys are kept indefinitely, per partner and per environment:
+                  the same key sent with a test key and with a live key makes two separate transactions.
+                </li>
+                <li>
+                  <strong className="text-foreground">Once a transaction exists under a key, every request
+                  with that key and a valid body returns that same transaction</strong>: <code>200</code> with the same{' '}
+                  <code>id</code> and its <em>current</em> state (not a copy of the first response). A
+                  concurrent duplicate can also get <code>201</code> for the same <code>id</code>, or a
+                  retryable <code>503</code>.
+                </li>
+                <li>
+                  <strong className="text-foreground">The body is validated but not compared.</strong> A
+                  different body that passes validation returns the original transaction and is not
+                  applied; one that fails validation is refused as usual (<code>400</code>/<code>404</code>/
+                  <code>422</code>). Never reuse a key for a different transfer.
+                </li>
+                <li>
+                  This includes a transaction blocked by sanctions screening: the first request gets{' '}
+                  <code>422</code>, a repeat with the same key gets <code>200</code> with the blocked
+                  transaction. Always read <code>status</code> and <code>compliance_status</code> in the
+                  body, not only the HTTP code.
+                </li>
+                <li>
+                  If a request failed with any error other than <code>409</code> and no transaction was
+                  created, a retry with the same key is validated again from scratch using the body you
+                  send then, and creates the transaction if it now succeeds.
+                </li>
+                <li>
+                  <code>409</code> <code>Idempotency-Key conflict. Retry with a new key.</code> is rare and
+                  means exactly that: the key can no longer be used, so retry with a new one.
+                </li>
+                <li>
+                  Reserved prefixes, refused with <code>400</code>: <code>draft:</code>,{' '}
+                  <code>b2binvoice:</code>, <code>sched:</code> and <code>test:</code>.
+                </li>
+              </ul>
+            </CardContent>
+          </Card>
 
           <Card id="settlements">
             <CardHeader className="pb-2">
@@ -570,10 +734,127 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
           </p>
           <p className="text-sm text-muted-foreground">
             <strong className="text-foreground">KYC:</strong> run it yourself (delegated mode — you
-            attest verification and our send-gate steps aside) or use SmartRemit&apos;s built-in
-            tiered KYC. Sanctions screening is <strong className="text-foreground">not</strong>{' '}
-            delegable — it always runs on our side.
+            attest verification) or use SmartRemit&apos;s built-in tiered KYC. Sanctions screening is{' '}
+            <strong className="text-foreground">not</strong> delegable — it always runs on our side
+            and cannot be switched off.
           </p>
+
+          {/* keep in sync with sendGateActive (src/lib/kyc-gate.ts), createTransfer's KYC backstop
+              (src/lib/transfer-create.ts) and deriveTier (src/lib/tier-rules.ts) (R6a) */}
+          <Card id="kyc-attestation">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">KYC attestation on the API</CardTitle>
+              <CardDescription>
+                Your <code>sender.kyc_status</code> is your attestation; SmartRemit trusts it.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <p className="text-muted-foreground">
+                Whether an unverified sender may send at all depends on your partner&apos;s{' '}
+                <strong className="text-foreground">verify-before-send</strong> setting (off unless it
+                was turned on for you), in either KYC mode. The value must be one of the five below,
+                exactly as written (lowercase); any other value, or no value, counts as{' '}
+                <code>not_started</code>. Always send it explicitly.
+              </p>
+              <div className="-mx-1 overflow-x-auto px-1">
+                <table className="w-full min-w-[560px] text-left">
+                  <thead>
+                    <tr className="border-b border-border text-muted-foreground">
+                      <th className="py-1.5 pr-4 font-medium"><code>kyc_status</code></th>
+                      <th className="py-1.5 pr-4 font-medium">Verify-before-send off</th>
+                      <th className="py-1.5 font-medium">Verify-before-send on</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    <tr>
+                      <td className="py-1.5 pr-4"><code>verified</code></td>
+                      <td className="py-1.5 pr-4">Sends.</td>
+                      <td className="py-1.5">Sends.</td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 pr-4"><code>grandfathered</code></td>
+                      <td className="py-1.5 pr-4">Sends.</td>
+                      <td className="py-1.5">Refused (<code>422</code>).</td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 pr-4"><code>not_started</code> · <code>pending</code></td>
+                      <td className="py-1.5 pr-4">Sends.</td>
+                      <td className="py-1.5">Refused (<code>422</code>).</td>
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 pr-4"><code>rejected</code></td>
+                      <td className="py-1.5 pr-4">Refused (<code>422</code>).</td>
+                      <td className="py-1.5">Refused (<code>422</code>).</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
+                <li>
+                  <strong className="text-foreground">Every new sender starts with a 3-day observation
+                  window</strong>, counted from when we first see them, even if you attest{' '}
+                  <code>verified</code>: during it the lower daily limit applies. After it, the higher
+                  limit applies to every sender who can send.
+                </li>
+                <li>
+                  A transfer over the sender&apos;s current limit is refused with <code>422</code>{' '}
+                  <code>This transfer exceeds the sender&apos;s current sending limit.</code> (no figures
+                  in the response).
+                </li>
+                <li>
+                  Sanctions screening runs on every transaction whatever the attestation, sandbox
+                  included.
+                </li>
+                <li>
+                  Always send <code>sender.name</code> as well: without it the transaction is held for
+                  manual review (see above).
+                </li>
+              </ul>
+            </CardContent>
+          </Card>
+
+          {/* keep in sync with recipientTemplateParams in src/lib/payment.ts and
+              RECIPIENT_TEMPLATE_NAME / RECIPIENT_TEMPLATE_LANG in src/lib/whatsapp.ts (R6a) */}
+          <Card id="delivery-template">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Recipient delivery template</CardTitle>
+              <CardDescription>
+                The message a recipient gets when their money is delivered.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <p className="text-muted-foreground">
+                A recipient usually has no open conversation with the sending number, so this notice
+                is a WhatsApp message template. If you use your own WhatsApp number, create it in your
+                own WhatsApp Business account with <strong className="text-foreground">exactly</strong>{' '}
+                this name and language, or every send falls back to a plain text, which only reaches a
+                recipient who messaged your number in the last 24 hours. (On SmartRemit&apos;s shared
+                number, SmartRemit&apos;s own template is used and there is nothing to submit.)
+              </p>
+              <ul className="list-disc space-y-1 pl-5 text-muted-foreground">
+                <li>Name <code>transfer_delivered</code> · category Utility · language English (<code>en</code>)</li>
+                <li>Exactly four body variables, in this order:</li>
+              </ul>
+              <Code>{`Hi {{1}}, you've received {{2}} from the sender with phone number {{3}}. It's on its way to your {{4}}.
+
+{{1}} recipient name       sample: Priya
+{{2}} amount delivered     sample: ₹4,750
+{{3}} sender phone, masked sample: ••••4567
+{{4}} payout label         sample: bank account`}</Code>
+              <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground">
+                <li>
+                  The sender&apos;s phone number is always masked to its last 4 digits (for example{' '}
+                  <code>••••4567</code>); the recipient never sees the full number.
+                </li>
+                <li>
+                  <code>{'{{4}}'}</code> is always <code>bank account</code> today, whatever the payout method.
+                </li>
+                <li>
+                  Submit the template well before you go live: Meta reviews it before it can be sent.
+                </li>
+              </ul>
+            </CardContent>
+          </Card>
         </section>
 
         <footer className="border-t border-border pt-6 text-sm text-muted-foreground">

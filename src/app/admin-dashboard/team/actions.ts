@@ -14,6 +14,7 @@ import { setStaffSessionCookie } from '@/lib/session-cookie';
 import { getStaffLoginGuard, isSeedAdminRecord, seedAdminUsername } from '@/lib/staff-login-guard';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
+import { assertNewStaffUsername } from '@/lib/staff-username';
 import {
   assertStaffPasswordPolicy,
   PASSWORD_CHANGED_CONCURRENTLY,
@@ -71,6 +72,7 @@ async function audit(
   action: StaffAuditAction,
   target: string,
   detail?: string,
+  partnerId?: string,
 ): Promise<void> {
   await getAuditLogStore().record({
     at: new Date().toISOString(),
@@ -78,6 +80,11 @@ async function audit(
     action,
     target,
     detail,
+    // partner-demo R5: the target's tenant (audit_events.partner_id), so a
+    // partner's own staff feed shows platform changes to its members too
+    // (as "SmartRemit": the actor here is always a platform admin).
+    partnerId,
+    actorScope: 'platform',
   });
 }
 
@@ -115,6 +122,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
     throw new Error('Name, username, and password are all required.');
   }
   assertMayTargetSeed(actor, username);
+  assertNewStaffUsername(username); // partner-demo R5 fix round 1: create-only format rule
   if (role !== 'admin' && role !== 'agent' && role !== 'support') throw new Error('Invalid role.');
   // Program-Fix 17a: 12..128 characters + breach check, FAIL-CLOSED on an HIBP
   // outage (a create never lands a possibly-breached password). New passwords
@@ -148,8 +156,10 @@ export async function createStaffAction(formData: FormData): Promise<void> {
   // Program-Fix 17b: a re-used username never inherits a stale MFA enrolment
   // (e.g. one left behind by a removal on the previous build).
   await getStaffMfaStore().reset(username);
-  await store.saveStaff(staff);
-  await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`);
+  // partner-demo R5 fix round 1: create-if-absent (SET NX), so a concurrent
+  // create of the same name loses instead of clobbering the winner.
+  if (!(await store.createStaff(staff))) throw new Error('That username already exists.');
+  await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`, partnerId);
   revalidatePath('/admin-dashboard/team');
   redirect('/admin-dashboard/team');
 }
@@ -195,7 +205,7 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
   // member out everywhere (after the save), so no session keeps acting on the
   // old access. A save that changes nothing leaves their sessions alone.
   if (accessChanged(target, updated)) await store.deleteAllSessionsFor(username);
-  await audit(actor.username, 'updated', username, `role ${role}, ${scopeLabel(partnerId)}`);
+  await audit(actor.username, 'updated', username, `role ${role}, ${scopeLabel(partnerId)}`, partnerId ?? target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
 
@@ -229,7 +239,7 @@ export async function setStaffStatusAction(formData: FormData): Promise<void> {
   if (status === 'suspended') {
     await store.deleteAllSessionsFor(username); // immediate lockout
   }
-  await audit(actor.username, status === 'suspended' ? 'suspended' : 'reactivated', username);
+  await audit(actor.username, status === 'suspended' ? 'suspended' : 'reactivated', username, undefined, target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
 
@@ -255,7 +265,7 @@ export async function removeStaffAction(formData: FormData): Promise<void> {
   await store.deleteStaff(username);
   await store.deleteAllSessionsFor(username);
   await getStaffMfaStore().reset(username); // Program-Fix 17b
-  await audit(actor.username, 'removed', username, `was ${target.role}, ${scopeLabel(target.partnerId)}`);
+  await audit(actor.username, 'removed', username, `was ${target.role}, ${scopeLabel(target.partnerId)}`, target.partnerId);
   revalidatePath('/admin-dashboard/team');
 }
 
