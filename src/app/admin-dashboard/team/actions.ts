@@ -153,12 +153,13 @@ export async function createStaffAction(formData: FormData): Promise<void> {
     status: 'active',
     ...(partnerId ? { partnerId } : {}),
   };
-  // Program-Fix 17b: a re-used username never inherits a stale MFA enrolment
-  // (e.g. one left behind by a removal on the previous build).
-  await getStaffMfaStore().reset(username);
   // partner-demo R5 fix round 1: create-if-absent (SET NX), so a concurrent
   // create of the same name loses instead of clobbering the winner.
   if (!(await store.createStaff(staff))) throw new Error('That username already exists.');
+  // Program-Fix 17b: a re-used username never inherits a stale MFA enrolment
+  // (e.g. one left behind by a removal on the previous build). Only AFTER our
+  // claim won: a create that lost the race must never reset the winner's MFA.
+  await getStaffMfaStore().reset(username);
   await audit(actor.username, 'created', username, `${role}, ${scopeLabel(partnerId)}`, partnerId);
   revalidatePath('/admin-dashboard/team');
   redirect('/admin-dashboard/team');

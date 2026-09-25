@@ -275,7 +275,6 @@ export async function createPartnerStaffAction(
   }
 
   await assertStaffPasswordPolicy(password, { failClosed: true }); // Program-Fix 17a
-  await getStaffMfaStore().reset(username); // Program-Fix 17b: no stale enrolment on a re-used name
   // Create-if-absent (SET NX): a concurrent create of the same name loses
   // here instead of clobbering the winner.
   const created = await authStore.createStaff(
@@ -288,6 +287,9 @@ export async function createPartnerStaffAction(
     }),
   );
   if (!created) throw new Error(USERNAME_UNAVAILABLE);
+  // Program-Fix 17b: no stale enrolment on a re-used name. Only AFTER our
+  // claim won: a create that lost the race must never reset the winner's MFA.
+  await getStaffMfaStore().reset(username);
   // Save, then audit (as the Team actions): the record is Redis + a ledger
   // row, not one transaction. Never a password or hash in the row.
   await getAuditLogStore().record({

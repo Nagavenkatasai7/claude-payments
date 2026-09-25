@@ -120,6 +120,16 @@ describe('worker:lastFullAt — the time-based backstop (R4 follow-up)', () => {
     expect(await isLastFullFresh(r, T + LAST_FULL_MAX_AGE_MS + 1)).toBe(false);
   });
 
+  it('a lastFullAt more than a minute in the future ⇒ not fresh (clock skew / bad write never suppresses the backstop)', async () => {
+    const r = fakeGateRedis();
+    r.strings.set(LAST_FULL_KEY, new Date(T + 60_000).toISOString());
+    expect(await isLastFullFresh(r, T)).toBe(true); // within skew tolerance
+    r.strings.set(LAST_FULL_KEY, new Date(T + 60_001).toISOString());
+    expect(await isLastFullFresh(r, T)).toBe(false);
+    r.strings.set(LAST_FULL_KEY, new Date(T + 365 * 24 * 3_600_000).toISOString());
+    expect(await isLastFullFresh(r, T)).toBe(false);
+  });
+
   it('an unparseable value ⇒ not fresh', async () => {
     const r = fakeGateRedis();
     r.strings.set(LAST_FULL_KEY, 'garbage');

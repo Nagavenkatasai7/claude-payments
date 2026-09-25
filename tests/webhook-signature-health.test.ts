@@ -5,6 +5,7 @@ import {
   noteSignedOk,
   readSignatureHealth,
   signatureAlarm,
+  signedWebhookLabel,
   SIG_FAIL_CLAIM_TTL_SEC,
 } from '@/lib/webhook-signature-health';
 import { summarizeChannelHealth } from '@/lib/channel-health';
@@ -88,8 +89,9 @@ describe('noteSignedOk / readSignatureHealth', () => {
 });
 
 describe('signatureAlarm (a failure can be forged, a success cannot)', () => {
-  it('recent failures and never a valid delivery ⇒ alarm', () => {
-    expect(signatureAlarm({ lastFailAt: hoursAgo(1) }, NOW)).toBe(true);
+  it('recent failures but never a valid delivery ⇒ NO alarm (the "no signed webhook" row covers that)', () => {
+    expect(signatureAlarm({ lastFailAt: hoursAgo(1) }, NOW)).toBe(false);
+    expect(signatureAlarm({ lastFailAt: hoursAgo(1), lastOkAt: 'garbage' }, NOW)).toBe(false);
   });
   it('recent failures but a valid delivery within 24h ⇒ no alarm', () => {
     expect(signatureAlarm({ lastFailAt: hoursAgo(0), lastOkAt: hoursAgo(23) }, NOW)).toBe(false);
@@ -105,11 +107,19 @@ describe('signatureAlarm (a failure can be forged, a success cannot)', () => {
 });
 
 describe('summarizeChannelHealth — the signature item', () => {
-  it('alarm ⇒ one sig_fail error item', () => {
-    const s = summarizeChannelHealth({ marks: {}, now: NOW, signature: { lastFailAt: hoursAgo(1) } });
-    expect(s.level).toBe('error');
+  const MSG =
+    "Some inbound webhook calls failed signature checks. If your bot isn't receiving messages, check the app secret.";
+
+  it('alarm ⇒ one sig_fail WARN item (never an error banner), worded as a hint', () => {
+    const s = summarizeChannelHealth({ marks: {}, now: NOW, signature: { lastFailAt: hoursAgo(1), lastOkAt: hoursAgo(25) } });
+    expect(s.level).toBe('warn');
     expect(s.items).toHaveLength(1);
-    expect(s.items[0]).toMatchObject({ kind: 'sig_fail', level: 'error', at: hoursAgo(1) });
+    expect(s.items[0]).toEqual({ kind: 'sig_fail', level: 'warn', message: MSG, at: hoursAgo(1) });
+  });
+
+  it('never a signed-ok delivery ⇒ no signature item at all', () => {
+    const s = summarizeChannelHealth({ marks: {}, now: NOW, signature: { lastFailAt: hoursAgo(1) } });
+    expect(s).toEqual({ level: 'ok', items: [] });
   });
 
   it('failures while valid deliveries continue ⇒ no item (cannot be inflated into a banner)', () => {
@@ -120,5 +130,15 @@ describe('summarizeChannelHealth — the signature item', () => {
   it('a sig_fail Redis mark alone never shows: the signature gate is the only source', () => {
     const s = summarizeChannelHealth({ marks: { sig_fail: { at: hoursAgo(0), count: 9 } }, now: NOW });
     expect(s.items).toEqual([]);
+  });
+});
+
+describe('signedWebhookLabel (the partner page row)', () => {
+  it('no ok mark (the mark lives 30 days) ⇒ "No signed webhook recorded in the last 30 days"', () => {
+    expect(signedWebhookLabel({})).toBe('No signed webhook recorded in the last 30 days');
+    expect(signedWebhookLabel({ lastFailAt: hoursAgo(1) })).toBe('No signed webhook recorded in the last 30 days');
+  });
+  it('an ok mark ⇒ its UTC minute', () => {
+    expect(signedWebhookLabel({ lastOkAt: NOW.toISOString() })).toBe('Last signed webhook · 2026-09-25 10:15 UTC');
   });
 });

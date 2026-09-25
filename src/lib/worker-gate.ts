@@ -46,6 +46,8 @@ export const DUE_KEY = 'outbox:due';
 export const LAST_FULL_KEY = 'worker:lastFullAt';
 /** A lastFullAt older than this forces a full run. */
 export const LAST_FULL_MAX_AGE_MS = WORKER_BACKSTOP_PERIOD_MIN * 60_000;
+/** Tolerated clock skew between instances: a lastFullAt further ahead is not trusted. */
+const LAST_FULL_MAX_SKEW_MS = 60_000;
 /** The marker outlives the window by a wide margin; its expiry just means "run full". */
 const LAST_FULL_TTL_SEC = 24 * 60 * 60;
 /** Upper bound on any single gate read/write: a slow Redis may only shorten a drain. */
@@ -132,14 +134,16 @@ export async function recordFullRun(redis: GateRedis, atMs: number): Promise<voi
 
 /**
  * Did a full run complete within the last LAST_FULL_MAX_AGE_MS? Missing,
- * unparseable or a Redis error all answer FALSE (run full: fail-open).
+ * unparseable, more than a minute in the FUTURE (a bad write or clock skew
+ * must never suppress the backstop) or a Redis error all answer FALSE (run
+ * full: fail-open).
  */
 export async function isLastFullFresh(redis: GateRedis, nowMs: number): Promise<boolean> {
   try {
     const raw = await redis.get(LAST_FULL_KEY);
     if (typeof raw !== 'string') return false;
     const ms = Date.parse(raw);
-    return !Number.isNaN(ms) && nowMs - ms <= LAST_FULL_MAX_AGE_MS;
+    return !Number.isNaN(ms) && ms <= nowMs + LAST_FULL_MAX_SKEW_MS && nowMs - ms <= LAST_FULL_MAX_AGE_MS;
   } catch (err) {
     warn('lastFullAt read', err);
     return false;
