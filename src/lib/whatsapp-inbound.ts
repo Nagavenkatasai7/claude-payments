@@ -481,18 +481,36 @@ export async function processInboundWebhook(
   const changes: WebhookChange[] = parseWebhook(body);
   if (changes.length === 0) return { ok: true };
 
+  // partner-demo R4 (+ follow-up): a poke forces a FULL /api/worker run, i.e.
+  // a Neon wake, so it follows exactly the inserts that can leave work behind.
+  // EVERY outbox write below goes through this one repo, and `inserted` flips
+  // when an enqueue created a NEW row (returned true — incl. the consent-failed
+  // ops alert, which never returns `durable`) or THREW (the insert may have
+  // committed before the error; Meta's redelivery would then conflict and not
+  // poke). A deduped redelivery or a replayed signed webhook — the msgq: fast
+  // skip, or the `wamid:` unique-index conflict (enqueue ⇒ false) — creates no
+  // row and does not poke. R1 holds: a newly queued row always pokes.
+  const repo = createOutboxRepo(getDb());
+  let inserted = false;
+  const outbox: MessageDeps['outbox'] = {
+    ...repo,
+    enqueue: async (...args: Parameters<typeof repo.enqueue>) => {
+      try {
+        const created = await repo.enqueue(...args);
+        if (created) inserted = true;
+        return created;
+      } catch (err) {
+        inserted = true;
+        throw err;
+      }
+    },
+  };
   const deps: MessageDeps = {
     store: getStore(),
-    outbox: createOutboxRepo(getDb()),
+    outbox,
     routedPartnerId,
     tenantId,
   };
-  let queued = false;
-  // partner-demo R4: a message can commit an outbox row without returning
-  // `durable` (the consent-failed ops alert, a reply on a non-durable path),
-  // and the gated cron would leave those for the 30-min backstop — so any
-  // processed message pokes.
-  let attempted = false;
 
   try {
     for (const change of changes) {
@@ -515,7 +533,6 @@ export async function processInboundWebhook(
 
       for (const incoming of change.messages) {
         let durable: boolean;
-        attempted = true;
         try {
           durable = await processMessage(deps, incoming);
         } catch (err) {
@@ -524,15 +541,14 @@ export async function processInboundWebhook(
           continue;
         }
         if (durable) {
-          queued = true;
           await afterInsert('queued mark', () => deps.store.markMessageQueued(incoming.messageId), tenantId);
         }
       }
     }
   } finally {
-    // Fast path — the per-minute cron drains it regardless. In a finally so
-    // rows queued before a later throw are not left for the cron.
-    if (queued || attempted) pokeWorker();
+    // Fast path — the gated cron only drains what is marked due (or at its
+    // backstop). In a finally so rows queued before a later throw still poke.
+    if (inserted) pokeWorker();
   }
   return { ok: true };
 }
