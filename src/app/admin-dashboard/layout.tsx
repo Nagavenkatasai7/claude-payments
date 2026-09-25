@@ -9,18 +9,21 @@ import { scopeOf } from '@/lib/staff-scope';
 import { getStore } from '@/lib/store';
 import { channelBannerModel, parseHealthMarks, summarizeChannelHealth, type ChannelBannerModel } from '@/lib/channel-health';
 import { ChannelHealthBanner } from './channel-health-banner';
+import { readSignatureHealth } from '@/lib/webhook-signature-health';
 
 /**
  * R2a: partner staff see their OWN tenant's WhatsApp channel signals on every
  * dashboard page. The tenant comes from scopeOf(staff) only (never a param).
- * ONE Redis read — no DB, no decrypt — and best-effort: a Redis error ⇒ no banner.
+ * Redis reads only (the health marks + R2b's signature marks) — no DB, no
+ * decrypt — and best-effort: a Redis error ⇒ no banner.
  */
 async function partnerChannelBanner(staff: Awaited<ReturnType<typeof requireStaff>>): Promise<ChannelBannerModel | null> {
   try {
     const scope = scopeOf(staff);
     if (scope.kind !== 'partner') return null;
-    const marks = parseHealthMarks(await getStore().readChannelHealth(scope.partnerId));
-    return channelBannerModel(summarizeChannelHealth({ marks, now: new Date() }), scope.partnerId);
+    const [raw, signature] = await Promise.all([getStore().readChannelHealth(scope.partnerId), readSignatureHealth(scope.partnerId)]);
+    const marks = parseHealthMarks(raw);
+    return channelBannerModel(summarizeChannelHealth({ marks, now: new Date(), signature }), scope.partnerId);
   } catch {
     return null;
   }

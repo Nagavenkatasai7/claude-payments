@@ -21,6 +21,7 @@ import { waMessageRef } from '@/lib/wa-message-ref';
 import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
 import { getRedis } from '@/lib/redis';
 import { recordChannelHealth } from '@/lib/channel-health';
+import { isAuthErrorCode } from '@/lib/whatsapp-errors';
 import { checkInboundThrottle, SLOW_DOWN_REPLY } from '@/lib/inbound-throttle';
 import { checkIpRateLimit } from '@/lib/ip-rate-limit';
 import { getPartnerStore } from '@/lib/partner-store';
@@ -135,6 +136,25 @@ async function recordStatus(ev: WebhookStatusEvent, tenantId: PartnerId): Promis
   } catch (err) {
     logWarn('whatsapp.delivery_failed', 'audit insert failed', { error: err instanceof Error ? err.name : 'error' });
   }
+  await recordMetaError(tenantId, ev.errorCode, 'status');
+}
+
+/**
+ * R2b: a Meta-reported error on a SIGNED webhook (a failed status, or the
+ * change's `errors`) → the tenant's channel-health mark. An auth code (190 / 0)
+ * is `auth_error` (alertable: an email may be queued, so the worker is poked
+ * here — the email row is not one of the pipeline's own inserts); anything else
+ * is `delivery_failed`. A failed status already wrote its own audit row, so its
+ * delivery_failed mark is Redis only. Code only; never a title, phone or body.
+ * recordChannelHealth never throws and skips the default tenant.
+ */
+async function recordMetaError(tenantId: PartnerId, code: number | undefined, source: 'status' | 'change'): Promise<void> {
+  const auth = isAuthErrorCode(code);
+  const queuedEmail = await recordChannelHealth(tenantId, auth ? 'auth_error' : 'delivery_failed', {
+    ...(code !== undefined ? { code } : {}),
+    ...(source === 'status' && !auth ? { audit: false } : {}),
+  });
+  if (queuedEmail) pokeWorker();
 }
 
 /**
@@ -534,6 +554,7 @@ export async function processInboundWebhook(
 
       for (const e of change.errors) {
         logWarn('whatsapp.webhook_error', `code=${e.code ?? 'n/a'} (${e.title ? scrub(e.title).slice(0, 200) : ''})`, { tenant: tenantId });
+        await recordMetaError(tenantId, e.code, 'change');
       }
 
       for (const d of change.dropped) await recordNoPhone(d, tenantId);

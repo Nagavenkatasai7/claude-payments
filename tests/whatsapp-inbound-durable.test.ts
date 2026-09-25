@@ -290,6 +290,61 @@ describe('a message without a phone (BSUID-only) is recorded, not silently lost'
   });
 });
 
+describe('R2b: Meta-reported errors on a SIGNED webhook feed the tenant\'s channel health', () => {
+  const failedStatus = (code: number, id = 'wamid.FS1') => ({
+    statuses: [{ id, recipient_id: PHONE, status: 'failed', errors: [{ code, title: 'x' }] }],
+  });
+  const marks = (p: string) => JSON.parse(redis.dump.get(`wahealth:${p}`) ?? '{}');
+  const emailRows = async () => (await outboxRows()).filter((r) => r.kind === 'email.send');
+
+  it('a failed status with an auth code (190) ⇒ auth_error mark + hourly health row + ONE alert email + a poke', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateSupportConfig('acme', (prev) => ({ ...prev, alertEmail: 'ops@acme.example' }));
+    await processInboundWebhook(webhook([], failedStatus(190, 'wamid.FS1')), { routedPartnerId: 'acme' });
+    await processInboundWebhook(webhook([], failedStatus(190, 'wamid.FS2')), { routedPartnerId: 'acme' });
+    expect(marks('acme').auth_error).toMatchObject({ count: 2, code: 190 });
+    expect(await auditRows('whatsapp.channel_health')).toHaveLength(1);
+    const emails = await emailRows();
+    expect(emails).toHaveLength(1);
+    expect(emails[0].dedupe_key).toMatch(/^partnerhealth:acme:auth_error:/);
+    expect(pokeWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed status with a delivery code ⇒ delivery_failed mark only (its own audit row already exists), no email, no poke', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { createPartnerRepo } = await import('@/db/repos/partner-repo');
+    await createPartnerRepo(db).updateSupportConfig('acme', (prev) => ({ ...prev, alertEmail: 'ops@acme.example' }));
+    await processInboundWebhook(webhook([], failedStatus(131026)), { routedPartnerId: 'acme' });
+    expect(marks('acme').delivery_failed).toMatchObject({ count: 1, code: 131026 });
+    expect(await auditRows('whatsapp.channel_health')).toHaveLength(0);
+    expect(await auditRows('whatsapp.delivery_failed')).toHaveLength(1);
+    expect(await emailRows()).toHaveLength(0);
+    expect(pokeWorker).not.toHaveBeenCalled();
+  });
+
+  it('value.errors ⇒ auth_error for an auth code, delivery_failed otherwise (hourly health row, code only)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await processInboundWebhook(webhook([], { errors: [{ code: 190, title: 'token 15551230000' }] }), { routedPartnerId: 'acme' });
+    await processInboundWebhook(webhook([], { errors: [{ code: 131000, title: 'Something' }] }), { routedPartnerId: 'beta' });
+    expect(marks('acme').auth_error).toMatchObject({ count: 1, code: 190 });
+    expect(marks('beta').delivery_failed).toMatchObject({ count: 1, code: 131000 });
+    const rows = await auditRows('whatsapp.channel_health');
+    expect(rows.map((r) => [r.partner_id, r.meta])).toEqual([
+      ['acme', { kind: 'auth_error', code: 190 }],
+      ['beta', { kind: 'delivery_failed', code: 131000 }],
+    ]);
+    expect(JSON.stringify([rows, [...redis.dump.entries()]])).not.toContain('15551230000');
+  });
+
+  it('the default tenant (the shared number) gets no channel-health mark', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await processInboundWebhook(webhook([], { ...failedStatus(190), errors: [{ code: 190 }] }), { routedPartnerId: null });
+    expect(redis.dump.has('wahealth:default')).toBe(false);
+    expect(await auditRows('whatsapp.channel_health')).toHaveLength(0);
+  });
+});
+
 describe('per-change tenant rule (acceptPnid) and cross-tenant regression', () => {
   it('a change the route rejects creates no customer, turn or audit row', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
