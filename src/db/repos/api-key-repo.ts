@@ -105,19 +105,21 @@ export function createApiKeyRepo(db: DbOrTx, deps: ApiKeyRepoDeps = {}) {
       return { partnerId: row.partnerId, keyId: row.id, mode, scopes: effectiveScopes(mode, row.scopes) };
     },
 
-    /** Idempotent revoke (first revocation timestamp wins). False only for unknown keyId. */
-    async revoke(keyId: string): Promise<boolean> {
+    /**
+     * Idempotent revoke (first revocation timestamp wins), TENANT-SCOPED:
+     * partner_id is in the WHERE of both the update and the fallback read
+     * (partner-demo R3a, M4), so another partner's key id behaves exactly like
+     * an unknown one. False ⇒ no such key for THIS partner (404-never-403).
+     */
+    async revoke(keyId: string, partnerId: PartnerId): Promise<boolean> {
+      const owned = and(eq(apiKeys.id, keyId), eq(apiKeys.partnerId, partnerId));
       const rows = await db
         .update(apiKeys)
         .set({ revokedAt: now() })
-        .where(and(eq(apiKeys.id, keyId), isNull(apiKeys.revokedAt)))
+        .where(and(owned, isNull(apiKeys.revokedAt)))
         .returning({ id: apiKeys.id });
       if (rows.length > 0) return true;
-      const exists = await db
-        .select({ id: apiKeys.id })
-        .from(apiKeys)
-        .where(eq(apiKeys.id, keyId))
-        .limit(1);
+      const exists = await db.select({ id: apiKeys.id }).from(apiKeys).where(owned).limit(1);
       return exists.length > 0;
     },
 

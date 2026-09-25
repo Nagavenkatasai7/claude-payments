@@ -57,10 +57,10 @@ describe('partner-api-key store', () => {
   it('revoke makes the key fail authentication (idempotent)', async () => {
     const s = store(db);
     const issued = await s.issue('acme');
-    expect(await s.revoke(issued.keyId)).toBe(true);
+    expect(await s.revoke(issued.keyId, 'acme')).toBe(true);
     expect(await s.authenticate(issued.plaintext)).toBeNull();
-    expect(await s.revoke(issued.keyId)).toBe(true); // idempotent
-    expect(await s.revoke('pk_nope')).toBe(false);
+    expect(await s.revoke(issued.keyId, 'acme')).toBe(true); // idempotent
+    expect(await s.revoke('pk_nope', 'acme')).toBe(false);
   });
 
   it('list returns public fields only (no hash, no plaintext) and is partner-scoped', async () => {

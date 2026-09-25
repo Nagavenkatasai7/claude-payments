@@ -99,13 +99,28 @@ describe('api-key-repo', () => {
     expect(JSON.stringify((raw as unknown as { rows: unknown[] }).rows)).not.toContain(issued.plaintext);
     expect(await r.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', keyId: issued.keyId, mode: 'live' });
     expect(await r.authenticate('sr_live_nope')).toBeNull();
-    expect(await r.revoke(issued.keyId)).toBe(true);
+    expect(await r.revoke(issued.keyId, 'acme')).toBe(true);
     expect(await r.authenticate(issued.plaintext)).toBeNull();
-    expect(await r.revoke(issued.keyId)).toBe(true); // idempotent
-    expect(await r.revoke('pk_ghost')).toBe(false);
+    expect(await r.revoke(issued.keyId, 'acme')).toBe(true); // idempotent
+    expect(await r.revoke('pk_ghost', 'acme')).toBe(false);
     const list = await r.list('acme');
     expect(list).toHaveLength(1);
     expect(list[0].revokedAt).toBeTruthy();
+  });
+
+  // partner-demo R3a (M4): tenant isolation lives in the repo, not only in the
+  // action's pre-list — partner_id is in BOTH the UPDATE and the fallback read.
+  it("revoke(keyId, partnerId) never touches another tenant's key (false, key still works)", async () => {
+    await seedPartner(db, 'acme');
+    await seedPartner(db, 'beta');
+    const r = repo();
+    const issued = await r.issue('acme');
+    expect(await r.revoke(issued.keyId, 'beta')).toBe(false);
+    expect(await r.authenticate(issued.plaintext)).toMatchObject({ partnerId: 'acme', keyId: issued.keyId });
+    expect((await r.list('acme'))[0].revokedAt).toBeUndefined();
+    // Already revoked by its owner: a foreign partner still gets false.
+    expect(await r.revoke(issued.keyId, 'acme')).toBe(true);
+    expect(await r.revoke(issued.keyId, 'beta')).toBe(false);
   });
 
   // Program-Fix 44 P1: last_used_at is written by authenticate — AWAITED (an
@@ -151,7 +166,7 @@ describe('api-key-repo', () => {
     const n = { v: 0 };
     const r = createApiKeyRepo(db, { pepper: 'p', genSecret: () => `S${n.v++}`, genKeyId: () => `pk_${n.v}`, redis: fakeRedis() });
     const issued = await r.issue('acme');
-    await r.revoke(issued.keyId);
+    await r.revoke(issued.keyId, 'acme');
     expect(await r.authenticate(issued.plaintext)).toBeNull();
     expect(await lastUsed()).toBeNull();
   });

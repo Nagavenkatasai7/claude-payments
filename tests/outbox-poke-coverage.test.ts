@@ -31,9 +31,14 @@ const HELPERS: Record<string, string[]> = {
   'src/lib/stale-money.ts': ['escalateStuckPaid', 'expireUnpaidLinks'],
   'src/lib/cron-run.ts': ['runDueSchedules'],
   'src/lib/sanctions/list-loader.ts': ['runOfacSdnLoad'],
+  // partner-demo R3a: the storage cap-watch — called only from the cron route.
+  'src/lib/storage-watch.ts': ['checkStorageCap'],
   'src/lib/providers/payment-provider.ts': ['getPaymentProvider'],
   'src/lib/stripe-funded-settle.ts': ['settleFundedTransfer'],
   'src/lib/settlement.ts': ['settleOrHold', 'beginSettlement', 'beginHold', 'releaseHold'],
+  // R2a: the partner alert email.send — called from drainOnce (the worker) and
+  // the inbound webhook path (whatsapp-inbound.ts, which pokes).
+  'src/lib/channel-health.ts': ['recordChannelHealth'],
 };
 /** The worker route drains in the same invocation and marks what is left. */
 const WORKER_ROUTE = 'src/app/api/worker/route.ts';

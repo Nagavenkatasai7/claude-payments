@@ -43,6 +43,20 @@ export function parseGraphError(_status: number, body: string): { code?: number;
   return typeof message === 'string' ? { code, title: message } : { code };
 }
 
+/**
+ * R2a: Graph codes only the PARTNER can fix (a new access token). Meta
+ * error-codes page
+ * (https://developers.facebook.com/documentation/business-messaging/whatsapp/support/error-codes):
+ * 190 = "access token has expired" (Graph also returns it for a revoked token),
+ * 0 = unable to authenticate the app user. They stay RETRYABLE (classifyGraphCode
+ * is unchanged): a re-saved token rescues the rows still backing off. This only
+ * decides when the partner is told (recordChannelHealth 'auth_error').
+ */
+const AUTH_CODES: ReadonlySet<number> = new Set([190, 0]);
+export function isAuthErrorCode(code: number | undefined): boolean {
+  return code !== undefined && AUTH_CODES.has(code);
+}
+
 /** Unknown / absent code ⇒ retryable: an unparseable reply is never terminal. */
 export function classifyGraphCode(code: number | undefined): GraphErrorKind {
   if (code === undefined) return 'retryable';

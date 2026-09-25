@@ -39,6 +39,8 @@ import {
   savePricingAction,
   saveSupportConfigAction,
   saveDisclosureConfigAction,
+  saveAlertEmailAction,
+  testWhatsappConnectionAction,
   revokeApiKeyAction,
   setPartnerSendLimitAction,
 } from '../actions';
@@ -48,6 +50,14 @@ import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
 import { scorePartnerHealth, type HealthBand } from '@/lib/partner-health';
 import { narratePartnerHealth } from '@/lib/partner-health-ai';
 import { resolvePartnerDisclosure } from '@/lib/partner-config';
+import { resolveWaChannel } from '@/lib/whatsapp-creds';
+import {
+  channelBannerModel,
+  getChannelHealth,
+  parseChannelTest,
+  summarizeChannelHealth,
+} from '@/lib/channel-health';
+import { ChannelHealthBanner } from '../../channel-health-banner';
 
 // Stage 5c: the partner detail is TABS (Overview · Settings · WhatsApp ·
 // Settlement · API keys · Staff · Integration) instead of a card pile — every
@@ -165,6 +175,29 @@ export default async function PartnerDetailPage({
   ]);
   const nowMs = Date.now();
   const recents = recentPage.items;
+  // R2a: the WhatsApp channel (own / shared / incomplete, from the integrations
+  // row already read above) + its health marks and the last "Test connection".
+  // partner.id is scope-checked above; the reads are best-effort (a Redis or
+  // audit hiccup renders "no signals", never a broken page).
+  const channel = resolveWaChannel(partner.id, integrations);
+  const [channelHealth, channelTest] = await Promise.all([
+    partner.id === 'default'
+      ? Promise.resolve(null)
+      : getChannelHealth(partner.id, { store: getStore(), db: getDb(), includeChannel: false }).catch((err: unknown) => {
+          logWarn('admin.channel_health', err, { partnerId: partner.id });
+          return null;
+        }),
+    getStore().readChannelTest(partner.id).then(parseChannelTest).catch(() => null),
+  ]);
+  const channelSummary = summarizeChannelHealth({ channel, marks: channelHealth?.marks ?? {}, now: new Date(nowMs) });
+  // Partner staff already get the marks from the dashboard-layout banner; the
+  // header adds only the config items (incomplete / missing fields) for them,
+  // so the same signal is never shown twice.
+  const headerSummary =
+    scopeOf(staff).kind === 'partner'
+      ? summarizeChannelHealth({ channel, marks: {}, now: new Date(nowMs) })
+      : channelSummary;
+  const channelBanner = partner.id === 'default' ? null : channelBannerModel(headerSummary, partner.id);
   // SenderCell (U7): batch-resolve the decrypted sender names for the recents
   // in ONE query, so each row shows name + phone (linked to the profile)
   // instead of a bare phone — phones with no captured name fall back to phone.
@@ -227,6 +260,8 @@ export default async function PartnerDetailPage({
             </form>
           )}
         </div>
+
+        <ChannelHealthBanner model={channelBanner} />
 
         <Tabs defaultValue="overview">
           <TabsList className="mb-4 flex-wrap">
@@ -449,6 +484,16 @@ export default async function PartnerDetailPage({
                 </CardHeader>
                 <CardContent>
                   <dl className={DL_CLASS}>
+                    <dt>Channel</dt>
+                    <dd>
+                      {channel.kind === 'own' ? (
+                        <Badge variant="outline" className="border-success/50 text-success">own number</Badge>
+                      ) : channel.kind === 'incomplete' ? (
+                        <Badge variant="destructive">incomplete — messages are not sent</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-muted-foreground">shared SmartRemit number</Badge>
+                      )}
+                    </dd>
                     <dt>Access token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.token))}</dd>
                     <dt>Verify token</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.verifyToken))}</dd>
                     <dt>App secret</dt><dd>{configuredBadge(Boolean(integrations.whatsapp.appSecret))}</dd>
@@ -460,9 +505,46 @@ export default async function PartnerDetailPage({
                     <Input name="verifyToken" type="password" autoComplete="off" placeholder="Webhook verify token (leave blank to keep)" />
                     <Input name="appSecret" type="password" autoComplete="off" placeholder="App secret (leave blank to keep)" />
                     <Input name="wabaId" inputMode="numeric" autoComplete="off" placeholder="WhatsApp Business Account ID (optional — used only for the check, not saved)" />
-                    <p className="text-xs text-muted-foreground">We check this number with Meta using the access token you enter.</p>
+                    <p className="text-xs text-muted-foreground">
+                      We check this number with Meta using the access token you enter. An own number needs the phone
+                      number ID, access token and app secret together.
+                    </p>
+                    <label className="flex items-center gap-1.5 text-sm">
+                      <input type="checkbox" name="disconnect" /> Disconnect WhatsApp (clear all four fields and use the
+                      shared SmartRemit number)
+                    </label>
                     <Button type="submit">Save WhatsApp config</Button>
                   </form>
+                  <form action={testWhatsappConnectionAction} className="mt-4 flex flex-wrap items-center gap-3">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <Button type="submit" variant="outline">Test connection</Button>
+                    <span className="text-sm text-muted-foreground">
+                      {channelTest
+                        ? channelTest.ok
+                          ? `Last test passed · ${channelTest.at.slice(0, 16).replace('T', ' ')} UTC`
+                          : channelTest.reason === 'not_configured'
+                            ? 'No own number to test.'
+                            : `Last test failed${channelTest.status ? ` (HTTP ${channelTest.status})` : ''} · ${channelTest.at.slice(0, 16).replace('T', ' ')} UTC`
+                        : 'Not tested yet.'}
+                    </span>
+                  </form>
+                  {channelHealth && channelHealth.events.length > 0 && (
+                    <div className="mt-4">
+                      <div className="mb-1 text-sm font-semibold">Channel events (last 7 days)</div>
+                      <ul className="space-y-0.5 text-xs text-muted-foreground">
+                        {channelHealth.events.map((e, i) => {
+                          const meta = (e.meta ?? {}) as { kind?: unknown; code?: unknown };
+                          const kind = e.action === 'whatsapp.inbound_no_phone' ? 'no_phone' : String(meta.kind ?? '');
+                          return (
+                            <li key={i}>
+                              {e.at.toISOString().slice(0, 16).replace('T', ' ')} UTC · {kind}
+                              {typeof meta.code === 'number' ? ` · code ${meta.code}` : ''}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
                   <div className="mt-4">
                     <CopyField label="Webhook callback URL (paste into Meta → WhatsApp → Configuration)" value={`${env.appBaseUrl}/api/whatsapp/${partner.id}`} />
                   </div>
@@ -650,6 +732,33 @@ export default async function PartnerDetailPage({
                       </select>
                     </div>
                     <Button type="submit">Save support config</Button>
+                  </form>
+                </CardContent>
+              </Card>
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Channel alert email</CardTitle>
+                  <CardDescription>
+                    Where we email this partner when its WhatsApp channel needs action (a rejected access token,
+                    undelivered messages, an incomplete setup). At most one email per issue per day. Leave blank
+                    to rely on the dashboard banner only.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <form action={saveAlertEmailAction} className="space-y-4">
+                    <input type="hidden" name="id" value={partner.id} />
+                    <div className="space-y-1.5">
+                      <Label htmlFor="p-alert-email">Alert email</Label>
+                      <Input
+                        id="p-alert-email"
+                        name="alertEmail"
+                        type="email"
+                        autoComplete="off"
+                        defaultValue={partner.supportConfig?.alertEmail ?? ''}
+                        placeholder="ops@partner.example"
+                      />
+                    </div>
+                    <Button type="submit">Save alert email</Button>
                   </form>
                 </CardContent>
               </Card>
