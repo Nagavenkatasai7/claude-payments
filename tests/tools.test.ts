@@ -3033,19 +3033,26 @@ describe('executeTool web dispatch gate (B5 defense-in-depth)', () => {
     expect(v.valid).toBe(true);
 
     const created = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
-      { ...ctx, channel: 'whatsapp' as const }, // mint via the WhatsApp channel
+      { ...ctx, channel: 'whatsapp' as const }, // setup mint via the test seam
     );
     const status = await executeTool('check_payment_status', { transfer_id: created.transfer_id }, ctx);
     expect(status.status).toBe('awaiting_payment');
   });
 
-  it('the default channel (absent) is whatsapp — dispatch unchanged', async () => {
+  it('the default channel (absent) is whatsapp — a non-web tool dispatches, a hidden one is refused (R6b)', async () => {
     const ctx = await buildCtx(fakeRedis());
-    const r = await runLegacyCreateTransferForTests({ amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' },
-      ctx,
-    );
+    // create_schedule is NOT on the web allowlist, so it dispatching proves the
+    // absent channel is not treated as web.
+    const r = await executeTool('create_schedule', {
+      amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210',
+      payout_method: 'upi', payout_destination: 'mom@upi', funding_method: 'bank_transfer',
+      frequency: 'monthly', day_of_month: 10,
+    }, ctx);
     expect(r.error).toBeUndefined();
-    expect(typeof r.transfer_id).toBe('string');
+    expect(typeof r.schedule_id).toBe('string');
+    // …and the WhatsApp hidden-tool gate applies to it (fail-closed).
+    const hidden = await executeTool('create_transfer', { amount_usd: 100, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer' }, ctx);
+    expect(hidden).toEqual({ error: 'not available here' });
   });
 
   it('request_refund on web keeps its ownership + paid-only guards', async () => {
@@ -3197,7 +3204,7 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
     // the REAL cap gate inside repeat_transfer rather than tripping it.
     await runLegacyCreateTransferForTests({
       amount_usd: 200, recipient_name: 'Mom', recipient_phone: '919876543210', funding_method: 'bank_transfer',
-    }, ctx, // whatsapp channel — the past send happened in the bot
+    }, ctx, // setup: a past send, minted via the test seam
     );
   };
 
