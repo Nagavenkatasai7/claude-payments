@@ -49,7 +49,7 @@ export default async function NewTeammatePage() {
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="t-username">Username</Label>
-                  <Input id="t-username" name="username" required placeholder="jordan" autoComplete="off" />
+                  <Input id="t-username" name="username" required placeholder="jordan" autoComplete="off" minLength={3} maxLength={64} pattern="[a-z0-9._\-]{3,64}" />
                 </div>
               </div>
 

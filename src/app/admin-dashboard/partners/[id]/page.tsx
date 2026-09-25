@@ -10,6 +10,8 @@ import { getDb } from '@/db/client';
 import { createPartnerRateRepo } from '@/db/repos/partner-rate-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { getAuthStore } from '@/lib/auth-store';
+import { getAuditLogStore } from '@/lib/audit-log-store';
+import { feedActorLabel, listTenantStaff } from '@/lib/partner-staff-policy';
 import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
 import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
 import { env } from '@/lib/env';
@@ -160,7 +162,7 @@ export default async function PartnerDetailPage({
 
   // Activity = one SQL aggregate; recents = one indexed page (Stage 5c —
   // previously this page serialized the whole ledger per render).
-  const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange] = await Promise.all([
+  const [summary, recentPage, allStaff, integrations, apiKeys, rates, lastLimitChange, staffFeed] = await Promise.all([
     getStore().transfersSummary(partner.id), // partner.id is scope-checked above
     scoped.transfersPage({ limit: 50, partnerFilter: partner.id }),
     getAuthStore().listStaff(),
@@ -173,6 +175,14 @@ export default async function PartnerDetailPage({
       logWarn('admin.send_limits.last_change', err, { scope: 'partner', partnerId: partner.id });
       return null;
     }),
+    // partner-demo R5: this tenant's staff created/removed rows (filtered in
+    // SQL; partner.id is scope-checked above, never a form value). Admins only.
+    isAdmin
+      ? getAuditLogStore().listForPartner(partner.id, 20).catch((err: unknown) => {
+          logWarn('admin.partner_staff_feed', err, { partnerId: partner.id });
+          return [];
+        })
+      : Promise.resolve([]),
   ]);
   const nowMs = Date.now();
   const recents = recentPage.items;
@@ -205,7 +215,8 @@ export default async function PartnerDetailPage({
   // in ONE query, so each row shows name + phone (linked to the profile)
   // instead of a bare phone — phones with no captured name fall back to phone.
   const senderNames = await resolveSenderNames(getDb(), recents);
-  const partnerStaff = allStaff.filter((s) => s.partnerId === partner.id);
+  // partner-demo R5: the scope-checked tenant list ([] for another tenant).
+  const partnerStaff = listTenantStaff(scopeOf(staff), partner.id, allStaff);
   // Support tab: the absent-config default (portal ON) interpreted ONCE for
   // both the badge and the checkbox.
   const portalEnabled = partner.supportConfig?.enableSupportPortal !== false;
@@ -272,7 +283,8 @@ export default async function PartnerDetailPage({
             {isAdmin && <TabsTrigger value="settings">Settings</TabsTrigger>}
             {isAdmin && <TabsTrigger value="whatsapp">WhatsApp</TabsTrigger>}
             {isAdmin && <TabsTrigger value="settlement">Settlement</TabsTrigger>}
-            {isAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
+            {/* partner-demo R5 (A1-4): send limits are SmartRemit governance, platform admins only. */}
+            {isPlatformAdmin && <TabsTrigger value="send-limits">Send limits</TabsTrigger>}
             {isAdmin && <TabsTrigger value="pricing">Pricing</TabsTrigger>}
             {isAdmin && <TabsTrigger value="support">Support</TabsTrigger>}
             {isAdmin && <TabsTrigger value="api-keys">API keys</TabsTrigger>}
@@ -605,7 +617,7 @@ export default async function PartnerDetailPage({
           )}
 
           {/* ── Send limits (Program fix 16b): the partner default + its audited raise ── */}
-          {isAdmin && (
+          {isPlatformAdmin && (
             <TabsContent value="send-limits">
               <SendLimitsCard
                 scope="partner"
@@ -935,7 +947,9 @@ export default async function PartnerDetailPage({
                         {s.role}
                       </Badge>,
                       new Date(s.createdAt).toLocaleDateString(),
-                      isAdmin ? (
+                      // partner-demo R5: no Remove on your own row (the action refuses it too).
+                      // Fix round 1: a SmartRemit suspension is not the tenant's to undo.
+                      isAdmin && s.username !== staff.username && (isPlatformAdmin || s.status !== 'suspended') ? (
                         <form key="actions" action={removePartnerStaffAction}>
                           <input type="hidden" name="username" value={s.username} />
                           <Button type="submit" size="sm" variant="outline" className="text-destructive">Remove</Button>
@@ -946,7 +960,7 @@ export default async function PartnerDetailPage({
                 />
                 {isAdmin && (
                   <form action={createPartnerStaffAction.bind(null, partner.id)} className="mt-4 space-y-4">
-                    <Input name="username" placeholder="Username" required />
+                    <Input name="username" placeholder="Username (3–64: a-z 0-9 . _ -)" required minLength={3} maxLength={64} pattern="[a-z0-9._\-]{3,64}" autoComplete="off" />
                     <Input name="name" placeholder="Full name" required />
                     <Input name="password" type="password" placeholder="Password (12+ characters)" required minLength={12} maxLength={128} autoComplete="new-password" />
                     <select className={SELECT_CLASS} name="role" defaultValue="agent">
@@ -959,6 +973,28 @@ export default async function PartnerDetailPage({
                 )}
               </CardContent>
             </Card>
+            {isAdmin && (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle>Recent staff changes</CardTitle>
+                  <CardDescription>Members added to or removed from this partner, newest first.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {staffFeed.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No staff changes yet.</p>
+                  ) : (
+                    <ul className="space-y-1 text-sm">
+                      {staffFeed.map((e, i) => (
+                        <li key={`${e.at}-${i}`}>
+                          <span className="text-muted-foreground">{new Date(e.at).toLocaleString()}</span>{' '}
+                          {feedActorLabel(e)} {e.action === 'created' ? 'added' : 'removed'} <strong>{e.target}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           {/* ── Integration guide ────────────────────────────────────────── */}
