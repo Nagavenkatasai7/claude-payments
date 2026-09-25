@@ -1863,3 +1863,28 @@ describe('Program-Fix 34A: every inbound text gets exactly one visible answer', 
     expect(reply.trim()).not.toBe('');
   });
 });
+
+describe('WhatsApp formatting: only the WhatsApp channel converts CommonMark', () => {
+  const MD = "Here's your quote for **$100.00 USD** to India 🇮🇳:\n\n- **Fee:** $1.99\n- **To:** account ****6789";
+
+  function build(channel?: 'web' | 'whatsapp') {
+    const redis = fakeRedis();
+    const store = createStore(redis, db);
+    const deps = extraDeps(redis, store);
+    return createAgent({
+      store, scheduleStore: freshScheduleStore(redis), draftStore: createDraftStore(redis), ...deps,
+      ...(channel ? { channel } : {}),
+      chat: async () => ({ role: 'assistant', content: MD }),
+    });
+  }
+
+  it('the default (WhatsApp) channel sends *bold* and • bullets; masked last-4 intact', async () => {
+    const reply = await build().runAgentTurn(PHONE, 'quote $100');
+    expect(reply).toBe("Here's your quote for *$100.00 USD* to India 🇮🇳:\n\n• *Fee:* $1.99\n• *To:* account ****6789");
+  });
+
+  it('the web channel reply is not converted', async () => {
+    const reply = await build('web').runAgentTurn(PHONE, 'quote $100');
+    expect(reply).toBe(MD);
+  });
+});
