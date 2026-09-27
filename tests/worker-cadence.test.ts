@@ -286,7 +286,7 @@ describe('sweepDrainGap (test 7)', () => {
 describe('no stale cadence promise in code or docs (test 10)', () => {
   // Mirrors: grep -rn -i "5-minute heartbeat\|5-min heartbeat\|delivery guarantee\|heartbeat is the\|every 5 minutes"
   //   src scripts CLAUDE.md docs/*.md docs/diagrams .github/workflows
-  // minus docs/AUDIT-2026-09-14.md (a dated audit record) and the rendered
+  // minus the rendered
   // diagram images (*.svg, *.png): the repo has no mermaid renderer, so the
   // .mmd sources are corrected here and the renders stay until regenerated.
   // Under this pattern BOTH renders are stale today:
@@ -307,7 +307,7 @@ describe('no stale cadence promise in code or docs (test 10)', () => {
     }
   }
 
-  it('grep gives no hits outside the audit record and the rendered images', () => {
+  it('grep gives no hits outside the rendered images', () => {
     const files: string[] = [join(ROOT, 'CLAUDE.md')];
     walk(join(ROOT, 'src'), files, true);
     walk(join(ROOT, 'scripts'), files, true);
@@ -316,7 +316,6 @@ describe('no stale cadence promise in code or docs (test 10)', () => {
     walk(join(ROOT, '.github', 'workflows'), files, true);
     const hits: string[] = [];
     for (const f of files) {
-      if (f.endsWith('docs/AUDIT-2026-09-14.md')) continue;
       readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
         if (STALE.test(line)) hits.push(`${f.slice(ROOT.length + 1)}:${i + 1}: ${line.trim()}`);
       });
