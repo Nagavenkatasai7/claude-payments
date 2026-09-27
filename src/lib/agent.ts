@@ -30,6 +30,7 @@ const CONTEXT_CALL_ID = 'ctx_r0';
 // Program-Fix 34A: exported (via a leaf module) so the worker can raise the
 // hourly fallback alert without importing this file.
 import { FALLBACK_REPLY } from './agent-fallback';
+import { toWhatsAppFormatting } from './whatsapp-format';
 export { FALLBACK_REPLY };
 
 export interface AgentDeps {
@@ -457,6 +458,9 @@ export function createAgent(deps: AgentDeps) {
       return '';
     }
     if (!reply) reply = FALLBACK_REPLY;
+    // WhatsApp does not render CommonMark: convert to *bold* / • bullets first,
+    // so sanitizeReply's URL/host policy runs over the exact text we send.
+    if (channel === 'whatsapp') reply = toWhatsAppFormatting(reply);
     // Sanitize: strip model-emitted URLs, append canonical link if present.
     reply = sanitizeReply(reply, paymentLinks, replyAllowHosts(env.appBaseUrl, branding.brand));
     // Program-Fix 34A: a reply that sanitizing EMPTIED (a URL-only answer) is

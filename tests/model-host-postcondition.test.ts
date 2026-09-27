@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { domainToASCII } from 'node:url';
 import { sanitizeReply } from '@/lib/agent';
+import { toWhatsAppFormatting } from '@/lib/whatsapp-format';
 import { IANA_TLDS } from '@/lib/iana-tlds';
 import { canonicalModelToken, hasModelHost, stripModelHosts } from '@/lib/untrusted-text';
 
@@ -183,6 +184,42 @@ describe('R6b final: postcondition — nothing we send names a real-TLD host exc
 
   it('dotted tokens are sent canonical: invisibles deleted, dot lookalikes folded', () => {
     expect(sanitizeReply('Rs\u200b.500 and 12。30', [], [ALLOWED])).toBe('Rs.500 and 12.30');
+  });
+});
+
+// The WhatsApp channel converts CommonMark before sanitizeReply. The R6b
+// postcondition must hold over that composition, for every markdown wrapper.
+const MD_WRAPS: Array<(h: string) => string> = [
+  (h) => `**${h}**`, (h) => `***${h}***`, (h) => `__${h}__`, (h) => `~~${h}~~`, (h) => `\n# ${h}\n`, (h) => `\n### **${h}**\n`,
+  (h) => `\n- ${h}\n`, (h) => `\n* **${h}**\n`, (h) => `[t](${h})`, (h) => `[${h}](${h})`, (h) => `![${h}](${h})`,
+  (h) => `[${h}](${ALLOWED})`, (h) => `\`${h}\``, (h) => `\n\`\`\`\n${h}\n\`\`\`\n`, (h) => `**[${h}](https://${h})**`,
+];
+
+describe('WhatsApp formatting ∘ sanitizeReply keeps the R6b postcondition', () => {
+  function sendWa(fragment: string): string {
+    const sent = sanitizeReply(toWhatsAppFormatting(`Hi ${fragment} there`), [LINK], [ALLOWED]);
+    expect(sent.endsWith(`\n\n${LINK}`)).toBe(true);
+    return sent.slice(0, -LINK.length);
+  }
+
+  it('no foreign host survives any markdown wrapper, across TLDs, dots and suffixes', () => {
+    const offenders: string[] = [];
+    for (const w of MD_WRAPS) {
+      for (const tld of TLDS) {
+        for (const dot of DOTS) {
+          for (const suf of ['', '/path', '.', ')']) {
+            const h = w(`pay-now${dot}${tld}${suf}`);
+            offenders.push(...oracleOffenders(sendWa(h)).map((t) => JSON.stringify([h, t])));
+          }
+        }
+        for (const pre of PREFIXES) {
+          const h = w(`${pre}evil.${tld}`);
+          offenders.push(...oracleOffenders(sendWa(h)).map((t) => JSON.stringify([h, t])));
+        }
+      }
+      for (const h of COMPAT_HOSTS) offenders.push(...oracleOffenders(sendWa(w(h))).map((t) => JSON.stringify([w(h), t])));
+    }
+    expect(offenders.slice(0, 20)).toEqual([]);
   });
 });
 
