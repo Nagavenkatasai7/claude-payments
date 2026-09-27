@@ -35,6 +35,8 @@ DOCS = [
   ('overview', 'Platform overview', REPO/'docs/SMARTREMIT-PLATFORM-OVERVIEW.md'),
   ('roadmap', 'Roadmap', REPO/'docs/ROADMAP.md'),
 ]
+# The audit record is no longer tracked in the repo; include it only when a local copy exists.
+DOCS = [d for d in DOCS if d[0] != 'audit' or d[2].exists()]
 for n, p in enumerate(EXTRA_PLANS, start=1):
     m = re.search(r'phase(\d)(?:-wave(\d))?', p.name)
     # Wave 1 keeps the historical key plan-p1; later waves get plan-p<phase>-w<wave> so they never collide.
@@ -130,7 +132,8 @@ for c in chunks:
 if cur: put('corpus', f'part-{part:03d}', {'part': part, 'chunks': cur}); part += 1
 
 # ---------- findings ----------
-A = (REPO/'docs/AUDIT-2026-09-14.md').read_text().split('\n')
+AUDIT = REPO/'docs/AUDIT-2026-09-14.md'
+A = AUDIT.read_text().split('\n') if AUDIT.exists() else []
 sec, sub = '', ''; findings = []
 for ln in A:
     m = re.match(r'^# (\d+\.\s.*)', ln)
