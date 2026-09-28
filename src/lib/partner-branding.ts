@@ -8,7 +8,8 @@ import type { MessageKey } from '@/lib/i18n';
 // The logo is stored as `data:image/<type>;base64,<payload>` and the store refuses a value longer
 // than MAX_LOGO_LEN CHARACTERS. Base64 turns every 3 bytes into 4 characters, so the largest FILE
 // that can fit is ⌊(MAX_LOGO_LEN − the longest accepted header) / 4⌋ × 3 bytes. The action refuses
-// anything larger before reading a single byte, so an oversized upload is never buffered.
+// anything larger before reading its bytes, so it is never base64-encoded or stored (the platform's
+// 1 MB server-action body limit bounds the multipart parse itself).
 const LONGEST_HEADER = 'data:image/jpeg;base64,'.length; // webp is the same length; png is shorter
 export const MAX_LOGO_FILE_BYTES = Math.floor((MAX_LOGO_LEN - LONGEST_HEADER) / 4) * 3;
 /** For copy only: the cap in whole KB, rounded down so the hint never overstates it. */

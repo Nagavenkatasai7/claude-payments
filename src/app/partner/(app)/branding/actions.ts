@@ -68,7 +68,7 @@ export async function saveLogoAction(formData: FormData): Promise<ActionResult> 
   if (!(await tenantExists(ctx))) return notFound();
   const file = formData.get('logo');
   if (!(file instanceof File) || file.size === 0) return { ok: false, error: t(logoErrorKey('missing')) };
-  // The size check comes BEFORE any read: an oversized upload is never buffered.
+  // The size check comes BEFORE the bytes are read: an oversized upload is never encoded or stored.
   if (file.size > MAX_LOGO_FILE_BYTES) return { ok: false, error: t(logoErrorKey('size'), { max: MAX_LOGO_FILE_KB }) };
   let r: Awaited<ReturnType<typeof savePartnerLogo>>;
   try {

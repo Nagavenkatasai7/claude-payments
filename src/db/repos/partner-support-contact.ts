@@ -28,14 +28,31 @@ export type SupportContactKind = 'url' | 'email' | 'phone';
 export type SupportContactCheck = { ok: true; value: string; kind: SupportContactKind } | { ok: false };
 export type SetSupportContactResult = { ok: true } | { ok: false; reason: 'invalid' | 'not_found' };
 
+// The contact can reach customer and bot copy, so on top of the shared shape checks each kind is
+// narrowed to a plain, unambiguous form (security review of this PR): the WHATWG URL parser accepts
+// spaces, fragments, percent-escapes, userinfo ("https://brand.example@evil.example") and non-ASCII
+// hosts (homographs), and the shared email pattern allows ':' and non-ASCII in the local part.
+const ASCII_NO_SPACE = /^[\x21-\x7e]+$/;
+const PLAIN_EMAIL = /^[A-Za-z0-9._+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+
+function isPlainHttpsUrl(value: string): boolean {
+  if (!ASCII_NO_SPACE.test(value) || value.includes('%') || value.includes('#')) return false;
+  try {
+    const u = new URL(value);
+    return u.username === '' && u.password === '' && !u.hostname.startsWith('xn--') && !u.hostname.includes('.xn--');
+  } catch {
+    return false;
+  }
+}
+
 /** Pure: the accepted, trimmed contact and its kind, or a refusal. */
 export function validateSupportContact(raw: unknown): SupportContactCheck {
   if (typeof raw !== 'string' || [...raw].length > SUPPORT_CONTACT_MAX) return { ok: false };
   const value = raw.trim();
   if (value === '' || boundUntrustedText(raw, SUPPORT_CONTACT_MAX) !== value) return { ok: false };
   if (hasOverridePhrase(value)) return { ok: false };
-  if (isHttpsUrl(value)) return { ok: true, value, kind: 'url' };
-  if (normalizePortalEmail(value) === value) return { ok: true, value, kind: 'email' };
+  if (isHttpsUrl(value)) return isPlainHttpsUrl(value) ? { ok: true, value, kind: 'url' } : { ok: false };
+  if (normalizePortalEmail(value) === value) return PLAIN_EMAIL.test(value) ? { ok: true, value, kind: 'email' } : { ok: false };
   if (isDisclosurePhone(value)) return { ok: true, value, kind: 'phone' };
   return { ok: false };
 }
