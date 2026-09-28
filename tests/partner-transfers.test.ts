@@ -103,6 +103,8 @@ describe('parseTransferFilters', () => {
     expect(parseTransferFilters({ cursor: 'not base64!' }).cursor).toBeUndefined();
     expect(parseTransferFilters({ cursor: encodeTransferCursor("x|' OR 1=1") }).cursor).toBeUndefined();
     expect(decodeTransferCursor('A'.repeat(500))).toBeUndefined();
+    expect(decodeTransferCursor(encodeTransferCursor('+275760-09-13T00:00:00.000Z|x'))).toBeUndefined();
+    expect(decodeTransferCursor(encodeTransferCursor('not-a-date-at-all|x'))).toBeUndefined();
   });
   it('the page size is bounded', () => {
     expect(PARTNER_TRANSFERS_PAGE_SIZE).toBeGreaterThan(0);
@@ -174,6 +176,18 @@ describe('transferTimeline', () => {
     );
     expect(rows.map((r) => r.by)).toEqual([undefined, t('partner.transfers.actor.system'), t('partner.transfers.actor.apiKey')]);
     expect(JSON.stringify(rows)).not.toContain('evidence');
+  });
+  it('shows note text only for a partner-scoped note by a tenant user (never platform free text)', () => {
+    const rows = transferTimeline(
+      base({ status: 'awaiting_payment' }),
+      [
+        { at: new Date('2026-09-01T10:01:00.000Z'), action: 'transfer.hold.note', actor: 'platform-ops', actorType: 'staff', meta: { note: 'PLATFORM TEXT', actorScope: 'partner' } },
+        { at: new Date('2026-09-01T10:02:00.000Z'), action: 'transfer.hold.note', actor: 'pa-agent', actorType: 'staff', meta: { note: 'NO SCOPE' } },
+      ],
+      tenant,
+    );
+    expect(JSON.stringify(rows)).not.toContain('PLATFORM TEXT');
+    expect(JSON.stringify(rows)).not.toContain('NO SCOPE');
   });
   it('a completed refund adds a refunded row; a malformed note is dropped to no text', () => {
     const rows = transferTimeline(
@@ -264,5 +278,10 @@ describe('isPartnerNoteShaped', () => {
     expect(isPartnerNoteShaped('Call +1 415 555 0101')).toBe(false);
     expect(isPartnerNoteShaped('acct 0000-1111-2222')).toBe(false);
     expect(isPartnerNoteShaped('4155550101')).toBe(false);
+    expect(isPartnerNoteShaped('12345/67890')).toBe(false);
+    expect(isPartnerNoteShaped('12345,67890')).toBe(false);
+    expect(isPartnerNoteShaped('12345_67890')).toBe(false);
+    expect(isPartnerNoteShaped('\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u0660')).toBe(false);
+    expect(isPartnerNoteShaped('Two refs: 12345 and 67890 checked')).toBe(true);
   });
 });

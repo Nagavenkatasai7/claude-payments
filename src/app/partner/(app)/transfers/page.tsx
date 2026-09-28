@@ -32,7 +32,7 @@ export default async function PartnerTransfersPage({ searchParams }: { searchPar
   let nextCursor: string | undefined;
   if (f.q) {
     const hit = await getPartnerTransfer(db, ctx.partnerId, f.q);
-    items = hit && (!f.status || hit.status === f.status) ? [hit] : [];
+    items = hit && (!f.status || hit.status === f.status) && (hit.environment ?? 'live') === f.environment ? [hit] : [];
   } else {
     const page = await listPartnerTransfers(db, ctx.partnerId, {
       limit: PARTNER_TRANSFERS_PAGE_SIZE,

@@ -53,6 +53,9 @@ export function parseTransferFilters(sp: SearchParams): TransferFilters {
   return { ...(status ? { status } : {}), environment, ...(q ? { q } : {}), ...(cursor ? { cursor } : {}) };
 }
 
+const CURSOR_MIN_MS = Date.UTC(2000, 0, 1);
+const CURSOR_MAX_MS = Date.UTC(2200, 0, 1);
+
 /** The repo's keyset cursor (`createdAt|id`) as an opaque URL token. */
 export function encodeTransferCursor(cursor: string): string {
   return Buffer.from(cursor, 'utf8').toString('base64url');
@@ -62,7 +65,10 @@ export function encodeTransferCursor(cursor: string): string {
 export function decodeTransferCursor(token: unknown): string | undefined {
   if (typeof token !== 'string' || token.length === 0 || token.length > 200 || !/^[A-Za-z0-9_-]+$/.test(token)) return undefined;
   const c = Buffer.from(token, 'base64url').toString('utf8');
-  return /^[0-9T:.Z+-]{10,40}\|[A-Za-z0-9_-]{1,64}$/.test(c) ? c : undefined;
+  if (!/^[0-9T:.Z+-]{10,40}\|[A-Za-z0-9_-]{1,64}$/.test(c)) return undefined;
+  // A plausible timestamp only (the database rejects extreme years).
+  const at = Date.parse(c.slice(0, c.lastIndexOf('|')));
+  return Number.isFinite(at) && at >= CURSOR_MIN_MS && at <= CURSOR_MAX_MS ? c : undefined;
 }
 
 /** A list URL carrying only the known filters (a static path; the tenant is never in it). */
@@ -161,7 +167,11 @@ export function transferTimeline(tr: Transfer, audit: readonly TimelineAuditRow[
     if (!Number.isFinite(at.getTime())) continue;
     const by = maskActor(a.actor, a.actorType, tenant);
     if (a.action === 'transfer.hold.note') {
-      const raw = (a.meta as { note?: unknown } | null)?.note;
+      const m = a.meta as { note?: unknown; actorScope?: unknown } | null;
+      // Text only from a note THIS tenant's staff wrote through the partner app; any other writer's
+      // free text (a platform or compliance flow reusing the action name) is never shown.
+      const own = m?.actorScope === 'partner' && a.actorType === 'staff' && tenant.has(a.actor);
+      const raw = own ? m?.note : undefined;
       rows.push({ at: at.toISOString(), kind: 'note', label: 'partner.transfers.timeline.note', by, ...(typeof raw === 'string' ? { note: raw } : {}) });
     } else if (a.action === 'transfer.release') {
       rows.push({ at: at.toISOString(), kind: 'release', label: 'partner.transfers.timeline.release', by });
@@ -267,13 +277,13 @@ export function settlementView(tr: Pick<Transfer, 'status' | 'environment' | 'pa
 
 // ── Hold note input ─────────────────────────────────────────────────────────
 /**
- * A hold note must not carry a phone- or account-length number (10+ digits, spaces, dots, dashes,
- * brackets and plus signs between digits ignored). The note is stored in the audit trail and shown
+ * A hold note must not carry a phone- or account-length number (10+ digits in any script; up to 3
+ * non-letter separators between digits are ignored). Best-effort, not a PII classifier. The note is stored in the audit trail and shown
  * to the tenant's staff, so it stays free of the identifiers the ledger keeps masked.
  */
 export function isPartnerNoteShaped(note: string): boolean {
-  const collapsed = note.replace(/(?<=\d)[\s.()+-]+(?=\d)/g, '');
-  return !/\d{10,}/.test(collapsed);
+  const collapsed = note.replace(/(?<=\p{Nd})[^\p{L}\p{Nd}]{1,3}(?=\p{Nd})/gu, '');
+  return !/\p{Nd}{10,}/u.test(collapsed);
 }
 
 /** A transfer id as the ledger mints it (letters, digits, _ and -), bounded. */

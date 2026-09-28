@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { DbOrTx } from '@/db/client';
 import { auditEvents, fundingEvents, outbox } from '@/db/schema';
 import { createTransferRepo, type Page } from './transfer-repo';
@@ -59,7 +59,9 @@ export async function loadPartnerTransferDetail(db: DbOrTx, partnerId: PartnerId
       .select({ at: auditEvents.at, action: auditEvents.action, actor: auditEvents.actor, actorType: auditEvents.actorType, meta: auditEvents.meta })
       .from(auditEvents)
       .where(and(eq(auditEvents.partnerId, partnerId), eq(auditEvents.subjectId, transfer.id), inArray(auditEvents.action, [...TIMELINE_AUDIT_ACTIONS])))
-      .orderBy(asc(auditEvents.at), asc(auditEvents.id))
+      // Newest first under the limit (a long trail never hides the latest events); the pure
+      // timeline sorts ascending for display.
+      .orderBy(desc(auditEvents.at), desc(auditEvents.id))
       .limit(TIMELINE_LIMIT),
     db
       .select({ status: outbox.status, attempts: outbox.attempts, createdAt: outbox.createdAt })

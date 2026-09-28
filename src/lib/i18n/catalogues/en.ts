@@ -181,6 +181,7 @@ export const en = {
   'partner.transfers.noteEmpty': 'Write a note first.',
   'partner.transfers.noteNotHeld': 'Notes can only be added while a transfer is held.',
   'partner.transfers.noteHasNumber': 'Remove phone or account numbers from the note.',
+  'partner.transfers.noteInFlight': 'This note is still being saved. Reload the page to check before trying again.',
   'partner.transfers.noteExpired': 'This form expired. Reload the page and try again.',
   'portal.nav.label': 'Your account',
   'portal.nav.home': 'Home',

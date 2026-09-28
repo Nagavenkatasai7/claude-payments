@@ -124,6 +124,11 @@ describe('/partner/transfers: list', () => {
     expect(await list({ q: 'tr_A_done' })).toContain('href="/partner/transfers/tr_A_done"');
     expect(await list({ q: 'tr_A_done', status: 'in_review' })).not.toContain('href="/partner/transfers/tr_A_done"');
   });
+  it('the id search honours the mode filter', async () => {
+    await asAdmin();
+    expect(await list({ q: 'tr_A_test' })).not.toContain('href="/partner/transfers/tr_A_test"');
+    expect(await list({ q: 'tr_A_test', environment: 'test' })).toContain('href="/partner/transfers/tr_A_test"');
+  });
   it('the status filter is a closed set', async () => {
     await asAdmin();
     const held = await list({ status: 'in_review' });
@@ -207,6 +212,17 @@ describe('/partner/transfers/[id]: detail', () => {
     expect(html).not.toContain('platform-ops');
     expect(html).not.toContain('EVIDENCE');
     expect(html).toContain('SmartRemit');
+  });
+  it('the timeline keeps the NEWEST rows when a trail is long', async () => {
+    await asAgent();
+    const repo = createAuditRepo(db);
+    for (let i = 0; i < 105; i++) {
+      await repo.record({ partnerId: 'pa', actor: 'pa-agent', actorType: 'staff', action: 'transfer.hold.note', subjectId: 'tr_A_held', meta: { note: `bulk note ${i}`, actorScope: 'partner' } });
+    }
+    await repo.record({ partnerId: 'pa', actor: 'platform-ops', actorType: 'staff', action: 'transfer.release', subjectId: 'tr_A_held', meta: {} });
+    const html = await detail('tr_A_held');
+    expect(html).toContain('Hold released');
+    expect(html).toContain('bulk note 104');
   });
 });
 

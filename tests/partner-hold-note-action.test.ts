@@ -47,6 +47,7 @@ import { addHoldNoteAction } from '@/app/partner/(app)/transfers/[id]/actions';
 import { auditEvents, transfers } from '@/db/schema';
 import { PARTNER_OPS } from '@/lib/partner-access';
 import { PARTNER_ROUTES } from '@/app/partner/routes';
+import { holdNoteClaimKey } from '@/lib/partner-transfers';
 
 const KEY = () => Array.from({ length: 32 }, () => 'abcdef'[Math.floor(Math.random() * 6)]).join('');
 const form = (id: string, note = 'Asked the sender for the source of funds.', requestKey = KEY()) => {
@@ -194,6 +195,37 @@ describe('addHoldNoteAction: success (item 6)', () => {
     await addHoldNoteAction(form('tr_heldA1', 'from admin', k));
     const rows = await noteRows();
     expect(rows.map((r) => r.actor)).toEqual(['pa-agent', 'pa-admin']);
+  });
+  it('a replay while the first submit is still in flight is NOT reported as saved', async () => {
+    await asAgent();
+    const k = KEY();
+    await redis.set(holdNoteClaimKey('pa', 'pa-agent', 'tr_heldA1', k), 'pending');
+    const r = await addHoldNoteAction(form('tr_heldA1', 'dup', k));
+    expect(r).toMatchObject({ ok: false });
+    expect(await noteRows()).toHaveLength(0);
+  });
+  it('a failed write releases the claim, and nothing about the note reaches the log', async () => {
+    await asAgent();
+    const k = KEY();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const orig = db.transaction.bind(db);
+    (db as unknown as { transaction: unknown }).transaction = async () => {
+      throw new Error('Failed query: insert ... params: SECRET-NOTE-TEXT,pa-agent');
+    };
+    try {
+      const r = await addHoldNoteAction(form('tr_heldA1', 'SECRET-NOTE-TEXT', k));
+      expect(r).toMatchObject({ ok: false });
+    } finally {
+      (db as unknown as { transaction: unknown }).transaction = orig;
+    }
+    const logged = JSON.stringify([...warn.mock.calls, ...err.mock.calls]);
+    warn.mockRestore();
+    err.mockRestore();
+    expect(logged).not.toContain('SECRET-NOTE-TEXT');
+    expect(await redis.get(holdNoteClaimKey('pa', 'pa-agent', 'tr_heldA1', k))).toBeNull();
+    expect(await addHoldNoteAction(form('tr_heldA1', 'retry works', k))).toEqual({ ok: true });
+    expect(await noteRows()).toHaveLength(1);
   });
   it('no audit row for pb is ever written by a pa session', async () => {
     await asAgent();

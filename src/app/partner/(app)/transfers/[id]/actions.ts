@@ -15,6 +15,9 @@ import { logWarn } from '@/lib/log';
 import type { ActionResult } from '../../../action-result';
 
 const CLAIM_TTL_S = 1800;
+const CLAIM_PENDING = 'p';
+const CLAIM_DONE = 'd';
+const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 
 /**
  * Add a note to one of THIS tenant's held transfers (UI redesign M3-5). AUDIT-ONLY: one
@@ -22,7 +25,8 @@ const CLAIM_TTL_S = 1800;
  * action shape: the gate first (outside any try); the target id from the form (any partnerId field
  * is never read); resolved INSIDE the session tenant (missing and foreign are the same result);
  * the input validated before any write; the write + its audit row in one transaction. A replayed
- * submit (same request key, same user and transfer) writes once.
+ * submit (same request key, same user and transfer) writes once, and is reported as saved only
+ * after the first write committed. Redis unavailable ⇒ the note is refused (fails closed).
  */
 export async function addHoldNoteAction(formData: FormData): Promise<ActionResult> {
   // A partner-site host never runs an apex action (the site-host guard rule for every action).
@@ -47,9 +51,12 @@ export async function addHoldNoteAction(formData: FormData): Promise<ActionResul
   const claim = holdNoteClaimKey(ctx.partnerId, ctx.username, transfer.id, requestKey);
   let claimed = false;
   try {
-    claimed = (await redis.set(claim, '1', { nx: true, ex: CLAIM_TTL_S })) !== null;
-    // A replay: the first submit wrote (or is writing) this note. Nothing more to do.
-    if (!claimed) return { ok: true };
+    claimed = (await redis.set(claim, CLAIM_PENDING, { nx: true, ex: CLAIM_TTL_S })) !== null;
+    if (!claimed) {
+      // A replay. "Saved" only once the first submit's write committed; while it is still in
+      // flight (or it failed and a stale claim remains) the user is told to reload and check.
+      return (await redis.get(claim)) === CLAIM_DONE ? { ok: true } : { ok: false, error: t('partner.transfers.noteInFlight') };
+    }
     await db.transaction(async (tx) => {
       await createAuditRepo(tx).record({
         partnerId: ctx.partnerId,
@@ -65,11 +72,18 @@ export async function addHoldNoteAction(formData: FormData): Promise<ActionResul
       try {
         await redis.del(claim);
       } catch (delErr) {
-        logWarn('partner.hold_note.release', delErr, { transferId: transfer.id });
+        logWarn('partner.hold_note.release', errName(delErr), { transferId: transfer.id });
       }
     }
-    logWarn('partner.hold_note', err, { transferId: transfer.id });
+    // The error NAME only: a failed query's message carries its bound params (the note text).
+    logWarn('partner.hold_note', errName(err), { transferId: transfer.id });
     return { ok: false, error: t('partner.common.failed') };
+  }
+  try {
+    await redis.set(claim, CLAIM_DONE, { ex: CLAIM_TTL_S });
+  } catch (err) {
+    // The note is written. A replay then reads "still working" until the TTL, never a second note.
+    logWarn('partner.hold_note.done', errName(err), { transferId: transfer.id });
   }
   revalidatePath(`/partner/transfers/${transfer.id}`);
   return { ok: true };
