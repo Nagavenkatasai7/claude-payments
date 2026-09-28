@@ -7,6 +7,8 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/components/ds',
   // The shared public-site shell (SiteHeader / SiteFooter / SiteShell).
   'src/components/site',
+  // The code-backed MDX blocks the /docs-next guides render (M4 PR-3).
+  'src/components/docs',
   // Planned roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so the
   // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',
@@ -29,6 +31,11 @@ export const HEX_EXEMPT_FILES: readonly string[] = [
 ];
 /** New route dirs exempt from the loading/error rule (static, data-free pages only; each needs a reason). */
 export const STATE_EXEMPT_DIRS: readonly string[] = [
+  // Static, prerendered, data-free (a loading boundary hides content without JS and flashes a
+  // skeleton): the prerendered HTML would put the page in <div hidden id="S:0"> behind the
+  // skeleton until React's inline reveal script runs. error.tsx is still required and present.
+  'src/app/docs-next',
+  'src/app/docs-next/[slug]',
   // A static, data-free page: nothing to load and nothing that can fail.
   'src/app/site-inactive',
 ];
