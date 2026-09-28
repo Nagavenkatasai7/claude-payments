@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { dsCn } from '@/lib/ui/ds-cn';
+import { dsCn, DS_COLORS } from '@/lib/ui/ds-cn';
 
 describe('dsCn', () => {
   it('keeps a ds colour and an arbitrary font size together', () => {
@@ -22,6 +22,7 @@ describe('dsCn', () => {
     const css = readFileSync('src/app/tailwind.css', 'utf8');
     const tokens = [...css.matchAll(/--color-(ds-[\w-]+):/g)].map((m) => m[1]);
     expect(tokens.length).toBeGreaterThan(0);
+    expect([...DS_COLORS].sort()).toEqual([...tokens].sort());
     for (const tok of tokens) expect(dsCn('text-[15px]', `text-${tok}`), tok).toBe(`text-[15px] text-${tok}`);
   });
 });
