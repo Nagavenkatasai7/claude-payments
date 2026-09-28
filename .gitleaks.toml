@@ -1,0 +1,16 @@
+# gitleaks config (Compliance A3). Default rules, plus value-exact allowlists
+# only: no path-wide allow, no broad pattern. Passed explicitly by
+# scripts/ci/gitleaks-scan.sh (--config .gitleaks.toml).
+
+[extend]
+useDefault = true
+
+# The documented example Idempotency-Key UUID shown in the partner API docs
+# (src/app/docs/page.tsx, src/content/docs/sandbox.mdx). It is a published
+# sample value, not a credential; an inline gitleaks:allow marker would render
+# in the shell sample and break its line continuation.
+[[allowlists]]
+description = "documented example idempotency key (exact value)"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^5f0c8a3e-2b7d-4e61-9a4f-0d3b8c1e7a52$''']
