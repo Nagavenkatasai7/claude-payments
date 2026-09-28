@@ -115,6 +115,23 @@ test('anonymous /account/login stays public (200, no redirect)', async ({ reques
   expect(res.status()).toBe(200);
 });
 
+// UI redesign M3 — the partner app is gated in-app (requirePartnerStaff), not by
+// src/proxy.ts. The gate runs inside the page, under the segment's loading.tsx
+// Suspense boundary, so the redirect may be streamed (200 + client redirect)
+// instead of a 307 (next/dist/docs/01-app/03-api-reference/03-file-conventions/
+// loading.md "Status Codes"; .../04-functions/redirect.md). So this checks where
+// the browser lands, not the status: anonymous → /login, with nothing of the
+// partner page on screen. Every new /partner page is added to this list.
+for (const path of ['/partner', '/partner/security']) {
+  test(`anonymous ${path} ends on /login and shows nothing of the partner app`, async ({ page, baseURL }) => {
+    test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
+    await page.goto(path);
+    await expect.poll(() => new URL(page.url(), baseURL).pathname).toBe('/login');
+    await expect(page.locator('[data-testid^="partner-"]')).toHaveCount(0);
+    await expect(page.locator('input[name="currentPassword"]')).toHaveCount(0);
+  });
+}
+
 // Program-Fix 47 — the enforced Content-Security-Policy, anonymously. Every
 // page carries exactly ONE enforced CSP (from next.config.ts) with the fix's
 // additions (https: images, object-src 'none'). headersArray() keeps duplicate

@@ -9,6 +9,7 @@ export const NEW_UI_ROOTS: readonly string[] = [
   // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',
   'src/app/trust',
+  'src/app/partner', // UI redesign M3: the partner app (hex-scanned and state-walked)
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */
