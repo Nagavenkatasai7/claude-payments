@@ -69,8 +69,12 @@ export function LoginMenu() {
       <div
         id={panelId}
         className={dsCn(
-          'absolute right-0 top-full z-50 pt-2 transition-[opacity,visibility] duration-150',
-          state.open ? 'visible opacity-100' : 'invisible opacity-0 group-hover:visible group-hover:opacity-100',
+          'absolute right-0 top-full z-50 pt-2',
+          // Fade in on open; hide at once on close. A visibility transition on close would leave
+          // the links focusable for its duration, so a Tab right after Escape would land inside.
+          state.open
+            ? 'visible opacity-100 transition-[opacity,visibility] duration-150 motion-reduce:transition-none'
+            : 'invisible opacity-0 group-hover:visible group-hover:opacity-100 group-hover:transition-[opacity,visibility] group-hover:duration-150 motion-reduce:group-hover:transition-none',
         )}
       >
         <div className="w-64 rounded-2xl border border-ds-border bg-ds-surface p-1.5 shadow-ds-pop">

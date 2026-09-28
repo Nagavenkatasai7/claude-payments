@@ -127,6 +127,9 @@ describe('LoginMenu is keyboard accessible (disclosure, not a hover-only menu)',
     expect(panel).toBeDefined();
     // Closed: invisible, so the links are out of the tab order until opened.
     expect(header).toMatch(/class="[^"]*\binvisible\b[^"]*"[^>]*>\s*<div[^>]*id=|id="[^"]+"[^>]*class="[^"]*\binvisible\b/);
+    // Closing must hide at once: a visibility transition on the closed panel keeps its links
+    // focusable while it fades, so Tab right after Escape would land inside (seen in a browser).
+    expect(panel).not.toMatch(/class="(?:[^"]*\s)?transition-\[opacity,visibility\]/);
     expect(header).not.toContain('aria-haspopup');
     expect(header).not.toContain('role="menu"');
   });
