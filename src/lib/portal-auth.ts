@@ -65,25 +65,39 @@ export async function requirePortalCustomer(): Promise<PortalCustomerContext> {
  * only (no `//`, no `..`, no query). Anything else → /portal.
  */
 const NEXT_RE =
-  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers\/[A-Za-z0-9_-]{6,64}|notifications|devices|privacy))?$/;
+  /^\/portal(\/(send|send\/review|recipients|recipients\/new|recipients\/[0-9a-f]{32}\/edit|schedules|schedules\/new|transfers\/[A-Za-z0-9_-]{6,64}|profile|notifications|devices|privacy))?$/;
 
 export function safePortalNext(next: unknown): string {
   return typeof next === 'string' && NEXT_RE.test(next) ? next : '/portal';
 }
 
 /**
- * The 15-minute step-up (owner O1). A session whose last WhatsApp-code proof (and, for a TOTP-enrolled
- * customer, last TOTP proof) is older than 15 minutes is sent through /portal/verify first.
+ * The 15-minute step-up rule (owner O1), answered without redirecting: true when the session's last
+ * WhatsApp-code proof (and, for a TOTP-enrolled customer, last TOTP proof) is within 15 minutes.
+ * Fails CLOSED: an unknown enrolment demands the TOTP proof, and any other error reads as not fresh.
+ * requireFreshPortalAuth and the portal chat (/api/portal/chat) share this one rule.
  */
-export async function requireFreshPortalAuth(returnTo: string): Promise<PortalCustomerContext> {
-  const ctx = await requirePortalCustomer();
+export async function isPortalSessionFresh(ctx: PortalCustomerContext): Promise<boolean> {
   let requireTotp = true; // unknown enrolment → demand the stronger proof (fail closed)
   try {
     requireTotp = await getCustomerMfaStore().isEnrolled({ partnerId: ctx.site.partnerId, phone: ctx.session.phone });
   } catch {
     /* keep true */
   }
-  if (!getPortalSessionStore().isFresh(ctx.session, { requireTotp })) {
+  try {
+    return getPortalSessionStore().isFresh(ctx.session, { requireTotp });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The 15-minute step-up (owner O1). A session that is not fresh (isPortalSessionFresh) is sent
+ * through /portal/verify first.
+ */
+export async function requireFreshPortalAuth(returnTo: string): Promise<PortalCustomerContext> {
+  const ctx = await requirePortalCustomer();
+  if (!(await isPortalSessionFresh(ctx))) {
     redirect(`/portal/verify?next=${safePortalNext(returnTo)}`);
   }
   return ctx;

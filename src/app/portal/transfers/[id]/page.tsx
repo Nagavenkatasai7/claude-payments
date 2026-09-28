@@ -3,7 +3,9 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Check, Circle, CircleDot, OctagonAlert } from 'lucide-react';
+import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
+import { verifiedReceiptEmail } from '@/lib/portal-prefs';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { getPortalTransfer, portalOwner, transferTimeline, type TimelineState } from '@/lib/portal-transfers';
 import { refundDisposition } from '@/lib/refund-policy';
@@ -63,8 +65,11 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
   await requirePortalSite();
   const ctx = await requirePortalCustomer();
   const { id } = await params;
-  const transfer = await getPortalTransfer(portalOwner(ctx), id);
+  const owner = portalOwner(ctx);
+  const transfer = await getPortalTransfer(owner, id);
   if (!transfer) notFound();
+  // "Email me a receipt" only for an address verified on THIS partner (the action re-checks it).
+  const canEmail = (await verifiedReceiptEmail(getDb(), { partnerId: owner.partnerId, senderPhone: owner.phone, email: ctx.customer.email })) !== null;
 
   const now = Date.now();
   const disp = refundDisposition(transfer, now);
@@ -187,12 +192,21 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
               {t('portal.detail.receiptLink')}
             </Link>
           </p>
-          <ActionForm
-            action={emailReceiptAction.bind(null, transfer.id)}
-            requestKey={key()}
-            label={t('portal.detail.emailCta')}
-            busyLabel={t('portal.detail.working')}
-          />
+          {canEmail ? (
+            <ActionForm
+              action={emailReceiptAction.bind(null, transfer.id)}
+              requestKey={key()}
+              label={t('portal.detail.emailCta')}
+              busyLabel={t('portal.detail.working')}
+            />
+          ) : (
+            <p className="text-[14px] text-ds-ink-muted">
+              {t('portal.detail.emailNeedsVerify')}{' '}
+              <Link href="/portal/notifications" className="font-semibold text-ds-primary hover:underline">
+                {t('portal.detail.emailNeedsVerifyLink')}
+              </Link>
+            </p>
+          )}
         </Card>
       </div>
     </>

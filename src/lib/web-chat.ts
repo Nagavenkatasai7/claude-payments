@@ -10,6 +10,7 @@ import { getMonthlyVolumeStore } from './monthly-volume-store';
 import { getKycProvider } from './providers/kyc-provider';
 import { getPartnerStore } from './partner-store';
 import type { Customer } from './types';
+import type { WebStepUp } from './tools';
 import { getDb } from '@/db/client';
 import { CARD_MARKER, createConversationLogRepo, type ConversationLogRepo } from '@/db/repos/conversation-log-repo';
 
@@ -51,6 +52,12 @@ export type WebChatDeps = Omit<AgentDeps, 'channel' | 'waCreds' | 'partnerId'> &
 };
 
 /**
+ * Per-turn options. The customer portal chat passes its session's step-up state
+ * (webStepUp); the legacy /api/account/chat passes nothing (unchanged behaviour).
+ */
+export type WebChatTurnOptions = { webStepUp?: WebStepUp };
+
+/**
  * Build the web-channel chat over injected deps (tests bind PGlite/fakeRedis;
  * production uses runWebChatTurn below). isNewConversation is derived from web
  * thread emptiness — there is no 24h-gap heuristic and no buttonTap on web.
@@ -62,8 +69,14 @@ export function createWebChat(deps: WebChatDeps) {
   const { conversationLog, ...agentDeps } = deps;
   const store = webThreadStore(agentDeps.store);
   return {
-    async runTurn(customer: Customer, text: string): Promise<string> {
-      const agent = createAgent({ ...agentDeps, store, channel: 'web', partnerId: customer.partnerId });
+    async runTurn(customer: Customer, text: string, opts?: WebChatTurnOptions): Promise<string> {
+      const agent = createAgent({
+        ...agentDeps,
+        store,
+        channel: 'web',
+        partnerId: customer.partnerId,
+        ...(opts?.webStepUp ? { webStepUp: opts.webStepUp } : {}),
+      });
       const phone = customer.senderPhone;
       // R3b: the portal customer's own (tenant, phone) thread, web channel.
       // Inbound BEFORE the agent runs, the reply after it (random ids: the web
@@ -79,7 +92,7 @@ export function createWebChat(deps: WebChatDeps) {
 }
 
 /** Production entry: one authenticated web chat turn for this customer. */
-export async function runWebChatTurn(customer: Customer, text: string): Promise<string> {
+export async function runWebChatTurn(customer: Customer, text: string, opts?: WebChatTurnOptions): Promise<string> {
   const store = getStore();
   const customerStore = getCustomerStore(store);
   const webChat = createWebChat({
@@ -94,5 +107,5 @@ export async function runWebChatTurn(customer: Customer, text: string): Promise<
     partnerStore: getPartnerStore(),
     conversationLog: createConversationLogRepo(getDb()),
   });
-  return webChat.runTurn(customer, text);
+  return webChat.runTurn(customer, text, opts);
 }
