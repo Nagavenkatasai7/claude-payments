@@ -31,7 +31,7 @@ Out of scope:
 
 ## Rules of engagement
 
-- Test only with your own sandbox keys and your own data.
+- If you are a partner, use only your sandbox keys; test only with your own data.
 - Never use live keys, and never access, change or delete data that is not yours.
 - Do not send messages to phone numbers you do not own.
 - Give us reasonable time to fix the issue before you disclose it.

@@ -10,7 +10,7 @@ export const SECURITY_MD_URL = 'https://github.com/Nagavenkatasai7/claude-paymen
 export const DISCLOSURE_POLICY = {
   scope: ['The smartremit.ai website and the pages it serves', 'The SmartRemit Partner API'],
   please: [
-    'Test only with your own sandbox keys and your own data.',
+    'If you are a partner, use only your sandbox keys; test only with your own data.',
     'Report privately by email and include the steps to reproduce.',
     'Give us reasonable time to fix the issue before you disclose it.',
   ],

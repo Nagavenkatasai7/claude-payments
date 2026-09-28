@@ -87,6 +87,28 @@ describe('Trust content is honest', () => {
     expect(names).not.toMatch(/Stripe|Sentry|webhook/i);
   });
 
+  it('the cache row names every category it holds, including payout details in short-lived drafts', async () => {
+    const { SUBPROCESSORS } = await import('@/content/trust/subprocessors');
+    const upstash = SUBPROCESSORS.find((s) => s.name === 'Upstash');
+    expect(upstash?.data).toMatch(/phone numbers/i);
+    expect(upstash?.data).toMatch(/chat text/i);
+    expect(upstash?.data).toMatch(/payout account details/i);
+    expect(upstash?.data).toMatch(/recipient name/i);
+  });
+
+  it('the encryption point does not hide the short-lived draft copy', async () => {
+    const { SECURITY_POINTS } = await import('@/content/trust/security-overview');
+    const fle = SECURITY_POINTS.find((p) => p.title === 'Field-level encryption');
+    expect(fle?.body).toMatch(/in our database/);
+    expect(fle?.body).toMatch(/up to 30 minutes/);
+  });
+
+  it('the disclosure policy does not tell outside researchers to use keys they cannot get', async () => {
+    const src = (await import('node:fs')).readFileSync('SECURITY.md', 'utf8');
+    expect(src).not.toMatch(/^- Test only with your own sandbox keys/m);
+    expect(src).toMatch(/If you are a partner, use only your sandbox keys/);
+  });
+
   it('file storage is its own row: the function region does not prove where stored documents live', async () => {
     const { SUBPROCESSORS } = await import('@/content/trust/subprocessors');
     const blob = SUBPROCESSORS.find((s) => /file storage/i.test(s.purpose));

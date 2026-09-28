@@ -41,7 +41,7 @@ export const SUBPROCESSORS: readonly Subprocessor[] = [
   {
     name: 'Upstash',
     purpose: 'Short-lived cache: sessions, recent conversations, one-time codes, rate limits',
-    data: 'Phone numbers, recent chat text',
+    data: 'Phone numbers, recent chat text, short-lived transfer drafts (recipient name, phone and payout account details)',
     region: 'Being confirmed',
     regionStatus: 'being-confirmed',
   },

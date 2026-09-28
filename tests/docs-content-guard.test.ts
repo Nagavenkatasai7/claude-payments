@@ -92,6 +92,11 @@ describe.each(published)('%s (published-content checks)', (f) => {
       expect({ host: m[1], ok: ALLOWED_HOSTS.some((r) => r.test(m[1])) }).toEqual({ host: m[1], ok: true });
     }
   });
+  it('links github.com only inside the public repository', () => {
+    for (const m of text.matchAll(/https?:\/\/github\.com[^\s)"'`>]*/g)) {
+      expect({ url: m[0], ok: m[0].startsWith('https://github.com/Nagavenkatasai7/claude-payments/') }).toEqual({ url: m[0], ok: true });
+    }
+  });
   it('names no environment variable and no internal host', () => {
     const envNames = readFileSync('.env.example', 'utf8').match(/^[A-Z][A-Z0-9_]+(?==)/gm) ?? [];
     expect(envNames.length).toBeGreaterThan(10);
