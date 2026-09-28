@@ -28,3 +28,11 @@ describe('PageHeader / Sidebar keep the e2e hooks', () => {
     expect(html).toContain('href="/partner/transfers"');
   });
 });
+
+describe('ds index', () => {
+  it('re-exports the primitives and the state components', async () => {
+    const ds = await import('@/components/ds');
+    for (const name of ['Button', 'buttonVariants', 'Card', 'Badge', 'StatusPill', 'Money', 'Skeleton', 'PageHeader', 'Sidebar', 'EmptyState', 'ErrorState', 'RouteLoading'])
+      expect(typeof (ds as Record<string, unknown>)[name], name).toBe('function');
+  });
+});
