@@ -2,9 +2,8 @@
 // (then it is hex-scanned and state-walked) or in LEGACY_APP_DIRS (frozen: today's dirs only).
 export const NEW_UI_ROOTS: readonly string[] = [
   'src/components/ds',
-  // Review round 1: M4's roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so neither plan
-  // goes red on the "every src/app dir is classified" test whichever merges first. M4's src/components/site
-  // is scanned by M4's own grep test.
+  // Planned roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so the
+  // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',
   'src/app/trust',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.

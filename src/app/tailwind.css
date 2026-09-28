@@ -351,7 +351,7 @@
 }
 
 /* Gradient utilities. Tailwind v4 `@utility` (a static utility, like any other
- * class). M4's provisional `bg-accent-gradient` maps to `bg-ds-gradient-bar`. */
+ * class): `bg-ds-gradient-bar` is the accent bar, `bg-ds-gradient-text` the headline. */
 @utility bg-ds-gradient-bar {
   background-image: var(--ds-gradient-bar);
 }

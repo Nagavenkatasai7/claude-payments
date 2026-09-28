@@ -127,7 +127,7 @@ describe('--ds-* tokens are extracted from the landing', () => {
   });
 });
 
-describe('gradient utilities (Tailwind v4 @utility; M4 maps bg-accent-gradient here)', () => {
+describe('gradient utilities (Tailwind v4 @utility)', () => {
   it('bg-ds-gradient-bar and bg-ds-gradient-text read the tokens', () => {
     expect(css).toMatch(/@utility bg-ds-gradient-bar \{\s*background-image: var\(--ds-gradient-bar\);\s*\}/);
     expect(css).toMatch(/@utility bg-ds-gradient-text \{\s*background-image: var\(--ds-gradient-text\);\s*\}/);
