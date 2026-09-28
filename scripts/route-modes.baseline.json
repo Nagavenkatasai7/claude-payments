@@ -79,6 +79,7 @@
   "/docs": "static",
   "/docs-next": "static",
   "/docs-next/[slug]": "ssg",
+  "/docs-next/api": "static",
   "/legal": "static",
   "/login": "dynamic",
   "/login/mfa": "dynamic",

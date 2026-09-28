@@ -13,6 +13,11 @@ function GuideList() {
           Overview
         </Link>
       </li>
+      <li>
+        <Link className={LINK} href="/docs-next/api">
+          API reference
+        </Link>
+      </li>
       {GUIDES.map((g) => (
         <li key={g.slug}>
           <Link className={LINK} href={`/docs-next/${g.slug}`}>
