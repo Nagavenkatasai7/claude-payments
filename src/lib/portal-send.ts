@@ -13,6 +13,8 @@ import type { DbOrTx } from '@/db/client';
 import { auditSubjectId } from './customer-ref';
 import { PORTAL_AUTH_ACTOR } from './portal-auth-audit';
 import { formatMoney } from './ui/money';
+import { FX_MAX_AGE_MS } from './rate';
+import type { DraftStore } from './draft-store';
 import { boundUntrustedText, NAME_MAX } from './untrusted-text';
 import { isSupportedDestination, SUPPORTED_DESTINATIONS } from './destination-country';
 import { isValidPhone, normalizePhone } from './phone';
@@ -484,3 +486,28 @@ export async function recordSendAudit(db: DbOrTx, owner: PortalOwner, e: SendAud
 
 /** Whether `id` looks like a draft id (the replay value and the audit carry only this shape). */
 export const isDraftId = (v: unknown): v is string => typeof v === 'string' && DRAFT_ID_RE.test(v);
+
+/**
+ * Back on the review after Continue made a draft: the draft expired (30-minute TTL), is not this
+ * customer's, or its rate is older than the 1-hour FX limit → `quote_refreshed` (the page shows the
+ * price it just re-quoted, never the stale one). A live draft of this customer's → null.
+ */
+export async function reviewNotice(
+  draftStore: Pick<DraftStore, 'getDraft'>,
+  owner: PortalOwner,
+  review: Pick<PortalSendReview, 'draftId'>,
+  now: number = Date.now(),
+): Promise<'portal.send.quote_refreshed' | null> {
+  if (!review.draftId) return null;
+  let d: Awaited<ReturnType<DraftStore['getDraft']>> = null;
+  try {
+    d = await draftStore.getDraft(review.draftId);
+  } catch {
+    d = null;
+  }
+  const mine = d && d.partnerId === owner.partnerId && normalizePhone(d.senderPhone) === normalizePhone(owner.phone);
+  if (!d || !mine) return 'portal.send.quote_refreshed';
+  const at = d.quote?.fxFetchedAt;
+  if (typeof at === 'number' && now - at > FX_MAX_AGE_MS) return 'portal.send.quote_refreshed';
+  return null;
+}
