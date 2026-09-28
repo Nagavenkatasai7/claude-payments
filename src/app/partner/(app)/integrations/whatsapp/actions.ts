@@ -32,13 +32,14 @@ import type { ActionResult } from '../../../action-result';
 const PAGE = PARTNER_ROUTES.integrationsWhatsapp.href;
 const SAVE_LIMIT = { scope: 'partner-wa-save', limit: 10, windowSec: 600 } as const;
 const TEST_LIMIT = { scope: 'partner-wa-test', limit: 5, windowSec: 600 } as const;
+const DISCONNECT_LIMIT = { scope: 'partner-wa-disconnect', limit: 5, windowSec: 600 } as const;
 const errName = (e: unknown): string => (e instanceof Error ? e.name : 'error');
 
 /** The audit marker, derived from the authenticated record (never from input). */
 const actorScopeOf = (ctx: PartnerCtx) => scopeOf(ctx.staff).kind;
 
 /**
- * Per-tenant budget for Graph-probing actions. FAILS CLOSED on a limiter error: this is config,
+ * Per-tenant budget for the Graph-probing actions and the audited disconnect. FAILS CLOSED on a limiter error: this is config,
  * not a money path, and an unbounded probe would let a session use SmartRemit as a Graph proxy.
  */
 async function withinLimit(partnerId: string, l: { scope: string; limit: number; windowSec: number }): Promise<boolean> {
@@ -111,6 +112,7 @@ export async function disconnectWhatsappAction(_formData: FormData): Promise<Act
   const ctx = await requirePartnerStaff(PARTNER_ROUTES.integrationsWhatsapp.policy);
   const managed = sharedManaged(ctx);
   if (managed) return managed;
+  if (!(await withinLimit(ctx.partnerId, DISCONNECT_LIMIT))) return { ok: false, error: t('partner.whatsapp.rateLimited') };
   try {
     await disconnectWhatsapp(ctx.partnerId, ctx.username, { actorScope: actorScopeOf(ctx) });
   } catch (err) {

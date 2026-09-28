@@ -309,4 +309,10 @@ describe('disconnectWhatsappAction', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ action: 'partner.whatsapp.disconnect', partnerId: 'pa', actor: 'pa-admin', meta: { actorScope: 'partner' } });
   });
+
+  it('is rate-limited per tenant (fails closed), so a session cannot flood the audit log', async () => {
+    for (let i = 0; i < 5; i++) expect(await disconnectWhatsappAction(form())).toEqual({ ok: true });
+    expect(await disconnectWhatsappAction(form())).toEqual({ ok: false, error: t('partner.whatsapp.rateLimited') });
+    expect(await audits()).toHaveLength(5);
+  });
 });
