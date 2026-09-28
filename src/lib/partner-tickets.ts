@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
+import { env } from './env';
 import type { RedisLike } from './store';
 import type { PartnerRole } from './partner-access';
 import type { PartnerId, Ticket, TicketKind, TicketStatus } from './types';
@@ -232,4 +233,49 @@ export async function claimOnce(redis: RedisLike, key: string, fn: () => Promise
     // Keep the pending claim (see above).
   }
   return { status: 'ran', value };
+}
+
+// ── Action helpers (kept out of the 'use server' modules, which may export only actions) ─────
+
+/** Thrown inside a status transaction when the repo guard refuses the move (rolls it back). */
+export class StatusRefusedError extends Error {
+  constructor() {
+    super('Status change refused');
+    this.name = 'StatusRefusedError';
+  }
+}
+
+/** An error's NAME only, for logs: a failed query's message carries its bound params (the text). */
+export function errName(e: unknown): string {
+  return e instanceof Error ? e.name : 'error';
+}
+
+/** The customer-facing link in a ticket nudge (the same one the platform ticket actions send). */
+export function ticketNudgeUrl(ticketId: string): string {
+  return `${env.appBaseUrl}/account/support/${ticketId}`;
+}
+
+/**
+ * Which of these usernames are members of THIS tenant (and so may be shown by name on its pages).
+ * Platform staff and anyone else render as a neutral label: a tenant page never lists SmartRemit
+ * staff usernames. One lookup per distinct name; a failed lookup names nobody.
+ */
+export async function tenantStaffUsernames(
+  partnerId: PartnerId,
+  usernames: readonly string[],
+  getStaff: (username: string) => Promise<{ partnerId?: string } | null>,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  const distinct = [...new Set(usernames.filter((u) => typeof u === 'string' && u.length > 0))];
+  await Promise.all(
+    distinct.map(async (u) => {
+      try {
+        const s = await getStaff(u);
+        if (s && s.partnerId === partnerId) out.add(u);
+      } catch {
+        // Unknown ⇒ not named.
+      }
+    }),
+  );
+  return out;
 }

@@ -193,3 +193,27 @@ describe('claimOnce (double-submit guard for staff writes)', () => {
     expect(await claimOnce(redis, 'k3', async () => 'ok')).toEqual({ status: 'ran', value: 'ok' });
   });
 });
+
+describe('tenantStaffUsernames (who is shown by name)', () => {
+  it('names only active members of THIS tenant; platform staff, other tenants and unknown names are not', async () => {
+    const { tenantStaffUsernames } = await import('@/lib/partner-tickets');
+    const people: Record<string, { partnerId?: string } | null> = {
+      mine: { partnerId: PA },
+      platform: {},
+      other: { partnerId: PB },
+    };
+    const lookups: string[] = [];
+    const getStaff = async (u: string) => {
+      lookups.push(u);
+      return people[u] ?? null;
+    };
+    const names = await tenantStaffUsernames(PA, ['mine', 'platform', 'other', 'ghost', 'mine', ''], getStaff);
+    expect([...names]).toEqual(['mine']);
+    expect(lookups.sort()).toEqual(['ghost', 'mine', 'other', 'platform']);
+  });
+  it('a failed lookup names nobody (never throws the page)', async () => {
+    const { tenantStaffUsernames } = await import('@/lib/partner-tickets');
+    const names = await tenantStaffUsernames(PA, ['mine'], async () => Promise.reject(new Error('down')));
+    expect(names.size).toBe(0);
+  });
+});
