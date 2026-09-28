@@ -162,9 +162,9 @@ describe('addHoldNoteAction: success (item 6)', () => {
     expect(revalidated.every((p) => p.startsWith('/partner/'))).toBe(true);
     expect(revalidated).toContain('/partner/transfers/tr_heldA1');
   });
-  it('a flagged transfer that is not in review is also held', async () => {
+  it('a flagged transfer that was released (now paid) is no longer held: no note', async () => {
     await asAgent();
-    expect(await addHoldNoteAction(form('tr_flagA1'))).toEqual({ ok: true });
+    expect(await addHoldNoteAction(form('tr_flagA1'))).toMatchObject({ ok: false });
   });
   it('the note is cut to 500 characters', async () => {
     await asAgent();

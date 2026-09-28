@@ -160,6 +160,8 @@ export const en = {
   'partner.transfers.settlement.retrying': 'Retrying',
   'partner.transfers.settlement.attention': 'Needs attention (SmartRemit is alerted)',
   'partner.transfers.settlement.accepted': 'Accepted by the rail',
+  'partner.transfers.settlement.notCompleted': 'Not completed (cancelled)',
+  'partner.transfers.settlement.simulated': 'Simulated (no real rail)',
   'partner.transfers.settlement.processed': 'Processed',
   'partner.transfers.timelineTitle': 'Timeline',
   'partner.transfers.timeline.created': 'Created',

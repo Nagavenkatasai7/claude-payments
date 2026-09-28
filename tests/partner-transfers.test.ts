@@ -201,9 +201,16 @@ describe('transferTimeline', () => {
 });
 
 describe('holds', () => {
+  it('isHeld: a flagged transfer stops being held once released or finished', () => {
+    // markPaidIfInReview never clears complianceStatus, so 'flagged' outlives the hold.
+    expect(isHeld(base({ status: 'awaiting_payment', complianceStatus: 'flagged' }))).toBe(true);
+    for (const status of ['paid', 'delivered', 'cancelled'] as const) {
+      expect(isHeld(base({ status, complianceStatus: 'flagged' })), status).toBe(false);
+    }
+  });
   it('isHeld: in_review, or a flagged/blocked compliance status', () => {
     expect(isHeld(base({ status: 'in_review' }))).toBe(true);
-    expect(isHeld(base({ complianceStatus: 'flagged' }))).toBe(true);
+    expect(isHeld(base({ status: 'awaiting_payment', complianceStatus: 'flagged' }))).toBe(true);
     expect(isHeld(base({ status: 'blocked', complianceStatus: 'blocked' }))).toBe(true);
     expect(isHeld(base({ status: 'delivered' }))).toBe(false);
   });
@@ -247,6 +254,15 @@ describe('H5: funding + settlement views (existing columns only)', () => {
   const row = (status: string, createdAt = '2026-09-01T10:00:00Z', attempts = 0) => ({ status, attempts, createdAt: new Date(createdAt) });
   it('settlementView: a sandbox transfer is never sent to a rail', () => {
     expect(settlementView(base({ environment: 'test' }), [row('done')]).state).toBe('partner.transfers.settlement.sandbox');
+  });
+  it('settlementView: a cancelled transfer is never "accepted", even with a rail reference and a done row', () => {
+    // The rail accepted (setProviderRef) and later failed (failPaidFromRail → cancelled, refund pending).
+    const v = settlementView(base({ status: 'cancelled', paymentProviderRef: 'rail-settle-00001234' }), [row('done')]);
+    expect(v.state).toBe('partner.transfers.settlement.notCompleted');
+    expect(settlementView(base({ status: 'blocked' }), [row('done')]).state).toBe('partner.transfers.settlement.notCompleted');
+  });
+  it('settlementView: a mock rail reference is shown as simulated, not as a real rail', () => {
+    expect(settlementView(base({ paymentProviderRef: 'mock-tr_abc123' }), [row('done')]).state).toBe('partner.transfers.settlement.simulated');
   });
   it('settlementView: delivered is settled', () => {
     expect(settlementView(base({ status: 'delivered' }), []).state).toBe('partner.transfers.settlement.settled');

@@ -96,9 +96,18 @@ export function maskRef(ref: string | undefined | null): string | undefined {
   return v.length <= 4 ? '****' : `****${v.slice(-4)}`;
 }
 
-/** Held: under review, or a flagged / blocked compliance status. */
+const FINISHED = new Set(['delivered', 'cancelled']);
+
+/**
+ * Held: under review or blocked, or a flagged transfer that has not been released yet. The
+ * `flagged` compliance status outlives the hold (markPaidIfInReview never clears it), so a flagged
+ * transfer counts as held only while it is still awaiting payment or in review.
+ */
 export function isHeld(tr: Pick<Transfer, 'status' | 'complianceStatus'>): boolean {
-  return tr.status === 'in_review' || tr.complianceStatus === 'flagged' || tr.complianceStatus === 'blocked';
+  if (tr.status === 'in_review' || tr.status === 'blocked') return true;
+  if (tr.complianceStatus === 'flagged') return tr.status === 'awaiting_payment';
+  if (tr.complianceStatus === 'blocked') return !FINISHED.has(tr.status);
+  return false;
 }
 
 // Only KNOWN hold-reason constants render as text. Screening reasons collapse to one label (they
@@ -257,6 +266,11 @@ export function settlementView(tr: Pick<Transfer, 'status' | 'environment' | 'pa
   const withRef = (v: SettlementView): SettlementView => (ref ? { ...v, ref } : v);
   if ((tr.environment ?? 'live') === 'test') return { state: 'partner.transfers.settlement.sandbox' };
   if (tr.status === 'delivered') return withRef({ state: 'partner.transfers.settlement.settled' });
+  // A rail that accepted and later failed leaves its reference and a done row behind while the
+  // transfer is cancelled (refund pending): never show that as accepted.
+  if (tr.status === 'cancelled' || tr.status === 'blocked') return { state: 'partner.transfers.settlement.notCompleted' };
+  // A mock rail stamps `mock-<id>` (settlement.ts): simulated, not a real rail's acceptance.
+  const simulated = (tr.paymentProviderRef ?? '').startsWith('mock-');
   const latest = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
   if (!latest) return withRef({ state: 'partner.transfers.settlement.notStarted' });
   switch (latest.status) {
@@ -269,6 +283,7 @@ export function settlementView(tr: Pick<Transfer, 'status' | 'environment' | 'pa
     case 'dead':
       return withRef({ state: 'partner.transfers.settlement.attention', attempts: latest.attempts });
     case 'done':
+      if (simulated) return { state: 'partner.transfers.settlement.simulated' };
       return withRef({ state: ref ? 'partner.transfers.settlement.accepted' : 'partner.transfers.settlement.processed' });
     default:
       return withRef({ state: 'partner.transfers.settlement.processed' });

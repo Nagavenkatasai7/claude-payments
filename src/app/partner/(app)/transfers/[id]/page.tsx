@@ -66,7 +66,7 @@ async function tenantActors(partnerId: PartnerId, audit: TimelineAuditRow[]): Pr
     for (const s of staff) if (s && s.partnerId === partnerId) out.add(s.username);
   } catch (err) {
     // Fail closed: an unknown actor is shown as SmartRemit, never by name.
-    logWarn('partner.transfers.actors', err);
+    logWarn('partner.transfers.actors', err instanceof Error ? err.name : 'error'); // the error name only (no bound values)
   }
   return out;
 }
