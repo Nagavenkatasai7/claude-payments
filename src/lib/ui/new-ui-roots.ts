@@ -7,6 +7,8 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/components/ds',
   // The shared public-site shell (SiteHeader / SiteFooter / SiteShell).
   'src/components/site',
+  // The code-backed MDX blocks the /docs-next guides render (M4 PR-3).
+  'src/components/docs',
   // Planned roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so the
   // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',

@@ -58,9 +58,10 @@ describe.each(mdx)('%s (MDX-only checks)', (f) => {
     for (const m of prose.matchAll(/<GuideLink slug="([^"]+)">/g)) expect(GUIDES.map((g) => g.slug)).toContain(m[1]);
     expect(prose.match(/<Fact\b/g)?.length ?? 0).toBe(prose.match(/<Fact name="[^"]+" \/>/g)?.length ?? 0);
   });
-  it('compiles as MDX (the same compiler @mdx-js/loader uses)', async () => {
+  it('compiles as MDX (the same compiler and remark plugins @mdx-js/loader uses via next.config.ts)', async () => {
     const { compile } = await import('@mdx-js/mdx');
-    const out = String(await compile(text));
+    const { default: remarkGfm } = await import('remark-gfm');
+    const out = String(await compile(text, { remarkPlugins: [remarkGfm] }));
     expect(out).not.toMatch(/dangerouslySetInnerHTML/);
   });
 });

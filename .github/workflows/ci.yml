@@ -152,6 +152,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The @next/mdx wrap in next.config.ts touches the build for every route: fail if any
+      # existing route changed rendering mode or disappeared (new routes are listed, not failed).
+      - name: Route rendering modes unchanged
+        run: node scripts/check-route-modes.mjs
+
   # Blocking at high. Its own job, so a dependency advisory never hides the
   # typecheck/lint/test/build results on the PR (2026-09-09 to 09-14 every
   # PR was red here and no other check ran).
