@@ -80,7 +80,13 @@ export function createRecipientRepo(
     );
 
   return {
-    async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<void> {
+    /**
+     * `keepTombstone` (UI redesign M2-10, #398 review L2): a SCHEDULED mint's address-book refresh.
+     * It writes the row exactly as below but never clears a tombstone, so a delete that races the
+     * run keeps the recipient deleted in either order (the row is kept and hidden anyway). Every
+     * other caller (pay page, bot) keeps the O5 un-delete.
+     */
+    async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient, opts: { keepTombstone?: boolean } = {}): Promise<void> {
       // The row key AS WRITTEN (the conflict target) — the sealed destination binds to it.
       const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
       const row = {
@@ -102,6 +108,16 @@ export function createRecipientRepo(
         .as(
           sql`DELETE FROM ${recipientTombstones} WHERE ${recipientTombstones.partnerId} = ${partnerId} AND ${recipientTombstones.senderPhone} = ${senderPhone} AND ${recipientTombstones.recipientPhone} = ${r.recipientPhone}`,
         );
+      if (opts.keepTombstone) {
+        await db
+          .insert(recipients)
+          .values(row)
+          .onConflictDoUpdate({
+            target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
+            set: row,
+          });
+        return;
+      }
       await db
         .with(clearTombstone)
         .insert(recipients)
