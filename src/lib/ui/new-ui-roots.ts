@@ -5,11 +5,13 @@
 // registered here explicitly (e.g. 'src/app/account/<new-segment>').
 export const NEW_UI_ROOTS: readonly string[] = [
   'src/components/ds',
+  // The shared public-site shell (SiteHeader / SiteFooter / SiteShell).
+  'src/components/site',
   // Planned roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so the
   // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',
   'src/app/trust',
-  'src/app/partner', // UI redesign M3: the partner app (hex-scanned and state-walked)
+  'src/app/partner', // the partner app (hex-scanned and state-walked)
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */

@@ -38,3 +38,14 @@ describe('tableHref', () => {
     expect(tableHref('/t', new URLSearchParams([['q', 'a b&c']]), { page: 2 })).toBe('/t?q=a+b%26c&page=2');
   });
 });
+
+describe('tableSorts', () => {
+  it('derives the allowed sort keys from the columns marked sortable, so none silently falls back', async () => {
+    const { tableSorts } = await import('@/lib/ui/table-params');
+    const cols = [{ key: 'created', sortable: true }, { key: 'recipient' }, { key: 'amount', sortable: true }];
+    const sorts = tableSorts(cols);
+    expect(sorts).toEqual(['created', 'amount']);
+    for (const c of cols.filter((x) => x.sortable)) expect(parseTableParams({ sort: c.key }, { sorts, defaultSort: 'created' }).sort).toBe(c.key);
+    expect(parseTableParams({ sort: 'recipient' }, { sorts, defaultSort: 'created' }).sort).toBe('created');
+  });
+});

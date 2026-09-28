@@ -39,3 +39,15 @@ export function tableHref(
   const qs = next.toString();
   return qs ? `${base}?${qs}` : base;
 }
+
+/** Pull an out-of-range page back to the last page (for callers that count before fetching). */
+export function clampPage(params: TableParams, total: number): TableParams {
+  const pages = Math.max(1, Math.ceil(total / params.limit));
+  if (params.page <= pages) return params;
+  return { ...params, page: pages, offset: (pages - 1) * params.limit };
+}
+
+/** The allowed sort keys, derived from the columns marked sortable. Pass this as `sorts` to parseTableParams. */
+export function tableSorts(columns: ReadonlyArray<{ key: string; sortable?: boolean }>): string[] {
+  return columns.filter((c) => c.sortable).map((c) => c.key);
+}

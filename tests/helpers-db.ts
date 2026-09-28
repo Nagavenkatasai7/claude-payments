@@ -53,6 +53,7 @@ async function initOnce() {
 const ALL_TABLES = [
   'outbox',
   'conversation_messages',
+  'partner_sites', // UI redesign M1 (0026): FK child of partners, truncated before it
   'idempotency_keys',
   'audit_events',
   'partner_rates',
