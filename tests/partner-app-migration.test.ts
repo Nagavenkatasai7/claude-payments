@@ -140,7 +140,7 @@ describe('migration 0028: the four new tables', () => {
     const idx = await rows<{ indexname: string; indexdef: string }>(db,
       `SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN ('partner_report_jobs_partner_created','partner_webhook_deliveries_partner_created') ORDER BY indexname`);
     expect(idx.map((i) => i.indexname)).toEqual(['partner_report_jobs_partner_created', 'partner_webhook_deliveries_partner_created']);
-    for (const i of idx) expect(i.indexdef).toMatch(/\(partner_id, created_at DESC\)$/);
+    for (const i of idx) expect(i.indexdef).toMatch(/\(partner_id, created_at DESC NULLS LAST\)$/);
   });
 
   it('every new constraint has the expected name (all within the 63-byte identifier limit)', async () => {
@@ -217,7 +217,7 @@ describe('migration 0028 is safe for the build already in production (rolling re
     }
     const inserts = [...code.matchAll(/INSERT INTO "([a-z_]+)"/g)].map((m) => m[1]);
     expect(inserts).toEqual(['partner_go_live']);
-    expect(code).not.toMatch(/\b(RENAME|ALTER COLUMN|TRUNCATE|DELETE|UPDATE "|DROP TABLE|DROP COLUMN|DROP INDEX)\b/i);
+    expect(code).not.toMatch(/\b(RENAME|ALTER COLUMN|TRUNCATE|DELETE FROM|UPDATE "|DROP TABLE|DROP COLUMN|DROP INDEX|NOT VALID)\b/i);
     expect(code).toContain(`SET LOCAL lock_timeout = '5s';`);
     // The backfill runs after the FK exists and is re-runnable.
     expect(code.indexOf('INSERT INTO "partner_go_live"')).toBeGreaterThan(code.indexOf('ADD CONSTRAINT "partner_go_live_partner_id_partners_id_fk"'));
