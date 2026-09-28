@@ -28,6 +28,13 @@ test.describe('customer portal on a partner subdomain', () => {
     }
   });
 
+  test('the send pages without a cookie land on the sign-in page (M2-9)', async ({ page }) => {
+    for (const path of ['/portal/send', '/portal/send/review', '/portal/send?amount=100.00&to=IN']) {
+      await page.goto(`${ORIGIN}${path}`);
+      await expect(page, path).toHaveURL(/\/portal\/login$/);
+    }
+  });
+
   test('a forged portal cookie is not a session', async ({ page, context }) => {
     // `url` (not `domain`) makes it host-only, as the __Host- prefix requires.
     await context.addCookies([{ name: '__Host-sr_portal', value: 'deadbeef', url: `${ORIGIN}/`, secure: true, httpOnly: true, sameSite: 'Lax' }]);
