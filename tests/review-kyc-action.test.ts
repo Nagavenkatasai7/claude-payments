@@ -36,6 +36,13 @@ vi.mock('next/navigation', () => ({ redirect: vi.fn(), notFound: vi.fn() }));
 
 import { reviewKycAction } from '@/app/admin-dashboard/customers/actions';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 const PHONE = '15551230000';
 function form(values: Record<string, string>): FormData {
   const fd = new FormData();

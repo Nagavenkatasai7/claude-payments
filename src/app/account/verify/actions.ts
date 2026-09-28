@@ -9,6 +9,7 @@ import { getKycCaseStore } from '@/lib/kyc-case-store';
 import { sendGateActive } from '@/lib/kyc-gate';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getKycProvider } from '@/lib/providers/kyc-provider';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Start identity verification for the logged-in customer (Phase 2, Task 12).
@@ -20,6 +21,7 @@ import { getKycProvider } from '@/lib/providers/kyc-provider';
  * Persona hosted flow where raw PII is captured (never on our servers).
  */
 export async function startVerificationAction(): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
 
   // KYC is partner OPT-IN — and server actions are public POST endpoints, so

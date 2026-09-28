@@ -12,6 +12,7 @@ import { normalizePhone, isValidPhone } from '@/lib/phone';
 import { canSee } from '@/lib/staff-scope';
 import { DEFAULT_PARTNER_ID, DEFAULT_SOURCE_CURRENCY } from '@/lib/defaults';
 import type { B2bInvoice, InvoiceLineItem, Staff } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * B2B admin actions. Server actions are public POST endpoints, so EVERY action
@@ -68,6 +69,7 @@ async function requireInvoiceActor(
  * buyer's open invoice by phone via getUnpaidInvoiceByBuyer).
  */
 export async function seedDemoInvoiceAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   await requirePlatformStaff();
 
   const businessName = String(formData.get('businessName') ?? '').trim();
@@ -131,6 +133,7 @@ export async function seedDemoInvoiceAction(formData: FormData): Promise<void> {
  * B2B-specific copy.
  */
 export async function cancelB2bTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformStaff();
   const id = String(formData.get('id') ?? '').trim();
   if (!id) throw new Error('Missing transfer id.');
@@ -171,6 +174,7 @@ export async function cancelB2bTransferAction(formData: FormData): Promise<void>
  * re-checks eligibility inside its transaction, so a double-click throws.
  */
 export async function reverseB2bTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformStaff();
   const id = String(formData.get('id') ?? '').trim();
   if (!id) throw new Error('Missing transfer id.');
@@ -206,6 +210,7 @@ export async function reverseB2bTransferAction(formData: FormData): Promise<void
  * the actual status instead of a bare "not voidable".
  */
 export async function voidB2bInvoiceAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, id, invoice: existing } = await requireInvoiceActor(formData);
   const partnerId = existing.partnerId;
 
@@ -239,6 +244,7 @@ export async function voidB2bInvoiceAction(formData: FormData): Promise<void> {
  * latest dead clone.
  */
 export async function reissueB2bInvoiceAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, id, invoice: existing } = await requireInvoiceActor(formData);
   const partnerId = existing.partnerId;
 

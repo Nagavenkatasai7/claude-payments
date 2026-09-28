@@ -8,6 +8,7 @@ import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { newTransferId } from '@/lib/id';
 import { getScopedQuestionTicket } from './queries';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Employee questions — the internal-ticket flow: support staff ASK the admins;
@@ -32,6 +33,7 @@ function refresh(ticketId: string): void {
 
 /** A support staffer (or admin) asks the admins a question. */
 export async function askQuestionAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff } = await requireSupportOrAdmin();
   const subject = String(formData.get('subject') ?? '').trim();
   const question = String(formData.get('question') ?? '').trim();
@@ -53,6 +55,7 @@ export async function askQuestionAction(formData: FormData): Promise<void> {
 
 /** The OPENER follows up on their own question (no audit — not an admin act). */
 export async function replyQuestionAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff } = await requireSupportOrAdmin();
   const ticketId = String(formData.get('ticketId') ?? '').trim();
   const body = String(formData.get('body') ?? '').trim();
@@ -75,6 +78,7 @@ export async function replyQuestionAction(formData: FormData): Promise<void> {
 
 /** An admin answers a question in their scope (audited). */
 export async function answerQuestionAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff } = await requireSupportOrAdmin();
   if (staff.role !== 'admin') throw new Error('Admin role required.');
   const ticketId = String(formData.get('ticketId') ?? '').trim();
@@ -104,6 +108,7 @@ export async function answerQuestionAction(formData: FormData): Promise<void> {
 
 /** An admin resolves or closes a question (audited; closed is terminal). */
 export async function setQuestionStatusAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff } = await requireSupportOrAdmin();
   if (staff.role !== 'admin') throw new Error('Admin role required.');
   const ticketId = String(formData.get('ticketId') ?? '').trim();

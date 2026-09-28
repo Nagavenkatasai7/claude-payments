@@ -22,6 +22,7 @@ import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { createScopedStore } from '@/lib/scoped-store';
 import { sealCustomerRef, auditSubjectId } from '@/lib/customer-ref';
 import type { CountryCode, KycStatus, PartnerId, Staff } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 const VALID_COUNTRIES = new Set<CountryCode>(['US', 'CA', 'GB', 'AE', 'SG', 'AU', 'NZ', 'IN']);
 
@@ -45,6 +46,7 @@ function customerDetailPath(partnerId: PartnerId, phone: string): string {
  * the RESOLVED row's own (partnerId, senderPhone), never the form fields.
  */
 export async function openCustomerAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff } = await requireScope();
   const phone = String(formData.get('phone') ?? '').trim();
   const partnerId = String(formData.get('partnerId') ?? '').trim();
@@ -92,6 +94,7 @@ function reviewerDisplay(staff: Pick<Staff, 'name' | 'username'>): string {
  * Persona review (reviewKycAction) keeps its gate-dependent notify.
  */
 export async function manualKycDecisionAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const phone = String(formData.get('phone') ?? '').trim();
   const decision = String(formData.get('decision') ?? '');
@@ -135,6 +138,7 @@ export async function manualKycDecisionAction(formData: FormData): Promise<void>
  * scope check (the customer key is global), reason guard before any mutation.
  */
 export async function reviewKycAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const phone = String(formData.get('phone') ?? '').trim();
   const decision = String(formData.get('decision') ?? '');
@@ -195,6 +199,7 @@ export async function reviewKycAction(formData: FormData): Promise<void> {
  *     pinned to their own partner; only a platform-admin may choose a partner.
  */
 export async function createCustomerAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff } = await requireScope();
   if (staff.role !== 'admin') throw new Error('Not authorized.');
 
@@ -296,6 +301,7 @@ export async function createCustomerAction(formData: FormData): Promise<void> {
  * (send-limits.ts resolveEffectiveSendLimits).
  */
 export async function setCustomerSendLimitAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
   const validated = validateSendLimitInput({
     perTransferUsd: String(formData.get('perTransferUsd') ?? ''),

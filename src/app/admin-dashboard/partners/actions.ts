@@ -64,6 +64,7 @@ import type {
   CurrencyCode,
 } from '@/lib/types';
 import { DEFAULT_CURRENCY_FOR_COUNTRY } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Write-only secret merge: a blank form field means "leave the stored secret
 // unchanged" (secrets are never rendered back, so blank ≠ delete).
@@ -108,6 +109,7 @@ async function gatePartnerConfig(id: string): Promise<Awaited<ReturnType<typeof 
 }
 
 export async function updatePartnerAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '').trim();
   if (!id) throw new Error('Partner id is required.');
@@ -171,6 +173,7 @@ export async function updatePartnerAction(formData: FormData): Promise<void> {
 }
 
 export async function setPartnerStatusAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   // M4: suspend/reactivate is platform governance (a tenant shouldn't suspend
   // itself, and a partner-admin must not suspend a rival). Platform-admin only.
   await requirePlatformAdmin();
@@ -247,6 +250,7 @@ export async function createPartnerStaffAction(
   partnerId: PartnerId,
   formData: FormData,
 ): Promise<void> {
+  await refuseOnSiteHost();
   // Server actions are public POST endpoints callable with any bound
   // partnerId: the gate resolves the tenant from the session first.
   const { actor, tenant } = await gatePartnerStaff(partnerId);
@@ -307,6 +311,7 @@ export async function createPartnerStaffAction(
 }
 
 export async function removePartnerStaffAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const actor = await requireStaffManager();
   const username = String(formData.get('username') ?? '').trim();
   if (!username) throw new Error('username is required.');
@@ -441,6 +446,7 @@ function whatsappAuditMeta(before: PartnerWhatsappConfig, after: PartnerWhatsapp
 }
 
 export async function saveWhatsappConfigAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
   const store = getPartnerIntegrationsStore();
@@ -521,6 +527,7 @@ export async function saveWhatsappConfigAction(formData: FormData): Promise<void
  * the WhatsApp tab; a pass clears a stale auth_error mark.
  */
 export async function testWhatsappConnectionAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
   const { whatsapp } = await getPartnerIntegrationsStore().getIntegrations(id);
@@ -562,6 +569,7 @@ function assertSettlementUrlAllowed(url: string | undefined, providerType: strin
 }
 
 export async function savePaymentConfigAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
   const store = getPartnerIntegrationsStore();
@@ -621,6 +629,7 @@ function parseCurrency(v: unknown): CurrencyCode {
 }
 
 export async function savePricingAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   await gatePartnerConfig(id);
 
@@ -660,6 +669,7 @@ export async function savePricingAction(formData: FormData): Promise<void> {
 // The partner shape also carries T0, tighten-only (<= the platform $500).
 
 export async function setPartnerSendLimitAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
   const validated = validateSendLimitInput(
     {
@@ -705,6 +715,7 @@ export async function setPartnerSendLimitAction(formData: FormData): Promise<voi
 // surfaces — this is a dashboard-only knob.
 
 export async function saveSupportConfigAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
 
@@ -738,6 +749,7 @@ export async function saveSupportConfigAction(formData: FormData): Promise<void>
 // field there can never clear it). Merged into support_config under the row
 // lock like every support_config writer, and audited WITHOUT the address.
 export async function saveAlertEmailAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
   const next = normalizeAlertEmail(String(formData.get('alertEmail') ?? ''));
@@ -833,6 +845,7 @@ function parseDisclosureForm(formData: FormData): PartnerDisclosureConfig | unde
 }
 
 export async function saveDisclosureConfigAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const id = String(formData.get('id') ?? '').trim();
   const staff = await gatePartnerConfig(id);
   const disclosure = parseDisclosureForm(formData); // validate BEFORE any write
@@ -868,6 +881,7 @@ export async function issueApiKeyAction(
   partnerId: PartnerId,
   mode?: ApiKeyMode,
 ): Promise<{ plaintext: string; keyId: string; last4: string }> {
+  await refuseOnSiteHost();
   const staff = await gatePartnerConfig(partnerId);
   const m: unknown = mode ?? 'live';
   if (m !== 'live' && m !== 'test') throw new Error('Invalid key mode.');
@@ -894,6 +908,7 @@ function apiKeyIssueAuditEvent(partnerId: string, actor: string, keyId: string, 
 }
 
 export async function revokeApiKeyAction(partnerId: PartnerId, formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await gatePartnerConfig(partnerId);
   const keyId = String(formData.get('keyId') ?? '').trim();
   if (!keyId) throw new Error('keyId is required.');
@@ -962,6 +977,7 @@ const clean = (v: unknown): string | undefined => {
 export async function wizardCreatePartnerAction(
   input: PartnerWizardInput,
 ): Promise<PartnerWizardResult> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
 
   const name = clean(input.name);
