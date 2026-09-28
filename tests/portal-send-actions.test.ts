@@ -241,6 +241,23 @@ describe('continueToPayAction — the draft', () => {
     expect(prepareSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('two tabs on the same review (different request keys, concurrent) → ONE draft', async () => {
+    const rv = await review('pa');
+    const results = await Promise.allSettled([
+      continueToPayAction({ requestKey: '' }, fd({ rv })),
+      continueToPayAction({ requestKey: '' }, fd({ rv })),
+    ]);
+    expect(drafts()).toHaveLength(1);
+    const refused = results.filter((r) => r.status === 'fulfilled').map((r) => (r as PromiseFulfilledResult<{ error?: string }>).value.error);
+    expect(refused).toEqual(['portal.send.already_sent']);
+  });
+
+  it('a refused Continue (e.g. sanctions) releases the review, so a corrected retry is not stuck', async () => {
+    const rv = await review('pa', { ...newRecipient, recipient: { kind: 'new', name: 'John Doe', phone: MOM } });
+    expect((await continueToPayAction({ requestKey: '' }, fd({ rv }))).error).toBe('portal.send.cannot_complete');
+    expect((await continueToPayAction({ requestKey: '' }, fd({ rv }))).error).toBe('portal.send.cannot_complete');
+  });
+
   it('(2) posted amount / rate / fee fields are ignored: the draft is the server re-quote of the stored review', async () => {
     const rv = await review('pa');
     await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv, amount: '1', amountSource: '1', rate: '999', fxRate: '999', fee: '0', fxFetchedAt: '1' })));

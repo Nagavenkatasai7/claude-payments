@@ -517,3 +517,17 @@ export async function reviewDraftState(
   if (typeof at === 'number' && now - at > FX_MAX_AGE_MS) return 'gone';
   return 'live';
 }
+
+/**
+ * One draft per review, atomically (review round: two tabs on the same review with different request
+ * keys). SET NX on `psend-drafted:<review id>`; the loser answers "already sent". A refused or failed
+ * attempt releases it, so a corrected retry is not stuck. The review id is random and server-minted.
+ */
+export async function claimReviewDraft(redis: RedisLike, reviewId: string): Promise<boolean> {
+  if (!REVIEW_ID_RE.test(reviewId)) return false;
+  return (await redis.set(`psend-drafted:${reviewId}`, '1', { nx: true, ex: PORTAL_SEND_REVIEW_TTL_S })) !== null;
+}
+
+export async function releaseReviewDraft(redis: RedisLike, reviewId: string): Promise<void> {
+  if (REVIEW_ID_RE.test(reviewId)) await redis.del(`psend-drafted:${reviewId}`);
+}

@@ -19,7 +19,9 @@ import { logWarn } from '@/lib/log';
 import { SEND_GATE_REASON } from '@/lib/kyc-gate';
 import {
   capCopy,
+  claimReviewDraft,
   isDraftId,
+  releaseReviewDraft,
   limitsCopy,
   loadSendReview,
   markReviewDrafted,
@@ -223,20 +225,31 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   if (!input) return refuse({ error: 'portal.send.recipient_not_found' });
 
   let fresh: Exclude<PrepareSendResult, { kind: 'draft' }> | undefined;
+  const redis = getRedis();
   let outcome: { kind: string; draftId?: string };
   try {
-    ({ value: outcome } = await runOnce(getRedis(), 'portal-send', owner.partnerId, owner.phone, text(formData, 'requestKey', 64), async () => {
+    ({ value: outcome } = await runOnce(redis, 'portal-send', owner.partnerId, owner.phone, text(formData, 'requestKey', 64), async () => {
       // M1: this review already made a draft (paid, pending or expired): never a second one from it.
-      // Inside the claim, so a double submit of the FIRST Continue still replays its redirect.
-      if (review.draftId) return { kind: 'already_sent' };
-      const r = await prepareSendDraft(portalToolContext(owner), input, { pointer: 'web' });
-      if (r.kind !== 'draft') {
-        fresh = r;
-        return { kind: r.kind };
+      // Inside the claim, so a double submit of the FIRST Continue still replays its redirect; the NX
+      // marker makes it atomic across two tabs with different request keys.
+      if (review.draftId || !(await claimReviewDraft(redis, review.id))) return { kind: 'already_sent' };
+      let r: PrepareSendResult;
+      try {
+        r = await prepareSendDraft(portalToolContext(owner), input, { pointer: 'web' });
+        if (r.kind !== 'draft') {
+          fresh = r;
+          await releaseReviewDraft(redis, review.id);
+          return { kind: r.kind };
+        }
+        // Inside the claim: audited exactly once per request key; then the slot records the draft, so
+        // the page never offers Continue again. A failure throws, the claims are released and the
+        // customer retries (an abandoned web draft is unpaid and expires in 30 minutes).
+        await recordSendAudit(getDb(), owner, { action: 'customer.send.draft', meta: { draftId: r.draftId, via: 'send' } });
+        await markReviewDrafted(redis, owner, review.id, r.draftId);
+      } catch (err) {
+        await releaseReviewDraft(redis, review.id).catch(() => undefined);
+        throw err;
       }
-      // Inside the claim: audited exactly once per request key. An audit failure throws, the claim
-      // is released and the customer retries (the abandoned web draft expires in 30 minutes).
-      await recordSendAudit(getDb(), owner, { action: 'customer.send.draft', meta: { draftId: r.draftId, via: 'send' } });
       return { kind: 'draft', draftId: r.draftId };
     }));
   } catch (err) {
@@ -246,14 +259,7 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   }
 
   if (outcome.kind === 'already_sent') return refuse({ error: 'portal.send.already_sent' });
-  if (outcome.kind === 'draft' && isDraftId(outcome.draftId)) {
-    try {
-      await markReviewDrafted(getRedis(), owner, review.id, outcome.draftId);
-    } catch {
-      /* the return-to-review notice only */
-    }
-    redirect(portalPayUrl(outcome.draftId));
-  }
+  if (outcome.kind === 'draft' && isDraftId(outcome.draftId)) redirect(portalPayUrl(outcome.draftId));
   // A replay of a refusal has no evaluation in hand: the neutral line.
   return refuse(fresh ? prepareResultCopy(fresh, site.brand) : { error: 'portal.send.cannot_complete' });
 }
