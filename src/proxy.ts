@@ -10,8 +10,9 @@ import { classifySitePath } from '@/lib/site-routes';
 // middleware just stops anonymous traffic from reaching protected trees.
 //
 // UI redesign M1: a partner subdomain (<slug>.smartremit.ai, see src/lib/site-host.ts) is dispatched
-// FIRST to siteProxy, before any cookie gate. Every other host is apex and runs the unchanged legacy
-// gate, synchronously (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant
+// FIRST to siteProxy, before any cookie gate; any other smartremit.ai subdomain except www is refused
+// (404), so the apex app is never served on it. The apex (smartremit.ai, www, previews, localhost)
+// runs the unchanged legacy gate, synchronously (tests/proxy-apex-noop.test.ts pins it against a frozen copy). The tenant
 // headers are stripped from every request this proxy sees; only siteProxy sets them.
 
 /** /account sub-paths that must stay PUBLIC (they ARE the auth entry points). */
@@ -25,6 +26,7 @@ const hasSiteHeader = (h: Headers) => h.has(SITE_HEADERS.partner) || h.has(SITE_
 export function proxy(req: NextRequest): NextResponse | Promise<NextResponse> {
   const site = parseSiteHost(req.headers.get('host'));
   if (site.kind === 'site') return siteProxy(req, site.slug);
+  if (site.kind === 'refused') return refuse(req);
   if (!isLegacyGatedPath(req.nextUrl.pathname)) {
     // Only reachable if the platform ever dropped the host condition: never the /login fallthrough.
     return hasSiteHeader(req.headers)
@@ -70,6 +72,11 @@ function legacyProxy(req: NextRequest): NextResponse {
 const isRead = (m: string) => m === 'GET' || m === 'HEAD';
 const bare404 = () => new NextResponse(null, { status: 404 });
 
+/** Read → the brand-neutral root 404 (a route that does not exist); anything else → a bare 404. */
+function refuse(req: NextRequest, headers: Headers = stripSiteHeaders(req.headers)): NextResponse {
+  return isRead(req.method) ? NextResponse.rewrite(new URL('/_site-not-found', req.url), { request: { headers } }) : bare404();
+}
+
 async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> {
   const headers = stripSiteHeaders(req.headers);
   let partnerId: string | null = null;
@@ -84,10 +91,7 @@ async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> 
     return isRead(req.method) ? NextResponse.rewrite(new URL('/site-inactive', req.url), { request: { headers } }) : bare404();
   }
   const route = classifySitePath(req.nextUrl.pathname);
-  if (route.kind === 'deny') {
-    // A route that does not exist: the brand-neutral root not-found renders with a 404.
-    return isRead(req.method) ? NextResponse.rewrite(new URL('/_site-not-found', req.url), { request: { headers } }) : bare404();
-  }
+  if (route.kind === 'deny') return refuse(req, headers);
   headers.set(SITE_HEADERS.partner, partnerId);
   headers.set(SITE_HEADERS.slug, slug);
   return route.rewriteTo
@@ -101,21 +105,28 @@ export const config = {
     '/admin-dashboard/:path*',
     '/account',
     '/account/:path*',
-    // UI redesign M1: partner subdomains ONLY (<slug>.smartremit.ai). Next lowercases the Host, strips
-    // the port and tests ^value$ (next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so
-    // apex hosts never satisfy this `has` and the apex match set is unchanged
-    // (tests/site-matcher-parity.test.ts). The value is a hand-written literal of the parseSiteHost
-    // rules (reserved labels, ??-- labels, 3-30 char slug); the parity test fails if they drift.
-    // Static assets are excluded explicitly.
+    // UI redesign M1: subdomains of smartremit.ai ONLY. Next lowercases the Host, strips the port and
+    // tests ^value$ (next/dist/shared/lib/router/utils/prepare-destination.js:84-101), so the apex
+    // (smartremit.ai, www.smartremit.ai) and every non-smartremit.ai host never satisfy either `has`,
+    // and the apex match set is unchanged (tests/site-matcher-parity.test.ts). The values are
+    // hand-written literals of the parseSiteHost rules; the parity test fails if they drift.
+    // Static assets are excluded explicitly (end-anchored).
+    // (1) <valid slug>.smartremit.ai: a partner site.
     {
-      source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg).*)',
+      source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg$).*)',
       has: [
         {
           type: 'host',
           value:
-            '(?!(?:www|api|admin|partner|docs|trust|status|mail|app|smartremit|portal|pay|support|help|static|cdn|m|ops)\\.smartremit\\.ai$)(?!..--)[a-z0-9][a-z0-9-]{1,28}[a-z0-9]\\.smartremit\\.ai',
+            '(?!(?:www|api|admin|partner|docs|trust|status|mail|app|smartremit|portal|pay|support|help|static|cdn|m|ops|mta-sts|autodiscover|autoconfig|login|auth|sso|account|dashboard|staging|dev|preview|sandbox|demo|webhooks|billing|security|abuse|postmaster|www2)\\.smartremit\\.ai$)(?!..--)[a-z0-9][a-z0-9-]{1,28}[a-z0-9]\\.smartremit\\.ai',
         },
       ],
+    },
+    // (2) every other smartremit.ai subdomain except www (reserved labels, invalid labels, the
+    // trailing-dot form): the proxy refuses it, so the apex app is never served there.
+    {
+      source: '/((?!_next/static|_next/image|brand/|flags/|about-poster\\.svg$).*)',
+      has: [{ type: 'host', value: '(?!www\\.smartremit\\.ai\\.?$).+\\.smartremit\\.ai\\.?' }],
     },
   ],
 };

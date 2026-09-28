@@ -54,6 +54,17 @@ describe('apex behaviour is byte-identical to pre-M1 (SPEC §7)', () => {
     }
   });
   it('the resolver is never loaded or called on apex', () => expect(resolver).not.toHaveBeenCalled());
+  it.each(APEX_HOSTS.filter(Boolean))('insurance, host %j: non-gated paths pass through for GET and Server-Action POSTs', (host) => {
+    for (const p of ['/', '/api/partner/v1/transactions', '/api/whatsapp', '/api/payment-webhook/x']) {
+      for (const init of [{ method: 'GET' }, { method: 'POST', body: '[]', headers: { 'next-action': 'abc123', 'content-type': 'text/plain' } }]) {
+        const r = proxy(new NextRequest(`https://smartremit.ai${p}`, { ...init, headers: { host, ...(init.headers ?? {}) } }));
+        expect(r, `${host}${p}`).not.toBeInstanceOf(Promise);
+        expect((r as Response).headers.get('location'), `${host}${p} ${init.method}`).toBeNull();
+        expect((r as Response).headers.get('x-middleware-next'), `${host}${p} ${init.method}`).toBe('1');
+        expect((r as Response).headers.get('x-middleware-rewrite')).toBeNull();
+      }
+    }
+  });
   it('insurance: an apex request on a NON-gated path passes through (never the /login fallthrough)', () => {
     for (const p of ['/', '/pay/abc', '/docs', '/api/version', '/login', '/admin-dashboardx', '/accountx']) {
       const r = proxy(new NextRequest(`https://smartremit.ai${p}`, { headers: { host: 'smartremit.ai' } })) as Response;

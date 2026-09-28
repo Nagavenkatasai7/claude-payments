@@ -5,6 +5,7 @@ import { classifySitePath, SITE_ROUTES } from '@/lib/site-routes';
 const { resolveSiteSlug } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn() })); // vi.mock factories are hoisted
 vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug }));
 import { proxy } from '@/proxy';
+import { REFUSED_HOSTS } from './site-host-corpus';
 
 describe('classifySitePath (SPEC §8a; M1 allowlist is empty, C4)', () => {
   it('M1 ships an empty allowlist', () => expect(SITE_ROUTES).toEqual([]));
@@ -101,5 +102,34 @@ describe('proxy on a partner subdomain', () => {
     resolveSiteSlug.mockImplementation(async () => { throw new Error('boom'); });
     expect(rewrittenPath(await proxy(site('/')))).toBe('/site-inactive');
     expect((await proxy(site('/', {}, 'POST'))).status).toBe(404);
+  });
+});
+
+describe('proxy on a REFUSED smartremit.ai subdomain (not a valid slug, not www)', () => {
+  beforeEach(() => { resolveSiteSlug.mockReset(); });
+  const PATHS = ['/', '/login', '/admin-dashboard', '/admin-dashboard/x', '/account', '/account/login', '/partners/apply/t',
+    '/api/worker', '/api/partner/v1/transactions', '/api/whatsapp', '/pay/x', '/robots.txt', '/site-inactive'];
+  it.each(REFUSED_HOSTS)('%s: reads → 404 via a non-existent route, never a redirect, never the resolver', async (host) => {
+    for (const p of PATHS) for (const method of ['GET', 'HEAD']) {
+      const r = await proxy(new NextRequest(`https://smartremit.ai${p}`, { method, headers: { host } }));
+      expect(rewrittenPath(r), `${host}${p}`).toBe('/_site-not-found');
+      expect(r.headers.get('location')).toBeNull();
+    }
+    expect(resolveSiteSlug).not.toHaveBeenCalled();
+  });
+  it.each(REFUSED_HOSTS)('%s: non-GET/HEAD → a bare 404 from the proxy (no app code)', async (host) => {
+    for (const p of PATHS) for (const method of ['POST', 'PUT', 'DELETE']) {
+      const r = await proxy(new NextRequest(`https://smartremit.ai${p}`,
+        { method, headers: { host, 'next-action': 'abc123', 'content-type': 'text/plain' }, body: '[]' }));
+      expect(r.status, `${host}${p} ${method}`).toBe(404);
+      expect(isRewrite(r as never)).toBe(false);
+      expect(r.headers.get('x-middleware-next')).toBeNull();
+      expect(await r.text()).toBe('');
+    }
+  });
+  it('forged tenant headers never reach upstream on a refused host', async () => {
+    const r = await proxy(new NextRequest('https://smartremit.ai/', { headers: { host: 'admin.smartremit.ai', 'x-sr-site-partner': 'evil', 'x-sr-site-slug': 'admin' } }));
+    expect(r.headers.get('x-middleware-request-x-sr-site-partner')).toBeNull();
+    expect(r.headers.get('x-middleware-override-headers') ?? '').not.toContain('x-sr-site');
   });
 });

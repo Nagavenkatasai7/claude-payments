@@ -8,8 +8,8 @@ import { getSiteTenant, requireSiteTenant } from '@/lib/site-tenant';
 
 describe('getSiteTenant (re-checks Host AND re-resolves the slug; the header alone is never trusted)', () => {
   beforeEach(() => { hdrs = new Headers(); resolveSiteSlug.mockReset(); resolveSiteSlug.mockResolvedValue('pa'); });
-  it('apex host + forged headers → null, and the resolver is never called on apex', async () => {
-    for (const host of ['smartremit.ai', 'www.smartremit.ai', 'pay.smartremit.ai', 'xn--abc.smartremit.ai']) {
+  it('apex or refused host + forged headers → null, and the resolver is never called on apex', async () => {
+    for (const host of ['smartremit.ai', 'www.smartremit.ai', 'pay.smartremit.ai', 'xn--abc.smartremit.ai', 'acme.smartremit.ai.', 'login.smartremit.ai']) {
       hdrs = new Headers({ host, 'x-sr-site-partner': 'pa', 'x-sr-site-slug': 'acme' });
       expect(await getSiteTenant(), host).toBeNull();
     }
