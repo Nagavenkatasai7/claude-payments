@@ -59,6 +59,24 @@ export const env = {
     const raw = process.env.PARTNER_LEAD_EMAILS ?? 'venkat@smartremit.ai';
     return raw.split(',').map((e) => e.trim()).filter(Boolean);
   },
+  // Home-Send H1 — the home-page "Send with <partner>" button. Both OPTIONAL (never
+  // boot-asserted): unset ⇒ no button, the landing calculator keeps its WhatsApp CTA.
+  // src/lib/featured-send-partner.ts validates the partner before any button shows.
+  /** Partner id featured on the home page (its NAME only, not a secret). '' ⇒ none. */
+  get featuredSendPartnerId(): string {
+    return process.env.FEATURED_SEND_PARTNER_ID ?? '';
+  },
+  /** 'live' ⇒ live copy (only with featuredSendLiveConfirmed); anything else (default) ⇒ test copy + badge. */
+  get featuredSendMode(): string {
+    return process.env.FEATURED_SEND_MODE ?? '';
+  },
+  /**
+   * Exactly 'true' ⇒ FEATURED_SEND_MODE=live may take effect. The owner sets it only after a
+   * licensed partner + real-money switches (home-send SPEC §3). Anything else ⇒ test copy.
+   */
+  get featuredSendLiveConfirmed(): string {
+    return process.env.FEATURED_SEND_LIVE_CONFIRMED ?? '';
+  },
   /**
    * The From header. Hostinger binds the SMTP session to one mailbox, so the From
    * ADDRESS must equal SMTP_USER (display-name aliasing is fine). Defaults to the
