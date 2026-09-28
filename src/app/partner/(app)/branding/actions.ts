@@ -19,7 +19,7 @@ import { PARTNER_ROUTES } from '../../routes';
 // /partner/branding server actions (UI redesign M3-17). The shared /partner action shape:
 //  - refuseOnSiteHost() first, then the gate (outside any try);
 //  - the target is ALWAYS the session's own tenant (ctx.partnerId). No form field names a partner:
-//    any id / partnerId / partner field is never read (carry-forward from the #381 review);
+//    any id / partnerId / partner field is never read (carry-forward from the PR 381 review);
 //  - the tenant is confirmed to exist before a write, and a writer's not_found maps to the same copy;
 //  - validation is the M1 writers' own (colour format + contrast, logo type allowlist + magic bytes,
 //    the support-contact rules), each writing its value + ONE audit row in one transaction, with
