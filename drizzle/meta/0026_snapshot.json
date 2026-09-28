@@ -1880,6 +1880,10 @@
           "name": "partner_sites_slug_format",
           "value": "\"partner_sites\".\"slug\" ~ '^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$'"
         },
+        "partner_sites_slug_not_reserved": {
+          "name": "partner_sites_slug_not_reserved",
+          "value": "\"partner_sites\".\"slug\" !~ '^..--'"
+        },
         "partner_sites_accent_format": {
           "name": "partner_sites_accent_format",
           "value": "\"partner_sites\".\"accent_color\" ~ '^#[0-9a-f]{6}$'"

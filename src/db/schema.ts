@@ -835,6 +835,9 @@ export const partnerSites = pgTable(
   (t) => [
     uniqueIndex('partner_sites_slug').on(t.slug),
     check('partner_sites_slug_format', sql`${t.slug} ~ '^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$'`),
+    // '--' in positions 3-4 is reserved in DNS (R-LDH: 'xn--' punycode and every '??--' label),
+    // so such a slug could never be served as <slug>.smartremit.ai.
+    check('partner_sites_slug_not_reserved', sql`${t.slug} !~ '^..--'`),
     check('partner_sites_accent_format', sql`${t.accentColor} ~ '^#[0-9a-f]{6}$'`),
   ],
 );

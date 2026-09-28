@@ -50,6 +50,21 @@ describe('partner_sites table (migration 0026)', () => {
   it.each(['acme', 'a1b', 'my-remit-co', 'a'.repeat(30)])('CHECK accepts slug %j', async (s) => {
     await ins(db, `'default', '${s}', NULL`);
   });
+  // Round 1 (security LOW): a label with '--' in positions 3-4 is reserved in DNS (R-LDH:
+  // 'xn--' punycode and every '??--' form), so it can never be a partner subdomain.
+  it.each(['xn--80ak6aa92e', 'ac--me', 'ab--cd'])('CHECK rejects the reserved ??-- slug %j', async (s) => {
+    await rejectsWith(ins(db, `'default', '${s}', NULL`), PG.check);
+  });
+  it.each(['abc--de', 'a-b-c'])('CHECK still accepts %j (hyphens outside positions 3-4)', async (s) => {
+    await ins(db, `'default', '${s}', NULL`);
+  });
+  it('the reserved-label CHECK is its own named constraint', async () => {
+    const names = await rows<{ conname: string }>(db,
+      `SELECT conname FROM pg_constraint WHERE conrelid = 'partner_sites'::regclass AND contype = 'c' ORDER BY conname`);
+    expect(names.map((n) => n.conname)).toEqual([
+      'partner_sites_accent_format', 'partner_sites_slug_format', 'partner_sites_slug_not_reserved',
+    ]);
+  });
   it.each(['#FFFFFF', '#fff', 'red', '0c5bd2', '#0c5bd2;x'])('CHECK rejects accent %j', async (c) => {
     await rejectsWith(ins(db, `'default', NULL, '${c}'`), PG.check);
   });
