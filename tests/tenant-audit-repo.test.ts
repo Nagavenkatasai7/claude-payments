@@ -59,6 +59,16 @@ describe('listTenantAudit', () => {
     expect(all.some((r) => foreign.has(r.id))).toBe(false);
   });
 
+  it('`to` is an exclusive bound: a row exactly at `to` belongs to the next window, never both or neither', async () => {
+    const edge = new Date('2026-09-21T00:00:00.000Z');
+    await insert({ partnerId: 'pa', action: 'api_key.issue', at: edge });
+    await insert({ partnerId: 'pa', action: 'api_key.issue', at: new Date(edge.getTime() - 1) });
+    const day20 = await listTenantAudit(db, 'pa', { actions: ['api_key.issue'], from: new Date('2026-09-20T00:00:00.000Z'), to: edge, limit: 10 });
+    const day21 = await listTenantAudit(db, 'pa', { actions: ['api_key.issue'], from: edge, to: new Date('2026-09-22T00:00:00.000Z'), limit: 10 });
+    expect(day20).toHaveLength(1);
+    expect(day21).toHaveLength(1);
+  });
+
   it('an empty action list runs no query and returns []', async () => {
     await insert({ partnerId: 'pa', action: 'api_key.issue' });
     expect(await listTenantAudit(db, 'pa', { actions: [], from: daysAgo(1), to: new Date(), limit: 10 })).toEqual([]);

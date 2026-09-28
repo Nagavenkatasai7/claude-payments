@@ -12,6 +12,7 @@ import { t } from '@/lib/i18n';
 // UI redesign M3-4: the pure half of the partner audit viewer. The allowlists (actions, meta keys)
 // and the projection are what keep platform-internal rows and PII off a tenant's screen.
 const tenant = new Set(['pa-admin', 'pa-ops']);
+const platform = new Set(['owner-admin']);
 const row = (o: Record<string, unknown>) => ({
   id: 1,
   at: new Date('2026-09-01T10:00:00.000Z'),
@@ -47,11 +48,11 @@ describe('projectAuditRow', () => {
       for (const v of ['203.0.113', '5550001111', 'Jane', 'jane@', 'old-brand', '#123456']) expect(s, action).not.toContain(v);
     }
   });
-  it('detail values are cut at 40 characters and arrays are joined', () => {
+  it('detail values are cut at 80 characters and arrays are joined', () => {
     const p = projectAuditRow(row({ action: 'pii.view', meta: { fields: ['full_name', 'date_of_birth'] } }), tenant);
     expect(p.detail).toBe('fields=full_name date_of_birth');
     const long = projectAuditRow(row({ action: 'report.request', meta: { kind: 'x'.repeat(80) } }), tenant);
-    expect(long.detail!.length).toBeLessThanOrEqual('kind='.length + 40);
+    expect(long.detail!.length).toBeLessThanOrEqual('kind='.length + 80 + 1); // + the ellipsis
   });
   it('a detail value that looks like a phone or an email is masked', () => {
     const p = projectAuditRow(row({ action: 'report.request', meta: { kind: '+15550001111' } }), tenant);
@@ -61,8 +62,8 @@ describe('projectAuditRow', () => {
   });
   it('platform, system and api-key actors are masked; a tenant username is shown', () => {
     expect(projectAuditRow(row({}), tenant).actor).toBe('pa-admin');
-    expect(projectAuditRow(row({ actor: 'owner-admin' }), tenant).actor).not.toContain('owner-admin');
-    expect(projectAuditRow(row({ actor: 'owner-admin' }), tenant).actor).toBe(t('partner.audit.smartremit'));
+    expect(projectAuditRow(row({ actor: 'owner-admin' }), tenant, platform).actor).not.toContain('owner-admin');
+    expect(projectAuditRow(row({ actor: 'owner-admin' }), tenant, platform).actor).toBe(t('partner.audit.smartremit'));
     expect(projectAuditRow(row({ actorType: 'system', actor: 'worker' }), tenant).actor).toBe(t('partner.audit.system'));
     expect(projectAuditRow(row({ actorType: 'api_key', actor: 'key_123' }), tenant).actor).toBe(t('partner.audit.apiKey'));
     // A system/api-key row whose actor string happens to equal a tenant username is still masked.
@@ -71,8 +72,22 @@ describe('projectAuditRow', () => {
   it('the actorScope marker refines the rule: a former partner member keeps their name; a platform-marked row never shows one', () => {
     expect(projectAuditRow(row({ actor: 'pa-former', meta: { actorScope: 'partner' } }), tenant).actor).toBe('pa-former');
     expect(projectAuditRow(row({ actor: 'pa-admin', meta: { actorScope: 'platform' } }), tenant).actor).toBe(t('partner.audit.smartremit'));
-    expect(projectAuditRow(row({ actor: 'owner-admin', meta: { actorScope: 'bogus' } }), tenant).actor).toBe(t('partner.audit.smartremit'));
+    expect(projectAuditRow(row({ actor: 'owner-admin', meta: { actorScope: 'bogus' } }), tenant, platform).actor).toBe(t('partner.audit.smartremit'));
     expect(projectAuditRow(row({ actorType: 'system', actor: 'x', meta: { actorScope: 'partner' } }), tenant).actor).toBe(t('partner.audit.system'));
+  });
+  it('an unmarked row by someone who is neither a current member nor a platform account is "Former staff", never "SmartRemit"', () => {
+    // Most staff writers (pii.reveal, pii.view, api_key.*, whatsapp config…) write no actorScope marker.
+    const gone = projectAuditRow(row({ action: 'pii.reveal', actor: 'pa-offboarded' }), tenant, platform).actor;
+    expect(gone).toBe(t('partner.audit.formerStaff'));
+    expect(gone).not.toBe(t('partner.audit.smartremit'));
+    expect(gone).not.toContain('pa-offboarded');
+    // A current platform account on an unmarked row is still SmartRemit.
+    expect(projectAuditRow(row({ action: 'pii.reveal', actor: 'owner-admin' }), tenant, platform).actor).toBe(t('partner.audit.smartremit'));
+  });
+  it('a long pii.view detail is cut on a word boundary, never mid-word', () => {
+    const d = projectAuditRow(row({ action: 'pii.view', meta: { fields: ['full_name', 'date_of_birth', 'nationality', 'residential_address', 'occupation', 'source_of_funds'] } }), tenant).detail ?? '';
+    expect(d).toContain('nationality');
+    for (const w of d.replace(/^fields=/, '').replace(/…$/, '').split(' ')) expect(['full_name', 'date_of_birth', 'nationality', 'residential_address', 'occupation', 'source_of_funds']).toContain(w);
   });
   it('customer subjects and phone-shaped subjects are masked', () => {
     const c = projectAuditRow(row({ action: 'pii.view', subjectId: 'cust:' + 'a'.repeat(64) }), tenant).subject;
@@ -131,7 +146,9 @@ describe('parseAuditFilters', () => {
   });
   it('`to` is the end of that UTC day, never later than now', () => {
     const f = parseAuditFilters({ to: '2026-09-20' }, [], now);
-    expect(f.to.toISOString()).toBe('2026-09-20T23:59:59.999Z');
+    // Exclusive upper bound: the start of the next UTC day (the repo compares with <), so no row at
+    // 23:59:59.9995 falls between two days.
+    expect(f.to.toISOString()).toBe('2026-09-21T00:00:00.000Z');
     expect(parseAuditFilters({ to: '2030-01-01' }, [], now).to.getTime()).toBe(now.getTime());
   });
   it('malformed or inverted dates fall back to the default window', () => {

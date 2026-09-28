@@ -46,8 +46,19 @@ export default async function PartnerAuditPage({ searchParams }: { searchParams:
   const sp = await searchParams;
   const now = new Date();
 
-  const staff = listTenantStaff(scopeOf(ctx.staff), ctx.partnerId, await getAuthStore().listStaff());
+  const allStaff = await getAuthStore().listStaff();
+  const staff = listTenantStaff(scopeOf(ctx.staff), ctx.partnerId, allStaff);
   const tenantUsernames = new Set(staff.map((s) => s.username));
+  // Current platform accounts: their unmarked rows read "SmartRemit"; anyone else not in this tenant
+  // reads "Former staff" (projectAuditRow).
+  const isPlatform = (s: (typeof allStaff)[number]) => {
+    try {
+      return scopeOf(s).kind === 'platform';
+    } catch {
+      return false; // a malformed record is never labelled SmartRemit, and never breaks the page
+    }
+  };
+  const platformUsernames = new Set(allStaff.filter(isPlatform).map((s) => s.username));
   // The actor filter travels in the URL, so only URL-safe usernames are offered (never an email-shaped legacy name).
   const selectable = [...tenantUsernames].filter(isValidNewStaffUsername).sort();
 
@@ -56,7 +67,7 @@ export default async function PartnerAuditPage({ searchParams }: { searchParams:
   const rows = await listTenantAudit(getDb(), ctx.partnerId, { ...f, before, limit: PAGE_SIZE + 1 });
   const page = rows.slice(0, PAGE_SIZE);
   const older = rows.length > PAGE_SIZE ? page[page.length - 1] : undefined;
-  const shown: Row[] = page.map((r) => ({ ...projectAuditRow(r, tenantUsernames), key: String(r.id) }));
+  const shown: Row[] = page.map((r) => ({ ...projectAuditRow(r, tenantUsernames, platformUsernames), key: String(r.id) }));
 
   // The query the pager keeps: only the validated filters, never the raw input.
   const action = f.actions.length === 1 ? f.actions[0] : undefined;

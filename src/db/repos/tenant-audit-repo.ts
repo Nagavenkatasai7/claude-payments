@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, sql, type SQL } from 'drizzle-orm';
 import type { DbOrTx } from '@/db/client';
 import { auditEvents } from '@/db/schema';
 import type { PartnerId } from '@/lib/types';
@@ -64,7 +64,7 @@ export async function listTenantAudit(db: DbOrTx, partnerId: PartnerId, q: Tenan
       and(
         tenantScope(partnerId, q.actions),
         gte(auditEvents.at, q.from),
-        lte(auditEvents.at, q.to),
+        lt(auditEvents.at, q.to), // exclusive: [from, to)
         q.actor ? eq(auditEvents.actor, q.actor) : undefined,
         before,
       ),

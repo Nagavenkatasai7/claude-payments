@@ -76,7 +76,7 @@ const MASK = '••••'; // ••••
 const PHONE_SHAPE = /^\+?[\d\s().-]{8,24}$/;
 const DIGIT_RUN = /\d{7,}/;
 const CUSTOMER_SUBJECT = /^cust:([0-9a-f]{6})[0-9a-f]*$/i;
-const MAX_DETAIL = 40;
+const MAX_DETAIL = 80;
 
 /** A value that could be a phone or an email never reaches the page. */
 function safeText(v: string): string {
@@ -91,7 +91,12 @@ function detailValue(v: unknown): string | null {
   else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') s = String(v);
   else return null; // objects are never rendered
   s = safeText(s.trim());
-  return s ? s.slice(0, MAX_DETAIL) : null;
+  if (!s) return null;
+  if (s.length <= MAX_DETAIL) return s;
+  // Cut on a word boundary (never mid-word), marked with an ellipsis.
+  const cut = s.slice(0, MAX_DETAIL + 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > 0 ? cut.slice(0, space) : s.slice(0, MAX_DETAIL)).trimEnd()}…`;
 }
 
 export interface TenantAuditRow {
@@ -112,18 +117,22 @@ export interface ProjectedAuditRow {
   detail: string | null;
 }
 
-function projectActor(row: TenantAuditRow, tenantUsernames: ReadonlySet<string>): string {
+const NO_PLATFORM: ReadonlySet<string> = new Set();
+
+function projectActor(row: TenantAuditRow, tenantUsernames: ReadonlySet<string>, platformUsernames: ReadonlySet<string>): string {
   if (row.actorType === 'system') return t('partner.audit.system');
   if (row.actorType === 'api_key') return t('partner.audit.apiKey');
   if (row.actorType !== 'staff') return t('partner.audit.smartremit');
-  // audit-log-store writes an actorScope marker on staff rows (partner-demo R5, feedActorLabel's
-  // rule). Partner staff are pinned to their own tenant, so a 'partner' actor on this tenant's row
-  // was this tenant's member (a removed member keeps their name); a 'platform' actor is never named,
-  // even if a tenant user later took the same username.
+  // Only the created/removed writers set an actorScope marker (partner-demo R5); most staff writers
+  // (pii.view, pii.reveal, api_key.*, whatsapp config…) write none. So: a 'platform' marker or a
+  // CURRENT platform account → "SmartRemit"; a 'partner' marker or a CURRENT member of this tenant →
+  // their name; anyone else (an offboarded member, a deleted account) → "Former staff", never
+  // "SmartRemit": the log must not blame the platform for an ex-employee's reveal.
   const scope = row.meta && typeof row.meta === 'object' ? (row.meta as { actorScope?: unknown }).actorScope : undefined;
   if (scope === 'platform') return t('partner.audit.smartremit');
   if (scope === 'partner' || tenantUsernames.has(row.actor)) return safeText(row.actor); // a legacy email-shaped name is masked
-  return t('partner.audit.smartremit');
+  if (platformUsernames.has(row.actor)) return t('partner.audit.smartremit');
+  return t('partner.audit.formerStaff');
 }
 
 function projectSubject(subjectId: string | null): string {
@@ -148,10 +157,14 @@ function projectDetail(action: string, meta: unknown): string | null {
 }
 
 /** The ONLY shape an audit row takes on a tenant's screen. Raw meta never leaves this function. */
-export function projectAuditRow(row: TenantAuditRow, tenantUsernames: ReadonlySet<string>): ProjectedAuditRow {
+export function projectAuditRow(
+  row: TenantAuditRow,
+  tenantUsernames: ReadonlySet<string>,
+  platformUsernames: ReadonlySet<string> = NO_PLATFORM,
+): ProjectedAuditRow {
   return {
     at: row.at.toISOString(),
-    actor: projectActor(row, tenantUsernames),
+    actor: projectActor(row, tenantUsernames, platformUsernames),
     action: row.action,
     subject: projectSubject(row.subjectId),
     detail: projectDetail(row.action, row.meta),
@@ -191,7 +204,8 @@ export function parseAuditFilters(sp: SearchParams, tenantUsernames: readonly st
 
   const floor = now.getTime() - AUDIT_MAX_WINDOW_DAYS * DAY_MS;
   const toDay = parseDay(first(sp.to));
-  let to = toDay ? new Date(Math.min(toDay.getTime() + DAY_MS - 1, now.getTime())) : now;
+  // Exclusive upper bound (the repo compares with <): the start of the next UTC day, capped at now.
+  let to = toDay ? new Date(Math.min(toDay.getTime() + DAY_MS, now.getTime())) : now;
   const fromDay = parseDay(first(sp.from));
   let from = fromDay ? new Date(Math.max(fromDay.getTime(), floor)) : new Date(to.getTime() - AUDIT_DEFAULT_WINDOW_DAYS * DAY_MS);
   if (from.getTime() < floor) from = new Date(floor);

@@ -92,6 +92,7 @@ export const en = {
   'partner.audit.system': 'System',
   'partner.audit.apiKey': 'API key',
   'partner.audit.smartremit': 'SmartRemit',
+  'partner.audit.formerStaff': 'Former staff',
   'partner.audit.customer': 'Customer',
   'partner.audit.action.created': 'Staff member added',
   'partner.audit.action.removed': 'Staff member removed',
