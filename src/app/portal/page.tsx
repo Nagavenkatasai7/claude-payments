@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Send, ShieldAlert, Wallet } from 'lucide-react';
 import { requirePortalSite } from '@/lib/portal-site';
@@ -9,8 +8,9 @@ import { isSendVerified, sendGateActive } from '@/lib/kyc-gate';
 import { t } from '@/lib/i18n';
 import { Button, Card, EmptyState, PageHeader } from '@/components/ds';
 import { TransferRows } from './transfers/transfer-rows';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.home.title') };
+export const generateMetadata = () => portalMetadata('portal.home.title');
 
 /**
  * Home (UI redesign M2-7, Task 7.2): quick send, the KYC banner when the partner gates sends and the

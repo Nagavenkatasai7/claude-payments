@@ -1,7 +1,6 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { LifeBuoy } from 'lucide-react';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
 import { requirePortalCustomer } from '@/lib/portal-auth';
 import { portalSupportEnabled, portalTicketOwner, portalTicketTransfers } from '@/lib/portal-tickets';
 import { newRequestKey } from '@/lib/portal-request-key';
@@ -10,10 +9,9 @@ import { t } from '@/lib/i18n';
 import { Card, EmptyState, PageHeader } from '@/components/ds';
 import { createPortalTicketAction } from '../actions';
 import { NewTicketForm, type TransferChoice } from '../ticket-forms';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export async function generateMetadata(): Promise<Metadata> {
-  return (await getPortalSite()) ? { title: t('portal.help.new.title') } : {};
-}
+export const generateMetadata = () => portalMetadata('portal.help.new.title');
 
 const dateFmt = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 

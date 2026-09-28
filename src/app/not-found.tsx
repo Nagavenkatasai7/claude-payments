@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { NOT_FOUND_METADATA } from '@/lib/not-found-metadata';
 
 // The root 404 (Program-Fix 41). Next renders it for every unmatched URL and
 // for any notFound() without a closer not-found file (node_modules/next/dist/
@@ -8,7 +9,7 @@ import type { Metadata } from 'next';
 // only. The metadata title replaces the root layout's "SmartRemit" tab title
 // (the not-found module's metadata is collected for the error convention:
 // next/dist/lib/metadata/resolve-metadata.js, collectMetadata).
-export const metadata: Metadata = { title: 'Page not found' };
+export const metadata: Metadata = NOT_FOUND_METADATA;
 
 export default function NotFound() {
   return (

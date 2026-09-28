@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Users } from 'lucide-react';
 import { getDb } from '@/db/client';
@@ -12,8 +11,9 @@ import { normalizePhone } from '@/lib/phone';
 import { t, type MessageKey } from '@/lib/i18n';
 import { Button, buttonVariants, Card, ConfirmDialog, EmptyState, PageHeader } from '@/components/ds';
 import { deleteRecipientAction } from './actions';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.recipients.title') };
+export const generateMetadata = () => portalMetadata('portal.recipients.title');
 
 // The flash copy is a fixed allow-list keyed by a fixed query value: nothing from the URL is echoed.
 const DONE: Record<string, MessageKey> = {

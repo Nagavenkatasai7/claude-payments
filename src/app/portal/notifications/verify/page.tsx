@@ -1,4 +1,3 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { requirePortalSite } from '@/lib/portal-site';
 import { getPortalCustomer } from '@/lib/portal-auth';
@@ -6,9 +5,10 @@ import { isPortalEmailToken } from '@/lib/portal-email-verify';
 import { t } from '@/lib/i18n';
 import { Button, Card, PageHeader } from '@/components/ds';
 import { VerifyEmailForm } from './verify-form';
+import { portalMetadata } from '@/lib/portal-metadata';
 
 // The token rides in the query: never leak it to another origin through the Referer.
-export const metadata: Metadata = { title: t('portal.email.verify_title'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.email.verify_title', { referrer: 'no-referrer' });
 
 /**
  * The email verify link's landing page (UI redesign M2-11, Task 11.4). GET NEVER consumes the token

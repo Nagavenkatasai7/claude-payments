@@ -1,5 +1,4 @@
 import type { ReactNode } from 'react';
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import { getDb } from '@/db/client';
 import { requirePortalSite } from '@/lib/portal-site';
@@ -13,8 +12,9 @@ import { t } from '@/lib/i18n';
 import { Badge, Card, MaskedValue, PageHeader } from '@/components/ds';
 import { revealPortalLegalNameAction } from './actions';
 import { KycStartForm, MfaEnrolForm } from './profile-forms';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.profile.title'), referrer: 'no-referrer' };
+export const generateMetadata = () => portalMetadata('portal.profile.title', { referrer: 'no-referrer' });
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (

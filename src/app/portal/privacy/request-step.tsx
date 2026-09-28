@@ -3,7 +3,8 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import { env } from '@/lib/env';
-import { getPortalSite, requirePortalSite } from '@/lib/portal-site';
+import { requirePortalSite } from '@/lib/portal-site';
+import { portalMetadata } from '@/lib/portal-metadata';
 import { requireFreshPortalAuth } from '@/lib/portal-auth';
 import { newRequestKey } from '@/lib/portal-request-key';
 import { DEFAULT_REASON_MIN } from '@/lib/ui/confirm-reason';
@@ -17,7 +18,7 @@ import { requestDataAction } from './actions';
  * on). Otherwise empty, so a 404 on the apex or with the flag off carries nothing page-specific.
  */
 export async function privacyMetadata(title: MessageKey): Promise<Metadata> {
-  return env.customerDataRightsEnabled && (await getPortalSite()) ? { title: t(title) } : {};
+  return env.customerDataRightsEnabled ? portalMetadata(title) : {};
 }
 
 const COPY = {

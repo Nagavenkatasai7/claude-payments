@@ -1,12 +1,12 @@
-import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { requirePortalSite } from '@/lib/portal-site';
 import { getPortalCustomer } from '@/lib/portal-auth';
 import { t } from '@/lib/i18n';
 import { Card, PageHeader } from '@/components/ds';
 import { LoginForm } from './login-form';
+import { portalMetadata } from '@/lib/portal-metadata';
 
-export const metadata: Metadata = { title: t('portal.login.title') };
+export const generateMetadata = () => portalMetadata('portal.login.title');
 
 /** The partner-branded sign-in (SPEC §2.1): a WhatsApp code from the partner's own number. */
 export default async function PortalLoginPage() {
