@@ -72,9 +72,17 @@ export async function signOutEverywhereAction(): Promise<void> {
   const partnerId = ctx.site.partnerId;
   const phone = ctx.session.phone;
   const store = getPortalSessionStore();
-  const ended = await store.revokeAll(partnerId, phone);
-  await store.destroy(ctx.token); // belt and braces: this session is gone even if the index missed it
-  await clearPortalCookie();
+  let ended: number;
+  try {
+    ended = await store.revokeAll(partnerId, phone);
+  } finally {
+    // Whatever happened to the others, THIS session ends and its cookie goes (a failure still errors).
+    try {
+      await store.destroy(ctx.token);
+    } finally {
+      await clearPortalCookie();
+    }
+  }
   await portalAudit(partnerId, phone, 'signout_all', { count: ended });
   redirect('/portal/login');
 }

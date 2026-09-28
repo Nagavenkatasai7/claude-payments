@@ -210,6 +210,17 @@ describe('signOutEverywhereAction', () => {
     expect(await sessions().list('pa', PHONE)).toEqual([]);
   });
 
+  it('a store failure while ending the other sessions still ends THIS one and clears the cookie', async () => {
+    const mine = await signIn();
+    await useCookie(mine.token);
+    const store = (await import('@/lib/portal-session-store')).getPortalSessionStore();
+    const spy = vi.spyOn(store, 'revokeAll').mockRejectedValueOnce(new Error('redis down'));
+    await expect(signOutEverywhereAction()).rejects.toThrow('redis down');
+    spy.mockRestore();
+    expect(await sessions().resolve(mine.token, 'pa')).toBeNull();
+    expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
+  });
+
   it('the audit row carries no phone', async () => {
     const mine = await signIn();
     await useCookie(mine.token);
