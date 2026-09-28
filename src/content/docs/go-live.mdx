@@ -1,0 +1,27 @@
+## Before live keys are issued
+
+Work through this list with your test key and a reference-rail test run arranged with SmartRemit. When every item is done, ask SmartRemit to take you live; SmartRemit issues your live keys.
+
+### WhatsApp
+
+- [ ] Your WhatsApp Business number's credentials are saved in your dashboard.
+- [ ] Meta's webhook points at the callback URL on your dashboard's partner page, and the verification succeeded.
+- [ ] Your message templates are approved, at minimum `transfer_delivered`. See <GuideLink slug="whatsapp-setup">WhatsApp setup</GuideLink>.
+
+### API
+
+- [ ] You hold a test key and call the API from your server only.
+- [ ] You created, confirmed and read back a sandbox transaction end to end. See <GuideLink slug="sandbox">Sandbox</GuideLink>.
+- [ ] Every `POST /transactions` sends a fresh `Idempotency-Key`, and your retries reuse it. See <GuideLink slug="idempotency">Idempotency</GuideLink>.
+- [ ] You handle `429` by waiting for `Retry-After`, and `503` by retrying later. See <GuideLink slug="rate-limits">Rate limits</GuideLink> and <GuideLink slug="errors">Errors</GuideLink>.
+
+### Settlement
+
+- [ ] Your settlement endpoint meets the endpoint rules and is saved with its signing secret.
+- [ ] Your endpoint verifies `x-smartremit-signature`, acknowledges quickly and deduplicates on `reference`.
+- [ ] Your status callbacks are signed with your webhook secret and echo the amount on `paid_out`.
+- [ ] In a reference-rail test run arranged with SmartRemit, you completed the full loop, including the failure path. See <GuideLink slug="sandbox">Sandbox</GuideLink> and <GuideLink slug="webhooks">Webhooks</GuideLink>.
+
+### Compliance
+
+- [ ] Your KYC mode is agreed, and you send `sender.kyc_status` and `sender.name` on every transaction. See <GuideLink slug="kyc-delegation">KYC delegation</GuideLink>.
