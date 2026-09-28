@@ -134,16 +134,18 @@ export async function editRecipientAction(rid: string, _prev: RecipientFormState
 
   const out = await once('portal-recipient-edit', pid, phone, formData, async () => {
     return getDb().transaction(async (tx): Promise<Outcome> => {
-      const current = await findByRid(tx, pid, phone, rid); // deleted meanwhile → not found, never un-deleted
+      const current = await findByRid(tx, pid, phone, rid); // deleted before this read → not found
       if (!current) return { kind: 'not_found' };
       if (change.fields.length === 0) return { kind: 'unchanged' };
-      await createRecipientRepo(tx).upsertRecipient(pid, phone, {
+      // Update-only and live-only: a delete that commits after the read above wins (never un-deleted).
+      const updated = await createRecipientRepo(tx).updateLiveRecipient(pid, phone, {
         name: change.name,
         recipientPhone: current.recipientPhone, // the stored key, never a form field
         payoutMethod: change.payoutMethod,
         payoutDestination: change.payoutDestination,
         lastUsedAt: current.lastUsedAt,
       });
+      if (!updated) return { kind: 'not_found' };
       await recordRecipientAudit(tx, { partnerId: pid, phone, action: 'recipient.update', meta: { rid: rid, fields: change.fields } });
       return { kind: 'done' };
     });

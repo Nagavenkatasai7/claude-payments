@@ -48,15 +48,9 @@ import type {
 // recipient_tombstones and KEEPS the recipients row (the FK tombstone → recipient is ON DELETE no
 // action, so the row cannot be removed while a tombstone points at it). Every read here hides a
 // tombstoned recipient; a later upsert (a new payment with bank details, owner O5) removes the
-// tombstone in the same transaction. The recipients columns are unchanged (review round 1, H1).
+// tombstone in the same statement. The recipients columns are unchanged (review round 1, H1).
 
 type RecipientRow = typeof recipients.$inferSelect;
-type TxRunner = { transaction?: <T>(fn: (tx: DbOrTx) => Promise<T>) => Promise<T> };
-/** Run `fn` in a transaction when holding a Db; inside an existing tx, share it. */
-function inTx<T>(db: DbOrTx, fn: (tx: DbOrTx) => Promise<T>): Promise<T> {
-  const maybeTx = db as TxRunner;
-  return maybeTx.transaction ? maybeTx.transaction(fn) : fn(db);
-}
 
 export function createRecipientRepo(
   db: DbOrTx,
@@ -99,25 +93,52 @@ export function createRecipientRepo(
         payoutDestinationLast4: last4(r.payoutDestination ?? ''),
         lastUsedAt: new Date(r.lastUsedAt),
       };
-      await inTx(db, async (tx) => {
-        await tx
-          .insert(recipients)
-          .values(row)
-          .onConflictDoUpdate({
-            target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
-            set: row,
-          });
-        // O5: saving the recipient again (a new payment with bank details) un-deletes it.
-        await tx
-          .delete(recipientTombstones)
-          .where(
-            and(
-              eq(recipientTombstones.partnerId, partnerId),
-              eq(recipientTombstones.senderPhone, senderPhone),
-              eq(recipientTombstones.recipientPhone, r.recipientPhone),
-            ),
-          );
-      });
+      // O5: saving the recipient again (a new payment with bank details) un-deletes it. The
+      // tombstone clear rides in a data-modifying CTE so the upsert stays ONE statement: the mint
+      // (transfer-create.ts) calls this after its READ COMMITTED transaction and must not open a
+      // second one. Postgres runs a WITH DELETE to completion even when nothing reads it.
+      const clearTombstone = db
+        .$with('cleared_tombstone', {})
+        .as(
+          sql`DELETE FROM ${recipientTombstones} WHERE ${recipientTombstones.partnerId} = ${partnerId} AND ${recipientTombstones.senderPhone} = ${senderPhone} AND ${recipientTombstones.recipientPhone} = ${r.recipientPhone}`,
+        );
+      await db
+        .with(clearTombstone)
+        .insert(recipients)
+        .values(row)
+        .onConflictDoUpdate({
+          target: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
+          set: row,
+        });
+    },
+
+    /**
+     * Edit a LIVE saved recipient in place (the portal's edit). Never touches tombstones: an edit
+     * that lands after a concurrent delete updates nothing and returns false, so the delete wins.
+     */
+    async updateLiveRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<boolean> {
+      const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
+      const updated = await db
+        .update(recipients)
+        .set({
+          name: r.name,
+          payoutMethod: r.payoutMethod,
+          payoutDestinationEnc: r.payoutDestination
+            ? encryptField(r.payoutDestination, provider, recipientRowCtx(key))
+            : '',
+          payoutDestinationLast4: last4(r.payoutDestination ?? ''),
+          lastUsedAt: new Date(r.lastUsedAt),
+        })
+        .where(
+          and(
+            eq(recipients.partnerId, partnerId),
+            eq(recipients.senderPhone, senderPhone),
+            eq(recipients.recipientPhone, r.recipientPhone),
+            live(db),
+          ),
+        )
+        .returning({ one: recipients.recipientPhone });
+      return updated.length > 0;
     },
 
     async listRecipients(partnerId: PartnerId, senderPhone: string, limit: number): Promise<Recipient[]> {

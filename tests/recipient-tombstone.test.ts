@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '@/db/client';
 import { recipients, recipientTombstones, transfers } from '@/db/schema';
@@ -92,6 +92,37 @@ describe('recipient tombstone (repo)', () => {
     await repo.upsertRecipient('pa', SENDER, rec(RP, '000099990000 HDFC0000003', '2026-06-03T00:00:00.000Z'));
     expect(await repo.isTombstoned('pa', SENDER, RP)).toBe(false);
     expect((await repo.listRecipients('pa', SENDER, 25)).map((r) => r.payoutDestination)).toEqual(['000099990000 HDFC0000003']);
+  });
+
+  it('upsert and the O5 tombstone clear are ONE statement: no transaction opened (the mint keeps one tx)', async () => {
+    const repo = createRecipientRepo(db);
+    await repo.tombstoneRecipient('pa', SENDER, RP).catch(() => undefined); // no row yet: FK may refuse
+    await repo.upsertRecipient('pa', SENDER, rec(RP, '000011112222 HDFC0000001'));
+    await repo.tombstoneRecipient('pa', SENDER, RP);
+    const spy = vi.spyOn(db, 'transaction');
+    await repo.upsertRecipient('pa', SENDER, rec(RP, '000099998888 HDFC0000009'));
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    expect(await repo.isTombstoned('pa', SENDER, RP)).toBe(false);
+    expect((await repo.getRecipient('pa', SENDER, RP))?.payoutDestination).toBe('000099998888 HDFC0000009');
+  });
+
+  it('updateLiveRecipient edits a live recipient and never un-deletes a tombstoned one', async () => {
+    const repo = createRecipientRepo(db);
+    await repo.upsertRecipient('pa', SENDER, rec(RP, '000011112222 HDFC0000001'));
+    expect(await repo.updateLiveRecipient('pa', SENDER, { ...rec(RP, '000033334444 HDFC0000003'), name: 'Renamed' })).toBe(true);
+    const live = await repo.getRecipient('pa', SENDER, RP);
+    expect(live?.name).toBe('Renamed');
+    expect(live?.payoutDestination).toBe('000033334444 HDFC0000003');
+    await repo.tombstoneRecipient('pa', SENDER, RP);
+    // An edit that lands after a delete (the two-tab race) must lose: no write, tombstone kept.
+    expect(await repo.updateLiveRecipient('pa', SENDER, { ...rec(RP, '000055556666 HDFC0000005'), name: 'Late edit' })).toBe(false);
+    expect(await repo.isTombstoned('pa', SENDER, RP)).toBe(true);
+    const row = await db.select().from(recipients).where(and(eq(recipients.partnerId, 'pa'), eq(recipients.recipientPhone, RP)));
+    expect(row[0].name).toBe('Renamed');
+    // Scope: another sender's or partner's key never matches.
+    expect(await repo.updateLiveRecipient('pb', SENDER, rec(RP, '000077778888 HDFC0000007'))).toBe(false);
+    expect(await repo.updateLiveRecipient('pa', SENDER_2, rec(RP, '000077778888 HDFC0000007'))).toBe(false);
   });
 
   it('upsert clears only ITS OWN tombstone', async () => {
