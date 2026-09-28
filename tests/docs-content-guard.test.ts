@@ -14,7 +14,8 @@ const mdx = readdirSync('src/content/docs')
   .map((f) => join('src/content/docs', f));
 const published = [...walk('src/content').filter((f) => /\.(mdx|ts)$/.test(f)), 'openapi.yaml'];
 
-const ALLOWED_HOSTS = [/^smartremit\.ai$/, /(^|\.)example\.com$/, /^business\.facebook\.com$/, /^developers\.facebook\.com$/];
+// github.com: /trust links the public repository's SECURITY.md (src/content/trust/disclosure.ts).
+const ALLOWED_HOSTS = [/^smartremit\.ai$/, /(^|\.)example\.com$/, /^business\.facebook\.com$/, /^developers\.facebook\.com$/, /^github\.com$/];
 // Exact documented values only. Writers use these, or placeholders like `<unix seconds>`.
 const ALLOWED_DIGIT_RUNS = new Set([
   '000000000000', // the reference rail's documented failure account
