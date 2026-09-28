@@ -332,6 +332,22 @@ describe('verifyCodeAction', () => {
     expect(await consentAction(null, fd({ pending: s.pending!, consent: 'yes' }))).toEqual({ step: 'phone', error: 'portal.login.expired' });
   });
 
+  it('a double-submitted consent is single-use: one session, one register row, one consent row', async () => {
+    const { verify } = await codeStep(UNKNOWN);
+    const s = await verify();
+    const results = await Promise.allSettled([
+      consentAction(null, fd({ pending: s.pending!, consent: 'yes' })),
+      consentAction(null, fd({ pending: s.pending!, consent: 'yes' })),
+    ]);
+    const redirects = results.filter((r) => r.status === 'rejected' && String((r.reason as Error).message) === 'REDIRECT:/portal');
+    expect(redirects).toHaveLength(1);
+    const other = results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<PortalLoginState>;
+    expect(other.value).toEqual({ step: 'phone', error: 'portal.login.expired' });
+    expect(await sessions().list('pa', UNKNOWN)).toHaveLength(1);
+    expect(await auditCount('pa', 'portal.auth.register')).toBe(1);
+    expect(await auditCount('pa', 'portal.auth.consent')).toBe(1);
+  });
+
   it('an existing row WITHOUT a WhatsApp opt-in (e.g. created by the partner API) also passes the consent step', async () => {
     await repo().ensureCustomer('pa', UNKNOWN);
     const { verify } = await codeStep(UNKNOWN);
@@ -470,6 +486,9 @@ describe('8. TOTP-enrolled customers', () => {
     expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(false);
     await expectRedirect(verifyMfaAction(null, fd({ pending: s.pending!, code: h.mfaValid })), '/portal');
     expect(h.jar.has(PORTAL_SESSION_COOKIE)).toBe(true);
+    // the sign-in proved BOTH factors: the session is step-up fresh for a TOTP-enrolled customer
+    const sess = await sessions().resolve(h.jar.get(PORTAL_SESSION_COOKIE)!, 'pa');
+    expect(sessions().isFresh(sess!, { requireTotp: true })).toBe(true);
   });
   it('five wrong TOTP codes → back to the phone step, audited', async () => {
     const { verify } = await codeStep(KNOWN);

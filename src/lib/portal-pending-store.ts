@@ -99,6 +99,21 @@ export function createPortalPendingStore(redis: RedisLike, opts: { now?: () => n
       return rec;
     },
 
+    /**
+     * ATOMIC single-use: GETDEL the record, then validate it (partner, purpose, lifetime). The first
+     * caller wins; a concurrent second caller (a double submit) gets null. A mismatched take burns
+     * the token too.
+     */
+    async take(token: unknown, hostPartnerId: PartnerId, purpose: PortalPendingPurpose): Promise<PortalPending | null> {
+      if (typeof token !== 'string' || !TOKEN_RE.test(token)) return null;
+      const h = sha(token);
+      const rec = parse(await redis.getdel(recKey(h)));
+      await redis.del(cntKey(h));
+      if (!rec || rec.partnerId !== hostPartnerId || rec.purpose !== purpose) return null;
+      if (now() - rec.createdMs > TTL_MS[rec.purpose] || now() < rec.createdMs) return null;
+      return rec;
+    },
+
     /** One more attempt against this token (TTL attached at creation: SET NX EX, then INCR). */
     async countAttempt(token: string): Promise<number> {
       const k = cntKey(sha(token));

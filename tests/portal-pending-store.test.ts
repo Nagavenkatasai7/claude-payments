@@ -52,6 +52,15 @@ describe('portal pending store', () => {
     await store.consume(token);
     expect(await store.peek(token, 'pa', 'login')).toBeNull();
   });
+  it('take is atomic and single-use: the first take wins, a second (or a wrong partner/purpose) gets null', async () => {
+    const store = createPortalPendingStore(fakeRedis());
+    const token = await store.create({ partnerId: 'pa', phone: '14155550101', purpose: 'consent' });
+    const [a, b] = await Promise.all([store.take(token, 'pa', 'consent'), store.take(token, 'pa', 'consent')]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    const other = await store.create({ partnerId: 'pa', phone: '14155550101', purpose: 'consent' });
+    expect(await store.take(other, 'pb', 'consent')).toBeNull(); // a mismatch also burns the token
+    expect(await store.take(other, 'pa', 'consent')).toBeNull();
+  });
   it('create refuses an invalid phone or partner', async () => {
     const store = createPortalPendingStore(fakeRedis());
     await expect(store.create({ partnerId: 'pa', phone: '12', purpose: 'login' })).rejects.toThrow();

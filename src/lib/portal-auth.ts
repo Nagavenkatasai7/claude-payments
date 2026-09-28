@@ -107,12 +107,16 @@ export async function clearPortalCookie(): Promise<void> {
  * verified for THIS tenant row, rotate (the cookie presented at sign-in is destroyed), mint the
  * session, set the cookie, audit. The caller redirects afterwards.
  */
-export async function completePortalSignIn(partnerId: PartnerId, phone: string): Promise<void> {
+export async function completePortalSignIn(partnerId: PartnerId, phone: string, proof: { totp: boolean } = { totp: false }): Promise<void> {
   await portalCustomers().setPhoneVerifiedIfUnset(partnerId, phone);
   const jar = await cookies();
   const existing = jar.get(PORTAL_SESSION_COOKIE)?.value;
   const ua = (await headers()).get('user-agent');
-  const { token } = await getPortalSessionStore().create(partnerId, phone, deviceLabel(ua), existing);
+  const store = getPortalSessionStore();
+  const { token } = await store.create(partnerId, phone, deviceLabel(ua), existing);
+  // A sign-in that proved the TOTP too stamps it, so the first sensitive action within 15 minutes
+  // does not ask an enrolled customer for both factors again.
+  if (proof.totp) await store.markStepUp(token, partnerId, { totp: true });
   await setPortalCookie(token);
   await recordPortalAuthEventSafe(getDb(), { partnerId, phone, event: 'login_success' });
 }

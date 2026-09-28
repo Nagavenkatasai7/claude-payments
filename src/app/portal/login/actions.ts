@@ -98,13 +98,13 @@ export async function resendCodeAction(_prev: PortalLoginState | null, formData:
 }
 
 /** After a proven code (and TOTP where enrolled): consent if needed, else the session. */
-async function nextAfterProof(pid: PartnerId, phone: string): Promise<PortalLoginState | 'signed_in'> {
+async function nextAfterProof(pid: PartnerId, phone: string, totp = false): Promise<PortalLoginState | 'signed_in'> {
   const customer = await portalCustomers().getCustomer(pid, phone);
   if (!customer?.optInAt) {
     const pending = await getPortalPendingStore().create({ partnerId: pid, phone, purpose: 'consent' });
     return { step: 'consent', pending };
   }
-  await completePortalSignIn(pid, phone);
+  await completePortalSignIn(pid, phone, { totp });
   return 'signed_in';
 }
 
@@ -197,7 +197,7 @@ export async function verifyMfaAction(_prev: PortalLoginState | null, formData: 
     return { step: 'mfa', pending: pendingToken, error: 'portal.login.mfa_invalid' };
   }
   await pendingStore.consume(pendingToken);
-  const next = await nextAfterProof(pid, rec.phone);
+  const next = await nextAfterProof(pid, rec.phone, true);
   if (next !== 'signed_in') return next;
   redirect('/portal');
 }
@@ -219,14 +219,16 @@ export async function consentAction(_prev: PortalLoginState | null, formData: Fo
   if (field(formData, 'consent') !== 'yes') {
     return { step: 'consent', pending: pendingToken, error: 'portal.login.consent_required' };
   }
-  const { phone } = rec;
+  // Take the token ATOMICALLY before any write: a double submit gets one session, one audit pair.
+  const taken = await pendingStore.take(pendingToken, pid, 'consent');
+  if (!taken) return { step: 'phone', error: 'portal.login.expired' };
+  const { phone } = taken;
   const repo = portalCustomers();
   const before = await repo.getCustomer(pid, phone);
   await repo.ensureCustomer(pid, phone); // under the HOST partner; no opt-in implied by itself
   if (!before) await audit(pid, phone, 'register');
   await repo.setOptedIn(pid, phone);
   await audit(pid, phone, 'consent', { whatsapp: true, terms: true });
-  await pendingStore.consume(pendingToken);
   await completePortalSignIn(pid, phone);
   redirect('/portal');
 }
