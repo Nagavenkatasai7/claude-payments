@@ -9,6 +9,8 @@ export const NEW_UI_ROOTS: readonly string[] = [
   // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',
   'src/app/trust',
+  // PR5: the generic inactive-site sheet a partner subdomain shows for an unknown/disabled slug.
+  'src/app/site-inactive',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */
@@ -17,6 +19,13 @@ export const LEGACY_APP_DIRS: readonly string[] = [
   'onboard', 'partners', 'pay', 'privacy', 'terms',
 ];
 /** Files allowed to carry hex (each needs a reason). */
-export const HEX_EXEMPT_FILES: readonly string[] = [];
+export const HEX_EXEMPT_FILES: readonly string[] = [
+  // Mirrors the legacy dark pay dead-link sheet byte for byte (no oracle between the two) until H2
+  // moves the pay page to the landing look and dedupes the sheet.
+  'src/app/site-inactive/page.tsx',
+];
 /** New route dirs exempt from the loading/error rule (static, data-free pages only; each needs a reason). */
-export const STATE_EXEMPT_DIRS: readonly string[] = [];
+export const STATE_EXEMPT_DIRS: readonly string[] = [
+  // A static, data-free page: nothing to load and nothing that can fail.
+  'src/app/site-inactive',
+];
