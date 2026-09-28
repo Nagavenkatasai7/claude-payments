@@ -2710,6 +2710,79 @@ describe('request_refund (customer-facing refund request — suggest-only, ops a
     expect((await ctx.store.getTransfer(id))?.status).toBe('paid');
   });
 
+  // M2 enablement (portal chat step-up): the portal chat carries the session's 15-minute freshness.
+  // A stale portal session must not cancel, escalate or refund through chat — the portal transfer
+  // page requires the same fresh proof (requireFreshPortalAuth). Nothing is written on a refusal.
+  const portal = (ctx: Ctx, fresh: boolean) => ({ ...ctx, channel: 'web' as const, webStepUp: { surface: 'portal' as const, fresh } });
+
+  it('portal chat, stale session: a confirmed in-window cancel refuses with verify_in_portal and cancels nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx, { charged: true });
+    const senderCancel = vi.fn();
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, { ...portal(ctx, false), senderCancel });
+    expect(r.error_code).toBe('verify_in_portal');
+    expect(r.transfer_id).toBe(id);
+    expect(String(r.reply_hint)).toContain(`/portal/transfers/${id}`);
+    expect(String(r.reply_hint)).not.toContain('/account/receipt');
+    expect(String(r.reply_hint).toLowerCase()).not.toMatch(/step-up|session/);
+    expect(senderCancel).not.toHaveBeenCalled();
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('paid');
+    expect(after?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
+  });
+
+  it('portal chat, stale session: an in_review cancel request refuses and escalates nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintTransfer(ctx);
+    expect((await beginHold(db, (await ctx.store.getTransfer(id))!)).kind).toBe('held');
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, portal(ctx, false));
+    expect(r.error_code).toBe('verify_in_portal');
+    const after = await ctx.store.getTransfer(id);
+    expect(after?.status).toBe('in_review');
+    expect(after?.refundStatus ?? 'none').toBe('none');
+    expect(await outboxKeys()).not.toContain(`regecancel:${id}`);
+  });
+
+  it('portal chat, stale session: an ordinary refund request refuses and flags nothing', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    const updateRefund = vi.fn();
+    const r = await executeTool('request_refund', { transfer_id: id }, { ...portal(ctx, false), transferRepo: { updateRefund } });
+    expect(r.error_code).toBe('verify_in_portal');
+    expect(r.requested).toBeUndefined();
+    expect(updateRefund).not.toHaveBeenCalled();
+    expect((await ctx.store.getTransfer(id))?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('portal chat, fresh session: the confirmed cancel and the refund request go through (existing behaviour)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const inWindow = await mintPaidInWindow(ctx, { charged: true });
+    const c = await executeTool('request_refund', { transfer_id: inWindow, confirm: true }, portal(ctx, true));
+    expect(c.cancelled).toBe(true);
+    const paid = await mintPaid(ctx);
+    const r = await executeTool('request_refund', { transfer_id: paid }, portal(ctx, true));
+    expect(r.requested).toBe(true);
+  });
+
+  it('portal chat, fresh session but TOTP-enrolled: the existing MFA refusal still applies, with the portal link', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaidInWindow(ctx, { charged: true });
+    expect(await ctx.customerStore.enableMfa(ctx.partnerId, ctx.phone, 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP')).toBe(true);
+    const r = await executeTool('request_refund', { transfer_id: id, confirm: true }, portal(ctx, true));
+    expect(r.error_code).toBe('verify_on_receipt');
+    expect(String(r.reply_hint)).toContain(`/portal/transfers/${id}`);
+    expect(String(r.reply_hint)).not.toContain('/account/receipt');
+    expect((await ctx.store.getTransfer(id))?.status).toBe('paid');
+  });
+
+  it('WhatsApp ignores a portal freshness flag entirely (the gate is web-only)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mintPaid(ctx);
+    const r = await executeTool('request_refund', { transfer_id: id }, { ...ctx, webStepUp: { surface: 'portal' as const, fresh: false } });
+    expect(r.requested).toBe(true);
+  });
+
   // ── transfer_id OMITTED: resolve from the customer's own recent transfers ──
 
   // Mint a small ($100) transfer so two fit inside the T0 daily cap ($500/day).
@@ -3247,6 +3320,19 @@ describe('repeat_transfer on the web channel (B5 safe degrade)', () => {
     expect(r.pay_url).toBeUndefined();
     expect(r.payout_destination).toBeUndefined(); // the WhatsApp-shaped hydration payload stays home
     expect(createDraft).not.toHaveBeenCalled();
+  });
+
+  // Decision (portal chat step-up): repeat_transfer is NOT gated. It only drafts an unpaid transfer
+  // and returns a pay link, exactly like generate_payment_link and the portal send flow, neither of
+  // which asks for the 15-minute proof; money moves only when someone pays on the pay page.
+  it('portal chat, stale session: repeat_transfer still returns the pay link (not a step-up action)', async () => {
+    const base = await buildCtx(fakeRedis());
+    await seedPast(base);
+    const ctx = { ...base, channel: 'web' as const, webStepUp: { surface: 'portal' as const, fresh: false } };
+    const r = await executeTool('repeat_transfer', { recipient_phone: '919876543210' }, ctx);
+    expect(r.error_code).toBeUndefined();
+    expect(typeof r.draft_id).toBe('string');
+    expect(String(r.pay_url)).toBe(`https://smartremit.test/pay/${r.draft_id}`);
   });
 
   it('on WhatsApp the same repeat still sends the approve card (unchanged)', async () => {
@@ -6211,6 +6297,31 @@ describe('refund / recall on the web channel respect portal MFA (Program-Fix 49D
     const r2 = await executeTool('open_recall_dispute', { transfer_id: delivered, reason: 'other' }, web(ctx));
     expect(r2.error_code).toBe('verify_on_receipt');
     expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('portal chat, stale session: open_recall_dispute refuses with verify_in_portal and opens no case', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, true);
+    const r = await executeTool(
+      'open_recall_dispute',
+      { transfer_id: id, reason: 'not_received' },
+      { ...ctx, channel: 'web' as const, webStepUp: { surface: 'portal' as const, fresh: false } },
+    );
+    expect(r.error_code).toBe('verify_in_portal');
+    expect(String(r.reply_hint)).toContain(`/portal/transfers/${id}`);
+    expect(r.opened).toBeUndefined();
+    expect(await ctx.ticketRepo.listByCustomer(ctx.phone)).toHaveLength(0);
+  });
+
+  it('portal chat, fresh session: open_recall_dispute opens the case (existing behaviour)', async () => {
+    const ctx = await buildCtx(fakeRedis());
+    const id = await mint(ctx, true);
+    const r = await executeTool(
+      'open_recall_dispute',
+      { transfer_id: id, reason: 'not_received' },
+      { ...ctx, channel: 'web' as const, webStepUp: { surface: 'portal' as const, fresh: true } },
+    );
+    expect(r.opened).toBe(true);
   });
 
   it('unenrolled web customer with the flag off: unchanged (the refund is flagged)', async () => {

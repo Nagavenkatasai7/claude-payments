@@ -6,6 +6,10 @@ import { createStore } from '@/lib/store';
 import { createPartnerStore } from '@/lib/partner-store';
 import { decodePortalCursor, encodePortalCursor, receiptView, renderReceiptText } from '@/lib/portal-transfers';
 import { saveTransferFilter } from '@/lib/portal-transfer-filter';
+import { customerPortalPrefs } from '@/db/schema';
+import { encryptField } from '@/lib/field-crypto';
+import { customerEmailCtx } from '@/lib/crypto-context';
+import { emailVerifiedTag } from '@/lib/portal-prefs';
 import { freshDb } from './helpers-db';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { seedTwoPartners, type TwoPartnerFixture } from './helpers-portal-two-partner';
@@ -184,6 +188,30 @@ describe('Transfer detail', () => {
     const html = await detail(A.transferIds[1]);
     expect(html).toContain('name="reason"');
     expect(html).toContain('value="not_received"');
+  });
+});
+
+describe('Transfer detail: "Email me a receipt" only for a verified address (#397 review L3)', () => {
+  const EMAIL = 'user@example.com';
+  function withEmail(partnerId: string) {
+    signIn(partnerId, phone);
+    (h.ctx as { customer: Record<string, unknown> }).customer.email = encryptField(EMAIL, undefined, customerEmailCtx({ partnerId, senderPhone: phone }));
+  }
+  it('no verified address → no email button, a link to Notifications instead', async () => {
+    withEmail('pa');
+    const html = await detail(A.transferIds[0]);
+    expect(html).not.toContain('Email me a receipt');
+    expect(html).toContain('href="/portal/notifications"');
+    expect(html).toContain('Add and verify an email address');
+  });
+  it('verified for THIS partner → the button; the same phone verified only on partner B does not count on A', async () => {
+    await db.insert(customerPortalPrefs).values({ partnerId: 'pb', phone, emailVerifiedAt: new Date(), emailVerifiedTag: emailVerifiedTag('pb', phone, EMAIL) });
+    withEmail('pa');
+    expect(await detail(A.transferIds[0])).not.toContain('Email me a receipt');
+    await db.insert(customerPortalPrefs).values({ partnerId: 'pa', phone, emailVerifiedAt: new Date(), emailVerifiedTag: emailVerifiedTag('pa', phone, EMAIL) });
+    const html = await detail(A.transferIds[0]);
+    expect(html).toContain('Email me a receipt');
+    expect(html).not.toContain(EMAIL);
   });
 });
 

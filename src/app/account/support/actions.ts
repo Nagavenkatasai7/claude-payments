@@ -10,6 +10,7 @@ import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import type { Customer, Partner } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { MAX_OPEN_TICKETS, OPEN_TICKET_STATUSES, validateNewTicket, validateTicketReply } from '@/lib/ticket-input';
 
 /**
  * /account/support server actions (customer support center, B2).
@@ -25,10 +26,6 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
  * components (no client islands), so refusals bounce back to the form with
  * ?error=<code> and the page renders the friendly message.
  */
-
-const MAX_OPEN_TICKETS = 5;
-/** Statuses that count against the per-customer open-ticket cap. */
-const OPEN_STATUSES = new Set<string>(['open', 'pending', 'waiting_admin']);
 
 /** The customer's partner row (the admin-controlled support kill switch lives on it). */
 async function customerPartner(customer: Customer): Promise<Partner> {
@@ -52,19 +49,18 @@ export async function createTicketAction(formData: FormData): Promise<void> {
   // (which renders the "handled in WhatsApp" note); nothing is created.
   if (portalDisabled(await customerPartner(customer))) redirect('/account/support');
 
-  const subject = String(formData.get('subject') ?? '').trim();
-  const body = String(formData.get('message') ?? '').trim();
   const transferId = String(formData.get('transferId') ?? '').trim();
-
-  if (subject.length < 3 || subject.length > 120) redirect('/account/support/new?error=subject');
-  if (body.length < 10 || body.length > 2000) redirect('/account/support/new?error=message');
+  // The shared validation (src/lib/ticket-input.ts): subject 3-120, message 10-2000, trimmed.
+  const input = validateNewTicket({ subject: formData.get('subject') ?? '', message: formData.get('message') ?? '' });
+  if (!input.ok) redirect(`/account/support/new?error=${input.error}`);
+  const { subject, body } = input;
 
   const repo = createTicketRepo(getDb());
 
   // Polite cap: at most 5 concurrently-open requests per customer. Resolved
   // and closed tickets don't count.
   const mine = await repo.listByCustomer(customer.senderPhone);
-  if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
+  if (mine.filter((t) => OPEN_TICKET_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
     redirect('/account/support/new?error=cap');
   }
 
@@ -117,8 +113,9 @@ export async function replyToTicketAction(ticketId: string, formData: FormData):
   // action refuses independently.
   if (ticket.status === 'closed') redirect(`/account/support/${ticket.id}?error=closed`);
 
-  const body = String(formData.get('message') ?? '').trim();
-  if (body.length < 1 || body.length > 2000) redirect(`/account/support/${ticket.id}?error=message`);
+  const reply = validateTicketReply(formData.get('message') ?? '');
+  if (!reply.ok) redirect(`/account/support/${ticket.id}?error=message`);
+  const { body } = reply;
 
   await repo.appendMessage({
     ticketId: ticket.id,
