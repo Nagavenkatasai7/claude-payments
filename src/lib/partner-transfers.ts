@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { t, type MessageKey } from '@/lib/i18n';
 import {
   LIST_UNAVAILABLE_REASON,
@@ -247,20 +248,20 @@ export function settlementView(tr: Pick<Transfer, 'status' | 'environment' | 'pa
   if ((tr.environment ?? 'live') === 'test') return { state: 'partner.transfers.settlement.sandbox' };
   if (tr.status === 'delivered') return withRef({ state: 'partner.transfers.settlement.settled' });
   const latest = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-  if (!latest) return { state: 'partner.transfers.settlement.notStarted' };
+  if (!latest) return withRef({ state: 'partner.transfers.settlement.notStarted' });
   switch (latest.status) {
     case 'pending':
-      return { state: 'partner.transfers.settlement.queued' };
+      return withRef({ state: 'partner.transfers.settlement.queued' });
     case 'processing':
-      return { state: 'partner.transfers.settlement.sending' };
+      return withRef({ state: 'partner.transfers.settlement.sending' });
     case 'failed':
-      return { state: 'partner.transfers.settlement.retrying', attempts: latest.attempts };
+      return withRef({ state: 'partner.transfers.settlement.retrying', attempts: latest.attempts });
     case 'dead':
-      return { state: 'partner.transfers.settlement.attention', attempts: latest.attempts };
+      return withRef({ state: 'partner.transfers.settlement.attention', attempts: latest.attempts });
     case 'done':
-      return ref ? { state: 'partner.transfers.settlement.accepted', ref } : { state: 'partner.transfers.settlement.processed' };
+      return withRef({ state: ref ? 'partner.transfers.settlement.accepted' : 'partner.transfers.settlement.processed' });
     default:
-      return { state: 'partner.transfers.settlement.processed' };
+      return withRef({ state: 'partner.transfers.settlement.processed' });
   }
 }
 
@@ -273,4 +274,23 @@ export function settlementView(tr: Pick<Transfer, 'status' | 'environment' | 'pa
 export function isPartnerNoteShaped(note: string): boolean {
   const collapsed = note.replace(/(?<=\d)[\s.()+-]+(?=\d)/g, '');
   return !/\d{10,}/.test(collapsed);
+}
+
+/** A transfer id as the ledger mints it (letters, digits, _ and -), bounded. */
+export function isTransferId(id: unknown): id is string {
+  return typeof id === 'string' && id.length > 0 && id.length <= PARTNER_TRANSFER_QUERY_MAX && ID_RE.test(id);
+}
+
+/** The hold-note form's server-minted request key (128-bit hex). */
+export function isRequestKey(k: unknown): k is string {
+  return typeof k === 'string' && /^[0-9a-f]{32}$/.test(k);
+}
+
+/**
+ * The replay claim for one hold-note submit, bound to (tenant, user, transfer, request key) and
+ * hashed so no identifier sits in a Redis key name.
+ */
+export function holdNoteClaimKey(partnerId: string, username: string, transferId: string, requestKey: string): string {
+  const digest = createHash('sha256').update(`${partnerId}|${username}|${transferId}|${requestKey}`).digest('hex');
+  return `pnote:${digest}`;
 }

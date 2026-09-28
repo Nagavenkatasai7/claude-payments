@@ -1,4 +1,4 @@
-import { PARTNER_ANY, type PartnerPolicy, type PartnerRole } from '@/lib/partner-access';
+import { PARTNER_ANY, PARTNER_MONEY_READ, type PartnerPolicy, type PartnerRole } from '@/lib/partner-access';
 import type { MessageKey } from '@/lib/i18n';
 
 // The ONE access table for /partner (UI redesign M3). Pages call
@@ -15,13 +15,14 @@ export interface PartnerRoute {
 
 export const PARTNER_ROUTES = Object.freeze({
   home: { href: '/partner', labelKey: 'partner.nav.home', policy: PARTNER_ANY, nav: true },
+  transfers: { href: '/partner/transfers', labelKey: 'partner.nav.transfers', policy: PARTNER_MONEY_READ, nav: true },
   security: { href: '/partner/security', labelKey: 'partner.nav.security', policy: PARTNER_ANY, nav: true },
 } as const satisfies Record<string, PartnerRoute>);
 export type PartnerRouteKey = keyof typeof PARTNER_ROUTES;
 
 // Final order once every page exists: home, onboarding, transfers, customers, reports, support,
 // staff, audit, integrations, branding, security.
-const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'security'];
+const NAV_ORDER: readonly PartnerRouteKey[] = ['home', 'transfers', 'security'];
 
 export function routeAllows(key: PartnerRouteKey, role: PartnerRole): boolean {
   return PARTNER_ROUTES[key].policy.roles.includes(role);

@@ -26,7 +26,8 @@ describe('PARTNER_ROUTES', () => {
     }
   });
   it('partnerNav keeps the fixed order, home first', () => {
-    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/security']);
+    expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/transfers', '/partner/security']);
+    expect(partnerNav('support').map((r) => r.href)).toEqual(['/partner', '/partner/security']);
   });
   it('an unknown role gets no nav at all (fails closed)', () => {
     expect(partnerNav('finance' as never)).toEqual([]);
