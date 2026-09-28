@@ -37,7 +37,9 @@ vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/cli
 vi.mock('@/lib/store', async (orig) => ({ ...(await orig<typeof import('@/lib/store')>()), getStore: () => store }));
 vi.mock('@/lib/customer-store', async (orig) => ({ ...(await orig<typeof import('@/lib/customer-store')>()), getCustomerStore: () => customerStore }));
 vi.mock('@/lib/transaction-otp', async (orig) => ({ ...(await orig<typeof import('@/lib/transaction-otp')>()), getTransactionOtpStore: () => txOtp }));
-vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async () => null }) }));
+// Drafts by id (the web/portal pay path pays a DRAFT id); empty ⇒ the existing-transfer branch.
+const draftsById = vi.hoisted(() => new Map<string, { senderPhone: string; partnerId?: string }>());
+vi.mock('@/lib/draft-store', () => ({ getDraftStore: () => ({ getDraft: async (id: string) => draftsById.get(id) ?? null }) }));
 vi.mock('@/lib/partner-store', () => ({
   getPartnerStore: () => ({ getPartner: async () => null, ensureDefaultPartner: async () => null }),
 }));
@@ -105,6 +107,7 @@ beforeEach(async () => {
     await customerStore.saveCustomer(customerFor(pid));
   }
   integrationsByPartner.clear();
+  draftsById.clear();
   getPortalSettingsSpy.fail = false;
   getPortalSettingsSpy.calls = [];
   sendTransactionOtp.mockClear();
@@ -158,5 +161,28 @@ describe('POST /api/pay/[transferId] request_otp — partner auth template (M2-6
     expect(logged).not.toContain('654321');
     expect(logged).not.toContain(PHONE);
     warn.mockRestore();
+  });
+
+  it("draft path: a draft of B (own number) never gets A's template; the draft's tenant decides", async () => {
+    integrationsByPartner.set('pa', CREDS_A);
+    integrationsByPartner.set('pb', CREDS_B);
+    draftsById.set('d_pb', { senderPhone: PHONE, partnerId: 'pb' });
+    const res = await requestOtp('d_pb');
+    expect(res.status).toBe(200);
+    expect(sendTransactionOtp).toHaveBeenCalledOnce();
+    const args = sendTransactionOtp.mock.calls[0];
+    expect(args[2]).toEqual(CREDS_B);
+    expect(args[4]).toBeUndefined();
+    expect(getPortalSettingsSpy.calls).toEqual(['pb']);
+  });
+
+  it("draft path: a draft of A (own number + template) → A's template on A's creds", async () => {
+    integrationsByPartner.set('pa', CREDS_A);
+    integrationsByPartner.set('pb', CREDS_B);
+    draftsById.set('d_pa', { senderPhone: PHONE, partnerId: 'pa' });
+    const res = await requestOtp('d_pa');
+    expect(res.status).toBe(200);
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', CREDS_A, undefined, { name: 'a_login_code', lang: 'en_US' });
+    expect(getPortalSettingsSpy.calls).toEqual(['pa']);
   });
 });
