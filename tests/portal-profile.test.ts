@@ -299,6 +299,14 @@ describe('TOTP enrolment (step-up; partner brand issuer)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].subjectId).toBe(auditSubjectId('pa', phone));
   });
+  it('if signing out the other sessions fails, the notice says so (never claims the devices were signed out)', async () => {
+    h.sessions.revokeAll.mockRejectedValueOnce(new Error('redis down'));
+    const begun = await beginPortalMfaEnrolmentAction({ ok: false }, fd());
+    clock += 31_000;
+    const done = await confirmPortalMfaEnrolmentAction({ ok: false }, fd({ code: totpAt(base32Decode(begun.secret!), clock) }));
+    expect(done).toEqual({ ok: true, notice: 'portal.mfa.on_revoke_failed' });
+    expect(await cs.isMfaEnrolled('pa', phone)).toBe(true);
+  });
   it('a wrong code → one error, nothing enrolled; already enrolled → refused', async () => {
     await beginPortalMfaEnrolmentAction({ ok: false }, fd());
     expect(await confirmPortalMfaEnrolmentAction({ ok: false }, fd({ code: '000000' }))).toEqual({ ok: false, error: 'portal.mfa.invalid' });

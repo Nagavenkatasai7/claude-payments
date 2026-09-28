@@ -243,6 +243,7 @@ export const en = {
   'portal.mfa.link_label': 'Setup link for apps that accept one',
   'portal.mfa.turn_on': 'Turn on',
   'portal.mfa.on': 'Two-step verification is on. Your other devices were signed out.',
+  'portal.mfa.on_revoke_failed': "Two-step verification is on, but we couldn't sign out your other devices. Sign them out from Devices.",
   'portal.mfa.already': 'Two-step verification is already on.',
   'portal.mfa.invalid': 'That code is not valid. Check the time on your phone and try again.',
   'portal.mfa.throttled': 'Too many codes. Start the setup again.',

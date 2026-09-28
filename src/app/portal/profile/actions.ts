@@ -130,11 +130,19 @@ export async function confirmPortalMfaEnrolmentAction(_prev: PortalMfaState, for
   }
   if (outcome !== 'ok') return { ok: false, error: CONFIRM_ERROR[outcome] ?? 'portal.mfa.expired' };
   const sessions = getPortalSessionStore();
+  // The revoke is the point (a borrowed session must not outlive the new factor): if it fails the
+  // customer is told to sign the other devices out from Devices, never that it happened.
+  let revoked = true;
   try {
     await sessions.revokeAll(ctx.site.partnerId, ctx.session.phone, ctx.session.sid);
+  } catch (err) {
+    revoked = false;
+    logWarn('portal.profile.mfa_revoke', err instanceof Error ? err.name : 'error');
+  }
+  try {
     await sessions.markStepUp(ctx.token, ctx.site.partnerId, { totp: true });
   } catch (err) {
-    logWarn('portal.profile.mfa_sessions', err instanceof Error ? err.name : 'error');
+    logWarn('portal.profile.mfa_stepup', err instanceof Error ? err.name : 'error');
   }
   try {
     await recordCustomerMfaAudit('customer.mfa.enroll', key, { via: 'portal' });
@@ -142,5 +150,5 @@ export async function confirmPortalMfaEnrolmentAction(_prev: PortalMfaState, for
     logWarn('portal.profile.mfa_audit', err instanceof Error ? err.name : 'error');
   }
   revalidatePath(PROFILE_PATH);
-  return { ok: true, notice: 'portal.mfa.on' };
+  return { ok: true, notice: revoked ? 'portal.mfa.on' : 'portal.mfa.on_revoke_failed' };
 }
