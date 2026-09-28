@@ -7,12 +7,14 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
 import type { Staff } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 // UI redesign M3-2: the /partner shell (layout + nav). The M3-1 harness (real auth store on a fake
 // Redis, real partner store on PGlite), plus usePathname for the client sidebar. The layout is
 // chrome only: every page re-gates, and these tests pin both.
 const redis = fakeRedis();
 let pgPartnerStore: PartnerStore;
+let homeDb: Db;
 // The gate itself reads the partner (the suspended-partner bounce in getCurrentStaff), so the
 // failure is injected only on the layout's own brand lookup: every call after the first.
 let partnerLookupFails = false;
@@ -40,6 +42,21 @@ vi.mock('next/navigation', () => ({
   usePathname: () => pathname.current,
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
+// M3-3: the home page reads the ledger, channel health, integrations and API keys. Wire every
+// store getter to this test's PGlite so no render ever dials a real database.
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => homeDb }));
+vi.mock('@/lib/store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/store')>();
+  return { ...actual, getStore: () => actual.createStore(redis, homeDb) };
+});
+vi.mock('@/lib/partner-integrations-store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/partner-integrations-store')>();
+  return { ...actual, getPartnerIntegrationsStore: () => actual.createPartnerIntegrationsStore(homeDb) };
+});
+vi.mock('@/lib/partner-api-key', async (orig) => {
+  const actual = await orig<typeof import('@/lib/partner-api-key')>();
+  return { ...actual, getPartnerApiKeyStore: () => actual.createPartnerApiKeyStore(homeDb) };
+});
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
@@ -96,6 +113,7 @@ beforeEach(async () => {
   partnerLookups = 0;
   pathname.current = '/partner';
   const db = await freshDb();
+  homeDb = db;
   pgPartnerStore = createPartnerStore(db);
   await seedPartner(db, TENANT, 'Acme Remit Test');
   await seedPartner(db, OTHER, 'Other Brand Co');
