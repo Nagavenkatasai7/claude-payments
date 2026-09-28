@@ -1,0 +1,43 @@
+## Test keys
+
+A test key starts `sr_test_…`. It holds exactly these scopes:
+
+- `corridors:read`
+- `quote`
+- `beneficiaries:validate`
+- `transactions:read`
+- `transactions:write`
+
+It never holds `rates:read`, `rates:write`, `beneficiaries:write` or `settlements:read`; those calls get `403` with a test key.
+
+## Sandbox transactions
+
+- A test key only ever creates and sees **sandbox** transactions. A live key never sees them, and a test key never sees live ones (`404`).
+- A sandbox transaction always settles on the platform's mock rail, after a short delay, whatever settlement rail your account is set up with. It is never sent to a real payout rail.
+- Sandbox transactions never message a real customer or recipient, and can never be paid on the hosted pay page.
+- Sanctions screening still runs on every sandbox transaction, exactly as it does on live ones.
+- Idempotency keys are kept per environment: the same `Idempotency-Key` used with a test key and with a live key creates two separate transactions.
+
+A minimal sandbox run:
+
+```bash
+curl -X POST https://smartremit.ai/api/partner/v1/transactions \
+  -H "Authorization: Bearer $TEST_KEY" \
+  -H "Idempotency-Key: 5f0c8a3e-2b7d-4e61-9a4f-0d3b8c1e7a52" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount_source": 200,
+    "source_currency": "USD",
+    "sender":      { "phone": "+12025550142", "name": "Jane Doe", "kyc_status": "verified" },
+    "beneficiary": { "name": "Anita Sharma", "phone": "+12025550143",
+                     "payout_method": "bank", "payout_destination": "123456789012|HDFC0001234" }
+  }'
+```
+
+Then confirm it with `POST /transactions/{id}/confirm` and read it back with `GET /transactions/{id}` until it is delivered.
+
+## The reference rail
+
+Before your own rail is ready, your account can be pointed at the hosted **reference rail**. It runs the exact loop a production rail would: it receives the signed settlement instruction, verifies the signature, acknowledges it with a provider reference, and later sends a signed status callback. Use it to prove your understanding of the loop described in <GuideLink slug="webhooks">Webhooks</GuideLink>. Ask SmartRemit to enable it for your account.
+
+To exercise the failure path on the reference rail, pay out to a bank account of all zeros (for India: account `000000000000`, IFSC `HDFC0001234`). The reference rail acknowledges the instruction, then reports `failed` with reason `account_unreachable`.

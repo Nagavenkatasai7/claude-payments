@@ -36,6 +36,22 @@ describe('docs FACTS equal the source constants', () => {
     expect(FACTS.railAckTimeoutSec).toBe(ms / 1000);
   });
 
+  it('settlement endpoint limits: ack size, redirects, providerRef length, failure reason length', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    const sf = await import('@/lib/safe-fetch');
+    const hp = await import('@/lib/providers/http-payment-provider');
+    expect(FACTS.ackMaxKb).toBe(sf.MAX_ACK_BYTES / 1024);
+    expect(FACTS.maxRedirects).toBe(sf.MAX_REDIRECTS);
+    expect(FACTS.providerRefMaxChars).toBe(num(extract('src/lib/settlement-url.ts', /\/\^\[A-Za-z0-9\._:-\]\{1,(\d+)\}\$\//)));
+    expect(FACTS.failureReasonMaxChars).toBe(hp.RAIL_FAILURE_REASON_MAX);
+  });
+
+  it('new-sender observation window (days) equals OBSERVATION_WINDOW_MS', async () => {
+    const { FACTS } = await import('@/content/docs/facts');
+    const { OBSERVATION_WINDOW_MS } = await import('@/lib/tier-rules');
+    expect(FACTS.newSenderObservationDays).toBe(OBSERVATION_WINDOW_MS / (24 * 60 * 60 * 1000));
+  });
+
   it('secret rotation overlap (days) equals RAIL_SECRET_GRACE_MS', async () => {
     const { FACTS } = await import('@/content/docs/facts');
     const { RAIL_SECRET_GRACE_MS } = await import('@/lib/partner-integrations');

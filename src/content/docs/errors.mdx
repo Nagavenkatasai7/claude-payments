@@ -1,0 +1,30 @@
+## Error format
+
+Every error is JSON with a single message:
+
+```json
+{ "error": "This key cannot perform this action." }
+```
+
+**Match on the HTTP status code, not the message text.** Messages are for people and may be reworded.
+
+## Common statuses
+
+| Status | Meaning | What to do |
+| --- | --- | --- |
+| `400` | The request is invalid (a missing or malformed field, or a missing `Idempotency-Key`). | Fix the request. A corrected retry may reuse the same `Idempotency-Key`. |
+| `401` | The key is missing, unknown or revoked. The message is the same in each case. | Check the `Authorization` header and the key. |
+| `403` | The key lacks the scope for this endpoint, or your account is not active. | Use a key with the right scope. |
+| `404` | Not found, including a record that belongs to another account or the other environment. You never get `403` for someone else's record. | Check the ID and which key you used. |
+| `409` | `Idempotency-Key` conflict. | Retry with a new key. |
+| `422` | Refused by a business rule: screening, the sender's limit, the sender's KYC status, or a masked payout account. | Read the message and the transaction's `status`; do not retry unchanged. |
+| `429` | Rate limit exceeded. | Wait for the `Retry-After` header, then retry with jitter. |
+| `503` | Live exchange rates are briefly unavailable, or another transfer for the same sender is in progress. Nothing was created. | Retry later. A `POST /transactions` retry may reuse its `Idempotency-Key`. |
+
+A `422` from screening still records the attempt as a `blocked` transaction: a repeat with the same `Idempotency-Key` returns it with `200`. Always read `status` and `compliance_status` in the body, not only the status code.
+
+## Statuses per endpoint
+
+Every status each endpoint can return:
+
+<ErrorStatusTable />

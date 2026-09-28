@@ -1,0 +1,14 @@
+## Limits
+
+- **<Fact name="partnerRateLimitPerMin" /> requests per minute per partner**, shared by all of your keys, live and test together.
+- Each key is also capped at <Fact name="partnerRateLimitPerMin" /> requests per minute on its own.
+- The window is a fixed calendar minute (UTC), not a rolling 60 seconds: the count resets at the start of each minute.
+
+## What counts
+
+- Every request with a valid key counts, including requests answered `403` or `429`. The scope check runs after the rate limiter, so calls a key is not allowed to make still spend budget.
+- A request refused with `401` (missing, unknown or revoked key) is not counted.
+
+## When you are limited
+
+Over the limit you get `429` with the body `{ "error": "Rate limit exceeded." }` and a `Retry-After` header of <Fact name="rateLimitRetryAfterSec" /> seconds, whatever is left of the minute. Back off before retrying, and add random jitter so your workers do not all retry at the same moment.

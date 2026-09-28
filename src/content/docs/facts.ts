@@ -17,6 +17,16 @@ export const FACTS = {
   outboxBackoffCapSec: 3600,
   /** src/lib/providers/http-payment-provider.ts RAIL_TIMEOUT_MS / 1000. */
   railAckTimeoutSec: 15,
+  /** src/lib/safe-fetch.ts MAX_ACK_BYTES / 1024 (the settlement acknowledgement cap). */
+  ackMaxKb: 64,
+  /** src/lib/safe-fetch.ts MAX_REDIRECTS (same-origin 307/308 only). */
+  maxRedirects: 2,
+  /** src/lib/settlement-url.ts safeProviderRef: the providerRef length cap. */
+  providerRefMaxChars: 128,
+  /** src/lib/providers/http-payment-provider.ts RAIL_FAILURE_REASON_MAX (longer is cut). */
+  failureReasonMaxChars: 200,
+  /** src/lib/tier-rules.ts OBSERVATION_WINDOW_MS in days (new-sender window). */
+  newSenderObservationDays: 3,
   /** src/lib/partner-integrations.ts RAIL_SECRET_GRACE_MS in days. */
   secretRotationOverlapDays: 7,
   /** src/lib/stale-money.ts UNPAID_LINK_EXPIRY_DAYS. */

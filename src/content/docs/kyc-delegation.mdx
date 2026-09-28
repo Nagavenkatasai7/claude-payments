@@ -1,0 +1,28 @@
+## Two KYC modes
+
+- **Delegated mode.** You run identity verification (KYC) yourself and attest the result on each transaction. SmartRemit trusts your attestation.
+- **Built-in mode.** SmartRemit runs tiered identity verification for your customers.
+
+Your mode is set for your account at onboarding.
+
+**Sanctions screening is never delegable.** It always runs on SmartRemit's side, on every transaction, in both modes and in the sandbox, and it cannot be switched off. A screening hit returns `422` and the attempt is recorded as `blocked`. In today's demonstration, screening runs against a built-in reference rule set, not yet a live commercial screening feed.
+
+## Attesting with `sender.kyc_status`
+
+On `POST /transactions`, `sender.kyc_status` is your attestation. It must be one of the five values below, exactly as written (lowercase). Any other value, or no value, counts as `not_started`, so always send it explicitly.
+
+Whether an unverified sender may send at all depends on your account's **verify-before-send** setting, which is off unless it was turned on for you.
+
+| `kyc_status` | Verify-before-send off | Verify-before-send on |
+| --- | --- | --- |
+| `verified` | Sends. | Sends. |
+| `grandfathered` | Sends. | Refused (`422`). |
+| `not_started` | Sends. | Refused (`422`). |
+| `pending` | Sends. | Refused (`422`). |
+| `rejected` | Refused (`422`). | Refused (`422`). |
+
+## Limits and review
+
+- Every new sender starts with a <Fact name="newSenderObservationDays" />-day observation window, counted from when we first see them, even if you attest `verified`. During it a lower daily limit applies; after it, the higher limit applies to every sender who can send.
+- A transfer over the sender's current limit is refused with `422`. The response does not include the limit figures.
+- Always send `sender.name` as well. A transaction created without it is held for manual review: it is created with `compliance_status` `flagged`, and confirming it returns `in_review` until compliance staff release it. `sender.name` will become required in a future version.

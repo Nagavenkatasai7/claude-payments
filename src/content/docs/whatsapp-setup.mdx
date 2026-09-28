@@ -1,0 +1,35 @@
+## Bring your own number
+
+Your customers can chat with the assistant on your own WhatsApp Business number, under your brand.
+
+1. In your dashboard, enter your number's phone-number ID, access token, verify token and app secret.
+2. Point your Meta app's webhook at the callback URL shown on your dashboard's partner page, using the verify token you entered.
+3. Send your number a message. Inbound messages on your number are routed to your account, and replies, sign-in codes and delivery notices leave from your number under your brand.
+
+Meta's own setup steps are in the [WhatsApp Business Platform documentation](https://developers.facebook.com/docs/whatsapp/).
+
+## Message templates
+
+WhatsApp only lets a business start a conversation, or write to someone who has not messaged it in the last 24 hours, with a **message template** that Meta has approved. Create each template in [WhatsApp Manager](https://business.facebook.com/) for your own WhatsApp Business account, **exactly** as listed below: the same name, the same category and the language **English** (code `en`, not `en_US`). A template approved under a different name or language fails, and the message falls back to plain text, which only reaches someone who messaged your number in the last 24 hours.
+
+Where a template below shows `[Your brand]`, submit it with your own brand name. Every `{{n}}` variable needs a sample value when you submit; the samples below are safe to use.
+
+<TemplateCatalog />
+
+- **Sent today**: submit these before you go live. `transfer_delivered` is the minimum; without it recipients outside the 24-hour window are not told their money arrived.
+- **Optional (configured)**: the verification-status and verification-code templates are used once they are approved and set up for your account at onboarding. Until then the same message is sent as plain text.
+- **Planned, not sent yet**: do not submit these until this page says so.
+
+## Submission order
+
+If Meta decides a template submitted as Utility is really marketing, it can re-categorise it without notice and block new Utility templates on your whole WhatsApp Business account for 7 days. To keep the risk low:
+
+1. Submit the authentication template and the plain transactional ones first.
+2. Then the templates with a URL button.
+3. Submit reminder-style templates last.
+
+Keep every template strictly transactional, with no promotional wording.
+
+## Before you go live
+
+Your WhatsApp credentials are saved, the webhook is verified, and at least `transfer_delivered` is approved. See the <GuideLink slug="go-live">go-live checklist</GuideLink>.
