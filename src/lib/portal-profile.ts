@@ -78,14 +78,20 @@ export function profileView(c: Customer): ProfileView {
  * = the keyed customer id, meta = the field NAMES and `by: 'customer'`. Awaited and not caught by the
  * page: if the audit write fails, the page fails rather than show identity without a record.
  */
-export async function recordPortalPiiView(db: DbOrTx, partnerId: PartnerId, phone: string, fields: readonly string[]): Promise<void> {
+export async function recordPortalPiiView(
+  db: DbOrTx,
+  partnerId: PartnerId,
+  phone: string,
+  fields: readonly string[],
+  via: 'portal.profile' | 'portal.notifications' = 'portal.profile',
+): Promise<void> {
   await createAuditRepo(db).record({
     partnerId,
     actor: PORTAL_AUTH_ACTOR,
     actorType: 'system',
     action: 'pii.view',
     subjectId: auditSubjectId(partnerId, phone),
-    meta: { fields: [...fields], by: 'customer', via: 'portal.profile' },
+    meta: { fields: [...fields], by: 'customer', via },
   });
 }
 
