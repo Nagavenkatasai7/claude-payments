@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { FACTS } from '@/content/docs/facts';
@@ -108,5 +108,23 @@ describe('mdx-components', () => {
     const { useMDXComponents } = await import('@/mdx-components');
     const T = useMDXComponents().table as (p: object) => React.ReactElement;
     expect(html(T({}))).toMatch(/^<div class="[^"]*overflow-x-auto[^"]*"><table/);
+  });
+});
+
+describe('<Fact> array keys (PR #385 review round 1)', () => {
+  it('a repeated array value renders every item without a duplicate-key warning', async () => {
+    vi.resetModules();
+    vi.doMock('@/content/docs/facts', () => ({ FACTS: { dup: ['a:', 'a:', 'b:'] } }));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { Fact } = await import('@/components/docs/mdx-blocks');
+      const out = html(createElement(Fact, { name: 'dup' as never }));
+      expect(out.replace(/<[^>]+>/g, '')).toBe('a:, a:, b:');
+      expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/i);
+    } finally {
+      errors.mockRestore();
+      vi.doUnmock('@/content/docs/facts');
+      vi.resetModules();
+    }
   });
 });

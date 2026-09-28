@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 // UI redesign M4 PR-3: next.config.ts is wrapped with @next/mdx so the partner guides
 // (src/content/docs/*.mdx) compile at build. The wrap changes the build for every route, so
 // this pins that it ONLY adds the .mdx loader: headers (incl. the enforced CSP), redirects and
 // every other config key are unchanged, and pageExtensions is NOT touched (no .mdx routes).
 // @next/mdx behaviour read from node_modules/@next/mdx/index.js (16.3.5).
+
+// The remark plugins, in order: GFM (tables, task lists) by package name, then the local guard that
+// refuses MDX expressions / ESM / unknown components (PR #385 review round 1), by absolute path.
+const REMARK = ['remark-gfm', resolve('src/lib/mdx/remark-no-mdx-expressions.mjs')];
 
 const loadConfig = async () => (await import('../next.config')).default;
 
@@ -50,7 +55,7 @@ describe('next.config after the MDX wrap', () => {
     expect(readFileSync('next.config.ts', 'utf8')).toMatch(/createMDX\(/);
   });
 
-  it('the webpack hook adds one .mdx rule with remark-gfm and resolves src/mdx-components first', async () => {
+  it('the webpack hook adds one .mdx rule with remark-gfm + the expression guard and resolves src/mdx-components first', async () => {
     const cfg = await loadConfig();
     const wp = { resolve: { alias: {} as Record<string, unknown> }, module: { rules: [] as Array<{ test: RegExp; use: unknown[] }> } };
     // A minimal stand-in for webpack's config and options (only the fields @next/mdx touches).
@@ -60,11 +65,11 @@ describe('next.config after the MDX wrap', () => {
     expect(rule.test.test('guide.mdx')).toBe(true);
     for (const f of ['page.tsx', 'README.md', 'route.ts']) expect(rule.test.test(f)).toBe(false);
     const loader = rule.use[1] as { options: { remarkPlugins: unknown[] } };
-    expect(loader.options.remarkPlugins).toEqual(['remark-gfm']);
+    expect(loader.options.remarkPlugins).toEqual(REMARK);
     expect((wp.resolve.alias['next-mdx-import-source-file'] as string[])[0]).toBe('private-next-root-dir/src/mdx-components');
   });
 
-  it('under Turbopack (the `next build` default) it adds one .mdx rule with remark-gfm by name', async () => {
+  it('under Turbopack (the `next build` default) it adds one .mdx rule with remark-gfm + the expression guard', async () => {
     vi.stubEnv('TURBOPACK', '1');
     const cfg = await loadConfig();
     const rules = cfg.turbopack?.rules ?? {};
@@ -72,7 +77,18 @@ describe('next.config after the MDX wrap', () => {
     const [rule] = rules['{*,next-mdx-rule}'] as Array<{ condition: { path: RegExp }; loaders: Array<{ options: { remarkPlugins: unknown[] } }> }>;
     expect(rule.condition.path.test('guide.mdx')).toBe(true);
     expect(rule.condition.path.test('page.tsx')).toBe(false);
-    expect(rule.loaders[0].options.remarkPlugins).toEqual(['remark-gfm']);
+    expect(rule.loaders[0].options.remarkPlugins).toEqual(REMARK);
     expect(cfg.pageExtensions).toBeUndefined();
+  });
+});
+
+describe('the expression-guard plugin path in next.config resolves to the tested module', () => {
+  it('is an absolute path to an existing file the loader can import', async () => {
+    const { existsSync } = await import('node:fs');
+    const { isAbsolute } = await import('node:path');
+    expect(isAbsolute(REMARK[1])).toBe(true);
+    expect(existsSync(REMARK[1])).toBe(true);
+    const mod = await import(REMARK[1]);
+    expect(typeof mod.default).toBe('function');
   });
 });

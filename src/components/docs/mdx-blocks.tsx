@@ -23,8 +23,9 @@ export function Fact({ name }: { name: FactName }) {
   if (Array.isArray(value))
     return (
       <>
+        {/* A static, never-reordered list: the position is a stable key even if a value repeats. */}
         {value.map((v: string, i) => (
-          <span key={v}>
+          <span key={`${i}:${v}`}>
             {i > 0 ? ', ' : null}
             <code className={CODE}>{v}</code>
           </span>
