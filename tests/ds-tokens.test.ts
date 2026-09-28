@@ -1,8 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 const css = readFileSync('src/app/tailwind.css', 'utf8');
-const landing = readFileSync('src/app/page.tsx', 'utf8');
+/** The landing = src/app/page.tsx plus every file under src/app/landing/ (the owner-set final design). */
+function landingSources(dir: string, out: string[] = []): string[] {
+  for (const n of readdirSync(dir).sort()) {
+    const p = join(dir, n);
+    if (statSync(p).isDirectory()) landingSources(p, out);
+    else if (/\.tsx?$/.test(n)) out.push(p);
+  }
+  return out;
+}
+const landing = ['src/app/page.tsx', ...landingSources('src/app/landing')].map((f) => readFileSync(f, 'utf8')).join('\n');
 
 /** All `--name: value;` declarations inside the FIRST block that starts with `selector {`. */
 function block(selector: string, from = 0): Map<string, string> {
@@ -68,6 +78,10 @@ const EXTRACTED: Array<[token: string, value: string, landingNeedle: string]> = 
   ['--ds-icon-bg', '#e3f6ee', 'bg-[#e3f6ee] text-[#047857] ring-1 ring-[#bfe8d3]'],
   ['--ds-success-bg', '#e8f7ef', 'border-[#a7e3c6] bg-[#e8f7ef]'],
   ['--ds-danger-bg', '#fdecec', 'border-[#f5c2c2] bg-[#fdecec]'],
+  // Warning set: the "Review" status tag in src/app/landing/showcase.tsx (142, 152).
+  ['--ds-warning-ink', '#b45309', "tag: 'Review', cls: 'text-[#b45309] border-[#f5d49c] bg-[#fff4e5]'"],
+  ['--ds-warning-border', '#f5d49c', "tag: 'Review', cls: 'text-[#b45309] border-[#f5d49c] bg-[#fff4e5]'"],
+  ['--ds-warning-bg', '#fff4e5', "tag: 'Review', cls: 'text-[#b45309] border-[#f5d49c] bg-[#fff4e5]'"],
 ];
 
 describe('--ds-* tokens are extracted from the landing', () => {
@@ -120,6 +134,7 @@ describe('--ds-* tokens are extracted from the landing', () => {
     expect(theme).toContain('--color-ds-primary: var(--ds-primary);');
     expect(theme).toContain('--radius-ds-card: var(--ds-radius-card);');
     expect(theme).toContain('--shadow-ds-primary: var(--ds-shadow-primary);');
+    for (const k of ['warning-ink', 'warning-bg', 'warning-border']) expect(theme).toContain(`--color-ds-${k}: var(--ds-${k});`);
     expect(theme).not.toMatch(/--font-sans:|--color-primary:|--radius-lg:/);
   });
   it('.ds-site is a box-less scope (like .account-brand)', () => {
