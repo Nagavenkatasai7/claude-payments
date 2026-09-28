@@ -1,0 +1,72 @@
+## What you get
+
+SmartRemit is remittance infrastructure for licensed money transmitters. Your customers chat with a WhatsApp assistant under your brand, and you integrate through the Partner API, signed settlement instructions and signed status callbacks. SmartRemit never holds funds: you, the licensed partner, move the money.
+
+## Keys and environments
+
+Every request carries your API key as a bearer token:
+
+```http
+Authorization: Bearer sr_test_…
+```
+
+- A **test** key starts `sr_test_…` and only ever creates and sees sandbox transactions. See <GuideLink slug="sandbox">Sandbox</GuideLink>.
+- A **live** key starts `sr_live_…`. Live keys are issued at the end of the <GuideLink slug="go-live">go-live checklist</GuideLink>.
+- The mode comes from the key itself. The whole key, prefix included, is what we verify, so editing the prefix only makes the key invalid (`401`).
+- A key is shown once, when it is issued on your dashboard's partner page. It does not expire. Keep it on your server, never in a browser or an app.
+- To rotate a key, issue a new one, move your traffic to it, then revoke the old one.
+
+## Base URL
+
+```text
+https://smartremit.ai/api/partner/v1
+```
+
+All requests and responses are JSON. Errors are JSON too; see <GuideLink slug="errors">Errors</GuideLink>.
+
+## Endpoints and scopes
+
+Each endpoint needs one scope. A key is issued with every scope its mode allows.
+
+| Endpoint | Scope | Test key |
+| --- | --- | --- |
+| `GET /corridors` | `corridors:read` | Yes |
+| `POST /quote` | `quote` | Yes |
+| `POST /beneficiaries/validate` | `beneficiaries:validate` | Yes |
+| `POST /beneficiaries` | `beneficiaries:write` | No |
+| `POST /transactions` | `transactions:write` | Yes (sandbox only) |
+| `GET /transactions` | `transactions:read` | Yes (sandbox only) |
+| `GET /transactions/{id}` | `transactions:read` | Yes (sandbox only) |
+| `POST /transactions/{id}/confirm` | `transactions:write` | Yes (sandbox only) |
+| `PUT /rates` | `rates:write` | No |
+| `GET /rates` | `rates:read` | No |
+| `GET /settlements` | `settlements:read` | No |
+
+A request outside the key's scopes gets `403`. The API reference in these docs lists every field and status code for each endpoint.
+
+## Your first calls
+
+Start by listing the corridors your account can send on:
+
+```bash
+curl https://smartremit.ai/api/partner/v1/corridors \
+  -H "Authorization: Bearer $KEY"
+```
+
+Then price a transfer. Nothing is stored by a quote:
+
+```bash
+curl -X POST https://smartremit.ai/api/partner/v1/quote \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "amount_source": 200, "source_currency": "USD", "destination_country": "IN" }'
+```
+
+The response carries the fee, the total charge, the exchange rate and the amount the recipient receives. A `503` means live exchange rates are briefly unavailable; nothing was stored, so retry later.
+
+## Next steps
+
+1. Create a sandbox transaction with a test key: <GuideLink slug="sandbox">Sandbox</GuideLink>.
+2. Build your settlement endpoint and status callbacks: <GuideLink slug="webhooks">Webhooks</GuideLink>.
+3. Retry safely: <GuideLink slug="idempotency">Idempotency</GuideLink>.
+4. Work through the <GuideLink slug="go-live">go-live checklist</GuideLink>.

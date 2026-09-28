@@ -1,0 +1,27 @@
+## The `Idempotency-Key` header
+
+`POST /transactions` requires an `Idempotency-Key` header; without it the request gets `400`. It makes creating a transaction safe to retry after a timeout or a dropped connection.
+
+No other endpoint is idempotent. In particular, retrying `POST /beneficiaries` stores a second beneficiary.
+
+## Choosing a key
+
+- Use a fresh random UUID per transaction, and put no personal data in it. We recommend at most 255 characters (a recommendation, not an enforced limit).
+- Keys are kept indefinitely, per partner and per environment. The sandbox and live namespaces never collide: the same key sent with a test key and with a live key creates two separate transactions.
+- These prefixes are reserved and refused with `400`: <Fact name="reservedIdempotencyPrefixes" />.
+
+## Replays
+
+- **Once a transaction exists under a key, every request with that key and a valid body returns that same transaction**: `200` with the same `id` and its current state (not a copy of the first response). A concurrent duplicate can also get `201` for the same `id`, or a retryable `503`.
+- **The body is validated but not compared.** A different body that passes validation returns the original transaction and is not applied; one that fails validation is refused as usual. Never reuse a key for a different transfer.
+- This includes a transaction blocked by screening: the first request gets `422`, and a repeat with the same key gets `200` with the blocked transaction. Always read `status` and `compliance_status` in the body.
+- If a request failed with any error other than `409` and no transaction was created, a retry with the same key is validated again from scratch using the body you send then, and creates the transaction if it now succeeds.
+- `409` means the key can no longer be used. Retry with a new key.
+
+## The key locks the payout account
+
+Every transaction is bound to its `Idempotency-Key` before it is created, and that binding locks the beneficiary's payout account: a payer can never change the account of a transaction created through the API. A `payout_destination` that is a masked display value (for example `****1234`) is refused with `422` before the key is bound.
+
+## Unpaid transactions expire
+
+A transaction still awaiting payment <Fact name="unpaidExpiryDays" /> days after it was created expires: its status becomes `cancelled` and it can no longer be paid. Retrying with its key returns the cancelled transaction; create a new one with a new key.

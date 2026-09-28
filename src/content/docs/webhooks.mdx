@@ -1,0 +1,105 @@
+## Two directions
+
+- **Settlement instructions (us to you).** When a transfer is paid, SmartRemit sends a signed instruction to your settlement endpoint telling your rail to pay out.
+- **Status callbacks (you to us).** Your rail reports the transfer's progress back to SmartRemit, signed with your webhook secret.
+
+Both directions use the same timestamped signature, described below.
+
+## Settlement instructions
+
+SmartRemit sends a `POST` to your settlement endpoint:
+
+```http
+POST https://partner.example.com/settlements
+x-smartremit-signature: t=1790000000,v1=5d2e…
+Content-Type: application/json
+
+{
+  "reference": "tr_abc123",
+  "partner_id": "acme",
+  "corridor": { "source": "US", "destination": "IN" },
+  "payout":   { "rail": "bank", "destination": "123456789012|HDFC0001234" },
+  "recipient":{ "name": "Anita Sharma", "phone": "+12025550143" },
+  "amount": {
+    "source": 200, "currency": "USD",
+    "destination": 16600, "destination_currency": "INR",
+    "fx_rate": 83
+  }
+}
+```
+
+- `reference` is our transfer ID. Echo it in your status callbacks.
+- The instruction is **at least once**: deduplicate on `reference`, so a retry can never pay out twice.
+- Answer `2xx`, optionally with a JSON body carrying `providerRef` (your reference, stored once against the transfer).
+- Instructions also carry an additive `compliance` object with the originator, beneficiary, purpose and screening summary. Ignore unknown keys, and do not reject an instruction that lacks it.
+
+### Reversals
+
+A cancelled transfer whose funds your rail pulled gets a signed **reverse** instruction. It has `"action": "reverse"` and its own `reference`, distinct from the original instruction's, so your rail can tell a reverse from a replay. A reverse for a debit that never happened must be a no-op on your side.
+
+### Ack deadline
+
+We wait at most <Fact name="railAckTimeoutSec" /> seconds for your `2xx`. A slower answer is treated as a failure and the same instruction is retried. Persist and acknowledge first, then process asynchronously.
+
+### Endpoint rules
+
+- A public `https://` host on port 443. No IP addresses, no internal or single-label host names, no credentials in the URL.
+- We follow at most <Fact name="maxRedirects" /> redirects, and only `307` or `308` to the same origin. A `301`, `302` or `303` would turn the signed `POST` into a `GET`, so it is refused.
+- Your acknowledgement must be <Fact name="ackMaxKb" /> KB or less, uncompressed. `providerRef` is at most <Fact name="providerRefMaxChars" /> characters of letters, digits and `. _ : -`.
+
+An endpoint that breaks these rules is refused before the instruction is sent; the instruction is retried, so fix the endpoint on your dashboard and the retries pick it up.
+
+## Retries
+
+Instructions are delivered at least once. A failed attempt is retried with exponential backoff: roughly `2^n` seconds after the n-th attempt, capped at <Fact name="outboxBackoffCapSec" /> seconds between attempts. After <Fact name="outboxMaxAttempts" /> attempts the instruction stops retrying and SmartRemit's operations team is alerted to resolve it with you.
+
+## Status callbacks
+
+Report each transfer's status to the callback URL shown on your dashboard's partner page (it has the shape `https://smartremit.ai/api/payment-webhook/{provider}`), signed with your webhook secret:
+
+```http
+POST https://smartremit.ai/api/payment-webhook/acme-rail
+x-smartremit-signature: t=1790000000,v1=9c44…
+Content-Type: application/json
+
+{ "reference": "tr_abc123", "status": "paid_out",
+  "amount": { "destination": 16600, "destination_currency": "INR" } }
+```
+
+| Status | Meaning |
+| --- | --- |
+| `created` | Awaiting payment (no change). |
+| `funded` | Paid: the customer was charged on your side. |
+| `paid_out` | Delivered. Triggers the delivery notifications. |
+| `failed` | Cancelled. If SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
+| `returned` | Cancelled, as for `failed`: if SmartRemit captured the charge it is refunded; a partner-pulled debit gets a signed `reverse`; otherwise you return the funds on your side. The customer is told. |
+
+- The state machine only moves forward, so replays and out-of-order callbacks are safe.
+- A `failed` or `returned` may carry an optional `reason` string. It is stored on the transfer for your operations team and ours, cut to <Fact name="failureReasonMaxChars" /> characters.
+- A `failed` after `paid_out` is recorded for operations and never reverses a delivery. A `paid_out` after `failed` is refused and the transfer stays cancelled.
+- **Echo the amount on `paid_out`.** Send back the `amount.destination` and `destination_currency` from our instruction. If they differ, the transfer is not marked delivered: it is held for our operations team, who resolve it with you, and we answer with `"held": true` so you stop retrying. A `paid_out` with no `amount` is accepted for now but is deprecated.
+- Unsigned, mis-signed and out-of-window callbacks are rejected with `401`.
+
+## Signatures
+
+Every instruction and every callback carries:
+
+```text
+x-smartremit-signature: t=<unix seconds>,v1=<hex>
+v1 = hex( HMAC-SHA256( secret, t + "." + rawBody ) )
+```
+
+Use your **signing secret** to verify our instructions, and your **webhook secret** to sign your callbacks. To verify:
+
+```text
+signed   = t + "." + rawBody          (the exact bytes received)
+expected = hex(HMAC_SHA256(secret, signed))
+valid    = |now - t| within the tolerance
+           AND some v1 in the header equals expected (constant-time compare)
+```
+
+- The tolerance is <Fact name="signatureToleranceSec" /> seconds either side of now. Reject anything outside it.
+- Compare in constant time.
+- Keep a record of the messages you have processed (for example a hash of `t.rawBody`) for at least 15 minutes, and answer a repeat with `2xx` without acting on it. We do the same.
+- **Secret rotation.** When a secret is changed, the old one stays valid for <Fact name="secretRotationOverlapDays" /> days. During that time our instructions carry one `v1` per active secret: accept the message if any of them matches. Your callbacks may be signed with either secret.
+- **Deprecated:** the older `x-signature` header (an HMAC of the raw body with no timestamp) is still sent, and still accepted when `x-smartremit-signature` is absent. It will be retired, so verify the timestamped header now. When both are present, `x-smartremit-signature` alone decides.
