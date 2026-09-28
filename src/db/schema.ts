@@ -15,6 +15,7 @@ import {
   uuid,
   smallint,
   customType,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -839,5 +840,81 @@ export const partnerSites = pgTable(
     // so such a slug could never be served as <slug>.smartremit.ai.
     check('partner_sites_slug_not_reserved', sql`${t.slug} !~ '^..--'`),
     check('partner_sites_accent_format', sql`${t.accentColor} ~ '^#[0-9a-f]{6}$'`),
+  ],
+);
+
+// UI redesign M2-3 (migration 0027, MIGRATION-ONLY): customer portal tables. NEW TABLES ONLY, so
+// no existing select() changes shape during the rolling release. No reader or writer yet; the
+// portal PRs that read them merge only after /migrate-prod applies 0027.
+// Loop A (erasure) note: all three FKs are ON DELETE no action; once rows exist, the erasure
+// engine must purge these children first (or switch to cascade). Not decided here.
+
+/** Per-partner portal switches: the WhatsApp auth (OTP) template and when the portal went live. */
+export const partnerPortalSettings = pgTable(
+  'partner_portal_settings',
+  {
+    partnerId: text('partner_id').primaryKey().references(() => partners.id),
+    authTemplateName: text('auth_template_name'),
+    authTemplateLang: text('auth_template_lang'),
+    portalEnabledAt: timestamp('portal_enabled_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // The Meta template-name charset (1..512 chars), and a language code such as en or en_US.
+    // Length is a separate predicate: Postgres regex bounds cap at 255 ({1,512} is 2201B).
+    check(
+      'partner_portal_settings_template_name_format',
+      sql`${t.authTemplateName} ~ '^[a-z0-9_]+$' AND char_length(${t.authTemplateName}) <= 512`,
+    ),
+    check('partner_portal_settings_template_lang_format', sql`${t.authTemplateLang} ~ '^[a-z]{2}(_[A-Z]{2})?$'`),
+  ],
+);
+
+/**
+ * A deleted saved recipient stays deleted. A separate table, not a column on recipients (an added
+ * column would be selected by the build already in production before the migration is applied).
+ * The recipients row itself is never updated or deleted.
+ */
+export const recipientTombstones = pgTable(
+  'recipient_tombstones',
+  {
+    partnerId: text('partner_id').notNull(),
+    senderPhone: text('sender_phone').notNull(),
+    recipientPhone: text('recipient_phone').notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.senderPhone, t.recipientPhone] }),
+    foreignKey({
+      name: 'recipient_tombstones_recipient_fk',
+      columns: [t.partnerId, t.senderPhone, t.recipientPhone],
+      foreignColumns: [recipients.partnerId, recipients.senderPhone, recipients.recipientPhone],
+    }),
+  ],
+);
+
+/**
+ * Customer portal preferences. email_verified_tag is an HMAC tag of the verified address (the
+ * address itself stays only in customers.email_enc), so an email change voids verification.
+ */
+export const customerPortalPrefs = pgTable(
+  'customer_portal_prefs',
+  {
+    partnerId: text('partner_id').notNull(),
+    phone: text('phone').notNull(),
+    emailReceipts: boolean('email_receipts').notNull().default(false),
+    emailVerifiedAt: timestamp('email_verified_at', { withTimezone: true }),
+    emailVerifiedTag: text('email_verified_tag'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.partnerId, t.phone] }),
+    foreignKey({
+      name: 'customer_portal_prefs_customer_fk',
+      columns: [t.partnerId, t.phone],
+      foreignColumns: [customers.partnerId, customers.phone],
+    }),
   ],
 );

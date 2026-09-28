@@ -1,4 +1,6 @@
 import type { NextConfig } from 'next';
+import { resolve } from 'node:path';
+import createMDX from '@next/mdx';
 import { buildCsp } from './src/lib/csp';
 
 // Security headers on EVERY response (Stage 3; CSP enforced as of Stage 5e —
@@ -53,4 +55,19 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// Partner guides (UI redesign M4): src/content/docs/*.mdx are IMPORTED by the /docs-next
+// pages and compiled at build to server components (no client JS, no inline script, no CSP
+// change). The wrap only adds the .mdx loader (node_modules/@next/mdx/index.js): no
+// pageExtensions change, so no .mdx file becomes a route. remark-gfm (pipe tables, task
+// lists) is passed BY NAME for Turbopack (node_modules/next/dist/docs/01-app/02-guides/
+// mdx.md "Using Plugins with Turbopack"). Pinned by tests/next-config-headers.test.ts.
+// The second plugin is the local guard that refuses MDX expressions, ESM, expression attributes
+// and unknown components, so a guide can never evaluate code (e.g. an env var) at build time
+// (src/lib/mdx/remark-no-mdx-expressions.mjs). Passed as an absolute path string: the loader
+// require.resolve()s plugin strings from the .mdx file's directory, and `next build` runs from
+// the project root.
+const withMDX = createMDX({
+  options: { remarkPlugins: ['remark-gfm', resolve('src/lib/mdx/remark-no-mdx-expressions.mjs')] },
+});
+
+export default withMDX(nextConfig);
