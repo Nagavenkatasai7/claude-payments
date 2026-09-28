@@ -180,7 +180,7 @@ paths:
           application/json:
             example:
               country: IN
-              fields: { accountNumber: '000123456789', ifsc: HDFC0001234 }
+              fields: { accountNumber: '123456789012', ifsc: HDFC0001234 }
       responses:
         '200': { description: 'The fields are valid: { valid: true, payout_destination }.' }
         '400': { description: country is required. }
@@ -207,7 +207,7 @@ paths:
               name: Ravi Example
               country: IN
               payout_method: bank
-              fields: { accountNumber: '000123456789', ifsc: HDFC0001234 }
+              fields: { accountNumber: '123456789012', ifsc: HDFC0001234 }
       responses:
         '201': { description: 'Created: { id, name, country, payout_destination }.' }
         '400': { description: 'name is missing or not a clean name (1–80 characters, no brackets or control characters), payout_method is not bank, upi or usdc, or country is missing.' }
@@ -249,7 +249,7 @@ paths:
               beneficiary:
                 name: Ravi Example
                 payout_method: bank
-                payout_destination: 000123456789|HDFC0001234
+                payout_destination: 123456789012|HDFC0001234
       responses:
         '200':
           description: Replay of an existing Idempotency-Key (same transaction, current state).
