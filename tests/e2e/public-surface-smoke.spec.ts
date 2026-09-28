@@ -122,7 +122,7 @@ test('anonymous /account/login stays public (200, no redirect)', async ({ reques
 // loading.md "Status Codes"; .../04-functions/redirect.md). So this checks where
 // the browser lands, not the status: anonymous → /login, with nothing of the
 // partner page on screen. Every new /partner page is added to this list.
-for (const path of ['/partner', '/partner/security']) {
+for (const path of ['/partner', '/partner/security', '/partner/audit']) {
   test(`anonymous ${path} ends on /login and shows nothing of the partner app`, async ({ page, baseURL }) => {
     test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
     await page.goto(path);
@@ -176,9 +176,10 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
 
 // UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
 // every portal path is the brand-neutral root 404 (the portal layout's gate 404s before rendering).
-// M2-7 adds the transfers pages (a made-up id: the 404 is the host gate's, never a lookup); M2-11 the
-// profile and notifications pages and the email verify link.
+// M2-7 adds the transfers pages (a made-up id: the 404 is the host gate's, never a lookup); M2-8 the recipients pages;
+// M2-11 the profile and notifications pages and the email verify link.
 for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/transfers', '/portal/transfers/AbCdEf123456', '/portal/transfers/AbCdEf123456/receipt',
+  '/portal/recipients', '/portal/recipients/new',
   '/portal/profile', '/portal/notifications', '/portal/notifications/verify?token=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE']) {
   test(`apex ${path} is the neutral 404`, async ({ page }) => {
     const res = await page.goto(path);
