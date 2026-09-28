@@ -41,17 +41,20 @@ export function openCustomerEmail(customer: Pick<Customer, 'partnerId' | 'sender
 export interface KycView {
   label: MessageKey;
   tone: Tone;
-  /** Whether "Verify your identity" is offered (never for verified, in-review or rejected rows). */
+  /** Whether "Verify your identity" is offered (never for verified, in-review or rejected rows; a started but unfinished one resumes). */
   canStart: boolean;
 }
 
-const IN_REVIEW = new Set(['inquiry_started', 'pending_review', 'needs_review']);
+// `inquiry_started` is NOT in review: the customer opened the provider and may have closed it. It
+// resumes (as the legacy /account/verify allows); the portal-kyc rate limit caps repeat inquiries.
+const IN_REVIEW = new Set(['pending_review', 'needs_review']);
 
 /** The KYC status as the customer sees it (kycStatus is human-moved; the review state refines "pending"). */
 export function kycView(c: Pick<Customer, 'kycStatus' | 'kycReviewState'>): KycView {
   if (c.kycStatus === 'verified' || c.kycStatus === 'grandfathered') return { label: 'portal.kyc.status.verified', tone: 'success', canStart: false };
   if (c.kycStatus === 'rejected') return { label: 'portal.kyc.status.rejected', tone: 'danger', canStart: false };
   if (c.kycReviewState && IN_REVIEW.has(c.kycReviewState)) return { label: 'portal.kyc.status.review', tone: 'warning', canStart: false };
+  if (c.kycReviewState === 'inquiry_started') return { label: 'portal.kyc.status.started', tone: 'warning', canStart: true };
   return { label: 'portal.kyc.status.none', tone: 'neutral', canStart: true };
 }
 

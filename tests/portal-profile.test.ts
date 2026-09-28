@@ -148,6 +148,13 @@ describe('view model (pure)', () => {
     expect(kycView({ kycStatus: 'rejected' } as Customer)).toMatchObject({ canStart: false });
     expect(kycView({ kycStatus: 'not_started' } as Customer)).toMatchObject({ label: 'portal.kyc.status.none', canStart: true });
   });
+  it('a started but unfinished verification can be resumed (never stuck on "In review")', () => {
+    expect(kycView({ kycStatus: 'pending', kycReviewState: 'inquiry_started' } as Customer)).toMatchObject({
+      label: 'portal.kyc.status.started',
+      canStart: true,
+    });
+    expect(kycView({ kycStatus: 'pending', kycReviewState: 'needs_review' } as Customer)).toMatchObject({ label: 'portal.kyc.status.review', canStart: false });
+  });
   it('profileView masks phone, name and email and names the fields shown', async () => {
     const v = profileView((await cs.getCustomer('pa', phone))!);
     expect(v.phone).toBe(`••••${phone.slice(-4)}`);
