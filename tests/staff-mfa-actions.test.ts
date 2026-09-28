@@ -17,7 +17,7 @@ let auditStore: import('@/lib/audit-log-store').AuditLogStore;
 let clock = 1_700_000_015_000;
 const cookieJar = new Map<string, string>();
 
-vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor, requireStaff: async () => actor }));
+vi.mock('@/lib/auth', () => ({ requirePlatformAdmin: async () => actor, requireStaffSelf: async () => actor }));
 vi.mock('next/headers', () => ({
   cookies: async () => ({
     get: (n: string) => (cookieJar.has(n) ? { value: cookieJar.get(n)! } : undefined),

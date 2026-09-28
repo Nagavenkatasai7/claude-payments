@@ -19,6 +19,13 @@ describe('ConfirmDialog / Toaster', () => {
     expect(html).toMatch(/<button[^>]*bg-ds-danger-bg[^>]*type="submit"/);
     expect(html).toMatch(/minLength="10"/); // default minimum
   });
+  it('ConfirmDialog form without a reason (requireReason: false): no textarea, and confirm is enabled', async () => {
+    const { ConfirmDialogForm } = await import('@/components/ds/confirm-dialog');
+    const html = renderToStaticMarkup(createElement(ConfirmDialogForm, { confirmLabel: 'Delete', destructive: true, requireReason: false, action: async () => {} }));
+    expect(html).not.toContain('<textarea');
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*>Delete/);
+    expect(html).not.toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
+  });
   it('ConfirmDialog renders only its trigger when closed (nothing else in the page)', async () => {
     const { ConfirmDialog } = await import('@/components/ds/confirm-dialog');
     const html = renderToStaticMarkup(createElement(ConfirmDialog, {

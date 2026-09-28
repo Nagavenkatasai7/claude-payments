@@ -29,9 +29,9 @@ describe('decidePartnerAccess (SPEC §3 gate, pure)', () => {
   it('anonymous → /login', () => {
     expect(decidePartnerAccess(null, PARTNER_ANY, NO_MFA)).toEqual({ ok: false, redirectTo: '/login' });
   });
-  it('platform staff (no partnerId) → /admin-dashboard, for every policy and every role', () => {
+  it('platform staff (no partnerId) → /admin-dashboard, for every policy and every legacy role', () => {
     for (const p of ALL_POLICIES) {
-      for (const role of KNOWN_PARTNER_ROLES) {
+      for (const role of KNOWN_PARTNER_ROLES.filter((r) => r !== 'finance')) {
         expect(decidePartnerAccess(mk({ partnerId: undefined, role }), p, NO_MFA)).toEqual({
           ok: false,
           redirectTo: '/admin-dashboard',
@@ -50,7 +50,7 @@ describe('decidePartnerAccess (SPEC §3 gate, pure)', () => {
     });
   });
   it('an unknown role string → /login (fail closed, never a guess), even with MFA pending', () => {
-    for (const role of ['owner', 'finance', 'ADMIN', '', 'superadmin']) {
+    for (const role of ['owner', 'FINANCE', 'ADMIN', '', 'superadmin']) {
       expect(decidePartnerAccess(mk({ role: role as Staff['role'] }), PARTNER_ANY, NO_MFA)).toEqual({
         ok: false,
         redirectTo: '/login',
@@ -69,12 +69,32 @@ describe('decidePartnerAccess (SPEC §3 gate, pure)', () => {
     expect(PARTNER_ANY.roles).toEqual(KNOWN_PARTNER_ROLES);
   });
   it('the role sets per preset (a set, not a rank)', () => {
-    expect([...PARTNER_ANY.roles]).toEqual(['admin', 'agent', 'support']);
+    expect([...PARTNER_ANY.roles]).toEqual(['admin', 'agent', 'support', 'finance']);
     expect([...PARTNER_ADMIN.roles]).toEqual(['admin']);
     expect([...PARTNER_OPS.roles]).toEqual(['admin', 'agent']);
-    expect([...PARTNER_MONEY_READ.roles]).toEqual(['admin', 'agent']);
+    expect([...PARTNER_MONEY_READ.roles]).toEqual(['admin', 'agent', 'finance']);
     expect([...PARTNER_TICKETS.roles]).toEqual(['admin', 'agent', 'support']);
-    expect([...PARTNER_REPORTS.roles]).toEqual(['admin']);
+    expect([...PARTNER_REPORTS.roles]).toEqual(['admin', 'finance']);
+  });
+  it('a platform-scoped finance record → /login (never the /partner ↔ /admin-dashboard loop)', () => {
+    for (const p of ALL_POLICIES) {
+      expect(decidePartnerAccess(mk({ partnerId: undefined, role: 'finance' }), p, NO_MFA)).toEqual({ ok: false, redirectTo: '/login' });
+    }
+  });
+  it('M3-6: finance is admitted ONLY by PARTNER_ANY, PARTNER_MONEY_READ and PARTNER_REPORTS', () => {
+    const f = mk({ role: 'finance', partnerId: 'pa' });
+    for (const p of [PARTNER_ANY, PARTNER_MONEY_READ, PARTNER_REPORTS]) {
+      expect(decidePartnerAccess(f, p, NO_MFA)).toMatchObject({ ok: true, ctx: { partnerId: 'pa', role: 'finance' } });
+    }
+    for (const p of [PARTNER_ADMIN, PARTNER_OPS, PARTNER_TICKETS]) {
+      expect(decidePartnerAccess(f, p, NO_MFA)).toEqual({ ok: false, redirectTo: '/partner' });
+    }
+  });
+  it('M3-6: a finance member with MFA pending is sent to enrol first', () => {
+    expect(decidePartnerAccess(mk({ role: 'finance', partnerId: 'pa' }), PARTNER_MONEY_READ, { pending: true })).toEqual({
+      ok: false,
+      redirectTo: '/partner/security?enroll=1',
+    });
   });
   it('presets are frozen (no caller can widen a policy at runtime)', () => {
     for (const p of ALL_POLICIES) {

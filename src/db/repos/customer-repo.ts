@@ -3,7 +3,7 @@ import { customers } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
 import { decryptField, defaultProvider, encryptField, type EncryptionKeyProvider } from '@/lib/field-crypto';
 import { openOptional, sealOptional } from './mappers';
-import { customerRowCtx } from '@/lib/crypto-context';
+import { customerEmailCtx, customerRowCtx } from '@/lib/crypto-context';
 import { DEFAULT_PARTNER_ID, DEFAULT_SENDER_COUNTRY } from '@/lib/defaults';
 import { countryForPhone } from '@/lib/partner-currency';
 import type {
@@ -311,6 +311,21 @@ export function createCustomerRepo(
       const rows = await db
         .update(customers)
         .set({ phoneVerifiedAt: sql`COALESCE(${customers.phoneVerifiedAt}, now())`, updatedAt: new Date() })
+        .where(tenantKey(partnerId, senderPhone))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
+    /**
+     * UI redesign M2-11: the customer portal's email change. A single-column UPDATE of email_enc keyed
+     * (partner_id, phone), sealed under customerEmailCtx exactly as registration seals it, so no KYC,
+     * consent or MFA column is ever rewritten (never saveCustomer). Returns whether the row exists.
+     */
+    async setEmail(partnerId: PartnerId, senderPhone: string, email: string): Promise<boolean> {
+      const sealed = encryptField(email, provider, customerEmailCtx({ partnerId, senderPhone }));
+      const rows = await db
+        .update(customers)
+        .set({ emailEnc: sealed, updatedAt: new Date() })
         .where(tenantKey(partnerId, senderPhone))
         .returning({ phone: customers.phone });
       return rows.length > 0;

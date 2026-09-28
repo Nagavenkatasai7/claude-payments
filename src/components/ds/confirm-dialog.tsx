@@ -17,6 +17,8 @@ type FormProps = {
   destructive?: boolean;
   /** A cancel control (ConfirmDialog passes its Close button). */
   cancel?: React.ReactNode;
+  /** false: no typed reason (an action that is not destructive to money history). Default true. */
+  requireReason?: boolean;
 };
 
 function Submit({ label, ready, destructive }: { label: string; ready: boolean; destructive?: boolean }) {
@@ -29,34 +31,36 @@ function Submit({ label, ready, destructive }: { label: string; ready: boolean; 
 }
 
 /** The dialog's form body: a required typed reason, and confirm stays disabled until it is long enough. */
-export function ConfirmDialogForm({ confirmLabel, action, reasonMin = DEFAULT_REASON_MIN, destructive, cancel }: FormProps) {
+export function ConfirmDialogForm({ confirmLabel, action, reasonMin = DEFAULT_REASON_MIN, destructive, cancel, requireReason = true }: FormProps) {
   const [reason, setReason] = React.useState('');
   const id = `reason-${React.useId()}`;
   const hintId = `${id}-hint`;
   return (
     <form action={action} className="flex flex-col gap-4">
-      <div className="flex flex-col">
-        <label htmlFor={id} className="mb-1.5 text-[14px] font-semibold text-ds-ink">
-          {t('ds.dialog.reasonLabel')}
-        </label>
-        <textarea
-          id={id}
-          name="reason"
-          required
-          minLength={reasonMin}
-          rows={3}
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          aria-describedby={hintId}
-          className="min-h-[92px] w-full rounded-ds-inner border border-ds-border-input bg-ds-surface px-4 py-3 text-[15px] text-ds-ink placeholder:text-ds-ink-subtle focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-ds-focus-ring"
-        />
-        <p id={hintId} className="mt-1.5 text-[13px] text-ds-ink-muted">
-          {t('ds.dialog.reasonHint', { min: reasonMin })}
-        </p>
-      </div>
+      {requireReason ? (
+        <div className="flex flex-col">
+          <label htmlFor={id} className="mb-1.5 text-[14px] font-semibold text-ds-ink">
+            {t('ds.dialog.reasonLabel')}
+          </label>
+          <textarea
+            id={id}
+            name="reason"
+            required
+            minLength={reasonMin}
+            rows={3}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            aria-describedby={hintId}
+            className="min-h-[92px] w-full rounded-ds-inner border border-ds-border-input bg-ds-surface px-4 py-3 text-[15px] text-ds-ink placeholder:text-ds-ink-subtle focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-ds-focus-ring"
+          />
+          <p id={hintId} className="mt-1.5 text-[13px] text-ds-ink-muted">
+            {t('ds.dialog.reasonHint', { min: reasonMin })}
+          </p>
+        </div>
+      ) : null}
       <div className="flex flex-wrap justify-end gap-2">
         {cancel}
-        <Submit label={confirmLabel} ready={isReasonValid(reason, reasonMin)} destructive={destructive} />
+        <Submit label={confirmLabel} ready={!requireReason || isReasonValid(reason, reasonMin)} destructive={destructive} />
       </div>
     </form>
   );
@@ -75,6 +79,7 @@ export function ConfirmDialog({
   reasonMin,
   action,
   destructive,
+  requireReason,
 }: {
   trigger: React.ReactElement;
   title: string;
@@ -83,6 +88,7 @@ export function ConfirmDialog({
   reasonMin?: number;
   action: (formData: FormData) => void | Promise<void>;
   destructive?: boolean;
+  requireReason?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
   const run = async (formData: FormData) => {
@@ -104,6 +110,7 @@ export function ConfirmDialog({
             action={run}
             reasonMin={reasonMin}
             destructive={destructive}
+            requireReason={requireReason}
             cancel={
               <Dialog.Close asChild>
                 <Button variant="ghost" size="md">
