@@ -55,6 +55,7 @@
   "/api/copilot/summarize": "dynamic",
   "/api/cron": "dynamic",
   "/api/dashboard/summary": "dynamic",
+  "/api/docs/try-it": "dynamic",
   "/api/funding-webhook/[provider]": "dynamic",
   "/api/funding-webhook/[provider]/[partnerId]": "dynamic",
   "/api/partner-application/upload": "dynamic",
