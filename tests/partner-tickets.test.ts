@@ -164,10 +164,14 @@ describe('input validation (refuse, never truncate)', () => {
 describe('claimOnce (double-submit guard for staff writes)', () => {
   const KEY = 'a'.repeat(32);
   it('the key is bound to the tenant, the user, the scope and the request key; no raw input in it', () => {
-    const k = staffClaimKey('reply', PA, 'u1', KEY);
-    expect(k).not.toBe(staffClaimKey('reply', PB, 'u1', KEY));
-    expect(k).not.toBe(staffClaimKey('reply', PA, 'u2', KEY));
-    expect(k).not.toBe(staffClaimKey('note', PA, 'u1', KEY));
+    const k = staffClaimKey('reply', PA, 'u1', KEY, 'tk_a1|hello');
+    expect(k).not.toBe(staffClaimKey('reply', PB, 'u1', KEY, 'tk_a1|hello'));
+    expect(k).not.toBe(staffClaimKey('reply', PA, 'u2', KEY, 'tk_a1|hello'));
+    expect(k).not.toBe(staffClaimKey('note', PA, 'u1', KEY, 'tk_a1|hello'));
+    // Bound to the target and the text: the same key on another ticket or text is a new request.
+    expect(k).not.toBe(staffClaimKey('reply', PA, 'u1', KEY, 'tk_a2|hello'));
+    expect(k).not.toBe(staffClaimKey('reply', PA, 'u1', KEY, 'tk_a1|other'));
+    expect(k).not.toContain('hello');
     expect(k).not.toContain(PA);
     expect(k).not.toContain(KEY);
   });

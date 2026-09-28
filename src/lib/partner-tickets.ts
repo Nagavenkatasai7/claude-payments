@@ -185,13 +185,17 @@ export function isRequestKey(v: unknown): v is string {
 const SCOPE_RE = /^[a-z][a-z-]{0,23}$/;
 
 /**
- * The claim key for one staff write: bound to the scope, the tenant, the user and the form's
- * server-minted request key, hashed so no raw input lands in a Redis key name.
+ * The claim key for one staff write: bound to the scope, the tenant, the user, the form's
+ * server-minted request key AND the write itself (`target`: the ticket id and the text), hashed so
+ * no raw input lands in a Redis key name. Binding the write means a reused key with a different
+ * ticket or text is a new request, never a silent "sent" for a write that did not happen.
  */
-export function staffClaimKey(scope: string, partnerId: PartnerId, username: string, requestKey: string): string {
+export function staffClaimKey(scope: string, partnerId: PartnerId, username: string, requestKey: string, target: string): string {
   if (!SCOPE_RE.test(scope)) throw new Error('partner-tickets: invalid claim scope');
   assertTenant(partnerId);
-  const digest = createHash('sha256').update(`${partnerId}|${username}|${requestKey}`).digest('hex');
+  const digest = createHash('sha256')
+    .update(JSON.stringify([partnerId, username, requestKey, target]))
+    .digest('hex');
   return `psup:${scope}:${digest}`;
 }
 
@@ -245,6 +249,14 @@ export class StatusRefusedError extends Error {
   }
 }
 
+/** Thrown inside the Contact create when the open-thread cap is reached (nothing is written). */
+export class CapReachedError extends Error {
+  constructor() {
+    super('Open-thread cap reached');
+    this.name = 'CapReachedError';
+  }
+}
+
 /** An error's NAME only, for logs: a failed query's message carries its bound params (the text). */
 export function errName(e: unknown): string {
   return e instanceof Error ? e.name : 'error';
@@ -278,4 +290,31 @@ export async function tenantStaffUsernames(
     }),
   );
   return out;
+}
+
+/**
+ * A short per-(tenant, user) lock around a check-then-create (the Contact SmartRemit open-thread
+ * cap), so concurrent submits with fresh request keys cannot all pass the check. Returns false
+ * when another submit holds it. The TTL bounds a crashed holder.
+ */
+export async function withUserLock<T>(
+  redis: RedisLike,
+  scope: string,
+  partnerId: PartnerId,
+  username: string,
+  fn: () => Promise<T>,
+): Promise<{ locked: false } | { locked: true; value: T }> {
+  if (!SCOPE_RE.test(scope)) throw new Error('partner-tickets: invalid lock scope');
+  assertTenant(partnerId);
+  const key = `psup:lock:${scope}:${createHash('sha256').update(JSON.stringify([partnerId, username])).digest('hex')}`;
+  if ((await redis.set(key, '1', { nx: true, ex: 30 })) === null) return { locked: false };
+  try {
+    return { locked: true, value: await fn() };
+  } finally {
+    try {
+      await redis.del(key);
+    } catch {
+      // Released by the TTL instead.
+    }
+  }
 }

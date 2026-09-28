@@ -251,6 +251,16 @@ describe('replyAction specifics', () => {
     expect(await audits()).toHaveLength(1);
     expect(await outboxRows()).toHaveLength(1);
   });
+  it('the same request key with a different text or ticket is a NEW write, never a silent "sent"', async () => {
+    await signInAs({ role: 'admin' });
+    const key = newKey();
+    expect(await replyAction(form({ id: 'tk_a1', body: 'first', requestKey: key }))).toEqual({ ok: true });
+    expect(await replyAction(form({ id: 'tk_a1', body: 'second', requestKey: key }))).toEqual({ ok: true });
+    expect(await replyAction(form({ id: 'tk_a2', body: 'first', requestKey: key }))).toEqual({ ok: true });
+    const bodies = (await createTicketRepo(db).listMessages('tk_a1', { includeInternal: false })).map((m) => m.body);
+    expect(bodies).toEqual(expect.arrayContaining(['first', 'second']));
+    expect(await audits()).toHaveLength(3);
+  });
   it('a missing request key is refused before any write', async () => {
     await signInAs({ role: 'admin' });
     const r = await replyAction(form({ id: 'tk_a1', body: 'hello' }));
@@ -301,7 +311,7 @@ describe('setStatusAction specifics', () => {
   it('pending and closed are recorded in the audit meta (the status only)', async () => {
     await signInAs({ role: 'admin' });
     await setStatusAction(statusForm('tk_a1', { status: 'pending' }));
-    expect((await audits())[0].meta).toEqual({ actorScope: 'partner', status: 'pending' });
+    expect((await audits())[0].meta).toEqual({ actorScope: 'partner', status: 'pending', from: 'open' });
     expect(await outboxRows()).toHaveLength(0);
   });
 });
@@ -356,6 +366,11 @@ describe('contactSmartRemitAction (Contact SmartRemit: a tenant → platform thr
     expect(second).toBe(first);
     expect(await db.select().from(tickets)).toHaveLength(6);
     expect(await audits()).toHaveLength(1);
+  });
+  it('concurrent submits with fresh keys cannot overrun the cap', async () => {
+    await signInAs({ username: 'racer', role: 'admin' });
+    await Promise.all(Array.from({ length: 12 }, () => contactSmartRemitAction(contactForm()).catch(() => undefined)));
+    expect((await db.select().from(tickets)).filter((t) => t.openedBy === 'racer').length).toBeLessThanOrEqual(5);
   });
   it('caps open threads per staff member', async () => {
     await signInAs({ username: 'capper', role: 'admin' });

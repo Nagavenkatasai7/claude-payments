@@ -13,6 +13,7 @@ import { t } from '@/lib/i18n';
 import { logWarn } from '@/lib/log';
 import {
   CONTACT_OPEN_CAP,
+  CapReachedError,
   claimOnce,
   errName,
   getVisibleTicket,
@@ -23,6 +24,7 @@ import {
   parseContactSubject,
   parseStaffText,
   staffClaimKey,
+  withUserLock,
 } from '@/lib/partner-tickets';
 import { PARTNER_ROUTES } from '../../../routes';
 import type { ActionResult } from '../../../action-result';
@@ -46,18 +48,25 @@ export async function contactSmartRemitAction(formData: FormData): Promise<Actio
   const requestKey = formData.get('requestKey');
   if (!isRequestKey(requestKey)) return { ok: false, error: t('partner.support.expired') };
 
-  const claim = staffClaimKey('contact', ctx.partnerId, ctx.username, requestKey);
+  const claim = staffClaimKey('contact', ctx.partnerId, ctx.username, requestKey, JSON.stringify([subject, message]));
   let ticketId: string;
   try {
     const redis = getRedis();
     // A replay of a submit that already created its thread lands on that thread (no cap check).
     const prior = await redis.get(claim);
-    if (typeof prior !== 'string' || !prior.startsWith('d:')) {
-      const mine = await listTenantTickets(ctx.partnerId, { kind: 'internal', limit: 500 });
-      const open = mine.filter((x) => x.openedBy === ctx.username && OPEN_STATUSES.has(x.status)).length;
-      if (open >= CONTACT_OPEN_CAP) return { ok: false, error: t('partner.contact.cap') };
-    }
-    const outcome = await claimOnce(redis, claim, async () =>
+    const isReplay = typeof prior === 'string' && prior.startsWith('d:');
+    // The cap check and the create run under a per-user lock, so parallel submits with fresh
+    // request keys cannot all pass the check before any insert commits.
+    const run = () =>
+      claimOnce(redis, claim, async () => {
+        if (!isReplay) {
+          const mine = await listTenantTickets(ctx.partnerId, { kind: 'internal', limit: 500 });
+          const open = mine.filter((x) => x.openedBy === ctx.username && OPEN_STATUSES.has(x.status)).length;
+          if (open >= CONTACT_OPEN_CAP) throw new CapReachedError();
+        }
+        return create();
+      });
+    const create = () =>
       getDb().transaction(async (tx) => {
         const id = `tk_${newTransferId()}`;
         await createTicketRepo(tx).createTicket({
@@ -77,12 +86,15 @@ export async function contactSmartRemitAction(formData: FormData): Promise<Actio
           meta: { actorScope: 'partner' },
         });
         return id;
-      }),
-    );
+      });
+    const locked = isReplay ? { locked: true as const, value: await run() } : await withUserLock(redis, 'contact', ctx.partnerId, ctx.username, run);
+    if (!locked.locked) return { ok: false, error: t('partner.support.inFlight') };
+    const outcome = locked.value;
     if (outcome.status === 'inflight') return { ok: false, error: t('partner.support.inFlight') };
     if (!isTicketId(outcome.value)) return failed();
     ticketId = outcome.value;
   } catch (err) {
+    if (err instanceof CapReachedError) return { ok: false, error: t('partner.contact.cap') };
     logWarn('partner.support.contact', errName(err), {});
     return failed();
   }
@@ -105,7 +117,7 @@ export async function contactFollowUpAction(formData: FormData): Promise<ActionR
   if (!isRequestKey(requestKey)) return { ok: false, error: t('partner.support.expired') };
 
   try {
-    const outcome = await claimOnce(getRedis(), staffClaimKey('contact-reply', ctx.partnerId, ctx.username, requestKey), async () =>
+    const outcome = await claimOnce(getRedis(), staffClaimKey('contact-reply', ctx.partnerId, ctx.username, requestKey, `${ticket.id}|${body}`), async () =>
       getDb().transaction(async (tx) => {
         const msg = await createTicketRepo(tx).appendMessage({
           ticketId: ticket.id,

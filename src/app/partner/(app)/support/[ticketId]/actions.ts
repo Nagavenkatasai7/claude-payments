@@ -56,7 +56,7 @@ export async function replyAction(formData: FormData): Promise<ActionResult> {
   if (!isRequestKey(requestKey)) return { ok: false, error: t('partner.support.expired') };
 
   try {
-    const outcome = await claimOnce(getRedis(), staffClaimKey('reply', ctx.partnerId, ctx.username, requestKey), async () =>
+    const outcome = await claimOnce(getRedis(), staffClaimKey('reply', ctx.partnerId, ctx.username, requestKey, `${ticket.id}|${waiting}|${body}`), async () =>
       getDb().transaction(async (tx) => {
         const repo = createTicketRepo(tx);
         const msg = await repo.appendMessage({
@@ -115,7 +115,7 @@ export async function internalNoteAction(formData: FormData): Promise<ActionResu
   if (!isRequestKey(requestKey)) return { ok: false, error: t('partner.support.expired') };
 
   try {
-    const outcome = await claimOnce(getRedis(), staffClaimKey('note', ctx.partnerId, ctx.username, requestKey), async () =>
+    const outcome = await claimOnce(getRedis(), staffClaimKey('note', ctx.partnerId, ctx.username, requestKey, `${ticket.id}|${body}`), async () =>
       getDb().transaction(async (tx) => {
         const msg = await createTicketRepo(tx).appendMessage({
           ticketId: ticket.id,
@@ -180,7 +180,7 @@ export async function setStatusAction(formData: FormData): Promise<ActionResult>
         actorType: 'staff',
         action: 'ticket.status',
         subjectId: ticket.id,
-        meta: { actorScope: 'partner', status },
+        meta: { actorScope: 'partner', status, from: ticket.status },
       });
     });
   } catch (err) {
