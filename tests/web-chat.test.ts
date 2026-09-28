@@ -21,6 +21,9 @@ import { createConversationLogRepo } from '@/db/repos/conversation-log-repo';
 
 let db: Db;
 
+// The refund writer falls back to getDb() (tools.ts request_refund); bind it to this file's PGlite.
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => db }));
+
 const PHONE = '15551234567';
 
 function customerFixture(phone = PHONE): Customer {
@@ -216,6 +219,56 @@ describe('createWebChat', () => {
     await webChat.runTurn(customerFixture(), 'hello');
     const sys = seen[0].filter((m) => m.role === 'system').map((m) => m.content).join('\n');
     expect(sys).toContain('[WEB CHAT]');
+  });
+});
+
+// M2 enablement (portal chat step-up): runTurn threads the portal session's freshness into the
+// tool context; absent (the legacy /api/account/chat) it is exactly today's behaviour.
+describe('createWebChat — portal step-up freshness reaches the tools', () => {
+  async function refundTurn(opts?: { webStepUp: { surface: 'portal'; fresh: boolean } }) {
+    const deps = buildDeps();
+    const id = `tx_stepup_${opts ? String(opts.webStepUp.fresh) : 'legacy'}`;
+    const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    await deps.store.saveTransfer({
+      id, phone: PHONE, amountUsd: 200, feeUsd: 0, totalChargeUsd: 200, fxRate: 85, amountInr: 17000,
+      recipientName: 'Mom', recipientPhone: '919876543210', payoutMethod: 'upi', payoutDestination: 'mom@upi',
+      fundingMethod: 'bank_transfer', complianceStatus: 'cleared', complianceReasons: [], status: 'paid',
+      createdAt: twoHoursAgo, paidAt: twoHoursAgo, sourceCountry: 'US', sourceCurrency: 'USD', destinationCountry: 'IN',
+      destinationCurrency: 'INR', partnerId: 'default', amountSource: 200, feeSource: 0, totalChargeSource: 200,
+      transferType: 'b2c',
+    });
+    const responses: ChatMessage[] = [
+      {
+        role: 'assistant', content: '',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'request_refund', arguments: JSON.stringify({ transfer_id: id }) } }],
+      },
+      { role: 'assistant', content: 'done' },
+    ];
+    let i = 0;
+    const webChat = createWebChat({ ...deps, chat: async () => responses[i++] });
+    await (opts ? webChat.runTurn(customerFixture(), 'refund please', opts) : webChat.runTurn(customerFixture(), 'refund please'));
+    const conv = JSON.parse(deps.redis.dump.get(`conv:default:web:${PHONE}`)!) as ChatMessage[];
+    const tool = String(conv.find((m) => m.role === 'tool')!.content);
+    return { tool, transfer: await deps.store.getTransfer(id) };
+  }
+
+  it('a stale portal session: request_refund refuses with verify_in_portal and flags nothing', async () => {
+    const { tool, transfer } = await refundTurn({ webStepUp: { surface: 'portal', fresh: false } });
+    expect(tool).toContain('verify_in_portal');
+    expect(tool).toContain('/portal/transfers/tx_stepup_false');
+    expect(transfer?.refundStatus ?? 'none').toBe('none');
+  });
+
+  it('a fresh portal session: the refund request is flagged (existing behaviour)', async () => {
+    const { tool, transfer } = await refundTurn({ webStepUp: { surface: 'portal', fresh: true } });
+    expect(tool).not.toContain('verify_in_portal');
+    expect(transfer?.refundStatus).toBe('requested');
+  });
+
+  it('no freshness passed (legacy account chat): unchanged, the refund request is flagged', async () => {
+    const { tool, transfer } = await refundTurn();
+    expect(tool).not.toContain('verify_in_portal');
+    expect(transfer?.refundStatus).toBe('requested');
   });
 });
 
