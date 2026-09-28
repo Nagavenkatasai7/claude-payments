@@ -48,7 +48,8 @@ function failed(err: unknown, label: string): PortalTicketState {
   if (err instanceof OpenTicketCapError) return { error: 'portal.help.error.cap' };
   if (err instanceof BadRequestKeyError) return { error: 'portal.help.error.expired' };
   if (err instanceof RequestInFlightError) return { error: 'portal.help.error.in_flight' };
-  logWarn(label, err);
+  // Never the error object: a driver error embeds the bound params (the ticket subject).
+  logWarn(label, err instanceof Error ? err.name : 'error');
   return { error: 'portal.help.error.failed' };
 }
 
