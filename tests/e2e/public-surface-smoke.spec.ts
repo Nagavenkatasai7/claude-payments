@@ -130,6 +130,13 @@ for (const path of ['/partner', '/partner/security']) {
     await expect(page.locator('[data-testid^="partner-"]')).toHaveCount(0);
     await expect(page.locator('input[name="currentPassword"]')).toHaveCount(0);
   });
+  test(`anonymous ${path}: the raw response carries no partner UI (only the redirect)`, async ({ request }) => {
+    test.skip(bypassActive, 'preview bypass cookie may add its own redirect');
+    const res = await request.get(path, { maxRedirects: 0 });
+    const body = await res.text();
+    expect(body).not.toContain('name="currentPassword"');
+    expect(body).not.toContain('data-testid="partner-');
+  });
 }
 
 // Program-Fix 47 — the enforced Content-Security-Policy, anonymously. Every

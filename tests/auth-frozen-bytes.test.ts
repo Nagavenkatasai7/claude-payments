@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 // src/lib/auth.ts is shared with the compliance loop (UI redesign SPEC §6b: one file, one owner).
 // UI redesign M3-1 may only ADD imports and ONE appended export; every pre-existing byte stays.
 // Frozen @ 96c8933, computed with `git show 96c8933:src/lib/auth.ts | shasum -a 256`.
-// A later PR that changes an existing gate on purpose (announced to the main session) updates
+// A later PR that changes an existing gate on purpose (announced to the owner first) updates
 // this pin, and the list below, in the same PR.
 const AUTH_TS_ORIGINAL_SHA = 'c176d7c74b5526668745310f02effa39d123e9e6cad90bd51338f882a906095a';
 const ADDED_IMPORTS = [
