@@ -7,12 +7,14 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
 import type { Staff } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 // UI redesign M3-2: the /partner shell (layout + nav). The M3-1 harness (real auth store on a fake
 // Redis, real partner store on PGlite), plus usePathname for the client sidebar. The layout is
 // chrome only: every page re-gates, and these tests pin both.
 const redis = fakeRedis();
 let pgPartnerStore: PartnerStore;
+let homeDb: Db;
 // The gate itself reads the partner (the suspended-partner bounce in getCurrentStaff), so the
 // failure is injected only on the layout's own brand lookup: every call after the first.
 let partnerLookupFails = false;
@@ -40,6 +42,21 @@ vi.mock('next/navigation', () => ({
   usePathname: () => pathname.current,
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
+// M3-3: the home page reads the ledger, channel health, integrations and API keys. Wire every
+// store getter to this test's PGlite so no render ever dials a real database.
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => homeDb }));
+vi.mock('@/lib/store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/store')>();
+  return { ...actual, getStore: () => actual.createStore(redis, homeDb) };
+});
+vi.mock('@/lib/partner-integrations-store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/partner-integrations-store')>();
+  return { ...actual, getPartnerIntegrationsStore: () => actual.createPartnerIntegrationsStore(homeDb) };
+});
+vi.mock('@/lib/partner-api-key', async (orig) => {
+  const actual = await orig<typeof import('@/lib/partner-api-key')>();
+  return { ...actual, getPartnerApiKeyStore: () => actual.createPartnerApiKeyStore(homeDb) };
+});
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
@@ -61,10 +78,11 @@ vi.mock('@/lib/partner-store', async () => {
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { MFA_PENDING_PREFIX } from '@/lib/partner-mfa-gate';
-import { partnerNav } from '@/app/partner/routes';
+import { PARTNER_ROUTES, partnerNav } from '@/app/partner/routes';
 import Layout from '@/app/partner/(app)/layout';
 import HomePage from '@/app/partner/(app)/page';
 import SecurityPage from '@/app/partner/(app)/security/page';
+import { PartnerSidebar } from '@/app/partner/(app)/partner-sidebar';
 
 // A distinctive tenant id, so "no tenant in any href" cannot false-match "/partner".
 const TENANT = 'ptn-zq9x';
@@ -96,6 +114,7 @@ beforeEach(async () => {
   partnerLookups = 0;
   pathname.current = '/partner';
   const db = await freshDb();
+  homeDb = db;
   pgPartnerStore = createPartnerStore(db);
   await seedPartner(db, TENANT, 'Acme Remit Test');
   await seedPartner(db, OTHER, 'Other Brand Co');
@@ -191,6 +210,41 @@ describe('/partner layout: the chrome', () => {
   });
 });
 
+// A page's gate, checked from its source: the page's path maps (via href) to exactly one
+// PARTNER_ROUTES key, and every requirePartnerStaff call in it uses THAT key's policy.
+// Route groups are dropped from the URL; a dynamic segment ([id]) shares its static parent's key.
+// Only the security page may pass { skipMfa: true } (it IS the enrolment page).
+const APP_DIR = 'src/app/partner/(app)';
+const SECURITY_PAGE = `${APP_DIR}/security/page.tsx`;
+// Comments are stripped first, so a commented-out gate never satisfies the check.
+const stripComments = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+function gateProblems(file: string, rawSrc: string): string[] {
+  const src = stripComments(rawSrc);
+  const segs = file
+    .slice(APP_DIR.length)
+    .split('/')
+    .filter((x) => x !== '' && x !== 'page.tsx' && !/^\(.*\)$/.test(x) && !/^\[.*\]$/.test(x));
+  const href = ['/partner', ...segs].join('/');
+  const key = Object.entries(PARTNER_ROUTES).find(([, r]) => r.href === href)?.[0];
+  if (!key) return [`${file}: no PARTNER_ROUTES entry for ${href}`];
+  const problems: string[] = [];
+  const calls = [...src.matchAll(/requirePartnerStaff\(([^)]*)\)/g)].map((m) => m[1].trim());
+  if (calls.length === 0) problems.push(`${file}: no requirePartnerStaff call`);
+  for (const args of calls) {
+    const m = /^PARTNER_ROUTES\.(\w+)\.policy(?:\s*,\s*(\{[^}]*\}))?$/.exec(args);
+    if (!m) {
+      problems.push(`${file}: gate is not PARTNER_ROUTES.${key}.policy: ${args}`);
+      continue;
+    }
+    if (m[1] !== key) problems.push(`${file}: gates with ${m[1]}, expected ${key}`);
+    if (m[2] !== undefined && !(file === SECURITY_PAGE && /^\{\s*skipMfa:\s*true\s*\}$/.test(m[2]))) {
+      problems.push(`${file}: options ${m[2]} are allowed only as { skipMfa: true } on the security page`);
+    }
+  }
+  if (!/await requirePartnerStaff\(/.test(src)) problems.push(`${file}: the gate is not awaited`);
+  return problems;
+}
+
 describe('/partner pages gate by themselves (the layout is not the guard)', () => {
   it('home: anonymous → /login; platform → /admin-dashboard', async () => {
     await expect(HomePage()).rejects.toThrow('REDIRECT:/login');
@@ -202,7 +256,7 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
     await signInAs({ partnerId: undefined });
     await expect(SecurityPage()).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
-  it('EVERY page under (app) gates with a policy from routes.ts (the layout uses skipMfa + every role)', () => {
+  it('EVERY page under (app) gates with ITS OWN routes.ts key; skipMfa only on the security page', () => {
     const pages = (d: string): string[] =>
       readdirSync(d).flatMap((n) => {
         const p = join(d, n);
@@ -210,7 +264,23 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
       });
     const found = pages('src/app/partner/(app)');
     expect(found.length).toBeGreaterThanOrEqual(2);
-    for (const f of found) expect(readFileSync(f, 'utf8'), f).toMatch(/await requirePartnerStaff\(PARTNER_ROUTES\.\w+\.policy/);
+    for (const f of found) expect(gateProblems(f, readFileSync(f, 'utf8')), f).toEqual([]);
+  });
+  it('the gate check itself catches a wrong key, a stray skipMfa, a direct policy and a missing gate', () => {
+    const home = 'src/app/partner/(app)/page.tsx';
+    const sec = 'src/app/partner/(app)/security/page.tsx';
+    expect(gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);')).toEqual([]);
+    expect(gateProblems(sec, 'await requirePartnerStaff(PARTNER_ROUTES.security.policy, { skipMfa: true });')).toEqual([]);
+    expect(gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.security.policy);')).not.toEqual([]);
+    expect(gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy, { skipMfa: true });')).not.toEqual([]);
+    expect(
+      gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);\nawait requirePartnerStaff(PARTNER_ANY);'),
+    ).not.toEqual([]);
+    expect(gateProblems(home, 'export default function P() { return null; }')).not.toEqual([]);
+    // A commented-out gate is no gate (LOW-5): comments are stripped before matching.
+    expect(gateProblems(home, '// await requirePartnerStaff(PARTNER_ROUTES.home.policy);\nexport default function P() { return null; }')).not.toEqual([]);
+    expect(gateProblems(home, '/* await requirePartnerStaff(PARTNER_ROUTES.home.policy); */ export default function P() { return null; }')).not.toEqual([]);
+    expect(gateProblems('src/app/partner/(app)/nowhere/page.tsx', 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);')).not.toEqual([]);
   });
   it('pages render no <main> of their own (the layout owns it) and read their policy from routes.ts', () => {
     for (const [f, key] of [
@@ -221,5 +291,25 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
       expect(src, f).not.toMatch(/<main\b/);
       expect(src, f).toContain(`requirePartnerStaff(PARTNER_ROUTES.${key}.policy`);
     }
+  });
+});
+
+describe('/partner mobile menu', () => {
+  // The <details> menu is keyed on the pathname, so a client-side navigation remounts it closed
+  // (otherwise it stays open over the new page). No DOM here: read the key off the element tree.
+  const menuKey = () => {
+    const tree = PartnerSidebar({ label: 'Nav', menuLabel: 'Menu', items: [{ href: '/partner', label: 'Home' }] });
+    const kids = (tree.props as { children: React.ReactElement[] }).children;
+    const details = kids.find((k) => k && k.type === 'details');
+    expect(details).toBeDefined();
+    return details!.key;
+  };
+  it('remounts (a new key) when the pathname changes, so it closes after navigating', () => {
+    pathname.current = '/partner';
+    const a = menuKey();
+    pathname.current = '/partner/security';
+    const b = menuKey();
+    expect(a).not.toBeNull();
+    expect(a).not.toBe(b);
   });
 });
