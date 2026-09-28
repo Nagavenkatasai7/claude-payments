@@ -554,6 +554,18 @@ export function createStore(redis: RedisLike, db: Db) {
     ): Promise<import('./types').Recipient[]> {
       return recipientsRepo.listRecipients(partnerId, senderPhone, limit);
     },
+    /** M2-8: the whole live address book (no LIMIT; tombstoned rows hidden). */
+    async listAllRecipientsForSender(partnerId: PartnerId, senderPhone: string): Promise<import('./types').Recipient[]> {
+      return recipientsRepo.listAllForSender(partnerId, senderPhone);
+    },
+    /** M2-8: a customer's "delete recipient" (the row is kept; every read hides it). */
+    async tombstoneRecipient(partnerId: PartnerId, senderPhone: string, recipientPhone: string): Promise<void> {
+      await recipientsRepo.tombstoneRecipient(partnerId, senderPhone, recipientPhone);
+    },
+    /** M2-8: whether the customer deleted this saved recipient (the bot must not auto-fill it). */
+    async isTombstoned(partnerId: PartnerId, senderPhone: string, recipientPhone: string): Promise<boolean> {
+      return recipientsRepo.isTombstoned(partnerId, senderPhone, recipientPhone);
+    },
 
     // ── Corridor demand capture (Postgres) ───────────────────────────────
     async saveCorridorRequest(req: import('./types').CorridorRequest): Promise<void> {

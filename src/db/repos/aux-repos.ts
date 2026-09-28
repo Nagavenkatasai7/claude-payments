@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, notExists, sql } from 'drizzle-orm';
 import {
   auditEvents,
   b2bInvoices,
@@ -9,6 +9,7 @@ import {
   partnerApplications,
   partnerRequests,
   recipients,
+  recipientTombstones,
   sellers,
 } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
@@ -42,10 +43,42 @@ import type {
 // envelope-encrypted at rest everywhere they appear.
 
 // ── Saved recipients (per-TENANT, per-sender address book) ──────────────────
+//
+// UI redesign M2-8 (owner/main 16:00 rule): a customer's "delete recipient" WRITES a row to
+// recipient_tombstones and KEEPS the recipients row (the FK tombstone → recipient is ON DELETE no
+// action, so the row cannot be removed while a tombstone points at it). Every read here hides a
+// tombstoned recipient; a later upsert (a new payment with bank details, owner O5) removes the
+// tombstone in the same statement. The recipients columns are unchanged (review round 1, H1).
+
+type RecipientRow = typeof recipients.$inferSelect;
+
 export function createRecipientRepo(
   db: DbOrTx,
   provider: EncryptionKeyProvider = defaultProvider(),
 ) {
+  const toRecipient = (row: RecipientRow): Recipient => ({
+    name: row.name,
+    recipientPhone: row.recipientPhone,
+    payoutMethod: row.payoutMethod as PayoutMethod,
+    payoutDestination: openOptional(row.payoutDestinationEnc, provider, recipientRowCtx(row)) ?? '',
+    lastUsedAt: row.lastUsedAt.toISOString(),
+  });
+  // `NOT EXISTS (SELECT 1 FROM recipient_tombstones WHERE <same three-column key>)`
+  // (notExists: node_modules/drizzle-orm/sql/expressions/conditions.d.ts:266).
+  const live = (h: DbOrTx) =>
+    notExists(
+      h
+        .select({ one: sql`1` })
+        .from(recipientTombstones)
+        .where(
+          and(
+            eq(recipientTombstones.partnerId, recipients.partnerId),
+            eq(recipientTombstones.senderPhone, recipients.senderPhone),
+            eq(recipientTombstones.recipientPhone, recipients.recipientPhone),
+          ),
+        ),
+    );
+
   return {
     async upsertRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<void> {
       // The row key AS WRITTEN (the conflict target) — the sealed destination binds to it.
@@ -60,7 +93,17 @@ export function createRecipientRepo(
         payoutDestinationLast4: last4(r.payoutDestination ?? ''),
         lastUsedAt: new Date(r.lastUsedAt),
       };
+      // O5: saving the recipient again (a new payment with bank details) un-deletes it. The
+      // tombstone clear rides in a data-modifying CTE so the upsert stays ONE statement: the mint
+      // (transfer-create.ts) calls this after its READ COMMITTED transaction and must not open a
+      // second one. Postgres runs a WITH DELETE to completion even when nothing reads it.
+      const clearTombstone = db
+        .$with('cleared_tombstone', {})
+        .as(
+          sql`DELETE FROM ${recipientTombstones} WHERE ${recipientTombstones.partnerId} = ${partnerId} AND ${recipientTombstones.senderPhone} = ${senderPhone} AND ${recipientTombstones.recipientPhone} = ${r.recipientPhone}`,
+        );
       await db
+        .with(clearTombstone)
         .insert(recipients)
         .values(row)
         .onConflictDoUpdate({
@@ -69,20 +112,93 @@ export function createRecipientRepo(
         });
     },
 
+    /**
+     * Edit a LIVE saved recipient in place (the portal's edit). Never touches tombstones: an edit
+     * that lands after a concurrent delete updates nothing and returns false, so the delete wins.
+     */
+    async updateLiveRecipient(partnerId: PartnerId, senderPhone: string, r: Recipient): Promise<boolean> {
+      const key = { partnerId, senderPhone, recipientPhone: r.recipientPhone };
+      const updated = await db
+        .update(recipients)
+        .set({
+          name: r.name,
+          payoutMethod: r.payoutMethod,
+          payoutDestinationEnc: r.payoutDestination
+            ? encryptField(r.payoutDestination, provider, recipientRowCtx(key))
+            : '',
+          payoutDestinationLast4: last4(r.payoutDestination ?? ''),
+          lastUsedAt: new Date(r.lastUsedAt),
+        })
+        .where(
+          and(
+            eq(recipients.partnerId, partnerId),
+            eq(recipients.senderPhone, senderPhone),
+            eq(recipients.recipientPhone, r.recipientPhone),
+            live(db),
+          ),
+        )
+        .returning({ one: recipients.recipientPhone });
+      return updated.length > 0;
+    },
+
     async listRecipients(partnerId: PartnerId, senderPhone: string, limit: number): Promise<Recipient[]> {
       const rows = await db
         .select()
         .from(recipients)
-        .where(and(eq(recipients.partnerId, partnerId), eq(recipients.senderPhone, senderPhone)))
+        .where(and(eq(recipients.partnerId, partnerId), eq(recipients.senderPhone, senderPhone), live(db)))
         .orderBy(desc(recipients.lastUsedAt))
         .limit(limit);
-      return rows.map((row) => ({
-        name: row.name,
-        recipientPhone: row.recipientPhone,
-        payoutMethod: row.payoutMethod as PayoutMethod,
-        payoutDestination: openOptional(row.payoutDestinationEnc, provider, recipientRowCtx(row)) ?? '',
-        lastUsedAt: row.lastUsedAt.toISOString(),
-      }));
+      return rows.map(toRecipient);
+    },
+
+    /** The whole live address book of one (tenant, sender), newest first, no LIMIT (the portal pages it). */
+    async listAllForSender(partnerId: PartnerId, senderPhone: string): Promise<Recipient[]> {
+      const rows = await db
+        .select()
+        .from(recipients)
+        .where(and(eq(recipients.partnerId, partnerId), eq(recipients.senderPhone, senderPhone), live(db)))
+        .orderBy(desc(recipients.lastUsedAt));
+      return rows.map(toRecipient);
+    },
+
+    /** One live saved recipient by its exact stored key, or null (tombstoned, missing or out of scope). */
+    async getRecipient(partnerId: PartnerId, senderPhone: string, recipientPhone: string): Promise<Recipient | null> {
+      const rows = await db
+        .select()
+        .from(recipients)
+        .where(
+          and(
+            eq(recipients.partnerId, partnerId),
+            eq(recipients.senderPhone, senderPhone),
+            eq(recipients.recipientPhone, recipientPhone),
+            live(db),
+          ),
+        )
+        .limit(1);
+      return rows[0] ? toRecipient(rows[0]) : null;
+    },
+
+    /**
+     * Mark a saved recipient deleted: `INSERT … ON CONFLICT DO NOTHING` into recipient_tombstones.
+     * The recipients row is never updated or deleted, and past transfers are untouched. The caller
+     * audits. `recipientPhone` is the STORED key (the FK requires the row to exist).
+     */
+    async tombstoneRecipient(partnerId: PartnerId, senderPhone: string, recipientPhone: string): Promise<void> {
+      await db.insert(recipientTombstones).values({ partnerId, senderPhone, recipientPhone }).onConflictDoNothing();
+    },
+
+    /**
+     * Whether (tenant, sender, recipient) is tombstoned. The recipient phone is compared NORMALIZED,
+     * like the bot's saved-book lookup (tools.ts resolveStoredPayout), so a formatted number matches.
+     */
+    async isTombstoned(partnerId: PartnerId, senderPhone: string, recipientPhone: string): Promise<boolean> {
+      const want = normalizePhone(recipientPhone);
+      if (!want) return false;
+      const rows = await db
+        .select({ recipientPhone: recipientTombstones.recipientPhone })
+        .from(recipientTombstones)
+        .where(and(eq(recipientTombstones.partnerId, partnerId), eq(recipientTombstones.senderPhone, senderPhone)));
+      return rows.some((r) => normalizePhone(r.recipientPhone) === want);
     },
   };
 }
