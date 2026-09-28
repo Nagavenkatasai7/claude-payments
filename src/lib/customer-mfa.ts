@@ -84,7 +84,6 @@ function accountLabel(phone: string): string {
  * dropped; capped at 64 characters. Existing enrolments are never touched.
  */
 function issuerLabel(raw: string | undefined): string {
-  // eslint-disable-next-line no-control-regex
   const v = (raw ?? '').replace(/[:\u0000-\u001f\u007f]/g, '').trim().slice(0, 64).trim();
   return v || CUSTOMER_MFA_ISSUER;
 }
