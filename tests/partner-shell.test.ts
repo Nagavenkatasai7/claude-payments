@@ -82,6 +82,7 @@ import { partnerNav } from '@/app/partner/routes';
 import Layout from '@/app/partner/(app)/layout';
 import HomePage from '@/app/partner/(app)/page';
 import SecurityPage from '@/app/partner/(app)/security/page';
+import { PartnerSidebar } from '@/app/partner/(app)/partner-sidebar';
 
 // A distinctive tenant id, so "no tenant in any href" cannot false-match "/partner".
 const TENANT = 'ptn-zq9x';
@@ -239,5 +240,25 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
       expect(src, f).not.toMatch(/<main\b/);
       expect(src, f).toContain(`requirePartnerStaff(PARTNER_ROUTES.${key}.policy`);
     }
+  });
+});
+
+describe('/partner mobile menu', () => {
+  // The <details> menu is keyed on the pathname, so a client-side navigation remounts it closed
+  // (otherwise it stays open over the new page). No DOM here: read the key off the element tree.
+  const menuKey = () => {
+    const tree = PartnerSidebar({ label: 'Nav', menuLabel: 'Menu', items: [{ href: '/partner', label: 'Home' }] });
+    const kids = (tree.props as { children: React.ReactElement[] }).children;
+    const details = kids.find((k) => k && k.type === 'details');
+    expect(details).toBeDefined();
+    return details!.key;
+  };
+  it('remounts (a new key) when the pathname changes, so it closes after navigating', () => {
+    pathname.current = '/partner';
+    const a = menuKey();
+    pathname.current = '/partner/security';
+    const b = menuKey();
+    expect(a).not.toBeNull();
+    expect(a).not.toBe(b);
   });
 });
