@@ -1,6 +1,10 @@
 # gitleaks baseline (Compliance A3). Each entry is bound to one commit, file,
 # rule and line, so it can never hide a new finding. Every entry below was
-# reviewed on 2026-09-28: none is a live credential. Classes:
+# reviewed on 2026-09-28: none is a live credential. Some entries point at
+# commits that exist only on non-main branches; CI and the nightly scan main
+# history only, so they are kept for a possible future `--all` run.
+# Value-exact allowlists (the documented example Idempotency-Key) live in
+# .gitleaks.toml. Classes:
 #
 # Documentation placeholders: partner API curl examples with a literal
 # `sk_live_...` placeholder, an audit-note example of a rejected made-up key,

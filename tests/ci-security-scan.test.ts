@@ -39,8 +39,9 @@ describe('ci.yml security job', () => {
     expect(needs![1].split(',').map((s) => s.trim())).toContain('security');
   });
 
-  it('checks out full history so the diff range resolves', () => {
+  it('checks out full history so the diff range resolves, without persisting the token', () => {
     expect(job).toMatch(/fetch-depth: 0/);
+    expect(job).toMatch(/persist-credentials: false/);
   });
 
   it('pins gitleaks and osv-scanner by version and verifies each download by sha256', () => {
@@ -55,6 +56,9 @@ describe('ci.yml security job', () => {
     expect(job).toMatch(/SEMGREP_IMAGE: 'semgrep\/semgrep:1\.178\.0@sha256:[0-9a-f]{64}'/);
     expect(job).toMatch(/SEMGREP_RULES_COMMIT: '[0-9a-f]{40}'/);
     expect(job).toMatch(/docker run [^\n]*\\\n[^\n]*"\$SEMGREP_IMAGE"/);
+    // The checkout really is the pinned commit, and the container has no network.
+    expect(job).toMatch(/test "\$\(git -C "\$rules" rev-parse HEAD\)" = "\$SEMGREP_RULES_COMMIT"/);
+    expect(job).toMatch(/docker run --rm --network none /);
   });
 
   it('runs semgrep offline-only: scan, metrics off, local rules, ERROR gate', () => {
@@ -109,6 +113,7 @@ describe('nightly full-history gitleaks scan', () => {
 
   it('scans the default branch history with full depth', () => {
     expect(job).toMatch(/fetch-depth: 0/);
+    expect(job).toMatch(/persist-credentials: false/);
     expect(job).toMatch(/SCAN_MODE: full/);
     expect(job).toMatch(/GITLEAKS_VERSION: '8\.30\.1'/);
     expect(job).toMatch(/GITLEAKS_SHA256: '[0-9a-f]{64}'/);
@@ -148,7 +153,8 @@ describe(`${SCRIPT}`, () => {
     expect(sh).toMatch(/0{40}/);
     expect(sh).toMatch(/git cat-file -e/);
     // Anything else is a configuration error, never a silent pass.
-    expect(sh).toMatch(/\*\)[\s\S]*exit 2/);
+    expect(sh).toMatch(/\*\)\n\s+fail /);
+    expect(sh).toMatch(/fail\(\) \{\n[^}]*exit 2\n\}/);
   });
 });
 
@@ -160,6 +166,22 @@ describe('gitleaks baseline', () => {
       .filter((l) => l.trim() && !l.startsWith('#'));
     expect(entries.length).toBeGreaterThan(0);
     for (const e of entries) expect(e).toMatch(/^[0-9a-f]{40}:.+:[a-z0-9-]+:\d+$/);
-    expect(existsSync(join(root, '.gitleaks.toml'))).toBe(false);
+  });
+
+  it('.gitleaks.toml extends the default rules and allowlists exact values only', () => {
+    const toml = read('.gitleaks.toml');
+    expect(toml).toMatch(/^\[extend\]\nuseDefault = true$/m);
+    // No path, commit or stopword allowlists: nothing broader than one value.
+    expect(toml).not.toMatch(/^\s*(paths|commits|stopwords)\s*=/m);
+    expect(toml).not.toMatch(/^\s*\[\[rules\]\]/m);
+    const regexes = [...toml.matchAll(/^regexes = \[(.*)\]$/gm)].map((m) => m[1]);
+    expect(regexes.length).toBeGreaterThan(0);
+    for (const r of regexes) {
+      // Each entry is one anchored literal: no wildcard, class or quantifier.
+      for (const lit of r.split(',').map((x) => x.trim())) {
+        expect(lit).toMatch(/^'''\^[0-9a-f-]+\$'''$/);
+      }
+    }
+    expect(read(SCRIPT)).toMatch(/--config "\$CONFIG"/);
   });
 });

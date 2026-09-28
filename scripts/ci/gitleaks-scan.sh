@@ -14,18 +14,39 @@
 #                   before that is not in the clone (force-push) falls back to
 #                   the pushed commit alone
 #
+# Fail-closed: a shallow clone, a range end missing from the clone, an empty
+# diff range or a missing config exits 2 (never a silent "0 commits scanned").
+#
 # Baseline: .gitleaksignore at the repo root (commit-bound fingerprints of
-# reviewed historical fixtures). A new test fixture that trips a rule gets an
-# inline `gitleaks:allow` comment, reviewed in its PR; there is no path-wide
-# allowlist.
+# reviewed historical fixtures) and .gitleaks.toml (default rules plus
+# value-exact allowlists, passed explicitly). A new test fixture that trips a
+# rule gets an inline `gitleaks:allow` comment, reviewed in its PR; there is
+# no path-wide allowlist.
 set -euo pipefail
 
 : "${GITLEAKS_BIN:?GITLEAKS_BIN is required}"
 : "${SCAN_MODE:?SCAN_MODE is required (full|diff)}"
 
 ZERO=0000000000000000000000000000000000000000
+CONFIG=.gitleaks.toml
+
+fail() {
+  echo "::error::gitleaks-scan: $1"
+  exit 2
+}
 
 has_commit() { [ -n "${1:-}" ] && git cat-file -e "${1}^{commit}" 2>/dev/null; }
+
+# Both ends must be in the clone and the range must hold at least one commit.
+diff_range() {
+  has_commit "$1" || fail "range base $1 is not in the clone"
+  has_commit "$2" || fail "range head $2 is not in the clone"
+  [ "$(git rev-list --count "$1..$2")" -gt 0 ] || fail "range $1..$2 holds no commits"
+  log_opts="$1..$2"
+}
+
+[ "$(git rev-parse --is-shallow-repository)" = false ] || fail "shallow clone; check out with fetch-depth: 0"
+[ -f "$CONFIG" ] || fail "$CONFIG not found in $(pwd)"
 
 if [ "$SCAN_MODE" = full ]; then
   # HEAD history only. actions/checkout with fetch-depth: 0 also fetches every
@@ -35,28 +56,28 @@ if [ "$SCAN_MODE" = full ]; then
 elif [ "$SCAN_MODE" = diff ]; then
   case "${GITHUB_EVENT_NAME:-}" in
     pull_request)
-      log_opts="${PR_BASE_SHA:?}..${PR_HEAD_SHA:?}"
+      diff_range "${PR_BASE_SHA:-}" "${PR_HEAD_SHA:-}"
       ;;
     merge_group)
-      log_opts="${MG_BASE_SHA:?}..${MG_HEAD_SHA:?}"
+      diff_range "${MG_BASE_SHA:-}" "${MG_HEAD_SHA:-}"
       ;;
     push)
-      : "${GITHUB_SHA:?}"
+      has_commit "${GITHUB_SHA:-}" || fail "pushed commit ${GITHUB_SHA:-} is not in the clone"
+      # New ref or unknown before: the pushed commit alone. main blocks
+      # force-push, and the nightly full-history scan covers any gap.
       if [ "${PUSH_BEFORE:-$ZERO}" = "$ZERO" ] || ! has_commit "${PUSH_BEFORE:-}"; then
         log_opts="-1 ${GITHUB_SHA}"
       else
-        log_opts="${PUSH_BEFORE}..${GITHUB_SHA}"
+        diff_range "$PUSH_BEFORE" "$GITHUB_SHA"
       fi
       ;;
     *)
-      echo "::error::gitleaks-scan: unsupported event '${GITHUB_EVENT_NAME:-}' for diff mode"
-      exit 2
+      fail "unsupported event '${GITHUB_EVENT_NAME:-}' for diff mode"
       ;;
   esac
 else
-  echo "::error::gitleaks-scan: SCAN_MODE must be full or diff (got '$SCAN_MODE')"
-  exit 2
+  fail "SCAN_MODE must be full or diff (got '$SCAN_MODE')"
 fi
 
 echo "gitleaks log-opts: $log_opts"
-"$GITLEAKS_BIN" git --redact --no-banner --verbose --exit-code 1 --log-opts="$log_opts" .
+"$GITLEAKS_BIN" git --redact --no-banner --verbose --exit-code 1 --config "$CONFIG" --log-opts="$log_opts" .
