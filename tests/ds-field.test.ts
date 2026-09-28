@@ -64,3 +64,14 @@ describe('Field', () => {
     expect(html).toContain('border-ds-border-input');
   });
 });
+
+describe('Checkbox wiring cannot be overridden', () => {
+  it('caller props never replace the generated id or aria-describedby', async () => {
+    const { Checkbox } = await import('@/components/ds/field');
+    const html = renderToStaticMarkup(createElement(Checkbox, { name: 'r', label: 'Agree', hint: 'Why', id: 'evil', 'aria-describedby': 'nowhere' } as never));
+    expect(html).not.toContain('id="evil"');
+    expect(html).not.toContain('nowhere');
+    const d = /aria-describedby="([^"]+)"/.exec(html)![1];
+    expect(html).toContain(`id="${d}"`);
+  });
+});

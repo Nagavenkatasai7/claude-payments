@@ -10,6 +10,9 @@ export type RevealResult = { value: string } | { error: string };
  * MUST follow the admin reveal pattern: require the session, check the permission BEFORE any read,
  * fetch scoped to the caller's tenant (out of scope returns the same generic error as not found),
  * decrypt inside the action, and record a `pii.reveal` audit event before returning.
+ *
+ * Any subject id bound into the action (e.g. `reveal={action.bind(null, transferId)}`) arrives from the
+ * client and is UNTRUSTED: the action must re-scope it to the caller's tenant, never trust it.
  */
 export type RevealAction = () => Promise<RevealResult>;
 
@@ -62,7 +65,11 @@ export function MaskedValueView({
   );
 }
 
-/** A sensitive value, masked by default. Show calls `reveal` once; Hide re-masks without a new call. */
+/**
+ * A sensitive value, masked by default. Show calls `reveal` once; Hide re-masks without a new call.
+ * `masked` must be computed on the SERVER (e.g. '****1234'): never pass the full value into this or any
+ * client wrapper, because Client Component props are serialised into the page.
+ */
 export function MaskedValue({ masked, reveal, label }: { masked: string; reveal: RevealAction; label: string }) {
   const [state, setState] = React.useState<MaskedState>(INITIAL_MASKED);
   const inFlight = React.useRef(false);

@@ -14,3 +14,16 @@ describe('formatMoney (money formatting in one place)', () => {
     expect(formatMoney(Number.POSITIVE_INFINITY, 'USD')).toBe('—');
   });
 });
+
+describe('formatMoney edge values', () => {
+  it('negative zero renders as plain zero', () => {
+    expect(formatMoney(-0, 'USD')).toBe('$0.00');
+    expect(formatMoney(-0.001, 'USD')).toBe('$0.00');
+  });
+  it('negatives keep their sign', () => {
+    expect(formatMoney(-5, 'USD')).toBe('-$5.00');
+  });
+  it('zero-decimal currencies have no minor units', () => {
+    expect(formatMoney(1234, 'JPY')).toBe('¥1,234');
+  });
+});

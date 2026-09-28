@@ -50,3 +50,26 @@ describe('ds Table', () => {
     expect(html).toContain('aria-sort="ascending"');
   });
 });
+
+describe('ds Table beyond the last page', () => {
+  const columns = [{ key: 'id', header: 'ID', sortable: true, cell: (r: { id: string }) => r.id }];
+  it('a page past the end is not a false empty state: it links to the real last page', async () => {
+    const { Table } = await import('@/components/ds/table');
+    const html = renderToStaticMarkup(createElement(Table<{ id: string }>, {
+      caption: 'T', columns, rows: [], total: 60,
+      params: { page: 5, sort: 'id', dir: 'desc', offset: 100, limit: 25 },
+      baseHref: '/t', currentQuery: new URLSearchParams('q=x&page=5'), empty: 'No transfers yet',
+    }));
+    expect(html).not.toContain('No transfers yet');
+    expect(html).toContain('href="/t?q=x&amp;page=3"');
+    expect(html).toContain('Go to the last page');
+    expect(html).not.toContain('page=6');
+  });
+  it('clampPage pulls the page and offset back to the last page for callers that count first', async () => {
+    const { clampPage } = await import('@/lib/ui/table-params');
+    expect(clampPage({ page: 5, sort: 'id', dir: 'desc', offset: 100, limit: 25 }, 60)).toEqual({ page: 3, sort: 'id', dir: 'desc', offset: 50, limit: 25 });
+    expect(clampPage({ page: 2, sort: 'id', dir: 'desc', offset: 25, limit: 25 }, 0)).toMatchObject({ page: 1, offset: 0 });
+    const inRange = { page: 2, sort: 'id', dir: 'asc' as const, offset: 25, limit: 25 };
+    expect(clampPage(inRange, 60)).toEqual(inRange);
+  });
+});

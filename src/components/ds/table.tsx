@@ -11,7 +11,8 @@ const PAGE_LINK = `inline-flex min-h-10 items-center rounded-full border border-
 
 /**
  * A server-rendered table: sortable headers and pagination are plain links (no client JS). The caller
- * parses `params` with parseTableParams and runs the scoped, paginated query itself.
+ * parses `params` with parseTableParams (sorts = tableSorts(columns)) and runs the scoped, paginated
+ * query itself; callers that count first can use clampPage.
  */
 export function Table<T>({
   caption,
@@ -36,6 +37,8 @@ export function Table<T>({
 }) {
   const pages = Math.max(1, Math.ceil(total / params.limit));
   const page = Math.min(params.page, pages);
+  // A page past the end (a stale link, or rows deleted since) is NOT an empty table: offer the real last page.
+  const pastEnd = rows.length === 0 && total > 0 && params.page > pages;
   return (
     <div className="flex flex-col gap-4">
       <div className="overflow-x-auto rounded-ds-card border border-ds-border bg-ds-surface">
@@ -72,7 +75,13 @@ export function Table<T>({
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length} className="px-4 py-10 text-center text-ds-ink-muted">
-                  {empty}
+                  {pastEnd ? (
+                    <Link href={tableHref(baseHref, currentQuery, { page: pages })} className={PAGE_LINK}>
+                      {t('ds.table.lastPage')}
+                    </Link>
+                  ) : (
+                    empty
+                  )}
                 </td>
               </tr>
             ) : (
@@ -89,7 +98,7 @@ export function Table<T>({
           </tbody>
         </table>
       </div>
-      {total > 0 ? (
+      {total > 0 && !pastEnd ? (
         <nav aria-label={caption} className="flex flex-wrap items-center justify-between gap-3">
           <span className="text-[13.5px] text-ds-ink-muted">{t('ds.table.pageOf', { page, pages })}</span>
           <span className="flex gap-2">

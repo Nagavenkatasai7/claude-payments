@@ -88,13 +88,13 @@ export function Checkbox({
     <div className={dsCn('flex flex-col', className)}>
       <label className="inline-flex min-h-[44px] cursor-pointer items-center gap-3 text-[15px] text-ds-ink">
         <input
+          {...props}
           type="checkbox"
           id={id}
           name={name}
           aria-invalid={error ? true : undefined}
           aria-describedby={describedBy}
           className={dsCn('size-5 shrink-0 cursor-pointer rounded accent-ds-primary', FOCUS)}
-          {...props}
         />
         <span>{label}</span>
       </label>
