@@ -24,6 +24,7 @@ const str = (v: unknown, what: string): string => {
 };
 const PARAM_IN = ['path', 'query', 'header'] as const;
 const RESPONSE_KEYS = ['description', 'content', 'headers', '$ref'];
+const FIELD_KEYS = ['type', 'format', 'description', 'enum', 'example', 'items', 'nullable', '$ref'];
 
 const optStr = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -65,6 +66,10 @@ function parseSchemas(components: Obj): SpecSchema[] {
       fields: Object.entries(raw.properties).map(([field, p]) => {
         const where = `schema ${name}.${field}`;
         if (!isObj(p)) throw new Error(`openapi: ${where} is not an object`);
+        // The same comma split as in responses: a flow-map description cut in two adds a stray key.
+        for (const k of Object.keys(p)) {
+          if (!FIELD_KEYS.includes(k)) throw new Error(`openapi: ${where} has unknown key "${k}"`);
+        }
         const t = p.type;
         const type = typeof t === 'string' ? t : Array.isArray(t) && t.length > 0 && t.every((x) => typeof x === 'string') ? t.join(' | ') : null;
         if (type === null) throw new Error(`openapi: ${where} type must be a string or a list of strings`);

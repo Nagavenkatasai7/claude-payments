@@ -52,12 +52,12 @@ const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
  * A copy-paste curl for one operation. Keys are placeholders only: sandbox operations use the
- * literal `sr_test_…`; operations a test key cannot call use $SMARTREMIT_LIVE_KEY. Required header
+ * $SMARTREMIT_TEST_KEY; operations a test key cannot call use $SMARTREMIT_LIVE_KEY (paste-ready either way). Required header
  * parameters (the Idempotency-Key on the mint) get a fresh UUID; path parameters stay as {name}.
  */
 export function curlExample(op: SpecOperation, serverUrl: string): string {
   const lines = [`curl -X ${op.method} ${shellQuote(`${serverUrl}${op.path}`)}`];
-  lines.push(op.sandbox ? `-H ${shellQuote('Authorization: Bearer sr_test_…')}` : '-H "Authorization: Bearer $SMARTREMIT_LIVE_KEY"');
+  lines.push(op.sandbox ? '-H "Authorization: Bearer $SMARTREMIT_TEST_KEY"' : '-H "Authorization: Bearer $SMARTREMIT_LIVE_KEY"');
   for (const p of op.parameters) {
     if (p.in === 'header' && p.required) lines.push(`-H "${p.name}: $(uuidgen)"`);
   }

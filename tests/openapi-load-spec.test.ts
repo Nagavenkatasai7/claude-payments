@@ -200,6 +200,12 @@ describe('response objects fail loud on keys they do not understand', () => {
       /GET \/transactions\/\{id\} response 404 has unknown key "or gone\."/,
     );
   });
+  it('refuses a schema field whose description was split by an unquoted comma', async () => {
+    const { parseOpenApiDocument } = await import('@/lib/openapi/load-spec');
+    expect(() => parseOpenApiDocument(DOC.replace('error: { type: string, description: Human-readable. }', 'error: { type: string, description: Human-readable, short. }'))).toThrow(
+      /schema Error\.error has unknown key "short\."/,
+    );
+  });
   it('the real openapi.yaml keeps every description whole', async () => {
     const { loadPartnerOpenApiDocument } = await import('@/lib/openapi/load-spec');
     const ops = loadPartnerOpenApiDocument().operations;

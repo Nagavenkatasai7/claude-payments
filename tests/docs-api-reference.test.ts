@@ -85,9 +85,9 @@ describe('curlExample', () => {
     }
   });
 
-  it('uses the literal sandbox placeholder for sandbox operations and a named placeholder for live-only ones', async () => {
+  it('uses a test-key variable for sandbox operations and a live-key variable for live-only ones', async () => {
     const { curlExample } = await import('@/lib/docs/api-reference');
-    expect(curlExample(op('createQuote'), doc.serverUrl)).toContain("-H 'Authorization: Bearer sr_test_…'");
+    expect(curlExample(op('createQuote'), doc.serverUrl)).toContain('-H "Authorization: Bearer $SMARTREMIT_TEST_KEY"');
     for (const id of ['createBeneficiary', 'pushRate', 'listRates', 'listSettlements']) {
       const c = curlExample(op(id), doc.serverUrl);
       expect(c).toContain('-H "Authorization: Bearer $SMARTREMIT_LIVE_KEY"');
@@ -110,7 +110,7 @@ describe('curlExample', () => {
     const body = /-d '([\s\S]*)'$/.exec(quote)![1];
     expect(JSON.parse(body)).toEqual(op('createQuote').requestExample);
     const get = curlExample(op('listCorridors'), doc.serverUrl);
-    expect(get).toBe("curl -X GET 'https://smartremit.ai/api/partner/v1/corridors' \\\n  -H 'Authorization: Bearer sr_test_…'");
+    expect(get).toBe("curl -X GET 'https://smartremit.ai/api/partner/v1/corridors' \\\n  -H \"Authorization: Bearer $SMARTREMIT_TEST_KEY\"");
   });
 
   it("escapes a single quote in the body so the shell string stays closed", async () => {
