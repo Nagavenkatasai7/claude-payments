@@ -487,6 +487,13 @@ describe('sendAgainAction (Task 9.4)', () => {
     expect(drafts()).toHaveLength(0);
   });
 
+  it('a blocked transfer is never repeated, even by a forged POST (the button is hidden too) → not found', async () => {
+    await db.execute(sql`UPDATE transfers SET status = 'blocked' WHERE id = ${A.transferIds[0]}`);
+    const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, fd());
+    expect(r.error).toBe('portal.send.not_found');
+    expect(drafts()).toHaveLength(0);
+  });
+
   it('EDD → the WhatsApp copy, nothing drafted', async () => {
     await raiseDaily();
     await seedLedgerSpend(db, { partnerId: 'pa', phone, amountUsd: 2950, status: 'paid' });

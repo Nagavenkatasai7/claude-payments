@@ -306,8 +306,9 @@ export async function sendAgainAction(transferId: string, _prev: ContinueState, 
     logWarn('portal.send.again', 'read failed');
     return refuse({ error: 'portal.send.failed' });
   }
-  // A business bill payment is never repeated as a consumer send (the bill flow is the bot's).
-  if (!t || t.transferType === 'b2b') return refuse({ error: 'portal.send.not_found' });
+  // A business bill payment is never repeated as a consumer send (the bill flow is the bot's), and a
+  // blocked transfer is never repeated (the page hides the button; this refuses a forged POST too).
+  if (!t || t.transferType === 'b2b' || t.status === 'blocked') return refuse({ error: 'portal.send.not_found' });
   if (!(await withinSendLimit(owner))) return refuse({ error: 'portal.send.too_many' });
 
   const { customer, partner } = loaded;
