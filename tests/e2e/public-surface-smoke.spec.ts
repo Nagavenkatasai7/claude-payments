@@ -185,3 +185,13 @@ for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/trans
     await expect(page.locator('body')).not.toContainText(/smartremit/i);
   });
 }
+
+// M2-13: the Devices and Privacy pages are apex 404s too (Privacy is also behind its own flag).
+for (const path of ['/portal/devices', '/portal/privacy', '/portal/privacy/export', '/portal/privacy/delete']) {
+  test(`apex ${path} is the neutral 404 (M2-13)`, async ({ page }) => {
+    const res = await page.goto(path);
+    expect(res?.status()).toBe(404);
+    await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(/smartremit/i);
+  });
+}

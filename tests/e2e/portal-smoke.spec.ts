@@ -28,6 +28,11 @@ test.describe('customer portal on a partner subdomain', () => {
     }
   });
 
+  test('the devices page without a cookie lands on the sign-in page (M2-13)', async ({ page }) => {
+    await page.goto(`${ORIGIN}/portal/devices`);
+    await expect(page).toHaveURL(/\/portal\/login$/);
+  });
+
   test('a forged portal cookie is not a session', async ({ page, context }) => {
     // `url` (not `domain`) makes it host-only, as the __Host- prefix requires.
     await context.addCookies([{ name: '__Host-sr_portal', value: 'deadbeef', url: `${ORIGIN}/`, secure: true, httpOnly: true, sameSite: 'Lax' }]);
