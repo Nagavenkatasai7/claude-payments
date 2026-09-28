@@ -173,6 +173,101 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+  # Compliance A3: secret scan + SAST + lockfile scan, the free/OSS stand-in
+  # for GitHub Advanced Security (which a private repo on GitHub Pro lacks).
+  # No npm ci: the scanners are standalone. Every tool is pinned by version
+  # AND sha256 (or image digest); nothing uploads source anywhere, and no
+  # SARIF goes to code scanning (that needs GHAS once the repo is private).
+  security:
+    name: security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      # gitleaks_8.30.1_linux_x64.tar.gz, from the release's checksums.txt.
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+      OSV_SCANNER_VERSION: '2.6.0'
+      # osv-scanner_linux_amd64, from the release's osv-scanner_SHA256SUMS.
+      OSV_SCANNER_SHA256: 'ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108'
+      # Semgrep CE, multi-arch index digest of the 1.178.0 tag.
+      SEMGREP_IMAGE: 'semgrep/semgrep:1.178.0@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b'
+      # semgrep/semgrep-rules at a fixed commit (the git object id is the
+      # integrity check). Fetched at run time, never vendored: the Semgrep
+      # Rules License v1.0 allows internal use, not redistribution.
+      SEMGREP_RULES_COMMIT: 'a84ff9cc2453ca91d581380de4b8b3f272f6f4be'
+    steps:
+      # Full history: the diff range below must resolve both ends. Cheap here
+      # (a few hundred commits).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks + osv-scanner (sha256-verified)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz -C bin gitleaks
+          curl -sSfL -o bin/osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  bin/osv-scanner" | sha256sum -c -
+          chmod +x bin/gitleaks bin/osv-scanner
+
+      # Only the commits this run adds (the nightly scans full history):
+      # PR base..head, merge-group base..head, or push before..sha (a new ref
+      # or an unknown `before` falls back to the pushed commit alone). The
+      # range logic lives in the script so the nightly and a local proof run
+      # the same command. A push run cancelled by the next push (concurrency
+      # above) leaves its range to the nightly full scan. Baseline:
+      # .gitleaksignore (commit-bound fingerprints, reviewed).
+      - name: Secret scan (gitleaks, new commits)
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/bin/gitleaks
+          SCAN_MODE: diff
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: bash scripts/ci/gitleaks-scan.sh
+
+      # Whole tree (tracked files; ~20 s), TS + JS rule packs only, blocking
+      # on ERROR severity. `scan` with --metrics=off and local --config paths
+      # makes no call to semgrep.dev (never `semgrep ci`, never --config auto).
+      # The rules clone sits in RUNNER_TEMP so its own JS/TS fixtures are not
+      # scanned; --user keeps git's ownership check happy so the scan stays
+      # limited to tracked files. Baseline: `// nosemgrep: <rule-id>` with a
+      # reason on the line before each reviewed finding.
+      - name: SAST (Semgrep CE)
+        run: |
+          rules="$RUNNER_TEMP/semgrep-rules"
+          git init -q "$rules"
+          git -C "$rules" fetch -q --depth 1 https://github.com/semgrep/semgrep-rules "$SEMGREP_RULES_COMMIT"
+          git -C "$rules" checkout -q FETCH_HEAD
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            -v "$PWD:/src" -v "$rules:/rules:ro" -w /src "$SEMGREP_IMAGE" \
+            semgrep scan --metrics=off --disable-version-check \
+              --config /rules/javascript --config /rules/typescript \
+              --severity ERROR --error
+
+      # report-only, deliberately. `npm audit --omit=dev --audit-level=high`
+      # (the audit job) stays the blocking dependency gate. osv-scanner adds
+      # dev dependencies and moderate advisories, which mostly only the
+      # Dependabot PRs can fix; gating on them (or on an osv.dev outage) would
+      # stall every PR. Findings and tool errors surface as a ::warning:: and a
+      # table in the job summary. Sends package names + versions to osv.dev,
+      # never source.
+      - name: Lockfile scan (osv-scanner, report-only)
+        run: |
+          rc=0
+          "$RUNNER_TEMP/bin/osv-scanner" scan source -L package-lock.json --format markdown --output-file "$RUNNER_TEMP/osv.md" || rc=$?
+          if [ -f "$RUNNER_TEMP/osv.md" ]; then tee -a "$GITHUB_STEP_SUMMARY" < "$RUNNER_TEMP/osv.md"; fi
+          case "$rc" in
+            0) echo "osv-scanner: no known vulnerabilities in package-lock.json" ;;
+            1) echo "::warning title=osv-scanner::advisories found in package-lock.json (report-only; see the job summary)" ;;
+            *) echo "::warning title=osv-scanner::scanner did not complete (exit $rc); report-only, not blocking" ;;
+          esac
+
   # The REQUIRED status check. Keep the job name exactly `ci`, and let no other
   # job use that name. `if: always()` makes it run (and report) even when a
   # job above failed or was cancelled; it then passes only when every needed
@@ -180,7 +275,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [drift, typecheck, lint, test, build, audit]
+    needs: [drift, typecheck, lint, test, build, audit, security]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

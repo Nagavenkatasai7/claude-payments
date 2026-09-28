@@ -190,6 +190,7 @@ export const env = {
   },
   get paymentProviderMode(): PaymentProviderMode {
     // Default + only supported value in v1 — a forward hook, not a live switch.
+    // nosemgrep: typescript.lang.correctness.useless-ternary
     return process.env.PAYMENT_PROVIDER_MODE === 'mock' ? 'mock' : 'mock';
   },
   // ── Customer onboarding Phase 1 ──

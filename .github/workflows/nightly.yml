@@ -60,6 +60,36 @@ jobs:
       - name: Audit all dependencies
         run: npm audit --audit-level=high
 
+  # Compliance A3: gitleaks over the FULL history of the default branch (the
+  # per-PR job in ci.yml scans only new commits). Same pinned build and the
+  # same script as ci.yml; baseline in .gitleaksignore. A found secret fails
+  # this run. Redacted output only (public logs).
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      # gitleaks_8.30.1_linux_x64.tar.gz, from the release's checksums.txt.
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks (sha256-verified)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz -C bin gitleaks
+
+      - name: Secret scan (gitleaks, full history)
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/bin/gitleaks
+          SCAN_MODE: full
+        run: bash scripts/ci/gitleaks-scan.sh
+
   prod-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 10

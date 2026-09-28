@@ -84,6 +84,8 @@ function aesGcmOpen(masterKey: Buffer, sealed: Buffer): Buffer {
   const iv = sealed.subarray(0, GCM_IV_BYTES);
   const tag = sealed.subarray(GCM_IV_BYTES, GCM_IV_BYTES + GCM_TAG_BYTES);
   const ct = sealed.subarray(GCM_IV_BYTES + GCM_TAG_BYTES);
+  // Tag length is enforced: the length guard above plus the fixed 16-byte subarray.
+  // nosemgrep: javascript.node-crypto.security.gcm-no-tag-length
   const decipher = createDecipheriv('aes-256-gcm', masterKey, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ct), decipher.final()]);
@@ -441,6 +443,8 @@ function openWith(
   aad: Buffer,
 ): string {
   const dek = provider.unwrapDataKey(wrappedDek); // throws if master key mismatches
+  // Tag length is enforced: both callers take `tag` from ivAndTag(), which rejects != 16 bytes.
+  // nosemgrep: javascript.node-crypto.security.gcm-no-tag-length
   const decipher = createDecipheriv('aes-256-gcm', dek, iv);
   decipher.setAAD(aad); // must match the AAD bound at encrypt
   decipher.setAuthTag(tag);
