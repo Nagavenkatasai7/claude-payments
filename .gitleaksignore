@@ -1,0 +1,45 @@
+# gitleaks baseline (Compliance A3). Each entry is bound to one commit, file,
+# rule and line, so it can never hide a new finding. Every entry below was
+# reviewed on 2026-09-28: none is a live credential. Some entries point at
+# commits that exist only on non-main branches; CI and the nightly scan main
+# history only, so they are kept for a possible future `--all` run.
+# Value-exact allowlists (the documented example Idempotency-Key) live in
+# .gitleaks.toml. Classes:
+#
+# Documentation placeholders: partner API curl examples with a literal
+# `sk_live_...` placeholder, an audit-note example of a rejected made-up key,
+# and a UUID shown as an example Idempotency-Key.
+07db7a4a1f7f7d7db72eb9f18c5e8d2dbf433478:src/app/docs/page.tsx:generic-api-key:242
+0db16826b53bb8949fd7374218b77a918f6f2a90:src/content/docs/sandbox.mdx:generic-api-key:26
+369e41a272c80458aff167a8a17a517bb0e5199b:docs/AUDIT-2026-09-14.md:curl-auth-header:3685
+3a35fc37759b72eb0e4291dcdaab1481c8da7225:src/app/admin-dashboard/partners/[id]/page.tsx:curl-auth-header:532
+3a35fc37759b72eb0e4291dcdaab1481c8da7225:src/app/admin-dashboard/partners/[id]/page.tsx:curl-auth-header:537
+3a35fc37759b72eb0e4291dcdaab1481c8da7225:src/app/admin-dashboard/partners/[id]/page.tsx:curl-auth-header:546
+3a35fc37759b72eb0e4291dcdaab1481c8da7225:src/app/admin-dashboard/partners/[id]/page.tsx:curl-auth-header:548
+b327bc5b7c89afd0abda05aabb6e29ceddc9529d:src/app/docs/page.tsx:generic-api-key:242
+b383a52f213cb1f41a4de1a3aa9593e37e0eaf1c:src/app/admin-dashboard/partners/[id]/page 2.tsx:curl-auth-header:472
+b383a52f213cb1f41a4de1a3aa9593e37e0eaf1c:src/app/admin-dashboard/partners/[id]/page 2.tsx:curl-auth-header:477
+b383a52f213cb1f41a4de1a3aa9593e37e0eaf1c:src/app/admin-dashboard/partners/[id]/page 2.tsx:curl-auth-header:486
+b383a52f213cb1f41a4de1a3aa9593e37e0eaf1c:src/app/admin-dashboard/partners/[id]/page 2.tsx:curl-auth-header:488
+e0271c2e9b589d40bfa427e616c9d24271c052bf:docs/AUDIT-2026-09-14.md:curl-auth-header:3737
+#
+# Test fixtures: made-up passwords, a fake Stripe client secret, a fake blob
+# token, a fake JWT used to test log scrubbing, and a throwaway self-signed TLS
+# key (CN=rail.example, labelled NOT A SECRET; later replaced by a per-run
+# openssl mint and never on main).
+1931382164a125afc013b88aa324d091f75aa3de:tests/stripe-funding-provider.test.ts:generic-api-key:46
+1931382164a125afc013b88aa324d091f75aa3de:tests/stripe-funding-provider.test.ts:generic-api-key:54
+1931382164a125afc013b88aa324d091f75aa3de:tests/stripe-funding-provider.test.ts:generic-api-key:77
+1e66e5f88e9d7cc43399cf832cc179195cfde500:tests/fixtures/tls/key.pem:private-key:1
+40ef8d6b615cff33741bf33f45ab6f7b4b1ae6f7:tests/partner-docs-private.test.ts:generic-api-key:206
+6db6019e02d21841aee2ae5e780e50bfb513d258:tests/staff-mfa-actions.test.ts:generic-api-key:237
+705a03e0ed1dca46bda1748e4c50463a1836ca08:tests/tracker-sync-core.test.ts:jwt:41
+c1650bedeb80cdd77ea921963e7d72ac73d950ac:tests/staff-mfa-actions.test.ts:generic-api-key:237
+c5655bdc7998d0c15b751a8a2bda8656e06fdc83:tests/staff-mfa-actions.test.ts:generic-api-key:177
+d523d6b431819e908b62655f89f4d6f69a9a22b9:tests/staff-mfa-actions.test.ts:generic-api-key:217
+ee9b0e5437d9dbbdafda5a9e4820e46b8e52bb4a:tests/partner-docs-private.test.ts:generic-api-key:206
+#
+# Not secrets: a SHA-256 digest of a source file (frozen-bytes guard) and a
+# migration sentinel key name.
+692273c8401d4d8b3b6a4360276499aa278b4121:src/lib/migration.ts:generic-api-key:13
+6f60007cb09bf927ec0e421bcb04813aef9dd14f:tests/auth-frozen-bytes.test.ts:generic-api-key:10

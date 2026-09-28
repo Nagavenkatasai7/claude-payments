@@ -90,6 +90,7 @@
   "/pay/b2b/[invoiceId]": "dynamic",
   "/privacy": "static",
   "/robots.txt": "static",
+  "/site-inactive": "static",
   "/sitemap.xml": "static",
   "/terms": "static"
 }

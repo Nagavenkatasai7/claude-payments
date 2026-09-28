@@ -14,6 +14,8 @@ export const NEW_UI_ROOTS: readonly string[] = [
   'src/app/docs-next',
   'src/app/trust',
   'src/app/partner', // the partner app (hex-scanned and state-walked)
+  // PR5: the generic inactive-site sheet a partner subdomain shows for an unknown/disabled slug.
+  'src/app/site-inactive',
   // M2/M3 append their roots here, e.g. 'src/app/partner'.
 ];
 /** Frozen @ 96c8933. Never add to this list. */
@@ -22,7 +24,11 @@ export const LEGACY_APP_DIRS: readonly string[] = [
   'onboard', 'partners', 'pay', 'privacy', 'terms',
 ];
 /** Files allowed to carry hex (each needs a reason). */
-export const HEX_EXEMPT_FILES: readonly string[] = [];
+export const HEX_EXEMPT_FILES: readonly string[] = [
+  // Mirrors the legacy dark pay dead-link sheet byte for byte (no oracle between the two) until H2
+  // moves the pay page to the landing look and dedupes the sheet.
+  'src/app/site-inactive/page.tsx',
+];
 /** New route dirs exempt from the loading/error rule (static, data-free pages only; each needs a reason). */
 export const STATE_EXEMPT_DIRS: readonly string[] = [
   // Static, prerendered, data-free (a loading boundary hides content without JS and flashes a
@@ -30,4 +36,6 @@ export const STATE_EXEMPT_DIRS: readonly string[] = [
   // skeleton until React's inline reveal script runs. error.tsx is still required and present.
   'src/app/docs-next',
   'src/app/docs-next/[slug]',
+  // A static, data-free page: nothing to load and nothing that can fail.
+  'src/app/site-inactive',
 ];
