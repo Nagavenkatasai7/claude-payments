@@ -11,3 +11,9 @@ export { Sidebar, type SidebarItem } from './sidebar';
 export { EmptyState } from './empty-state';
 export { ErrorState } from './error-state';
 export { RouteLoading } from './route-loading';
+export { Field, Input, Select, Checkbox, type FieldIds } from './field';
+export { Table, type TableColumn } from './table';
+// Client Components (each module carries 'use client'):
+export { ConfirmDialog } from './confirm-dialog';
+export { Toaster, useToast } from './toast';
+export { MaskedValue, type RevealAction, type RevealResult } from './masked-value';

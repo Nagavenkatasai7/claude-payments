@@ -32,7 +32,7 @@ describe('PageHeader / Sidebar keep the e2e hooks', () => {
 describe('ds index', () => {
   it('re-exports the primitives and the state components', async () => {
     const ds = await import('@/components/ds');
-    for (const name of ['Button', 'buttonVariants', 'Card', 'Badge', 'StatusPill', 'Money', 'Skeleton', 'PageHeader', 'Sidebar', 'EmptyState', 'ErrorState', 'RouteLoading'])
+    for (const name of ['Button', 'buttonVariants', 'Card', 'Badge', 'StatusPill', 'Money', 'Skeleton', 'PageHeader', 'Sidebar', 'EmptyState', 'ErrorState', 'RouteLoading', 'Field', 'Input', 'Select', 'Checkbox', 'Table', 'ConfirmDialog', 'Toaster', 'useToast', 'MaskedValue'])
       expect(typeof (ds as Record<string, unknown>)[name], name).toBe('function');
   });
 });

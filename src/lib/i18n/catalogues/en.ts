@@ -17,6 +17,8 @@ export const en = {
   'ds.masked.show': 'Show',
   'ds.masked.hide': 'Hide',
   'ds.masked.failed': 'This value could not be shown.',
+  'ds.masked.showLabel': 'Show {label}',
+  'ds.masked.hideLabel': 'Hide {label}',
   'ds.toast.dismiss': 'Dismiss',
   'ds.field.required': 'Required',
   'status.transfer.awaiting_payment': 'Awaiting payment',
