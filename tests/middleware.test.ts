@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { RequestCookies, ResponseCookies } from 'next/dist/compiled/@edge-runtime/cookies';
-import { proxy, config } from '@/proxy';
+import { proxy as proxyAnyHost, config } from '@/proxy';
+import type { NextResponse } from 'next/server';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import {
   SESSION_COOKIE,
@@ -12,6 +13,15 @@ import {
   clearStaffSessionCookies,
 } from '@/lib/session-cookie';
 import { fakeRedis } from './helpers';
+
+// UI redesign M1: proxy() is typed NextResponse | Promise<NextResponse> (a partner subdomain is
+// async). Every request here is apex, which stays synchronous; this wrapper asserts that and
+// leaves every assertion below unchanged.
+function proxy(req: NextRequest): NextResponse {
+  const res = proxyAnyHost(req);
+  if (res instanceof Promise) throw new Error('apex proxy must stay synchronous');
+  return res;
+}
 
 // ── logout harness: a REAL cookie jar (request cookies in, Set-Cookie out) ──
 let redis = fakeRedis();
@@ -114,12 +124,16 @@ describe('proxy (auth gate)', () => {
   });
 
   it('matches only the two gated trees (/login and /login/mfa stay unmatched)', () => {
-    expect(config.matcher).toEqual([
+    // UI redesign M1: the four legacy entries stay byte-identical; TWO host-conditioned entries
+    // (smartremit.ai subdomains other than www only) are appended. tests/site-matcher-parity.test.ts proves the apex
+    // match set is unchanged.
+    expect(config.matcher.slice(0, 4)).toEqual([
       '/admin-dashboard',
       '/admin-dashboard/:path*',
       '/account',
       '/account/:path*',
     ]);
+    expect(config.matcher.slice(4)).toHaveLength(2);
   });
 });
 

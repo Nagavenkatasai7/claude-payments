@@ -162,3 +162,14 @@ for (const path of ['/', '/about', '/docs', '/login', '/account/login', '/terms'
     expect(enforced[0]).not.toContain('unsafe-eval');
   });
 }
+
+// UI redesign M1 (PR5): the sheet a partner subdomain shows for an unknown or inactive slug. On the
+// apex it is reachable directly. NO brand-neutral assertion: it mirrors the pay dead link, which
+// renders the default brand name (src/lib/partner-config.ts DEFAULT_BRAND); the unit test
+// tests/site-inactive-page.test.ts pins <main> equality with that sheet.
+test('the inactive-site sheet renders the generic dead-link heading and is noindex', async ({ page }) => {
+  const res = await page.goto('/site-inactive');
+  expect(res?.status()).toBe(200);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('This link is no longer active');
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
+});
