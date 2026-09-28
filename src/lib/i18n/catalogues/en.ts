@@ -25,6 +25,7 @@ export const en = {
   'status.transfer.delivered': 'Delivered',
   'status.transfer.cancelled': 'Cancelled',
   'status.transfer.blocked': 'On hold',
+  'status.transfer.unknown': 'In progress',
   'status.refund.requested': 'Refund requested',
   'status.refund.pending': 'Refund on the way',
   'status.refund.completed': 'Refunded',
