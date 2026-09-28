@@ -244,3 +244,123 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 }
+
+/* ── DS tokens (UI redesign M1) ─────────────────────────────────────────────
+ * EXTRACTED from the landing (src/app/page.tsx), which the owner set as the
+ * final design on 2026-09-28. Each value is pinned to its landing source
+ * by tests/ds-tokens.test.ts. ADDITIVE: no pre-M1 variable is redefined.
+ * Partner theming re-points ONLY the "overridable" group, inside .ds-site
+ * (src/components/ds/site-theme-style.tsx). */
+:root {
+  --ds-brand-blue: #0c5bd2;
+  --ds-brand-blue-hover: #0a4fb8;
+  --ds-brand-teal: #0e7490;
+  --ds-brand-sky: #48b3f5;
+  --ds-brand-mint: #34d399;
+  --ds-ink: #0b1b3f;
+  --ds-ink-muted: #475569;
+  --ds-ink-subtle: #667085;
+  --ds-ground: #f5f9ff;
+  --ds-surface: #ffffff;
+  --ds-tint: #eef4fc;
+  --ds-border: #dbe4f0;
+  --ds-border-strong: #c5d3e6;
+  --ds-border-input: #8391a8;
+  --ds-cta-whatsapp: #25d366;
+  --ds-cta-whatsapp-hover: #1fbd5d;
+  --ds-on-whatsapp: #04231a;
+  --ds-on-primary: #ffffff;
+  --ds-icon-bg: #e3f6ee;
+  --ds-icon-ink: #047857;
+  --ds-icon-ring: #bfe8d3;
+  --ds-success-bg: #e8f7ef;
+  --ds-success-border: #a7e3c6;
+  --ds-success-ink: #065f46;
+  --ds-danger-bg: #fdecec;
+  --ds-danger-border: #f5c2c2;
+  --ds-danger-ink: #991b1b;
+  /* warning set: the "Review" tag in src/app/landing/showcase.tsx (142, 152) */
+  --ds-warning-ink: #b45309;
+  --ds-warning-bg: #fff4e5;
+  --ds-warning-border: #f5d49c;
+  --ds-ink-faint: #52607a;
+  --ds-nav-bg: rgba(245,249,255,0.85);
+  /* overridable (partner theming layer) */
+  --ds-primary: var(--ds-brand-blue);
+  --ds-primary-hover: var(--ds-brand-blue-hover);
+  --ds-accent: var(--ds-brand-teal);
+  --ds-gradient-text: linear-gradient(95deg,#0e7490,#0d9488 45%,#059669);
+  --ds-shadow-cta: 0 10px 30px -10px rgba(37,211,102,0.65);
+  --ds-shadow-pop: 0 24px 60px -24px rgba(11,27,63,0.28);
+  --ds-radius-card: 1rem;
+  --ds-radius-inner: 0.75rem;
+  --ds-radius-focus: 6px;
+  --ds-text-hero: clamp(40px,6.2vw,74px);
+  --ds-text-h2: clamp(28px,4vw,46px);
+  --ds-text-h3: clamp(24px,3.2vw,38px);
+  --ds-text-lead: clamp(20px,2.3vw,26px);
+  --ds-leading-body: 1.6;
+  --ds-container: 1180px;
+}
+
+/* DERIVED tokens reference the overridable ones. Custom properties resolve where they are DECLARED,
+ * so they are declared on :root AND .ds-site. Otherwise a partner scope would inherit the landing-blue
+ * computed values (tests/ds-tokens.test.ts pins this). */
+:root,
+.ds-site {
+  --ds-focus-ring: var(--ds-primary);
+  --ds-gradient-bar: linear-gradient(90deg,var(--ds-primary),var(--ds-brand-sky),var(--ds-brand-mint));
+  --ds-shadow-primary: 0 10px 26px -12px color-mix(in srgb,var(--ds-primary) 70%,transparent);
+}
+
+.ds-site { display: contents; }
+
+@theme inline {
+  --color-ds-primary: var(--ds-primary);
+  --color-ds-primary-hover: var(--ds-primary-hover);
+  --color-ds-accent: var(--ds-accent);
+  --color-ds-on-primary: var(--ds-on-primary);
+  --color-ds-ink: var(--ds-ink);
+  --color-ds-ink-muted: var(--ds-ink-muted);
+  --color-ds-ink-subtle: var(--ds-ink-subtle);
+  --color-ds-ink-faint: var(--ds-ink-faint);
+  --color-ds-nav-bg: var(--ds-nav-bg);
+  --color-ds-ground: var(--ds-ground);
+  --color-ds-surface: var(--ds-surface);
+  --color-ds-tint: var(--ds-tint);
+  --color-ds-border: var(--ds-border);
+  --color-ds-border-strong: var(--ds-border-strong);
+  --color-ds-border-input: var(--ds-border-input);
+  --color-ds-cta-whatsapp: var(--ds-cta-whatsapp);
+  --color-ds-cta-whatsapp-hover: var(--ds-cta-whatsapp-hover);
+  --color-ds-on-whatsapp: var(--ds-on-whatsapp);
+  --color-ds-icon-bg: var(--ds-icon-bg);
+  --color-ds-icon-ink: var(--ds-icon-ink);
+  --color-ds-icon-ring: var(--ds-icon-ring);
+  --color-ds-success-bg: var(--ds-success-bg);
+  --color-ds-success-border: var(--ds-success-border);
+  --color-ds-success-ink: var(--ds-success-ink);
+  --color-ds-danger-bg: var(--ds-danger-bg);
+  --color-ds-danger-border: var(--ds-danger-border);
+  --color-ds-danger-ink: var(--ds-danger-ink);
+  --color-ds-warning-ink: var(--ds-warning-ink);
+  --color-ds-warning-bg: var(--ds-warning-bg);
+  --color-ds-warning-border: var(--ds-warning-border);
+  --color-ds-focus-ring: var(--ds-focus-ring);
+  --radius-ds-card: var(--ds-radius-card);
+  --radius-ds-inner: var(--ds-radius-inner);
+  --radius-ds-focus: var(--ds-radius-focus);
+  --shadow-ds-cta: var(--ds-shadow-cta);
+  --shadow-ds-primary: var(--ds-shadow-primary);
+  --shadow-ds-pop: var(--ds-shadow-pop);
+}
+
+/* Gradient utilities. Tailwind v4 `@utility` (a static utility, like any other
+ * class): `bg-ds-gradient-bar` is the accent bar, `bg-ds-gradient-text` the headline. */
+@utility bg-ds-gradient-bar {
+  background-image: var(--ds-gradient-bar);
+}
+
+@utility bg-ds-gradient-text {
+  background-image: var(--ds-gradient-text);
+}
