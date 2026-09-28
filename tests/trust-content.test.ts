@@ -102,3 +102,19 @@ describe('Trust content is honest', () => {
     expect(DISCLOSURE_POLICY.safeHarbor.draft).toBe(true);
   });
 });
+
+describe('SECURITY.md (repo root)', () => {
+  it('exists, names the disclosure mailbox, and makes no time promise or over-claim', async () => {
+    expect(existsSync('SECURITY.md')).toBe(true);
+    const md = readFileSync('SECURITY.md', 'utf8');
+    const { DISCLOSURE_CONTACT } = await import('@/content/trust/disclosure');
+    expect(md).toContain(DISCLOSURE_CONTACT);
+    expect(md).not.toMatch(/security@/i);
+    expect(TIME_PROMISE.test(md)).toBe(false);
+    for (const r of FORBIDDEN) expect({ r: String(r), hit: r.test(md) }).toEqual({ r: String(r), hit: false });
+    expect(md).toMatch(/draft/i);
+  });
+  it('does not link the unlinked preview routes before the post-demo swap', () => {
+    expect(readFileSync('SECURITY.md', 'utf8')).not.toMatch(/\/(trust|docs-next)\b/);
+  });
+});
