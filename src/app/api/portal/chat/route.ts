@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { requirePortalSite } from '@/lib/portal-site';
-import { getPortalCustomer } from '@/lib/portal-auth';
+import { getPortalCustomer, isPortalSessionFresh } from '@/lib/portal-auth';
 import { isSameOrigin } from '@/lib/same-origin';
 import { checkIpRateLimit, enforceIpRateLimit } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
@@ -29,7 +29,9 @@ import { t, type MessageKey } from '@/lib/i18n';
 //  5. the body: at most PORTAL_CHAT_MAX_BODY_BYTES read (413), JSON, a 1-1000 character message (400);
 //  6. the daily cap and 7. the in-flight lock, both keyed by (partner, customer), never the phone alone;
 //  8. the EXISTING web-chat turn (src/lib/web-chat.ts: channel 'web', WEB_TOOL_ALLOWLIST at the schema
-//     and dispatch layers, the tenant-keyed web thread) for the session's own (partner, phone) row.
+//     and dispatch layers, the tenant-keyed web thread) for the session's own (partner, phone) row,
+//     carrying the session's step-up freshness (isPortalSessionFresh) so cancel / refund / recall
+//     refuse on a stale session exactly where the transfer page would ask for the fresh proof.
 // No new agent logic and no money path: money still moves only through the pay page.
 
 export const maxDuration = 60;
@@ -87,7 +89,10 @@ export async function POST(req: NextRequest) {
 
   try {
     // ctx.customer is the (host partner, session phone) row: getPortalCustomer reads it tenant-keyed.
-    const reply = await runWebChatTurn(ctx.customer, message.trim());
+    // The transfer page's 15-minute step-up rule, answered without a redirect (fail-closed): a stale
+    // session still chats, but the money tools (cancel, refund, recall) refuse and point to the page.
+    const fresh = await isPortalSessionFresh(ctx);
+    const reply = await runWebChatTurn(ctx.customer, message.trim(), { webStepUp: { surface: 'portal', fresh } });
     return NextResponse.json({ reply });
   } catch (err) {
     logError('portal.chat', err);

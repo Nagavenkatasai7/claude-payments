@@ -1,6 +1,6 @@
 import { buildSystemPrompt } from './prompt';
 import { resolveEffectiveSendLimits } from './send-limits';
-import { toolSchemasForChannel, executeTool, buildCustomerContext, type AgentChannel, type ToolContext } from './tools';
+import { toolSchemasForChannel, executeTool, buildCustomerContext, type AgentChannel, type ToolContext, type WebStepUp } from './tools';
 import { buildToolContext } from './tool-context';
 import type { ChatMessage, ChatTool, PartnerId, TurnContext } from './types';
 import { DEFAULT_PARTNER_ID } from './defaults';
@@ -51,6 +51,9 @@ export interface AgentDeps {
   // executeTool dispatch to WEB_TOOL_ALLOWLIST, and injects the web-channel
   // system note. Absent ⇒ 'whatsapp' — every existing call site is unchanged.
   channel?: AgentChannel;
+  // Portal chat step-up (M2 enablement): the customer portal chat's session freshness, handed to
+  // the tools (ToolContext.webStepUp). Absent ⇒ the legacy account chat or WhatsApp, unchanged.
+  webStepUp?: WebStepUp;
 }
 
 // Injected as a system message on EVERY round of a web-channel turn (not
@@ -205,6 +208,7 @@ export function createAgent(deps: AgentDeps) {
         partnerStore: deps.partnerStore,
         waCreds: deps.waCreds,
       },
+      webStepUp: deps.webStepUp,
     });
 
     // Customer context (fix 5 / F43): the customer's OWN recent sends and, after

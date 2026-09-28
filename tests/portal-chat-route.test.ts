@@ -31,6 +31,9 @@ const h = vi.hoisted(() => {
     ipLimited: false,
     turns: [] as Array<{ partnerId: string; phone: string; text: string }>,
     turnImpl: null as null | (() => Promise<string>),
+    turnOpts: [] as unknown[],
+    mfaEnrolled: false,
+    mfaThrow: false,
   };
   state.redisProxy = new Proxy({}, { get: (_t, k: string) => (...a: unknown[]) => state.redis[k](...a) });
   return state;
@@ -75,10 +78,20 @@ vi.mock('@/lib/ip-rate-limit', async (orig) => ({
   },
 }));
 vi.mock('@/lib/web-chat', () => ({
-  runWebChatTurn: async (customer: { partnerId: string; senderPhone: string }, text: string) => {
+  runWebChatTurn: async (customer: { partnerId: string; senderPhone: string }, text: string, opts?: unknown) => {
     h.turns.push({ partnerId: customer.partnerId, phone: customer.senderPhone, text });
+    h.turnOpts.push(opts);
     return h.turnImpl ? h.turnImpl() : `reply for ${customer.partnerId}`;
   },
+}));
+
+vi.mock('@/lib/customer-mfa', () => ({
+  getCustomerMfaStore: () => ({
+    isEnrolled: async () => {
+      if (h.mfaThrow) throw new Error('mfa store down');
+      return h.mfaEnrolled;
+    },
+  }),
 }));
 
 import { POST } from '@/app/api/portal/chat/route';
@@ -119,6 +132,9 @@ beforeEach(async () => {
   h.ipLimited = false;
   h.turns = [];
   h.turnImpl = null;
+  h.turnOpts = [];
+  h.mfaEnrolled = false;
+  h.mfaThrow = false;
   onHost('pa');
 });
 
@@ -218,6 +234,43 @@ describe('POST /api/portal/chat: the turn', () => {
     expect(res.status).toBe(500);
     expect(JSON.stringify(await res.json())).not.toContain('model down');
     expect(await redis.get(portalChatLockKey('pa', phone))).toBeNull();
+  });
+});
+
+// M2 enablement (portal chat step-up): the route passes the session's 15-minute freshness (the
+// transfer page's own rule, never a redirect) into the turn, so the money tools can refuse on a
+// stale session. Any error in the check reads as stale (fail closed).
+describe('POST /api/portal/chat: step-up freshness reaches the turn', () => {
+  it('a session signed in just now → fresh: true', async () => {
+    await signIn('pa');
+    expect((await POST(req())).status).toBe(200);
+    expect(h.turnOpts).toEqual([{ webStepUp: { surface: 'portal', fresh: true } }]);
+  });
+
+  it('a session older than 15 minutes still chats, with fresh: false', async () => {
+    await signIn('pa');
+    const later = Date.now() + 16 * 60_000;
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => later);
+    try {
+      expect((await POST(req())).status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(h.turnOpts).toEqual([{ webStepUp: { surface: 'portal', fresh: false } }]);
+  });
+
+  it('a TOTP-enrolled customer signed in on a WhatsApp code alone → fresh: false', async () => {
+    h.mfaEnrolled = true;
+    await signIn('pa');
+    expect((await POST(req())).status).toBe(200);
+    expect(h.turnOpts).toEqual([{ webStepUp: { surface: 'portal', fresh: false } }]);
+  });
+
+  it('an enrolment lookup error fails closed → fresh: false', async () => {
+    h.mfaThrow = true;
+    await signIn('pa');
+    expect((await POST(req())).status).toBe(200);
+    expect(h.turnOpts).toEqual([{ webStepUp: { surface: 'portal', fresh: false } }]);
   });
 });
 
