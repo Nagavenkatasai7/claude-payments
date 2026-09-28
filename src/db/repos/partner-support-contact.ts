@@ -19,9 +19,10 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { isDisclosurePhone, isHttpsUrl } from '@/lib/partner-config';
 import { normalizePortalEmail } from '@/lib/portal-email-verify';
 import { boundUntrustedText, hasOverridePhrase } from '@/lib/untrusted-text';
+import { SUPPORT_CONTACT_MAX } from '@/lib/partner-branding';
 import type { PartnerId } from '@/lib/types';
 
-export const SUPPORT_CONTACT_MAX = 120;
+export { SUPPORT_CONTACT_MAX };
 
 export type SupportContactKind = 'url' | 'email' | 'phone';
 export type SupportContactCheck = { ok: true; value: string; kind: SupportContactKind } | { ok: false };
