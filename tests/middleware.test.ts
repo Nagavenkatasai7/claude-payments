@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { RequestCookies, ResponseCookies } from 'next/dist/compiled/@edge-runtime/cookies';
-import { proxy, config } from '@/proxy';
+import { proxy as proxyAnyHost, config } from '@/proxy';
+import type { NextResponse } from 'next/server';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import {
   SESSION_COOKIE,
@@ -12,6 +13,15 @@ import {
   clearStaffSessionCookies,
 } from '@/lib/session-cookie';
 import { fakeRedis } from './helpers';
+
+// UI redesign M1: proxy() is typed NextResponse | Promise<NextResponse> (a partner subdomain is
+// async). Every request here is apex, which stays synchronous; this wrapper asserts that and
+// leaves every assertion below unchanged.
+function proxy(req: NextRequest): NextResponse {
+  const res = proxyAnyHost(req);
+  if (res instanceof Promise) throw new Error('apex proxy must stay synchronous');
+  return res;
+}
 
 // ── logout harness: a REAL cookie jar (request cookies in, Set-Cookie out) ──
 let redis = fakeRedis();

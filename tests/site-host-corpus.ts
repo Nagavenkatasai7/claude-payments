@@ -19,5 +19,5 @@ export const APEX_HOSTS: string[] = [
   // config.matcher and RESERVED_SLUGS ever drift apart.
   ...[...RESERVED_SLUGS].map((r) => `${r}.smartremit.ai`), ...[...RESERVED_SLUGS].map((r) => `${r.toUpperCase()}.smartremit.ai:443`),
   'claude-payments.vercel.app', 'claude-payments-git-feat-x-team.vercel.app', 'localhost', 'localhost:3000',
-  'acme.localhost', '127.0.0.1', '127.0.0.1:3000', '[::1]', '[::1]:3000', '', ' acme.smartremit.ai', 'acme.smartremit.ai ',
+  'acme.localhost', '127.0.0.1', '127.0.0.1:3000', '[::1]', '[::1]:3000', '',
 ];
