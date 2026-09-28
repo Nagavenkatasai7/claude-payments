@@ -1,8 +1,8 @@
 // M4 PR-2: guard for everything the docs PUBLISH: the MDX guides, the content
 // data modules they render (src/content/**/*.ts) and openapi.yaml (rendered on
 // the API reference). No secrets, real phones, internal hosts, env-var names or
-// script escape hatches; every guide compiles with the same compiler
-// @mdx-js/loader uses. The import/script/compile checks are MDX-only.
+// script escape hatches; every guide compiles with the same compiler and
+// remark plugins @mdx-js/loader uses. The import/script/compile checks are MDX-only.
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -47,21 +47,30 @@ describe.each(mdx)('%s (MDX-only checks)', (f) => {
   it('makes no certification or over-claim', () => {
     expect(text).not.toMatch(/\bcompliant\b|\bcertified\b|SOC ?2|\bOFAC\b|PCI/i);
   });
-  it('uses only the global components PR-3 provides, with real fact names and guide slugs', async () => {
+  // PR #385 review round 1: an AST walk, not a regex. The same remark plugin runs in the MDX
+  // loader (next.config.ts), so the build refuses expressions, ESM and unknown components too.
+  it('is data only (no expressions, ESM or unknown components), with real fact names and guide slugs', async () => {
+    const { compile } = await import('@mdx-js/mdx');
+    const { default: remarkGfm } = await import('remark-gfm');
+    const { default: remarkNoMdxExpressions } = await import('../src/lib/mdx/remark-no-mdx-expressions.mjs');
     const { FACTS } = await import('@/content/docs/facts');
     const { GUIDES } = await import('@/content/docs/registry');
-    const prose = text.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
-    for (const m of prose.matchAll(/<([A-Za-z][\w.]*)/g)) {
-      expect({ tag: m[1], ok: ['Fact', 'TemplateCatalog', 'ErrorStatusTable', 'GuideLink'].includes(m[1]) }).toEqual({ tag: m[1], ok: true });
-    }
-    for (const m of prose.matchAll(/<Fact name="([^"]+)" \/>/g)) expect(Object.keys(FACTS)).toContain(m[1]);
-    for (const m of prose.matchAll(/<GuideLink slug="([^"]+)">/g)) expect(GUIDES.map((g) => g.slug)).toContain(m[1]);
-    expect(prose.match(/<Fact\b/g)?.length ?? 0).toBe(prose.match(/<Fact name="[^"]+" \/>/g)?.length ?? 0);
-  });
-  it('compiles as MDX (the same compiler @mdx-js/loader uses)', async () => {
-    const { compile } = await import('@mdx-js/mdx');
-    const out = String(await compile(text));
+    type Node = { type: string; name?: string | null; attributes?: Array<{ name?: string; value?: unknown }>; children?: Node[] };
+    let tree: Node | undefined;
+    const capture = () => (t: Node) => {
+      tree = t;
+    };
+    const out = String(await compile(text, { remarkPlugins: [remarkGfm, remarkNoMdxExpressions, capture] }));
     expect(out).not.toMatch(/dangerouslySetInnerHTML/);
+    const elements: Node[] = [];
+    const visit = (n: Node) => {
+      if (n.type === 'mdxJsxFlowElement' || n.type === 'mdxJsxTextElement') elements.push(n);
+      n.children?.forEach(visit);
+    };
+    visit(tree!);
+    const attr = (n: Node, k: string) => n.attributes?.find((a) => a.name === k)?.value;
+    for (const n of elements.filter((e) => e.name === 'Fact')) expect(Object.keys(FACTS)).toContain(attr(n, 'name'));
+    for (const n of elements.filter((e) => e.name === 'GuideLink')) expect(GUIDES.map((g) => g.slug)).toContain(attr(n, 'slug'));
   });
 });
 
