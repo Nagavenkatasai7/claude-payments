@@ -108,4 +108,12 @@ export const en = {
   'portal.verify.sendCode': 'Send me a code on WhatsApp',
   'portal.verify.mfaSub': 'Now enter the code from your authenticator app.',
   'portal.verify.codeSent': 'We sent a 6-digit code to your WhatsApp. It expires in 5 minutes.',
+  'portal.timeline.created': 'Transfer created',
+  'portal.timeline.paid': 'Payment received',
+  'portal.timeline.delivered': 'Delivered to your recipient',
+  'portal.timeline.under_review': 'Under review. We will contact you if we need anything.',
+  'portal.timeline.cancelled': 'Cancelled',
+  'portal.timeline.refund_requested': 'Refund requested',
+  'portal.timeline.refund_in_progress': 'Refund on the way',
+  'portal.timeline.refunded': 'Refunded',
 } as const;
