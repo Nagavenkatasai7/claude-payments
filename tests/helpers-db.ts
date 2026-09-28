@@ -54,6 +54,7 @@ const ALL_TABLES = [
   'outbox',
   'conversation_messages',
   'partner_sites', // UI redesign M1 (0026): FK child of partners, truncated before it
+  'partner_portal_settings', // UI redesign M2-3 (0027): FK child of partners
   'idempotency_keys',
   'audit_events',
   'partner_rates',
@@ -62,11 +63,13 @@ const ALL_TABLES = [
   'transfers',
   'schedules',
   'beneficiaries',
+  'recipient_tombstones', // UI redesign M2-3 (0027): FK child of recipients
   'recipients',
   'kyc_cases',
   'corridor_requests',
   'api_keys',
   'partner_integrations',
+  'customer_portal_prefs', // UI redesign M2-3 (0027): FK child of customers
   'customers',
   'partners',
   'waitlist_signups',

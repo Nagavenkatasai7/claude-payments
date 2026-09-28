@@ -177,13 +177,18 @@ describe('migration 0027 is NEW TABLES ONLY (safe for the build already in produ
     expect(list).toEqual([{ name: 'A', recipientPhone: '91A', payoutMethod: 'bank', payoutDestination: '111122223333', lastUsedAt: '2026-06-01T00:00:00.000Z' }]);
   });
 
-  it('the composite FKs carry explicit names under the 63-byte identifier limit', async () => {
-    const fks = await rows<{ conname: string; rel: string }>(db,
-      `SELECT conname, conrelid::regclass::text AS rel FROM pg_constraint WHERE contype = 'f' AND conrelid::regclass::text IN ('partner_portal_settings','recipient_tombstones','customer_portal_prefs') ORDER BY conname`);
-    expect(fks).toEqual([
-      { conname: 'customer_portal_prefs_customer_fk', rel: 'customer_portal_prefs' },
-      { conname: 'partner_portal_settings_partner_id_partners_id_fk', rel: 'partner_portal_settings' },
-      { conname: 'recipient_tombstones_recipient_fk', rel: 'recipient_tombstones' },
+  it('every new constraint name fits the 63-byte identifier limit and matches the snapshot', async () => {
+    const cons = await rows<{ conname: string; contype: string }>(db,
+      `SELECT conname, contype FROM pg_constraint WHERE conrelid::regclass::text IN ('partner_portal_settings','recipient_tombstones','customer_portal_prefs') AND contype IN ('p','f','c','u') ORDER BY conname`);
+    expect(cons).toEqual([
+      { conname: 'customer_portal_prefs_customer_fk', contype: 'f' },
+      { conname: 'customer_portal_prefs_partner_id_phone_pk', contype: 'p' },
+      { conname: 'partner_portal_settings_partner_id_partners_id_fk', contype: 'f' },
+      { conname: 'partner_portal_settings_pkey', contype: 'p' },
+      { conname: 'partner_portal_settings_template_lang_format', contype: 'c' },
+      { conname: 'partner_portal_settings_template_name_format', contype: 'c' },
+      { conname: 'recipient_tombstones_partner_id_sender_phone_recipient_phone_pk', contype: 'p' },
+      { conname: 'recipient_tombstones_recipient_fk', contype: 'f' },
     ]);
   });
 });
