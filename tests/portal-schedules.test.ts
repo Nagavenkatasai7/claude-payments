@@ -21,7 +21,7 @@ import {
   setPortalScheduleStatus,
   visibleSchedules,
 } from '@/lib/portal-schedules';
-import type { ToolContext } from '@/lib/tools';
+import { executeTool, type ToolContext } from '@/lib/tools';
 import type { Customer, Schedule } from '@/lib/types';
 import { fakeRedis } from './helpers';
 import { freshDb, seedSender } from './helpers-db';
@@ -170,6 +170,26 @@ describe('createPortalSchedule', () => {
     const ok = good(recipientRid('pa', PHONE, A_RP));
     if (!ok.ok) throw new Error('form');
     expect(await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, ok.value)).toEqual({ ok: false, code: 'sender_name' });
+  });
+});
+
+describe('bot parity', () => {
+  it('the portal saves the SAME schedule row the bot saves for the same recipient, amount and day', async () => {
+    const bot = await executeTool('create_schedule', {
+      amount_source: 150, funding_method: 'bank_transfer', recipient_name: 'Recipient PA', recipient_phone: A_RP,
+      frequency: 'monthly', day_of_month: 5,
+    }, { ...ctxFor('pa'), channel: 'whatsapp' });
+    expect(bot.error).toBeUndefined();
+    const parsed = good(recipientRid('pa', PHONE, A_RP));
+    if (!parsed.ok) throw new Error('form');
+    const web = await createPortalSchedule(db, ctxFor('pa'), 'pa', PHONE, parsed.value);
+    if (!web.ok) throw new Error('web create');
+    const repo = createScheduleRepo(db);
+    const strip = (x: Schedule | null) => {
+      const { id: _i, createdAt: _c, ...rest } = x!;
+      return rest;
+    };
+    expect(strip(await repo.getOwnedSchedule('pa', PHONE, web.scheduleId))).toEqual(strip(await repo.getOwnedSchedule('pa', PHONE, String(bot.schedule_id))));
   });
 });
 
