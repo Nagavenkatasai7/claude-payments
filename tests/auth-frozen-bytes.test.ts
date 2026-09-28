@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 // Frozen @ 96c8933, computed with `git show 96c8933:src/lib/auth.ts | shasum -a 256`.
 // A later PR that changes an existing gate on purpose (announced to the owner first) updates
 // this pin, and the list below, in the same PR.
-const AUTH_TS_ORIGINAL_SHA = 'c176d7c74b5526668745310f02effa39d123e9e6cad90bd51338f882a906095a';
+const AUTH_TS_ORIGINAL_SHA = 'c176d7c74b5526668745310f02effa39d123e9e6cad90bd51338f882a906095a'; // gitleaks:allow (SHA-256 digest, not a secret)
 const ADDED_IMPORTS = [
   "import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';",
   "import { partnerMfaEnrolmentPending } from './partner-mfa-gate';",
