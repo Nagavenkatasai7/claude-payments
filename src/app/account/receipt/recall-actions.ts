@@ -2,19 +2,12 @@
 
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { getDb } from '@/db/client';
-import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { requireCustomer } from '@/lib/customer-auth';
-import { newTransferId } from '@/lib/id';
-import { enqueueTriage } from '@/lib/ticket-triage';
-import { getPartnerStore } from '@/lib/partner-store';
-import { getStore } from '@/lib/store';
-import { isRecallEligible } from '@/lib/refund-policy';
-import type { Customer, Partner } from '@/lib/types';
 import { getCustomerAuthStore } from '@/lib/customer-auth-store';
 import { getCustomerMfaStore, stepUp, STEP_UP_ERROR } from '@/lib/customer-mfa';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { requestRecallFor } from '@/lib/receipt-cores';
 
 /**
  * Customer-facing "Report a problem with this transfer" server action — opens a
@@ -42,41 +35,6 @@ import { refuseOnSiteHost } from '@/lib/site-host-guard';
  * (no client islands), so refusals bounce back to it with ?error=<code>.
  */
 
-const MAX_OPEN_TICKETS = 5;
-/** Statuses that count against the per-customer open-ticket cap. */
-const OPEN_STATUSES = new Set<string>(['open', 'pending', 'waiting_admin']);
-
-/** The recall reasons the receipt form offers (mirrors the bot tool's enum). */
-const RECALL_REASONS = new Set<string>([
-  'wrong_recipient',
-  'wrong_amount',
-  'not_received',
-  'unauthorized',
-  'other',
-]);
-
-/** Human-readable description for the ticket subject/body. */
-const REASON_LABEL: Record<string, string> = {
-  wrong_recipient: 'Sent to the wrong recipient',
-  wrong_amount: 'Wrong amount sent',
-  not_received: 'Recipient did not receive the money',
-  unauthorized: 'I did not authorize this transfer',
-  other: 'Something else is wrong',
-};
-
-/** The customer's partner row (the admin-controlled support kill switch lives on it). */
-async function customerPartner(customer: Customer): Promise<Partner> {
-  return (
-    (await getPartnerStore().getPartner(customer.partnerId)) ??
-    (await getPartnerStore().ensureDefaultPartner())
-  );
-}
-
-/** enableSupportPortal defaults to TRUE when supportConfig is absent. */
-function portalDisabled(partner: Partner): boolean {
-  return partner.supportConfig?.enableSupportPortal === false;
-}
-
 export async function requestRecallAction(formData: FormData): Promise<void> {
   await refuseOnSiteHost();
   const customer = await requireCustomer();
@@ -89,67 +47,30 @@ export async function requestRecallAction(formData: FormData): Promise<void> {
   const back = (code: string) =>
     redirect(`/account/receipt/${encodeURIComponent(transferId)}?error=${code}`);
 
-  // Validate the reason against the offered enum FIRST — a forged or empty reason
-  // is a bad request and fails with zero DB work (no partner/transfer round-trip).
-  if (!RECALL_REASONS.has(reason)) back('reason');
-
-  // Admin kill switch — the receipt section hides itself when support is off,
-  // but hiding a CTA never gates a POST endpoint. Off ⇒ bounce to the support
-  // landing (which renders the "handled in WhatsApp" note); nothing is created.
-  if (portalDisabled(await customerPartner(customer))) redirect('/account/support');
-
-  const transfer = await getStore().getTransfer(transferId);
-  // STRICT ownership, 404-never-403: another customer's transfer — or a missing
-  // one — is refused identically. We don't leak which.
-  if (!transfer || transfer.phone !== customer.senderPhone || transfer.partnerId !== customer.partnerId) back('ineligible');
-
-  // Server-side eligibility re-check — NEVER trust the client. Only a delivered
-  // transfer still inside the 24h recall window qualifies.
-  if (!isRecallEligible(transfer!, Date.now())) back('ineligible');
-
-  // Program-Fix 49D (portal-03): step-up — a customer with two-step
-  // verification on proves a fresh authenticator code before the case opens
-  // (see refund-actions.ts). Refusals bounce back with a fixed code.
-  const gate = await stepUp(customer, String(formData.get('code') ?? ''), async () => clientIpFrom(await headers()), {
-    mfa: getCustomerMfaStore(),
-    auth: getCustomerAuthStore(),
-  });
-  if (gate !== 'ok') back(STEP_UP_ERROR[gate]);
-
-  const repo = createTicketRepo(getDb());
-
-  // Polite cap: at most 5 concurrently-open requests per customer. Resolved and
-  // closed tickets don't count. (Mirrors createTicketAction.)
-  const mine = await repo.listByCustomer(customer.senderPhone);
-  if (mine.filter((t) => OPEN_STATUSES.has(t.status)).length >= MAX_OPEN_TICKETS) {
-    back('cap');
+  // The core (src/lib/receipt-cores.ts, UI redesign M2-7) runs the legacy order: the reason enum
+  // FIRST (a forged reason fails with zero DB work), the admin support kill switch (hiding a CTA
+  // never gates a POST endpoint), STRICT ownership 404-never-403, the server-side 24h eligibility
+  // re-check, the Program-Fix 49D step-up, the 5-open-requests cap, the ticket (partnerId and
+  // customerPhone from the SESSION; hostile form fields are ignored) and the out-of-band triage.
+  const res = await requestRecallFor(customer, transferId, { reason }, async () =>
+    stepUp(customer, String(formData.get('code') ?? ''), async () => clientIpFrom(await headers()), {
+      mfa: getCustomerMfaStore(),
+      auth: getCustomerAuthStore(),
+    }),
+  );
+  switch (res.kind) {
+    case 'bad_reason':
+      return back('reason');
+    case 'support_off':
+      // Off ⇒ bounce to the support landing (which renders the "handled in WhatsApp" note).
+      return redirect('/account/support');
+    case 'ineligible':
+      return back('ineligible');
+    case 'step_up':
+      return back(STEP_UP_ERROR[res.failure]);
+    case 'cap':
+      return back('cap');
+    case 'opened':
+      return redirect(`/account/support/${res.ticketId}`);
   }
-
-  const reasonLabel = REASON_LABEL[reason] ?? reason;
-
-  // partnerId + customerPhone come from the SESSION — hostile form fields with
-  // the same names are ignored. transferId is re-validated above (ownership +
-  // eligibility), so linking it here is safe.
-  const ticket = await repo.createTicket({
-    id: `tk_${newTransferId()}`,
-    partnerId: customer.partnerId,
-    kind: 'customer',
-    customerPhone: customer.senderPhone,
-    transferId: transfer!.id,
-    subject: `Recall request: ${reason}`,
-    body:
-      `Recall/dispute opened from the receipt page for transfer ${transfer!.id}.\n` +
-      `Reason: ${reasonLabel} (${reason}).\n` +
-      `The customer reports a problem with a delivered transfer within the 24h recall window. ` +
-      `Recovery is not guaranteed — please review and follow up.`,
-    category: 'refund',
-  });
-
-  // Out-of-band AI triage (durable outbox, drained by the worker) — re-confirms
-  // category/priority off the actual case text. setTriage is idempotent, so a
-  // re-set over the pre-filled 'refund' category is safe. Never an inline
-  // Ollama call: it must not block this redirect.
-  await enqueueTriage(getDb(), ticket.id);
-
-  redirect(`/account/support/${ticket.id}`);
 }

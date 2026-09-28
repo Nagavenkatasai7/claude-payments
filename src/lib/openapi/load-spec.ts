@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { load } from 'js-yaml';
-import { HTTP_METHODS, type HttpMethod, type SpecOperation } from './types';
+import {
+  HTTP_METHODS,
+  type HttpMethod,
+  type SpecDocument,
+  type SpecOperation,
+  type SpecResponseBody,
+  type SpecSchema,
+} from './types';
 
 // load-spec: parse + validate openapi.yaml (the hand-maintained source of truth
 // for /api/partner/v1). Fails LOUD on any shape it does not understand, so the
@@ -16,13 +23,77 @@ const str = (v: unknown, what: string): string => {
   return v;
 };
 const PARAM_IN = ['path', 'query', 'header'] as const;
+const RESPONSE_KEYS = ['description', 'content', 'headers', '$ref'];
+// Keywords a schema field may carry. The loader renders only type/format/description and ignores
+// the rest; add a keyword here when the spec starts using it (an unknown key fails the build).
+const FIELD_KEYS = ['type', 'format', 'description', 'enum', 'example', 'examples', 'items', 'nullable', 'default', 'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'readOnly', 'writeOnly', 'deprecated', 'title', '$ref'];
 
-export function parseOpenApi(text: string): SpecOperation[] {
+const optStr = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/** '#/components/<kind>/<Name>' → the named entry of components[kind]; throws when it is absent. */
+function resolveRef(components: Obj, ref: unknown, kind: 'schemas' | 'responses', where: string): { name: string; target: Obj } {
+  const prefix = `#/components/${kind}/`;
+  if (typeof ref !== 'string' || !ref.startsWith(prefix)) throw new Error(`openapi: ${where} $ref ${String(ref)} is not a ${prefix} reference`);
+  const name = ref.slice(prefix.length);
+  const pool = components[kind];
+  const target = isObj(pool) && Object.hasOwn(pool, name) ? pool[name] : undefined;
+  if (!isObj(target)) throw new Error(`openapi: ${where} $ref ${ref} does not resolve`);
+  return { name, target };
+}
+
+function responseBody(components: Obj, r: Obj, where: string): SpecResponseBody {
+  const resolved = r.$ref === undefined ? r : resolveRef(components, r.$ref, 'responses', where).target;
+  const content = resolved.content;
+  if (content === undefined) return { schema: null, example: null, contentTypes: [] };
+  if (!isObj(content)) throw new Error(`openapi: ${where} content is not an object`);
+  const json = content['application/json'];
+  let schema: string | null = null;
+  let example: unknown = null;
+  if (isObj(json)) {
+    if (isObj(json.schema) && json.schema.$ref !== undefined) schema = resolveRef(components, json.schema.$ref, 'schemas', where).name;
+    if ('example' in json) example = json.example;
+  }
+  return { schema, example, contentTypes: Object.keys(content) };
+}
+
+function parseSchemas(components: Obj): SpecSchema[] {
+  const schemas = components.schemas;
+  if (schemas === undefined) return [];
+  if (!isObj(schemas)) throw new Error('openapi: components.schemas is not an object');
+  return Object.entries(schemas).map(([name, raw]) => {
+    if (!isObj(raw) || !isObj(raw.properties)) throw new Error(`openapi: schema ${name} must be an object with properties`);
+    const required = Array.isArray(raw.required) ? raw.required : [];
+    return {
+      name,
+      fields: Object.entries(raw.properties).map(([field, p]) => {
+        const where = `schema ${name}.${field}`;
+        if (!isObj(p)) throw new Error(`openapi: ${where} is not an object`);
+        // The same comma split as in responses: a flow-map description cut in two adds a stray key.
+        for (const k of Object.keys(p)) {
+          if (!FIELD_KEYS.includes(k)) throw new Error(`openapi: ${where} has unknown key "${k}"`);
+        }
+        const t = p.type;
+        const type = typeof t === 'string' ? t : Array.isArray(t) && t.length > 0 && t.every((x) => typeof x === 'string') ? t.join(' | ') : null;
+        if (type === null) throw new Error(`openapi: ${where} type must be a string or a list of strings`);
+        return { name: field, type, format: typeof p.format === 'string' ? p.format : null, required: required.includes(field), description: optStr(p.description) };
+      }),
+    };
+  });
+}
+
+export function parseOpenApiDocument(text: string): SpecDocument {
   const doc = load(text);
   if (!isObj(doc) || typeof doc.openapi !== 'string' || !doc.openapi.startsWith('3.')) {
     throw new Error('openapi: not an OpenAPI 3.x document');
   }
   if (!isObj(doc.paths)) throw new Error('openapi: paths missing');
+  const info = isObj(doc.info) ? doc.info : {};
+  const server = Array.isArray(doc.servers) && isObj(doc.servers[0]) ? doc.servers[0] : {};
+  const components = isObj(doc.components) ? doc.components : {};
+  const tags = (Array.isArray(doc.tags) ? doc.tags : []).map((t) => {
+    if (!isObj(t)) throw new Error('openapi: a top-level tag is not an object');
+    return { name: str(t.name, 'tag name'), description: optStr(t.description) };
+  });
   const ops: SpecOperation[] = [];
   const seenIds = new Set<string>();
   for (const [path, item] of Object.entries(doc.paths)) {
@@ -45,10 +116,17 @@ export function parseOpenApi(text: string): SpecOperation[] {
       }
       if (!isObj(raw.responses)) throw new Error(`openapi: ${where} responses missing`);
       const responses: Record<number, string> = {};
+      const responseBodies: Record<number, SpecResponseBody> = {};
       for (const [code, r] of Object.entries(raw.responses)) {
         if (!/^\d{3}$/.test(code)) throw new Error(`openapi: ${where} response key ${code} must be a 3-digit status`);
         if (!isObj(r)) throw new Error(`openapi: ${where} response ${code} is not an object`);
+        // An unquoted comma inside a YAML flow map ({ description: a, b }) silently splits the
+        // description into a second key: refuse it rather than publish a truncated sentence.
+        for (const k of Object.keys(r)) {
+          if (!RESPONSE_KEYS.includes(k)) throw new Error(`openapi: ${where} response ${code} has unknown key "${k}"`);
+        }
         responses[Number(code)] = str(r.description, `${where} response ${code} description`);
+        responseBodies[Number(code)] = responseBody(components, r, `${where} response ${code}`);
       }
       const tags = Array.isArray(raw.tags) ? raw.tags : [];
       const params = raw.parameters === undefined ? [] : raw.parameters;
@@ -79,13 +157,31 @@ export function parseOpenApi(text: string): SpecOperation[] {
           };
         }),
         requestExample: isObj(body) && 'example' in body ? body.example : null,
+        requestBodyRequired: isObj(raw.requestBody) && raw.requestBody.required === true,
+        responseBodies,
       });
     }
   }
-  return ops;
+  return {
+    title: optStr(info.title),
+    description: optStr(info.description).trim(),
+    serverUrl: optStr(server.url),
+    tags,
+    schemas: parseSchemas(components),
+    operations: ops,
+  };
+}
+
+export function parseOpenApi(text: string): SpecOperation[] {
+  return parseOpenApiDocument(text).operations;
 }
 
 /** The repo's openapi.yaml. process.cwd() is the repo root under vitest and `next build`. */
 export function loadPartnerOpenApi(repoRoot: string = process.cwd()): SpecOperation[] {
   return parseOpenApi(readFileSync(join(repoRoot, 'openapi.yaml'), 'utf8'));
+}
+
+/** The whole repo openapi.yaml (server, tags, schemas, operations) for the API reference. */
+export function loadPartnerOpenApiDocument(repoRoot: string = process.cwd()): SpecDocument {
+  return parseOpenApiDocument(readFileSync(join(repoRoot, 'openapi.yaml'), 'utf8'));
 }

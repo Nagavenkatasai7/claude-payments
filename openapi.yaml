@@ -123,7 +123,7 @@ paths:
                   - { source_country: US, source_currency: USD, destination_country: IN, destination_currency: INR }
                 destinations: [IN, MX]
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks corridors:read, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks corridors:read, or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
   /quote:
@@ -160,7 +160,7 @@ paths:
                 fx_rate: 85.2
         '400': { description: 'Invalid request: amount_source is not a positive number, destination_country or destination_currency is not supported, or the amount is outside the allowed range.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks quote, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks quote, or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
         '503': { description: Live FX is temporarily unavailable. Nothing was stored; retry later. }
 
@@ -185,7 +185,7 @@ paths:
         '200': { description: 'The fields are valid: { valid: true, payout_destination }.' }
         '400': { description: country is required. }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks beneficiaries:validate, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks beneficiaries:validate, or the partner is not active.' }
         '422': { description: One or more fields are invalid. The error string is a JSON-encoded map of field name to message. }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
@@ -212,7 +212,7 @@ paths:
         '201': { description: 'Created: { id, name, country, payout_destination }.' }
         '400': { description: 'name is missing or not a clean name (1–80 characters, no brackets or control characters), payout_method is not bank, upi or usdc, or country is missing.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks beneficiaries:write (test keys never hold it), or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks beneficiaries:write (test keys never hold it), or the partner is not active.' }
         '422': { description: One or more payout fields are invalid. The error string is a JSON-encoded map of field name to message. }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
@@ -263,7 +263,7 @@ paths:
               schema: { $ref: '#/components/schemas/Transaction' }
         '400': { description: 'Validation failed before the Idempotency-Key was bound: a missing or reserved Idempotency-Key; a missing or invalid amount, sender.phone, beneficiary name or payout destination; a name that is not clean; an unsupported payout_method or destination_country; or an amount outside the allowed range. A corrected retry with the same key succeeds.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks transactions:write, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
         '404': { description: The beneficiary_id was not found for this partner. }
         '409': { description: Idempotency-Key conflict. Retry with a new key. }
         '422': { description: 'Refused: the payout destination is a masked display value, the stored beneficiary has no usable name, sender identity verification is required, the transfer exceeds the sender''s sending limit, or it was blocked by compliance screening.' }
@@ -290,7 +290,7 @@ paths:
       responses:
         '200': { description: A page of transactions with the next cursor (null on the last page). }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks transactions:read, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:read, or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
   /transactions/{id}:
@@ -314,7 +314,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks transactions:read, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:read, or the partner is not active.' }
         '404': { description: Transaction not found. }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
@@ -342,9 +342,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Transaction' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks transactions:write, or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks transactions:write, or the partner is not active.' }
         '404': { description: Transaction not found. }
-        '409': { description: The transaction is not awaiting payment (for example, it was cancelled). }
+        '409': { description: 'The transaction is not awaiting payment (for example, it was cancelled).' }
         '422': { description: The transfer was blocked by compliance screening. }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
@@ -372,7 +372,7 @@ paths:
         '200': { description: The saved rate. }
         '400': { description: 'source_currency or destination_currency is unsupported or the two are equal, effective_rate is not a number greater than 0 and less than 100000, or ttl_seconds is not a number.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks rates:write (test keys never hold it), or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks rates:write (test keys never hold it), or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
     get:
       operationId: listRates
@@ -384,7 +384,7 @@ paths:
       responses:
         '200': { description: The rate sheet. }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks rates:read (test keys never hold it), or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks rates:read (test keys never hold it), or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
 
   /settlements:
@@ -432,5 +432,5 @@ paths:
             text/csv: {}
         '400': { description: 'Invalid query: from or to is not a date or datetime, to is not after from, the window is longer than 31 days, or limit, cursor or format is invalid.' }
         '401': { $ref: '#/components/responses/Unauthorized', description: Missing or invalid key. }
-        '403': { $ref: '#/components/responses/Forbidden', description: The key lacks settlements:read (test keys never hold it), or the partner is not active. }
+        '403': { $ref: '#/components/responses/Forbidden', description: 'The key lacks settlements:read (test keys never hold it), or the partner is not active.' }
         '429': { $ref: '#/components/responses/RateLimited', description: Rate limited. Retry after 60 seconds. }
