@@ -131,8 +131,6 @@ export const en = {
   'portal.help.tickets.sub': 'Your conversations with the {brand} team, most recent first.',
   'portal.help.tickets.emptyTitle': 'No support requests yet',
   'portal.help.tickets.emptyBody': 'When you send a request, it will appear here with our replies.',
-  'portal.help.tickets.colSubject': 'Subject',
-  'portal.help.tickets.colStatus': 'Status',
   'portal.help.tickets.colUpdated': 'Updated',
   'portal.help.new.title': 'New support request',
   'portal.help.new.sub': 'Tell us what you need and our team will reply here.',
@@ -183,5 +181,4 @@ export const en = {
   'portal.chat.error.too_large': 'That message is too long.',
   'portal.chat.error.daily_cap': "You have reached today's chat limit. It resets tomorrow, or message us on WhatsApp anytime.",
   'portal.chat.error.one_at_a_time': 'One message at a time, please. Wait for the current reply to finish.',
-  'portal.chat.error.rate_limited': 'Too many messages. Please wait a minute and try again.',
 } as const;

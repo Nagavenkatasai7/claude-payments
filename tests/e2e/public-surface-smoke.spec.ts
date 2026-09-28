@@ -184,3 +184,21 @@ for (const path of ['/portal', '/portal/login', '/portal/verify']) {
     await expect(page.locator('body')).not.toContainText(/smartremit/i);
   });
 }
+
+// UI redesign M2-12: Help & tickets and Chat are portal-only too. On the apex the pages are the neutral
+// 404, and the chat endpoint answers a POST with a 404 (its host gate runs before anything else).
+for (const path of ['/portal/help', '/portal/help/tickets', '/portal/help/tickets/new', '/portal/help/tickets/tk_x', '/portal/chat']) {
+  test(`apex ${path} is the neutral 404 (M2-12)`, async ({ page }) => {
+    const res = await page.goto(path);
+    expect(res?.status()).toBe(404);
+    await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(/smartremit/i);
+  });
+}
+test('apex POST /api/portal/chat is a 404 with no body (M2-12)', async ({ request, baseURL }) => {
+  const res = await request.post('/api/portal/chat', {
+    headers: { origin: new URL(baseURL ?? 'https://smartremit.ai').origin, 'content-type': 'application/json' },
+    data: { message: 'hello' },
+  });
+  expect(res.status()).toBe(404);
+});

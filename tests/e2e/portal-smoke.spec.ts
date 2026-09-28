@@ -28,6 +28,25 @@ test.describe('customer portal on a partner subdomain', () => {
     await expect(page).toHaveURL(/\/portal\/login$/);
   });
 
+  // UI redesign M2-12: the chat endpoint refuses a POST without a same-origin Origin (403) and one
+  // without a portal session (401). Read-only: neither reaches the agent.
+  test('POST /api/portal/chat: no Origin → 403; same origin, no session → 401', async ({ request }) => {
+    const noOrigin = await request.post(`${ORIGIN}/api/portal/chat`, { headers: { 'content-type': 'application/json' }, data: { message: 'hi' } });
+    expect(noOrigin.status()).toBe(403);
+    const noSession = await request.post(`${ORIGIN}/api/portal/chat`, {
+      headers: { origin: new URL(ORIGIN!).origin, 'content-type': 'application/json' },
+      data: { message: 'hi' },
+    });
+    expect(noSession.status()).toBe(401);
+  });
+
+  test('help and chat pages without a cookie land on the sign-in page', async ({ page }) => {
+    for (const path of ['/portal/help', '/portal/help/tickets', '/portal/chat']) {
+      await page.goto(`${ORIGIN}${path}`);
+      await expect(page, path).toHaveURL(/\/portal\/login$/);
+    }
+  });
+
   test('apex-only surfaces are 404 on the subdomain', async ({ request }) => {
     for (const path of ['/admin-dashboard', '/account', '/login', '/pay/x']) {
       const res = await request.get(`${ORIGIN}${path}`, { maxRedirects: 0 });
