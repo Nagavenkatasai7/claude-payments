@@ -31,6 +31,7 @@ export type PortalAuthEvent =
   | 'login_locked'
   | 'mfa_failure'
   | 'register'
+  | 'consent'
   | 'signout'
   | 'signout_one'
   | 'signout_all'
@@ -46,6 +47,7 @@ const EVENTS: ReadonlySet<string> = new Set<PortalAuthEvent>([
   'login_locked',
   'mfa_failure',
   'register',
+  'consent',
   'signout',
   'signout_one',
   'signout_all',

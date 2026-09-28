@@ -7,9 +7,10 @@ vi.mock('@/lib/site-tenant-resolver', () => ({ resolveSiteSlug }));
 import { proxy } from '@/proxy';
 import { REFUSED_HOSTS } from './site-host-corpus';
 
-describe('classifySitePath (SPEC §8a; M1 allowlist is empty, C4)', () => {
-  it('M1 ships an empty allowlist', () => expect(SITE_ROUTES).toEqual([]));
-  it.each(['/', '/admin-dashboard', '/admin-dashboard/x', '/partner', '/login', '/login/mfa', '/docs', '/partners/apply/t',
+describe('classifySitePath (SPEC §8a; C4)', () => {
+  // M2 allowlists the customer portal only (tests/site-routes-portal.test.ts); everything else stays denied.
+  it('only portal routes are allowlisted', () => expect(SITE_ROUTES.every((r) => r.prefix === '/' || r.prefix.startsWith('/portal') || r.prefix.startsWith('/api/portal'))).toBe(true));
+  it.each(['/admin-dashboard', '/admin-dashboard/x', '/partner', '/login', '/login/mfa', '/docs', '/partners/apply/t',
     '/account', '/account/login', '/pay/abc', '/pay/b2b/x', '/api/pay/abc', '/api/partner/v1/quote', '/api/partner-rail',
     '/api/whatsapp', '/api/worker', '/api/cron', '/api/version', '/api/persona-webhook', '/api/payment-webhook/x',
     '/robots.txt', '/sitemap.xml', '/site-inactive', '/%2e%2e/admin-dashboard',

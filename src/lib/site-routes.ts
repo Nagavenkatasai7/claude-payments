@@ -1,8 +1,11 @@
 // site-routes — the partner-subdomain ALLOWLIST. Any path not listed here is 404 on a subdomain.
 //
-// M1 ships it EMPTY (plan conflict C4): /pay/** and /api/pay/** wait for the host-tenant check (H2),
-// and M2 appends the portal routes. Apex-only surfaces (the docs-next and trust pages, the docs try-it API,
-// /admin-dashboard, /login, /api/*) must NEVER be listed here; tests/proxy-site.test.ts pins them.
+// M1 shipped it EMPTY (plan conflict C4): /pay/** and /api/pay/** wait for the host-tenant check (H2).
+// M2 adds EXACTLY the customer portal: '/' (rewritten to /portal), /portal/** and /api/portal/**
+// (tests/site-routes-portal.test.ts). Apex-only surfaces (the docs-next and trust pages, the docs try-it
+// API, /admin-dashboard, /login, /account, /terms, /privacy, other /api/*) must NEVER be listed here.
+// Dark by default: src/proxy.ts consults this table only when CUSTOMER_PORTAL_ENABLED=1, and every
+// portal page/action also calls requirePortalSite() (src/lib/portal-site.ts).
 // PURE: imported by src/proxy.ts on every matched request.
 
 export interface SiteRoute {
@@ -14,7 +17,11 @@ export interface SiteRoute {
   rewriteTo?: string;
 }
 
-export const SITE_ROUTES: ReadonlyArray<SiteRoute> = [];
+export const SITE_ROUTES: ReadonlyArray<SiteRoute> = [
+  { prefix: '/', exact: true, rewriteTo: '/portal' },
+  { prefix: '/portal' },
+  { prefix: '/api/portal' },
+];
 
 export type SitePathClass = { kind: 'allow'; rewriteTo?: string } | { kind: 'deny' };
 

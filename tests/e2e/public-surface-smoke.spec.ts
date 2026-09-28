@@ -173,3 +173,14 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('This link is no longer active');
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute('content', /noindex/);
 });
+
+// UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
+// every portal path is the brand-neutral root 404 (the portal layout's gate 404s before rendering).
+for (const path of ['/portal', '/portal/login', '/portal/verify']) {
+  test(`apex ${path} is the neutral 404`, async ({ page }) => {
+    const res = await page.goto(path);
+    expect(res?.status()).toBe(404);
+    await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(/smartremit/i);
+  });
+}
