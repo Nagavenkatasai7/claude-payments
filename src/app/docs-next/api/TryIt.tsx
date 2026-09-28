@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import { Button } from '@/components/ds/button';
 import { Field, Input } from '@/components/ds/field';
 import type { TryItOperation } from '@/lib/docs/try-it';
@@ -9,7 +9,8 @@ import type { TryItOperation } from '@/lib/docs/try-it';
 // The key lives in React state only: never browser storage, never a cookie, never a URL, never
 // logged. The form talks to our own proxy (POST /api/docs/try-it, same origin, so the enforced
 // CSP connect-src 'self' covers it); the proxy refuses anything but a sandbox key server-side.
-// Collapsed by default, so the prerendered page reads the same without JavaScript.
+// Collapsed by default, so the prerendered page reads the same without JavaScript. Collapsing the
+// form drops the key (and the last response); a reload drops everything.
 
 type Result = { kind: 'ok'; upstreamStatus: number; retryAfter: string | null; body: unknown } | { kind: 'error'; message: string };
 
@@ -25,9 +26,6 @@ export function TryIt({ operationId, exampleBody }: { operationId: TryItOperatio
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const bodyId = useId();
-
-  // Drop the key when the form goes away.
-  useEffect(() => () => setKey(''), []);
 
   const needsId = operationId === 'getTransaction';
   const listParams = operationId === 'listTransactions';
@@ -73,7 +71,15 @@ export function TryIt({ operationId, exampleBody }: { operationId: TryItOperatio
   }
 
   return (
-    <details className="mt-6 rounded-ds-inner border border-ds-border bg-ds-surface">
+    <details
+      className="mt-6 rounded-ds-inner border border-ds-border bg-ds-surface"
+      onToggle={(e) => {
+        if (!e.currentTarget.open) {
+          setKey('');
+          setResult(null);
+        }
+      }}
+    >
       <summary className="cursor-pointer px-4 py-3 text-[15px] font-semibold text-ds-ink">Try it with a sandbox key</summary>
       <form onSubmit={onSubmit} className="flex flex-col gap-4 border-t border-ds-border p-4" noValidate>
         <Field name="tryit-key" label="Sandbox API key" hint="Sandbox keys only (sr_test_…). Never paste a live key." required>
@@ -82,7 +88,9 @@ export function TryIt({ operationId, exampleBody }: { operationId: TryItOperatio
               id={f.id}
               aria-describedby={f.describedBy}
               type="password"
-              autoComplete="off"
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
               spellCheck={false}
               autoCapitalize="off"
               autoCorrect="off"

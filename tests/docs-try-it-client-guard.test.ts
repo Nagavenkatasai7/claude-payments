@@ -32,14 +32,21 @@ describe('TryIt.tsx (client form) source guard', () => {
   it('the key input is a labelled password field that the browser will not autofill or spell-check', () => {
     const s = src();
     expect(s).toMatch(/type="password"/);
-    expect(s).toMatch(/autoComplete="off"/);
+    // Password managers ignore autocomplete="off" on a password field; new-password plus the
+    // manager opt-outs keeps the key from being offered for saving (security review LOW 1).
+    expect(s).toMatch(/autoComplete="new-password"/);
+    expect(s).toContain('data-1p-ignore');
+    expect(s).toContain('data-lpignore="true"');
     expect(s).toMatch(/spellCheck=\{false\}/);
     expect(s).toContain('Sandbox keys only (sr_test_…). Never paste a live key.');
   });
 
-  it('the key is cleared on unmount and never put in a URL', () => {
+  it('the key is cleared when the form is collapsed and never put in a URL', () => {
+    // A state update during unmount is discarded by React, so an unmount cleanup would be a false
+    // promise (security review LOW 2). Collapsing the <details> is the real "done" signal.
     const s = src();
-    expect(s).toMatch(/useEffect\(\s*\(\)\s*=>\s*\(\)\s*=>\s*setKey\(''\)/);
+    expect(s).toMatch(/onToggle=\{[^}]*if \(!e\.currentTarget\.open\) \{?\s*setKey\(''\)/);
+    expect(s).not.toMatch(/useEffect/);
     expect(s).not.toMatch(/URLSearchParams|searchParams|encodeURIComponent\(\s*key/);
   });
 
