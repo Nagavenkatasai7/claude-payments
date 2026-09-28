@@ -158,6 +158,26 @@ describe('portal OTP store: codes (SPEC §2.1)', () => {
     expect(await store.verify('pa', P, '000042', 'login')).toEqual({ ok: false, reason: 'no_code' });
   });
 
+  it('a newer code that raced in between the read and the consume survives (L1)', async () => {
+    const base = fakeRedis();
+    const newRecord = JSON.stringify({ hash: sha('777777'), expMs: START + 300_000 });
+    let raced = false;
+    const racing: RedisLike = {
+      ...base,
+      async getdel(key: string) {
+        if (!raced) {
+          raced = true;
+          await base.set(key, newRecord);
+        }
+        return base.getdel(key);
+      },
+    };
+    const { store } = mk({ redis: racing });
+    await store.issue('pa', P, 'login');
+    expect(await store.verify('pa', P, '000042', 'login')).toEqual({ ok: false, reason: 'no_code' });
+    expect(await store.verify('pa', P, '777777', 'login')).toEqual({ ok: true });
+  });
+
   it('two parallel correct submits: exactly one wins', async () => {
     const { store } = mk();
     await store.issue('pa', P, 'login');
@@ -166,6 +186,68 @@ describe('portal OTP store: codes (SPEC §2.1)', () => {
       store.verify('pa', P, '000042', 'login'),
     ]);
     expect(rs.filter((r) => r.ok).length).toBe(1);
+  });
+});
+
+/** Wraps a fake so every call is recorded as "<op>" (keys are opaque hashes, so op names suffice). */
+function recording(base: RedisLike): { redis: RedisLike; ops: string[] } {
+  const ops: string[] = [];
+  const redis = Object.fromEntries(
+    Object.entries(base)
+      .filter(([, v]) => typeof v === 'function')
+      .map(([name, fn]) => [
+        name,
+        (...args: unknown[]) => {
+          const opts = args[2] as { nx?: boolean } | undefined;
+          ops.push(name === 'set' && opts?.nx ? 'set:nx' : name);
+          return (fn as (...a: unknown[]) => unknown)(...args);
+        },
+      ]),
+  ) as unknown as RedisLike;
+  return { redis, ops };
+}
+
+describe('portal OTP store: equal Redis op sequences (no timing oracle)', () => {
+  async function verifyOps(setup: (s: ReturnType<typeof mk>['store'], advance: (ms: number) => void) => Promise<void>, code: string) {
+    const rec = recording(fakeRedis());
+    const m = mk({ redis: rec.redis });
+    await setup(m.store, m.advance);
+    rec.ops.length = 0;
+    const r = await m.store.verify('pa', P, code, 'login');
+    return { r, ops: [...rec.ops] };
+  }
+
+  it('wrong, no_code and expired verifies perform the IDENTICAL Redis call sequence', async () => {
+    const wrong = await verifyOps(async (s) => { await s.issue('pa', P, 'login'); }, WRONG);
+    const noCode = await verifyOps(async () => {}, WRONG);
+    const expired = await verifyOps(async (s, adv) => {
+      await s.issue('pa', P, 'login');
+      adv(PORTAL_OTP_POLICY.codeTtlMs);
+    }, '000042');
+    expect(wrong.r).toEqual({ ok: false, reason: 'wrong' });
+    expect(noCode.r).toEqual({ ok: false, reason: 'no_code' });
+    expect(expired.r).toEqual({ ok: false, reason: 'expired' });
+    expect(noCode.ops).toEqual(wrong.ops);
+    expect(expired.ops).toEqual(wrong.ops);
+  });
+
+  it('the sequence is also identical after prior failures (bucket TTL set without a count-dependent call)', async () => {
+    const first = await verifyOps(async () => {}, WRONG);
+    const third = await verifyOps(async (s) => {
+      await s.verify('pa', P, WRONG, 'login');
+      await s.verify('pa', P, WRONG, 'login');
+    }, WRONG);
+    expect(third.ops).toEqual(first.ops);
+  });
+
+  it('counter buckets get their TTL atomically with creation (SET NX EX, then INCR)', async () => {
+    const rec = recording(fakeRedis());
+    const m = mk({ redis: rec.redis });
+    rec.ops.length = 0;
+    await m.store.verify('pa', P, WRONG, 'login');
+    expect(rec.ops).not.toContain('expire');
+    expect(rec.ops.filter((o) => o === 'incr').length).toBe(2);
+    expect(rec.ops.filter((o) => o === 'set:nx').length).toBe(2);
   });
 });
 

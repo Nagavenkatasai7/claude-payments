@@ -94,16 +94,23 @@ export function createPortalOtpStore(redis: RedisLike, opts: PortalOtpStoreOptio
   const dayFailKey = (h: string, day: number) => `potp:faild:${h}:${day}`;
   const codeKey = (purpose: PortalOtpPurpose, h: string) => `potp:${purpose}:${h}`;
 
-  /** Atomic INCR; the TTL is set when the bucket opens (no read-then-set race). */
+  /**
+   * Counter bucket increment. RedisLike has no MULTI/pipeline, so the TTL is attached at
+   * creation instead: SET NX EX creates the bucket with its TTL in ONE command, and INCR/DECR
+   * keep an existing TTL (src/lib/store.ts RedisLike.set opts {ex, nx}). A crash can never
+   * leave a TTL-less counter, and every call makes the SAME two Redis calls whatever the
+   * count (no count-dependent EXPIRE, so the call sequence reveals nothing). Every bucket's
+   * TTL is at least twice its window, so it cannot expire between the two calls while the
+   * bucket is current.
+   */
   async function bump(key: string, ttlS: number): Promise<number> {
-    const n = await redis.incr(key);
-    if (n === 1) await redis.expire(key, ttlS);
-    return n;
+    await redis.set(key, '0', { nx: true, ex: ttlS });
+    return redis.incr(key);
   }
-  /** Refund one reservation. Re-applies the TTL so a key that expired in between is never left without one. */
+  /** Refund one reservation (the same TTL-at-creation rule). */
   async function refund(key: string, ttlS: number): Promise<void> {
+    await redis.set(key, '0', { nx: true, ex: ttlS });
     await redis.decr(key);
-    await redis.expire(key, ttlS);
   }
 
   /**
@@ -218,23 +225,22 @@ export function createPortalOtpStore(redis: RedisLike, opts: PortalOtpStoreOptio
       const fail = async (reason: 'wrong' | 'no_code' | 'expired'): Promise<PortalVerifyResult> =>
         exhausted ? lockNow() : { ok: false, reason };
 
+      // wrong / no_code / expired must make the IDENTICAL Redis call sequence (review of #387):
+      // an extra DEL only when a record exists would reveal which phones were sent a code.
+      // An expired or corrupt record is left to its Redis TTL (360 s); until then every
+      // verify against it keeps costing budget, exactly like a wrong guess.
       const raw = await redis.get(k);
       if (raw === null) return fail('no_code');
       let rec: { hash?: unknown; expMs?: unknown };
       try {
         rec = JSON.parse(raw) as { hash?: unknown; expMs?: unknown };
       } catch {
-        await redis.del(k);
         return fail('no_code');
       }
       if (typeof rec.hash !== 'string' || typeof rec.expMs !== 'number' || !Number.isFinite(rec.expMs)) {
-        await redis.del(k);
         return fail('no_code');
       }
-      if (t >= rec.expMs) {
-        await redis.del(k);
-        return fail('expired');
-      }
+      if (t >= rec.expMs) return fail('expired');
       const a = Buffer.from(sha(code), 'hex');
       const b = Buffer.from(rec.hash, 'hex');
       if (a.length !== b.length || !timingSafeEqual(a, b)) return fail('wrong');
@@ -242,7 +248,12 @@ export function createPortalOtpStore(redis: RedisLike, opts: PortalOtpStoreOptio
       // Atomic consume. The consumed value must be the one compared: if a resend replaced
       // the record in between, the old code must not consume the new one (no refund).
       const got = await redis.getdel(k);
-      if (got !== raw) return fail('no_code');
+      if (got !== raw) {
+        // A newer record (a resend) raced in between: put it back so the customer's fresh
+        // code survives. NX, so a still-newer record written meanwhile is never clobbered.
+        if (got !== null) await redis.set(k, got, { nx: true, ex: CODE_RECORD_TTL_S });
+        return fail('no_code');
+      }
       await refund(winKey, FAIL_WINDOW_TTL_S);
       await refund(dKey, DAY_BUCKET_TTL_S);
       return { ok: true };
