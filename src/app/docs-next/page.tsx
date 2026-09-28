@@ -11,6 +11,16 @@ export default function DocsIndexPage() {
         title="Partner documentation"
         sub="Everything you need to run SmartRemit under your own brand: API keys, the sandbox, webhooks, your WhatsApp number and go-live."
       />
+      <Card className="mt-8 p-5 transition-colors hover:border-ds-border-strong sm:p-6">
+        <h2 className="text-[17px] font-semibold text-ds-ink">
+          <Link className="hover:text-ds-primary" href="/docs-next/api">
+            API reference
+          </Link>
+        </h2>
+        <p className="mt-2 text-[15px] leading-relaxed text-ds-ink-muted">
+          Every Partner API operation with its scope, sandbox availability, examples and status codes, generated from the OpenAPI description.
+        </p>
+      </Card>
       {GUIDES.length === 0 ? (
         <div className="mt-8">
           <EmptyState title="No guides yet" body="The partner guides are being written. Check back soon." />
