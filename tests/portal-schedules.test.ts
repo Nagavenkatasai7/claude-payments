@@ -256,6 +256,16 @@ describe('setPortalScheduleStatus', () => {
     expect(await audits()).toEqual([]);
   });
 
+  it('a concurrent pause + cancel (both decided on the same active read): exactly one wins', async () => {
+    const r = await Promise.all([
+      setPortalScheduleStatus(db, 'pa', PHONE, id(), 'pause'),
+      setPortalScheduleStatus(db, 'pa', PHONE, id(), 'cancel'),
+    ]);
+    expect(r.filter((x) => x.ok)).toHaveLength(1);
+    expect(r.filter((x) => !x.ok)).toEqual([{ ok: false, code: 'changed' }]);
+    expect(await audits()).toHaveLength(1);
+  });
+
   it('two concurrent pauses: exactly one wins, the loser writes nothing (conditional write)', async () => {
     const r = await Promise.all([
       setPortalScheduleStatus(db, 'pa', PHONE, id(), 'pause'),
