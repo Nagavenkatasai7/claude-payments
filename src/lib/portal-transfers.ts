@@ -1,6 +1,9 @@
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTransferRepo, PORTAL_QUERY_MAX, type PortalStatusGroup } from '@/db/repos/transfer-repo';
-import type { MessageKey } from './i18n';
+import { t, type MessageKey } from './i18n';
+import { formatMoney } from './ui/money';
+import { transferStatusView } from './ui/transfer-status';
+import { payoutMethodLabel } from './payout-format';
 import type { PartnerId, PayoutMethod, RefundStatus, Transfer, TransferStatus } from './types';
 
 /**
@@ -157,4 +160,64 @@ export function transferTimeline(t: Pick<Transfer, 'status' | 'createdAt' | 'pai
   else if (r === 'pending' || r === 'failed') steps.push({ key: 'portal.timeline.refund_in_progress', state: 'current' });
   else if (r === 'completed') steps.push({ key: 'portal.timeline.refunded', state: 'done', ...(t.refundedAt ? { at: t.refundedAt } : {}) });
   return steps;
+}
+
+// ── The receipt (pure) ─────────────────────────────────────────────────────────────────────────
+
+/** What a receipt shows. Built from the MASKED read only: the destination is `****last4`. */
+export interface ReceiptView {
+  id: string;
+  createdAt: string;
+  recipientName: string;
+  maskedDestination: string;
+  payoutMethod: PayoutMethod;
+  amount: number;
+  fee: number;
+  total: number;
+  currency: string;
+  amountDest: number;
+  destCurrency: string;
+  fxRate: number;
+  statusKey: MessageKey;
+}
+
+export function receiptView(t: Transfer): ReceiptView {
+  return {
+    id: t.id,
+    createdAt: t.createdAt,
+    recipientName: t.recipientName,
+    maskedDestination: t.payoutDestination,
+    payoutMethod: t.payoutMethod,
+    amount: t.amountSource ?? t.amountUsd,
+    fee: t.feeSource ?? t.feeUsd,
+    total: t.totalChargeSource ?? t.totalChargeUsd,
+    currency: t.sourceCurrency ?? 'USD',
+    amountDest: t.amountInr,
+    destCurrency: t.destinationCurrency ?? 'INR',
+    fxRate: t.fxRate,
+    statusKey: transferStatusView(t).labelKey,
+  };
+}
+
+const RECEIPT_DATE = new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
+
+/** The plain-text receipt (the email body). Masked destination only; no HTML. */
+export function renderReceiptText(v: ReceiptView, brand: string): string {
+  const created = Number.isFinite(Date.parse(v.createdAt)) ? `${RECEIPT_DATE.format(new Date(v.createdAt))} UTC` : '—';
+  return [
+    t('portal.receipt.textHead', { brand }),
+    '',
+    `${t('portal.receipt.transferId')}: ${v.id}`,
+    `${t('portal.receipt.date')}: ${created}`,
+    `${t('portal.receipt.status')}: ${t(v.statusKey)}`,
+    `${t('portal.receipt.recipient')}: ${v.recipientName}`,
+    `${t('portal.receipt.destination')}: ${payoutMethodLabel(v.payoutMethod)} ${v.maskedDestination}`,
+    `${t('portal.receipt.youSend')}: ${formatMoney(v.amount, v.currency)}`,
+    `${t('portal.receipt.fee')}: ${formatMoney(v.fee, v.currency)}`,
+    `${t('portal.receipt.total')}: ${formatMoney(v.total, v.currency)}`,
+    `${t('portal.receipt.rate')}: 1 ${v.currency} = ${v.fxRate} ${v.destCurrency}`,
+    `${t('portal.receipt.theyGet')}: ${formatMoney(v.amountDest, v.destCurrency)}`,
+    '',
+    t('portal.receipt.textFoot', { brand }),
+  ].join('\n');
 }
