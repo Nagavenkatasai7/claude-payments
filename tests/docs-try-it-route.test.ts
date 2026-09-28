@@ -98,7 +98,8 @@ describe('POST /api/docs/try-it (mocked partner handlers)', { retry: 0 }, () => 
   });
 
   it('3. a cross-site (or same-site, or foreign-origin) request is 403 and never dispatched', async () => {
-    for (const headers of [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }, { origin: 'https://evil.example' }]) {
+    const variants: Record<string, string>[] = [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }, { origin: 'https://evil.example' }];
+    for (const headers of variants) {
       const res = await call({ operationId: 'listCorridors', key: FAKE_TEST_KEY }, { headers });
       expect(res.status).toBe(403);
     }
