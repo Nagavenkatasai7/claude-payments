@@ -409,6 +409,8 @@ export const en = {
   'portal.send.nameSave': 'Save and continue',
   'portal.send.nameSaving': 'Saving…',
   'portal.send.legal_name_invalid': 'That doesn’t look like a full legal name. Enter it exactly as on your ID.',
+  'portal.send.name_needed': 'We need your full legal name before you can send. Start a transfer on the Send page to add it.',
+  'portal.send.not_found': 'We could not find that transfer.',
   'portal.send.noReviewTitle': 'Nothing to review yet',
   'portal.send.noReviewBody': 'Start a transfer to see its price.',
   'portal.send.start': 'Start a transfer',

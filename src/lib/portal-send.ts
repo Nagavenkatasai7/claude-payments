@@ -1,19 +1,25 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { buildToolContext, type ToolContextDeps } from './tool-context';
 import { executeTool, type ToolContext } from './tools';
-import { getQuoteTyped, type PrepareSendInput, type QuoteTypedResult } from './send-seam';
+import { getQuoteTyped, type PrepareSendInput, type PrepareSendResult, type QuoteTypedResult } from './send-seam';
 import { getKycProvider } from './providers/kyc-provider';
 import type { KycProvider } from './providers/kyc-provider';
 import { getCustomerStore } from './customer-store';
 import { getStore, type RedisLike } from './store';
 import { env } from './env';
-import { SEND_GATE_REASON } from './kyc-gate';
+import { isSendVerified, SEND_GATE_REASON, sendGateActive } from './kyc-gate';
+import { createAuditRepo } from '@/db/repos/aux-repos';
+import type { DbOrTx } from '@/db/client';
+import { auditSubjectId } from './customer-ref';
+import { PORTAL_AUTH_ACTOR } from './portal-auth-audit';
+import { formatMoney } from './ui/money';
 import { boundUntrustedText, NAME_MAX } from './untrusted-text';
 import { isSupportedDestination, SUPPORTED_DESTINATIONS } from './destination-country';
 import { isValidPhone, normalizePhone } from './phone';
 import { isRid, validateRecipientName } from './portal-recipients';
 import type { MessageKey } from './i18n';
-import type { CountryCode, CurrencyCode, PartnerId, TurnContext } from './types';
+import type { PortalOwner } from './portal-transfers';
+import type { CountryCode, CurrencyCode, Customer, Partner, TurnContext } from './types';
 
 /**
  * portal-send — the customer portal's Send adapter (UI redesign M2-9). Server only.
@@ -53,10 +59,7 @@ export const isPortalFunding = (v: unknown): v is PortalFundingMethod =>
 /** The portal's destinations: every supported corridor (the one authority, destination-country.ts). */
 export const PORTAL_DESTINATIONS: readonly CountryCode[] = SUPPORTED_DESTINATIONS;
 
-export interface PortalOwner {
-  partnerId: PartnerId;
-  phone: string;
-}
+export type { PortalOwner };
 
 // ── The tool context ──────────────────────────────────────────────────────────
 
@@ -367,3 +370,117 @@ export async function markReviewDrafted(redis: RedisLike, owner: PortalOwner, id
 
 /** The last 4 digits of a phone for display ("•••• 3210"); the full number is never rendered. */
 export const maskPhone = (phone: string) => `•••• ${normalizePhone(phone).slice(-4)}`;
+
+// ── Fixed customer copy for every refusal (never a seam `message`, which is written for the model) ──
+
+export interface SendCopy {
+  error: MessageKey;
+  vars?: Record<string, string>;
+  /** 'verify' → the card linking /portal/profile#verify; 'contact' → contact the partner, no retry. */
+  kyc?: 'verify' | 'contact';
+}
+
+const contactPartner = (brand: string): SendCopy => ({ error: 'portal.send.contact_partner', vars: { brand }, kyc: 'contact' });
+const verifyCard: SendCopy = { error: 'portal.send.kycBody', kyc: 'verify' };
+
+/**
+ * The bot's verify-before-send gate as PURE reads (kyc-gate.ts), run before any seam call so a gated
+ * customer never reaches startVerificationForTurn. A rejected customer is told to contact the partner
+ * and is never offered a retry (owner decision 2026-09-28).
+ */
+export function portalKycGate(
+  partner: Partner | null | undefined,
+  customer: Pick<Customer, 'kycStatus'> | null | undefined,
+  brand: string,
+): SendCopy | null {
+  if (!sendGateActive(partner) || isSendVerified(customer)) return null;
+  return customer?.kycStatus === 'rejected' ? contactPartner(brand) : verifyCard;
+}
+
+/** The cap copy per reason; the limits are USD-equivalent (the cap basis), shown through formatMoney. */
+export function capCopy(
+  reason: string | undefined,
+  fig: { todayRemainingUsd: number; perTransferCapUsd: number },
+  brand: string,
+): SendCopy {
+  switch (reason) {
+    case 'over_daily_cap':
+      return { error: 'portal.send.cap_daily', vars: { remaining: formatMoney(fig.todayRemainingUsd, 'USD') } };
+    case 'over_per_transfer_cap':
+      return { error: 'portal.send.cap_per_transfer', vars: { max: formatMoney(fig.perTransferCapUsd, 'USD') } };
+    case 'verification_rejected':
+      return contactPartner(brand);
+    case 'verification_required_after_window':
+      return { error: 'portal.send.cap_verify', kyc: 'verify' };
+    default:
+      return { error: 'portal.send.cannot_complete' };
+  }
+}
+
+/** Every non-draft arm of prepareSendDraft → fixed copy. `blocked` is neutral (no oracle). */
+export function prepareResultCopy(r: Exclude<PrepareSendResult, { kind: 'draft' }>, brand: string): SendCopy {
+  switch (r.kind) {
+    case 'invalid_phone':
+      return { error: 'portal.send.phone_invalid' };
+    case 'bad_funding':
+      return { error: 'portal.send.funding_invalid' };
+    case 'missing_destination':
+      return { error: 'portal.send.destination_invalid' };
+    case 'invalid_request':
+      return { error: 'portal.send.amount_not_allowed' };
+    case 'fx_unavailable':
+      return { error: 'portal.send.fx_unavailable' };
+    case 'kyc_required':
+      return verifyCard;
+    case 'sender_name_required':
+      return { error: 'portal.send.name_needed' };
+    case 'cap':
+      return capCopy(r.evaluation.reason, {
+        todayRemainingUsd: r.evaluation.todayRemainingCents / 100,
+        perTransferCapUsd: r.evaluation.perTransferCapCents / 100,
+      }, brand);
+    case 'bill_refused':
+    case 'blocked':
+      return { error: 'portal.send.cannot_complete' };
+  }
+}
+
+/** check_send_limit → the refusal to show before any draft (cap, then EDD), or null to go on. */
+export function limitsCopy(l: PortalSendLimits, brand: string): SendCopy | null {
+  if (l.kind === 'kyc_required') return verifyCard;
+  if (l.kind === 'unavailable') return { error: 'portal.send.fx_unavailable' };
+  if (!l.withinCap) return capCopy(l.reason, l, brand);
+  if (l.eddRequired) return { error: 'portal.send.edd_whatsapp' };
+  return null;
+}
+
+// ── Audit ─────────────────────────────────────────────────────────────────────
+
+export type SendAuditEvent =
+  | { action: 'customer.send.draft'; meta: { draftId: string; via: 'send' | 'send_again' } }
+  | { action: 'customer.sender_name.set'; meta: Record<string, never> };
+
+/**
+ * One audit row for a portal send step: actor `system:customer-portal`, subject = the keyed customer
+ * subject (never the phone). Meta is an allow-list: a draft id and the path, nothing else (never a
+ * name, phone or amount). Throws on a guard refusal or a DB failure.
+ */
+export async function recordSendAudit(db: DbOrTx, owner: PortalOwner, e: SendAuditEvent): Promise<void> {
+  for (const [k, v] of Object.entries(e.meta as Record<string, unknown>)) {
+    const ok =
+      (e.action === 'customer.send.draft' && k === 'draftId' && typeof v === 'string' && DRAFT_ID_RE.test(v)) ||
+      (e.action === 'customer.send.draft' && k === 'via' && (v === 'send' || v === 'send_again'));
+    if (!ok) throw new Error('portal send audit: meta not allowed');
+  }
+  await createAuditRepo(db).record({
+    partnerId: owner.partnerId,
+    actor: PORTAL_AUTH_ACTOR,
+    actorType: 'system',
+    action: e.action,
+    subjectId: auditSubjectId(owner.partnerId, normalizePhone(owner.phone)),
+    meta: e.meta,
+  });
+}
+
+/** Whether `id` looks like a draft id (the replay value and the audit carry only this shape). */
+export const isDraftId = (v: unknown): v is string => typeof v === 'string' && DRAFT_ID_RE.test(v);
