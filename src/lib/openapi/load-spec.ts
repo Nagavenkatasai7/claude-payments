@@ -23,6 +23,7 @@ const str = (v: unknown, what: string): string => {
   return v;
 };
 const PARAM_IN = ['path', 'query', 'header'] as const;
+const RESPONSE_KEYS = ['description', 'content', 'headers', '$ref'];
 
 const optStr = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -112,6 +113,11 @@ export function parseOpenApiDocument(text: string): SpecDocument {
       for (const [code, r] of Object.entries(raw.responses)) {
         if (!/^\d{3}$/.test(code)) throw new Error(`openapi: ${where} response key ${code} must be a 3-digit status`);
         if (!isObj(r)) throw new Error(`openapi: ${where} response ${code} is not an object`);
+        // An unquoted comma inside a YAML flow map ({ description: a, b }) silently splits the
+        // description into a second key: refuse it rather than publish a truncated sentence.
+        for (const k of Object.keys(r)) {
+          if (!RESPONSE_KEYS.includes(k)) throw new Error(`openapi: ${where} response ${code} has unknown key "${k}"`);
+        }
         responses[Number(code)] = str(r.description, `${where} response ${code} description`);
         responseBodies[Number(code)] = responseBody(components, r, `${where} response ${code}`);
       }

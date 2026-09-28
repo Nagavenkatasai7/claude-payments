@@ -192,3 +192,19 @@ describe('parseOpenApiDocument', () => {
     expect(confirm.responseBodies[429].schema).toBe('Error');
   });
 });
+
+describe('response objects fail loud on keys they do not understand', () => {
+  it('throws on an unknown response key (an unquoted comma in a YAML flow map splits the description)', async () => {
+    const { parseOpenApiDocument } = await import('@/lib/openapi/load-spec');
+    expect(() => parseOpenApiDocument(DOC.replace("'404': { description: Not found. }", "'404': { description: Not found, or gone. }"))).toThrow(
+      /GET \/transactions\/\{id\} response 404 has unknown key "or gone\."/,
+    );
+  });
+  it('the real openapi.yaml keeps every description whole', async () => {
+    const { loadPartnerOpenApiDocument } = await import('@/lib/openapi/load-spec');
+    const ops = loadPartnerOpenApiDocument().operations;
+    const confirm = ops.find((o) => o.operationId === 'confirmTransaction')!;
+    expect(confirm.responses[403]).toBe('The key lacks transactions:write, or the partner is not active.');
+    expect(confirm.responses[409]).toBe('The transaction is not awaiting payment (for example, it was cancelled).');
+  });
+});
