@@ -111,6 +111,16 @@ test('staff can log in and reach dashboard pages', async ({ page }) => {
   ).toBeVisible();
 });
 
+// UI redesign M3-2: the partner app is for partner-scoped staff only. The smoke account is a
+// platform admin, so its gate (requirePartnerStaff) sends it to /admin-dashboard. The redirect
+// can be streamed (the page renders under loading.tsx), hence gotoExpectRedirect.
+test('a platform admin opening /partner is sent to /admin-dashboard', async ({ page }) => {
+  await loginAs(page, USERNAME, PASSWORD);
+  await expect(page).toHaveURL(/\/admin-dashboard/);
+  await gotoExpectRedirect(page, '/partner', /\/admin-dashboard\/?$/);
+  await expect(page.locator('.sh-page-title')).toContainText(/overview/i);
+});
+
 test('partner-scoped staff is restricted to their partner', async ({ page }) => {
   // Fail loud in CI: a missing partner password is a misconfiguration, not a
   // reason to silently pass the most security-sensitive smoke check. Skip only
