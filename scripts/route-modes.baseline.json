@@ -85,6 +85,8 @@
   "/login/mfa": "dynamic",
   "/onboard/seller/[id]": "dynamic",
   "/partner": "dynamic",
+  "/partner/customers": "dynamic",
+  "/partner/customers/[ref]": "dynamic",
   "/partner/security": "dynamic",
   "/partners/apply/[token]": "dynamic",
   "/pay/[transferId]": "dynamic",

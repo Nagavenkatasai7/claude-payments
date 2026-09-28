@@ -116,6 +116,9 @@ export async function auditIdentityView(
   db: DbOrTx,
   staff: { username: string },
   customer: Customer,
+  // UI redesign M3-11: the partner app marks its rows (actorScope 'partner') so the tenant audit
+  // viewer can attribute them. Opt-in: the legacy caller writes exactly what it wrote before.
+  opts: { actorScope?: 'partner' | 'platform' } = {},
 ): Promise<boolean> {
   const fields = IDENTITY_FIELDS.filter(([, get]) => {
     const v = get(customer);
@@ -128,7 +131,7 @@ export async function auditIdentityView(
     actorType: 'staff',
     action: 'pii.view',
     subjectId: auditSubjectId(customer.partnerId, customer.senderPhone),
-    meta: { fields },
+    meta: opts.actorScope ? { fields, actorScope: opts.actorScope } : { fields },
   });
   return true;
 }

@@ -154,6 +154,14 @@ describe('auditIdentityView', () => {
     for (const v of ['Asha', '1987-03-14', 'Elm', PHONE]) expect(serialized).not.toContain(v);
   });
 
+  it('UI redesign M3-11: an opt-in actorScope marks the row; the legacy call writes no marker', async () => {
+    await auditIdentityView(db, { username: 'alice' }, customer({ fullName: 'A' }));
+    await auditIdentityView(db, { username: 'pat' }, customer({ fullName: 'A' }), { actorScope: 'partner' });
+    const r = await rows();
+    expect(r[0].meta).toEqual({ fields: ['full_name'] });
+    expect(r[1].meta).toEqual({ fields: ['full_name'], actorScope: 'partner' });
+  });
+
   it('writes nothing when every identity field is empty', async () => {
     expect(await auditIdentityView(db, { username: 'alice' }, customer())).toBe(false);
     expect(await rows()).toHaveLength(0);
