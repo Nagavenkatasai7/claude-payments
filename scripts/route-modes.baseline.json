@@ -92,5 +92,6 @@
   "/robots.txt": "static",
   "/site-inactive": "static",
   "/sitemap.xml": "static",
-  "/terms": "static"
+  "/terms": "static",
+  "/trust": "static"
 }

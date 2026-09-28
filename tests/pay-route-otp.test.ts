@@ -98,7 +98,7 @@ describe('POST /api/pay/[transferId] — per-transaction OTP', () => {
   it('request_otp issues + delivers a code, no charge', async () => {
     const res = await POST(req({ action: 'request_otp' }), ctx);
     expect((await res.json()).sent).toBe(true);
-    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', undefined);
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', undefined, undefined, undefined); // M2-6: no own number ⇒ no partner template
     expect(await status()).toBe('awaiting_payment');
   });
 
@@ -182,7 +182,7 @@ describe('POST /api/pay/[transferId] — request_otp uses the pay budget of the 
     for (let i = 0; i < 21; i++) await txOtp.issue(`o_${i}`, PHONE, { kind: 'pay', partnerId: 'other_partner' });
     const res = await POST(req({ action: 'request_otp' }), ctx);
     expect(await res.json()).toEqual({ ok: true, sent: true });
-    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', undefined);
+    expect(sendTransactionOtp).toHaveBeenCalledWith(PHONE, '654321', undefined, undefined, undefined); // M2-6: no own number ⇒ no partner template
     expect([...r.dump.keys()].some((k) => k.startsWith('txotp:phone:pay:default:'))).toBe(true);
   });
 

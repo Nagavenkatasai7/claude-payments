@@ -386,6 +386,10 @@ export interface PartnerDisclosureConfig {
 
 export interface Draft {
   senderPhone: string;
+  // UI redesign M2-4: 'web' marks a draft made on the web channel; it sits
+  // under the web active-draft pointer (draft-store.ts). Absent on every bot
+  // draft (and on drafts written before the field existed).
+  channel?: 'web';
   // The tenant the draft was created under (fix 1). Optional ONLY so in-flight
   // legacy drafts drain their 30-min TTL; every new draft sets it and readers
   // use `draft.partnerId ?? DEFAULT_PARTNER_ID`.

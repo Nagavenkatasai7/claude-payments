@@ -14,7 +14,8 @@ const mdx = readdirSync('src/content/docs')
   .map((f) => join('src/content/docs', f));
 const published = [...walk('src/content').filter((f) => /\.(mdx|ts)$/.test(f)), 'openapi.yaml'];
 
-const ALLOWED_HOSTS = [/^smartremit\.ai$/, /(^|\.)example\.com$/, /^business\.facebook\.com$/, /^developers\.facebook\.com$/];
+// github.com: /trust links the public repository's SECURITY.md (src/content/trust/disclosure.ts).
+const ALLOWED_HOSTS = [/^smartremit\.ai$/, /(^|\.)example\.com$/, /^business\.facebook\.com$/, /^developers\.facebook\.com$/, /^github\.com$/];
 // Exact documented values only. Writers use these, or placeholders like `<unix seconds>`.
 const ALLOWED_DIGIT_RUNS = new Set([
   '000000000000', // the reference rail's documented failure account
@@ -89,6 +90,11 @@ describe.each(published)('%s (published-content checks)', (f) => {
   it('links only to allow-listed hosts', () => {
     for (const m of text.matchAll(/https?:\/\/([^/\s)"'`>]+)/g)) {
       expect({ host: m[1], ok: ALLOWED_HOSTS.some((r) => r.test(m[1])) }).toEqual({ host: m[1], ok: true });
+    }
+  });
+  it('links github.com only inside the public repository', () => {
+    for (const m of text.matchAll(/https?:\/\/github\.com[^\s)"'`>]*/g)) {
+      expect({ url: m[0], ok: m[0].startsWith('https://github.com/Nagavenkatasai7/claude-payments/') }).toEqual({ url: m[0], ok: true });
     }
   });
   it('names no environment variable and no internal host', () => {
