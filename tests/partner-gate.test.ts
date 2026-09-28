@@ -101,7 +101,8 @@ describe('requirePartnerStaff', () => {
     await expect(requirePartnerStaff(PARTNER_ANY)).rejects.toThrow('REDIRECT:/login');
   });
   it('an unknown role on the stored record → /login (fail closed)', async () => {
-    await signInAs({ partnerId: 'pa', role: 'finance' as Staff['role'] });
+    // M3-6 made 'finance' a known role; the fail-closed case now uses a role outside the set.
+    await signInAs({ partnerId: 'pa', role: 'root' as Staff['role'] });
     await expect(requirePartnerStaff(PARTNER_ANY)).rejects.toThrow('REDIRECT:/login');
   });
   it('partner agent on an admin surface → /partner; support on an ops surface → /partner', async () => {

@@ -13,6 +13,7 @@ import { env } from '@/lib/env';
 import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
 import type { Staff, Ticket, TicketPriority } from '@/lib/types';
 import { refuseOnSiteHost } from '@/lib/site-host-guard';
+import { isLegacyDashboardStaff } from '@/lib/legacy-dashboard-staff';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -173,6 +174,10 @@ export async function assignTicketAction(formData: FormData): Promise<void> {
     }
     if (!canSee(scopeOf(assigneeStaff), ticket.partnerId)) {
       throw new Error('Cannot assign: staff member is outside this ticket’s scope.');
+    }
+    // UI redesign M3-6: a /partner-only role (finance) cannot open the ticket it would be given.
+    if (!isLegacyDashboardStaff(assigneeStaff)) {
+      throw new Error('Cannot assign: staff member cannot work tickets.');
     }
   }
   const updated = await createTicketRepo(getDb()).assign(ticket.id, assignee || null);
