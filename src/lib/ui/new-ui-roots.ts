@@ -5,6 +5,8 @@
 // registered here explicitly (e.g. 'src/app/account/<new-segment>').
 export const NEW_UI_ROOTS: readonly string[] = [
   'src/components/ds',
+  // The shared public-site shell (SiteHeader / SiteFooter / SiteShell).
+  'src/components/site',
   // Planned roots are PRE-REGISTERED here (the scanners tolerate missing dirs), so the
   // "every src/app dir is classified" test stays green whichever change lands first.
   'src/app/docs-next',
