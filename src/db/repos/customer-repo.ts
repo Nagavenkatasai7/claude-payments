@@ -301,6 +301,21 @@ export function createCustomerRepo(
       return { customer, wasCreated: !minAt };
     },
 
+    /**
+     * UI redesign M2-5: a customer-portal sign-in proved this phone for ONE tenant row. A single-column
+     * `UPDATE customers SET phone_verified_at = COALESCE(phone_verified_at, now()) WHERE partner_id = $1
+     * AND phone = $2` (the first proof wins). Never saveCustomer (whole row) and never the phone-only
+     * markPhoneVerified. Returns whether the row exists.
+     */
+    async setPhoneVerifiedIfUnset(partnerId: PartnerId, senderPhone: string): Promise<boolean> {
+      const rows = await db
+        .update(customers)
+        .set({ phoneVerifiedAt: sql`COALESCE(${customers.phoneVerifiedAt}, now())`, updatedAt: new Date() })
+        .where(tenantKey(partnerId, senderPhone))
+        .returning({ phone: customers.phone });
+      return rows.length > 0;
+    },
+
     async setOptedIn(partnerId: PartnerId, senderPhone: string): Promise<void> {
       await db
         .update(customers)
