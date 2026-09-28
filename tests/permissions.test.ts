@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { hasPermission } from '@/lib/permissions';
 import type { Staff } from '@/lib/types';
 
-function make(role: 'admin' | 'agent', perms: Partial<Staff['permissions']>): Staff {
+function make(role: Staff['role'], perms: Partial<Staff['permissions']>): Staff {
   return {
     username: 'u',
     name: 'U',
@@ -39,5 +39,14 @@ describe('hasPermission', () => {
     expect(hasPermission(make('admin', {}), 'canRevealPii')).toBe(true);
     expect(hasPermission(make('agent', {}), 'canRevealPii')).toBe(false);
     expect(hasPermission(make('agent', { canRevealPii: true }), 'canRevealPii')).toBe(true);
+  });
+  it('a non-legacy role (finance, or anything unknown) has no legacy permission, whatever is stored', () => {
+    // A Redis record with no ledger row (or a failed ledger read) keeps its stored permissions.
+    const fin = make('finance', { canCancel: true, canResend: true, canAssign: true });
+    expect(hasPermission(fin, 'canCancel')).toBe(false);
+    expect(hasPermission(fin, 'canResend')).toBe(false);
+    expect(hasPermission(fin, 'canAssign')).toBe(false);
+    const odd = make('root' as Staff['role'], { canCancel: true });
+    expect(hasPermission(odd, 'canCancel')).toBe(false);
   });
 });

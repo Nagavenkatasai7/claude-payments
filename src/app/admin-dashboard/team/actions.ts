@@ -6,7 +6,7 @@ import { redirect } from 'next/navigation';
 import { getAuthStore } from '@/lib/auth-store';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getAuditLogStore, type StaffAuditAction } from '@/lib/audit-log-store';
-import { requirePlatformAdmin, requireStaff } from '@/lib/auth';
+import { requirePlatformAdmin, requireStaffSelf } from '@/lib/auth';
 import { hashPassword, verifyPassword } from '@/lib/password';
 import { SUPPORT_DEFAULT_PERMISSIONS, type Staff, type StaffPermissions, type StaffRole } from '@/lib/types';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
@@ -299,7 +299,7 @@ export async function changeOwnPasswordAction(
   formData: FormData,
 ): Promise<StaffPasswordFormState> {
   await refuseOnSiteHost();
-  const me = await requireStaff();
+  const me = await requireStaffSelf();
   const current = String(formData.get('currentPassword') ?? '');
   const next = String(formData.get('newPassword') ?? '');
   const confirm = String(formData.get('confirmPassword') ?? '');

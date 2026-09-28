@@ -198,6 +198,14 @@ describe('assignTransferAction assignee scope (M2)', () => {
     expect((await store.getTransfer('a2'))?.assignedTo).toBe('agentA');
   });
 
+  it('M3-6: rejects a finance assignee (a /partner-only role cannot open the legacy transfer surfaces)', async () => {
+    await store.saveTransfer(makeTransfer({ id: 'a4', partnerId: 'A', status: 'paid' }));
+    await authStore.saveStaff(staff({ username: 'finA', role: 'finance' as Staff['role'], partnerId: 'A' }));
+    currentStaff = staff({ username: 'plat' });
+    await expect(assignTransferAction(form({ id: 'a4', assignee: 'finA', note: 'x' }))).rejects.toThrow(/cannot work/i);
+    expect((await store.getTransfer('a4'))?.assignedTo).toBeUndefined();
+  });
+
   it('caps the stored note at 500 chars (L3)', async () => {
     await store.saveTransfer(makeTransfer({ id: 'a3', partnerId: 'A', status: 'paid' }));
     await authStore.saveStaff(staff({ username: 'agentA', partnerId: 'A' }));
