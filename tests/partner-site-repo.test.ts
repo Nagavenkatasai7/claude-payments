@@ -72,6 +72,10 @@ describe('partner-site-repo', () => {
     expect(await primaryOf('pa')).toBeNull();
     expect(await siteRows()).toHaveLength(0);
   });
+  it('M3-17: an optional actorScope is recorded in the audit meta (partner-surface writers)', async () => {
+    expect(await savePartnerTheme(db, 'pa', { primaryColor: '#7a1fa2', accentColor: '#0e7490' }, 'u', { actorScope: 'partner' })).toEqual({ ok: true });
+    expect((await themeAudits())[0]!.meta).toEqual({ primaryColor: '#7a1fa2', accentColor: '#0e7490', actorScope: 'partner' });
+  });
   it('runs on a caller transaction without nesting', async () => {
     await db.transaction(async (tx) => {
       expect(await savePartnerTheme(tx, 'pa', { primaryColor: '#7a1fa2', accentColor: '#0e7490' }, 'u')).toEqual({ ok: true });

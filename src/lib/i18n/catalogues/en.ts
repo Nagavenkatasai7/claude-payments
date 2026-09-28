@@ -110,6 +110,7 @@ export const en = {
   'partner.audit.action.theme': 'Brand colours changed',
   'partner.audit.action.logo': 'Logo changed',
   'partner.audit.action.slug': 'Web address changed',
+  'partner.audit.action.supportContact': 'Support contact changed',
   'partner.audit.action.settlementEndpoint': 'Settlement endpoint changed',
   'partner.audit.action.settlementSecret': 'Settlement secret rotated',
   'partner.audit.action.goLiveRequest': 'Go-live requested',
