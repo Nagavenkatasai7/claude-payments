@@ -22,6 +22,13 @@ const section = (html: string, id: string) => {
 const text = (s: string) => s.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
 
 describe('/docs-next/api page', () => {
+  it('tells the reader which shell variables the curl examples read', async () => {
+    const t = text(await render());
+    expect(t).toMatch(/\$SMARTREMIT_TEST_KEY/);
+    expect(t).toMatch(/\$SMARTREMIT_LIVE_KEY/);
+    expect(t).toMatch(/export it in your\s+shell first/);
+  });
+
   it('has one h1 "API reference" and one section per operation, keyed by the stable anchor', async () => {
     const html = await render();
     expect(html.match(/<h1[\s>]/g)).toHaveLength(1);

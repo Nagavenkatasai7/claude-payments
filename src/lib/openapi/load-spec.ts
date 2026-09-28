@@ -24,7 +24,9 @@ const str = (v: unknown, what: string): string => {
 };
 const PARAM_IN = ['path', 'query', 'header'] as const;
 const RESPONSE_KEYS = ['description', 'content', 'headers', '$ref'];
-const FIELD_KEYS = ['type', 'format', 'description', 'enum', 'example', 'items', 'nullable', '$ref'];
+// Keywords a schema field may carry. The loader renders only type/format/description and ignores
+// the rest; add a keyword here when the spec starts using it (an unknown key fails the build).
+const FIELD_KEYS = ['type', 'format', 'description', 'enum', 'example', 'examples', 'items', 'nullable', 'default', 'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'readOnly', 'writeOnly', 'deprecated', 'title', '$ref'];
 
 const optStr = (v: unknown): string => (typeof v === 'string' ? v : '');
 

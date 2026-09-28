@@ -44,7 +44,9 @@ export default function ApiReferencePage() {
           <div>
             <dt className="font-semibold text-ds-ink">Authentication</dt>
             <dd className="mt-1 text-ds-ink-muted">
-              <code className={CODE}>Authorization: Bearer sr_test_…</code> with a sandbox key, or your live key after go-live.
+              <code className={CODE}>Authorization: Bearer sr_test_…</code> with a sandbox key, or your live key after go-live. The examples below read the key from{' '}
+              <code className={CODE}>$SMARTREMIT_TEST_KEY</code> or <code className={CODE}>$SMARTREMIT_LIVE_KEY</code>: export it in your
+              shell first.
             </dd>
           </div>
         </dl>
