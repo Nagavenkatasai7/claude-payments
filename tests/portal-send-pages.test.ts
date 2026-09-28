@@ -304,13 +304,22 @@ describe('the Review page (GET)', () => {
     expect(html).not.toContain('name="rv"');
   });
 
-  it('back on review after the draft expired → quote_refreshed, with the fresh price', async () => {
+  it('M1: back on review after the draft was used or expired → "already sent", NO Continue (no duplicate send)', async () => {
     const rv = await review('pa');
     await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv })));
-    for (const k of drafts()) await redis.del(k);
+    for (const k of drafts()) await redis.del(k); // paid (consumed) or expired: the same from here
     const html = await reviewHtml();
-    expect(html).toContain('this is a new quote');
-    expect(html).toContain('name="rv"');
+    expect(html).toContain('data-already-sent');
+    expect(html).toContain('href="/portal/transfers"');
+    expect(html).not.toContain('name="rv"');
+  });
+
+  it('M1: back on review while the draft is still live → a link to that same payment page, NO Continue', async () => {
+    const rv = await review('pa');
+    const url = await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv })));
+    const html = await reviewHtml();
+    expect(html).toContain(`href="${url}"`);
+    expect(html).not.toContain('name="rv"');
   });
 });
 

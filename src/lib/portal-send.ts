@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { buildToolContext, type ToolContextDeps } from './tool-context';
 import { executeTool, type ToolContext } from './tools';
 import { getQuoteTyped, type PrepareSendInput, type PrepareSendResult, type QuoteTypedResult } from './send-seam';
@@ -280,19 +280,22 @@ export function validateSendForm(
 /**
  * Home-send H2: the Send page's pre-fill from `?amount=&to=&r=`. INITIAL VALUES ONLY: each value is
  * validated here and dropped silently when doubtful (never coerced). The amount is a 2-decimal number
- * within [1, ceilingUsd] (the sender's quote ceiling); `to` a supported ISO2 corridor; `r` a
+ * within [1, ceilingUsd] (the sender's quote ceiling; USD partners only); `to` a supported ISO2 corridor; `r` a
  * well-formed rid (the page resolves it inside the customer's own book, so another customer's,
  * another tenant's or a deleted recipient's rid is dropped there).
  */
 export function parsePrefill(
   sp: Record<string, string | string[] | undefined>,
-  opts: { ceilingUsd: number },
+  opts: { ceilingUsd: number; sourceCurrency: string },
 ): { amount?: string; to?: CountryCode; rid?: string } {
   const one = (v: string | string[] | undefined) => (typeof v === 'string' ? v : undefined);
   const out: { amount?: string; to?: CountryCode; rid?: string } = {};
   const rawAmount = one(sp.amount);
   const amount = rawAmount !== undefined && /^\d{1,7}(\.\d{1,2})?$/.test(rawAmount) ? Number(rawAmount) : null;
-  if (amount !== null && amount >= 1 && amount <= opts.ceilingUsd) out.amount = amount.toFixed(2);
+  // The ceiling is USD: applied when the partner sends in USD; otherwise only the format and a floor
+  // (the quote on the review applies the real bounds in any currency).
+  const ceiling = opts.sourceCurrency === 'USD' ? opts.ceilingUsd : 9_999_999;
+  if (amount !== null && amount >= 1 && amount <= ceiling) out.amount = amount.toFixed(2);
   const to = one(sp.to);
   if (to !== undefined && /^[A-Z]{2}$/.test(to) && isSupportedDestination(to)) out.to = to;
   const r = one(sp.r);
@@ -313,8 +316,9 @@ export interface PortalSendReview extends SendFormValue {
   draftId?: string;
 }
 
+/** Keyed (HMAC, customer-ref's auditSubjectId): a Redis key listing never reveals the sender phone. */
 function reviewKey(owner: PortalOwner): string {
-  return `psend:${createHash('sha256').update(`${owner.partnerId}|${normalizePhone(owner.phone)}`).digest('hex')}`;
+  return `psend:${auditSubjectId(owner.partnerId, normalizePhone(owner.phone))}`;
 }
 
 /** Store the customer's in-progress send (replacing any other); returns the new review id. */
@@ -488,16 +492,18 @@ export async function recordSendAudit(db: DbOrTx, owner: PortalOwner, e: SendAud
 export const isDraftId = (v: unknown): v is string => typeof v === 'string' && DRAFT_ID_RE.test(v);
 
 /**
- * Back on the review after Continue made a draft: the draft expired (30-minute TTL), is not this
- * customer's, or its rate is older than the 1-hour FX limit → `quote_refreshed` (the page shows the
- * price it just re-quoted, never the stale one). A live draft of this customer's → null.
+ * Review round (M1): once Continue made a draft, the review never offers Continue again (a second
+ * click after paying would send the money twice). Back on the review: 'live' = the customer's own
+ * draft still exists with a fresh rate (the page links to that same payment page); 'gone' = consumed
+ * (paid), expired, not this customer's, or its rate is older than the 1-hour FX limit (the page says
+ * it was already sent: check Transfers, or start a new transfer on purpose). No draft yet → null.
  */
-export async function reviewNotice(
+export async function reviewDraftState(
   draftStore: Pick<DraftStore, 'getDraft'>,
   owner: PortalOwner,
   review: Pick<PortalSendReview, 'draftId'>,
   now: number = Date.now(),
-): Promise<'portal.send.quote_refreshed' | null> {
+): Promise<'live' | 'gone' | null> {
   if (!review.draftId) return null;
   let d: Awaited<ReturnType<DraftStore['getDraft']>> = null;
   try {
@@ -506,8 +512,8 @@ export async function reviewNotice(
     d = null;
   }
   const mine = d && d.partnerId === owner.partnerId && normalizePhone(d.senderPhone) === normalizePhone(owner.phone);
-  if (!d || !mine) return 'portal.send.quote_refreshed';
+  if (!d || !mine) return 'gone';
   const at = d.quote?.fxFetchedAt;
-  if (typeof at === 'number' && now - at > FX_MAX_AGE_MS) return 'portal.send.quote_refreshed';
-  return null;
+  if (typeof at === 'number' && now - at > FX_MAX_AGE_MS) return 'gone';
+  return 'live';
 }

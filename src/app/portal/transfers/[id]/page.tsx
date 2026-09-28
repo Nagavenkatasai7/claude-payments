@@ -177,7 +177,7 @@ export default async function TransferDetailPage({ params }: { params: Promise<{
           </Card>
         ) : null}
 
-        {transfer.status !== 'blocked' ? (
+        {transfer.status !== 'blocked' && transfer.transferType !== 'b2b' ? (
           <Card as="section" className="flex flex-col gap-3 p-5 sm:p-6">
             <h2 data-send-again className="text-[17px] font-bold text-ds-ink">{t('portal.send.sendAgainTitle')}</h2>
             <p className="text-[14px] text-ds-ink-muted">{t('portal.send.sendAgainBody')}</p>

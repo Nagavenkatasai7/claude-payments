@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { Db } from '@/db/client';
 import { buildToolContext, type ToolContextDeps } from '@/lib/tool-context';
@@ -254,14 +255,17 @@ describe('edge validation', () => {
 
 describe('H2: the Send pre-fill (initial values only; doubtful values dropped silently)', () => {
   it('keeps a valid amount, ISO2 destination and rid', () => {
-    expect(parsePrefill({ amount: '250', to: 'IN', r: 'b'.repeat(32) }, { ceilingUsd: 2999 })).toEqual({ amount: '250.00', to: 'IN', rid: 'b'.repeat(32) });
+    expect(parsePrefill({ amount: '250', to: 'IN', r: 'b'.repeat(32) }, { ceilingUsd: 2999, sourceCurrency: 'USD' })).toEqual({ amount: '250.00', to: 'IN', rid: 'b'.repeat(32) });
   });
   it('drops anything doubtful', () => {
-    expect(parsePrefill({ amount: '0.5', to: 'in' }, { ceilingUsd: 2999 })).toEqual({});
-    expect(parsePrefill({ amount: '99999', to: 'ZZ' }, { ceilingUsd: 2999 })).toEqual({});
-    expect(parsePrefill({ amount: '1e3', to: ['IN', 'MX'], r: 'x' }, { ceilingUsd: 2999 })).toEqual({});
-    expect(parsePrefill({ amount: '12.345', to: 'IND' }, { ceilingUsd: 2999 })).toEqual({});
-    expect(parsePrefill({ amount: '<script>' }, { ceilingUsd: 2999 })).toEqual({});
+    expect(parsePrefill({ amount: '0.5', to: 'in' }, { ceilingUsd: 2999, sourceCurrency: 'USD' })).toEqual({});
+    expect(parsePrefill({ amount: '99999', to: 'ZZ' }, { ceilingUsd: 2999, sourceCurrency: 'USD' })).toEqual({});
+    expect(parsePrefill({ amount: '1e3', to: ['IN', 'MX'], r: 'x' }, { ceilingUsd: 2999, sourceCurrency: 'USD' })).toEqual({});
+    expect(parsePrefill({ amount: '12.345', to: 'IND' }, { ceilingUsd: 2999, sourceCurrency: 'USD' })).toEqual({});
+    expect(parsePrefill({ amount: '<script>' }, { ceilingUsd: 2999, sourceCurrency: 'USD' })).toEqual({});
+  });
+  it('the USD ceiling is not applied to another send currency (units differ)', () => {
+    expect(parsePrefill({ amount: '50000' }, { ceilingUsd: 2999, sourceCurrency: 'INR' })).toEqual({ amount: '50000.00' });
   });
 });
 
@@ -276,6 +280,7 @@ describe('the review slot', () => {
     for (const k of redis.dump.keys()) {
       expect(k).not.toContain(PHONE);
       expect(k).not.toContain('pa');
+      expect(k).not.toContain(createHash('sha256').update(`pa|${PHONE}`).digest('hex')); // keyed, not a bare hash
     }
   });
 

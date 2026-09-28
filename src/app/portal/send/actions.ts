@@ -180,23 +180,29 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   const owner = ownerOf(ctx);
   if (!(await withinSendLimit(owner))) return refuse({ error: 'portal.send.too_many' });
 
-  const review = await loadSendReview(getRedis(), owner);
+  let review: Awaited<ReturnType<typeof loadSendReview>>;
+  let recipient: { phone: string; name: string } | null = null;
+  let loaded: Awaited<ReturnType<typeof customerAndPartner>>;
+  try {
+    review = await loadSendReview(getRedis(), owner);
+    if (review && review.recipient.kind === 'saved') {
+      const r = await findByRid(getDb(), owner.partnerId, owner.phone, review.recipient.rid);
+      recipient = r ? { phone: r.recipientPhone, name: r.name } : null;
+    } else if (review && review.recipient.kind === 'new') {
+      recipient = { phone: review.recipient.phone, name: review.recipient.name };
+    }
+    loaded = await customerAndPartner(owner);
+  } catch {
+    logWarn('portal.send.continue', 'read failed');
+    return refuse({ error: 'portal.send.failed' });
+  }
   if (!review) redirect('/portal/send');
   if (text(formData, 'rv', 64) !== review.id) return refuse({ error: 'portal.send.changed' });
+  if (!recipient) return refuse({ error: 'portal.send.recipient_not_found' });
+  const recipientPhone = recipient.phone;
+  const recipientName = recipient.name;
 
-  let recipientPhone: string;
-  let recipientName: string;
-  if (review.recipient.kind === 'saved') {
-    const r = await findByRid(getDb(), owner.partnerId, owner.phone, review.recipient.rid);
-    if (!r) return refuse({ error: 'portal.send.recipient_not_found' });
-    recipientPhone = r.recipientPhone;
-    recipientName = r.name;
-  } else {
-    recipientPhone = review.recipient.phone;
-    recipientName = review.recipient.name;
-  }
-
-  const { customer, partner } = await customerAndPartner(owner);
+  const { customer, partner } = loaded;
   const gated = portalKycGate(partner, customer, site.brand);
   if (gated) return refuse(gated);
 
@@ -220,6 +226,9 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
   let outcome: { kind: string; draftId?: string };
   try {
     ({ value: outcome } = await runOnce(getRedis(), 'portal-send', owner.partnerId, owner.phone, text(formData, 'requestKey', 64), async () => {
+      // M1: this review already made a draft (paid, pending or expired): never a second one from it.
+      // Inside the claim, so a double submit of the FIRST Continue still replays its redirect.
+      if (review.draftId) return { kind: 'already_sent' };
       const r = await prepareSendDraft(portalToolContext(owner), input, { pointer: 'web' });
       if (r.kind !== 'draft') {
         fresh = r;
@@ -236,6 +245,7 @@ export async function continueToPayAction(_prev: ContinueState, formData: FormDa
     return refuse({ error: 'portal.send.failed' });
   }
 
+  if (outcome.kind === 'already_sent') return refuse({ error: 'portal.send.already_sent' });
   if (outcome.kind === 'draft' && isDraftId(outcome.draftId)) {
     try {
       await markReviewDrafted(getRedis(), owner, review.id, outcome.draftId);
@@ -281,11 +291,20 @@ export async function sendAgainAction(transferId: string, _prev: ContinueState, 
   const safeId = typeof transferId === 'string' && TRANSFER_ID_RE.test(transferId) ? transferId : '';
   const ctx = await requireFreshPortalAuth(safeId ? `/portal/transfers/${safeId}` : '/portal/transfers');
   const owner = ownerOf(ctx);
-  const t = safeId ? await getPortalTransfer(owner, safeId) : null;
-  if (!t) return refuse({ error: 'portal.send.not_found' });
+  let t: Awaited<ReturnType<typeof getPortalTransfer>>;
+  let loaded: Awaited<ReturnType<typeof customerAndPartner>>;
+  try {
+    t = safeId ? await getPortalTransfer(owner, safeId) : null;
+    loaded = await customerAndPartner(owner);
+  } catch {
+    logWarn('portal.send.again', 'read failed');
+    return refuse({ error: 'portal.send.failed' });
+  }
+  // A business bill payment is never repeated as a consumer send (the bill flow is the bot's).
+  if (!t || t.transferType === 'b2b') return refuse({ error: 'portal.send.not_found' });
   if (!(await withinSendLimit(owner))) return refuse({ error: 'portal.send.too_many' });
 
-  const { customer, partner } = await customerAndPartner(owner);
+  const { customer, partner } = loaded;
   const gated = portalKycGate(partner, customer, site.brand);
   if (gated) return refuse(gated);
 

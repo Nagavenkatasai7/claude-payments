@@ -10,6 +10,7 @@ import { getRedis } from '@/lib/redis';
 import { findByRid } from '@/lib/portal-recipients';
 import { hasSenderName } from '@/lib/sender-identity';
 import { newRequestKey } from '@/lib/portal-request-key';
+import { portalPayUrl } from '@/lib/send-seam';
 import {
   capCopy,
   limitsCopy,
@@ -18,7 +19,7 @@ import {
   portalKycGate,
   portalToolContext,
   quoteForPortal,
-  reviewNotice,
+  reviewDraftState,
   sendLimitsForPortal,
   type SendCopy,
 } from '@/lib/portal-send';
@@ -97,6 +98,31 @@ export default async function PortalSendReviewPage() {
   }
 
   const tc = portalToolContext(owner);
+
+  // Review round (M1): this review already made a draft. Never offer Continue again (a click after
+  // paying would send the money twice): the live draft's own payment page, or "already sent".
+  if (review.draftId) {
+    const state = await reviewDraftState(tc.draftStore, owner, review);
+    return shell(
+      <Card className="flex flex-col gap-4 p-5 sm:p-6">
+        <p data-already-sent role="status" className="text-[14.5px] font-semibold text-ds-ink">{t('portal.send.already_sent')}</p>
+        <div className="flex flex-wrap items-center gap-3">
+          {state === 'live' ? (
+            <a href={portalPayUrl(review.draftId)} className={buttonVariants({ variant: 'primary', size: 'md' })}>
+              {t('portal.send.goToPayment')}
+            </a>
+          ) : null}
+          <Link href="/portal/transfers" className={buttonVariants({ variant: state === 'live' ? 'ghost' : 'primary', size: 'md' })}>
+            {t('portal.send.viewTransfers')}
+          </Link>
+          <Link href="/portal/send" className="text-[14px] font-semibold text-ds-primary hover:underline">
+            {t('portal.send.startNew')}
+          </Link>
+        </div>
+      </Card>,
+    );
+  }
+
   const [customer, partner] = await Promise.all([
     tc.customerStore.getCustomer(owner.partnerId, owner.phone),
     getPartnerStore().getPartner(owner.partnerId),
@@ -149,15 +175,8 @@ export default async function PortalSendReviewPage() {
   const quote = q.quote;
   const src = quote.sourceCurrency;
   const dest = quote.destinationCurrency ?? 'INR';
-  const notice = await reviewNotice(tc.draftStore, owner, review);
-
   return shell(
     <>
-      {notice ? (
-        <p role="status" className="rounded-ds-inner border border-ds-border bg-ds-surface px-4 py-3 text-[14px] font-semibold text-ds-ink">
-          {t(notice)}
-        </p>
-      ) : null}
       <Card className="flex flex-col gap-4 p-5 sm:p-6">
         <dl className="divide-y divide-ds-border">
           <Row label={t('portal.send.to')}>

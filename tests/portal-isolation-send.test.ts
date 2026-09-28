@@ -11,7 +11,7 @@ import { MockKycProvider } from '@/lib/providers/mock-kyc-provider';
 import { resetRateCacheForTests, FX_MAX_AGE_MS } from '@/lib/rate';
 import { newRequestKey } from '@/lib/portal-request-key';
 import { recipientRid } from '@/lib/portal-recipients';
-import { loadSendReview, markReviewDrafted, reviewNotice, saveSendReview, type SendFormValue } from '@/lib/portal-send';
+import { loadSendReview, markReviewDrafted, reviewDraftState, saveSendReview, type SendFormValue } from '@/lib/portal-send';
 import type { ToolContextDeps } from '@/lib/tool-context';
 import { fakeRedis, type FakeRedis } from './helpers';
 import { freshDb } from './helpers-db';
@@ -157,20 +157,20 @@ describe('crafted draft ids', () => {
     await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv: rvB })));
     const [bDraft] = draftIds();
     const ds = createDraftStore(redis);
-    expect(await reviewNotice(ds, { partnerId: 'pa', phone }, { draftId: bDraft })).toBe('portal.send.quote_refreshed');
-    expect(await reviewNotice(ds, { partnerId: 'pb', phone }, { draftId: bDraft })).toBeNull();
-    expect(await reviewNotice(ds, { partnerId: 'pa', phone }, { draftId: 'madeUpDraft1' })).toBe('portal.send.quote_refreshed');
-    expect(await reviewNotice(ds, { partnerId: 'pa', phone }, {})).toBeNull();
+    expect(await reviewDraftState(ds, { partnerId: 'pa', phone }, { draftId: bDraft })).toBe('gone');
+    expect(await reviewDraftState(ds, { partnerId: 'pb', phone }, { draftId: bDraft })).toBe('live');
+    expect(await reviewDraftState(ds, { partnerId: 'pa', phone }, { draftId: 'madeUpDraft1' })).toBe('gone');
+    expect(await reviewDraftState(ds, { partnerId: 'pa', phone }, {})).toBeNull();
   });
 
-  it('a stale rate on the draft → quote_refreshed', async () => {
+  it('a stale rate on the draft → gone', async () => {
     onHost('pa');
     const rv = await saveSendReview(redis, { partnerId: 'pa', phone }, value);
     await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv })));
     const [id] = draftIds();
     const ds = createDraftStore(redis);
-    expect(await reviewNotice(ds, { partnerId: 'pa', phone }, { draftId: id })).toBeNull();
-    expect(await reviewNotice(ds, { partnerId: 'pa', phone }, { draftId: id }, Date.now() + FX_MAX_AGE_MS + 60_000)).toBe('portal.send.quote_refreshed');
+    expect(await reviewDraftState(ds, { partnerId: 'pa', phone }, { draftId: id })).toBe('live');
+    expect(await reviewDraftState(ds, { partnerId: 'pa', phone }, { draftId: id }, Date.now() + FX_MAX_AGE_MS + 60_000)).toBe('gone');
   });
 
   it('markReviewDrafted refuses a malformed id and a review id from another tab', async () => {

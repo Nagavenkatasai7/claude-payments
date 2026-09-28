@@ -232,6 +232,15 @@ describe('continueToPayAction — the draft', () => {
     expect(await auditRows('customer.send.draft')).toHaveLength(1);
   });
 
+  it('M1: a second Continue on an already-drafted review (a NEW request key) makes no second draft', async () => {
+    const rv = await review('pa');
+    await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv })));
+    const r = await continueToPayAction({ requestKey: '' }, fd({ rv }));
+    expect(r.error).toBe('portal.send.already_sent');
+    expect(drafts()).toHaveLength(1);
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('(2) posted amount / rate / fee fields are ignored: the draft is the server re-quote of the stored review', async () => {
     const rv = await review('pa');
     await redirectOf(continueToPayAction({ requestKey: '' }, fd({ rv, amount: '1', amountSource: '1', rate: '999', fxRate: '999', fee: '0', fxFetchedAt: '1' })));
@@ -452,6 +461,13 @@ describe('sendAgainAction (Task 9.4)', () => {
     expect(await ds.getActiveDraftId('pa', phone, 'web')).toBe(draftId);
     const rows = await db.select().from(auditEvents).where(and(eq(auditEvents.action, 'customer.send.draft'), eq(auditEvents.partnerId, 'pa')));
     expect(rows.map((r) => r.meta)).toEqual([{ draftId, via: 'send_again' }]);
+  });
+
+  it('a business bill payment is never repeated as a consumer send → not found', async () => {
+    await db.execute(sql`UPDATE transfers SET transfer_type = 'b2b' WHERE id = ${A.transferIds[0]}`);
+    const r = await sendAgainAction(A.transferIds[0], { requestKey: '' }, fd());
+    expect(r.error).toBe('portal.send.not_found');
+    expect(drafts()).toHaveLength(0);
   });
 
   it('EDD → the WhatsApp copy, nothing drafted', async () => {

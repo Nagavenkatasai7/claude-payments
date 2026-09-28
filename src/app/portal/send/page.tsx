@@ -71,9 +71,12 @@ export default async function PortalSendPage({ searchParams }: { searchParams: P
       masked: maskAccount(r.payoutMethod, r.payoutDestination),
       country: countryForPhone(r.recipientPhone),
     }));
-    const prefill = parsePrefill(sp, { ceilingUsd: quoteCeilingUsd(resolveEffectiveSendLimits(partner, customer)) });
-    const picked = saved.find((r) => r.rid === prefill.rid);
     const currencies = partner ? allowedSendCurrencies(partner) : ['USD'];
+    const prefill = parsePrefill(sp, {
+      ceilingUsd: quoteCeilingUsd(resolveEffectiveSendLimits(partner, customer)),
+      sourceCurrency: currencies.length === 1 ? currencies[0] : '',
+    });
+    const picked = saved.find((r) => r.rid === prefill.rid);
     const hasQuery = prefill.amount !== undefined || prefill.to !== undefined || picked !== undefined;
     // "Change details" comes back here: the customer's own review slot fills the form (no query).
     const fromReview = !hasQuery && previous ? previous : null;
