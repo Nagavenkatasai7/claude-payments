@@ -176,7 +176,7 @@ test('the inactive-site sheet renders the generic dead-link heading and is noind
 
 // UI redesign M2-5: the customer portal is served ONLY on an enabled partner subdomain. On the apex
 // every portal path is the brand-neutral root 404 (the portal layout's gate 404s before rendering).
-for (const path of ['/portal', '/portal/login', '/portal/verify']) {
+for (const path of ['/portal', '/portal/login', '/portal/verify', '/portal/recipients', '/portal/recipients/new']) {
   test(`apex ${path} is the neutral 404`, async ({ page }) => {
     const res = await page.goto(path);
     expect(res?.status()).toBe(404);
