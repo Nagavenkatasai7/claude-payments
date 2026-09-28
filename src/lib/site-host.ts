@@ -53,3 +53,8 @@ export function stripSiteHeaders(h: Headers): Headers {
   out.delete(SITE_HEADERS.slug);
   return out;
 }
+
+/** Cache TTL of a slug → partner answer. Also the bound on how long a disabled partner keeps routing. */
+export const SITE_CACHE_TTL_SEC = 60;
+/** Redis key of the slug → partnerId ('-' = no active partner) cache. Lives here (pure) so the writer can clear it. */
+export const siteCacheKey = (slug: string) => `site:v1:slug:${slug}`;
