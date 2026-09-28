@@ -87,6 +87,15 @@ describe('Trust content is honest', () => {
     expect(names).not.toMatch(/Stripe|Sentry|webhook/i);
   });
 
+  it('file storage is its own row: the function region does not prove where stored documents live', async () => {
+    const { SUBPROCESSORS } = await import('@/content/trust/subprocessors');
+    const blob = SUBPROCESSORS.find((s) => /file storage/i.test(s.purpose));
+    expect(blob?.data).toMatch(/partner documents/i);
+    expect(blob?.regionStatus).toBe('being-confirmed');
+    for (const s of SUBPROCESSORS.filter((x) => x.regionStatus === 'confirmed'))
+      expect({ name: s.name, storage: /documents|file storage/i.test(s.purpose + s.data) }).toEqual({ name: s.name, storage: false });
+  });
+
   it('the disclosure contact is an existing public mailbox, not an invented one', async () => {
     const { DISCLOSURE_CONTACT } = await import('@/content/trust/disclosure');
     expect(DISCLOSURE_CONTACT).toBe('support@smartremit.ai');

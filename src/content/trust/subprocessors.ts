@@ -16,11 +16,19 @@ export interface Subprocessor {
 export const SUBPROCESSORS: readonly Subprocessor[] = [
   {
     name: 'Vercel',
-    purpose: 'Hosting, serverless functions, scheduled jobs and private file storage',
-    data: 'Request data, application logs, partner documents',
+    purpose: 'Hosting, serverless functions and scheduled jobs',
+    data: 'Request data, application logs',
     // Verified from the serving function region of production responses.
     region: 'United States (Washington, D.C. area)',
     regionStatus: 'confirmed',
+  },
+  {
+    // A separate row: the function region does not establish where stored files live.
+    name: 'Vercel Blob',
+    purpose: 'Private file storage',
+    data: 'Partner documents',
+    region: 'Being confirmed',
+    regionStatus: 'being-confirmed',
   },
   {
     name: 'Neon',
