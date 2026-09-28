@@ -37,6 +37,8 @@ export const STATE_EXEMPT_DIRS: readonly string[] = [
   'src/app/docs-next',
   'src/app/docs-next/[slug]',
   'src/app/docs-next/api',
+  // The /trust page: static, prerendered and data-free for the same reason (error.tsx present).
+  'src/app/trust',
   // A static, data-free page: nothing to load and nothing that can fail.
   'src/app/site-inactive',
 ];
