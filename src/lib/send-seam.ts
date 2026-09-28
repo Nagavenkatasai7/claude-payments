@@ -18,9 +18,18 @@
 
 import type { Quote, CapEvaluation, CountryCode, CurrencyCode, FundingMethod } from './types';
 import type { DraftPointer } from './draft-store';
+import { payUrlFor } from './pay-url';
 
 export { prepareSendDraft, getQuoteTyped } from './tools';
 export type { DraftPointer };
+export { payUrlFor };
+
+/**
+ * The pay link the portal redirects to. The apex pay page for now (plan X2);
+ * M1 H2 changes payUrlFor itself to the host's subdomain when the host tenant
+ * equals the transfer's tenant.
+ */
+export const portalPayUrl = payUrlFor;
 
 /**
  * The inputs send_approve_picker reads, typed as the parser each one goes

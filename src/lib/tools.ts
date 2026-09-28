@@ -16,6 +16,7 @@ import { B2B_DISPUTE_REASONS, DEFAULT_CURRENCY_FOR_COUNTRY } from './types';
 import type { Store } from './store';
 import { DRAFT_TTL_SECONDS, type DraftPointer, type DraftStore } from './draft-store';
 import type { PrepareSendInput, PrepareSendResult, QuoteTypedInput, QuoteTypedResult } from './send-seam';
+import { payUrlFor } from './pay-url';
 import type { CustomerStore } from './customer-store';
 import type { DailyVolumeStore } from './daily-volume-store';
 import type { MonthlyVolumeStore } from './monthly-volume-store';
@@ -2505,7 +2506,7 @@ async function generatePaymentLinkTool(
       error: 'This transfer did not pass compliance and cannot be paid.',
     };
   }
-  return { url: `${env.appBaseUrl}/pay/${transfer.id}` };
+  return { url: payUrlFor(transfer.id) };
 }
 
 async function checkPaymentStatusTool(
@@ -3935,7 +3936,7 @@ export async function prepareSendDraft(
       q.destinationCurrency ?? 'INR',
       rateLockMinutes(fxFetchedAt),
     );
-    const payUrl = `${env.appBaseUrl}/pay/${draftId}`;
+    const payUrl = payUrlFor(draftId);
     return {
       kind: 'draft',
       draftId,
