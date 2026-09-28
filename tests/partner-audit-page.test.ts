@@ -120,9 +120,9 @@ describe('/partner/audit: the gate (the page gates itself; MFA enforced)', () =>
   });
   it('agent and support → /partner (admin only)', async () => {
     await signInAs({ username: 'pa-agent', partnerId: 'pa', role: 'agent' });
-    await expect(open()).rejects.toThrow('REDIRECT:/partner');
+    await expect(open()).rejects.toThrow(/^REDIRECT:\/partner$/);
     await signInAs({ username: 'pa-support', partnerId: 'pa', role: 'support' });
-    await expect(open()).rejects.toThrow('REDIRECT:/partner');
+    await expect(open()).rejects.toThrow(/^REDIRECT:\/partner$/);
   });
   it('an admin with MFA enrolment pending is sent to enrolment (no skipMfa here)', async () => {
     await signInAs({ username: 'pa-admin', partnerId: 'pa', role: 'admin' });
@@ -180,6 +180,18 @@ describe('/partner/audit: tenant isolation and the safe projection', () => {
     const html = await render();
     expect(html).toContain('SmartRemit');
     expect(html).not.toContain('owner-admin');
+  });
+
+  it('staff rows keep the writers\' actorScope rule: platform-marked rows never name the actor, partner-marked rows do', async () => {
+    // The exact meta the real writers produce (team/actions.ts: 'platform'; partners/actions.ts: scopeOf(actor).kind).
+    await audit({ partnerId: 'pa', action: 'created', actor: 'owner-admin', subjectId: 'made-by-platform', meta: { actorScope: 'platform', detail: 'x' } });
+    await audit({ partnerId: 'pa', action: 'removed', actor: 'pa-former', subjectId: 'made-by-former', meta: { actorScope: 'partner' } });
+    await audit({ partnerId: 'pa', action: 'created', actor: 'legacy@example.com', subjectId: 'made-by-legacy', meta: { actorScope: 'partner' } });
+    const html = await render();
+    expect(html).toContain('made-by-platform');
+    expect(html).not.toContain('owner-admin');
+    expect(html).toContain('pa-former');
+    expect(html).not.toContain('legacy@example.com');
   });
 
   it("?actor=<pb's username> is ignored, and the actor select lists only this tenant's staff", async () => {

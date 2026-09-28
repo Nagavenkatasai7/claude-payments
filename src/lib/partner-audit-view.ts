@@ -122,7 +122,7 @@ function projectActor(row: TenantAuditRow, tenantUsernames: ReadonlySet<string>)
   // even if a tenant user later took the same username.
   const scope = row.meta && typeof row.meta === 'object' ? (row.meta as { actorScope?: unknown }).actorScope : undefined;
   if (scope === 'platform') return t('partner.audit.smartremit');
-  if (scope === 'partner' || tenantUsernames.has(row.actor)) return row.actor;
+  if (scope === 'partner' || tenantUsernames.has(row.actor)) return safeText(row.actor); // a legacy email-shaped name is masked
   return t('partner.audit.smartremit');
 }
 
