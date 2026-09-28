@@ -8,6 +8,8 @@ import { scopeOf, type Scope } from './staff-scope';
 import { mfaEnrolmentRequired } from './staff-mfa-policy';
 import { getStaffMfaStore } from './staff-mfa-store';
 import type { Staff } from './types';
+import { decidePartnerAccess, type PartnerCtx, type PartnerPolicy } from './partner-access';
+import { partnerMfaEnrolmentPending } from './partner-mfa-gate';
 
 /**
  * Program-Fix 45 P1: the session's username from the `__Host-` cookie, else the
@@ -112,4 +114,18 @@ export async function requireTicketWorker(): Promise<{ staff: Staff; scope: Scop
     redirect('/admin-dashboard');
   }
   return { staff, scope: scopeOf(staff) };
+}
+
+// UI redesign M3 (SPEC §3): requirePartnerStaff. The ONE gate for /partner pages and server
+// actions. The tenant is the session record's partnerId (decidePartnerAccess takes no request
+// input). Layouts do not re-run on navigation and do not stop child segments rendering
+// (next/dist/docs/01-app/02-guides/authentication.md "Layouts and auth checks"), so EVERY page
+// and action calls this. redirect() throws NEXT_REDIRECT, so callers never wrap this in
+// try/catch (next/dist/docs/01-app/03-api-reference/04-functions/redirect.md "Behavior").
+export async function requirePartnerStaff(policy: PartnerPolicy, opts: { skipMfa?: boolean } = {}): Promise<PartnerCtx> {
+  const staff = await getCurrentStaff();
+  const pending = staff?.partnerId && !opts.skipMfa ? await partnerMfaEnrolmentPending(staff) : false;
+  const d = decidePartnerAccess(staff, policy, { pending, skip: opts.skipMfa });
+  if (!d.ok) redirect(d.redirectTo);
+  return d.ctx;
 }

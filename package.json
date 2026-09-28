@@ -24,6 +24,7 @@
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
     "hash-wasm": "^4.12.0",
+    "js-yaml": "^4.3.2",
     "lucide-react": "^1.28.0",
     "next": "^16.3.5",
     "nodemailer": "^9.1.1",
@@ -36,8 +37,10 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "@mdx-js/mdx": "^3.1.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^8.0.1",
     "@types/react": "^19.2.18",
