@@ -139,6 +139,9 @@ const isUniqueViolation = (e: unknown) => {
  * (else not_found), the partner_sites row is upserted (slug only; the accent colour is kept),
  * and a `partner.slug.update` audit row records { slug, previousSlug }. After commit the cache
  * entries for the old and the new slug are deleted; if that fails the 60 s TTL bounds staleness.
+ *
+ * Pass the top-level Db, not an open transaction: inside a caller's tx a lost unique-index race
+ * (23505) is returned as `unavailable` but leaves that outer transaction aborted.
  */
 export async function setPartnerSlug(
   db: DbOrTx,

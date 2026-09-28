@@ -70,6 +70,14 @@ describe('resolveSiteSlug', () => {
     expect(await redis.get(siteCacheKey('acme'))).toBeNull(); // a DB blip must not blank a live site for 60 s
     warn.mockRestore();
   });
+  it('a stalled DB lookup is abandoned → null (fail closed), nothing cached', async () => {
+    const log = await import('@/lib/log');
+    const warn = vi.spyOn(log, 'logWarn').mockImplementation(() => {});
+    const stalledDb = { select: () => ({ from: () => ({ innerJoin: () => ({ where: () => ({ limit: () => new Promise(() => {}) }) }) }) }) } as unknown as Db;
+    expect(await resolveSiteSlug('acme', H, { redis, db: stalledDb, limited, dbTimeoutMs: 20 })).toBeNull();
+    expect(await redis.get(siteCacheKey('acme'))).toBeNull();
+    warn.mockRestore();
+  });
   it('a rate-limited IP on a cache miss → null without touching the DB, and nothing cached', async () => {
     const spyDb = { select: vi.fn() } as unknown as Db;
     expect(await resolveSiteSlug('acme', H, { redis, db: spyDb, limited: async () => true })).toBeNull();

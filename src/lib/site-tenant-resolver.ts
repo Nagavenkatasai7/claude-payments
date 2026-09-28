@@ -21,6 +21,8 @@ export { siteCacheKey, SITE_CACHE_TTL_SEC };
 /** Cache misses allowed per IP per minute before the IP sees the generic sheet. */
 export const SITE_HOST_IP_LIMIT = 120;
 const REDIS_TIMEOUT_MS = 800;
+/** A stalled DB must not hold a subdomain request open: past this, fail closed (uncached). */
+const DB_TIMEOUT_MS = 2500;
 const NEGATIVE = '-';
 
 export interface ResolveSiteDeps {
@@ -28,6 +30,7 @@ export interface ResolveSiteDeps {
   db?: DbOrTx;
   limited?: (h: Headers) => Promise<boolean>;
   redisTimeoutMs?: number;
+  dbTimeoutMs?: number;
 }
 
 const TIMED_OUT = Symbol('timeout');
@@ -67,7 +70,12 @@ export async function resolveSiteSlug(slug: string, reqHeaders: Headers, deps: R
 
   let partnerId: string | null;
   try {
-    partnerId = await findActivePartnerIdBySlug(deps.db ?? getDb(), slug);
+    const answer = await withDeadline(findActivePartnerIdBySlug(deps.db ?? getDb(), slug), deps.dbTimeoutMs ?? DB_TIMEOUT_MS);
+    if (answer === TIMED_OUT) {
+      logWarn('site-tenant', 'slug lookup timed out', { slug });
+      return null;
+    }
+    partnerId = answer;
   } catch {
     logWarn('site-tenant', 'slug lookup failed', { slug });
     return null;
