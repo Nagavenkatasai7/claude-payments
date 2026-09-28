@@ -107,4 +107,5 @@ export const en = {
   'portal.verify.sub': 'For your security, we need a fresh code before this step.',
   'portal.verify.sendCode': 'Send me a code on WhatsApp',
   'portal.verify.mfaSub': 'Now enter the code from your authenticator app.',
+  'portal.verify.codeSent': 'We sent a 6-digit code to your WhatsApp. It expires in 5 minutes.',
 } as const;

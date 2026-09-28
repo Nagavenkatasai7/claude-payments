@@ -17,14 +17,14 @@ import { isValidPhone, normalizePhone } from './phone';
  * - Lifetimes are enforced in code off the injectable clock (the Redis TTL is only a backstop).
  */
 
-export type PortalPendingPurpose = 'login' | 'mfa' | 'consent' | 'stepup';
+export type PortalPendingPurpose = 'login' | 'mfa' | 'consent' | 'stepup' | 'stepup_totp';
 
 export interface PortalPending {
   partnerId: PartnerId;
   phone: string;
   purpose: PortalPendingPurpose;
   createdMs: number;
-  /** stepup only: the session this proof is for. */
+  /** stepup / stepup_totp: the session this proof is for. */
   sid?: string;
 }
 
@@ -36,11 +36,12 @@ const TTL_MS: Record<PortalPendingPurpose, number> = {
   stepup: 300_000,
   mfa: 600_000,
   consent: 600_000,
+  stepup_totp: 600_000,
 };
 
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 const SID_RE = /^[0-9a-f]{32}$/;
-const PURPOSES: ReadonlySet<string> = new Set(['login', 'mfa', 'consent', 'stepup']);
+const PURPOSES: ReadonlySet<string> = new Set(['login', 'mfa', 'consent', 'stepup', 'stepup_totp']);
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const recKey = (h: string) => `ppend:${h}`;
 const cntKey = (h: string) => `ppend_n:${h}`;
