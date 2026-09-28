@@ -279,7 +279,10 @@
   --ds-danger-bg: #fdecec;
   --ds-danger-border: #f5c2c2;
   --ds-danger-ink: #991b1b;
-  --ds-warning-ink: var(--warning);
+  /* warning set: the "Review" tag in src/app/landing/showcase.tsx (142, 152) */
+  --ds-warning-ink: #b45309;
+  --ds-warning-bg: #fff4e5;
+  --ds-warning-border: #f5d49c;
   --ds-ink-faint: #52607a;
   --ds-nav-bg: rgba(245,249,255,0.85);
   /* overridable (partner theming layer) */
@@ -341,6 +344,8 @@
   --color-ds-danger-border: var(--ds-danger-border);
   --color-ds-danger-ink: var(--ds-danger-ink);
   --color-ds-warning-ink: var(--ds-warning-ink);
+  --color-ds-warning-bg: var(--ds-warning-bg);
+  --color-ds-warning-border: var(--ds-warning-border);
   --color-ds-focus-ring: var(--ds-focus-ring);
   --radius-ds-card: var(--ds-radius-card);
   --radius-ds-inner: var(--ds-radius-inner);
