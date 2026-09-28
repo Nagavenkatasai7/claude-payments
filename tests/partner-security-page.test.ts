@@ -6,10 +6,12 @@ import { fakeRedis } from './helpers';
 import { freshDb, seedPartner } from './helpers-db';
 import { createPartnerStore, type PartnerStore } from '@/lib/partner-store';
 import type { Staff } from '@/lib/types';
+import type { Db } from '@/db/client';
 
 // The M3-1 Task 1.3 harness, plus an injectable "enrolled" set on the real MFA store.
 const redis = fakeRedis();
 let pgPartnerStore: PartnerStore;
+let homeDb: Db;
 const enrolled = new Set<string>();
 const cookieJar = new Map<string, string>();
 vi.mock('next/headers', () => ({
@@ -32,6 +34,21 @@ vi.mock('next/navigation', () => ({
   },
 }));
 vi.mock('@/lib/redis', () => ({ getRedis: () => redis }));
+// M3-3: the home page reads the ledger, channel health, integrations and API keys. Wire every
+// store getter to this test's PGlite so no render ever dials a real database.
+vi.mock('@/db/client', async (orig) => ({ ...(await orig<typeof import('@/db/client')>()), getDb: () => homeDb }));
+vi.mock('@/lib/store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/store')>();
+  return { ...actual, getStore: () => actual.createStore(redis, homeDb) };
+});
+vi.mock('@/lib/partner-integrations-store', async (orig) => {
+  const actual = await orig<typeof import('@/lib/partner-integrations-store')>();
+  return { ...actual, getPartnerIntegrationsStore: () => actual.createPartnerIntegrationsStore(homeDb) };
+});
+vi.mock('@/lib/partner-api-key', async (orig) => {
+  const actual = await orig<typeof import('@/lib/partner-api-key')>();
+  return { ...actual, getPartnerApiKeyStore: () => actual.createPartnerApiKeyStore(homeDb) };
+});
 vi.mock('@/lib/auth-store', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth-store')>('@/lib/auth-store');
   return { ...actual, getAuthStore: () => actual.createAuthStore(redis) };
@@ -81,6 +98,7 @@ beforeEach(async () => {
   enrolled.clear();
   redirectMock.mockClear();
   const db = await freshDb();
+  homeDb = db;
   pgPartnerStore = createPartnerStore(db);
   await seedPartner(db, 'pa');
 });
@@ -141,7 +159,7 @@ describe('/partner (the M3-1 home stub; M3-2 adds the shell)', () => {
     await redis.set(`${MFA_PENDING_PREFIX}u1`, '1');
     await expect(HomePage()).rejects.toThrow('REDIRECT:/partner/security?enroll=1');
   });
-  it('every partner role sees the page, with an explicit empty state and the security link', async () => {
+  it('every partner role sees the page and the security link', async () => {
     for (const [i, role] of (['admin', 'agent', 'support'] as const).entries()) {
       await signInAs({ username: `r${i}`, partnerId: 'pa', role });
       const html = await render(HomePage());
