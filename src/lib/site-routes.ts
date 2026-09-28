@@ -1,7 +1,7 @@
 // site-routes — the partner-subdomain ALLOWLIST. Any path not listed here is 404 on a subdomain.
 //
 // M1 ships it EMPTY (plan conflict C4): /pay/** and /api/pay/** wait for the host-tenant check (H2),
-// and M2 appends the portal routes. Apex-only surfaces (/docs-next/**, /trust, /api/docs/try-it,
+// and M2 appends the portal routes. Apex-only surfaces (the docs-next and trust pages, the docs try-it API,
 // /admin-dashboard, /login, /api/*) must NEVER be listed here; tests/proxy-site.test.ts pins them.
 // PURE: imported by src/proxy.ts on every matched request.
 
