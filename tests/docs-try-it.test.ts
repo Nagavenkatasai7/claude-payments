@@ -5,6 +5,7 @@ import {
   TRY_IT_MAX_BODY_BYTES,
   forwardTarget,
   isSameOriginRequest,
+  isTryItOperation,
   parseTryItRequest,
   type TryItParsed,
 } from '@/lib/docs/try-it';
@@ -66,6 +67,11 @@ describe('parseTryItRequest: operations are a closed set', () => {
 
   it('a non-string operationId → 400', () => {
     expect(parseTryItRequest(JSON_CT, req({ operationId: ['listCorridors'], key: FAKE_TEST_KEY }))).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it('isTryItOperation is a strict membership test (no prototype keys)', () => {
+    for (const op of TRY_IT_OPERATIONS) expect(isTryItOperation(op)).toBe(true);
+    for (const op of ['createTransaction', 'confirmTransaction', 'listSettlements', '__proto__', 'toString', '', 1, null]) expect(isTryItOperation(op)).toBe(false);
   });
 
   it('the allowlist is exactly the five read-only or stateless operations', () => {

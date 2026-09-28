@@ -49,8 +49,10 @@ const CURSOR_RE = /^[\x21-\x7e]{1,256}$/;
 
 const reject = (status: 400 | 413 | 415, error: string = TRY_IT_INVALID): TryItReject => ({ ok: false, status, error });
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const isOperation = (v: unknown): v is TryItOperation =>
-  typeof v === 'string' && (TRY_IT_OPERATIONS as readonly string[]).includes(v);
+/** Membership in the closed operation set (the reference page renders the form only for these). */
+export function isTryItOperation(v: unknown): v is TryItOperation {
+  return typeof v === 'string' && (TRY_IT_OPERATIONS as readonly string[]).includes(v);
+}
 
 /** UTF-8 byte length (the cap is on bytes, not characters). */
 export function utf8Bytes(s: string): number {
@@ -73,7 +75,7 @@ export function parseTryItRequest(contentType: string | null, raw: string): TryI
     return reject(400);
   }
   if (!isPlainObject(doc)) return reject(400);
-  if (!isOperation(doc.operationId)) return reject(400);
+  if (!isTryItOperation(doc.operationId)) return reject(400);
   const op = doc.operationId;
 
   const key = doc.key;
