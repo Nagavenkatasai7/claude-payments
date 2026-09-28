@@ -11,6 +11,8 @@ import { SiteThemeStyle } from '@/components/ds/site-theme-style';
 import { signOutAction } from './signout/actions';
 
 export const metadata: Metadata = { robots: { index: false, follow: false } };
+// Per-request only (Host, flag, per-partner enablement, session): never prerendered.
+export const dynamic = 'force-dynamic';
 
 /**
  * The customer portal shell (UI redesign M2-5, Task 5.7): the partner's theme and brand in the

@@ -28,7 +28,7 @@ vi.mock('next/navigation', async (orig) => ({
   },
 }));
 
-import PortalLayout from '@/app/portal/layout';
+import PortalLayout, { dynamic as layoutDynamic } from '@/app/portal/layout';
 import PortalLoginPage from '@/app/portal/login/page';
 import { portalNavItems, showLanguageSwitch } from '@/lib/portal-nav';
 
@@ -47,6 +47,9 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe('portal layout', () => {
+  it('is request-time only (never prerendered: a build-time 404 would outlive the flag switch)', () => {
+    expect(layoutDynamic).toBe('force-dynamic');
+  });
   it('apex / portal off → the gate 404s before anything renders', async () => {
     h.site = null;
     await expect(PortalLayout({ children: null })).rejects.toThrow('NEXT_HTTP_ERROR_FALLBACK;404');

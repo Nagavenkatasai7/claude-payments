@@ -57,10 +57,10 @@ describe('getPortalSite', () => {
     h.tenant = null;
     expect(await getPortalSite()).toBeNull();
   });
-  it('flag off → null, and no DB read happens', async () => {
+  it('flag off → null, and no DB read happens (the Host is read first: request-time, never prerendered)', async () => {
     vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '');
     expect(await getPortalSite()).toBeNull();
-    expect(h.calls).not.toContain('settings');
+    expect(h.calls).toEqual(['tenant']);
   });
   it('partner not enabled → null', async () => {
     h.settings = { ...h.settings, portalEnabledAt: null };

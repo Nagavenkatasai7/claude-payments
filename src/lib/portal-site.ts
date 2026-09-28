@@ -39,9 +39,10 @@ export interface PortalSite {
 }
 
 async function loadPortalSite(): Promise<PortalSite | null> {
-  if (!env.customerPortalEnabled) return null;
+  // The Host read comes FIRST: it makes every portal route request-time (a flag check first would
+  // let the build prerender the 404 statically and serve it after the flag is switched on).
   const tenant = await getSiteTenant();
-  if (!tenant) return null;
+  if (!tenant || !env.customerPortalEnabled) return null;
   try {
     const db = getDb();
     const settings = await getPortalSettings(db, tenant.partnerId);
