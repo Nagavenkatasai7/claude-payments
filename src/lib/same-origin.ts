@@ -4,8 +4,13 @@
  * Server actions already get Next's Origin-vs-Host check (node_modules/next/dist/
  * docs/01-app/02-guides/data-security.md:550-552), as long as next.config sets no
  * `serverActions.allowedOrigins` (pinned by tests/next-config-no-allowed-origins).
- * Route handlers get nothing, so every portal route handler that changes state or
- * returns customer data calls this first.
+ * Route handlers get nothing, so every portal route handler that changes state calls
+ * this first.
+ *
+ * NON-GET/HEAD handlers ONLY. Browsers omit the Origin header on same-origin GET and
+ * HEAD requests, and this helper fails closed on a missing Origin, so wiring it onto a
+ * GET would refuse every legitimate page load. A GET handler must not change state;
+ * it relies on the session cookie (SameSite=Lax) and the host-bound session instead.
  *
  * The rule mirrors Next's action check and src/app/admin-dashboard/waitlist/export/
  * route.ts: the Origin's host (with port, case-insensitive) must equal the first

@@ -18,7 +18,7 @@ import type { PartnerId } from '@/lib/types';
  * partner that is not enabled or not active. The partner is ALWAYS the host's; the phone is typed
  * once, normalized once, and from then on read ONLY from the server-side pending record.
  *
- * ENUMERATION SAFETY (review round 1, M1/M2; carry-forward from #387):
+ * ENUMERATION SAFETY (review round 1, M1/M2; carry-forward from the OTP store review):
  * - requestCodeAction's request path touches nothing phone-dependent: site gate → per-IP limit →
  *   format check → the partner's channel readiness (partner-only) → one pending-record write. It
  *   answers the SAME state for known, unknown, cooldown, locked, throttled and geo-refused phones.
