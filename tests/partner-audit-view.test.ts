@@ -68,6 +68,12 @@ describe('projectAuditRow', () => {
     // A system/api-key row whose actor string happens to equal a tenant username is still masked.
     expect(projectAuditRow(row({ actorType: 'system', actor: 'pa-admin' }), tenant).actor).toBe(t('partner.audit.system'));
   });
+  it('the actorScope marker refines the rule: a former partner member keeps their name; a platform-marked row never shows one', () => {
+    expect(projectAuditRow(row({ actor: 'pa-former', meta: { actorScope: 'partner' } }), tenant).actor).toBe('pa-former');
+    expect(projectAuditRow(row({ actor: 'pa-admin', meta: { actorScope: 'platform' } }), tenant).actor).toBe(t('partner.audit.smartremit'));
+    expect(projectAuditRow(row({ actor: 'owner-admin', meta: { actorScope: 'bogus' } }), tenant).actor).toBe(t('partner.audit.smartremit'));
+    expect(projectAuditRow(row({ actorType: 'system', actor: 'x', meta: { actorScope: 'partner' } }), tenant).actor).toBe(t('partner.audit.system'));
+  });
   it('customer subjects and phone-shaped subjects are masked', () => {
     const c = projectAuditRow(row({ action: 'pii.view', subjectId: 'cust:' + 'a'.repeat(64) }), tenant).subject;
     expect(c).not.toContain('a'.repeat(20));

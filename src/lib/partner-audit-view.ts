@@ -12,6 +12,9 @@ import { maskPhoneLast4 } from '@/lib/mask';
 //      colours) is dropped. Customer and phone-shaped subjects are masked.
 // Audit-log hardening (separate role, TRUNCATE guard, off-site copy) is compliance loop A's (§6b).
 
+// Adding an action here is a PII review: check its writer's subject_id shape (safeText masks only
+// phone- and email-shaped values) and keep its meta out of DETAIL_KEYS unless every key is safe.
+// Some entries (invites, go-live, reports, webhooks, hold notes) have no writer yet: their PRs own that review.
 const ACTION_LABELS = Object.freeze({
   created: 'partner.audit.action.created',
   removed: 'partner.audit.action.removed',
@@ -112,7 +115,14 @@ export interface ProjectedAuditRow {
 function projectActor(row: TenantAuditRow, tenantUsernames: ReadonlySet<string>): string {
   if (row.actorType === 'system') return t('partner.audit.system');
   if (row.actorType === 'api_key') return t('partner.audit.apiKey');
-  if (row.actorType === 'staff' && tenantUsernames.has(row.actor)) return row.actor;
+  if (row.actorType !== 'staff') return t('partner.audit.smartremit');
+  // audit-log-store writes an actorScope marker on staff rows (partner-demo R5, feedActorLabel's
+  // rule). Partner staff are pinned to their own tenant, so a 'partner' actor on this tenant's row
+  // was this tenant's member (a removed member keeps their name); a 'platform' actor is never named,
+  // even if a tenant user later took the same username.
+  const scope = row.meta && typeof row.meta === 'object' ? (row.meta as { actorScope?: unknown }).actorScope : undefined;
+  if (scope === 'platform') return t('partner.audit.smartremit');
+  if (scope === 'partner' || tenantUsernames.has(row.actor)) return row.actor;
   return t('partner.audit.smartremit');
 }
 
