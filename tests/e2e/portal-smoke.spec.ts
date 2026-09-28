@@ -21,6 +21,13 @@ test.describe('customer portal on a partner subdomain', () => {
     await expect(page).toHaveURL(/\/portal\/login$/);
   });
 
+  test('the transfers pages without a cookie land on the sign-in page (M2-7)', async ({ page }) => {
+    for (const path of ['/portal/transfers', '/portal/transfers/AbCdEf123456', '/portal/transfers/AbCdEf123456/receipt']) {
+      await page.goto(`${ORIGIN}${path}`);
+      await expect(page, path).toHaveURL(/\/portal\/login$/);
+    }
+  });
+
   test('a forged portal cookie is not a session', async ({ page, context }) => {
     // `url` (not `domain`) makes it host-only, as the __Host- prefix requires.
     await context.addCookies([{ name: '__Host-sr_portal', value: 'deadbeef', url: `${ORIGIN}/`, secure: true, httpOnly: true, sameSite: 'Lax' }]);

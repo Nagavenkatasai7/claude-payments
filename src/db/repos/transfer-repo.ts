@@ -66,6 +66,32 @@ function parseCursor(cursor: string | undefined): { createdAt: Date; id: string 
 const LIVE_ONLY = eq(transfers.environment, 'live');
 
 /**
+ * UI redesign M2-7: the customer portal's status filter groups. A completed refund wins over the
+ * transfer status (the row shows "Refunded"), so the other groups exclude it.
+ *  - in_progress: awaiting_payment, paid, in_review
+ *  - completed:   delivered
+ *  - cancelled:   cancelled, blocked (never charged)
+ *  - refunded:    refund_status = completed
+ */
+export type PortalStatusGroup = 'in_progress' | 'completed' | 'cancelled' | 'refunded';
+export const PORTAL_STATUS_GROUPS: Record<Exclude<PortalStatusGroup, 'refunded'>, TransferStatus[]> = {
+  in_progress: ['awaiting_payment', 'paid', 'in_review'],
+  completed: ['delivered'],
+  cancelled: ['cancelled', 'blocked'],
+};
+export const PORTAL_QUERY_MAX = 64;
+
+function statusGroupCond(group: PortalStatusGroup) {
+  if (group === 'refunded') return eq(transfers.refundStatus, 'completed');
+  return and(inArray(transfers.status, PORTAL_STATUS_GROUPS[group]), ne(transfers.refundStatus, 'completed'))!;
+}
+
+/** Escape a LIKE pattern literal (ESCAPE '\'): the backslash first, then % and _. */
+export function escapeLike(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+/**
  * Program-Fix 7 — THE FUNDING GATE (a predicate, like the compliance gate):
  * a row may flip to paid / in_review only when its async debit is absent
  * (NULL — every mock / partner-settled row, i.e. everything while the flag is
@@ -1124,6 +1150,32 @@ export function createTransferRepo(
      */
     listByPhone(partnerId: PartnerId, phone: string, req: PageReq): Promise<Page<Transfer>> {
       return page(and(eq(transfers.partnerId, partnerId), eq(transfers.phone, phone), LIVE_ONLY), req);
+    },
+
+    /**
+     * UI redesign M2-7: the customer portal's transfer list. listByPhone's scope (tenant AND phone,
+     * LIVE rows only) plus an optional status group and a search `q`, matched case-insensitively
+     * against recipient_name (plaintext by design, CLAUDE.md crypto-06) OR as an id prefix. `q` is
+     * trimmed, capped at 64 characters, and `\`, `%` and `_` are escaped, so it is always a literal.
+     */
+    listByPhoneFiltered(
+      partnerId: PartnerId,
+      phone: string,
+      req: PageReq & { status?: PortalStatusGroup; q?: string },
+    ): Promise<Page<Transfer>> {
+      const conds = [eq(transfers.partnerId, partnerId), eq(transfers.phone, phone), LIVE_ONLY];
+      if (req.status) conds.push(statusGroupCond(req.status));
+      const q = typeof req.q === 'string' ? req.q.trim().slice(0, PORTAL_QUERY_MAX) : '';
+      if (q) {
+        const lit = escapeLike(q);
+        conds.push(
+          or(
+            sql`${transfers.recipientName} ILIKE ${`%${lit}%`} ESCAPE '\\'`,
+            sql`${transfers.id} LIKE ${`${lit}%`} ESCAPE '\\'`,
+          )!,
+        );
+      }
+      return page(and(...conds), req);
     },
 
     /** Staff-only unscoped list (server actions behind requireStaff). */
