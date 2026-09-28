@@ -216,6 +216,7 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
     for (const [f, key] of [
       ['src/app/partner/(app)/page.tsx', 'home'],
       ['src/app/partner/(app)/security/page.tsx', 'security'],
+      ['src/app/partner/(app)/audit/page.tsx', 'audit'],
     ] as const) {
       const src = readFileSync(f, 'utf8');
       expect(src, f).not.toMatch(/<main\b/);
