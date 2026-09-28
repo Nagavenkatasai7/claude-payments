@@ -128,17 +128,38 @@ function isWebChannel(ctx: ToolContext): boolean {
   return (ctx.channel ?? 'whatsapp') === 'web';
 }
 
+/** The customer portal chat's step-up state (see ToolContext.webStepUp). */
+export type WebStepUp = { surface: 'portal'; fresh: boolean };
+
+/** Where the customer completes a refused request: the portal transfer page, or the legacy receipt. */
+function stepUpPagePath(ctx: ToolContext, transferId: string): string {
+  return ctx.webStepUp?.surface === 'portal' ? `/portal/transfers/${transferId}` : `/account/receipt/${transferId}`;
+}
+
 /**
- * Program-Fix 49D (review r1): the portal chat (/api/account/chat, channel
- * 'web') must not be a way around the receipt page's MFA step-up. On the web
- * channel, when the customer has portal TOTP on — or CUSTOMER_MFA_REQUIRED is
- * set — request_refund and open_recall_dispute refuse with a fixed
- * `verify_on_receipt` and write nothing; the receipt form asks for the code.
- * A failed enrolment lookup fails CLOSED. WhatsApp is unchanged (it has no
- * portal session and no code step).
+ * Program-Fix 49D (review r1): the web chat must not be a way around the
+ * receipt page's MFA step-up. On the web channel, when the customer has portal
+ * TOTP on — or CUSTOMER_MFA_REQUIRED is set — request_refund and
+ * open_recall_dispute refuse with a fixed `verify_on_receipt` and write
+ * nothing; the receipt form asks for the code. A failed enrolment lookup fails
+ * CLOSED. WhatsApp is unchanged (it has no portal session and no code step).
+ *
+ * M2 enablement: the customer portal chat also carries its session's 15-minute
+ * freshness (ctx.webStepUp). A stale portal session refuses first with a fixed
+ * `verify_in_portal` and writes nothing: the portal transfer page asks for the
+ * fresh proof (requireFreshPortalAuth). The check is additive — a fresh portal
+ * session still meets the MFA rule above. The hint names the page on the
+ * surface the customer is using.
  */
 async function webStepUpRefusal(ctx: ToolContext, transferId: string): Promise<ToolResult | null> {
   if (!isWebChannel(ctx)) return null;
+  if (ctx.webStepUp?.surface === 'portal' && ctx.webStepUp.fresh !== true) {
+    return {
+      error_code: 'verify_in_portal',
+      transfer_id: transferId,
+      reply_hint: `for their security this request needs them to confirm it is them — ask them to open ${stepUpPagePath(ctx, transferId)}, confirm it is them when asked, and make the request there; nothing has been requested yet`,
+    };
+  }
   let required = env.customerMfaRequired;
   if (!required) {
     try {
@@ -151,7 +172,7 @@ async function webStepUpRefusal(ctx: ToolContext, transferId: string): Promise<T
   return {
     error_code: 'verify_on_receipt',
     transfer_id: transferId,
-    reply_hint: `for their security this request needs a code from their authenticator app — ask them to open the receipt page /account/receipt/${transferId} and submit it there with the code; nothing has been requested yet`,
+    reply_hint: `for their security this request needs a code from their authenticator app — ask them to open the receipt page ${stepUpPagePath(ctx, transferId)} and submit it there with the code; nothing has been requested yet`,
   };
 }
 
@@ -1095,6 +1116,10 @@ export interface ToolContext {
   // the approve-card path return a pay link instead of a WhatsApp interactive.
   // Absent ⇒ 'whatsapp' — every existing call site is unchanged.
   channel?: AgentChannel;
+  // Portal chat step-up (M2 enablement): the customer portal's chat (/api/portal/chat) states
+  // whether its session passes the transfer page's 15-minute step-up rule (isPortalSessionFresh).
+  // Web channel only. Absent ⇒ the legacy account chat or WhatsApp, byte-for-byte unchanged.
+  webStepUp?: WebStepUp;
   customerStore: CustomerStore;
   dailyVolumeStore: DailyVolumeStore;
   monthlyVolumeStore: MonthlyVolumeStore;   // NEW (KYC) — cumulative-month USD-equiv cents

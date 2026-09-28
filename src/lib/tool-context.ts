@@ -1,4 +1,4 @@
-import type { AgentChannel, ToolContext } from './tools';
+import type { AgentChannel, ToolContext, WebStepUp } from './tools';
 import type { PartnerId, TurnContext } from './types';
 import { getStore } from './store';
 import { getCustomerStore } from './customer-store';
@@ -43,6 +43,8 @@ export function buildToolContext(args: {
   channel: AgentChannel;
   turn: TurnContext;
   deps?: Partial<ToolContextDeps>;
+  /** The portal chat's step-up state; absent ⇒ the field is left off (every other caller unchanged). */
+  webStepUp?: WebStepUp;
 }): ToolContext {
   const { partnerId, phone, channel, turn } = args;
   const deps = args.deps ?? {};
@@ -67,5 +69,6 @@ export function buildToolContext(args: {
     // (default only) and fail open to mid — this only supplies it.
     routeSelector: (s, d, m) =>
       selectSettlementRoute(getDb(), getPartnerIntegrationsStore(), s, d, m),
+    ...(args.webStepUp ? { webStepUp: args.webStepUp } : {}),
   };
 }
