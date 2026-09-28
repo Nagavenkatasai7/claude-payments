@@ -28,8 +28,9 @@ export interface TemplateEntry {
   sentToday: boolean;
   /**
    * 'fixed' = the platform sends exactly this name; 'configured' = a platform-wide name, used once
-   * SmartRemit enables it (src/lib/env.ts). sendTransactionOtp never uses the verification-code
-   * template on a partner's own number (src/lib/whatsapp.ts).
+   * SmartRemit enables it (src/lib/env.ts). sendTransactionOtp never sends the platform-wide
+   * verification-code template on a partner's own number; there it uses the partner's own recorded
+   * auth template when one is set (partner_portal_settings, M2-6; src/lib/whatsapp.ts).
    */
   nameSource: 'fixed' | 'configured';
   purpose: string;

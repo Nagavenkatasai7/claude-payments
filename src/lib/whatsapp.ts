@@ -888,15 +888,43 @@ export async function sendVerificationStatus(
  * creds) and only when WHATSAPP_AUTH_TEMPLATE is set, the approved
  * AUTHENTICATION template carries the code (it reaches a customer outside the
  * 24h window), with the free-form text as the fallback — the same shape as
- * sendOtpCode. A partner's BYO number has no approved template, so it stays
- * free-form. Template unset ⇒ one free-form text, byte-for-byte as before.
+ * sendOtpCode. Template unset ⇒ one free-form text, byte-for-byte as before.
+ *
+ * M2-6: a partner's BYO number uses the partner's OWN approved AUTHENTICATION
+ * template when one is recorded (`partnerTemplate`, read from
+ * partner_portal_settings by the transfer's partner). It is used ONLY together
+ * with that partner's creds: the template send and its free-form fallback both
+ * go out on the partner's number, never the shared one. A partner template
+ * without creds is ignored (today's path), so one tenant's template name never
+ * reaches the shared number. No partnerTemplate ⇒ today's behaviour exactly.
  */
 export async function sendTransactionOtp(
   phone: string,
   code: string,
   creds?: WaCreds,
   brand?: string, // Program-Fix 49A: absent ⇒ "SmartRemit" (callers unchanged)
+  partnerTemplate?: { name: string; lang: string }, // M2-6: absent ⇒ today's behaviour
 ): Promise<void> {
+  if (creds && partnerTemplate) {
+    try {
+      await sendAuthTemplate(
+        phone,
+        partnerTemplate.name,
+        partnerTemplate.lang,
+        authenticationTemplateParams(code),
+        creds,
+      );
+    } catch (err) {
+      // The Graph error never echoes the params; the code is never passed to the logger.
+      logWarn(
+        'whatsapp.txotp-partner-fallback',
+        `transaction OTP partner template send failed; falling back to free-form text on the partner number: ${err instanceof Error ? err.message : 'unknown error'}`,
+        { to: maskPhone(phone) },
+      );
+      await sendText(phone, transactionOtpMessage(code, brand), creds);
+    }
+    return;
+  }
   const authTemplate = env.whatsappAuthTemplate;
   if (!authTemplate || creds) {
     await sendText(phone, transactionOtpMessage(code, brand), creds);
