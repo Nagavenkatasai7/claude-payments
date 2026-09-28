@@ -28,3 +28,8 @@ export const GUIDES: readonly Guide[] = [
 export function guideBySlug(slug: string): Guide | undefined {
   return GUIDES.find((g) => g.slug === slug);
 }
+
+/** The /docs-next/[slug] static params: one per registered guide, in registry order (M4 PR-3). */
+export function guideStaticParams(): { slug: string }[] {
+  return GUIDES.map((g) => ({ slug: g.slug }));
+}
