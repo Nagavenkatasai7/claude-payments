@@ -15,6 +15,17 @@
 // (check_send_limit, then repeat_transfer's pre-check), so a non-bot caller
 // must run that same pre-check itself BEFORE calling prepareSendDraft (the
 // portal send action does: review round 1, M5).
+//
+// Obligations of every non-bot caller:
+//  - Build the ToolContext with buildToolContext, with partnerId and phone from
+//    the resolved session (never from form fields) and channel 'web'.
+//  - Pass only the consumer subset of PrepareSendInput: no entityType, business
+//    names or invoiceId (the B2B shape is the bot's bill flow).
+//  - Validate fundingMethod before getQuoteTyped: like get_quote, it does not
+//    (prepareSendDraft does, over the chat funding set).
+//  - Run the pure KYC-gate reads first: a gated call here mints a verification
+//    inquiry (startVerificationForTurn) as a side effect.
+//  - Run the cap + EDD pre-check first (above).
 
 import type { Quote, CapEvaluation, CountryCode, CurrencyCode, FundingMethod } from './types';
 import type { DraftPointer } from './draft-store';
