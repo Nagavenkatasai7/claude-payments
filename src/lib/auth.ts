@@ -139,8 +139,9 @@ export async function requirePartnerStaff(policy: PartnerPolicy, opts: { skipMfa
 //
 // Today's requireStaff behaviour (any role), for the self-service account actions ONLY (MFA
 // enrolment and the own-password change), so a finance member can enrol at /partner/security.
+// A role outside the closed set (legacy roles + finance) is refused here too.
 export async function requireStaffSelf(): Promise<Staff> {
   const staff = await getCurrentStaff();
-  if (!staff) redirect('/login');
+  if (!staff || !(isLegacyDashboardStaff(staff) || staff.role === 'finance')) redirect('/login');
   return staff;
 }

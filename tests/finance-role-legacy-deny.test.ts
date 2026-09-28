@@ -128,6 +128,13 @@ describe('M3-6: legacy dashboard gates deny finance', () => {
     await expect(auth.requireStaffSelf()).resolves.toMatchObject({ role: 'finance' });
   });
 
+  it('requireStaffSelf refuses a role outside the closed set (legacy roles + finance) → /login', async () => {
+    await signInAs({ partnerId: 'pa', role: 'root' as Staff['role'] });
+    await expect(auth.requireStaffSelf()).rejects.toThrow(TO_LOGIN);
+    await signInAs({ partnerId: 'pa', role: 'agent' });
+    await expect(auth.requireStaffSelf()).resolves.toMatchObject({ role: 'agent' });
+  });
+
   it('requireStaffSelf still sends anonymous and suspended sessions to /login', async () => {
     await expect(auth.requireStaffSelf()).rejects.toThrow(TO_LOGIN);
     await signInAs({ partnerId: 'pa', role: FINANCE, status: 'suspended' });
