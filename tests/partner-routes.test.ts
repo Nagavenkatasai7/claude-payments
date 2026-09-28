@@ -29,7 +29,10 @@ describe('PARTNER_ROUTES', () => {
     expect(partnerNav('admin').map((r) => r.href)).toEqual(['/partner', '/partner/security']);
   });
   it('an unknown role gets no nav at all (fails closed)', () => {
-    expect(partnerNav('finance' as never)).toEqual([]);
+    expect(partnerNav('root' as never)).toEqual([]);
+  });
+  it('M3-6: finance gets the every-role routes', () => {
+    expect(partnerNav('finance').map((r) => r.href)).toEqual(['/partner', '/partner/security']);
   });
   it('hrefs are static paths (no tenant, no query string)', () => {
     for (const r of Object.values(PARTNER_ROUTES)) expect(r.href).toMatch(/^\/partner(\/[a-z-]+)*$/);

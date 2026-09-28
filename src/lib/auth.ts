@@ -48,6 +48,7 @@ export async function getCurrentStaff(): Promise<Staff | null> {
 export async function requireStaff(): Promise<Staff> {
   const staff = await getCurrentStaff();
   if (!staff) redirect('/login');
+  if (!isLegacyDashboardStaff(staff)) redirect(staff.role === 'finance' ? '/partner' : '/login');
   return staff;
 }
 
@@ -128,4 +129,20 @@ export async function requirePartnerStaff(policy: PartnerPolicy, opts: { skipMfa
   const d = decidePartnerAccess(staff, policy, { pending, skip: opts.skipMfa });
   if (!d.ok) redirect(d.redirectTo);
   return d.ctx;
+}
+
+// UI redesign M3-6: the finance role. 'finance' is a /partner-only role, so every legacy
+// /admin-dashboard gate (all of them resolve the session through requireStaff) refuses it.
+// The check is a CLOSED allowlist: a role outside it fails closed to /login in requireStaff
+// (never /partner, which would bounce a platform-scoped record back to /admin-dashboard).
+export function isLegacyDashboardStaff(s: Staff): boolean {
+  return s.role === 'admin' || s.role === 'agent' || s.role === 'support';
+}
+
+// Today's requireStaff behaviour (any role), for the self-service account actions ONLY (MFA
+// enrolment and the own-password change), so a finance member can enrol at /partner/security.
+export async function requireStaffSelf(): Promise<Staff> {
+  const staff = await getCurrentStaff();
+  if (!staff) redirect('/login');
+  return staff;
 }

@@ -24,6 +24,8 @@ describe('buildPartnerHome', () => {
     expect(buildPartnerHome(base).kpis).toEqual({ countToday: 3, volumeTodayUsd: 450, feesTodayUsd: 9 });
     expect(buildPartnerHome({ ...base, role: 'agent' }).kpis).toEqual({ countToday: 3, volumeTodayUsd: 450, feesTodayUsd: 9 });
     expect(buildPartnerHome({ ...base, role: 'support' }).kpis).toBeNull();
+    // M3-6: finance is in PARTNER_MONEY_READ, so it sees the money KPIs.
+    expect(buildPartnerHome({ ...base, role: 'finance' }).kpis).toEqual({ countToday: 3, volumeTodayUsd: 450, feesTodayUsd: 9 });
   });
 
   it('actions: holds from byStatus.in_review, attention, and unhealthy channels; zero counts omitted', () => {

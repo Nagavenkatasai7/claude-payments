@@ -140,6 +140,9 @@ describe('newStaffRecord', () => {
     expect(() => newStaffRecord('', { ...input, role: 'agent' })).toThrow();
     expect(() => newStaffRecord('acme', { ...input, role: 'root' as never })).toThrow(/role/i);
   });
+  it('M3-6: refuses finance WITH a valid tenant (the partner-staff create stays closed to finance until the M3-7 migration)', () => {
+    expect(() => newStaffRecord('acme', { ...input, role: 'finance' })).toThrow('Invalid role.');
+  });
 });
 
 describe('listTenantStaff', () => {
