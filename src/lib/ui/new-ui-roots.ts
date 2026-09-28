@@ -38,6 +38,8 @@ export const STATE_EXEMPT_DIRS: readonly string[] = [
   // skeleton until React's inline reveal script runs. error.tsx is still required and present.
   'src/app/docs-next',
   'src/app/docs-next/[slug]',
+  // The /trust page: static, prerendered and data-free for the same reason (error.tsx present).
+  'src/app/trust',
   // A static, data-free page: nothing to load and nothing that can fail.
   'src/app/site-inactive',
 ];

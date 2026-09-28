@@ -8,6 +8,7 @@ import { getCustomerMfaStore, customerKey, recordCustomerMfaAudit } from '@/lib/
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
 import { logWarn } from '@/lib/log';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Program-Fix 49D (portal-03): TOTP enrolment for the signed-in customer, from
@@ -38,6 +39,7 @@ export async function beginCustomerMfaEnrolmentAction(
   _prev: CustomerMfaEnrolState,
   formData: FormData,
 ): Promise<CustomerMfaEnrolState> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const current = String(formData.get('currentPassword') ?? '');
   if (!current) return { ok: false, message: 'Enter your current password.' };
@@ -68,6 +70,7 @@ export async function confirmCustomerMfaEnrolmentAction(
   _prev: CustomerMfaEnrolState,
   formData: FormData,
 ): Promise<CustomerMfaEnrolState> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const code = String(formData.get('code') ?? '').replace(/\s+/g, '');
   const key = customerKey(customer);

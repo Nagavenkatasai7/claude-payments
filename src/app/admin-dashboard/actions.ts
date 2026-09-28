@@ -26,6 +26,7 @@ import { getDb } from '@/db/client';
 import { boundStaffNote } from '@/lib/send-limits';
 import type { StaffAuditCtx } from '@/lib/dashboard-ops';
 import type { Staff, StaffPermissions } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 async function requirePermission(
   permission: keyof StaffPermissions,
@@ -68,6 +69,7 @@ async function getScopedTransfer(staff: Staff, id: string) {
 }
 
 export async function cancelTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePermission('canCancel');
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
@@ -79,6 +81,7 @@ export async function cancelTransferAction(formData: FormData): Promise<void> {
 }
 
 export async function assignTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePermission('canAssign');
   const id = String(formData.get('id') ?? '');
   const assignee = String(formData.get('assignee') ?? '');
@@ -104,6 +107,7 @@ export async function assignTransferAction(formData: FormData): Promise<void> {
 export async function resendPaymentLinkAction(
   formData: FormData,
 ): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePermission('canResend');
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
@@ -127,6 +131,7 @@ export async function resendPaymentLinkAction(
  *   (e) releaseTransfer re-verifies status === 'in_review'
  */
 export async function releaseTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   const { store, transfer } = await getScopedTransfer(staff, id);
@@ -158,6 +163,7 @@ export async function releaseTransferAction(formData: FormData): Promise<void> {
  * worker. Requires admin role + partner scope (see releaseTransferAction).
  */
 export async function rejectTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   const { store } = await getScopedTransfer(staff, id);
@@ -173,6 +179,7 @@ export async function rejectTransferAction(formData: FormData): Promise<void> {
  * ineligible transfer or a double-click throws instead of moving money twice.
  */
 export async function issueRefundAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
@@ -187,6 +194,7 @@ export async function issueRefundAction(formData: FormData): Promise<void> {
  * transaction, so replays and double-clicks throw instead of double-enqueuing.
  */
 export async function approveRefundAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
@@ -200,6 +208,7 @@ export async function approveRefundAction(formData: FormData): Promise<void> {
  * 'requested') makes wrong-state calls throw without mutating.
  */
 export async function dismissRefundAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
@@ -213,6 +222,7 @@ export async function dismissRefundAction(formData: FormData): Promise<void> {
  * partner scope; retryRefund re-verifies refundStatus === 'failed'.
  */
 export async function retryRefundAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requireAdmin();
   const id = String(formData.get('id') ?? '');
   await getScopedTransfer(staff, id);
@@ -230,6 +240,7 @@ export async function retryRefundAction(formData: FormData): Promise<void> {
 export async function revealDestinationAction(
   transferId: string,
 ): Promise<{ destination: string } | { error: string }> {
+  await refuseOnSiteHost();
   const staff = await requireStaff();
   // Program-Fix 45 P1 (authz-06): revealing needs canRevealPii (admins pass
   // through hasPermission's bypass; support never reveals). Checked BEFORE any

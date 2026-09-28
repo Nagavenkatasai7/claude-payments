@@ -12,6 +12,7 @@ import { clientIpFrom } from '@/lib/ip-rate-limit';
 import { getStaffAuthAudit } from '@/lib/staff-auth-audit';
 import { getStaffMfaStore } from '@/lib/staff-mfa-store';
 import { logWarn } from '@/lib/log';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Program-Fix 17b: TOTP enrolment for the signed-in staff member (any role,
@@ -37,6 +38,7 @@ const UNAVAILABLE = 'Two-step verification is unavailable right now. Try again l
  * or stolen session alone cannot bind its own authenticator to the account.
  */
 export async function beginMfaEnrolmentAction(_prev: MfaEnrolState, formData: FormData): Promise<MfaEnrolState> {
+  await refuseOnSiteHost();
   const me = await requireStaff();
   const current = String(formData.get('currentPassword') ?? '');
   if (!current) return { ok: false, message: 'Enter your current password.' };
@@ -86,6 +88,7 @@ export async function beginMfaEnrolmentAction(_prev: MfaEnrolState, formData: Fo
 }
 
 export async function confirmMfaEnrolmentAction(_prev: MfaEnrolState, formData: FormData): Promise<MfaEnrolState> {
+  await refuseOnSiteHost();
   const me = await requireStaff();
   const code = String(formData.get('code') ?? '').replace(/\s+/g, '');
   let outcome;

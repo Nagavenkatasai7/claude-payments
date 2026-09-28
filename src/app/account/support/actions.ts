@@ -9,6 +9,7 @@ import { enqueueTriage } from '@/lib/ticket-triage';
 import { getPartnerStore } from '@/lib/partner-store';
 import { getStore } from '@/lib/store';
 import type { Customer, Partner } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * /account/support server actions (customer support center, B2).
@@ -43,6 +44,7 @@ function portalDisabled(partner: Partner): boolean {
 }
 
 export async function createTicketAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
 
   // Admin kill switch — the pages hide themselves when it's off, but hiding a
@@ -95,6 +97,7 @@ export async function createTicketAction(formData: FormData): Promise<void> {
 }
 
 export async function replyToTicketAction(ticketId: string, formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
 
   if (portalDisabled(await customerPartner(customer))) redirect('/account/support');
