@@ -182,3 +182,38 @@ describe('M3-6: the self-service account actions admit finance (requireStaffSelf
     await expect(changeOwnPasswordAction({ ok: false, message: '' }, new FormData())).rejects.toThrow(TO_LOGIN);
   });
 });
+
+// Enumeration pins: the deny above is only complete while (a) every legacy require* gate is in
+// GATES and (b) the only direct session readers outside auth.ts are the six API routes covered by
+// tests/finance-role-api-deny.test.ts. A new gate or a new direct reader fails here until it is
+// covered.
+describe('M3-6: the gate and session-reader inventory is complete', () => {
+  it('every exported require* in auth.ts is a tested legacy gate, requireStaffSelf or requirePartnerStaff', async () => {
+    const { readFileSync } = await import('node:fs');
+    const text = readFileSync('src/lib/auth.ts', 'utf8');
+    const exported = [...text.matchAll(/^export async function (require\w+)\(/gm)].map((m) => m[1]).sort();
+    expect(exported).toEqual([...GATES, 'requirePartnerStaff', 'requireStaffSelf'].sort());
+  });
+  it('getCurrentStaff( is called only by auth.ts and the six API routes', async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const n of readdirSync(dir)) {
+        const p = join(dir, n);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.(ts|tsx)$/.test(n) && readFileSync(p, 'utf8').includes('getCurrentStaff(')) hits.push(p);
+      }
+    };
+    walk('src');
+    expect(hits.sort()).toEqual(
+      [
+        'src/lib/auth.ts',
+        'src/app/api/dashboard/summary/route.ts',
+        ...['review-triage', 'summarize', 'kyc-review', 'ops-diagnose', 'draft-reply'].map(
+          (r) => `src/app/api/copilot/${r}/route.ts`,
+        ),
+      ].sort(),
+    );
+  });
+});
