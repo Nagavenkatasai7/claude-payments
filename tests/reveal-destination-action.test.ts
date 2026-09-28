@@ -39,6 +39,13 @@ vi.mock('next/cache', () => ({ revalidatePath: vi.fn() }));
 
 import { revealDestinationAction } from '@/app/admin-dashboard/actions';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 const DEST = 'acct 000111222333';
 
 function staff(overrides: Partial<Staff>): Staff {

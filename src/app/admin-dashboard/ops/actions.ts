@@ -7,6 +7,7 @@ import { createOutboxRepo } from '@/db/repos/outbox-repo';
 import { createAuditRepo } from '@/db/repos/aux-repos';
 import { pokeWorker } from '@/lib/outbox';
 import type { Staff } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Operations actions (Stage 5). Self-gated (every server action is a public
 // POST endpoint): PLATFORM staff only — the ops surface is cross-tenant by
@@ -27,6 +28,7 @@ function idFrom(formData: FormData): number {
 
 /** Resurrect a dead outbox row for a fresh attempt cycle (and drain it now). */
 export async function retryDeadAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformStaff();
   const id = idFrom(formData);
   await createOutboxRepo(getDb()).retryDead(id);
@@ -42,6 +44,7 @@ export async function retryDeadAction(formData: FormData): Promise<void> {
 
 /** Permanently dismiss a dead row (marks it done — it will never run). */
 export async function dismissDeadAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformStaff();
   const id = idFrom(formData);
   await createOutboxRepo(getDb()).markDone(id);

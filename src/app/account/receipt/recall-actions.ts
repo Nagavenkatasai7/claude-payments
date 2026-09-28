@@ -14,6 +14,7 @@ import type { Customer, Partner } from '@/lib/types';
 import { getCustomerAuthStore } from '@/lib/customer-auth-store';
 import { getCustomerMfaStore, stepUp, STEP_UP_ERROR } from '@/lib/customer-mfa';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Customer-facing "Report a problem with this transfer" server action — opens a
@@ -77,6 +78,7 @@ function portalDisabled(partner: Partner): boolean {
 }
 
 export async function requestRecallAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const transferId = String(formData.get('transferId') ?? '').trim();
   const reason = String(formData.get('reason') ?? '').trim();

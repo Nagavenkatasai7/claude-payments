@@ -12,6 +12,7 @@ import { pokeWorker } from '@/lib/outbox';
 import { env } from '@/lib/env';
 import { TICKET_CATEGORIES, type TicketCategory } from '@/lib/ticket-ai';
 import type { Staff, Ticket, TicketPriority } from '@/lib/types';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Ticket actions (B3 — the employee/support dashboard). Every action is a
 // public POST endpoint, so each one self-gates with requireSupportOrAdmin
@@ -80,6 +81,7 @@ function supportUrl(ticketId: string): string {
  * commit in one transaction (the outbox-with-state-change invariant).
  */
 export async function replyAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const body = String(formData.get('body') ?? '').trim().slice(0, 4000);
@@ -131,6 +133,7 @@ export async function replyAction(formData: FormData): Promise<void> {
 
 /** Staff-only internal note — never visible to the customer, never nudges. */
 export async function internalNoteAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const body = String(formData.get('body') ?? '').trim().slice(0, 4000);
@@ -157,6 +160,7 @@ export async function internalNoteAction(formData: FormData): Promise<void> {
  * ticket handlers. Same no-cross-partner-assignment rule as transfers (M2).
  */
 export async function assignTicketAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireSupportOrAdmin();
   const ticketId = String(formData.get('ticketId') ?? '');
   const assignee = String(formData.get('assignee') ?? '');
@@ -179,6 +183,7 @@ export async function assignTicketAction(formData: FormData): Promise<void> {
 
 /** Escalate to the admins: waiting_admin + an internal system note with the reason. */
 export async function escalateAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const reason = String(formData.get('reason') ?? '').trim().slice(0, 500);
@@ -206,6 +211,7 @@ export async function escalateAction(formData: FormData): Promise<void> {
  * ticket id alone, so a reopen→re-resolve cycle never re-sends it.
  */
 export async function resolveAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
@@ -235,6 +241,7 @@ export async function resolveAction(formData: FormData): Promise<void> {
 
 /** Close — terminal (the repo guard refuses every later transition). No nudge. */
 export async function closeAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const ticket = await getScopedTicket(scope, ticketId);
@@ -250,6 +257,7 @@ export async function closeAction(formData: FormData): Promise<void> {
  * against the closed lists server-side — the client's claim is never trusted.
  */
 export async function applyTriageAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticketId = String(formData.get('ticketId') ?? '');
   const category = String(formData.get('category') ?? '');
@@ -273,6 +281,7 @@ export async function applyTriageAction(formData: FormData): Promise<void> {
 
 /** The staff member discarded an AI draft — audit-only (rung-1 telemetry). */
 export async function copilotRejectAction(ticketId: string): Promise<void> {
+  await refuseOnSiteHost();
   const { staff, scope } = await requireTicketWorker();
   const ticket = await getScopedTicket(scope, ticketId);
   assertCanWork(staff, ticket);

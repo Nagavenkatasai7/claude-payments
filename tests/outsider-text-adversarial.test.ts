@@ -50,6 +50,13 @@ import { beginSettlement } from '@/lib/settlement';
 import { completePaymentStage2, recipientDeliveredFallbackText, recipientTemplateParams } from '@/lib/payment';
 import { resetRateCacheForTests } from '@/lib/rate';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 const PARTNER = 'pa';
 const SELLER_PHONE = '15550001111';
 const BUYER_PHONE = '15550002222';

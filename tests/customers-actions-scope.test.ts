@@ -56,6 +56,13 @@ import {
 } from '@/app/admin-dashboard/customers/actions';
 import { openCustomerRef } from '@/lib/customer-ref';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 function staff(overrides: Partial<Staff>): Staff {
   return {
     username: 'u',

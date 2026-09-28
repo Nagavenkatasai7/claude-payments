@@ -32,6 +32,7 @@ import { checkIpRateLimit, clientIpFrom } from '@/lib/ip-rate-limit';
 import { getRedis } from '@/lib/redis';
 import { customerEmailCtx } from '@/lib/crypto-context';
 import { getCustomerMfaStore, customerKey, recordCustomerMfaAudit } from '@/lib/customer-mfa';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Account portal server actions (customer onboarding Phase 1) — AAL2.
@@ -175,6 +176,7 @@ export async function registerAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const phone = normalizePhone(field(formData, 'phone'));
   const email = field(formData, 'email').trim();
   const password = field(formData, 'password');
@@ -249,6 +251,7 @@ export async function loginAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const phone = normalizePhone(field(formData, 'phone'));
   const password = field(formData, 'password');
   const ip = await clientIp();
@@ -321,6 +324,7 @@ export async function verifyMfaAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const pendingToken = field(formData, 'pendingToken');
   // A pasted code may carry spaces ("123 456"); nothing else is normalised.
   const code = field(formData, 'code').replace(/\s+/g, '');
@@ -369,6 +373,7 @@ export async function verifyOtpAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const pendingToken = field(formData, 'pendingToken');
   const code = field(formData, 'code').replace(/\D/g, '');
 
@@ -440,6 +445,7 @@ export async function resendOtpAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const pendingToken = field(formData, 'pendingToken');
   const pending = await getPendingAuthStore().peek(pendingToken);
   // Only the two flows that send a WhatsApp code may resend one. An 'mfa'
@@ -461,6 +467,7 @@ export async function resendOtpAction(
 
 /** Sign out: revoke the current session + clear the cookie. */
 export async function logoutAction(): Promise<void> {
+  await refuseOnSiteHost();
   const jar = await cookies();
   const token = jar.get(CUSTOMER_SESSION_COOKIE)?.value;
   if (token) await getCustomerAuthStore().deleteSession(token);
@@ -485,6 +492,7 @@ export async function requestResetAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const phone = normalizePhone(field(formData, 'phone'));
   const ip = await clientIp();
   const notice = 'If that number has an account, we sent a reset code.';
@@ -507,6 +515,7 @@ export async function resetAction(
   _prev: AccountState | null,
   formData: FormData,
 ): Promise<AccountState> {
+  await refuseOnSiteHost();
   const pendingToken = field(formData, 'pendingToken');
   const code = field(formData, 'code').replace(/\D/g, '');
   const password = field(formData, 'password');
@@ -573,6 +582,7 @@ const SETTINGS_PATH = '/account/settings';
 
 /** Update the account email (re-encrypted at rest, same as registration). */
 export async function updateEmailAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const email = field(formData, 'email').trim();
   if (!email || !email.includes('@') || email.length > EMAIL_MAX_LENGTH) {
@@ -611,6 +621,7 @@ export async function updateEmailAction(formData: FormData): Promise<void> {
  * on success this device's session is re-minted in place.
  */
 export async function changePasswordAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const phone = customer.senderPhone;
   const current = field(formData, 'currentPassword');
