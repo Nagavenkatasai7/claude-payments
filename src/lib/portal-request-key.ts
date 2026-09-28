@@ -25,7 +25,8 @@ import { logWarn } from './log';
  */
 
 /** What a replay may hand back: ids and kinds only (a flat record of scalars). */
-export type ReplayValue = Readonly<Record<string, string | number | boolean | null>>;
+/** `undefined` fields (e.g. `draftId?`) are dropped by JSON, so they come back absent on replay. */
+export type ReplayValue = Readonly<Record<string, string | number | boolean | null | undefined>>;
 
 export class BadRequestKeyError extends Error {
   constructor() {

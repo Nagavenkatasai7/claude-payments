@@ -152,6 +152,8 @@ describe('runOnce', () => {
   it('the replay value type is a flat record of scalars (ids and kinds only; compile-time pin)', async () => {
     const redis = fakeRedis();
     if (false as boolean) {
+      // The plan's send replay shape ({ kind, draftId? }) must typecheck.
+      await runOnce(redis, 'send', 'pa', P, newRequestKey(), async () => ({ kind: 'draft', draftId: undefined as string | undefined }));
       // @ts-expect-error nested objects (e.g. a summary) are not replay values
       await runOnce(redis, 'send', 'pa', P, newRequestKey(), async () => ({ summary: { text: 'x' } }));
       // @ts-expect-error a bare string is not a replay value
