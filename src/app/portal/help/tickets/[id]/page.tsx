@@ -44,11 +44,14 @@ export default async function PortalTicketPage({ params }: { params: Promise<{ i
 
   return (
     <>
-      <PageHeader
-        title={ticket.subject}
-        sub={t('portal.help.thread.started', { date: dateFmt(ticket.createdAt) })}
-        actions={<Badge tone={view.tone}>{t(view.label)}</Badge>}
-      />
+      {/* A 120-character subject with no spaces must still wrap at 375 px. */}
+      <div className="min-w-0 [&_.sh-page-title]:[overflow-wrap:anywhere]">
+        <PageHeader
+          title={ticket.subject}
+          sub={t('portal.help.thread.started', { date: dateFmt(ticket.createdAt) })}
+          actions={<Badge tone={view.tone}>{t(view.label)}</Badge>}
+        />
+      </div>
       <div className="flex flex-col gap-5">
         <p className="flex flex-wrap gap-x-5 gap-y-2 text-[14px]">
           <Link href="/portal/help/tickets" className="font-semibold text-ds-primary hover:underline">

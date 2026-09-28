@@ -206,6 +206,15 @@ describe('createPortalTicketAction', () => {
     await createdId(createPortalTicketAction(null, fd({ ...VALID, requestKey: newRequestKey() })));
   });
 
+  it('a cap refusal does not stick to the request key: after a ticket is resolved the same form goes through', async () => {
+    await signIn('pa');
+    for (let i = 0; i < 4; i++) await createdId(createPortalTicketAction(null, fd({ ...VALID, requestKey: newRequestKey() })));
+    const key = newRequestKey();
+    expect(await createPortalTicketAction(null, fd({ ...VALID, requestKey: key }))).toEqual({ error: 'portal.help.error.cap' });
+    await repo().updateStatus(A.ticketIds[0], 'resolved');
+    await createdId(createPortalTicketAction(null, fd({ ...VALID, requestKey: key })));
+  });
+
   it("the partner's support kill switch refuses the POST (hiding the page is not the gate)", async () => {
     await signIn('pa');
     h.supportOff.add('pa');

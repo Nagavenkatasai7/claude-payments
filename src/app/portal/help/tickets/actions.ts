@@ -36,12 +36,16 @@ import type { MessageKey } from '@/lib/i18n';
 
 export type PortalTicketState = { error: MessageKey } | null;
 
+/** Thrown inside runOnce so the claim is released: a cap refusal must not stick to the request key. */
+class OpenTicketCapError extends Error {}
+
 const field = (fd: FormData, name: string) => {
   const v = fd.get(name);
   return typeof v === 'string' ? v : '';
 };
 
 function failed(err: unknown, label: string): PortalTicketState {
+  if (err instanceof OpenTicketCapError) return { error: 'portal.help.error.cap' };
   if (err instanceof BadRequestKeyError) return { error: 'portal.help.error.expired' };
   if (err instanceof RequestInFlightError) return { error: 'portal.help.error.in_flight' };
   logWarn(label, err);
@@ -64,20 +68,22 @@ export async function createPortalTicketAction(_prev: PortalTicketState, formDat
     if (!own.some((t) => t.id === transferId)) return { error: 'portal.help.error.transfer' };
   }
 
-  let result: { code: string; ticketId: string };
+  let ticketId: string;
   try {
-    ({ value: result } = await runOnce(getRedis(), 'portal-ticket', owner.partnerId, owner.phone, field(formData, 'requestKey'), async () => {
-      // The cap runs inside the claim, so a replay returns the first answer, never a late "cap".
-      if ((await countOpenPortalTickets(owner)) >= MAX_OPEN_TICKETS) return { code: 'cap', ticketId: '' };
-      const ticketId = await createPortalTicket(owner, { subject: input.subject, body: input.body, ...(transferId ? { transferId } : {}) });
-      return { code: 'created', ticketId };
+    ({
+      value: { ticketId },
+    } = await runOnce(getRedis(), 'portal-ticket', owner.partnerId, owner.phone, field(formData, 'requestKey'), async () => {
+      // The cap runs inside the claim, so a replay of a created ticket returns it, never a late "cap".
+      // A cap refusal THROWS, so the claim is released and the same form works once a ticket closes.
+      if ((await countOpenPortalTickets(owner)) >= MAX_OPEN_TICKETS) throw new OpenTicketCapError();
+      return { ticketId: await createPortalTicket(owner, { subject: input.subject, body: input.body, ...(transferId ? { transferId } : {}) }) };
     }));
   } catch (err) {
     return failed(err, 'portal.ticket.create');
   }
-  if (result.code !== 'created' || !result.ticketId) return { error: result.code === 'cap' ? 'portal.help.error.cap' : 'portal.help.error.failed' };
+  if (!ticketId) return { error: 'portal.help.error.failed' };
   revalidatePath('/portal/help/tickets');
-  redirect(`/portal/help/tickets/${result.ticketId}`);
+  redirect(`/portal/help/tickets/${ticketId}`);
 }
 
 /** Reply on the customer's own ticket. The bound route id is re-scoped here; any body id is ignored. */
