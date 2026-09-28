@@ -16,10 +16,12 @@
 // Never reuse a released slug: a partner that re-slugs releases its old slug, and a DIFFERENT
 // partner claiming it would receive the first partner's old links. Until the tombstone table
 // (planned for migration 0027) exists, setPartnerSlug refuses any slug that appears in another
-// partner's `partner.slug.update` audit history. That holds for every slug this writer ever set
-// (the claim's audit row commits in the same transaction as the slug). Known gaps, closed by 0027:
-// a slug written by direct SQL (no audit row) is protected only while it is still held (unique
-// index), and deleting audit rows would erase the history the check relies on.
+// partner's `partner.slug.update` audit history, as the claimed slug OR as the slug that partner
+// released (`previousSlug`). The claim's audit row commits in the same transaction as the slug, and
+// a release records the old slug, so this also covers a slug first written outside the writer once
+// the writer moves the partner off it. Known gaps, closed by 0027: a slug written by direct SQL and
+// then released by direct SQL (no audit row at all) is protected only while it is still held
+// (unique index), and deleting audit rows would erase the history the check relies on.
 import { and, eq, sql } from 'drizzle-orm';
 import { auditEvents, partners, partnerSites } from '@/db/schema';
 import type { DbOrTx } from '@/db/client';
@@ -174,7 +176,7 @@ export async function setPartnerSlug(
         .where(
           and(
             eq(auditEvents.action, 'partner.slug.update'),
-            sql`${auditEvents.meta}->>'slug' = ${slug}`,
+            sql`(${auditEvents.meta}->>'slug' = ${slug} or ${auditEvents.meta}->>'previousSlug' = ${slug})`,
             sql`${auditEvents.partnerId} is distinct from ${partnerId}`,
           ),
         )

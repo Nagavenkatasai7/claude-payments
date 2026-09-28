@@ -47,6 +47,12 @@ describe('setPartnerSlug', () => {
     expect(await setPartnerSlug(db, 'pb', 'acme', 'u', { redis })).toEqual({ ok: false, reason: 'unavailable' });
     expect(await getPartnerSite(db, 'pb')).toBeNull();
   });
+  it('a slug first written outside the writer (no claim audit) is still never reusable once released (previousSlug)', async () => {
+    await db.insert(partnerSites).values({ partnerId: 'pa', slug: 'old-co' });
+    expect(await setPartnerSlug(db, 'pa', 'new-co', 'u', { redis })).toEqual({ ok: true });
+    expect(await setPartnerSlug(db, 'pb', 'old-co', 'u', { redis })).toEqual({ ok: false, reason: 'unavailable' });
+    expect(await setPartnerSlug(db, 'pa', 'old-co', 'u', { redis })).toEqual({ ok: true });
+  });
   it('the same partner may take back its own former slug', async () => {
     await setPartnerSlug(db, 'pa', 'acme', 'u', { redis });
     await setPartnerSlug(db, 'pa', 'acme-two', 'u', { redis });
