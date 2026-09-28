@@ -11,6 +11,13 @@ import { drainOnce, type WorkerDeps } from '@/lib/outbox-worker';
 import type { Db } from '@/db/client';
 import type { Customer, Staff } from '@/lib/types';
 
+// Legacy server actions refuse on a partner-site host (src/lib/site-host-guard.ts); this suite runs
+// them as on the apex.
+vi.mock('next/headers', async (orig) => ({
+  ...(await orig<typeof import('next/headers')>()),
+  headers: async () => new Headers({ host: 'smartremit.ai' }),
+}));
+
 /**
  * U2 — out-of-band AI auto-triage of customer tickets via the durable outbox.
  *

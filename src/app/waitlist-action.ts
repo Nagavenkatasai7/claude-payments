@@ -10,6 +10,7 @@ import { logWarn } from '@/lib/log';
 import { getRedis } from '@/lib/redis';
 import { WAITLIST_CONSENT_VERSION, parseWaitlistSignup } from '@/lib/waitlist';
 import { WAITLIST_DESTINATION_CODES } from '@/app/landing/corridors';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // joinWaitlistAction — the PUBLIC "Join waitlist" landing form action. Same
 // defensive posture as submitPartnerRequestAction (src/app/partners-action.ts):
@@ -23,6 +24,7 @@ import { WAITLIST_DESTINATION_CODES } from '@/app/landing/corridors';
 // warning, which carries no form data).
 
 export async function joinWaitlistAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   // ── HONEYPOT ───────────────────────────────────────────────────────────────
   if (String(formData.get('website') ?? '').trim() !== '') {
     redirect('/?waitlist=ok#waitlist');

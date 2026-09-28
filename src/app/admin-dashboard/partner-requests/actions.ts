@@ -21,6 +21,7 @@ import {
   parseDecisionReason,
   type ApplicationDecision,
 } from '@/lib/partner-application-decision';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 // Partner-request staff actions (Program-Fix 39). A server action is a public
 // POST endpoint, so every action self-gates: PLATFORM ADMINS only (these are
@@ -43,6 +44,7 @@ import {
  * The recipient is the address on the locked row, never a form field.
  */
 export async function resendApplicationInviteAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const staff = await requirePlatformAdmin();
 
   const id = String(formData.get('id') ?? '').trim();
@@ -144,9 +146,11 @@ async function decideApplication(formData: FormData, decision: ApplicationDecisi
 }
 
 export async function approveApplicationAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   await decideApplication(formData, 'approved');
 }
 
 export async function rejectApplicationAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   await decideApplication(formData, 'rejected');
 }

@@ -10,6 +10,7 @@ import { logWarn } from '@/lib/log';
 import { getCustomerAuthStore } from '@/lib/customer-auth-store';
 import { getCustomerMfaStore, stepUp, STEP_UP_ERROR } from '@/lib/customer-mfa';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { cancelWithinWindow } from '@/lib/sender-cancel';
 import { requestRefundFor } from '@/lib/receipt-cores';
 
@@ -31,6 +32,7 @@ import { requestRefundFor } from '@/lib/receipt-cores';
  * approves before any money returns). No funding.refund enqueue here.
  */
 export async function requestRefundAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const transferId = String(formData.get('transferId') ?? '');
 
@@ -76,6 +78,7 @@ export async function requestRefundAction(formData: FormData): Promise<void> {
  * page maps to fixed copy.
  */
 export async function cancelTransferAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const transferId = String(formData.get('transferId') ?? '');
   const refuse = (): never => {

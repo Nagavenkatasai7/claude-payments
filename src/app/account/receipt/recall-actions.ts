@@ -6,6 +6,7 @@ import { requireCustomer } from '@/lib/customer-auth';
 import { getCustomerAuthStore } from '@/lib/customer-auth-store';
 import { getCustomerMfaStore, stepUp, STEP_UP_ERROR } from '@/lib/customer-mfa';
 import { clientIpFrom } from '@/lib/ip-rate-limit';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 import { requestRecallFor } from '@/lib/receipt-cores';
 
 /**
@@ -35,6 +36,7 @@ import { requestRecallFor } from '@/lib/receipt-cores';
  */
 
 export async function requestRecallAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const customer = await requireCustomer();
   const transferId = String(formData.get('transferId') ?? '').trim();
   const reason = String(formData.get('reason') ?? '').trim();

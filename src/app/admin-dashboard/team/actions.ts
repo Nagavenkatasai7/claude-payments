@@ -21,6 +21,7 @@ import {
   StaffPasswordPolicyError,
   type StaffPasswordFormState,
 } from '@/lib/staff-password';
+import { refuseOnSiteHost } from '@/lib/site-host-guard';
 
 /**
  * Team management — platform-admin only. Every action is a public POST endpoint,
@@ -111,6 +112,7 @@ function scopeLabel(partnerId?: string): string {
 
 /** Create a teammate with credentials (no email/pending state). */
 export async function createStaffAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const actor = await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const name = String(formData.get('name') ?? '').trim();
@@ -169,6 +171,7 @@ export async function createStaffAction(formData: FormData): Promise<void> {
 
 /** Update a teammate's role, permissions, and partner scope. */
 export async function updateStaffAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const actor = await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const role = String(formData.get('role') ?? 'agent') as StaffRole;
@@ -214,6 +217,7 @@ export async function updateStaffAction(formData: FormData): Promise<void> {
 
 /** Suspend or reactivate a teammate (reversible; suspend revokes sessions). */
 export async function setStaffStatusAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const actor = await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const status = String(formData.get('status') ?? '');
@@ -248,6 +252,7 @@ export async function setStaffStatusAction(formData: FormData): Promise<void> {
 
 /** Remove a teammate entirely (guarded: not yourself, not the last platform admin). */
 export async function removeStaffAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const actor = await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const store = getAuthStore();
@@ -293,6 +298,7 @@ export async function changeOwnPasswordAction(
   _prev: StaffPasswordFormState,
   formData: FormData,
 ): Promise<StaffPasswordFormState> {
+  await refuseOnSiteHost();
   const me = await requireStaff();
   const current = String(formData.get('currentPassword') ?? '');
   const next = String(formData.get('newPassword') ?? '');
@@ -383,6 +389,7 @@ export async function resetStaffPasswordAction(
   _prev: StaffPasswordFormState,
   formData: FormData,
 ): Promise<StaffPasswordFormState> {
+  await refuseOnSiteHost();
   const actor = await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const next = String(formData.get('newPassword') ?? '');
@@ -430,6 +437,7 @@ export async function resetStaffPasswordAction(
  * <username> --clear-mfa --apply`.
  */
 export async function resetStaffMfaAction(formData: FormData): Promise<void> {
+  await refuseOnSiteHost();
   const actor = await requirePlatformAdmin();
   const username = String(formData.get('username') ?? '').trim();
   const store = getAuthStore();
