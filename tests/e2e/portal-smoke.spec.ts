@@ -69,6 +69,11 @@ test.describe('customer portal on a partner subdomain', () => {
     }
   });
 
+  test('the devices page without a cookie lands on the sign-in page (M2-13)', async ({ page }) => {
+    await page.goto(`${ORIGIN}/portal/devices`);
+    await expect(page).toHaveURL(/\/portal\/login$/);
+  });
+
   test('apex-only surfaces are 404 on the subdomain', async ({ request }) => {
     for (const path of ['/admin-dashboard', '/account', '/login', '/pay/x']) {
       const res = await request.get(`${ORIGIN}${path}`, { maxRedirects: 0 });
