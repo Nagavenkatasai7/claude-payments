@@ -198,6 +198,57 @@ export function createTicketRepo(db: DbOrTx, opts: TicketRepoOptions = {}) {
     },
 
     /**
+     * UI redesign M2-12: the customer portal's ticket list. Tenant + customer scoped in the WHERE
+     * (partner, phone, kind 'customer'): one phone that is a customer of two partners never sees
+     * the other partner's tickets. listByCustomer (phone-only) stays for the legacy /account portal.
+     */
+    async listByCustomerInTenant(partnerId: PartnerId, customerPhone: string, limit = 50): Promise<Ticket[]> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(and(eq(tickets.partnerId, partnerId), eq(tickets.customerPhone, customerPhone), eq(tickets.kind, 'customer')))
+        .orderBy(desc(tickets.updatedAt), desc(tickets.id))
+        .limit(limit);
+      return rows.map(rowToTicket);
+    },
+
+    /**
+     * UI redesign M2-12: the portal's single-ticket read. Null for a missing id, another partner's
+     * ticket, another customer's ticket or an internal ticket alike (404-never-403).
+     */
+    async getCustomerTicketInTenant(partnerId: PartnerId, customerPhone: string, id: string): Promise<Ticket | null> {
+      const rows = await db
+        .select()
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.id, id),
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, customerPhone),
+            eq(tickets.kind, 'customer'),
+          ),
+        )
+        .limit(1);
+      return rows[0] ? rowToTicket(rows[0]) : null;
+    },
+
+    /** UI redesign M2-12: the customer's open (open/pending/waiting_admin) tickets under ONE tenant, counted in SQL. */
+    async countOpenByCustomerInTenant(partnerId: PartnerId, customerPhone: string): Promise<number> {
+      const rows = await db
+        .select({ n: count() })
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.partnerId, partnerId),
+            eq(tickets.customerPhone, customerPhone),
+            eq(tickets.kind, 'customer'),
+            inArray(tickets.status, ['open', 'pending', 'waiting_admin']),
+          ),
+        );
+      return Number(rows[0]?.n ?? 0);
+    },
+
+    /**
      * Program-Fix 34B: the customer's OPEN help case under ONE tenant — the one
      * request_human_help reuses. Tenant-scoped in SQL (never a phone-only page
      * filtered in JS). A help case is category human_help OR the fixed help
