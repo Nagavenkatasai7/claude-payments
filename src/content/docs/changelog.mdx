@@ -1,0 +1,23 @@
+## 2026-10
+
+- **New documentation preview.** These guides and an API reference generated from the Partner API's OpenAPI description.
+
+## 2026-09
+
+- **Test keys and scopes.** Keys are now live (`sr_live_…`) or test (`sr_test_…`), and each endpoint needs one scope. A test key works only with sandbox transactions, which never reach a real payout rail.
+- **Per-key rate limit.** Each key now has its own per-minute budget, inside the per-partner one.
+- **Settlements statement.** `GET /settlements` lists your paid and delivered transfers for reconciliation, as JSON or CSV.
+- **Timestamped signatures.** Instructions and callbacks are signed with `x-smartremit-signature` (timestamp plus HMAC), with an overlap window when a secret is rotated. The older `x-signature` header is deprecated.
+- **Compliance block.** Settlement instructions carry an additive `compliance` object.
+- **Sender name.** A transaction created without `sender.name` is held for manual review.
+- **Idempotency hardening.** The transaction is bound to its `Idempotency-Key` before it is created, reserved key prefixes are refused, and a masked payout account is refused.
+- **Unpaid expiry.** A transaction left unpaid is cancelled after a fixed period.
+- **Exchange rates fail safely.** A quote or transaction is refused with `503` rather than priced on a stale or missing rate.
+- **Settlement endpoint rules.** Settlement endpoints must be public HTTPS hosts; redirects and acknowledgement sizes are limited.
+
+## 2026-06
+
+- **Partner API v1.** Key authentication, per-partner rate limit, and the corridors, quote, beneficiaries and transactions endpoints.
+- **Webhook-driven settlement.** Signed settlement instructions to your rail and signed status callbacks back, with automatic retries.
+- **Rates.** `PUT /rates` and `GET /rates` let you push a wholesale rate per corridor.
+- **Any-to-any corridors.** `destination_country` on quotes and transactions.
