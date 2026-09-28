@@ -11,7 +11,7 @@ import { loadPartnerOpenApi } from '@/lib/openapi/load-spec';
 // Server components only: the guides are prerendered at build and ship no client JS. Every
 // unknown name THROWS, which fails `next build` instead of publishing a stale or broken page.
 
-const CODE = 'rounded-ds-focus bg-ds-tint px-1 py-0.5 font-mono text-[0.9em] text-ds-ink [overflow-wrap:anywhere]';
+const CODE = 'rounded-ds-focus bg-ds-tint px-1 py-0.5 font-mono text-[0.9em] text-ds-ink break-words';
 const H3 = 'mt-8 text-lg font-semibold text-ds-ink';
 
 /** A value from facts.ts. Numbers print bare; strings and array items print as code. */
@@ -52,8 +52,8 @@ export function ErrorStatusTable() {
       <table className="w-full text-left text-sm">
         <thead>
           <tr>
-            <th scope="col" className="border-b border-ds-border px-4 py-2 font-semibold text-ds-ink">Endpoint</th>
-            <th scope="col" className="border-b border-ds-border px-4 py-2 font-semibold text-ds-ink">Status codes</th>
+            <th scope="col" className="whitespace-nowrap border-b border-ds-border px-4 py-2 font-semibold text-ds-ink">Endpoint</th>
+            <th scope="col" className="whitespace-nowrap border-b border-ds-border px-4 py-2 font-semibold text-ds-ink">Status codes</th>
           </tr>
         </thead>
         <tbody>
@@ -61,7 +61,7 @@ export function ErrorStatusTable() {
             <tr data-op={op.operationId} key={op.operationId}>
               <td className="border-b border-ds-border px-4 py-2 align-top">
                 <span className="block font-semibold text-ds-ink">{op.summary}</span>
-                <code className="font-mono text-[12.5px] text-ds-ink-muted [overflow-wrap:anywhere]">
+                <code className="font-mono text-[12.5px] text-ds-ink-muted break-words">
                   {`${op.method} /api/partner/v1${op.path}`}
                 </code>
               </td>
@@ -93,7 +93,7 @@ function TemplateCard({ t }: { t: TemplateEntry }) {
   return (
     <li data-template={t.name} className="rounded-ds-inner border border-ds-border bg-ds-surface p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <code className="font-mono text-[15px] font-semibold text-ds-ink [overflow-wrap:anywhere]">{t.name}</code>
+        <code className="font-mono text-[15px] font-semibold text-ds-ink break-words">{t.name}</code>
         <Badge tone="neutral">{t.category}</Badge>
         {t.nameSource === 'configured' ? <Badge tone="info">Optional (configured)</Badge> : null}
       </div>
@@ -102,7 +102,7 @@ function TemplateCard({ t }: { t: TemplateEntry }) {
         <div className={row}>
           <dt className={dt}>Body</dt>
           <dd>
-            <pre className="whitespace-pre-wrap rounded-ds-focus bg-ds-tint p-2 font-mono text-[13px] text-ds-ink [overflow-wrap:anywhere]">{t.body}</pre>
+            <pre className="whitespace-pre-wrap rounded-ds-focus bg-ds-tint p-2 font-mono text-[13px] text-ds-ink break-words">{t.body}</pre>
           </dd>
         </div>
         {t.footer ? (
@@ -114,7 +114,7 @@ function TemplateCard({ t }: { t: TemplateEntry }) {
         {t.button ? (
           <div className={row}>
             <dt className={dt}>Button</dt>
-            <dd className="text-ds-ink [overflow-wrap:anywhere]">{buttonText(t.button)}</dd>
+            <dd className="text-ds-ink break-words">{buttonText(t.button)}</dd>
           </div>
         ) : null}
         <div className={row}>

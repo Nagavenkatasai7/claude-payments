@@ -77,6 +77,8 @@
   "/api/whatsapp/[partnerId]": "dynamic",
   "/api/worker": "dynamic",
   "/docs": "static",
+  "/docs-next": "static",
+  "/docs-next/[slug]": "ssg",
   "/legal": "static",
   "/login": "dynamic",
   "/login/mfa": "dynamic",

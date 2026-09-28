@@ -7,7 +7,7 @@ import { dsCn } from '@/lib/ui/ds-cn';
 // look) and exposes the code-backed blocks the partner guides use WITHOUT imports (the content
 // guard forbids import/export in .mdx). Server-only: no client JS, no inline script.
 
-const CODE = 'rounded-ds-focus bg-ds-tint px-1 py-0.5 font-mono text-[0.9em] text-ds-ink [overflow-wrap:anywhere]';
+const CODE = 'rounded-ds-focus bg-ds-tint px-1 py-0.5 font-mono text-[0.9em] text-ds-ink break-words';
 const LINK = 'font-semibold text-ds-primary hover:underline';
 
 const components: MDXComponents = {
@@ -48,10 +48,12 @@ const components: MDXComponents = {
   ),
   table: (p) => (
     <div className="mt-4 overflow-x-auto rounded-ds-inner border border-ds-border bg-ds-surface">
-      <table className="w-full text-left text-sm" {...p} />
+      {/* min-width + nowrap headers: on a phone the table scrolls inside this wrapper instead of
+          squeezing its columns to one character (review focus #4). */}
+      <table className="w-full min-w-[480px] text-left text-sm [&_code]:whitespace-nowrap" {...p} />
     </div>
   ),
-  th: (p) => <th className="border-b border-ds-border px-4 py-2 font-semibold text-ds-ink" {...p} />,
+  th: (p) => <th className="whitespace-nowrap border-b border-ds-border px-4 py-2 font-semibold text-ds-ink" {...p} />,
   td: (p) => <td className="border-b border-ds-border px-4 py-2 align-top text-ds-ink-muted" {...p} />,
   Fact,
   TemplateCatalog,
