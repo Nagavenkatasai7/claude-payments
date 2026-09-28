@@ -1,0 +1,22 @@
+openapi: 3.1.0
+info:
+  title: SmartRemit Partner API
+  version: '1'
+servers:
+  - url: https://smartremit.ai/api/partner/v1
+tags:
+  - { name: Corridors }
+paths:
+  /corridors:
+    get:
+      operationId: listCorridors
+      summary: List your corridors
+      description: Data-driven corridor discovery for the partner resolved from the key.
+      tags: [Corridors]
+      x-smartremit-scope: corridors:read
+      x-smartremit-sandbox: true
+      responses:
+        '200': { description: Corridors available to this partner. }
+        '401': { description: Invalid key }
+        '403': { description: Scope or partner status }
+        '429': { description: Rate limited }
