@@ -1,32 +1,88 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
-import { ShieldCheck } from 'lucide-react';
 import { requirePartnerStaff } from '@/lib/auth';
-import { PARTNER_ANY } from '@/lib/partner-access';
+import { PARTNER_ROUTES } from '../routes';
 import { t } from '@/lib/i18n';
-import { EmptyState, PageHeader, buttonVariants } from '@/components/ds';
+import { logWarn } from '@/lib/log';
+import { env } from '@/lib/env';
+import { getDb } from '@/db/client';
+import { getStore } from '@/lib/store';
+import { getPartnerIntegrationsStore } from '@/lib/partner-integrations-store';
+import { getPartnerApiKeyStore } from '@/lib/partner-api-key';
+import { getChannelHealth, summarizeChannelHealth } from '@/lib/channel-health';
+import { readSignatureHealth, type SignatureHealth } from '@/lib/webhook-signature-health';
+import { DEFAULT_PARTNER_ID } from '@/lib/defaults';
+import { buildPartnerHome, settlementHealth, whatsappHealth, type HealthState } from '@/lib/partner-home';
+import { PageHeader, buttonVariants } from '@/components/ds';
+import { ActionList, HealthCard, KpiRow } from './home-sections';
 
 export const metadata: Metadata = { title: t('partner.home.title'), robots: { index: false, follow: false } };
 
-// /partner: the M3-1 home stub. The gate runs on every render (a layout call is never the guard);
-// M3-2 adds the shell around it and M3-3 the data.
+// /partner (home, UI redesign M3-3) inside the M3-2 shell (the layout owns the main landmark and
+// runs with skipMfa, so it fetches no tenant data). This page gates on every render, then reads
+// each source with the SESSION tenant (ctx.partnerId), never a param. Read-only: no writes.
+
+// A failed source is logged (ids only, scrubbed) and becomes null: its card shows an error state
+// and the rest of the page renders. The wrapper is async, so a synchronous throw from a store
+// getter is caught too.
+async function safe<T>(source: string, partnerId: string, read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch (err) {
+    logWarn('partner.home', err, { source, partnerId });
+    return null;
+  }
+}
+
+async function readWhatsapp(partnerId: string): Promise<HealthState> {
+  const now = new Date();
+  // As the legacy partner page does (admin-dashboard/partners/[id]/page.tsx): the default tenant IS
+  // the shared number, so its marks are the platform's, not a partner signal.
+  const isDefault = partnerId === DEFAULT_PARTNER_ID;
+  const [view, signature] = await Promise.all([
+    getChannelHealth(partnerId, { store: getStore(), db: getDb() }),
+    isDefault ? Promise.resolve<SignatureHealth>({}) : readSignatureHealth(partnerId),
+  ]);
+  return whatsappHealth(
+    summarizeChannelHealth({ channel: view.channel, marks: isDefault ? {} : view.marks, now, signature }),
+  );
+}
+
+async function readSettlement(partnerId: string): Promise<HealthState> {
+  const integrations = await getPartnerIntegrationsStore().getIntegrations(partnerId);
+  return settlementHealth(integrations.payment, { appOrigin: env.appBaseUrl, production: env.isProduction });
+}
+
 export default async function PartnerHomePage() {
-  await requirePartnerStaff(PARTNER_ANY);
+  const ctx = await requirePartnerStaff(PARTNER_ROUTES.home.policy);
+  const pid = ctx.partnerId;
+  const [summary, whatsapp, settlement, apiKeys] = await Promise.all([
+    // Live rows only; "today" is the ledger's America/New_York day (transfer-repo.ts summary()).
+    safe('summary', pid, () => getStore().transfersSummary(pid)),
+    safe('whatsapp', pid, () => readWhatsapp(pid)),
+    safe('settlement', pid, () => readSettlement(pid)),
+    safe('api_keys', pid, () => getPartnerApiKeyStore().list(pid)),
+  ]);
+  const model = buildPartnerHome({ role: ctx.role, summary, whatsapp, settlement, apiKeys, now: new Date() });
+
   return (
-    <div className="min-h-dvh bg-ds-ground">
-      <main id="main" className="sh-main bg-transparent">
-        <PageHeader title={t('partner.home.title')} sub={t('partner.home.sub')} />
-        <EmptyState
-          icon={<ShieldCheck className="size-5" />}
-          title={t('partner.home.emptyTitle')}
-          body={t('partner.home.emptyBody')}
-          action={
-            <Link href="/partner/security" className={buttonVariants({ variant: 'ghost', size: 'md' })}>
-              {t('partner.home.securityLink')}
-            </Link>
-          }
-        />
-      </main>
-    </div>
+    <>
+      <PageHeader
+        title={t('partner.home.title')}
+        sub={t('partner.home.sub')}
+        actions={
+          <Link href={PARTNER_ROUTES.security.href} className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+            {t('partner.home.securityLink')}
+          </Link>
+        }
+      />
+      <div className="grid gap-4 lg:gap-6">
+        {model.kpis !== null ? <KpiRow kpis={model.kpis} /> : null}
+        <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
+          <ActionList actions={model.actions} incomplete={model.actionsIncomplete} />
+          <HealthCard health={model.health} />
+        </div>
+      </div>
+    </>
   );
 }
