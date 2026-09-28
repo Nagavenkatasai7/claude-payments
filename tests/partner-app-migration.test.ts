@@ -164,6 +164,7 @@ describe('migration 0028: the four new tables', () => {
 
   it('no plaintext-PII column: the report body is only ever the sealed content_enc', async () => {
     const all = (await Promise.all(NEW_TABLES.map((t) => columns(db, t)))).flat().map((c) => c[0]);
+    expect(all.length).toBe(33); // guards a vacuous pass if a table name is wrong
     expect(all.filter((c) => /phone|name|email|address|dob|content(?!_enc)|body|csv/.test(String(c)))).toEqual([]);
   });
 });
@@ -217,7 +218,7 @@ describe('migration 0028 is safe for the build already in production (rolling re
     }
     const inserts = [...code.matchAll(/INSERT INTO "([a-z_]+)"/g)].map((m) => m[1]);
     expect(inserts).toEqual(['partner_go_live']);
-    expect(code).not.toMatch(/\b(RENAME|ALTER COLUMN|TRUNCATE|DELETE FROM|UPDATE "|DROP TABLE|DROP COLUMN|DROP INDEX|NOT VALID)\b/i);
+    expect(code).not.toMatch(/\b(RENAME|ALTER COLUMN|TRUNCATE|DELETE FROM|ADD COLUMN|UPDATE "|DROP TABLE|DROP COLUMN|DROP INDEX|NOT VALID)\b/i);
     expect(code).toContain(`SET LOCAL lock_timeout = '5s';`);
     // The backfill runs after the FK exists and is re-runnable.
     expect(code.indexOf('INSERT INTO "partner_go_live"')).toBeGreaterThan(code.indexOf('ADD CONSTRAINT "partner_go_live_partner_id_partners_id_fk"'));
