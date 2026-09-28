@@ -77,6 +77,18 @@ function accountLabel(phone: string): string {
   return `portal …${phone.replace(/\D/g, '').slice(-4)}`;
 }
 
+/**
+ * UI redesign M2-11 (owner O7): the authenticator-app issuer of a NEW enrolment. The customer portal
+ * passes the partner's brand; anything else (and the legacy /account enrolment, which passes none)
+ * keeps CUSTOMER_MFA_ISSUER. A ':' would split the otpauth label, so it and control characters are
+ * dropped; capped at 64 characters. Existing enrolments are never touched.
+ */
+function issuerLabel(raw: string | undefined): string {
+  // eslint-disable-next-line no-control-regex
+  const v = (raw ?? '').replace(/[:\u0000-\u001f\u007f]/g, '').trim().slice(0, 64).trim();
+  return v || CUSTOMER_MFA_ISSUER;
+}
+
 export function createCustomerMfaStore(redis: RedisLike, repo: CustomerMfaRepo, opts: CustomerMfaStoreOptions = {}) {
   const now = opts.now ?? (() => Date.now());
   const provider = opts.provider ?? defaultProvider;
@@ -127,7 +139,7 @@ export function createCustomerMfaStore(redis: RedisLike, repo: CustomerMfaRepo, 
      * first code confirms it. The plaintext is returned to the caller ONCE
      * (the action state), never persisted unsealed. Refused while enrolled.
      */
-    async beginEnrolment(k: CustomerKey): Promise<BeginEnrolmentResult> {
+    async beginEnrolment(k: CustomerKey, opts: { issuer?: string } = {}): Promise<BeginEnrolmentResult> {
       if (await this.isEnrolled(k)) return { ok: false, reason: 'enrolled' };
       const secretBase32 = base32Encode(generateTotpSecret());
       await redis.set(customerMfaKeys.enroll(k), encryptField(secretBase32, provider(), ctxFor(k)), {
@@ -137,7 +149,7 @@ export function createCustomerMfaStore(redis: RedisLike, repo: CustomerMfaRepo, 
       return {
         ok: true,
         secretBase32,
-        uri: totpOtpauthUri({ issuer: CUSTOMER_MFA_ISSUER, account: accountLabel(k.phone), secretBase32 }),
+        uri: totpOtpauthUri({ issuer: issuerLabel(opts.issuer), account: accountLabel(k.phone), secretBase32 }),
       };
     },
 
