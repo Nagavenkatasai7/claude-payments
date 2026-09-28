@@ -78,7 +78,7 @@ vi.mock('@/lib/partner-store', async () => {
 import { getAuthStore } from '@/lib/auth-store';
 import { SESSION_COOKIE } from '@/lib/session-cookie';
 import { MFA_PENDING_PREFIX } from '@/lib/partner-mfa-gate';
-import { partnerNav } from '@/app/partner/routes';
+import { PARTNER_ROUTES, partnerNav } from '@/app/partner/routes';
 import Layout from '@/app/partner/(app)/layout';
 import HomePage from '@/app/partner/(app)/page';
 import SecurityPage from '@/app/partner/(app)/security/page';
@@ -210,6 +210,38 @@ describe('/partner layout: the chrome', () => {
   });
 });
 
+// A page's gate, checked from its source: the page's path maps (via href) to exactly one
+// PARTNER_ROUTES key, and every requirePartnerStaff call in it uses THAT key's policy.
+// Route groups are dropped from the URL; a dynamic segment ([id]) shares its static parent's key.
+// Only the security page may pass { skipMfa: true } (it IS the enrolment page).
+const APP_DIR = 'src/app/partner/(app)';
+const SECURITY_PAGE = `${APP_DIR}/security/page.tsx`;
+function gateProblems(file: string, src: string): string[] {
+  const segs = file
+    .slice(APP_DIR.length)
+    .split('/')
+    .filter((x) => x !== '' && x !== 'page.tsx' && !/^\(.*\)$/.test(x) && !/^\[.*\]$/.test(x));
+  const href = ['/partner', ...segs].join('/');
+  const key = Object.entries(PARTNER_ROUTES).find(([, r]) => r.href === href)?.[0];
+  if (!key) return [`${file}: no PARTNER_ROUTES entry for ${href}`];
+  const problems: string[] = [];
+  const calls = [...src.matchAll(/requirePartnerStaff\(([^)]*)\)/g)].map((m) => m[1].trim());
+  if (calls.length === 0) problems.push(`${file}: no requirePartnerStaff call`);
+  for (const args of calls) {
+    const m = /^PARTNER_ROUTES\.(\w+)\.policy(?:\s*,\s*(\{[^}]*\}))?$/.exec(args);
+    if (!m) {
+      problems.push(`${file}: gate is not PARTNER_ROUTES.${key}.policy: ${args}`);
+      continue;
+    }
+    if (m[1] !== key) problems.push(`${file}: gates with ${m[1]}, expected ${key}`);
+    if (m[2] !== undefined && !(file === SECURITY_PAGE && /^\{\s*skipMfa:\s*true\s*\}$/.test(m[2]))) {
+      problems.push(`${file}: options ${m[2]} are allowed only as { skipMfa: true } on the security page`);
+    }
+  }
+  if (!/await requirePartnerStaff\(/.test(src)) problems.push(`${file}: the gate is not awaited`);
+  return problems;
+}
+
 describe('/partner pages gate by themselves (the layout is not the guard)', () => {
   it('home: anonymous → /login; platform → /admin-dashboard', async () => {
     await expect(HomePage()).rejects.toThrow('REDIRECT:/login');
@@ -221,7 +253,7 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
     await signInAs({ partnerId: undefined });
     await expect(SecurityPage()).rejects.toThrow('REDIRECT:/admin-dashboard');
   });
-  it('EVERY page under (app) gates with a policy from routes.ts (the layout uses skipMfa + every role)', () => {
+  it('EVERY page under (app) gates with ITS OWN routes.ts key; skipMfa only on the security page', () => {
     const pages = (d: string): string[] =>
       readdirSync(d).flatMap((n) => {
         const p = join(d, n);
@@ -229,7 +261,20 @@ describe('/partner pages gate by themselves (the layout is not the guard)', () =
       });
     const found = pages('src/app/partner/(app)');
     expect(found.length).toBeGreaterThanOrEqual(2);
-    for (const f of found) expect(readFileSync(f, 'utf8'), f).toMatch(/await requirePartnerStaff\(PARTNER_ROUTES\.\w+\.policy/);
+    for (const f of found) expect(gateProblems(f, readFileSync(f, 'utf8')), f).toEqual([]);
+  });
+  it('the gate check itself catches a wrong key, a stray skipMfa, a direct policy and a missing gate', () => {
+    const home = 'src/app/partner/(app)/page.tsx';
+    const sec = 'src/app/partner/(app)/security/page.tsx';
+    expect(gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);')).toEqual([]);
+    expect(gateProblems(sec, 'await requirePartnerStaff(PARTNER_ROUTES.security.policy, { skipMfa: true });')).toEqual([]);
+    expect(gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.security.policy);')).not.toEqual([]);
+    expect(gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy, { skipMfa: true });')).not.toEqual([]);
+    expect(
+      gateProblems(home, 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);\nawait requirePartnerStaff(PARTNER_ANY);'),
+    ).not.toEqual([]);
+    expect(gateProblems(home, 'export default function P() { return null; }')).not.toEqual([]);
+    expect(gateProblems('src/app/partner/(app)/nowhere/page.tsx', 'await requirePartnerStaff(PARTNER_ROUTES.home.policy);')).not.toEqual([]);
   });
   it('pages render no <main> of their own (the layout owns it) and read their policy from routes.ts', () => {
     for (const [f, key] of [
