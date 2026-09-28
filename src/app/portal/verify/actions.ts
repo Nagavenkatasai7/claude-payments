@@ -151,3 +151,16 @@ export async function stepUpTotpAction(_prev: PortalStepUpState | null, formData
   await store.consume(pendingToken);
   return markFresh(ctx, true, next);
 }
+
+/** The step-up form's single entry point: the submit button's `intent` picks the step. */
+export async function portalStepUpAction(prev: PortalStepUpState | null, formData: FormData): Promise<PortalStepUpState> {
+  await requirePortalSite();
+  switch (field(formData, 'intent')) {
+    case 'verify':
+      return stepUpVerifyAction(prev, formData);
+    case 'mfa':
+      return stepUpTotpAction(prev, formData);
+    default:
+      return stepUpRequestAction(prev, formData);
+  }
+}

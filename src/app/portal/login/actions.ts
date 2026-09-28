@@ -230,3 +230,23 @@ export async function consentAction(_prev: PortalLoginState | null, formData: Fo
   await completePortalSignIn(pid, phone);
   redirect('/portal');
 }
+
+/**
+ * The login form's single entry point (one useActionState, progressive enhancement): the submit
+ * button's `intent` picks the step. Each step action re-runs every gate itself.
+ */
+export async function portalLoginAction(prev: PortalLoginState | null, formData: FormData): Promise<PortalLoginState> {
+  await requirePortalSite();
+  switch (field(formData, 'intent')) {
+    case 'verify':
+      return verifyCodeAction(prev, formData);
+    case 'resend':
+      return resendCodeAction(prev, formData);
+    case 'mfa':
+      return verifyMfaAction(prev, formData);
+    case 'consent':
+      return consentAction(prev, formData);
+    default:
+      return requestCodeAction(prev, formData);
+  }
+}
