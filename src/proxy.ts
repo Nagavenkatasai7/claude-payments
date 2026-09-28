@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { hasStaffSessionCookie } from '@/lib/session-cookie';
 import { CUSTOMER_SESSION_COOKIE } from '@/lib/customer-session-cookie';
 import { parseSiteHost, stripSiteHeaders, SITE_HEADERS } from '@/lib/site-host';
-import { classifySitePath } from '@/lib/site-routes';
+import { classifySitePath, type SitePathClass } from '@/lib/site-routes';
+import { PORTAL_SESSION_COOKIE, portalSessionCookieOptions } from '@/lib/portal-session-cookie';
 
 // Edge gate for the two signed-in surfaces (Stage 3 expanded to /account).
 // This is defense-in-depth ONLY — every page still runs its own require* and
@@ -90,13 +91,41 @@ async function siteProxy(req: NextRequest, slug: string): Promise<NextResponse> 
   if (!partnerId) {
     return isRead(req.method) ? NextResponse.rewrite(new URL('/site-inactive', req.url), { request: { headers } }) : bare404();
   }
-  const route = classifySitePath(req.nextUrl.pathname);
+  const route: SitePathClass = siteRoutesLive() ? classifySitePath(req.nextUrl.pathname) : DENY;
   if (route.kind === 'deny') return refuse(req, headers);
   headers.set(SITE_HEADERS.partner, partnerId);
   headers.set(SITE_HEADERS.slug, slug);
-  return route.rewriteTo
+  const res = route.rewriteTo
     ? NextResponse.rewrite(new URL(route.rewriteTo, req.url), { request: { headers } })
     : NextResponse.next({ request: { headers } });
+  refreshPortalCookie(req, res);
+  return res;
+}
+
+const DENY: SitePathClass = { kind: 'deny' };
+
+/**
+ * UI redesign M2: dark by default. Until CUSTOMER_PORTAL_ENABLED=1 NO subdomain route is served (the
+ * table holds only the portal today), so a POST naming ANY server-action id never reaches app code on
+ * a partner host while the portal is off. Read straight from process.env: env.ts is not pulled into
+ * the proxy.
+ */
+const siteRoutesLive = () => process.env.CUSTOMER_PORTAL_ENABLED === '1';
+
+const PORTAL_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Sliding-cookie refresh on activity (UI redesign M2, review L1). Pages cannot set cookies, so a
+ * GET/HEAD of an allowed subdomain path re-sets a well-formed portal cookie with the standard options
+ * (host-only, 30 days). The Redis session record stays the authority (idle, 90-day cap, revocation):
+ * re-setting a revoked token grants nothing. NEVER on another method: a sign-out POST deletes the
+ * cookie, and a proxy Set-Cookie on the same response could re-create it.
+ */
+function refreshPortalCookie(req: NextRequest, res: NextResponse): void {
+  if (!isRead(req.method)) return;
+  const token = req.cookies.get(PORTAL_SESSION_COOKIE)?.value;
+  if (!token || !PORTAL_TOKEN_RE.test(token)) return;
+  res.cookies.set(PORTAL_SESSION_COOKIE, token, portalSessionCookieOptions());
 }
 
 export const config = {

@@ -1,6 +1,7 @@
-// The allow branch of the subdomain proxy. M1's SITE_ROUTES is empty, so the route table is mocked
-// here to prove what M2's first allowlisted path will get: the proxy-set tenant headers (and only those).
-import { describe, it, expect, vi } from 'vitest';
+// The allow branch of the subdomain proxy. The route table is mocked here to prove what an allowlisted
+// path gets: the proxy-set tenant headers (and only those). M2: the table is consulted only with
+// CUSTOMER_PORTAL_ENABLED=1 (tests/proxy-portal.test.ts pins the flag-off side).
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { NextRequest } from 'next/server';
 import { isRewrite, getRewrittenUrl } from 'next/experimental/testing/server';
 const { resolveSiteSlug, classifySitePath } = vi.hoisted(() => ({ resolveSiteSlug: vi.fn(), classifySitePath: vi.fn() }));
@@ -12,6 +13,8 @@ const site = (path: string, headers: Record<string, string> = {}) =>
   new NextRequest(`https://acme.smartremit.ai${path}`, { headers: { host: 'acme.smartremit.ai', ...headers } });
 
 describe('proxy allow branch', () => {
+  beforeAll(() => vi.stubEnv('CUSTOMER_PORTAL_ENABLED', '1'));
+  afterAll(() => vi.unstubAllEnvs());
   it('passes through with the resolved tenant headers, overwriting any forged value', async () => {
     resolveSiteSlug.mockResolvedValue('pa');
     classifySitePath.mockReturnValue({ kind: 'allow' });
