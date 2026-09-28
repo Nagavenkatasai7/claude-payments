@@ -37,6 +37,9 @@ const tier2Card =
   'rounded-2xl border border-[#dbe4f0] bg-white [box-shadow:0_24px_60px_-32px_rgba(11,27,63,.35)]';
 const btnWaBlock =
   'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border-0 bg-[var(--lp-wa)] px-[22px] py-[13px] min-h-12 text-base leading-normal font-bold text-[#04231A] [box-shadow:0_10px_26px_-10px_rgba(37,211,102,.6)] [transition:background_.18s_ease,transform_.18s_ease,box-shadow_.18s_ease] hover:bg-[var(--lp-wa-deep)] hover:-translate-y-px';
+// Home-Send H1 secondary WhatsApp CTA (beside the partner button): same target, outline style.
+const btnWaSecondary =
+  'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border border-[var(--lp-wa-deep)] bg-white px-[22px] py-[11px] min-h-12 text-[15px] leading-normal font-bold text-[#04231A] [transition:background_.18s_ease] hover:bg-[#f0fdf4]';
 // Home-Send H1 partner button: the landing's brand blue (#0c5bd2, white label 6.2:1).
 const btnPartnerBlock =
   'inline-flex w-full cursor-pointer items-center justify-center gap-2.5 rounded-full border-0 bg-[#0c5bd2] px-[22px] py-[13px] min-h-12 text-base leading-normal font-bold text-white [box-shadow:0_10px_26px_-10px_rgba(12,91,210,.6)] [transition:background_.18s_ease,transform_.18s_ease,box-shadow_.18s_ease] hover:bg-[#0a4db3] hover:-translate-y-px';
@@ -67,12 +70,16 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
     ? `Send ${formatUsd(Math.round(numeric))} to India on WhatsApp`
     : 'Send money on WhatsApp';
 
-  // Home-Send H1: the partner handoff replaces the WhatsApp CTA only when the server
-  // resolved a featured partner AND its slug yields a link; otherwise nothing changes.
+  // Home-Send H1: the partner handoff button sits BESIDE the WhatsApp CTA (partner
+  // primary, WhatsApp secondary) only when the server resolved a featured partner AND
+  // its slug yields a link; otherwise nothing changes. The link is built here, from
+  // the calculator's own state, by the pure validator in send-handoff.ts.
   const handoffHref = featured
     ? buildSendHandoffUrl({ slug: featured.slug, amount: hasAmount ? numeric : undefined, to: 'IN' })
     : null;
   const partner = featured && handoffHref ? featured : null;
+  // Live copy only with a named licensed entity (the server enforces the same rule).
+  const isLive = partner?.mode === 'live' && Boolean(partner.legalName);
   const confirmWhere = partner ? '' : ' in chat';
 
   return (
@@ -114,7 +121,7 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
 
       {partner && handoffHref ? (
         <>
-          {partner.mode === 'test' ? (
+          {!isLive ? (
             <p className="mb-2 text-center">
               <span className="inline-block rounded-full border border-[#b45309] bg-[#fffbeb] px-2.5 py-0.5 text-xs font-bold tracking-[.04em] text-[#92400e]">
                 TEST — no real money
@@ -123,14 +130,18 @@ export default function RateCalculator({ rate, live, asOf, featured }: Props) {
           ) : null}
           <a className={btnPartnerBlock} href={handoffHref}>
             <span>
-              {partner.mode === 'test' ? `Try a test send with ${partner.displayName}` : `Send with ${partner.displayName}`}
+              {isLive ? `Send with ${partner.displayName}` : `Try a test send with ${partner.displayName}`}
             </span>
           </a>
-          <p className="mt-2.5 text-center text-[12.5px] leading-[1.5] text-[var(--lp-text-300)]">
-            {partner.mode === 'test'
-              ? 'Test mode — no money moves.'
-              : `Money is handled by ${partner.legalName ?? partner.displayName}, a licensed money transmitter. SmartRemit provides the technology.`}
+          <p className="mt-2.5 mb-3 text-center text-[12.5px] leading-[1.5] text-[var(--lp-text-300)]">
+            {isLive
+              ? `Money is handled by ${partner.legalName}, a licensed money transmitter. SmartRemit provides the technology.`
+              : 'Test mode — no money moves.'}
           </p>
+          <a className={btnWaSecondary} href={href} target="_blank" rel="noopener noreferrer">
+            <WhatsAppIcon />
+            <span>{label}</span>
+          </a>
         </>
       ) : (
         <a className={btnWaBlock} href={href} target="_blank" rel="noopener noreferrer">

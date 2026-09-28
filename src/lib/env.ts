@@ -66,9 +66,16 @@ export const env = {
   get featuredSendPartnerId(): string {
     return process.env.FEATURED_SEND_PARTNER_ID ?? '';
   },
-  /** 'live' ⇒ live copy; anything else (default) ⇒ test-send copy and a "no real money" badge. */
+  /** 'live' ⇒ live copy (only with featuredSendLiveConfirmed); anything else (default) ⇒ test copy + badge. */
   get featuredSendMode(): string {
     return process.env.FEATURED_SEND_MODE ?? '';
+  },
+  /**
+   * Exactly 'true' ⇒ FEATURED_SEND_MODE=live may take effect. The owner sets it only after a
+   * licensed partner + real-money switches (home-send SPEC §3). Anything else ⇒ test copy.
+   */
+  get featuredSendLiveConfirmed(): string {
+    return process.env.FEATURED_SEND_LIVE_CONFIRMED ?? '';
   },
   /**
    * The From header. Hostinger binds the SMTP session to one mailbox, so the From

@@ -36,9 +36,12 @@ describe('RateCalculator — featured send partner', () => {
     }
   });
 
+  const WA_HREF =
+    'https://api.whatsapp.com/send/?phone=15556298293&text=Hi%20SmartRemit%2C%20I%20want%20to%20send%201000%20USD%20to%20India.&type=phone_number&app_absent=0';
+
   it('test mode: a test-send button to the partner portal, a TEST badge and the test-mode note', () => {
     const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'test' } });
-    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN']);
+    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN', WA_HREF]);
     expect(html).toContain('Try a test send with Acme Pay');
     expect(html).toContain('TEST — no real money');
     expect(html).toContain('Test mode — no money moves.');
@@ -51,7 +54,7 @@ describe('RateCalculator — featured send partner', () => {
       ...BASE,
       featured: { displayName: 'Acme Pay', legalName: 'Acme Money Services LLC', slug: 'acme-pay', mode: 'live' },
     });
-    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN']);
+    expect(hrefs(html)).toEqual(['https://acme-pay.smartremit.ai/send?amount=1000.00&to=IN', WA_HREF]);
     expect(html).toContain('Send with Acme Pay');
     expect(html).not.toContain('Try a test send');
     expect(html).not.toContain('TEST — no real money');
@@ -60,9 +63,19 @@ describe('RateCalculator — featured send partner', () => {
     );
   });
 
-  it('live mode without a legal name falls back to the display name in the disclosure', () => {
+  it('live mode WITHOUT a legal name never claims a licensed transmitter: it renders the test copy', () => {
     const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'live' } });
-    expect(html).toContain('Money is handled by Acme Pay, a licensed money transmitter. SmartRemit provides the technology.');
+    expect(html).not.toContain('licensed money transmitter');
+    expect(html).toContain('Try a test send with Acme Pay');
+    expect(html).toContain('TEST — no real money');
+    expect(html).toContain('Test mode — no money moves.');
+  });
+
+  it('keeps the WhatsApp CTA beside the partner button: partner first (primary), WhatsApp second', () => {
+    const html = render({ ...BASE, featured: { displayName: 'Acme Pay', slug: 'acme-pay', mode: 'test' } });
+    expect(html.indexOf('Try a test send with Acme Pay')).toBeLessThan(html.indexOf('Send $1,000 to India on WhatsApp'));
+    // The e2e smoke's selector (tests/e2e/dashboard-smoke.spec.ts) still matches.
+    expect(html).toContain('href="https://api.whatsapp.com/send/?phone=');
   });
 
   it('escapes partner-supplied names (React text, never HTML)', () => {

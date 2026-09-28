@@ -10,7 +10,7 @@ import { SMARTREMIT_ICONS } from './brand-icons';
 import { SkipLink } from '@/components/skip-link';
 import { BankIcon, BadgeIcon, ShieldIcon, AuditIcon, BoltIcon, GlobeIcon } from './landing/TrustIcons';
 import RateCalculator from './landing/RateCalculator';
-import { resolveFeaturedSendPartner } from '@/lib/featured-send-partner';
+import { getFeaturedSendPartner } from '@/lib/featured-send-partner';
 import HeroPipeline from './landing/HeroPipeline';
 import { ChatMock, OpsMock, RailMock, AiMock } from './landing/showcase';
 import { submitPartnerRequestAction } from './partners-action';
@@ -161,8 +161,10 @@ export default async function LandingPage({
   // refused (getFxRates throws RateUnavailableError) ⇒ no figure at all, never
   // a constant labelled live. Any throw degrades — the page never errors on FX.
   // Home-Send H1: the featured send partner, resolved on the server in parallel with
-  // FX. Never throws; unset env ⇒ null with no db work ⇒ the calculator is unchanged.
-  const featuredPromise = resolveFeaturedSendPartner();
+  // FX and memoised per instance at the FX soft-TTL cadence (this route renders per
+  // request: it awaits searchParams). Never throws; unset env ⇒ null with no db work
+  // ⇒ the calculator is unchanged. Amount/destination are read client-side.
+  const featuredPromise = getFeaturedSendPartner();
   let fxRate: number | null = null;
   let fxLive = false;
   let fxAsOf: string | null = null;
