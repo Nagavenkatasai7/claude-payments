@@ -193,6 +193,25 @@ describe('bot parity', () => {
   });
 });
 
+describe('create racing a recipient delete (review LOW 2)', () => {
+  it('a delete that commits after validation read the recipient: the create writes nothing (not_found)', async () => {
+    const ctx = ctxFor('pa');
+    const realList = ctx.store.listRecipients.bind(ctx.store);
+    vi.spyOn(ctx.store, 'listRecipients').mockImplementation(async (...a: Parameters<typeof ctx.store.listRecipients>) => {
+      const stale = await realList(...a); // validation sees the live recipient …
+      const { deleteRecipientWithSchedules } = await import('@/lib/portal-recipients');
+      expect((await deleteRecipientWithSchedules(db, 'pa', PHONE, recipientRid('pa', PHONE, A_RP))).ok).toBe(true); // … then the delete commits
+      return stale;
+    });
+    const parsed = good(recipientRid('pa', PHONE, A_RP));
+    if (!parsed.ok) throw new Error('form');
+    expect(await createPortalSchedule(db, ctx, 'pa', PHONE, parsed.value)).toEqual({ ok: false, code: 'not_found' });
+    const live = (await createScheduleRepo(db).listForCustomer('pa', PHONE)).filter((s) => s.status !== 'cancelled');
+    expect(live).toEqual([]);
+    expect((await audits()).map((a) => a.action)).toEqual(['schedule.cancel']); // the delete's own sweep only
+  });
+});
+
 describe('setPortalScheduleStatus', () => {
   const id = () => A.scheduleIds[0];
 
@@ -222,6 +241,18 @@ describe('setPortalScheduleStatus', () => {
     }
     expect((await createScheduleRepo(db).getOwnedSchedule('pb', PHONE, B.scheduleIds[0]))?.status).toBe('active');
     expect((await createScheduleRepo(db).getOwnedSchedule('pa', OTHER, 's_other_1'))?.status).toBe('active');
+    expect(await audits()).toEqual([]);
+  });
+
+  it('a cancel decided on a stale read writes nothing when the status moved (the audit `from` is always true)', async () => {
+    const realTx = db.transaction.bind(db);
+    const spy = vi.spyOn(db, 'transaction').mockImplementationOnce((async (fn: Parameters<typeof db.transaction>[0]) => {
+      await createScheduleRepo(db).setStatusIf(id(), 'pa', ['active'], 'paused'); // a pause commits after the action's read
+      return realTx(fn);
+    }) as typeof db.transaction);
+    expect(await setPortalScheduleStatus(db, 'pa', PHONE, id(), 'cancel')).toEqual({ ok: false, code: 'changed' });
+    spy.mockRestore();
+    expect((await createScheduleRepo(db).getOwnedSchedule('pa', PHONE, id()))?.status).toBe('paused');
     expect(await audits()).toEqual([]);
   });
 

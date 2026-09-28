@@ -3,7 +3,7 @@ import { createAuditRepo } from '@/db/repos/aux-repos';
 import { createScheduleRepo } from '@/db/repos/schedule-repo';
 import { auditSubjectId } from './customer-ref';
 import { PORTAL_AUTH_ACTOR } from './portal-auth-audit';
-import { findByRid, isRid } from './portal-recipients';
+import { findByRid, isRid, lockRecipientBook } from './portal-recipients';
 import { decideScheduleAction, SCHEDULE_REFUSAL, type ScheduleAction } from './schedule-control';
 import { validateScheduleInput, type ScheduleRefusalCode } from './schedule-validate';
 import { newTransferId } from './id';
@@ -198,10 +198,18 @@ export async function createPortalSchedule(
   );
   if (!v.ok) return { ok: false, code: v.code };
   const schedule: Schedule = { id: newTransferId(), ...v.schedule, createdAt: new Date().toISOString() };
-  await db.transaction(async (tx) => {
+  // Serialized with a recipient delete (review LOW 2): both take the same per-(tenant, sender)
+  // address-book lock, and the recipient is re-resolved under it. A delete that committed first is
+  // seen here (not_found, nothing written); a delete that comes after waits and its schedule sweep
+  // then sees (and cancels) this schedule.
+  const saved = await db.transaction(async (tx) => {
+    await lockRecipientBook(tx, partnerId, phone);
+    if (!(await findByRid(tx, partnerId, phone, value.rid))) return false;
     await createScheduleRepo(tx).saveSchedule(schedule);
     await recordScheduleAudit(tx, { partnerId, phone, action: 'schedule.create', meta: { scheduleId: schedule.id } });
+    return true;
   });
+  if (!saved) return { ok: false, code: 'not_found' };
   return { ok: true, scheduleId: schedule.id };
 }
 
@@ -232,7 +240,9 @@ export async function setPortalScheduleStatus(
   if (!decision.ok) return { ok: false, code: refusalCode(decision.reason) };
   return db.transaction(async (tx): Promise<SetScheduleStatusResult> => {
     // partnerId is the HOST's; the owner check above bound the id to this (partner, phone).
-    const updated = await createScheduleRepo(tx).setStatusIf(id, partnerId, decision.from, decision.to);
+    // From the status actually read (always inside decision.from), so a concurrent change is a
+    // 'changed' refusal and the audit's `from` is exactly what was replaced (review LOW 1).
+    const updated = await createScheduleRepo(tx).setStatusIf(id, partnerId, [current.status], decision.to);
     if (!updated || updated.phone !== phone) {
       if (updated) throw new Error('portal schedule: owner changed'); // unreachable: phone is immutable; roll back
       return { ok: false, code: 'changed' };
