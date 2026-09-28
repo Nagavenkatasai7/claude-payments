@@ -28,6 +28,21 @@ test.describe('customer portal on a partner subdomain', () => {
     }
   });
 
+  test('the profile and notifications pages without a cookie land on the sign-in page (M2-11)', async ({ page }) => {
+    for (const path of ['/portal/profile', '/portal/notifications']) {
+      await page.goto(`${ORIGIN}${path}`);
+      await expect(page, path).toHaveURL(/\/portal\/login$/);
+    }
+  });
+
+  test('the email verify link signed out asks to sign in and never renders the token (M2-11)', async ({ page }) => {
+    const token = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdE';
+    await page.goto(`${ORIGIN}/portal/notifications/verify?token=${token}`);
+    await expect(page.locator('.sh-page-title')).toHaveText('Verify your email');
+    await expect(page.locator('body')).toContainText('Sign in first');
+    await expect(page.locator(`input[value="${token}"]`)).toHaveCount(0);
+  });
+
   test('a forged portal cookie is not a session', async ({ page, context }) => {
     // `url` (not `domain`) makes it host-only, as the __Host- prefix requires.
     await context.addCookies([{ name: '__Host-sr_portal', value: 'deadbeef', url: `${ORIGIN}/`, secure: true, httpOnly: true, sameSite: 'Lax' }]);

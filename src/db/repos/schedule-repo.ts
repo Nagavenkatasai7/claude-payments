@@ -122,6 +122,19 @@ export function createScheduleRepo(
       return rows.map(rowToSchedule);
     },
 
+    /**
+     * UI redesign M2-8 (M2-10 reuses it): one customer's schedules, newest first. The tenant AND
+     * the phone are both in the WHERE, so another partner's schedules for the same phone never appear.
+     */
+    async listForCustomer(partnerId: PartnerId, phone: string): Promise<Schedule[]> {
+      const rows = await db
+        .select()
+        .from(schedules)
+        .where(and(eq(schedules.partnerId, partnerId), eq(schedules.phone, phone)))
+        .orderBy(desc(schedules.createdAt));
+      return rows.map(rowToSchedule);
+    },
+
     async listActiveSchedules(): Promise<Schedule[]> {
       const rows = await db
         .select()

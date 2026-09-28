@@ -260,7 +260,7 @@ describe('5. safePortalNext', () => {
     (v) => expect(safePortalNext(v)).toBe('/portal'),
   );
   it.each(['/portal', '/portal/send', '/portal/send/review', '/portal/transfers/tx_ABC123', `/portal/recipients/${'a'.repeat(32)}/edit`,
-    '/portal/devices', '/portal/privacy'])('%s is kept', (v) => expect(safePortalNext(v)).toBe(v));
+    '/portal/devices', '/portal/privacy', '/portal/profile', '/portal/notifications'])('%s is kept', (v) => expect(safePortalNext(v)).toBe(v));
 });
 
 describe('step-up', () => {

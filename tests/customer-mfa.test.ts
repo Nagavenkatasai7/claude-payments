@@ -58,6 +58,15 @@ beforeEach(async () => {
 });
 
 describe('customer-mfa store (Program-Fix 49D)', () => {
+  it("UI redesign M2-11 (owner O7): a new portal enrolment can carry the partner's brand as the issuer; the default stays SmartRemit", async () => {
+    const begun = await store().beginEnrolment(WHO, { issuer: 'Acme Remit' });
+    expect(begun.ok).toBe(true);
+    if (!begun.ok) return;
+    expect(begun.uri).toMatch(/^otpauth:\/\/totp\/Acme%20Remit:portal%20%E2%80%A64321\?secret=[A-Z2-7]{32}&issuer=Acme%20Remit&/);
+    const again = await store().beginEnrolment(WHO, { issuer: '   ' });
+    if (!again.ok) throw new Error('expected ok');
+    expect(again.uri).toMatch(/^otpauth:\/\/totp\/SmartRemit:/);
+  });
   it('begin → confirm with one code enrols; the secret lands in the customers row, not Redis', async () => {
     expect(await store().isEnrolled(WHO)).toBe(false);
     const begun = await store().beginEnrolment(WHO);

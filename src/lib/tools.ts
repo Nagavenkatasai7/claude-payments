@@ -260,13 +260,14 @@ function maskDestination(method: PayoutMethod, dest: string): string {
  *      mint may have saved a seller's verified-profile account there);
  *   2. else the sender's newest CONSUMER transfer to that number that settled
  *      (paid / delivered) in the SAME destination country, DECRYPTED.
+ * A recipient the customer deleted (M2-8 tombstone) is neither: → null.
  * '' or a display placeholder is never usable. Keyed (ctx.partnerId, ctx.phone)
  * + the normalized recipient phone ONLY (fix 1: a phone is not an identity).
  * The value goes into a DRAFT or an encrypted SCHEDULE row only — never a
  * ToolResult, card body or log line. Read errors propagate (the agent turn's
  * outbox row retries).
  */
-async function resolveStoredPayout(
+export async function resolveStoredPayout(
   ctx: ToolContext,
   recipientPhone: string,
   destinationCountry: CountryCode,
@@ -283,6 +284,9 @@ async function resolveStoredPayout(
     const fromBook = usable(saved?.payoutDestination);
     if (saved && fromBook) return { payoutMethod: saved.payoutMethod, payoutDestination: fromBook };
   }
+  // M2-8 (X7): a recipient the customer deleted is never auto-filled, not even from the ledger.
+  // listRecipients already hides it, so without this check the fallback below would re-hydrate it.
+  if (await ctx.store.isTombstoned(ctx.partnerId, ctx.phone, recipientPhone)) return null;
   const settled = await ctx.store.latestSettledConsumerTransferTo(ctx.partnerId, ctx.phone, recipientPhone, destinationCountry);
   const fromLedger = usable(settled?.payoutDestination);
   return settled && fromLedger ? { payoutMethod: settled.payoutMethod, payoutDestination: fromLedger } : null;
