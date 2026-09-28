@@ -29,7 +29,7 @@ describe('/docs reference-rail failure example', () => {
   });
 
   it('states that the account number must be the last group of digits', () => {
-    expect(railParagraph().replace(/\s+/g, ' ')).toMatch(/last group of digits/);
+    expect(railParagraph().replace(/\s+/g, ' ')).toMatch(/account number must be the last group of digits/);
   });
 });
 

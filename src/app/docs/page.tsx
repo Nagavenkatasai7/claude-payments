@@ -716,7 +716,7 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
             reference rail</strong> (<code>providerType: simulator</code>) — it verifies your
             signatures, acks a providerRef, and calls the public webhook back ~12s later, running
             the exact production loop end to end. To exercise the failure path, pay to a bank
-            account that is all zeros, with the account number as the last group of digits in the
+            account that is all zeros; the account number must be the last group of digits in the
             destination (for India: <code>HDFC0001234|000000000000</code>): the reference rail acks,
             then reports{' '}
             <code>failed</code> with reason <code>account_unreachable</code>.
