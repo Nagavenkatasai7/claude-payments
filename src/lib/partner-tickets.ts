@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getDb, type DbOrTx } from '@/db/client';
 import { createTicketRepo } from '@/db/repos/ticket-repo';
 import { env } from './env';
@@ -307,12 +307,15 @@ export async function withUserLock<T>(
   if (!SCOPE_RE.test(scope)) throw new Error('partner-tickets: invalid lock scope');
   assertTenant(partnerId);
   const key = `psup:lock:${scope}:${createHash('sha256').update(JSON.stringify([partnerId, username])).digest('hex')}`;
-  if ((await redis.set(key, '1', { nx: true, ex: 30 })) === null) return { locked: false };
+  const token = randomUUID();
+  if ((await redis.set(key, token, { nx: true, ex: 30 })) === null) return { locked: false };
   try {
     return { locked: true, value: await fn() };
   } finally {
     try {
-      await redis.del(key);
+      // Release only our own lock: if fn outlived the TTL and another request took the lock, leave it.
+      // (get-then-del is not atomic; the window is a few ms, and the worst case is one extra thread.)
+      if ((await redis.get(key)) === token) await redis.del(key);
     } catch {
       // Released by the TTL instead.
     }

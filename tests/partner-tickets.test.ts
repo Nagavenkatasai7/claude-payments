@@ -198,6 +198,31 @@ describe('claimOnce (double-submit guard for staff writes)', () => {
   });
 });
 
+describe('withUserLock', () => {
+  it('releases only its OWN lock: a holder whose lock expired never frees a second holder', async () => {
+    const { withUserLock } = await import('@/lib/partner-tickets');
+    const redis = fakeRedis();
+    let secondKey = '';
+    const r = await withUserLock(redis, 'contact', PA, 'pa-admin', async () => {
+      // Simulate the TTL expiring mid-run and a second request taking the lock.
+      const { createHash } = await import('node:crypto');
+      secondKey = `psup:lock:contact:${createHash('sha256').update(JSON.stringify([PA, 'pa-admin'])).digest('hex')}`;
+      await redis.del(secondKey);
+      await redis.set(secondKey, 'someone-else', { nx: true, ex: 30 });
+      return 'done';
+    });
+    expect(r).toEqual({ locked: true, value: 'done' });
+    expect(secondKey).not.toBe('');
+    expect(await redis.get(secondKey)).toBe('someone-else');
+  });
+  it('a normal run releases its lock', async () => {
+    const { withUserLock } = await import('@/lib/partner-tickets');
+    const redis = fakeRedis();
+    await withUserLock(redis, 'contact', PA, 'pa-admin', async () => 1);
+    expect((await withUserLock(redis, 'contact', PA, 'pa-admin', async () => 2))).toEqual({ locked: true, value: 2 });
+  });
+});
+
 describe('tenantStaffUsernames (who is shown by name)', () => {
   it('names only active members of THIS tenant; platform staff, other tenants and unknown names are not', async () => {
     const { tenantStaffUsernames } = await import('@/lib/partner-tickets');
