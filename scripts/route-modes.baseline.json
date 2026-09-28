@@ -86,6 +86,8 @@
   "/onboard/seller/[id]": "dynamic",
   "/partner": "dynamic",
   "/partner/audit": "dynamic",
+  "/partner/integrations": "dynamic",
+  "/partner/integrations/whatsapp": "dynamic",
   "/partner/security": "dynamic",
   "/partners/apply/[token]": "dynamic",
   "/pay/[transferId]": "dynamic",
