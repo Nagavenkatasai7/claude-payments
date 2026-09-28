@@ -31,7 +31,7 @@ vi.mock('@/db/repos/outbox-repo', async (orig) => {
       return {
         ...repo,
         enqueue: async (...e: Parameters<typeof repo.enqueue>) => {
-          if (faults.enqueueThrow && e[0] === 'email.send') throw new Error('outbox insert failed');
+          if (faults.enqueueThrow && e[0] === 'email.send') throw new Error(`Failed query: insert into outbox params: ${JSON.stringify(e[1])}`);
           return repo.enqueue(...e);
         },
       };
@@ -206,10 +206,27 @@ describe('automatic receipt on delivery — the shared delivered transition (Sto
     await optIn('pa');
     await store().saveTransfer(transfer());
     faults.enqueueThrow = true;
-    await expect(store().updateTransferFromWebhook('rc_t1', 'delivered')).rejects.toThrow();
+    const err = await store().updateTransferFromWebhook('rc_t1', 'delivered').then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toMatch(/delivery receipt enqueue failed/);
+    expect(err?.message).not.toContain(EMAIL); // the driver's params never leak into last_error / logs
     expect(await statusOf('rc_t1')).toBe('paid'); // the rail retries; nothing half-committed
     expect(await emailRows()).toHaveLength(0);
     faults.enqueueThrow = false;
+    expect((await store().updateTransferFromWebhook('rc_t1', 'delivered'))?.status).toBe('delivered');
+    expect(await emailRows()).toHaveLength(1);
+  });
+
+  it('the rcpt-auto:<id> dedupe key alone holds: a pre-existing receipt row → delivered, still ONE row', async () => {
+    await optIn('pa');
+    await store().saveTransfer(transfer());
+    await db.execute(sql`INSERT INTO outbox (kind, payload, next_attempt_at, dedupe_key) VALUES ('email.send', '{}'::jsonb, now(), 'rcpt-auto:rc_t1')`);
+    expect((await store().updateTransferFromWebhook('rc_t1', 'delivered'))?.status).toBe('delivered');
+    expect(await emailRows()).toHaveLength(1);
+  });
+
+  it('awaiting_payment (cleared) → delivered directly also sends the receipt', async () => {
+    await optIn('pa');
+    await store().saveTransfer(transfer({ status: 'awaiting_payment', paidAt: undefined }));
     expect((await store().updateTransferFromWebhook('rc_t1', 'delivered'))?.status).toBe('delivered');
     expect(await emailRows()).toHaveLength(1);
   });

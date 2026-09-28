@@ -37,6 +37,10 @@ import type { PartnerId, Transfer } from './types';
  * with the same placeholder and context as the manual "email me a receipt" (`receipt_body`), so
  * the worker's email.send path (renderSealedText) opens it unchanged. Sandbox (test) transfers
  * never email.
+ *
+ * Known, accepted: the prefs are a snapshot taken just before the transaction, so a toggle-off or
+ * an address change in the milliseconds before the commit can still send ONE receipt to the address
+ * that was verified at read time (the price of never reading prefs inside the money transaction).
  */
 
 export const AUTO_RECEIPT_DEDUPE_PREFIX = 'rcpt-auto';
@@ -112,16 +116,22 @@ export async function deliverTransfer(db: Db, transferId: string): Promise<Trans
   return db.transaction(async (tx) => {
     const updated = await createTransferRepo(tx).updateTransferFromWebhook(transferId, 'delivered');
     if (updated && receipt && updated.partnerId === receipt.partnerId && updated.phone === receipt.phone) {
-      await createOutboxRepo(tx).enqueue(
-        'email.send',
-        {
-          to: [receipt.to],
-          subject: receipt.subject,
-          text: '{{receipt_body}}',
-          sealed: { receipt_body: receipt.sealedBody },
-        },
-        { dedupeKey: `${AUTO_RECEIPT_DEDUPE_PREFIX}:${transferId}` },
-      );
+      try {
+        await createOutboxRepo(tx).enqueue(
+          'email.send',
+          {
+            to: [receipt.to],
+            subject: receipt.subject,
+            text: '{{receipt_body}}',
+            sealed: { receipt_body: receipt.sealedBody },
+          },
+          { dedupeKey: `${AUTO_RECEIPT_DEDUPE_PREFIX}:${transferId}` },
+        );
+      } catch (err) {
+        // Rethrown WITHOUT the driver's message: a query error carries its params (the address),
+        // and this error reaches outbox.last_error (mock.settle) and the runtime log (the route).
+        throw new Error(`delivery receipt enqueue failed (${err instanceof Error ? err.name : 'unknown'})`);
+      }
     }
     return updated;
   });
