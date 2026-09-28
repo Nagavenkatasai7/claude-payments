@@ -815,3 +815,29 @@ export const conversationMessages = pgTable(
   },
   (t) => [index('conversation_messages_thread').on(t.partnerId, t.threadKey, t.createdAt)],
 );
+
+// UI redesign M1 (0026): per-partner site settings for the white-label portal. A NEW table, so no
+// existing explicit-column partners query changes shape during a rolling release. Reader/writer land
+// in a later PR, after /migrate-prod.
+//   • partner_id is PK + FK: at most one site row per tenant.
+//   • slug: nullable, unique, lowercase [a-z0-9-], 3–30 chars, no leading/trailing hyphen. Reserved
+//     slugs and the `xn--` refusal are enforced by the app-level writer (later PR), not here.
+//   • accent_color: nullable, lowercase #rrggbb only.
+export const partnerSites = pgTable(
+  'partner_sites',
+  {
+    partnerId: text('partner_id').primaryKey().references(() => partners.id),
+    slug: text('slug'),
+    accentColor: text('accent_color'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('partner_sites_slug').on(t.slug),
+    check('partner_sites_slug_format', sql`${t.slug} ~ '^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$'`),
+    // '--' in positions 3-4 is reserved in DNS (R-LDH: 'xn--' punycode and every '??--' label),
+    // so such a slug could never be served as <slug>.smartremit.ai.
+    check('partner_sites_slug_not_reserved', sql`${t.slug} !~ '^..--'`),
+    check('partner_sites_accent_format', sql`${t.accentColor} ~ '^#[0-9a-f]{6}$'`),
+  ],
+);
