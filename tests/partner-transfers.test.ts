@@ -204,6 +204,8 @@ describe('holds', () => {
   it('isHeld: a flagged transfer stops being held once released or finished', () => {
     // markPaidIfInReview never clears complianceStatus, so 'flagged' outlives the hold.
     expect(isHeld(base({ status: 'awaiting_payment', complianceStatus: 'flagged' }))).toBe(true);
+    // A pay-time re-screen that blocks a row with a bound payment intent keeps it awaiting_payment.
+    expect(isHeld(base({ status: 'awaiting_payment', complianceStatus: 'blocked' }))).toBe(true);
     for (const status of ['paid', 'delivered', 'cancelled'] as const) {
       expect(isHeld(base({ status, complianceStatus: 'flagged' })), status).toBe(false);
     }
@@ -259,7 +261,7 @@ describe('H5: funding + settlement views (existing columns only)', () => {
     // The rail accepted (setProviderRef) and later failed (failPaidFromRail → cancelled, refund pending).
     const v = settlementView(base({ status: 'cancelled', paymentProviderRef: 'rail-settle-00001234' }), [row('done')]);
     expect(v.state).toBe('partner.transfers.settlement.notCompleted');
-    expect(settlementView(base({ status: 'blocked' }), [row('done')]).state).toBe('partner.transfers.settlement.notCompleted');
+    expect(settlementView(base({ status: 'blocked' }), [row('done')]).state).toBe('partner.transfers.settlement.blocked');
   });
   it('settlementView: a mock rail reference is shown as simulated, not as a real rail', () => {
     expect(settlementView(base({ paymentProviderRef: 'mock-tr_abc123' }), [row('done')]).state).toBe('partner.transfers.settlement.simulated');

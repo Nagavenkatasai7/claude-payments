@@ -268,7 +268,8 @@ export function settlementView(tr: Pick<Transfer, 'status' | 'environment' | 'pa
   if (tr.status === 'delivered') return withRef({ state: 'partner.transfers.settlement.settled' });
   // A rail that accepted and later failed leaves its reference and a done row behind while the
   // transfer is cancelled (refund pending): never show that as accepted.
-  if (tr.status === 'cancelled' || tr.status === 'blocked') return { state: 'partner.transfers.settlement.notCompleted' };
+  if (tr.status === 'cancelled') return { state: 'partner.transfers.settlement.notCompleted' };
+  if (tr.status === 'blocked') return { state: 'partner.transfers.settlement.blocked' };
   // A mock rail stamps `mock-<id>` (settlement.ts): simulated, not a real rail's acceptance.
   const simulated = (tr.paymentProviderRef ?? '').startsWith('mock-');
   const latest = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];

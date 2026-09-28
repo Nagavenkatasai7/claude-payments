@@ -161,6 +161,7 @@ export const en = {
   'partner.transfers.settlement.attention': 'Needs attention (SmartRemit is alerted)',
   'partner.transfers.settlement.accepted': 'Accepted by the rail',
   'partner.transfers.settlement.notCompleted': 'Not completed (cancelled)',
+  'partner.transfers.settlement.blocked': 'Not sent (blocked)',
   'partner.transfers.settlement.simulated': 'Simulated (no real rail)',
   'partner.transfers.settlement.processed': 'Processed',
   'partner.transfers.timelineTitle': 'Timeline',
