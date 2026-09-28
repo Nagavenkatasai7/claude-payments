@@ -63,6 +63,8 @@ describe('the /partner app never ships the internal churn / AI outreach card (M3
       "// import { x } from '@/lib/partner-health';",
       "import { requireStaff } from '@/lib/auth';",
       "import { enrol } from '@/app/admin-dashboard/account/actions';",
+      "import {\n  scorePartnerHealth,\n  type HealthBand,\n} from '@/lib/partner-health';",
+      "export * from '@/lib/partner-health-ai';",
     ].join('\n');
     const mods = specifiers(src).map((s) => toSrcPath(s, from));
     expect(mods).toEqual([
@@ -71,11 +73,15 @@ describe('the /partner app never ships the internal churn / AI outreach card (M3
       'lib/partner-health-ai',
       'lib/auth',
       'app/admin-dashboard/account/actions',
+      'lib/partner-health',
+      'lib/partner-health-ai',
       'app/admin-dashboard/partners/actions',
       'app/admin-dashboard/partners/[id]/page',
     ]);
     expect(mods.filter((m) => m && forbidden(m))).toEqual([
       'lib/partner-health',
+      'lib/partner-health',
+      'lib/partner-health-ai',
       'lib/partner-health',
       'lib/partner-health-ai',
       'app/admin-dashboard/partners/actions',

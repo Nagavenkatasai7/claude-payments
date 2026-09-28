@@ -118,6 +118,14 @@ describe('admin partner page: churn / AI outreach card is platform-only (M3-22)'
     expect(health.narrate).toHaveBeenCalledTimes(1);
   });
 
+  it("platform admin on the 'default' partner: no card (unchanged)", async () => {
+    currentStaff = staff({ username: 'platform.admin' });
+    await seedPartner(db, 'default', 'SmartRemit');
+    const html = await render('default');
+    expect(html).not.toContain('churn-risk');
+    expect(health.score).not.toHaveBeenCalled();
+  });
+
   it('platform agent: the card still renders (unchanged)', async () => {
     currentStaff = staff({ username: 'platform.agent', role: 'agent' });
     const html = await render();
