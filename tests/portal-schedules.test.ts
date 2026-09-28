@@ -210,6 +210,29 @@ describe('create racing a recipient delete (review LOW 2)', () => {
     expect(live).toEqual([]);
     expect((await audits()).map((a) => a.action)).toEqual(['schedule.cancel']); // the delete's own sweep only
   });
+  // The other order (the create commits first, the delete then waits on the address-book lock and its
+  // schedule sweep sees and cancels the new schedule) needs two connections; PGlite has one, so it is
+  // argued in lockRecipientBook's comment, not tested here.
+});
+
+describe('create racing a recipient edit (delta review LOW-B)', () => {
+  it('an account change that lands after validation: refused (recipient_changed), nothing written', async () => {
+    const ctx = ctxFor('pa');
+    const realList = ctx.store.listRecipients.bind(ctx.store);
+    vi.spyOn(ctx.store, 'listRecipients').mockImplementation(async (...a: Parameters<typeof ctx.store.listRecipients>) => {
+      const stale = await realList(...a);
+      await createRecipientRepo(db).updateLiveRecipient('pa', PHONE, {
+        name: 'Recipient PA', recipientPhone: A_RP, payoutMethod: 'bank', payoutDestination: '999988887777|ICIC0004321', lastUsedAt: new Date().toISOString(),
+      });
+      return stale;
+    });
+    const parsed = good(recipientRid('pa', PHONE, A_RP));
+    if (!parsed.ok) throw new Error('form');
+    const before = await count();
+    expect(await createPortalSchedule(db, ctx, 'pa', PHONE, parsed.value)).toEqual({ ok: false, code: 'recipient_changed' });
+    expect(await count()).toBe(before);
+    expect(await audits()).toEqual([]);
+  });
 });
 
 describe('setPortalScheduleStatus', () => {

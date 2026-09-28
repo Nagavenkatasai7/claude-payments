@@ -277,6 +277,7 @@ export const en = {
   'portal.schedules.day_invalid': 'Choose a day.',
   'portal.schedules.endDate_invalid': 'Enter a future date, or leave it blank.',
   'portal.schedules.recipient_gone': 'That recipient is no longer saved. Choose another one.',
+  'portal.schedules.recipient_changed': 'That recipient\'s bank details just changed. Check them and try again.',
   'portal.schedules.corridor': 'Scheduled payments can go to India only for now.',
   'portal.schedules.sender_name': 'We need your full legal name before a scheduled payment. Add it the next time you send money, then come back.',
   'portal.schedules.no_payout': 'This recipient has no bank details saved. Edit the recipient to add them, then try again.',

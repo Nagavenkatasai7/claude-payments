@@ -209,8 +209,11 @@ export async function recordRecipientAudit(
 /**
  * UI redesign M2-10: the per-(tenant, sender) address-book lock, a transaction-scoped advisory lock
  * under its own key prefix (the mint's sender lock is `<partner>:<phone>`, store.ts). A recipient
- * delete and a portal schedule create both take it first, so a schedule can never be created to a
- * recipient whose delete is committing (the delete's schedule sweep would miss it).
+ * delete, a portal recipient edit and a portal schedule create take it first, so a schedule is never
+ * created to a recipient whose delete is committing (the delete's schedule sweep would miss it) or
+ * with an account an edit is replacing. If the create commits first, the delete waits here and its
+ * sweep (READ COMMITTED, a fresh snapshot per statement) sees and cancels the new schedule. The
+ * scheduled mint never takes this lock, so there is no cycle with the sender lock.
  */
 export async function lockRecipientBook(tx: DbOrTx, partnerId: PartnerId, phone: string): Promise<void> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`recipient-book:${partnerId}:${phone}`}))`);

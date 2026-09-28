@@ -161,7 +161,7 @@ export async function recordScheduleAudit(
 
 // ── Create ────────────────────────────────────────────────────────────────────
 
-export type CreateScheduleResult = { ok: true; scheduleId: string } | { ok: false; code: 'not_found' | ScheduleRefusalCode };
+export type CreateScheduleResult = { ok: true; scheduleId: string } | { ok: false; code: 'not_found' | 'recipient_changed' | ScheduleRefusalCode };
 
 /**
  * Create one schedule for (partnerId, phone). `ctx` is a web ToolContext for the SAME (partner,
@@ -202,14 +202,19 @@ export async function createPortalSchedule(
   // address-book lock, and the recipient is re-resolved under it. A delete that committed first is
   // seen here (not_found, nothing written); a delete that comes after waits and its schedule sweep
   // then sees (and cancels) this schedule.
-  const saved = await db.transaction(async (tx) => {
+  // The account saved must be exactly the saved recipient's as it stands under the lock: a portal
+  // edit (which takes the same lock) or a delete-and-re-add that changed it after validation is
+  // refused, never saved with the old account (delta review LOW-B).
+  const outcome = await db.transaction(async (tx): Promise<'saved' | 'not_found' | 'recipient_changed'> => {
     await lockRecipientBook(tx, partnerId, phone);
-    if (!(await findByRid(tx, partnerId, phone, value.rid))) return false;
+    const fresh = await findByRid(tx, partnerId, phone, value.rid);
+    if (!fresh) return 'not_found';
+    if (fresh.payoutMethod !== schedule.payoutMethod || fresh.payoutDestination !== schedule.payoutDestination) return 'recipient_changed';
     await createScheduleRepo(tx).saveSchedule(schedule);
     await recordScheduleAudit(tx, { partnerId, phone, action: 'schedule.create', meta: { scheduleId: schedule.id } });
-    return true;
+    return 'saved';
   });
-  if (!saved) return { ok: false, code: 'not_found' };
+  if (outcome !== 'saved') return { ok: false, code: outcome };
   return { ok: true, scheduleId: schedule.id };
 }
 

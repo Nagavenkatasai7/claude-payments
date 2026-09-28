@@ -75,6 +75,7 @@ async function withinLimit(partnerId: PartnerId, phone: string): Promise<boolean
 /** Each create refusal maps to ONE fixed message (a gone recipient and a foreign rid read the same). */
 const CREATE_REFUSAL: Record<string, MessageKey> = {
   not_found: 'portal.schedules.recipient_gone',
+  recipient_changed: 'portal.schedules.recipient_changed',
   corridor: 'portal.schedules.corridor',
   unknown_destination: 'portal.schedules.corridor',
   sender_name: 'portal.schedules.sender_name',
