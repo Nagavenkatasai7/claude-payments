@@ -53,9 +53,10 @@ vi.mock('@/lib/store', async () => {
   return {
     ...actual,
     getStore: () => {
-      // A synchronous throw from the getter: the page must still fail soft.
-      if (fail.summary) throw new Error('ledger unavailable 15559990000');
-      return actual.createStore(redis, db);
+      const s = actual.createStore(redis, db);
+      // Only the ledger aggregate fails, so the other cards (WhatsApp reads the same store) must hold.
+      if (fail.summary) s.transfersSummary = async () => Promise.reject(new Error('ledger unavailable 15559990000'));
+      return s;
     },
   };
 });
@@ -220,11 +221,17 @@ describe('/partner home: fail-soft per card', () => {
   it('a failing ledger read shows an error on the KPI card only; health still renders', async () => {
     await signInAs({ partnerId: PA, role: 'admin' });
     fail.summary = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const html = await render();
     expect(html).toContain('data-card-error="kpis"');
     expect(html).not.toContain('data-kpi=');
     expect(html).toContain('data-health="webhooks" data-state="off"');
+    expect(html).toContain('data-health="whatsapp" data-state="ok"');
     expect(html).toContain('data-actions-incomplete');
+    const logged = warn.mock.calls.flat().map(String).join('\n');
+    expect(logged).toContain('partner.home');
+    expect(logged).not.toContain('15559990000');
+    warn.mockRestore();
     expect(html).not.toContain('ledger unavailable');
     expect(html).not.toContain('15559990000');
     expect(html.match(/<h1\b/g)).toHaveLength(1);
