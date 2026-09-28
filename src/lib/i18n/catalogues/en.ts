@@ -83,7 +83,7 @@ export const en = {
   'portal.devices.emptyTitle': 'No other devices',
   'portal.devices.emptyBody': 'You are only signed in here.',
   'portal.devices.everywhereTitle': 'Sign out everywhere',
-  'portal.devices.everywhereBody': 'Ends every session, including this one. We will ask for a fresh WhatsApp code first.',
+  'portal.devices.everywhereBody': 'Ends every session, including this one. If you have not confirmed a code recently, we will ask you to confirm it’s you first.',
   'portal.devices.everywhereCta': 'Sign out of all devices',
   'portal.privacy.title': 'Privacy',
   'portal.privacy.sub': 'Your consent record and your data requests.',

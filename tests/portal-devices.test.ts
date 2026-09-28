@@ -229,3 +229,12 @@ describe('signOutEverywhereAction', () => {
     expect(JSON.stringify(rows)).not.toContain(PHONE);
   });
 });
+
+describe('copy', () => {
+  it('everywhereBody copy does not promise a WhatsApp code every time (step-up may already be fresh, or ask for TOTP)', async () => {
+    const { en } = await import('@/lib/i18n/catalogues/en');
+    const body = (en as Record<string, string>)['portal.devices.everywhereBody'];
+    expect(body).not.toMatch(/fresh WhatsApp code first/);
+    expect(body).toMatch(/confirm it’s you/);
+  });
+});
