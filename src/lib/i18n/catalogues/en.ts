@@ -11,6 +11,7 @@ export const en = {
   'ds.table.next': 'Next',
   'ds.table.pageOf': 'Page {page} of {pages}',
   'ds.table.sortBy': 'Sort by {column}',
+  'ds.table.lastPage': 'Go to the last page',
   'ds.dialog.cancel': 'Cancel',
   'ds.dialog.reasonLabel': 'Reason',
   'ds.dialog.reasonHint': 'At least {min} characters. This is recorded.',

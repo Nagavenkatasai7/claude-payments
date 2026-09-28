@@ -697,10 +697,11 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
                 <li><code>funded</code> → paid (customer charged on your side)</li>
                 <li><code>paid_out</code> → delivered — triggers the branded WhatsApp delivery notifications</li>
                 <li>
-                  <code>failed</code> / <code>returned</code> → cancelled — the sender&apos;s charge is
-                  refunded (a partner-pulled debit gets a signed <code>reverse</code> instruction) and the
-                  customer is notified, in one transaction. An optional <code>reason</code> (string, ≤200
-                  characters) is stored on the transfer&apos;s note for your ops and ours.
+                  <code>failed</code> / <code>returned</code> → cancelled. If SmartRemit captured the
+                  charge it is refunded; a partner-pulled debit gets a signed <code>reverse</code> instruction;
+                  otherwise you return the funds to the sender on your side. The customer is notified, in one
+                  transaction. An optional <code>reason</code> (string, ≤200 characters) is stored on the
+                  transfer&apos;s note for your ops and ours.
                 </li>
               </ul>
               <ul className="mt-3 space-y-1.5 text-muted-foreground">
@@ -715,8 +716,9 @@ x-smartremit-signature: t=1790000000,v1=9c44…   # HMAC-SHA256(webhookSecret, t
             reference rail</strong> (<code>providerType: simulator</code>) — it verifies your
             signatures, acks a providerRef, and calls the public webhook back ~12s later, running
             the exact production loop end to end. To exercise the failure path, pay to a bank
-            account that is all zeros (for India: account <code>000000000000</code>, IFSC{' '}
-            <code>HDFC0001234</code>): the reference rail acks, then reports{' '}
+            account that is all zeros; the account number must be the last group of digits in the
+            destination (for India: <code>HDFC0001234|000000000000</code>): the reference rail acks,
+            then reports{' '}
             <code>failed</code> with reason <code>account_unreachable</code>.
           </p>
         </section>
